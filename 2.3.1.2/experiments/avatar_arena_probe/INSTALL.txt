@@ -11,7 +11,8 @@ Install:
        org.peng.offline_2311_poc_0.1.0.wotmod
        org.peng.offline_2312_poc_0.1.0.wotmod
        org.peng.offline_2312_poc_0.1.1.wotmod
-  2. Copy org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod to:
+       org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod
+  2. Copy org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod to:
        <World_of_Tanks>\mods\2.3.1.2\
   3. Run from the client root:
        win64\WorldOfTanks.exe --script-arg avatarArenaProbe --script-arg offline --script-arg spaces/01_karelia
@@ -20,10 +21,19 @@ Evidence:
   Search python.log for [OFFLINE_2312_AVATAR_ARENA_PROBE].
   The final pass marker is:
     gate_pass gate=player_arena
-  It must report the real PlayerAvatar/ClientArena path, geometry 01_karelia,
-  gameplay ctf, matching player/camera space IDs, player_vehicle_id=0 and
-  input_handler=None. Any gate_fail, bootstrap failure, crash or login-screen
-  transition fails the Avatar/Arena gate.
+  Before it, avatar_init_observed must report preseed_applied=True,
+  init_returned=True, has_bonus_cap_calls greater than zero and
+  has_bonus_cap_exceptions=0. avatar_lifecycle_observed must report positive,
+  matching call/return counts and zero exceptions for both onEnterWorld and
+  onBecomePlayer. The final marker must report the real PlayerAvatar/
+  ClientArena path, geometry 01_karelia, gameplay ctf, matching player/camera
+  space IDs, player_vehicle_id=0 and input_handler=None.
+  On the untouched #919 stock viewer, space_lifecycle_missing and
+  player_space_loaded=False are expected because it skips the normal battle
+  session. Preserve either observed player_space_loaded value in the log;
+  True does not automatically fail this narrow gate.
+  Any gate_fail, bootstrap failure, Traceback, AttributeError, crash or
+  login-screen transition fails the Avatar/Arena gate.
 
 Exit:
   Exit the client process. The package stops its callback, restores its routes,
@@ -42,3 +52,11 @@ Boundary:
   This package proves only a real PlayerAvatar and ClientArena without a
   Vehicle, controls, battle GUI or combat. It must not be extended into a
   parallel battle implementation.
+
+Display:
+  Use exclusive fullscreen for this gate. The stock creator places the camera
+  target about 19.6 metres below Karelia terrain at (50, 50); the mostly-sky
+  underground view is known and is not corrected by this package. Borderless
+  flicker is a separate display/presentation-path experiment. Keep each
+  VSync, Windows windowed-optimization and windowed-VRR comparison to one
+  changed variable per cold launch, and preserve the display_state log line.

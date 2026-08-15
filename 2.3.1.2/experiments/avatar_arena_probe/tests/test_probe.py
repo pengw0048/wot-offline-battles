@@ -49,7 +49,17 @@ class ClientArena(object):
 
 
 class PlayerAvatar(object):
-    def __init__(self, arena_type, arena_type_id=101, space_id=41):
+    def __init__(self, arena_type, arena_type_id=101, space_id=41,
+                 init_progress=2):
+        self.preseed_at_init = {
+            'arenaUniqueID': self.arenaUniqueID,
+            'arenaTypeID': self.arenaTypeID,
+            'arenaBonusType': self.arenaBonusType,
+            'arenaGuiType': self.arenaGuiType,
+            'arenaExtraData': self.arenaExtraData,
+            'weatherPresetID': self.weatherPresetID,
+            'bonusCapsOverrides': self.bonusCapsOverrides,
+        }
         self.id = 7001
         self.inWorld = True
         self.spaceID = space_id
@@ -58,6 +68,17 @@ class PlayerAvatar(object):
         self.weatherPresetID = 0
         self.inputHandler = None
         self.arena = ClientArena(arena_type)
+        self._PlayerAvatar__initProgress = init_progress
+
+    def hasBonusCap(self, unused_cap):
+        return (self.arenaBonusType is not None and
+                self.bonusCapsOverrides is None)
+
+    def onEnterWorld(self, *unused_args):
+        return None
+
+    def onBecomePlayer(self):
+        return None
 
 
 class CursorCamera(object):
@@ -97,15 +118,53 @@ class _BigWorld(object):
     def spaceLoadStatus(self):
         return self.status
 
+    def getWindowMode(self):
+        return 2
+
+    def wg_getCurrentResolution(self, window_mode):
+        if window_mode != 2:
+            raise AssertionError('wrong window mode')
+        return (2560, 1440)
+
+    def videoModeIndex(self):
+        return 7
+
+    def getActiveMonitorIndex(self, window_mode):
+        if window_mode != 2:
+            raise AssertionError('wrong window mode')
+        return 1
+
+    def getBorderlessParameters(self):
+        return ('FULLSCREEN', 2560, 1440)
+
+    def isVideoVSync(self):
+        return True
+
+    def isTripleBuffered(self):
+        return False
+
+    def getDRRScale(self):
+        return 1.0
+
+    def isDRRAutoscalingEnabled(self):
+        return False
+
+    def getGammaCorrection(self):
+        return 1.0
+
 
 class _Creator(object):
-    def __init__(self, bigworld, arena_type):
+    def __init__(self, bigworld, arena_type, avatar_type=PlayerAvatar):
         self.bigworld = bigworld
         self.arena_type = arena_type
+        self.avatar_type = avatar_type
         self.active = False
         self.created = []
         self.destroyed = 0
         self.activate_after_create = True
+        self.init_progress = 2
+        self.swallow_component_errors = False
+        self.swallow_lifecycle_errors = False
 
     def Active(self):
         return self.active
@@ -115,8 +174,21 @@ class _Creator(object):
         if not self.activate_after_create:
             return
         self.active = True
-        self.bigworld.current_player = PlayerAvatar(self.arena_type)
+        avatar = self.avatar_type(
+            self.arena_type, init_progress=self.init_progress)
+        self.bigworld.current_player = avatar
         self.bigworld.current_camera = CursorCamera()
+        try:
+            avatar.hasBonusCap('component-init')
+        except Exception:
+            if not self.swallow_component_errors:
+                raise
+        for method in (avatar.onEnterWorld, avatar.onBecomePlayer):
+            try:
+                method()
+            except Exception:
+                if not self.swallow_lifecycle_errors:
+                    raise
 
     def destroy(self):
         self.destroyed += 1
@@ -153,6 +225,7 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.arena_type = _ArenaType()
         self.cache = {101: self.arena_type}
         self.creator = _Creator(self.bigworld, self.arena_type)
+        self.avatar_type = PlayerAvatar
         self.offline_mode = _OfflineMode()
         self.game = _Game()
         self.logger = _Logger()
@@ -169,6 +242,9 @@ class AvatarArenaProbeTests(unittest.TestCase):
             creator=self.creator,
             arena_cache=self.cache,
             game_module=self.game,
+            avatar_type=self.avatar_type,
+            arena_bonus_unknown=17,
+            arena_gui_unknown=23,
             logger=self.logger,
             now=lambda: self.clock[0],
             get_client_version=lambda: 'v.2.3.1.2 #919')
@@ -216,8 +292,25 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.assertEqual([], self.offline_mode.original_calls)
         self.assertTrue(self.logger.contains('avatar_seen'))
         self.assertTrue(self.logger.contains('client_arena_seen'))
-        self.assertTrue(self.logger.contains('space_loaded'))
+        self.assertTrue(self.logger.contains(
+            'geometry_loaded status=1.000000'))
+        self.assertTrue(self.logger.contains(
+            'space_lifecycle_missing '
+            'reason=offline_battle_session_not_started'))
+        self.assertTrue(self.logger.contains('display_state window_mode=2'))
+        self.assertTrue(self.logger.contains(
+            'avatar_init_observed preseed_applied=True init_returned=True'))
         self.assertTrue(self.logger.contains('gate_pass gate=player_arena'))
+        self.assertTrue(self.logger.contains('player_space_loaded=False'))
+        self.assertEqual({
+            'arenaUniqueID': 0,
+            'arenaTypeID': 101,
+            'arenaBonusType': 17,
+            'arenaGuiType': 23,
+            'arenaExtraData': {},
+            'weatherPresetID': 0,
+            'bonusCapsOverrides': None,
+        }, self.bigworld.current_player.preseed_at_init)
 
     def test_missing_arena_cache_fails_closed_without_native_create(self):
         probe = self.init(arena_cache={})
@@ -242,6 +335,10 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.assertTrue(self.logger.contains('reason=native_exception'))
 
     def test_creator_failure_never_falls_back_to_stock_free_camera(self):
+        original_init = PlayerAvatar.__dict__['__init__']
+        original_has_bonus_cap = PlayerAvatar.__dict__['hasBonusCap']
+        original_on_enter_world = PlayerAvatar.__dict__['onEnterWorld']
+        original_on_become_player = PlayerAvatar.__dict__['onBecomePlayer']
         self.creator.activate_after_create = False
         probe = self.init()
         self.offline_mode.launch('spaces/01_karelia')
@@ -251,35 +348,160 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.assertEqual([], self.offline_mode.original_calls)
         self.assertTrue(
             self.logger.contains('reason=creator_inactive_after_create'))
+        self.assertIs(original_init, PlayerAvatar.__dict__['__init__'])
+        self.assertIs(
+            original_has_bonus_cap, PlayerAvatar.__dict__['hasBonusCap'])
+        self.assertIs(
+            original_on_enter_world, PlayerAvatar.__dict__['onEnterWorld'])
+        self.assertIs(
+            original_on_become_player,
+            PlayerAvatar.__dict__['onBecomePlayer'])
+
+    def test_native_create_exception_restores_avatar_routes(self):
+        original_init = PlayerAvatar.__dict__['__init__']
+        original_has_bonus_cap = PlayerAvatar.__dict__['hasBonusCap']
+        original_on_enter_world = PlayerAvatar.__dict__['onEnterWorld']
+        original_on_become_player = PlayerAvatar.__dict__['onBecomePlayer']
+
+        def fail_create(unused_map_name):
+            raise RuntimeError('native create failed')
+
+        self.creator.create = fail_create
+        probe = self.init()
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.run(probe.callback_id)
+
+        self.assertTrue(probe.failed)
+        self.assertTrue(self.logger.contains('reason=native_exception'))
+        self.assertIs(original_init, PlayerAvatar.__dict__['__init__'])
+        self.assertIs(
+            original_has_bonus_cap, PlayerAvatar.__dict__['hasBonusCap'])
+        self.assertIs(
+            original_on_enter_world, PlayerAvatar.__dict__['onEnterWorld'])
+        self.assertIs(
+            original_on_become_player,
+            PlayerAvatar.__dict__['onBecomePlayer'])
 
     def test_unexpected_native_property_error_ends_with_gate_fail(self):
-        class PlayerAvatar(object):
-            id = 88
-            inWorld = True
-            spaceID = 41
-            playerVehicleID = 0
-            arenaTypeID = 101
-            weatherPresetID = 0
-            inputHandler = None
+        base_avatar_type = self.avatar_type
+
+        class BrokenPlayerAvatar(base_avatar_type):
+            def __init__(self, *args, **kwargs):
+                base_avatar_type.__init__(self, *args, **kwargs)
+
+            def hasBonusCap(self, cap):
+                return base_avatar_type.hasBonusCap(self, cap)
+
+            def onEnterWorld(self, *args):
+                return base_avatar_type.onEnterWorld(self, *args)
+
+            def onBecomePlayer(self):
+                return base_avatar_type.onBecomePlayer(self)
 
             @property
             def arena(self):
                 raise RuntimeError('arena stream unavailable')
 
-        def create(unused_map_name):
-            self.creator.active = True
-            self.bigworld.current_player = PlayerAvatar()
-            self.bigworld.current_camera = CursorCamera()
+            @arena.setter
+            def arena(self, value):
+                self._arena = value
 
-        self.creator.create = create
-        probe = self.init()
+        self.creator.avatar_type = BrokenPlayerAvatar
+        probe = self.init(avatar_type=BrokenPlayerAvatar)
         self.offline_mode.launch('spaces/01_karelia')
         self.bigworld.run(probe.callback_id)
         self.assertTrue(probe.failed)
         self.assertFalse(self.bigworld.pending)
         self.assertTrue(self.logger.contains('reason=native_exception'))
-        self.assertTrue(self.logger.contains('stage=create'))
+        self.assertTrue(self.logger.contains('stage=poll'))
         self.assertTrue(self.logger.contains('arena stream unavailable'))
+
+    def test_native_component_error_cannot_false_pass(self):
+        base_avatar_type = self.avatar_type
+
+        class BrokenPlayerAvatar(base_avatar_type):
+            def __init__(self, *args, **kwargs):
+                base_avatar_type.__init__(self, *args, **kwargs)
+
+            def hasBonusCap(self, unused_cap):
+                raise AttributeError('component property missing')
+
+            def onEnterWorld(self, *args):
+                return base_avatar_type.onEnterWorld(self, *args)
+
+            def onBecomePlayer(self):
+                return base_avatar_type.onBecomePlayer(self)
+
+        self.creator.avatar_type = BrokenPlayerAvatar
+        self.creator.swallow_component_errors = True
+        probe = self.init(avatar_type=BrokenPlayerAvatar)
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.run(probe.callback_id)
+
+        self.assertTrue(probe.failed)
+        self.assertFalse(probe.completed)
+        self.assertTrue(self.logger.contains('has_bonus_cap_exceptions=1'))
+        self.assertTrue(self.logger.contains('reason=bonus_cap_check_failed'))
+
+    def test_late_lifecycle_error_cannot_false_pass(self):
+        base_avatar_type = self.avatar_type
+
+        class BrokenPlayerAvatar(base_avatar_type):
+            def __init__(self, *args, **kwargs):
+                base_avatar_type.__init__(self, *args, **kwargs)
+
+            def hasBonusCap(self, cap):
+                return base_avatar_type.hasBonusCap(self, cap)
+
+            def onEnterWorld(self, *args):
+                return base_avatar_type.onEnterWorld(self, *args)
+
+            def onBecomePlayer(self):
+                raise RuntimeError('late player lifecycle failed')
+
+        self.creator.avatar_type = BrokenPlayerAvatar
+        self.creator.swallow_lifecycle_errors = True
+        probe = self.init(avatar_type=BrokenPlayerAvatar)
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.run(probe.callback_id)
+
+        self.assertTrue(probe.failed)
+        self.assertFalse(probe.completed)
+        self.assertTrue(self.logger.contains('become_player_exceptions=1'))
+        self.assertTrue(self.logger.contains('reason=become_player_failed'))
+
+    def test_missing_enter_world_progress_times_out(self):
+        self.creator.init_progress = 0
+        probe = self.init(load_timeout=1.0)
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.run(probe.callback_id)
+        self.bigworld.status = 1.0
+        self.clock[0] += 2.0
+        self.bigworld.run(probe.callback_id)
+
+        self.assertTrue(probe.failed)
+        self.assertFalse(probe.completed)
+        self.assertTrue(self.logger.contains(
+            'reason=avatar_enter_world_timeout'))
+        self.assertTrue(self.logger.contains('init_progress=0'))
+
+    def test_avatar_routes_are_restored_after_synchronous_create(self):
+        original_init = PlayerAvatar.__dict__['__init__']
+        original_has_bonus_cap = PlayerAvatar.__dict__['hasBonusCap']
+        original_on_enter_world = PlayerAvatar.__dict__['onEnterWorld']
+        original_on_become_player = PlayerAvatar.__dict__['onBecomePlayer']
+        probe = self.init()
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.run(probe.callback_id)
+
+        self.assertIs(original_init, PlayerAvatar.__dict__['__init__'])
+        self.assertIs(
+            original_has_bonus_cap, PlayerAvatar.__dict__['hasBonusCap'])
+        self.assertIs(
+            original_on_enter_world, PlayerAvatar.__dict__['onEnterWorld'])
+        self.assertIs(
+            original_on_become_player,
+            PlayerAvatar.__dict__['onBecomePlayer'])
 
     def test_timeout_reports_the_exact_runtime_snapshot(self):
         probe = self.init(load_timeout=1.0)

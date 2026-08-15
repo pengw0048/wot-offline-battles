@@ -42,10 +42,28 @@ class AvatarArenaPackageTests(unittest.TestCase):
         for forbidden in (
                 'createSpace', 'addSpaceGeometryMapping', 'createEntity',
                 'destroyEntity', 'controlEntity', 'Vehicle',
-                'AvatarInputHandler', 'socket', 'urllib', 'requests'):
+                'AvatarInputHandler', 'onSpaceLoaded', 'wg_collideSegment',
+                'setWindowMode', 'setVideoVSync', 'setTripleBuffering',
+                'setWatcher', 'socket', 'urllib', 'requests'):
             self.assertNotIn(forbidden, names | attributes)
         self.assertIn('creator.create', source)
         self.assertIn('creator.destroy', source)
+
+    def test_target_adapter_is_scoped_to_synchronous_stock_create(self):
+        source = (
+            ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' / 'mods' /
+            'mod_offline_2312_avatar_arena_probe.py').read_text(
+                encoding='utf-8')
+        self.assertIn('avatar_type.__init__ = routed_avatar_init', source)
+        self.assertIn('avatar_type.hasBonusCap = routed_has_bonus_cap', source)
+        self.assertIn(
+            'avatar_type.onEnterWorld = routed_on_enter_world', source)
+        self.assertIn(
+            'avatar_type.onBecomePlayer = routed_on_become_player', source)
+        self.assertIn('finally:', source)
+        self.assertIn("self._creator.create(self._map_name)", source)
+        self.assertIn("'bonusCapsOverrides':", (
+            ROOT / 'tests' / 'test_probe.py').read_text(encoding='utf-8'))
 
     def test_route_is_explicit_and_does_not_fallback_to_stock_launch(self):
         source = (
@@ -75,6 +93,8 @@ class AvatarArenaPackageTests(unittest.TestCase):
             '--script-arg offline --script-arg spaces/01_karelia')
         self.assertIn(command, docs)
         self.assertIn('This is not an offline battle', docs)
+        self.assertIn('Version 0.1.0 is superseded', docs)
+        self.assertIn('space_lifecycle_missing', docs)
 
 
 if __name__ == '__main__':

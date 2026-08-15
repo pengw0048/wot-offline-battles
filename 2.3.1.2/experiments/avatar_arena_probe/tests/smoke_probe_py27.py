@@ -45,14 +45,29 @@ class ClientArena(object):
 
 
 class PlayerAvatar(object):
-    id = 17
-    inWorld = True
-    spaceID = 23
-    playerVehicleID = 0
-    arenaTypeID = 101
-    weatherPresetID = 0
-    inputHandler = None
-    arena = ClientArena()
+    def __init__(self):
+        if self.arenaUniqueID != 0 or self.arenaTypeID != 101:
+            raise AssertionError('avatar arena properties were not preseeded')
+        if self.arenaBonusType != 17 or self.arenaGuiType != 23:
+            raise AssertionError('avatar mode properties were not preseeded')
+        if self.arenaExtraData != {} or self.bonusCapsOverrides is not None:
+            raise AssertionError('avatar bonus properties were not preseeded')
+        self.id = 17
+        self.inWorld = True
+        self.spaceID = 23
+        self.playerVehicleID = 0
+        self.inputHandler = None
+        self.arena = ClientArena()
+        self._PlayerAvatar__initProgress = 2
+
+    def hasBonusCap(self, unused_cap):
+        return False
+
+    def onEnterWorld(self, *unused_args):
+        return None
+
+    def onBecomePlayer(self):
+        return None
 
 
 class CursorCamera(object):
@@ -105,6 +120,9 @@ class Creator(object):
         self.active = True
         self.bigworld.current_player = PlayerAvatar()
         self.bigworld.current_camera = CursorCamera()
+        self.bigworld.current_player.hasBonusCap('component-init')
+        self.bigworld.current_player.onEnterWorld()
+        self.bigworld.current_player.onBecomePlayer()
 
     def destroy(self):
         self.destroyed = True
@@ -160,6 +178,9 @@ def main(argv=None):
         creator=creator,
         arena_cache={101: ArenaType()},
         game_module=game,
+        avatar_type=PlayerAvatar,
+        arena_bonus_unknown=17,
+        arena_gui_unknown=23,
         logger=logger,
         get_client_version=lambda: 'v.2.3.1.2 #919')
     if probe is None:

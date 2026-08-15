@@ -8,13 +8,25 @@ the explicit stock `offline` request through the client's own
 `OfflineMapCreator`. The stock creator owns space and entity creation. The
 probe does not construct an Avatar, Arena or Vehicle itself.
 
+Version 0.1.0 is superseded. Windows evidence showed that #919's stock creator
+passes an empty initial-property dictionary to `BigWorld.createEntity()` and
+assigns the Arena fields only after native component initialization has
+already called `PlayerAvatar.hasBonusCap()`. Native creation logged the
+resulting `AttributeError` but continued, so 0.1.0 could emit a false
+`gate_pass`. Version 0.1.1 temporarily applies the same pre-super property
+preparation boundary used by the mature 0.9.22 port, limited to the synchronous
+stock `creator.create()` call. It restores all four class routes in `finally`
+and requires the native bonus-cap check, `onEnterWorld()` and
+`onBecomePlayer()` to be observed and exception-free through their complete
+Python methods.
+
 The single gate answers whether the exact client can reach:
 
 ```text
 game.start -> helpers.OfflineMode.onStartup
            -> routed helpers.OfflineMode.launch
            -> stock OfflineMapCreator.create
-           -> real PlayerAvatar -> real ClientArena -> loaded space
+           -> real PlayerAvatar -> real ClientArena -> loaded geometry
 ```
 
 The expected stock offline-map boundary is deliberately part of the verdict:
@@ -30,9 +42,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 PYENV_VERSION=2.7.18 pyenv exec python tests/smoke_probe_py27.py
 PYENV_VERSION=2.7.18 pyenv exec python build_wotmod.py
 PYENV_VERSION=2.7.18 pyenv exec python tests/smoke_probe_py27.py \
-  dist/org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod
+  dist/org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod
 python3 tools/validate_wotmod.py \
-  dist/org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod
+  dist/org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod
 ```
 
 The release contains one direct CPython 2.7 `mod_*.pyc` loader entry and no
@@ -41,7 +53,7 @@ Python source.
 ## Windows experiment
 
 Remove the earlier offline probe packages before installing this one. Copy
-`org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod` to
+`org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod` to
 `mods/2.3.1.2/`, then run exactly:
 
 ```bat
@@ -58,17 +70,35 @@ Search `python.log` for `[OFFLINE_2312_AVATAR_ARENA_PROBE]`.
 A pass has these milestones in order:
 
 1. `route_installed target=helpers.OfflineMode.launch`;
-2. `native_create_requested ... gameplay=ctf` is represented by the selected
+2. `display_state ...` records the read-only native display mode;
+3. `native_create_requested ... gameplay=ctf` is represented by the selected
    CTF `arena_type_id`;
-3. `avatar_seen ... in_world=True`;
-4. `client_arena_seen geometry=01_karelia gameplay=ctf`;
-5. `space_loaded ... camera=CursorCamera`;
-6. exactly one `gate_pass gate=player_arena`, with `player_vehicle_id=0` and
-   `input_handler=None`.
+4. `avatar_init_observed preseed_applied=True init_returned=True`, with
+   `has_bonus_cap_calls` greater than zero and
+   `has_bonus_cap_exceptions=0`;
+5. `avatar_lifecycle_observed` reports positive, matching call/return counts
+   and zero exceptions for both `onEnterWorld` and `onBecomePlayer`;
+6. `avatar_seen ... in_world=True`;
+7. `client_arena_seen geometry=01_karelia gameplay=ctf`;
+8. `geometry_loaded ... camera=CursorCamera`;
+9. exactly one `gate_pass gate=player_arena`, with `player_vehicle_id=0`,
+   `input_handler=None`, and the observed `player_space_loaded` value. The
+   untouched #919 stock offline-map path is expected to report `False`.
+
+`space_lifecycle_missing reason=offline_battle_session_not_started` is an
+expected boundary marker when that value is `False`, not a success claim. The
+stock offline-map branch deliberately skips `guiSessionProvider.start()`; the
+normal battle arena-load controller therefore never calls
+`PlayerAvatar.onSpaceLoaded()`. If a runtime instead reports `True`, preserve
+the log and investigate the additional lifecycle rather than failing this
+narrow gate automatically. The next independent gate must enter the stock
+battle-session path instead of calling `onSpaceLoaded()` directly or
+fabricating its progress bit.
 
 The Avatar/Arena verdict and the shutdown verdict are separate. Any
-`gate_fail`, `probe_bootstrap_failed`, native crash or transition to the login
-screen fails the Avatar/Arena gate.
+`gate_fail`, `probe_bootstrap_failed`, Traceback, AttributeError, native crash
+or transition to the login screen fails the Avatar/Arena gate even if a later
+marker says `gate_pass`.
 
 On process exit, the wrapper stops its callback, restores both routes, calls
 the stock creator's `destroy()`, and then calls the original `game.fini()`.
@@ -89,12 +119,23 @@ three cold create-to-exit cycles. If creation passes but exit does not, report
 synthetic input handler or teardown bypass. The original global shutdown is
 the final cleanup owner. Do not use an online account for this experiment.
 
-## Sky-flicker comparison
+## Camera and borderless rendering observations
 
-This probe is also a controlled renderer comparison. Unlike the stock free
-camera, `PlayerAvatar.onSpaceLoaded()` follows the real Arena weather path.
-Record whether the bright-sky flicker is unchanged, reduced or gone, but do
-not make renderer behavior part of the Avatar/Arena gate.
+The #919 stock creator hard-codes the Avatar and CursorCamera target at
+`(50, 0, 50)`. Karelia terrain at that horizontal point is about 19.6 metres
+above the target, so the current view is below the terrain and is not an
+upside-down framebuffer. Version 0.1.1 records this as a known stock-viewer
+boundary and does not move the camera. Camera ground placement belongs in a
+separate experiment after geometry load.
+
+Use exclusive fullscreen as the stable visual baseline for this interface
+probe. If exclusive fullscreen is stable but borderless flickers, treat that
+as an independent presentation-path issue. Compare one variable per cold
+launch: first in-game VSync, then the per-application Windows 11 windowed-game
+optimization (if present), then windowed VRR/G-SYNC/FreeSync. Do not interpret
+a single screenshot as flicker evidence. The `display_state` line records
+window mode, resolution, video-mode index, monitor, borderless parameters,
+VSync, triple buffering, DRR and gamma without changing them.
 
 For the stock free-camera baseline, use a cold launch with the exact CTF mask:
 
@@ -102,16 +143,8 @@ For the stock free-camera baseline, use a cold launch with the exact CTF mask:
 win64\WorldOfTanks.exe --script-arg offline --script-arg spaces/01_karelia --script-arg gameMode --script-arg ctf
 ```
 
-If that baseline still flickers, use a fresh process for each single-variable
-test: press `T` once, then in a new process `P` once, then in another new
-process `C` once. These are the stock FreeCamera toggles for temporal AA,
-post-processing and cinematic post-processing. Do not use the mouse wheel;
-the #919 stock `OfflineMode.adjustSpeed()` watcher conversion raises a
-`TypeError` and is unrelated to the Avatar/Arena gate.
-
-Disabling a render feature is diagnostic only. It must not become the formal
-battle port's default fix; the real battle lifecycle may initialize the same
-renderer state correctly.
+Do not use the mouse wheel; the #919 stock `OfflineMode.adjustSpeed()` watcher
+conversion raises a `TypeError` and is unrelated to either gate.
 
 ## Next gate
 
