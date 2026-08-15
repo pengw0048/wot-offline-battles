@@ -8,6 +8,12 @@ two legacy Windows clients:
 | [`0.8.2`](0.8.2/) | World of Tanks 0.8.2 | Server-free single-player or trusted LAN |
 | [`0.9.22`](0.9.22/) | Chinese HD client 0.9.22.0.1 #1513 | Server-backed single-player or trusted LAN |
 
+The [`2.3.1.1`](2.3.1.1/) directory is a development-only interface POC for
+the pinned North American HD client. It observes the stock offline map loader;
+it is not yet a playable offline battle port. Its formal porting baseline
+requires reuse of the mature 0.8.2 behavior instead of extending the POC into
+a parallel implementation.
+
 The current repository head is a pre-release test candidate. A formal release
 will follow validation on two Windows PCs.
 

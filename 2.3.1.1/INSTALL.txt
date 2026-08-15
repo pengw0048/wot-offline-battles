@@ -1,0 +1,31 @@
+World of Tanks 2.3.1.1 offline interface POC
+================================================
+
+Target client:
+  North America HD v.2.3.1.1 #916, client revision 2594806
+
+Install:
+  1. Copy org.peng.offline_2311_poc_0.1.0.wotmod to:
+       <World_of_Tanks>\mods\2.3.1.1\
+  2. Open Command Prompt in the client root.
+  3. Run:
+       win64\WorldOfTanks.exe offline spaces/01_karelia
+
+Evidence:
+  Search <World_of_Tanks>\python.log for [OFFLINE_2311_POC].
+  A passing interface proof reaches a "space_loaded" line containing:
+    player=OfflineEntity
+    camera=FreeCamera
+    one matching space_id in spaces=[...]
+  It also writes "probe_stop" on exit. A transient
+  "space_loaded_snapshot_incomplete" is allowed only when a later exact
+  "space_loaded" success line follows it. No "*_failed", "probe_timeout", or
+  "unexpected_online_lifecycle" may appear. Repeat one cold launch and require
+  the same final success sequence.
+
+Stop:
+  Exit the client process. The stock offline command is process-lifetime mode.
+
+Boundary:
+  This package observes the stock offline map loader. It is not an offline
+  battle mod and does not create or control a tank.

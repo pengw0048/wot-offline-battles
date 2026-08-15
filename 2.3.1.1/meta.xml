@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <id>org.peng.offline_2311_poc</id>
+  <version>0.1.0</version>
+  <name>World of Tanks 2.3.1.1 offline interface probe</name>
+  <description>Version-pinned observability probe for the stock offline map loader. This is not an offline battle implementation.</description>
+</root>
