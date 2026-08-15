@@ -138,11 +138,12 @@ class OfflineBattleRuntime(object):
         from skeletons.gameplay import IGameplayLogic
         gameplay = dependency.instance(IGameplayLogic)
         machine = getattr(gameplay, '_GameplayLogic__machine', None)
-        if machine is not None and machine.isRunning:
+        if machine is not None and machine.isRunning():
             self._log('gameplay_machine_already_running')
             return
         gameplay.start()
-        self._log('gameplay_machine_started')
+        self._log('gameplay_machine_started running=%s',
+                  machine.isRunning() if machine is not None else None)
 
     def _find_arena_type(self, arena_cache):
         matches = []
