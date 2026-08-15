@@ -1,7 +1,7 @@
-# 2.3.1.1 formal porting baseline
+# 2.3.1.2 formal porting baseline
 
 This document is the source-of-truth rule for the formal World of Tanks
-2.3.1.1 port. The interface POC in this directory is intentionally disposable;
+2.3.1.2 port. The interface POC in this directory is intentionally disposable;
 it must not grow into a second battle implementation.
 
 ## Non-negotiable source order
@@ -10,7 +10,7 @@ it must not grow into a second battle implementation.
    `0.8.2/scripts/client/gui/mods/offhangar/`.
 2. **Modern structural template:** the real-Avatar/Vehicle split under
    `0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/`.
-3. **Target adapters only:** exact 2.3.1.1 lifecycle, entity property stream,
+3. **Target adapters only:** exact 2.3.1.2 lifecycle, entity property stream,
    descriptor, GUI/input, native physics, presentation and resource APIs.
 
 Copy working battle law unchanged whenever its inputs and outputs still match.
@@ -49,12 +49,12 @@ not formal-runtime architecture.
 
 ## Formal subsystem matrix
 
-| Responsibility | Copy from mature behavior | Adapt only at the 2.3.1.1 boundary | Replace or exclude | Required runtime proof |
+| Responsibility | Copy from mature behavior | Adapt only at the 2.3.1.2 boundary | Replace or exclude | Required runtime proof |
 | --- | --- | --- | --- | --- |
 | Bot roles, tactics, cover and driving | `bot_ai.py`, `bot_ai_cover.py`, `bot_ai_driver.py`, `bot_ai_navigation.py`, plus the mature map-independent planner laws | Modern descriptor reads and target collision, terrain, water and cover probes | No nearest-target or fixed-route simplification | 29 bots retain roles, routes, traffic handling, cover cycles, aiming and bounded frame work |
 | Vehicle motion and tank contact | `physics.py` longitudinal/traverse/fall/ram law and `vehicle_collision.py` spatial index, OBB contact and pair response | Parameter extraction and one proven owner wired to `WGVehicleFilter`, `WGTankPhysics` or `WGWheeledPhysics` | Replace the 0.8.2 x86 `native_filter_bridge.py` and `offhangar_native_seed.pyd`; no Python pose may masquerade as native control | Create, control, wall/slope/contact/landing/stop behavior, then release with exactly one motion owner |
 | Map, CTF and spawning | Mature spawn candidates, ground/roof checks, enemy-base facing, formation and fail-closed lineup state | Modern `ArenaType`, CTF spawn/base records and typed space visibility | Replace the 0.8.2 map pool, XML shapes and far-plane workarounds | Only selected CTF objects are visible; player plus 29 bots spawn on drivable ground |
-| Navigation and foliage | `foliage.py`, A*, hazards, shallow-water, slope, recovery and prebaked-data validation law | Rebuild the map catalogue, navigation and foliage data from the pinned 2.3.1.1 client | Never relabel 0.8.2 coordinates as current data | Multiple maps show no wall, deep-water or cliff shortcuts and correct sight-line foliage |
+| Navigation and foliage | `foliage.py`, A*, hazards, shallow-water, slope, recovery and prebaked-data validation law | Rebuild the map catalogue, navigation and foliage data from the pinned 2.3.1.2 client | Never relabel 0.8.2 coordinates as current data | Multiple maps show no wall, deep-water or cliff shortcuts and correct sight-line foliage |
 | Projectiles and armour | `projectile_runtime.py` flight and moving-target sweeps plus mature penetration, normalization, ricochet, overmatch, spaced-armour and HE law | Modern shell descriptors, collision results, tracer/effects and feedback presenters | No instant damage or effect-only firing | Elapsed flight, gravity, dodging targets, shell classes, penetration falloff, visuals and HUD agree |
 | Artillery | `artillery_arc_queue.py` and mature low/high ballistic solutions, lead and ray budget | Modern SPG descriptors, muzzle matrices, collision query and tracer presenter | A rear route or straight shell is not artillery support | Low/high arcs, obstruction, moving lead, fixed launch trajectory and bounded probes |
 | Modules, crew, fire and consumables | `device_damage.py`, `internal_geometry.py`, `internal_hit_layouts.py`, `internal_layout_profiles.py`, `internal_layout_store.py` | Modern component shapes and state/HUD presentation | Do not invent a new random critical-hit model; new vehicles use the mature fallback until profiled | Ammo rack, tank, engine, track, crew, fire, repair/med/extinguisher and death transactions |
@@ -64,7 +64,7 @@ not formal-runtime architecture.
 | Camera, input and HUD | Preserve arcade/sniper/SPG, reticle, reload, speed, death spectator and visibility behavior | Modern `AvatarInputHandler`, `VehicleGunRotator`, `ConsistentMatrices` and session provider | Exclude all old `fix_*`, `inject_*`, `dis_*` and private-field forcing scripts | Movement, aim, fire, zoom, SPG camera, spectator, HUD and entity pose remain coherent |
 | Destructibles | `destructibles_authority.py` ownership, deduplication and commit law | Modern encoder/manager/controller, chunk identity, collision callback and current-map data | Replace 0.8.2 native callback and hard-coded entity shapes | Ram/shot/fall/despawn/pass-through work while unrelated static walls still block |
 | LAN, after local parity | External Python 3 room, clock, revision fences, shared rules and authority failover | Modern client roster, descriptors, maps, entity/presentation seam and build ID | The LAN transport must never become a competing battle simulator | Two clients share roster, countdown, damage, deaths, capture, result and failover |
-| Cleanup and repeated battle | Generation fencing, full ownership inventory, and stop-owner-before-visual/entity/space teardown | Exact 2.3.1.1 lifecycle and callbacks; mod-owned cleanup must precede stock entity clearing | Exclude 0.8.2 process termination and stock OfflineMode's one-way lifecycle | No callbacks, entities, models or physics owners remain; a second in-process round is complete |
+| Cleanup and repeated battle | Generation fencing, full ownership inventory, and stop-owner-before-visual/entity/space teardown | Exact 2.3.1.2 lifecycle and callbacks; mod-owned cleanup must precede stock entity clearing | Exclude 0.8.2 process termination and stock OfflineMode's one-way lifecycle | No callbacks, entities, models or physics owners remain; a second in-process round is complete |
 
 ## Old shell that must be replaced
 

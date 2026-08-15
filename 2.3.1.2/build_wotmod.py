@@ -14,7 +14,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 SOURCE_ROOT = os.path.join(ROOT, 'src')
 META_PATH = os.path.join(ROOT, 'meta.xml')
 DIST_ROOT = os.path.join(ROOT, 'dist')
-OUTPUT_NAME = 'org.peng.offline_2311_poc_0.1.0.wotmod'
+OUTPUT_NAME = 'org.peng.offline_2312_poc_0.1.0.wotmod'
 PYTHON_27_MAGIC = '\x03\xf3\r\n'
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -82,13 +82,14 @@ def _archive_directories(files):
 def _write_member(archive, archive_name, data):
     info = zipfile.ZipInfo(archive_name, FIXED_TIMESTAMP)
     info.compress_type = zipfile.ZIP_STORED
-    info.external_attr = 0o644 << 16
+    info.create_system = 0
+    info.external_attr = 16 if archive_name.endswith('/') else 32
     archive.writestr(info, data)
 
 
 def build():
     _require_python_27()
-    stage_root = tempfile.mkdtemp(prefix='offline_2311_poc-')
+    stage_root = tempfile.mkdtemp(prefix='offline_2312_poc-')
     try:
         shutil.copytree(SOURCE_ROOT, os.path.join(stage_root, 'source'))
         compiled_root = os.path.join(stage_root, 'source')

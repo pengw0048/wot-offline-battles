@@ -1,17 +1,19 @@
 import importlib.util
+import io
 from pathlib import Path
+from contextlib import redirect_stdout
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LIFECYCLE = (
+PROBE_MODULE = (
     ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' / 'mods' /
-    'offline_2311_poc' / 'lifecycle.py')
+    'mod_offline_2312_poc.py')
 
 
 def _load_lifecycle():
     spec = importlib.util.spec_from_file_location(
-        'offline_2311_poc_lifecycle_test', LIFECYCLE)
+        'mod_offline_2312_poc_test', PROBE_MODULE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -206,7 +208,7 @@ class OfflineProbeTests(unittest.TestCase):
         self.assertTrue(
             self.logger.contains('space_loaded_snapshot_incomplete'))
         self.assertFalse(any(
-            message.startswith('[OFFLINE_2311_POC] space_loaded ')
+            message.startswith('[OFFLINE_2312_POC] space_loaded ')
             for unused_level, message in self.logger.entries))
 
         self.bigworld.current_player = OfflineEntity(9)
@@ -215,34 +217,39 @@ class OfflineProbeTests(unittest.TestCase):
         self.bigworld.run(second_id)
         self.assertTrue(probe.completed)
         self.assertTrue(any(
-            message.startswith('[OFFLINE_2311_POC] space_loaded ')
+            message.startswith('[OFFLINE_2312_POC] space_loaded ')
             for unused_level, message in self.logger.entries))
 
     def test_lifecycle_is_inactive_without_the_exact_offline_token(self):
-        result = self.lifecycle.init(
-            argv=['WorldOfTanks.exe', 'spaces/01_karelia'],
-            bigworld=self.bigworld, offline_mode=self.offline_mode,
-            logger=self.logger, now=lambda: self.clock[0])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = self.lifecycle.init(
+                argv=['WorldOfTanks.exe', 'spaces/01_karelia'],
+                bigworld=self.bigworld, offline_mode=self.offline_mode,
+                logger=self.logger, now=lambda: self.clock[0])
         self.assertIsNone(result)
         self.assertFalse(self.bigworld.callbacks)
+        self.assertIn('inactive reason=offline_request_missing',
+                      output.getvalue())
 
     def test_lifecycle_fails_closed_on_a_different_client_version(self):
-        result = self.lifecycle.init(
-            argv=['WorldOfTanks.exe', 'offline', 'spaces/01_karelia'],
-            bigworld=self.bigworld, offline_mode=self.offline_mode,
-            logger=self.logger, now=lambda: self.clock[0],
-            get_client_version=lambda: 'v.2.3.1.0 #900')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = self.lifecycle.init(
+                argv=['WorldOfTanks.exe', 'offline', 'spaces/01_karelia'],
+                bigworld=self.bigworld, offline_mode=self.offline_mode,
+                logger=self.logger, now=lambda: self.clock[0],
+                get_client_version=lambda: 'v.2.3.1.0 #900')
         self.assertIsNone(result)
         self.assertFalse(self.bigworld.callbacks)
-        self.assertTrue(self.logger.contains('version_mismatch'))
+        self.assertIn('version_mismatch', output.getvalue())
 
     def test_exact_version_starts_and_online_lifecycle_is_only_reported(self):
-        self.lifecycle._logger = self.logger
         probe = self.lifecycle.init(
             argv=['WorldOfTanks.exe', 'offline', 'spaces/01_karelia'],
             bigworld=self.bigworld, offline_mode=self.offline_mode,
             logger=self.logger, now=lambda: self.clock[0],
-            get_client_version=lambda: ' v.2.3.1.1 #916 ')
+            get_client_version=lambda: ' v.2.3.1.2 #919 ')
         self.assertIsNotNone(probe)
         callback_count = len(self.bigworld.callbacks)
         self.lifecycle.record_online_lifecycle(

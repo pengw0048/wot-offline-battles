@@ -28,11 +28,11 @@ jobs:
         run: >-
           python -m unittest discover -s 0.9.22/tests
           -p "test_*.py" -v
-      - name: Run 2.3.1.1 interface POC test suite
+      - name: Run 2.3.1.2 interface POC test suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
-          python -m unittest discover -s 2.3.1.1/tests
+          python -m unittest discover -s 2.3.1.2/tests
           -p "test_*.py" -v
       - name: Check Python 2.6 client syntax
         run: |
@@ -58,20 +58,25 @@ jobs:
         run: >-
           python 0.9.22/tools/validate_wotmod.py
           0.9.22/dist/org.peng.offline_lan_0922_0.4.0.wotmod
-      - name: Smoke and build Python 2.7 2.3.1.1 interface POC
+      - name: Smoke and build Python 2.7 2.3.1.2 interface POC
         run: |
           docker run --rm --platform linux/amd64 \
             -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/work" \
-            -w /work/2.3.1.1 python:2.7.18 \
+            -w /work/2.3.1.2 python:2.7.18 \
             python tests/smoke_probe_py27.py
           docker run --rm --platform linux/amd64 \
             -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/work" \
-            -w /work/2.3.1.1 python:2.7.18 \
+            -w /work/2.3.1.2 python:2.7.18 \
             python build_wotmod.py
-      - name: Validate 2.3.1.1 interface POC package
+          docker run --rm --platform linux/amd64 \
+            -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/work" \
+            -w /work/2.3.1.2 python:2.7.18 \
+            python tests/smoke_probe_py27.py \
+            dist/org.peng.offline_2312_poc_0.1.0.wotmod
+      - name: Validate 2.3.1.2 interface POC package
         run: >-
-          python 2.3.1.1/tools/validate_wotmod.py
-          2.3.1.1/dist/org.peng.offline_2311_poc_0.1.0.wotmod
+          python 2.3.1.2/tools/validate_wotmod.py
+          2.3.1.2/dist/org.peng.offline_2312_poc_0.1.0.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: wot-0.9.22-lan-client
@@ -79,8 +84,8 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: wot-2.3.1.1-interface-poc
-          path: 2.3.1.1/dist/org.peng.offline_2311_poc_0.1.0.wotmod
+          name: wot-2.3.1.2-interface-poc
+          path: 2.3.1.2/dist/org.peng.offline_2312_poc_0.1.0.wotmod
           if-no-files-found: error
 
   windows-server:

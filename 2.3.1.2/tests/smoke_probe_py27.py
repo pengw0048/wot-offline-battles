@@ -3,13 +3,17 @@ from __future__ import print_function
 
 import imp
 import os
+import shutil
 import sys
+import tempfile
+import zipfile
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-LIFECYCLE = os.path.join(
+PROBE_MODULE = os.path.join(
     ROOT, 'src', 'res', 'scripts', 'client', 'gui', 'mods',
-    'offline_2311_poc', 'lifecycle.py')
+    'mod_offline_2312_poc.py')
+PACKAGE_ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_poc.pyc'
 
 
 class Logger(object):
@@ -74,8 +78,31 @@ class OfflineModeStub(object):
         return self.is_loaded
 
 
-def main():
-    lifecycle = imp.load_source('offline_2311_poc_py27_smoke', LIFECYCLE)
+def _load_probe(package_path=None):
+    if package_path is None:
+        return imp.load_source(
+            'offline_2312_poc_py27_source_smoke', PROBE_MODULE)
+
+    temporary_root = tempfile.mkdtemp(prefix='offline_2312_pyc_smoke-')
+    try:
+        compiled_path = os.path.join(
+            temporary_root, 'mod_offline_2312_poc.pyc')
+        with zipfile.ZipFile(package_path, 'r') as archive:
+            bytecode = archive.read(PACKAGE_ENTRY)
+        with open(compiled_path, 'wb') as output:
+            output.write(bytecode)
+        return imp.load_compiled(
+            'offline_2312_poc_py27_package_smoke', compiled_path)
+    finally:
+        shutil.rmtree(temporary_root)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) > 1:
+        raise SystemExit('usage: smoke_probe_py27.py [package.wotmod]')
+    package_path = argv[0] if argv else None
+    lifecycle = _load_probe(package_path)
     bigworld = BigWorldStub()
     offline_mode = OfflineModeStub()
     logger = Logger()
@@ -86,7 +113,7 @@ def main():
         offline_mode=offline_mode,
         logger=logger,
         now=lambda: clock[0],
-        get_client_version=lambda: 'v.2.3.1.1 #916')
+        get_client_version=lambda: 'v.2.3.1.2 #919')
     if probe is None or len(bigworld.pending) != 1:
         raise AssertionError('probe did not schedule exactly one callback')
 
@@ -102,7 +129,8 @@ def main():
     if not any('space_loaded' in message for message in logger.messages):
         raise AssertionError('space_loaded evidence marker is missing')
     lifecycle.fini()
-    print('CPython 2.7 probe smoke passed')
+    source = 'package' if package_path is not None else 'source'
+    print('CPython 2.7 %s probe smoke passed' % source)
     return 0
 
 

@@ -8,13 +8,11 @@ import zipfile
 
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
-MOD_ID = 'org.peng.offline_2311_poc'
+MOD_ID = 'org.peng.offline_2312_poc'
 MOD_VERSION = '0.1.0'
-ENTRY = 'res/scripts/client/gui/mods/mod_offline_2311_poc.pyc'
+ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_poc.pyc'
 EXPECTED_PYC = {
     ENTRY,
-    'res/scripts/client/gui/mods/offline_2311_poc/__init__.pyc',
-    'res/scripts/client/gui/mods/offline_2311_poc/lifecycle.pyc',
 }
 
 
@@ -49,6 +47,14 @@ def validate(path):
             if info.date_time != (1980, 1, 1, 0, 0, 0):
                 raise ValueError('archive member timestamp is not fixed: %s' %
                                  info.filename)
+            if info.create_system != 0:
+                raise ValueError('archive member is not DOS-compatible: %s' %
+                                 info.filename)
+            expected_attr = 16 if info.is_dir() else 32
+            if info.external_attr != expected_attr:
+                raise ValueError(
+                    'archive member has unexpected DOS attributes: %s' %
+                    info.filename)
 
         root = ET.fromstring(archive.read('meta.xml'))
         if (root.findtext('id') or '').strip() != MOD_ID:
