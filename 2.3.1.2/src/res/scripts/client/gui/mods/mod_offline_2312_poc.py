@@ -8,6 +8,7 @@ LOG_PREFIX = '[OFFLINE_2312_POC]'
 EXPECTED_CLIENT_VERSION = 'v.2.3.1.2 #919'
 POLL_INTERVAL_SECONDS = 0.5
 LOAD_TIMEOUT_SECONDS = 120.0
+SPACE_LOAD_EPS = 0.0001
 
 _probe = None
 
@@ -132,9 +133,12 @@ class OfflineModeProbe(object):
             camera = self._bigworld.camera()
             camera_type = (
                 'None' if camera is None else type(camera).__name__)
+            camera_space_id = (
+                None if camera is None else getattr(camera, 'spaceID', None))
         except Exception as error:
             self._report_error_once('camera', 'camera_lookup_failed', error)
             camera_type = 'unavailable'
+            camera_space_id = 'unavailable'
 
         try:
             space_ids = sorted(self._bigworld.spaces.keys())
@@ -144,7 +148,7 @@ class OfflineModeProbe(object):
 
         return (player_type,
                 None if player is None else getattr(player, 'spaceID', None),
-                camera_type, space_ids)
+                camera_type, camera_space_id, space_ids)
 
     def _schedule(self):
         if self._stopped or self._completed or self._callback_id is not None:
@@ -176,30 +180,33 @@ class OfflineModeProbe(object):
                 LOG_PREFIX, self._space_name, status)
 
         if loaded:
-            player_type, space_id, camera_type, space_ids = (
-                self._read_world_snapshot())
+            (player_type, player_space_id, camera_type, camera_space_id,
+             space_ids) = self._read_world_snapshot()
             snapshot_complete = (
+                status > 1.0 - SPACE_LOAD_EPS and
                 player_type == 'OfflineEntity' and
                 camera_type == 'FreeCamera' and
-                isinstance(space_ids, list) and
-                space_id in space_ids)
+                player_space_id is not None and
+                player_space_id == camera_space_id)
             if snapshot_complete:
                 self._completed = True
                 self._record(
                     'info',
                     '%s space_loaded space=%s status=%.6f player=%s '
-                    'space_id=%s camera=%s spaces=%s',
+                    'player_space_id=%s camera=%s camera_space_id=%s '
+                    'spaces=%s',
                     LOG_PREFIX, self._space_name, status, player_type,
-                    space_id, camera_type, space_ids)
+                    player_space_id, camera_type, camera_space_id, space_ids)
                 return
             if not self._snapshot_incomplete_seen:
                 self._snapshot_incomplete_seen = True
                 self._record(
                     'error',
                     '%s space_loaded_snapshot_incomplete space=%s '
-                    'player=%s space_id=%s camera=%s spaces=%s',
-                    LOG_PREFIX, self._space_name, player_type, space_id,
-                    camera_type, space_ids)
+                    'status=%.6f player=%s player_space_id=%s camera=%s '
+                    'camera_space_id=%s spaces=%s',
+                    LOG_PREFIX, self._space_name, status, player_type,
+                    player_space_id, camera_type, camera_space_id, space_ids)
 
         elapsed = self._now() - self._started_at
         if elapsed >= self._timeout:

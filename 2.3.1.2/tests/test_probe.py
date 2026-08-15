@@ -91,6 +91,11 @@ class OfflineEntity(object):
 
 
 class FreeCamera(object):
+    def __init__(self, space_id=None):
+        self.spaceID = space_id
+
+
+class CameraWithoutSpaceID(object):
     pass
 
 
@@ -135,15 +140,15 @@ class OfflineProbeTests(unittest.TestCase):
         self.offline_mode.is_loaded = True
         self.bigworld.load_status = 1.0
         self.bigworld.current_player = OfflineEntity(17)
-        self.bigworld.current_camera = FreeCamera()
-        self.bigworld.spaces = {17: object()}
+        self.bigworld.current_camera = FreeCamera(17)
         self.bigworld.run(second_id)
         self.assertTrue(probe.completed)
         self.assertIsNone(probe.callback_id)
         self.assertFalse(self.bigworld.callbacks)
         self.assertTrue(self.logger.contains('space_loaded'))
-        self.assertTrue(self.logger.contains('space_id=17'))
-        self.assertTrue(self.logger.contains('spaces=[17]'))
+        self.assertTrue(self.logger.contains('player_space_id=17'))
+        self.assertTrue(self.logger.contains('camera_space_id=17'))
+        self.assertTrue(self.logger.contains('spaces=[]'))
 
     def test_probe_times_out_without_creating_replacement_state(self):
         probe = self.make_probe(timeout=5.0)
@@ -188,8 +193,7 @@ class OfflineProbeTests(unittest.TestCase):
         self.offline_mode.is_loaded = True
         self.bigworld.load_status = 1.0
         self.bigworld.current_player = OfflineEntity(5)
-        self.bigworld.current_camera = FreeCamera()
-        self.bigworld.spaces = {5: object()}
+        self.bigworld.current_camera = FreeCamera(5)
         self.bigworld.run(callback_id)
         self.assertTrue(probe.completed)
         self.assertTrue(self.logger.contains('space_loaded'))
@@ -212,13 +216,74 @@ class OfflineProbeTests(unittest.TestCase):
             for unused_level, message in self.logger.entries))
 
         self.bigworld.current_player = OfflineEntity(9)
-        self.bigworld.current_camera = FreeCamera()
-        self.bigworld.spaces = {9: object()}
+        self.bigworld.current_camera = FreeCamera(9)
         self.bigworld.run(second_id)
         self.assertTrue(probe.completed)
         self.assertTrue(any(
             message.startswith('[OFFLINE_2312_POC] space_loaded ')
             for unused_level, message in self.logger.entries))
+
+    def test_server_space_data_does_not_change_the_client_space_verdict(self):
+        for spaces in ({}, {91: object()}, {999: object()}):
+            lifecycle = _load_lifecycle()
+            bigworld = _BigWorld()
+            offline_mode = _OfflineMode()
+            logger = _Logger()
+            probe = lifecycle.OfflineModeProbe(
+                bigworld, offline_mode, 'spaces/01_karelia', logger=logger,
+                now=lambda: self.clock[0])
+            probe.start()
+            callback_id = probe.callback_id
+            offline_mode.is_enabled = True
+            offline_mode.is_loaded = True
+            bigworld.load_status = 1.0
+            bigworld.current_player = OfflineEntity(91)
+            bigworld.current_camera = FreeCamera(91)
+            bigworld.spaces = spaces
+            bigworld.run(callback_id)
+            self.assertTrue(probe.completed)
+
+    def test_mismatched_player_and_camera_spaces_are_not_success(self):
+        probe = self.make_probe()
+        probe.start()
+        callback_id = probe.callback_id
+        self.offline_mode.is_enabled = True
+        self.offline_mode.is_loaded = True
+        self.bigworld.load_status = 1.0
+        self.bigworld.current_player = OfflineEntity(11)
+        self.bigworld.current_camera = FreeCamera(12)
+        self.bigworld.run(callback_id)
+        self.assertFalse(probe.completed)
+        self.assertTrue(
+            self.logger.contains('space_loaded_snapshot_incomplete'))
+
+    def test_loaded_flag_without_current_load_milestone_is_not_success(self):
+        probe = self.make_probe()
+        probe.start()
+        callback_id = probe.callback_id
+        self.offline_mode.is_enabled = True
+        self.offline_mode.is_loaded = True
+        self.bigworld.load_status = 0.9
+        self.bigworld.current_player = OfflineEntity(12)
+        self.bigworld.current_camera = FreeCamera(12)
+        self.bigworld.run(callback_id)
+        self.assertFalse(probe.completed)
+        self.assertTrue(
+            self.logger.contains('space_loaded_snapshot_incomplete'))
+
+    def test_camera_without_space_id_is_not_success(self):
+        probe = self.make_probe()
+        probe.start()
+        callback_id = probe.callback_id
+        self.offline_mode.is_enabled = True
+        self.offline_mode.is_loaded = True
+        self.bigworld.load_status = 1.0
+        self.bigworld.current_player = OfflineEntity(13)
+        self.bigworld.current_camera = CameraWithoutSpaceID()
+        self.bigworld.run(callback_id)
+        self.assertFalse(probe.completed)
+        self.assertTrue(
+            self.logger.contains('space_loaded_snapshot_incomplete'))
 
     def test_lifecycle_is_inactive_without_the_exact_offline_token(self):
         output = io.StringIO()

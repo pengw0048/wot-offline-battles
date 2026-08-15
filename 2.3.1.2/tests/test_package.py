@@ -96,7 +96,7 @@ class PackageContractTests(unittest.TestCase):
                 encoding='utf-8')
         self.assertIn(
             'python tests/smoke_probe_py27.py \\\n'
-            '            dist/org.peng.offline_2312_poc_0.1.0.wotmod',
+            '            dist/org.peng.offline_2312_poc_0.1.1.wotmod',
             workflow)
 
 

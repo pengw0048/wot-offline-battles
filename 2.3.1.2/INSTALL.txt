@@ -5,8 +5,9 @@ Target client:
   North America HD v.2.3.1.2 #919, client revision 2598149
 
 Install:
-  1. Remove org.peng.offline_2311_poc_0.1.0.wotmod if it is still installed.
-  2. Copy org.peng.offline_2312_poc_0.1.0.wotmod to:
+  1. Remove org.peng.offline_2311_poc_0.1.0.wotmod and
+     org.peng.offline_2312_poc_0.1.0.wotmod if either is still installed.
+  2. Copy org.peng.offline_2312_poc_0.1.1.wotmod to:
        <World_of_Tanks>\mods\2.3.1.2\
   3. Open Command Prompt in the client root.
   4. Run:
@@ -23,7 +24,8 @@ Evidence:
   A passing interface proof reaches a "space_loaded" line containing:
     player=OfflineEntity
     camera=FreeCamera
-    one matching space_id in spaces=[...]
+    matching non-null player_space_id and camera_space_id values
+  "spaces=[]" is valid for the stock client-only space and is diagnostic only.
   It also writes "probe_stop" on exit. A transient
   "space_loaded_snapshot_incomplete" is allowed only when a later exact
   "space_loaded" success line follows it. No "*_failed", "probe_timeout", or

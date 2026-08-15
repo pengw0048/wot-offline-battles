@@ -38,7 +38,7 @@ class OfflineEntity(object):
 
 
 class FreeCamera(object):
-    pass
+    spaceID = 23
 
 
 class BigWorldStub(object):
@@ -120,7 +120,6 @@ def main(argv=None):
     offline_mode.is_enabled = True
     offline_mode.is_loaded = True
     bigworld.status = 1.0
-    bigworld.spaces = {23: object()}
     callback_id = probe.callback_id
     unused_delay, function = bigworld.pending.pop(callback_id)
     function()

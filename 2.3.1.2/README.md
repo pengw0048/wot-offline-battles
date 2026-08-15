@@ -27,9 +27,9 @@ cd /path/to/wot-offline-battles/2.3.1.2
 PYENV_VERSION=2.7.18 pyenv exec python tests/smoke_probe_py27.py
 PYENV_VERSION=2.7.18 pyenv exec python build_wotmod.py
 PYENV_VERSION=2.7.18 pyenv exec python tests/smoke_probe_py27.py \
-  dist/org.peng.offline_2312_poc_0.1.0.wotmod
+  dist/org.peng.offline_2312_poc_0.1.1.wotmod
 python3 tools/validate_wotmod.py \
-  dist/org.peng.offline_2312_poc_0.1.0.wotmod
+  dist/org.peng.offline_2312_poc_0.1.1.wotmod
 ```
 
 The result contains stored CPython 2.7 adjacent bytecode and no Python source.
@@ -38,9 +38,10 @@ does not depend on a nested package import.
 
 ## Windows runtime proof
 
-Remove the earlier `org.peng.offline_2311_poc_0.1.0.wotmod`, copy the generated
-`.wotmod` into the complete target client at `mods/2.3.1.2/`, then launch the
-client executable directly:
+Remove the earlier `org.peng.offline_2311_poc_0.1.0.wotmod` and
+`org.peng.offline_2312_poc_0.1.0.wotmod`, copy the generated `.wotmod` into the
+complete target client at `mods/2.3.1.2/`, then launch the client executable
+directly:
 
 ```bat
 cd /d C:\Games\World_of_Tanks
@@ -62,9 +63,10 @@ Search `python.log` for `[OFFLINE_2312_POC]`.
   `offline_mode_entered`, then `space_loaded` appear in that order; the first
   two markers show Python `argv` containing separate `offline` and
   `spaces/01_karelia` entries; the last marker identifies `OfflineEntity`,
-  `FreeCamera`, and the loaded space; the map is visible in the stock free
-  camera; and `probe_stop` appears on exit. Both cold launches must produce the
-  same sequence.
+  `FreeCamera`, and matching non-null player/camera space IDs; `spaces=[]` is
+  valid for this client-only space and remains diagnostic only; the map is
+  visible in the stock free camera; and `probe_stop` appears on exit. Both cold
+  launches must produce the same sequence.
 - Fail: `probe_bootstrap_failed`, `callback_schedule_failed`, or
   `probe_timeout` appears; `space_loaded_snapshot_incomplete` does not recover
   to the exact success marker; any `unexpected_online_lifecycle` appears; or
