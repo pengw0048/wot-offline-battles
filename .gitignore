@@ -14,4 +14,5 @@ python.log
 # Generated 0.9.22 mod packages are CI/local build artifacts.
 0.9.22/dist/
 2.3.1.2/dist/
+2.3.1.2/experiments/*/dist/
 deliverables/

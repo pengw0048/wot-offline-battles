@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <id>org.peng.offline_2312_avatar_arena_probe</id>
+  <version>0.1.0</version>
+  <name>World of Tanks 2.3.1.2 PlayerAvatar and ClientArena probe</name>
+  <description>Version-pinned interface probe that routes the stock offline command through the stock OfflineMapCreator. This is not an offline battle implementation.</description>
+</root>

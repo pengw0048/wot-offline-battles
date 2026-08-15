@@ -1,0 +1,44 @@
+World of Tanks 2.3.1.2 PlayerAvatar and ClientArena probe
+=========================================================
+
+This is not an offline battle.
+
+Target:
+  North America HD v.2.3.1.2 #919
+
+Install:
+  1. Remove all earlier offline POC packages, including:
+       org.peng.offline_2311_poc_0.1.0.wotmod
+       org.peng.offline_2312_poc_0.1.0.wotmod
+       org.peng.offline_2312_poc_0.1.1.wotmod
+  2. Copy org.peng.offline_2312_avatar_arena_probe_0.1.0.wotmod to:
+       <World_of_Tanks>\mods\2.3.1.2\
+  3. Run from the client root:
+       win64\WorldOfTanks.exe --script-arg avatarArenaProbe --script-arg offline --script-arg spaces/01_karelia
+
+Evidence:
+  Search python.log for [OFFLINE_2312_AVATAR_ARENA_PROBE].
+  The final pass marker is:
+    gate_pass gate=player_arena
+  It must report the real PlayerAvatar/ClientArena path, geometry 01_karelia,
+  gameplay ctf, matching player/camera space IDs, player_vehicle_id=0 and
+  input_handler=None. Any gate_fail, bootstrap failure, crash or login-screen
+  transition fails the Avatar/Arena gate.
+
+Exit:
+  Exit the client process. The package stops its callback, restores its routes,
+  calls the stock OfflineMapCreator destroy path, and then calls the original
+  game shutdown. A successful creation run must contain:
+    probe_stop reason=game_fini
+    cleanup_destroy_begin creator_active=True
+    cleanup_destroy_returned creator_active=False
+    cleanup_original_fini_returned
+  It must not contain OfflineMapCreator.destroy(): FAILED, cleanup_failed,
+  Traceback, AttributeError, VehicleDeinitFailure or a native crash. Repeat
+  three cold create-to-exit cycles. The returned marker is an observation, not
+  proof by itself, because stock destroy catches its own exceptions.
+
+Boundary:
+  This package proves only a real PlayerAvatar and ClientArena without a
+  Vehicle, controls, battle GUI or combat. It must not be extended into a
+  parallel battle implementation.

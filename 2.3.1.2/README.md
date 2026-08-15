@@ -76,3 +76,7 @@ Search `python.log` for `[OFFLINE_2312_POC]`.
 
 The `space_loaded` marker is not evidence of a garage, a controllable tank,
 battle UI, combat rules, bots, or normal battle fidelity.
+
+The next independent native lifecycle experiment is documented under
+[`experiments/avatar_arena_probe`](experiments/avatar_arena_probe/README.md).
+It replaces this package during its run; do not install both together.
