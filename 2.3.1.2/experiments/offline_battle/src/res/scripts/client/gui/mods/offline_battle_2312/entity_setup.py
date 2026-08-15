@@ -100,6 +100,21 @@ def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
         'wheelsScroll': (),
         'wheelsState': 0,
         'burnoutLevel': 0,
+        'dotEffect': None,
+        'inspiringEffect': None,
+        'healingEffect': None,
+        'inspired': None,
+        'healing': None,
+        'healOverTime': None,
+        'ownVehiclePosition': None,
+        'perkEffects': {'equipment': []},
+        'perks': [],
+        'perksRibbonNotify': [],
+        'dogTag': {
+            'dogTag': {'components': []},
+            'defaultDogTag': {'components': []},
+            'showDogTagToKiller': False,
+        },
     }
 
 

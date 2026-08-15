@@ -120,6 +120,7 @@ class OfflineBattleRuntime(object):
             self._fail('arena_not_found')
             return
         self._arena_type_id, self._arena_type = match
+        self._start_gameplay_machine()
         account_setup.install(self._log)
         self._install_class_patches()
         self._stage = 'create'
@@ -129,6 +130,19 @@ class OfflineBattleRuntime(object):
             return
         self._stage = 'await_ground'
         self._schedule(POLL_INTERVAL_SECONDS, self._poll)
+
+    def _start_gameplay_machine(self):
+        """game.start() skips ServiceLocator.gameplay.start() on the offline
+        branch; the battle session posts state events, so start it here."""
+        from helpers import dependency
+        from skeletons.gameplay import IGameplayLogic
+        gameplay = dependency.instance(IGameplayLogic)
+        machine = getattr(gameplay, '_GameplayLogic__machine', None)
+        if machine is not None and machine.isRunning:
+            self._log('gameplay_machine_already_running')
+            return
+        gameplay.start()
+        self._log('gameplay_machine_started')
 
     def _find_arena_type(self, arena_cache):
         matches = []
@@ -269,6 +283,7 @@ class OfflineBattleRuntime(object):
             return False
         if not self._became_player:
             self._fail('become_player_missing')
+            self._stop_partial_session(avatar)
             return False
         if getattr(avatar, 'arena', None) is None:
             self._fail('arena_missing_after_create')
@@ -278,12 +293,22 @@ class OfflineBattleRuntime(object):
             return False
         if avatar.inputHandler is None:
             self._fail('input_handler_missing_after_create')
+            self._stop_partial_session(avatar)
             return False
         self._log('session_started arena_type_id=%s input_handler=%s '
                   'gui_type=%s bonus_type=%s', self._arena_type_id,
                   type(avatar.inputHandler).__name__, avatar.arenaGuiType,
                   avatar.arenaBonusType)
         return True
+
+    def _stop_partial_session(self, avatar):
+        try:
+            if avatar.guiSessionProvider.getArenaDP() is not None:
+                avatar.guiSessionProvider.stop()
+                self._log('partial_session_stopped')
+        except Exception as error:
+            self._log('partial_session_stop_failed error=%s',
+                      type(error).__name__)
 
     def _preseed_avatar(self, avatar, constants):
         avatar.arenaUniqueID = 0
@@ -311,6 +336,10 @@ class OfflineBattleRuntime(object):
         avatar.numOfObservers = 0
         avatar.shouldSendKillcamSimulationData = False
         avatar.goodiesSnapshot = []
+        avatar.playLimits = {'curfew': -1, 'weeklyPlayLimit': -1,
+                             'dailyPlayLimit': -1, 'sessionLimit': -1}
+        avatar.battleChatRestriction = {'isBattleChatDisabled': False,
+                                        'restrictionReasonID': 0}
 
     # ------------------------------------------------------------------
     def _collide_ground(self, space_id, x, z):
@@ -358,6 +387,9 @@ class OfflineBattleRuntime(object):
             entity_setup.roster_entry(vehicle_id, comp_descr, max_health)])
         avatar.playerVehicleID = vehicle_id
         avatar.set_playerVehicleID(0)
+        arena_load = avatar.guiSessionProvider.shared.arenaLoad
+        if arena_load is not None:
+            arena_load.invalidateArenaInfo()
         self._log('player_vehicle_selected id=%s init_progress=%s',
                   vehicle_id, self._init_progress(avatar))
         return True
