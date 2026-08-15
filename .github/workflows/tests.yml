@@ -98,12 +98,12 @@ jobs:
             -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/work" \
             -w /work/2.3.1.2/experiments/avatar_arena_probe \
             python:2.7.18 python tests/smoke_probe_py27.py \
-            dist/org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod
+            dist/org.peng.offline_2312_avatar_arena_probe_0.1.2.wotmod
       - name: Validate 2.3.1.2 Avatar/Arena probe package
         run: >-
           python
           2.3.1.2/experiments/avatar_arena_probe/tools/validate_wotmod.py
-          2.3.1.2/experiments/avatar_arena_probe/dist/org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod
+          2.3.1.2/experiments/avatar_arena_probe/dist/org.peng.offline_2312_avatar_arena_probe_0.1.2.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: wot-0.9.22-lan-client
@@ -117,7 +117,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wot-2.3.1.2-avatar-arena-probe
-          path: 2.3.1.2/experiments/avatar_arena_probe/dist/org.peng.offline_2312_avatar_arena_probe_0.1.1.wotmod
+          path: 2.3.1.2/experiments/avatar_arena_probe/dist/org.peng.offline_2312_avatar_arena_probe_0.1.2.wotmod
           if-no-files-found: error
 
   windows-server:

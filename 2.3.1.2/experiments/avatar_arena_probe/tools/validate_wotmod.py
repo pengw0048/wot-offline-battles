@@ -9,7 +9,7 @@ import zipfile
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 MOD_ID = 'org.peng.offline_2312_avatar_arena_probe'
-MOD_VERSION = '0.1.1'
+MOD_VERSION = '0.1.2'
 ENTRY = (
     'res/scripts/client/gui/mods/'
     'mod_offline_2312_avatar_arena_probe.pyc')

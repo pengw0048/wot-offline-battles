@@ -2,6 +2,7 @@ from __future__ import absolute_import, print_function
 
 import sys
 import time
+import math
 
 
 LOG_PREFIX = '[OFFLINE_2312_AVATAR_ARENA_PROBE]'
@@ -14,6 +15,15 @@ SPACE_LOAD_EPS = 0.0001
 INIT_PROGRESS_SPACE_LOADED = 1
 INIT_PROGRESS_ENTERED_WORLD = 2
 INIT_PROGRESS_REQUIRED = INIT_PROGRESS_ENTERED_WORLD
+TERRAIN_COLLISION_MASK = 128
+TERRAIN_ONLY_FLAGS = 8
+TERRAIN_RAY_HEIGHT = 1000.0
+BASE_SPAWN_FORWARD_METRES = 20.0
+SPAWN_BOUNDS_MARGIN_METRES = 8.0
+CAMERA_PITCH_DEGREES = -25.0
+MATURE_CTF_SPAWNS = {
+    '01_karelia': ((382.0, 386.0), (-386.0, -386.0)),
+}
 
 _probe = None
 _offline_mode = None
@@ -64,15 +74,100 @@ def _find_arena_type(arena_cache, map_name):
     return matches[0]
 
 
+def _vector2_xz(value):
+    if value is None:
+        return None
+    try:
+        return float(value.x), float(value.y)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        return float(value[0]), float(value[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _first_team_point(team_points):
+    if not team_points:
+        return None
+    if isinstance(team_points, dict):
+        for key in sorted(team_points):
+            point = _vector2_xz(team_points[key])
+            if point is not None:
+                return point
+        return None
+    for value in team_points:
+        point = _vector2_xz(value)
+        if point is not None:
+            return point
+    return None
+
+
+def _team_points(value, team_index):
+    try:
+        return value[team_index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _camera_spawn_pose(arena_type):
+    """Copy the mature CTF spawn rule: stock spawns, then the team base."""
+    spawn_points = getattr(arena_type, 'teamSpawnPoints', None)
+    base_points = getattr(arena_type, 'teamBasePositions', None)
+    geometry_name = getattr(arena_type, 'geometryName', None)
+    mature_spawns = MATURE_CTF_SPAWNS.get(geometry_name)
+    mature_team_spawn = _vector2_xz(_team_points(mature_spawns, 0))
+    team_spawn = (mature_team_spawn or
+                  _first_team_point(_team_points(spawn_points, 0)))
+    own_base = _first_team_point(_team_points(base_points, 0))
+    enemy_base = _first_team_point(_team_points(base_points, 1))
+
+    anchor = team_spawn or own_base
+    if anchor is None:
+        anchor = (50.0, 50.0)
+    x, z = anchor
+    heading_anchor = own_base or anchor
+    if enemy_base is not None:
+        yaw = math.atan2(
+            enemy_base[0] - heading_anchor[0],
+            enemy_base[1] - heading_anchor[1])
+    else:
+        yaw = math.atan2(-x, -z)
+
+    source = ('mature_ctf_spawn' if mature_team_spawn is not None else
+              'team_spawn')
+    if team_spawn is None and own_base is not None:
+        source = 'team_base_formation'
+        x += math.sin(yaw) * BASE_SPAWN_FORWARD_METRES
+        z += math.cos(yaw) * BASE_SPAWN_FORWARD_METRES
+    elif team_spawn is None:
+        source = 'viewer_fallback'
+
+    bounds = getattr(arena_type, 'boundingBox', None)
+    try:
+        bottom_left = _vector2_xz(bounds[0])
+        upper_right = _vector2_xz(bounds[1])
+    except (IndexError, TypeError):
+        bottom_left = upper_right = None
+    if bottom_left is not None and upper_right is not None:
+        x = max(bottom_left[0] + SPAWN_BOUNDS_MARGIN_METRES,
+                min(upper_right[0] - SPAWN_BOUNDS_MARGIN_METRES, x))
+        z = max(bottom_left[1] + SPAWN_BOUNDS_MARGIN_METRES,
+                min(upper_right[1] - SPAWN_BOUNDS_MARGIN_METRES, z))
+    return x, z, yaw, source
+
+
 class AvatarArenaProbe(object):
     """Route stock OfflineMode to stock OfflineMapCreator and observe it."""
 
-    def __init__(self, bigworld, creator, arena_cache, requested_space,
+    def __init__(self, bigworld, engine_math, creator, arena_cache,
+                 requested_space,
                  map_name, avatar_type, arena_bonus_unknown,
                  arena_gui_unknown, logger=None, now=None,
                  poll_interval=POLL_INTERVAL_SECONDS,
                  load_timeout=LOAD_TIMEOUT_SECONDS):
         self._bigworld = bigworld
+        self._math = engine_math
         self._creator = creator
         self._arena_cache = arena_cache
         self._requested_space = requested_space
@@ -96,6 +191,8 @@ class AvatarArenaProbe(object):
         self._space_lifecycle_reported = False
         self._reported_errors = set()
         self._arena_type_id = None
+        self._arena_type = None
+        self._camera_repositioned = False
         self._stage = 'idle'
         self._display_state_reported = False
         self._avatar_init_object = None
@@ -241,11 +338,11 @@ class AvatarArenaProbe(object):
             if context:
                 self._record(
                     'error',
-                    '%s gate_fail gate=player_arena reason=%s %s',
+                    '%s bootstrap_failed reason=%s %s',
                     LOG_PREFIX, reason, context)
             else:
                 self._record(
-                    'error', '%s gate_fail gate=player_arena reason=%s',
+                    'error', '%s bootstrap_failed reason=%s',
                     LOG_PREFIX, reason)
         else:
             try:
@@ -254,7 +351,7 @@ class AvatarArenaProbe(object):
                 detail = '<unavailable>'
             self._record(
                 'error',
-                '%s gate_fail gate=player_arena reason=%s stage=%s '
+                '%s bootstrap_failed reason=%s stage=%s '
                 'error=%s detail=%s',
                 LOG_PREFIX, reason, stage or self._stage,
                 type(error).__name__, detail[:200])
@@ -438,6 +535,7 @@ class AvatarArenaProbe(object):
 
         arena_type_id, unused_arena_type = arena_match
         self._arena_type_id = arena_type_id
+        self._arena_type = unused_arena_type
         self._create_requested_at = self._now()
         self._record(
             'info',
@@ -513,6 +611,46 @@ class AvatarArenaProbe(object):
             self._report_error_once(
                 'space_status', 'space_load_status_failed', error)
             return -1.0
+
+    def _reposition_camera(self, camera):
+        if self._camera_repositioned:
+            return True
+        if camera is None or type(camera).__name__ != 'CursorCamera':
+            return False
+        space_id = getattr(camera, 'spaceID', None)
+        if space_id is None or self._arena_type is None:
+            return False
+        x, z, yaw, source_name = _camera_spawn_pose(self._arena_type)
+        start = self._math.Vector3(x, TERRAIN_RAY_HEIGHT, z)
+        end = self._math.Vector3(x, -TERRAIN_RAY_HEIGHT, z)
+        collision = self._bigworld.wg_collideSegment(
+            int(space_id), start, end, TERRAIN_COLLISION_MASK,
+            TERRAIN_ONLY_FLAGS)
+        if collision is None:
+            return False
+        closest = collision.closestPoint
+        ground_x = float(closest.x)
+        ground_y = float(closest.y)
+        ground_z = float(closest.z)
+
+        target = self._math.Matrix()
+        target.setTranslate(self._math.Vector3(
+            ground_x, ground_y, ground_z))
+        camera.target = target
+
+        source = self._math.Matrix()
+        source.setRotateYPR((yaw, math.radians(CAMERA_PITCH_DEGREES), 0.0))
+        camera.source = source
+        camera.forceUpdate()
+
+        self._camera_repositioned = True
+        self._record(
+            'info',
+            '%s camera_repositioned source=%s target=(%.3f,%.3f,%.3f) '
+            'yaw=%.6f pitch=%.3f',
+            LOG_PREFIX, source_name, ground_x, ground_y, ground_z, yaw,
+            CAMERA_PITCH_DEGREES)
+        return True
 
     def _snapshot(self):
         player = self._safe_player()
@@ -715,7 +853,7 @@ class AvatarArenaProbe(object):
             return 'space_id_mismatch'
         if status <= 1.0 - SPACE_LOAD_EPS:
             return 'space_timeout'
-        return 'gate_contract_mismatch'
+        return 'bootstrap_state_mismatch'
 
     def _poll_runtime(self):
         if self._stopped or self._completed or self._failed:
@@ -725,6 +863,20 @@ class AvatarArenaProbe(object):
         if not snapshot['creator_active']:
             self._fail('creator_became_inactive')
             return
+
+        if status > 1.0 - SPACE_LOAD_EPS:
+            try:
+                camera = self._bigworld.camera()
+                if not self._reposition_camera(camera):
+                    elapsed = self._now() - self._create_requested_at
+                    if elapsed >= self._load_timeout:
+                        self._fail('camera_ground_timeout', stage='camera')
+                        return
+                    self._schedule()
+                    return
+            except Exception as error:
+                self._fail('camera_reposition_failed', error, stage='camera')
+                return
 
         if (not self._avatar_seen and
                 snapshot['player_type'] == 'PlayerAvatar'):
@@ -805,7 +957,7 @@ class AvatarArenaProbe(object):
             self._completed = True
             self._record(
                 'info',
-                '%s gate_pass gate=player_arena entity_id=%s space_id=%s '
+                '%s bootstrap_ready entity_id=%s space_id=%s '
                 'arena_type_id=%s geometry=%s gameplay=%s '
                 'player_vehicle_id=%s input_handler=%s init_progress=%s '
                 'has_bonus_cap_calls=%s enter_world_calls=%s '
@@ -832,7 +984,7 @@ class AvatarArenaProbe(object):
 
 def _routed_launch(space_name):
     if _probe is None:
-        _write_marker('%s gate_fail gate=player_arena reason=route_unbound',
+        _write_marker('%s bootstrap_failed reason=route_unbound',
                       LOG_PREFIX)
         return None
     return _probe.route_launch(space_name)
@@ -907,7 +1059,8 @@ def init(argv=None, bigworld=None, offline_mode=None, creator=None,
          arena_bonus_unknown=None, arena_gui_unknown=None, logger=None,
          now=None,
          poll_interval=POLL_INTERVAL_SECONDS,
-         load_timeout=LOAD_TIMEOUT_SECONDS, get_client_version=None):
+         load_timeout=LOAD_TIMEOUT_SECONDS, get_client_version=None,
+         engine_math=None):
     global _probe, _offline_mode, _original_launch
     global _game_module, _original_game_fini, _creator
     effective_argv = sys.argv if argv is None else argv
@@ -933,6 +1086,8 @@ def init(argv=None, bigworld=None, offline_mode=None, creator=None,
             return None
         if bigworld is None:
             import BigWorld as bigworld
+        if engine_math is None:
+            import Math as engine_math
         if offline_mode is None:
             from helpers import OfflineMode as offline_mode
         if creator is None:
@@ -950,7 +1105,8 @@ def init(argv=None, bigworld=None, offline_mode=None, creator=None,
             if arena_gui_unknown is None:
                 arena_gui_unknown = constants.ARENA_GUI_TYPE.UNKNOWN
         _probe = AvatarArenaProbe(
-            bigworld, creator, arena_cache, requested_space, map_name,
+            bigworld, engine_math, creator, arena_cache, requested_space,
+            map_name,
             avatar_type, arena_bonus_unknown, arena_gui_unknown,
             logger=logger, now=now, poll_interval=poll_interval,
             load_timeout=load_timeout)

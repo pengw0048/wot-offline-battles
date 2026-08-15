@@ -35,9 +35,45 @@ class Logger(object):
         self._record(message, args)
 
 
+class Vector2(object):
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+class Vector3(object):
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class Matrix(object):
+    def setTranslate(self, value):
+        self.translation = value
+
+    def setRotateYPR(self, value):
+        self.rotation = value
+
+
+class EngineMath(object):
+    Vector3 = Vector3
+    Matrix = Matrix
+
+
+class Collision(object):
+    closestPoint = Vector3(382.0, 56.3056, 386.0)
+
+
 class ArenaType(object):
     geometryName = '01_karelia'
     gameplayName = 'ctf'
+    teamSpawnPoints = ([], [])
+    teamBasePositions = (
+        {0: Vector2(397.524078, 402.612030)},
+        {0: Vector2(-401.340332, -399.975006)})
+    boundingBox = (
+        Vector2(-500.0, -500.0), Vector2(500.0, 500.0))
 
 
 class ClientArena(object):
@@ -73,6 +109,13 @@ class PlayerAvatar(object):
 class CursorCamera(object):
     spaceID = 23
 
+    def __init__(self):
+        self.target = None
+        self.source = None
+
+    def forceUpdate(self):
+        return None
+
 
 class BigWorldStub(object):
     def __init__(self):
@@ -99,6 +142,11 @@ class BigWorldStub(object):
 
     def camera(self):
         return self.current_camera
+
+    def wg_collideSegment(self, space_id, start, end, mask, only_flags):
+        if space_id != 23 or mask != 128 or only_flags != 8:
+            raise AssertionError('wrong terrain collision request')
+        return Collision()
 
     def run(self, callback_id):
         unused_delay, function = self.pending.pop(callback_id)
@@ -174,6 +222,7 @@ def main(argv=None):
         argv=['WorldOfTanks.exe', 'offline', 'spaces/01_karelia',
               'avatarArenaProbe'],
         bigworld=bigworld,
+        engine_math=EngineMath(),
         offline_mode=offline_mode,
         creator=creator,
         arena_cache={101: ArenaType()},
@@ -190,10 +239,12 @@ def main(argv=None):
         raise AssertionError('route did not schedule native preflight')
     bigworld.run(probe.callback_id)
     if not probe.completed or probe.failed:
-        raise AssertionError('player/arena gate did not pass')
-    if not any('gate_pass gate=player_arena' in message
+        raise AssertionError('player/arena bootstrap did not finish')
+    if bigworld.current_camera.target is None:
+        raise AssertionError('camera target was not ground-aligned')
+    if not any('bootstrap_ready' in message
                for message in logger.messages):
-        raise AssertionError('gate pass marker is missing')
+        raise AssertionError('bootstrap-ready marker is missing')
     game.fini()
     if not creator.destroyed or not game.finished:
         raise AssertionError('ordered game shutdown did not run')

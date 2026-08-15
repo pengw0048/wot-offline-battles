@@ -41,6 +41,47 @@ class _ArenaType(object):
     def __init__(self, geometry='01_karelia', gameplay='ctf'):
         self.geometryName = geometry
         self.gameplayName = gameplay
+        self.teamSpawnPoints = ([], [])
+        self.teamBasePositions = (
+            {0: _Vector2(397.524078, 402.612030)},
+            {0: _Vector2(-401.340332, -399.975006)})
+        self.boundingBox = (
+            _Vector2(-500.0, -500.0), _Vector2(500.0, 500.0))
+
+
+class _Vector2(object):
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+class _Vector3(object):
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class _Matrix(object):
+    def __init__(self):
+        self.translation = None
+        self.rotation = None
+
+    def setTranslate(self, value):
+        self.translation = value
+
+    def setRotateYPR(self, value):
+        self.rotation = value
+
+
+class _Math(object):
+    Vector3 = _Vector3
+    Matrix = _Matrix
+
+
+class _Collision(object):
+    def __init__(self, point):
+        self.closestPoint = point
 
 
 class ClientArena(object):
@@ -84,6 +125,12 @@ class PlayerAvatar(object):
 class CursorCamera(object):
     def __init__(self, space_id=41):
         self.spaceID = space_id
+        self.target = None
+        self.source = None
+        self.force_updates = 0
+
+    def forceUpdate(self):
+        self.force_updates += 1
 
 
 class _BigWorld(object):
@@ -94,6 +141,8 @@ class _BigWorld(object):
         self.status = 0.0
         self.current_player = None
         self.current_camera = None
+        self.collision_point = _Vector3(382.0, 56.3056, 386.0)
+        self.collision_calls = []
 
     def callback(self, delay, function):
         callback_id = self.next_id
@@ -117,6 +166,13 @@ class _BigWorld(object):
 
     def spaceLoadStatus(self):
         return self.status
+
+    def wg_collideSegment(self, space_id, start, end, mask, only_flags):
+        self.collision_calls.append(
+            (space_id, start, end, mask, only_flags))
+        if self.collision_point is None:
+            return None
+        return _Collision(self.collision_point)
 
     def getWindowMode(self):
         return 2
@@ -225,6 +281,7 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.arena_type = _ArenaType()
         self.cache = {101: self.arena_type}
         self.creator = _Creator(self.bigworld, self.arena_type)
+        self.engine_math = _Math()
         self.avatar_type = PlayerAvatar
         self.offline_mode = _OfflineMode()
         self.game = _Game()
@@ -238,6 +295,7 @@ class AvatarArenaProbeTests(unittest.TestCase):
         kwargs = dict(
             argv=self.argv,
             bigworld=self.bigworld,
+            engine_math=self.engine_math,
             offline_mode=self.offline_mode,
             creator=self.creator,
             arena_cache=self.cache,
@@ -272,6 +330,13 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.assertEqual(4, match[0])
         self.assertEqual('ctf', match[1].gameplayName)
 
+    def test_camera_pose_copies_mature_karelia_spawn_and_base_heading(self):
+        x, z, yaw, source = self.lifecycle._camera_spawn_pose(
+            self.arena_type)
+        self.assertEqual((382.0, 386.0), (x, z))
+        self.assertAlmostEqual(-2.358519018, yaw, places=7)
+        self.assertEqual('mature_ctf_spawn', source)
+
     def test_route_uses_stock_creator_and_passes_player_arena_gate(self):
         original_launch = self.offline_mode.launch
         original_fini = self.game.fini
@@ -295,12 +360,14 @@ class AvatarArenaProbeTests(unittest.TestCase):
         self.assertTrue(self.logger.contains(
             'geometry_loaded status=1.000000'))
         self.assertTrue(self.logger.contains(
+            'camera_repositioned source=mature_ctf_spawn'))
+        self.assertTrue(self.logger.contains(
             'space_lifecycle_missing '
             'reason=offline_battle_session_not_started'))
         self.assertTrue(self.logger.contains('display_state window_mode=2'))
         self.assertTrue(self.logger.contains(
             'avatar_init_observed preseed_applied=True init_returned=True'))
-        self.assertTrue(self.logger.contains('gate_pass gate=player_arena'))
+        self.assertTrue(self.logger.contains('bootstrap_ready'))
         self.assertTrue(self.logger.contains('player_space_loaded=False'))
         self.assertEqual({
             'arenaUniqueID': 0,
@@ -311,6 +378,33 @@ class AvatarArenaProbeTests(unittest.TestCase):
             'weatherPresetID': 0,
             'bonusCapsOverrides': None,
         }, self.bigworld.current_player.preseed_at_init)
+        camera = self.bigworld.current_camera
+        self.assertAlmostEqual(382.0, camera.target.translation.x)
+        self.assertAlmostEqual(56.3056, camera.target.translation.y)
+        self.assertAlmostEqual(386.0, camera.target.translation.z)
+        self.assertIsNotNone(camera.source.rotation)
+        self.assertEqual(1, camera.force_updates)
+        self.assertEqual(128, self.bigworld.collision_calls[0][3])
+        self.assertEqual(8, self.bigworld.collision_calls[0][4])
+        ray_start = self.bigworld.collision_calls[0][1]
+        ray_end = self.bigworld.collision_calls[0][2]
+        self.assertEqual((382.0, 386.0), (ray_start.x, ray_start.z))
+        self.assertEqual((382.0, 386.0), (ray_end.x, ray_end.z))
+
+    def test_camera_waits_for_terrain_collision_before_completion(self):
+        probe = self.init()
+        self.offline_mode.launch('spaces/01_karelia')
+        self.bigworld.status = 1.0
+        self.bigworld.collision_point = None
+        self.bigworld.run(probe.callback_id)
+        self.assertFalse(probe.completed)
+        self.assertFalse(probe.failed)
+        self.assertEqual(1, len(self.bigworld.pending))
+
+        self.bigworld.collision_point = _Vector3(382.0, 56.3056, 386.0)
+        self.bigworld.run(probe.callback_id)
+        self.assertTrue(probe.completed)
+        self.assertTrue(self.logger.contains('camera_repositioned'))
 
     def test_missing_arena_cache_fails_closed_without_native_create(self):
         probe = self.init(arena_cache={})

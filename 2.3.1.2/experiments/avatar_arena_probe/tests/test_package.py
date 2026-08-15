@@ -27,7 +27,7 @@ class AvatarArenaPackageTests(unittest.TestCase):
         self.assertIn('module_import argv=%r', source)
         self.assertIn('route_installed target=helpers.OfflineMode.launch',
                       source)
-        self.assertIn('gate_pass gate=player_arena', source)
+        self.assertIn('bootstrap_ready', source)
 
     def test_probe_has_no_direct_entity_vehicle_or_network_implementation(self):
         source = '\n'.join(
@@ -42,12 +42,17 @@ class AvatarArenaPackageTests(unittest.TestCase):
         for forbidden in (
                 'createSpace', 'addSpaceGeometryMapping', 'createEntity',
                 'destroyEntity', 'controlEntity', 'Vehicle',
-                'AvatarInputHandler', 'onSpaceLoaded', 'wg_collideSegment',
+                'AvatarInputHandler', 'onSpaceLoaded',
                 'setWindowMode', 'setVideoVSync', 'setTripleBuffering',
                 'setWatcher', 'socket', 'urllib', 'requests'):
             self.assertNotIn(forbidden, names | attributes)
         self.assertIn('creator.create', source)
         self.assertIn('creator.destroy', source)
+        self.assertIn('wg_collideSegment', source)
+        self.assertIn('collision.closestPoint', source)
+        self.assertIn('camera.target = target', source)
+        self.assertIn('camera.source = source', source)
+        self.assertIn('camera.forceUpdate()', source)
 
     def test_target_adapter_is_scoped_to_synchronous_stock_create(self):
         source = (
@@ -92,9 +97,9 @@ class AvatarArenaPackageTests(unittest.TestCase):
             'win64\\WorldOfTanks.exe --script-arg avatarArenaProbe '
             '--script-arg offline --script-arg spaces/01_karelia')
         self.assertIn(command, docs)
-        self.assertIn('This is not an offline battle', docs)
-        self.assertIn('Version 0.1.0 is superseded', docs)
-        self.assertIn('space_lifecycle_missing', docs)
+        self.assertIn('offline map bootstrap 0.1.2', docs)
+        self.assertIn('camera_repositioned', docs)
+        self.assertIn('ArenaInfo/TeamInfo', docs)
 
 
 if __name__ == '__main__':
