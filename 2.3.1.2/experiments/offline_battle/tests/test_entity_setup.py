@@ -86,6 +86,9 @@ class RosterSchemaTests(unittest.TestCase):
         self.assertEqual(properties['avatarID'], 5)
         self.assertEqual(properties['physicsMode'],
                          entity_setup.VEHICLE_PHYSICS_MODE_STANDARD)
+        # constants.py: VEHICLE_PHYSICS_MODE.STANDARD = 0, DETAILED = 1
+        self.assertEqual(entity_setup.VEHICLE_PHYSICS_MODE_STANDARD, 0)
+        self.assertEqual(entity_setup.VEHICLE_SIEGE_STATE_DISABLED, 0)
 
 
 class SpawnPoseTests(unittest.TestCase):
@@ -126,6 +129,62 @@ class ParseRequestTests(unittest.TestCase):
     def test_rejects_nested_path(self):
         argv = ['', 'offlineBattle', 'offline', 'spaces/a/b']
         self.assertIsNone(entry.parse_request(argv))
+
+
+
+
+class NeutralAuxPhysicsTests(unittest.TestCase):
+    """Probe-based calibration against a synthetic packer of the same shape
+    as the client's: contiguous unsigned fields, value 0 meaning minimum."""
+
+    LAYOUT = (
+        (0, 10, -math.pi, math.pi),
+        (10, 8, -math.pi / 2, math.pi / 2),
+        (18, 10, -math.pi, math.pi),
+        (28, 8, -15.0, 15.0),
+        (36, 8, -15.0, 15.0),
+        (44, 8, 0.0, 4000.0),
+    )
+
+    def _unpack(self, value):
+        result = []
+        for shift, bits, low, high in self.LAYOUT:
+            code = value >> shift & (1 << bits) - 1
+            result.append(low + (high - low) * code / float((1 << bits) - 1))
+        return tuple(result)
+
+    def test_zero_decodes_to_field_minimums(self):
+        self.assertEqual(self._unpack(0),
+                         tuple(low for _, _, low, _ in self.LAYOUT))
+
+    def test_neutral_value_decodes_close_to_zero(self):
+        value, overlaps = entity_setup.neutral_aux_physics_data(self._unpack)
+        self.assertEqual(overlaps, 0)
+        decoded = self._unpack(value)
+        for index, (_, bits, low, high) in enumerate(self.LAYOUT):
+            step = (high - low) / float((1 << bits) - 1)
+            self.assertLessEqual(abs(decoded[index]), step,
+                                 'field %d decoded %s' % (index, decoded[index]))
+
+    def test_neutral_value_is_not_zero(self):
+        value, _ = entity_setup.neutral_aux_physics_data(self._unpack)
+        self.assertNotEqual(value, 0)
+
+    def test_calibration_survives_unresolvable_low_bits(self):
+        """Float output can hide a field's least significant bits; the
+        composition must still land as close to neutral as it can."""
+        layout = self.LAYOUT
+
+        def coarse_unpack(value):
+            decoded = list(self._unpack(value))
+            decoded[0] = round(decoded[0], 2)
+            return tuple(decoded)
+
+        value, overlaps = entity_setup.neutral_aux_physics_data(coarse_unpack)
+        self.assertEqual(overlaps, 0)
+        yaw = self._unpack(value)[0]
+        step = (layout[0][3] - layout[0][2]) / float((1 << layout[0][1]) - 1)
+        self.assertLessEqual(abs(yaw), 0.02 + step)
 
 
 if __name__ == '__main__':

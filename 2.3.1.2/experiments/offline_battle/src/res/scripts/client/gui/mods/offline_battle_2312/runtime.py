@@ -14,7 +14,10 @@ import math
 import zlib
 
 from gui.mods.offline_battle_2312 import account_setup
+from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
+from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
+from gui.mods.offline_battle_2312 import server_settings_setup
 from gui.mods.offline_battle_2312.avatar_server import AvatarServerBridge
 
 LOG_PREFIX = '[OFFLINE_2312_BATTLE]'
@@ -31,6 +34,7 @@ MAILBOX_NAMES = ('base', 'cell', 'server')
 class _BridgeState(object):
     active = False
     bridge = None
+    sync_scope_vehicle = None
 
 
 _state = _BridgeState()
@@ -58,6 +62,12 @@ class OfflineBattleRuntime(object):
         self._class_patches = []
         self._started = False
         self._shutdown_done = False
+        self._physics_ready = False
+        self._input_deferred = False
+        self._input_calls = 0
+        self._last_input = None
+        self._drive_probe_at = 0.0
+        self._world_patch = None
 
     # ------------------------------------------------------------------
     def _log(self, message, *args):
@@ -120,8 +130,12 @@ class OfflineBattleRuntime(object):
             self._fail('arena_not_found')
             return
         self._arena_type_id, self._arena_type = match
+        self._install_client_world_patch()
         self._start_gameplay_machine()
+        server_settings_setup.install(self._log)
+        server_settings_setup.seed(self._log, 'preflight')
         account_setup.install(self._log)
+        diagnostics.install(self._log)
         self._install_class_patches()
         self._stage = 'create'
         self._log('native_create_requested map=%s arena_type_id=%s '
@@ -130,6 +144,36 @@ class OfflineBattleRuntime(object):
             return
         self._stage = 'await_ground'
         self._schedule(POLL_INTERVAL_SECONDS, self._poll)
+
+    def _install_client_world_patch(self):
+        """Report a battle world while the offline space is created.
+
+        CGF decides which systems to register for a space when the space
+        is created, and getClientWorld derives that from the current
+        player entity. OfflineMapCreator creates the space before it
+        creates the Avatar, so the appearance systems, and with them
+        vehicle activation and native physics, are never registered."""
+        from cgf_components import client_worlds_helpers
+        original = client_worlds_helpers.getClientWorld
+        battle = client_worlds_helpers.ClientWorld.BATTLE
+
+        def get_client_world():
+            return battle
+
+        client_worlds_helpers.getClientWorld = get_client_world
+        self._world_patch = (client_worlds_helpers, 'getClientWorld',
+                             original, get_client_world)
+        self._log('client_world_forced value=%s previous=%s', battle,
+                  original())
+
+    def _restore_client_world_patch(self):
+        if self._world_patch is None:
+            return
+        owner, name, original, installed = self._world_patch
+        if getattr(owner, name) is installed:
+            setattr(owner, name, original)
+        self._world_patch = None
+        self._log('client_world_restored')
 
     def _start_gameplay_machine(self):
         """game.start() skips ServiceLocator.gameplay.start() on the offline
@@ -158,6 +202,7 @@ class OfflineBattleRuntime(object):
 
     # ------------------------------------------------------------------
     def _install_class_patches(self):
+        import BigWorld
         import Vehicle
         from Avatar import PlayerAvatar
         avatar_cls = PlayerAvatar
@@ -178,7 +223,76 @@ class OfflineBattleRuntime(object):
         def vehicle_getattribute(vehicle, name):
             if name == 'cell' and _state.active and _state.bridge is not None:
                 return _state.bridge
-            return original_vehicle_getattribute(vehicle, name)
+            value = original_vehicle_getattribute(vehicle, name)
+            if name == 'filter' and _state.sync_scope_vehicle is vehicle:
+                return OfflineFilterProxy(value)
+            return value
+
+        original_start_physics = vehicle_cls._Vehicle__startWGPhysics
+
+        def start_wg_physics(vehicle):
+            """Mark the moment the native physics owner exists."""
+            previous = _state.sync_scope_vehicle
+            _state.sync_scope_vehicle = vehicle
+            try:
+                result = original_start_physics(vehicle)
+            finally:
+                _state.sync_scope_vehicle = previous
+            if not getattr(vehicle, '_offlineBattlePhysicsReady', False):
+                vehicle._offlineBattlePhysicsReady = True
+                self._physics_ready = True
+                self._log('native_physics_ready id=%s', vehicle.id)
+                BigWorld.callback(0.0, self._on_physics_ready)
+            return result
+
+        original_notify_keys = vehicle_cls.notifyInputKeysDown
+
+        def notify_input_keys_down(vehicle, movement, rotation, handbrake):
+            """Hold driving input until the filter owns native physics.
+
+            startVisual only queues the appearance activation, so the
+            physics owner appears a tick later. setClientReady feeds an
+            initial movement command before that, which would reach the
+            filter with no physics."""
+            if not getattr(vehicle, '_offlineBattlePhysicsReady', False):
+                if not self._input_deferred:
+                    self._input_deferred = True
+                    self._log('input_deferred reason=physics_not_attached')
+                return None
+            self._input_calls += 1
+            self._last_input = (movement, rotation, handbrake)
+            return original_notify_keys(vehicle, movement, rotation,
+                                        handbrake)
+
+        original_set_gun_angles = vehicle_cls.set_gunAnglesPacked
+
+        def set_gun_angles_packed(vehicle, previous=None):
+            """Keep the stock handler, minus the unsubmittable sync."""
+            outer = _state.sync_scope_vehicle
+            _state.sync_scope_vehicle = vehicle
+            try:
+                return original_set_gun_angles(vehicle, previous)
+            finally:
+                _state.sync_scope_vehicle = outer
+
+        original_aux_physics = avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData
+
+        def on_set_aux_physics(avatar, prev):
+            """Defer the stabilised-pose sync until physics is attached.
+
+            The native syncStabilisedYPR call needs the filter physics
+            owner, which the appearance only attaches from its
+            asynchronous CGF activation. Online the server never sends
+            this property that early; offline stock startVehicleVisual
+            reaches it microseconds after startVisual, where the native
+            call faults."""
+            vehicle = BigWorld.entity(avatar.playerVehicleID)
+            outer = _state.sync_scope_vehicle
+            _state.sync_scope_vehicle = vehicle
+            try:
+                return original_aux_physics(avatar, prev)
+            finally:
+                _state.sync_scope_vehicle = outer
 
         original_set_remote_camera = vehicle_cls.set_remoteCamera
 
@@ -190,7 +304,20 @@ class OfflineBattleRuntime(object):
         avatar_cls.__getattribute__ = avatar_getattribute
         vehicle_cls.__getattribute__ = vehicle_getattribute
         vehicle_cls.set_remoteCamera = set_remote_camera
+        vehicle_cls._Vehicle__startWGPhysics = start_wg_physics
+        avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData = (
+            on_set_aux_physics)
+        vehicle_cls.notifyInputKeysDown = notify_input_keys_down
+        vehicle_cls.set_gunAnglesPacked = set_gun_angles_packed
         self._class_patches = [
+            (vehicle_cls, 'notifyInputKeysDown', original_notify_keys,
+             notify_input_keys_down),
+            (vehicle_cls, 'set_gunAnglesPacked', original_set_gun_angles,
+             set_gun_angles_packed),
+            (vehicle_cls, '_Vehicle__startWGPhysics', original_start_physics,
+             start_wg_physics),
+            (avatar_cls, '_PlayerAvatar__onSetOwnVehicleAuxPhysicsData',
+             original_aux_physics, on_set_aux_physics),
             (avatar_cls, '__getattribute__', original_avatar_getattribute,
              avatar_getattribute),
             (vehicle_cls, '__getattribute__', original_vehicle_getattribute,
@@ -296,11 +423,43 @@ class OfflineBattleRuntime(object):
             self._fail('input_handler_missing_after_create')
             self._stop_partial_session(avatar)
             return False
+        server_settings_setup.seed(self._log, 'avatar')
+        diagnostics.trace_vehicle_enter_world(self._log, avatar)
         self._log('session_started arena_type_id=%s input_handler=%s '
                   'gui_type=%s bonus_type=%s', self._arena_type_id,
                   type(avatar.inputHandler).__name__, avatar.arenaGuiType,
                   avatar.arenaBonusType)
         return True
+
+    def _neutral_aux_physics(self):
+        import WoT
+        value, overlaps = entity_setup.neutral_aux_physics_data(
+            WoT.unpackAuxVehiclePhysicsData)
+        self._log('aux_physics_neutral value=%s overlaps=%s decoded=%r',
+                  value, overlaps, WoT.unpackAuxVehiclePhysicsData(value))
+        return value
+
+    def _on_physics_ready(self):
+        """Replay what was held back until native physics existed."""
+        import BigWorld
+        self._resync_aux_physics()
+        avatar = self._avatar
+        if avatar is None or BigWorld.player() is not avatar:
+            return
+        if self._input_deferred:
+            self._input_deferred = False
+            avatar.moveVehicle(avatar.makeVehicleMovementCommandByKeys(),
+                               False)
+            self._log('input_resumed')
+
+    def _resync_aux_physics(self):
+        """Replay the deferred stabilised-pose sync once physics exists."""
+        import BigWorld
+        avatar = self._avatar
+        if avatar is None or BigWorld.player() is not avatar:
+            return
+        avatar.set_ownVehicleAuxPhysicsData(avatar.ownVehicleAuxPhysicsData)
+        self._log('aux_physics_resynced vehicle_id=%s', self._vehicle_id)
 
     def _stop_partial_session(self, avatar):
         try:
@@ -327,7 +486,7 @@ class OfflineBattleRuntime(object):
         avatar.observableTeamID = 0
         avatar.isGunLocked = False
         avatar.ownVehicleGear = 0
-        avatar.ownVehicleAuxPhysicsData = 0
+        avatar.ownVehicleAuxPhysicsData = self._neutral_aux_physics()
         avatar.ownVehicleHullAimingPitchPacked = 0
         avatar.denunciationsLeft = 0
         avatar.clientCtx = ''
@@ -358,6 +517,7 @@ class OfflineBattleRuntime(object):
     def _create_player_vehicle(self):
         import BigWorld
         import Math
+        import gun_rotation_shared
         from items import vehicles
         avatar = self._avatar
         x, z, yaw, source = entity_setup.spawn_pose(self._arena_type)
@@ -367,9 +527,11 @@ class OfflineBattleRuntime(object):
         descriptor = vehicles.VehicleDescr(typeName=VEHICLE_TYPE_NAME)
         comp_descr = descriptor.makeCompactDescr()
         max_health = int(descriptor.maxHealth)
+        gun_angles = gun_rotation_shared.encodeGunAngles(
+            0.0, 0.0, descriptor.gun.pitchLimits['absolute'])
         properties = entity_setup.vehicle_properties(
             comp_descr, max_health, avatar.id, self._arena_type_id,
-            avatar.arenaBonusType)
+            avatar.arenaBonusType, gun_angles_packed=gun_angles)
         position = Math.Vector3(x, ground_y, z)
         vehicle_id = BigWorld.createEntity(
             'Vehicle', avatar.spaceID, 0, position, (0.0, 0.0, yaw),
@@ -391,6 +553,7 @@ class OfflineBattleRuntime(object):
         arena_load = avatar.guiSessionProvider.shared.arenaLoad
         if arena_load is not None:
             arena_load.invalidateArenaInfo()
+        self._push_battle_period(avatar)
         self._log('player_vehicle_selected id=%s init_progress=%s',
                   vehicle_id, self._init_progress(avatar))
         return True
@@ -402,10 +565,10 @@ class OfflineBattleRuntime(object):
     # ------------------------------------------------------------------
     def _poll(self):
         import BigWorld
-        if self._failed or self._battle_ready:
+        if self._failed:
             return
         self._elapsed += POLL_INTERVAL_SECONDS
-        if self._elapsed >= BOOTSTRAP_TIMEOUT_SECONDS:
+        if not self._battle_ready and self._elapsed >= BOOTSTRAP_TIMEOUT_SECONDS:
             self._report_timeout()
             return
         avatar = self._avatar
@@ -421,30 +584,36 @@ class OfflineBattleRuntime(object):
             if vehicle is None:
                 self._fail('vehicle_lost')
                 return
+            if (vehicle.appearance is not None and not self._physics_ready
+                    and int(self._elapsed * 4) % 8 == 0):
+                diagnostics.log_appearance_state(
+                    self._log, vehicle, 'awaiting_physics')
             if avatar.initCompleted and vehicle.appearance is not None:
+                diagnostics.log_vehicle_state(self._log, vehicle, 'init_done')
                 self._stage = 'client_ready'
         elif self._stage == 'client_ready':
-            if not self._client_ready_requested:
+            if not avatar.userSeesWorld() and not self._client_ready_requested:
                 self._client_ready_requested = True
                 self._log('client_ready_requested init_progress=%s',
                           self._init_progress(avatar))
-                try:
-                    avatar.setClientReady()
-                except Exception as error:
-                    detail = repr(error).replace('\n', ' ')[:200]
-                    self._log('client_ready_partial error=%s detail=%s',
-                              type(error).__name__, detail)
+                avatar.setClientReady()
             if avatar.userSeesWorld():
-                self._push_battle_period(avatar)
                 self._stage = 'await_started'
         elif self._stage == 'await_started':
             vehicle = BigWorld.entities.get(self._vehicle_id)
             if vehicle is not None and vehicle.isStarted:
                 self._report_ready(avatar, vehicle)
-                return
+        elif self._stage == 'battle_ready':
+            self._probe_drive(avatar)
         self._schedule(POLL_INTERVAL_SECONDS, self._poll)
 
     def _push_battle_period(self, avatar):
+        """Publish BATTLE before setClientReady.
+
+        Stock setClientReady only calls __setIsOnArena, which enables
+        driving and the gun rotator, when the arena already reports
+        BATTLE. It also keeps the prebattle dog-tag markers out of the
+        vehicle-visual path, where an offline vehicle has no dog tag."""
         import BigWorld
         from constants import ARENA_PERIOD, ARENA_UPDATE
         if self._period_pushed:
@@ -453,14 +622,13 @@ class OfflineBattleRuntime(object):
         end_time = BigWorld.serverTime() + BATTLE_PERIOD_LENGTH_SECONDS
         payload = zlib.compress(cPickle.dumps(
             (ARENA_PERIOD.BATTLE, end_time, BATTLE_PERIOD_LENGTH_SECONDS,
-             None), -1))
+             ()), -1))
         avatar.updateArena(ARENA_UPDATE.PERIOD, payload)
         self._log('arena_period_pushed period=BATTLE length=%s',
                   BATTLE_PERIOD_LENGTH_SECONDS)
 
     def _report_ready(self, avatar, vehicle):
         import BigWorld
-        self._battle_ready = True
         self._stage = 'battle_ready'
         camera = BigWorld.camera()
         handler = avatar.inputHandler
@@ -470,17 +638,41 @@ class OfflineBattleRuntime(object):
         self._log('battle_ready vehicle_id=%s started=%s filter=%s '
                   'appearance=%s init_progress=%s user_sees_world=%s '
                   'input_handler=%s ctrl_mode=%s camera=%s '
-                  'client_ready_received=%s', vehicle.id, vehicle.isStarted,
+                  'client_ready_received=%s is_on_arena=%s gun_rotator=%s '
+                  'arena_period=%s', vehicle.id, vehicle.isStarted,
                   filter_name, type(vehicle.appearance).__name__,
                   self._init_progress(avatar), bool(avatar.userSeesWorld()),
                   type(handler).__name__, ctrl_mode,
                   type(camera).__name__ if camera else None,
-                  self._bridge.client_ready_received)
+                  self._bridge.client_ready_received, avatar.isOnArena,
+                  type(avatar.gunRotator).__name__, avatar.arena.period)
+        self._battle_ready = True
+
+    def _probe_drive(self, avatar):
+        """Report whether input reaches the filter and whether it moves."""
+        import BigWorld
+        if self._elapsed - self._drive_probe_at < 2.0:
+            return
+        self._drive_probe_at = self._elapsed
+        vehicle = BigWorld.entities.get(self._vehicle_id)
+        if vehicle is None:
+            return
+        position = vehicle.position
+        entity_filter = vehicle.filter
+        self._log('drive_probe pos=(%.2f,%.2f,%.2f) speed=%.3f '
+                  'input_calls=%s last_input=%s on_arena=%s '
+                  'moving=%s velocity=%s',
+                  position.x, position.y, position.z, vehicle.getSpeed(),
+                  self._input_calls, self._last_input, avatar.isOnArena,
+                  avatar.isVehicleMoving(),
+                  getattr(entity_filter, 'velocity', None))
 
     def _report_timeout(self):
         import BigWorld
         avatar = self._avatar
         vehicle = BigWorld.entities.get(self._vehicle_id)
+        self._log('timeout_state physics_ready=%s input_deferred=%s',
+                  self._physics_ready, self._input_deferred)
         self._fail('bootstrap_timeout stage=%s init_progress=%s '
                    'space_load=%.3f vehicle=%s started=%s appearance=%s' % (
                        self._stage,
@@ -536,6 +728,9 @@ class OfflineBattleRuntime(object):
             self._log('creator_destroy_failed error=%s detail=%s',
                       type(error).__name__, detail)
         self._restore_class_patches()
+        self._restore_client_world_patch()
+        diagnostics.uninstall(self._log)
+        server_settings_setup.uninstall(self._log)
         account_setup.uninstall(self._log)
         self._avatar = None
         self._bridge = None

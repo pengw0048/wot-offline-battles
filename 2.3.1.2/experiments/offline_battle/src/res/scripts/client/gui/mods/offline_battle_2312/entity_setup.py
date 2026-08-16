@@ -12,7 +12,9 @@ PLAYER_NAME = 'Player'
 PLAYER_TEAM = 1
 ENEMY_TEAM = 2
 PLAYER_SESSION_ID = 'offline_battle'
-VEHICLE_PHYSICS_MODE_STANDARD = 1
+# Frozen from 2.3.1.2 scripts/common/constants.py: STANDARD is 0 and
+# DETAILED is 1; siege DISABLED is 0.
+VEHICLE_PHYSICS_MODE_STANDARD = 0
 VEHICLE_SIEGE_STATE_DISABLED = 0
 NONE_ROSTER_POSITION = (-32768, -32768)
 
@@ -59,7 +61,8 @@ def public_vehicle_info(comp_descr, max_health, name=PLAYER_NAME,
 
 
 def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
-                       arena_bonus_type, name=PLAYER_NAME, team=PLAYER_TEAM):
+                       arena_bonus_type, gun_angles_packed=0,
+                       name=PLAYER_NAME, team=PLAYER_TEAM):
     """Vehicle.def client property values for BigWorld.createEntity."""
     return {
         'publicInfo': public_vehicle_info(comp_descr, max_health, name, team),
@@ -70,7 +73,7 @@ def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
         'isHidden': False,
         'physicsMode': VEHICLE_PHYSICS_MODE_STANDARD,
         'siegeState': VEHICLE_SIEGE_STATE_DISABLED,
-        'gunAnglesPacked': 0,
+        'gunAnglesPacked': gun_angles_packed,
         'engineMode': (0, 0),
         'damageStickers': [],
         'publicStateModifiers': [],
@@ -161,6 +164,43 @@ def roster_entry(vehicle_id, comp_descr, max_health, name=PLAYER_NAME,
         'position': NONE_ROSTER_POSITION,
         '__generation': 1,
     }
+
+
+def neutral_aux_physics_data(unpack, bit_count=64, targets=None):
+    """Packed value for a level, stationary vehicle.
+
+    A zero OWN_VEHICLE aux physics word decodes to the minimum of every
+    field: yaw -180, pitch -90, roll -180 and full reverse track scroll.
+    Only the client can decode the layout, so probe one bit at a time
+    with the client's own unpack function and compose the neutral word.
+    Returns (value, overlapping_bit_count)."""
+    base = list(unpack(0))
+    if targets is None:
+        targets = [0.0] * len(base)
+    fields = {}
+    owner = {}
+    overlaps = 0
+    for bit in range(bit_count):
+        probe = unpack(1 << bit)
+        for index in range(len(base)):
+            if probe[index] == base[index]:
+                continue
+            if bit in owner:
+                overlaps += 1
+                continue
+            owner[bit] = index
+            fields.setdefault(index, []).append(
+                (bit, probe[index] - base[index]))
+
+    value = 0
+    for index, entries in fields.items():
+        remaining = targets[index] - base[index]
+        for bit, delta in sorted(entries, key=lambda item: -abs(item[1])):
+            if delta and abs(remaining - delta) < abs(remaining):
+                value |= 1 << bit
+                remaining -= delta
+
+    return value, overlaps
 
 
 def _vector2_xz(value):

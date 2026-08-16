@@ -116,6 +116,34 @@ class AvatarServerBridge(object):
     def doCmdInt(self, request_id, command, int1):
         self._ack_command(request_id, command)
 
+    def doCmdInt2(self, request_id, command, int1, int2):
+        self._ack_command(request_id, command)
+
+    def doCmdInt3(self, request_id, command, int1, int2, int3):
+        self._ack_command(request_id, command)
+
+    def doCmdInt4(self, request_id, command, int1, int2, int3, int4):
+        self._ack_command(request_id, command)
+
+    def doCmdInt2Str(self, request_id, command, int1, int2, string_value):
+        self._ack_command(request_id, command)
+
+    def doCmdInt3Str(self, request_id, command, int1, int2, int3,
+                     string_value):
+        self._ack_command(request_id, command)
+
+    def doCmdIntStr(self, request_id, command, int1, string_value):
+        self._ack_command(request_id, command)
+
+    def doCmdIntStrArr(self, request_id, command, int1, strings):
+        self._ack_command(request_id, command)
+
+    def doCmdIntArrStrArr(self, request_id, command, ints, strings):
+        self._ack_command(request_id, command)
+
+    def doCmdStrArr(self, request_id, command, strings):
+        self._ack_command(request_id, command)
+
     def doCmdIntArr(self, request_id, command, values):
         if command == self._commands.CMD_ADD_INT_USER_SETTINGS:
             pairs = list(values)
@@ -130,7 +158,8 @@ class AvatarServerBridge(object):
         supported = (
             self._commands.CMD_GET_AVATAR_SYNC,
             self._commands.CMD_ADD_INT_USER_SETTINGS,
-            self._commands.CMD_DEL_INT_USER_SETTINGS)
+            self._commands.CMD_DEL_INT_USER_SETTINGS,
+            self._commands.CMD_SET_ACTIVE_VEH_SEASON)
         if command not in supported:
             self._log('bridge_command_unsupported command=%s' % (command,))
         self._respond(request_id)

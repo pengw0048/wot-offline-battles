@@ -63,8 +63,35 @@ interfaces that 2.3.1.2 actually changed.
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.2.2.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.2.26.wotmod
 ```
+
+## Current state (validated on the 2.3.1.2 Windows client)
+
+Working: the battle starts from the offline map, one real Vehicle entity
+spawns on the Karelia CTF spawn with its real appearance, the stock
+BattleSessionProvider, AvatarInputHandler, ArcadeCamera, gun rotator and
+battle HUD all run, `is_on_arena` is true, the avatar reaches
+`init_progress=63`, exit teardown is clean and there is no crash.
+
+Not working: the vehicle does not move. Keyboard input is proven to reach
+`Vehicle.notifyInputKeysDown` with the right directions, but the native
+`WGTankPhysics` produces no pose samples: position and velocity stay
+exactly zero.
+
+This is a known boundary, not a missing call. The mature 0.9.22 offline
+port reached the same conclusion on its client and records it in
+`battle_runtime.py`:
+
+> A remote #1513 Vehicle has no retail server stream, so treating its
+> WGVehiclePhysics as authoritative leaves movement inputs without pose
+> samples.
+
+That port therefore integrates vehicle motion itself (`vehicle_physics.py`
+plus terrain and collision probes) and owns the pose, using the native
+filter only for presentation. Driving in this port needs the same work:
+port the mature motion law, probe terrain with
+`BigWorld.wg_collideSegment`, and write the resulting pose each tick.
 
 ## Scope and known gaps
 

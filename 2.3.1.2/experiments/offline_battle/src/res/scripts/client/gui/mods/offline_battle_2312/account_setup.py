@@ -11,11 +11,50 @@ ACCOUNT_CLASS_NAME = 'PlayerAccount'
 INITIAL_SERVER_SETTINGS = {'file_server': {}}
 
 _installed = False
+_conversion_patch = None
+
+
+def _guard_settings_conversion(log):
+    """Keep a lobby settings migration from aborting onBecomePlayer.
+
+    AccountSettings.convert migrates preference sections written by
+    earlier sessions and assumes keys an offline session never writes.
+    The migration has no meaning for an offline battle, so a failure
+    must not stop the avatar from becoming the player."""
+    global _conversion_patch
+    from account_helpers.AccountSettings import AccountSettings
+    if _conversion_patch is not None:
+        return
+    original = AccountSettings.convert
+
+    def convert():
+        try:
+            return original()
+        except Exception as error:
+            log('account_settings_conversion_failed error=%s detail=%r'
+                % (type(error).__name__, error))
+            return None
+
+    AccountSettings.convert = staticmethod(convert)
+    _conversion_patch = (AccountSettings, original, convert)
+
+
+def _restore_settings_conversion():
+    global _conversion_patch
+    if _conversion_patch is None:
+        return
+    owner, original, installed = _conversion_patch
+    owner.convert = staticmethod(original)
+    _conversion_patch = None
 
 
 def install(log):
     global _installed
     import Account
+    try:
+        _guard_settings_conversion(log)
+    except Exception as error:
+        log('account_settings_guard_failed error=%s' % (type(error).__name__,))
     if Account.g_accountRepository is not None:
         log('account_repository_present className=%s' %
             (getattr(Account.g_accountRepository, 'className', None),))
@@ -39,6 +78,7 @@ def install(log):
 
 def uninstall(log):
     global _installed
+    _restore_settings_conversion()
     if not _installed:
         return
     _installed = False
