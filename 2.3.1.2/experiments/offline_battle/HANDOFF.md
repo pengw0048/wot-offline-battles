@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.4.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.5.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.4.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.5.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.4.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.5.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -306,6 +306,28 @@ Enemy track animation stays open: `updateTracksScroll` no-ops without a
 `trackScrollController`, which nothing creates offline. The own-turret
 diagnostic now logs a `scroll_probe` line with the filter's scroll
 attribute names and the controller value, deciding the route next run.
+
+## What 0.12.5 adds
+
+The 0.12.4 log proved the track crit lands (`crits=['rightTrackHealth']`)
+— a hit damages the track pool and several hits sever it, which is the
+law; the log now prints the target's device pools per hit so the drain
+is visible. The other three reports each had a mechanism:
+
+- The extinguisher key never sent anything: the panel's canActivate
+  reads Vehicle.isOnFire, a server-fed dynamic component that is never
+  present offline. isOnFire is Python and now also reports the copied
+  law's own is_on_fire, so the extinguisher activates and the stock
+  fire consumers agree.
+- Auto-repair had no countdown: critical_control now publishes the
+  stock updateDestroyedDevicesIsRepairing with progress and time left
+  while a destroyed device regenerates to critical.
+- A yellow engine at half mobility plus an unhealed driver is the
+  copied law itself; the medkit is the cure, and both kits now have
+  working gates.
+- Track animation: scroll_probe showed the controller exists
+  (PyTrackScroll) and the filter carries writable-looking
+  leftTrackScroll/rightTrackScroll; both routes are fed now.
 
 ## What to check on the next run
 

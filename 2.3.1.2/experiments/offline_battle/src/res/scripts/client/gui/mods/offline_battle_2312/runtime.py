@@ -355,6 +355,16 @@ class OfflineBattleRuntime(object):
             finally:
                 _state.sync_scope_vehicle = outer
 
+        original_is_on_fire = vehicle_cls.isOnFire
+
+        def is_on_fire(vehicle):
+            """The copied fire law owns is_on_fire; the stock reads a
+            server-fed dynamic component that never exists offline."""
+            if getattr(vehicle, 'is_on_fire', False):
+                return True
+            return original_is_on_fire(vehicle)
+
+        vehicle_cls.isOnFire = is_on_fire
         original_set_remote_camera = vehicle_cls.set_remoteCamera
 
         def set_remote_camera(vehicle, _=None):
@@ -387,6 +397,7 @@ class OfflineBattleRuntime(object):
              vehicle_getattribute),
             (vehicle_cls, 'set_remoteCamera', original_set_remote_camera,
              set_remote_camera),
+            (vehicle_cls, 'isOnFire', original_is_on_fire, is_on_fire),
         ]
         _state.active = True
 
@@ -1028,8 +1039,9 @@ class OfflineBattleRuntime(object):
                                killed)
         self._log_layers(landing.collisions)
         self._log('shell_hit target=%s distance=%.1f result=%s damage=%s '
-                  'health=%s crits=%s' % (target.id, landing.travelled, result,
-                                          points, health, crits))
+                  'health=%s crits=%s devices=%s'
+                  % (target.id, landing.travelled, result, points, health,
+                     crits, getattr(target, 'devices_hp', None)))
 
     def _on_player_hit(self, landing, shot, shooter_id):
         """Publish the damage an enemy shell does to the player."""

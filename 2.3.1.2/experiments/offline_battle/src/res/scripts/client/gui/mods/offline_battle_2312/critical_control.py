@@ -7,6 +7,7 @@ stat factors to the motion driver.
 from __future__ import absolute_import
 
 from gui.mods.offline_battle_2312 import critical_damage
+from gui.mods.offline_battle_2312 import device_damage
 
 TICK_SECONDS = 0.5
 CAUSE_SUFFIXES = {
@@ -70,6 +71,7 @@ class CriticalControl(object):
         self._on_factors = on_factors
         self._on_fire_damage = on_fire_damage
         self._stopped = False
+        self._repair_progress = {}
         self._indices = {code: index for index, code
                          in enumerate(constants.DAMAGE_INFO_CODES)}
 
@@ -115,6 +117,29 @@ class CriticalControl(object):
             self._on_fire_damage(int(burn))
         if repair is not None or fire is not None:
             self._push_factors(vehicle)
+        self._present_repair_progress(vehicle)
+
+    def _present_repair_progress(self, vehicle):
+        """The countdown the cell sends while a destroyed device regens."""
+        descriptor = vehicle.typeDescriptor
+        destroyed = getattr(vehicle, '_destroyed_devices', None) or ()
+        hp_map = getattr(vehicle, 'devices_hp', None) or {}
+        for name in tuple(destroyed):
+            cap = device_damage.device_regen_hp(descriptor, name)
+            if not cap:
+                continue
+            hp = max(0.0, min(float(hp_map.get(name, 0.0)), float(cap)))
+            progress = max(0, min(int(round(100.0 * hp / cap)), 100))
+            if self._repair_progress.get(name) == progress:
+                continue
+            self._repair_progress[name] = progress
+            extra = extra_index(descriptor, name)
+            if extra <= 0:
+                continue
+            seconds = device_damage.repair_seconds(name, descriptor)
+            time_left = max(0.0, float(seconds) * (1.0 - hp / float(cap)))
+            self._avatar.updateDestroyedDevicesIsRepairing(
+                self._vehicle_id, extra, progress, time_left, 0)
 
     def present(self, vehicle, payload, attacker_id=0):
         """Publish one payload's events and refresh the stat factors."""

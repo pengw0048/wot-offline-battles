@@ -351,6 +351,11 @@ class MotionDriver(object):
             left, right = motion.track_scroll(self._params, self._speed,
                                               self._omega)
             appearance.updateTracksScroll(left, right)
+            try:
+                vehicle.filter.leftTrackScroll = left
+                vehicle.filter.rightTrackScroll = right
+            except Exception:
+                pass
 
     def _publish_gun_angles(self, vehicle):
         """Offline this runtime is the authority the turret syncs against.

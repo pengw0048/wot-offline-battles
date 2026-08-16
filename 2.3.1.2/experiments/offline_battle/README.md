@@ -100,7 +100,7 @@ navigation, cover, tactical maps and reviewed routes).
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.12.4.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.12.5.wotmod
 ```
 
 ## Current state

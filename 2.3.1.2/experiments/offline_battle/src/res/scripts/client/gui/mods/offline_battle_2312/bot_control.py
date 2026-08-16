@@ -418,3 +418,8 @@ class BotControl(object):
         left, right = motion.track_scroll(body.params, body.speed,
                                           body.omega)
         appearance.updateTracksScroll(left, right)
+        try:
+            vehicle.filter.leftTrackScroll = left
+            vehicle.filter.rightTrackScroll = right
+        except Exception:
+            pass
