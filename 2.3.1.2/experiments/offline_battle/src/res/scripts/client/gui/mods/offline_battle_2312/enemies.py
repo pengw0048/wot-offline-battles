@@ -42,6 +42,7 @@ class EnemyForce(object):
         self._health = {}
         self._poses = {}
         self._comp_descr = None
+        self._matrices = {}
 
     @property
     def ids(self):
@@ -62,6 +63,24 @@ class EnemyForce(object):
     def pose(self, vehicle_id):
         """(x, y, z, yaw) where this enemy was placed; it does not move."""
         return self._poses.get(vehicle_id)
+
+    def set_pose(self, vehicle_id, pose):
+        """Move an enemy: the runtime owns these poses, as it owns its own."""
+        import BigWorld
+        import Math
+        self._poses[vehicle_id] = pose
+        vehicle = BigWorld.entities.get(vehicle_id)
+        if vehicle is None:
+            return
+        model = getattr(vehicle, 'model', None)
+        matrix = self._matrices.get(vehicle_id)
+        if matrix is None:
+            matrix = Math.Matrix()
+            self._matrices[vehicle_id] = matrix
+        matrix.setRotateYPR((pose[3], 0.0, 0.0))
+        matrix.translation = Math.Vector3(pose[0], pose[1], pose[2])
+        if model is not None and model.matrix is not matrix:
+            model.matrix = matrix
 
     def bodies(self):
         """Plain-data hulls for the copied tank-against-tank law."""

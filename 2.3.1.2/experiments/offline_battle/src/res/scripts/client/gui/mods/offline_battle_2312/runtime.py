@@ -20,6 +20,7 @@ from gui.mods.offline_battle_2312 import feedback
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312.enemies import EnemyForce
+from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
@@ -86,6 +87,7 @@ class OfflineBattleRuntime(object):
         self._gunnery = None
         self._enemies = None
         self._enemy_ai = None
+        self._bots = None
         self._devices = {}
         self._devices_destroyed = []
         self._layers_logged = 0
@@ -763,6 +765,7 @@ class OfflineBattleRuntime(object):
                                      BigWorld.callback, self._log,
                                      self._on_player_hit)
             self._enemy_ai.start()
+            self._start_bots(avatar)
         except Exception as error:
             self._log('combat_setup_failed error=%s detail=%s'
                       % (type(error).__name__, repr(error)[:200]))
@@ -843,6 +846,16 @@ class OfflineBattleRuntime(object):
                          getattr(material, 'armor', None),
                          getattr(material, 'vehicleDamageFactor', None),
                          getattr(extra, 'name', extra)))
+
+    def _start_bots(self, avatar):
+        """Hand the enemies to the copied planner and driver."""
+        import BigWorld
+        control = BotControl(self._enemies, self._map_name, self._arena_type,
+                             avatar.spaceID, self._log)
+        for vehicle in self._enemies.alive():
+            control.register(vehicle, entity_setup.ENEMY_TEAM)
+        control.start(BigWorld.callback)
+        self._bots = control
 
     def _enemy_bodies(self):
         return self._enemies.bodies() if self._enemies is not None else ()
@@ -1036,6 +1049,9 @@ class OfflineBattleRuntime(object):
             self._motion.stop()
             self._motion = None
             _state.motion = None
+        if self._bots is not None:
+            self._bots.stop()
+            self._bots = None
         if self._enemy_ai is not None:
             self._enemy_ai.stop()
             self._enemy_ai = None
