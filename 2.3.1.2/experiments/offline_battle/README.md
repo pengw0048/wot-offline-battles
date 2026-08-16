@@ -142,6 +142,13 @@ Every caller in the client is accounted for:
 | `CompoundAppearance.__onModelsRefresh` | unreachable: the model refresh is skipped |
 | `Avatar.__onSetOwnVehicleAuxPhysicsData` | deferred, then scoped |
 
+## Device names that differ from the copied law
+
+2.3.1.2 carries one `chassisHealth` device where the 0.9.22 law tables
+expect `leftTrackHealth` and `rightTrackHealth`. Everything else, crew
+included, uses the same names. `damage.law_devices` translates, so the
+copied stat tables keep working without being edited.
+
 Enemy turrets are animated through the appearance turret and gun matrix
 providers instead, which is what the 0.9.22 port does for a remote
 vehicle.
@@ -198,6 +205,8 @@ entity pose overlay, using the native filter only for presentation.
 - `spotting.py` and `gun_mechanics.py` are copied but not wired: nothing
   is hidden by view range yet, and dispersion still comes from the stock
   gun rotator.
+- Crew injuries and module repair are not wired: a crit is reported and
+  costs the stat, but nothing repairs it and no crew message appears.
 - A destroyed vehicle keeps its intact model. The destroyed model arrives
   through CompoundAppearance.__onModelsRefresh, which calls
   filter.syncGunAngles directly, and a client-only vehicle faults on that

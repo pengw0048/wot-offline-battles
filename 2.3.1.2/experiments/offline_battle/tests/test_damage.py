@@ -190,9 +190,32 @@ class ModuleHitTests(unittest.TestCase):
         self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.0), [])
 
 
+class LawDeviceNameTests(unittest.TestCase):
+    def test_the_chassis_becomes_the_two_tracks_the_law_knows(self):
+        self.assertEqual(damage.law_devices(['chassisHealth']),
+                         ['leftTrackHealth', 'rightTrackHealth'])
+
+    def test_every_other_device_keeps_its_name(self):
+        self.assertEqual(damage.law_devices(['engineHealth', 'gunHealth']),
+                         ['engineHealth', 'gunHealth'])
+
+    def test_a_crew_name_passes_through(self):
+        self.assertEqual(damage.law_devices(['commanderHealth']),
+                         ['commanderHealth'])
+
+    def test_no_device_is_named_twice(self):
+        self.assertEqual(
+            damage.law_devices(['chassisHealth', 'leftTrackHealth']),
+            ['leftTrackHealth', 'rightTrackHealth'])
+
+
 class CritFlagTests(unittest.TestCase):
     def test_a_track_reports_a_chassis_crit(self):
         self.assertTrue(damage.crit_flags(['leftTrackHealth']) &
+                        damage.HIT_CHASSIS_DAMAGED)
+
+    def test_the_client_chassis_device_reports_a_chassis_crit(self):
+        self.assertTrue(damage.crit_flags(['chassisHealth']) &
                         damage.HIT_CHASSIS_DAMAGED)
 
     def test_a_gun_reports_a_gun_crit(self):

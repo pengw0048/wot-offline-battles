@@ -25,8 +25,14 @@ HIT_CHASSIS_DAMAGED = 2048
 HIT_GUN_DAMAGED = 4096
 HIT_DIRECT_PROJECTILE = 1048576
 
-CHASSIS_DEVICES = ('leftTrackHealth', 'rightTrackHealth')
+CHASSIS_DEVICES = ('chassisHealth', 'leftTrackHealth', 'rightTrackHealth')
 GUN_DEVICES = ('gunHealth', 'turretRotatorHealth')
+
+# 2.3.1.2 carries one chassis device where the copied law tables expect a
+# track per side. Every other device and every crew name already matches.
+LAW_DEVICE_NAMES = {
+    'chassisHealth': ('leftTrackHealth', 'rightTrackHealth'),
+}
 
 
 class ShotResult(object):
@@ -96,6 +102,16 @@ def module_hits(collisions, random_uniform=None):
         if sampler(0.0, 1.0) < device_damage.saving_throw(material, name):
             names.append(name)
     return names
+
+
+def law_devices(names):
+    """The same devices, named the way the copied law tables name them."""
+    result = []
+    for name in names or ():
+        for mapped in LAW_DEVICE_NAMES.get(name, (name,)):
+            if mapped not in result:
+                result.append(mapped)
+    return result
 
 
 def crit_flags(names):

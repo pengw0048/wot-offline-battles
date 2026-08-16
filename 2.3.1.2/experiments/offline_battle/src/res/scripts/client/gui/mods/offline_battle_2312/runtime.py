@@ -798,7 +798,7 @@ class OfflineBattleRuntime(object):
         descriptor = vehicle.typeDescriptor
         rolled = device_damage.module_damage_roll(
             damage.legacy_shot(shot)['shell'])
-        for name in names:
+        for name in damage.law_devices(names):
             if device_damage.has_hp_pool(descriptor, name) and rolled:
                 remaining = self._devices.get(
                     name, device_damage.device_max_hp(descriptor, name) or 0.0)
