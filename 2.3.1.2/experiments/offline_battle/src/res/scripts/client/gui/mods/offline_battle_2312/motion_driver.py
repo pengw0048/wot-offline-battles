@@ -266,14 +266,16 @@ class MotionDriver(object):
                                        (self._x, self._y, self._z),
                                        self._yaw)))
         steering = self._rotation != 0
+        # Module damage scales the drive intent, the mature bot rule; a
+        # per-tick multiplier on the velocity decays it geometrically.
+        movement = self._movement * self._stat_factors.get('mobility', 1.0)
+        rotation = self._rotation * self._stat_factors.get('traverse', 1.0)
         self._omega = motion.traverse_step(
-            self._params, self._omega, self._rotation, self._speed,
-            TICK_SECONDS, drive_intent=self._movement)
+            self._params, self._omega, rotation, self._speed,
+            TICK_SECONDS, drive_intent=movement)
         self._speed = motion.longitudinal_step(
-            self._params, self._speed, self._movement, steering,
+            self._params, self._speed, movement, steering,
             self._drive_pitch, TICK_SECONDS)
-        self._speed *= self._stat_factors.get('mobility', 1.0)
-        self._omega *= self._stat_factors.get('traverse', 1.0)
 
         self._rotate()
         start_x, start_z = self._x, self._z

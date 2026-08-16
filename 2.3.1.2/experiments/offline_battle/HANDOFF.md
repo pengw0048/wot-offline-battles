@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.5.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.6.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.5.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.6.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.5.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.6.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -328,6 +328,15 @@ is visible. The other three reports each had a mechanism:
 - Track animation: scroll_probe showed the controller exists
   (PyTrackScroll) and the filter carries writable-looking
   leftTrackScroll/rightTrackScroll; both routes are fed now.
+
+## What 0.12.6 adds
+
+The field report was right and the law was innocent: the player's
+mobility factor was multiplied into the velocity every 0.1 s tick, so a
+yellow engine's 0.5 decayed the speed geometrically to a crawl within a
+second. The factor now scales the drive intent once, the same rule the
+bots already used, so a yellow engine costs half the drive power, not
+the whole tank.
 
 ## What to check on the next run
 
