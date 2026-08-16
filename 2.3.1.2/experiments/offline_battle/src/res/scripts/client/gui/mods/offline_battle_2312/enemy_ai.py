@@ -13,9 +13,8 @@ from gui.mods.offline_battle_2312 import projectiles
 
 TICK_SECONDS = 0.25
 TRACED_TICKS = 3
-# Binding an enemy appearance provider is the open suspect behind the
-# 0.7.1 and 0.8.0 load crashes. Off until a run proves the rest is clean.
-ANIMATE_TURRET = False
+ANIMATE_TURRET = True
+TRACED_SHOTS = 6
 ENGAGE_RANGE_METRES = 400.0
 FIRST_SHOT_DELAY_SECONDS = 6.0
 ALL_GUNS = -1
@@ -124,6 +123,14 @@ class EnemyAI(object):
             (muzzle.x, muzzle.y, muzzle.z), pose[3],
             (target.x, target.y, target.z))
         pitch = clamp_pitch(pitch, limits)
+        # Aim again from where the shell actually leaves the barrel: the
+        # muzzle sits ahead of and above the turret centre this aimed
+        # from, and at close range that offset is the whole miss.
+        start, _unused = self._muzzle(vehicle, matrix, turret_yaw, pitch)
+        turret_yaw, pitch = aim_angles(
+            (start.x, start.y, start.z), pose[3],
+            (target.x, target.y, target.z))
+        pitch = clamp_pitch(pitch, limits)
         if trace:
             self._stage('aimed', ' id=%s yaw=%.3f pitch=%.3f'
                         % (vehicle.id, turret_yaw, pitch))
@@ -227,10 +234,37 @@ class EnemyAI(object):
             vehicle.spaceID, (start.x, start.y, start.z),
             (velocity.x, velocity.y, velocity.z), float(shot.gravity),
             float(shot.maxDistance), targets)
+        if self._shots <= TRACED_SHOTS:
+            self._log_shot(vehicle, start, velocity, player, landing)
         if landing is None:
             return
         self._schedule(landing.elapsed,
                        lambda: self._land(shot_id, shot, vehicle.id, landing))
+
+    def _log_shot(self, vehicle, start, velocity, player, landing):
+        """Record where one shot was aimed and where it went."""
+        import Math
+        aim = self._aim_point(player) if player is not None else None
+        direction = Math.Vector3(velocity)
+        direction.normalise()
+        if aim is not None:
+            reach = (aim - start).length
+            predicted = Math.Vector3(start.x + direction.x * reach,
+                                     start.y + direction.y * reach,
+                                     start.z + direction.z * reach)
+            miss = (predicted - aim).length
+        else:
+            miss = -1.0
+        self._log('enemy_shot id=%s muzzle=(%.1f,%.1f,%.1f) '
+                  'aim=(%.1f,%.1f,%.1f) miss=%.2f hit=%s landed=%s'
+                  % (vehicle.id, start.x, start.y, start.z,
+                     aim.x if aim else 0.0, aim.y if aim else 0.0,
+                     aim.z if aim else 0.0, miss,
+                     landing.vehicle.id if landing and landing.vehicle
+                     else None,
+                     '(%.1f,%.1f,%.1f)' % (landing.point.x, landing.point.y,
+                                           landing.point.z)
+                     if landing else None))
 
     def _land(self, shot_id, shot, shooter_id, landing):
         import BigWorld

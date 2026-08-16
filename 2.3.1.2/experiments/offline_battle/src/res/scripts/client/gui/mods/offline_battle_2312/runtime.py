@@ -16,6 +16,7 @@ import zlib
 from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import damage
 from gui.mods.offline_battle_2312 import device_damage
+from gui.mods.offline_battle_2312 import feedback
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312.enemies import EnemyForce
@@ -86,6 +87,7 @@ class OfflineBattleRuntime(object):
         self._enemy_ai = None
         self._devices = {}
         self._devices_destroyed = []
+        self._layers_logged = False
         self._spawn_yaw = 0.0
         self._world_patch = None
 
@@ -766,6 +768,25 @@ class OfflineBattleRuntime(object):
         self._gunnery = gunnery
         self._bridge.set_gunnery(gunnery)
 
+    def _log_layers(self, collisions):
+        """Record the material layers of one hit, once per battle.
+
+        Crits have never fired, and the saving throws read the device
+        off the material, so this says whether the layers carry one."""
+        if self._layers_logged or not collisions:
+            return
+        self._layers_logged = True
+        for collision in collisions:
+            material = collision.matInfo
+            extra = getattr(material, 'extra', None)
+            self._log('hit_layer part=%s dist=%.2f armor=%s factor=%s '
+                      'extra=%s'
+                      % (getattr(collision, 'compName', None),
+                         float(collision.dist),
+                         getattr(material, 'armor', None),
+                         getattr(material, 'vehicleDamageFactor', None),
+                         getattr(extra, 'name', extra)))
+
     def _enemy_bodies(self):
         return self._enemies.bodies() if self._enemies is not None else ()
 
@@ -812,6 +833,9 @@ class OfflineBattleRuntime(object):
                  if result == damage.PIERCED else [])
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
         self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
+        feedback.publish_dealt(self._avatar, target.id, points, len(crits),
+                               killed)
+        self._log_layers(landing.collisions)
         self._log('shell_hit target=%s distance=%.1f result=%s damage=%s '
                   'health=%s crits=%s' % (target.id, landing.travelled, result,
                                           points, health, crits))
@@ -834,9 +858,19 @@ class OfflineBattleRuntime(object):
             vehicle.onHealthChanged(health, previous, int(shooter_id), 0, 0)
             self._avatar.updateVehicleHealth(self._vehicle_id, health, 0,
                                              health > 0, False)
+        shooter = BigWorld.entities.get(shooter_id)
+        if shooter is not None:
+            own = vehicle.position
+            other = shooter.position
+            feedback.publish_received(
+                self._avatar, shooter_id, points if result is not None else 0,
+                len(crits),
+                feedback.hit_direction_yaw((own.x, own.y, own.z),
+                                           (other.x, other.y, other.z)))
         self._log('player_hit shooter=%s distance=%.1f result=%s damage=%s '
                   'health=%s crits=%s' % (shooter_id, landing.travelled,
                                           result, points, health, crits))
+        self._log_layers(landing.collisions)
 
     def _start_motion(self, vehicle):
         """Own the pose: the native body never simulates offline."""

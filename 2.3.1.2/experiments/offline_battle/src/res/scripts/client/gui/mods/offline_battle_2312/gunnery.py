@@ -124,7 +124,18 @@ class Gunnery(object):
                       % (int_cd, state[0], burst))
 
     def _reloaded(self):
+        """Report the gun loaded, and load the shell the player queued.
+
+        One press of a shell key queues it and the icon blinks; the cell
+        promotes it when the reload ends. Offline nobody did, so a
+        queued shell blinked forever."""
         avatar = self._avatar()
-        if avatar is not None:
-            avatar.updateVehicleGunReloadTime(self._vehicle_id, 0.0,
-                                              self._reload_time)
+        if avatar is None:
+            return
+        ammo = avatar.guiSessionProvider.shared.ammo
+        queued = ammo.getNextShellCD()
+        if queued is not None and queued != ammo.getCurrentShellCD():
+            avatar.updateVehicleSetting(self._vehicle_id, CURRENT_SHELLS,
+                                        queued)
+        avatar.updateVehicleGunReloadTime(self._vehicle_id, 0.0,
+                                          self._reload_time)

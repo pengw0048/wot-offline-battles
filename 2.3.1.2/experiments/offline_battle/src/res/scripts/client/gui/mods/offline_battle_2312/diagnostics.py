@@ -178,6 +178,28 @@ def _install_input_trace(log):
     log('input_trace_installed')
 
 
+def _install_vehicle_state_trace(log):
+    """Name whoever puts the crew panel into a stun state.
+
+    The panel shows a stunned crew with a zero timer, and this build has
+    no stun mechanic at all."""
+    from gui.battle_control.battle_session import BattleSessionProvider
+    from gui.battle_control.battle_constants import VEHICLE_VIEW_STATE
+    original = BattleSessionProvider.invalidateVehicleState
+    watched = (VEHICLE_VIEW_STATE.STUN,)
+
+    def invalidate_vehicle_state(provider, state_id, value=None,
+                                 vehicle_id=0):
+        if state_id in watched:
+            log('vehicle_state_invalidated state=%s value=%s vehicle=%s'
+                % (state_id, value, vehicle_id))
+        return original(provider, state_id, value, vehicle_id)
+
+    BattleSessionProvider.invalidateVehicleState = invalidate_vehicle_state
+    _patches.append((BattleSessionProvider, 'invalidateVehicleState',
+                     original, invalidate_vehicle_state))
+
+
 def install(log):
     global _log
     _log = log
@@ -210,6 +232,7 @@ def install(log):
     import BigWorld
     import ClientArena
     _install_input_trace(log)
+    _install_vehicle_state_trace(log)
     _wrap(BigWorld, 'notifyBattleTime', 'BigWorld.notifyBattleTime')
     _wrap(ClientArena.ClientArena, 'startVsePlans', 'Arena.startVsePlans')
     _wrap(ClientArena.ClientArena, 'invalidateVehiclesPosition',
