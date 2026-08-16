@@ -93,6 +93,18 @@ class HitDirectionTests(unittest.TestCase):
             feedback.hit_direction_yaw((0.0, 0.0, 0.0), (0.0, 0.0, 10.0)),
             0.0)
 
+    def test_the_bearing_is_in_the_target_frame(self):
+        """An attacker dead ahead of a hull facing east reads as ahead."""
+        self.assertAlmostEqual(
+            feedback.hit_direction_yaw((0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+                                       math.pi / 2.0),
+            0.0)
+
+    def test_the_bearing_stays_inside_one_turn(self):
+        value = feedback.hit_direction_yaw((0.0, 0.0, 0.0), (0.0, 0.0, -10.0),
+                                           math.pi)
+        self.assertLessEqual(abs(value), math.pi)
+
     def test_an_attacker_to_the_right_is_a_quarter_turn(self):
         self.assertAlmostEqual(
             feedback.hit_direction_yaw((0.0, 0.0, 0.0), (10.0, 0.0, 0.0)),

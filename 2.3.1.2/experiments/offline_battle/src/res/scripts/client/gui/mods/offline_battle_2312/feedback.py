@@ -59,10 +59,19 @@ def received_events(attacker_id, damage, crit_count):
     return events
 
 
-def hit_direction_yaw(target_position, attacker_position):
-    """Yaw from the target to whoever shot it, which the arrow points at."""
-    return math.atan2(attacker_position[0] - target_position[0],
-                      attacker_position[2] - target_position[2])
+def hit_direction_yaw(target_position, attacker_position, target_yaw=0.0):
+    """Bearing to the attacker in the target's own frame.
+
+    The indicator is drawn around the player's hull, so a world bearing
+    points the arrow somewhere else as soon as the hull turns."""
+    world = math.atan2(attacker_position[0] - target_position[0],
+                       attacker_position[2] - target_position[2])
+    relative = world - float(target_yaw)
+    while relative > math.pi:
+        relative -= 2.0 * math.pi
+    while relative < -math.pi:
+        relative += 2.0 * math.pi
+    return relative
 
 
 def publish_dealt(avatar, target_id, damage, crit_count, killed):

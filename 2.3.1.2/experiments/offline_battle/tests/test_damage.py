@@ -106,8 +106,15 @@ class PenetrationTests(unittest.TestCase):
 
 class ResolveTests(unittest.TestCase):
     def test_a_track_absorbs_the_shell(self):
+        """The running gear swallowing a shell is a track hit, not a miss."""
         collisions = [_Collision(1.0, 1.0, _MatInfo(20.0, 0.0), 'track')]
         result, points = damage.resolve(_Shot(), 100.0, collisions,
+                                        random_uniform=_median)
+        self.assertEqual(result, damage.TRACK_ABSORBED)
+        self.assertEqual(points, 0)
+
+    def test_a_shell_that_reaches_nothing_is_not_a_track_hit(self):
+        result, points = damage.resolve(_Shot(), 100.0, [],
                                         random_uniform=_median)
         self.assertIsNone(result)
         self.assertEqual(points, 0)

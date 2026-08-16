@@ -50,6 +50,9 @@ class MotionDriver(object):
         self._shape = tank_collision.chassis_shape(descriptor)
         self._stat_factors = {}
         self._pushes = 0
+        self._slide_speed = 0.0
+        self._downhill = (0.0, 0.0)
+        self._slope_tangent = 0.0
         self._turns = 0
         self._grind = 0
 
@@ -203,6 +206,11 @@ class MotionDriver(object):
                                              self._length, self._width)
         self._pitch = suspension.smooth(self._pitch, pitch)
         self._roll = suspension.smooth(self._roll, roll)
+        down_x, down_z, tangent = suspension.slope_fall_line(
+            samples[0], samples[1], samples[2], samples[3],
+            self._length, self._width, self._yaw)
+        self._downhill = (down_x, down_z)
+        self._slope_tangent = tangent
 
     def _settle(self, start_x, start_z):
         """Place the hull on its centre support, or reject a step."""
@@ -221,6 +229,24 @@ class MotionDriver(object):
             return
         self._y = suspension.settle(self._y, ground, self._speed,
                                     TICK_SECONDS)
+
+    def _slide(self):
+        """Copied passive fall-line slip, cross-heading only.
+
+        The along-hull component is already in the longitudinal law, so
+        only the sideways part is applied here and the two never double
+        count."""
+        self._slide_speed = motion.slope_slide_speed(
+            self._slide_speed, self._slope_tangent, TICK_SECONDS)
+        if self._slide_speed <= 0.01:
+            return
+        cross_x, cross_z = math.cos(self._yaw), -math.sin(self._yaw)
+        slide_dot = self._downhill[0] * cross_x + self._downhill[1] * cross_z
+        slide_x, slide_z = cross_x * slide_dot, cross_z * slide_dot
+        if abs(slide_x) <= 0.0001 and abs(slide_z) <= 0.0001:
+            return
+        self._x += slide_x * self._slide_speed * TICK_SECONDS
+        self._z += slide_z * self._slide_speed * TICK_SECONDS
 
     def _tick(self):
         import BigWorld
@@ -254,8 +280,9 @@ class MotionDriver(object):
         start_x, start_z = self._x, self._z
         self._translate()
         self._resolve_hulls()
-        self._settle(start_x, start_z)
         self._hull_pose()
+        self._slide()
+        self._settle(start_x, start_z)
 
         self._apply_pose(vehicle)
         self._ticks += 1

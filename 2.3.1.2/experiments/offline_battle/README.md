@@ -3,7 +3,7 @@
 This experiment turns the 2.3.1.2 client-only map bootstrap into a playable
 battle: real `PlayerAvatar`, real `Vehicle`, the stock
 `BattleSessionProvider`, `AvatarInputHandler` and `ArcadeCamera`. It follows
-the mature 0.9.22 architecture (`offline_lan_0922`) and changes only the
+the mature 0.9.32 architecture (`offline_lan_0922`) and changes only the
 interfaces that 2.3.1.2 actually changed.
 
 ## How it works
@@ -62,29 +62,29 @@ interfaces that 2.3.1.2 actually changed.
   spawn schemas (pure data, unit-tested).
 - `.../offline_battle_2312/account_setup.py` — real client-side account
   repository install/remove.
-- `.../offline_battle_2312/motion.py` — the 0.9.22 motion law, copied.
+- `.../offline_battle_2312/motion.py` — the 0.9.32 motion law, copied.
 - `.../offline_battle_2312/motion_driver.py` — owns the pose each tick and
   publishes it to the model, the camera and the speedometer.
-- `.../offline_battle_2312/world_collision.py` — the 0.9.22 horizontal
+- `.../offline_battle_2312/world_collision.py` — the 0.9.32 horizontal
   collision law, copied.
 - `.../offline_battle_2312/targeting.py` — the targeting parameters the
   cell normally sends, read from the vehicle descriptor.
 - `.../offline_battle_2312/gunnery.py` — ammo publication and the shot
   answer the cell normally gives.
-- `.../offline_battle_2312/suspension.py` — the 0.9.22 ground probes and
+- `.../offline_battle_2312/suspension.py` — the 0.9.32 ground probes and
   four-point hull pose, copied.
 - `.../offline_battle_2312/projectiles.py` — shell flight and the impact
   the cell normally reports.
 - `.../offline_battle_2312/enemies.py` — enemy vehicles, their roster
   entries and their health.
-- `.../offline_battle_2312/combat_rules.py` — the 0.9.22 armour and
+- `.../offline_battle_2312/combat_rules.py` — the 0.9.32 armour and
   damage law, copied.
 - `.../offline_battle_2312/damage.py` — the 2.3.1.2 input adapter for
   that law.
 - `.../offline_battle_2312/enemy_ai.py` — enemy turret aim and return
   fire.
 
-Law copied from the 0.9.22 port, unchanged, reached through the adapters
+Law copied from the 0.9.32 port, unchanged, reached through the adapters
 above: `motion.py`, `world_collision.py`, `suspension.py`,
 `combat_rules.py`, `tank_collision.py`, `device_damage.py`,
 `ballistics.py`, `projectile_runtime.py`, `spotting.py`,
@@ -95,7 +95,7 @@ above: `motion.py`, `world_collision.py`, `suspension.py`,
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.9.2.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.9.3.wotmod
 ```
 
 ## Current state
@@ -144,17 +144,17 @@ Every caller in the client is accounted for:
 
 ## Device names that differ from the copied law
 
-2.3.1.2 carries one `chassisHealth` device where the 0.9.22 law tables
+2.3.1.2 carries one `chassisHealth` device where the 0.9.32 law tables
 expect `leftTrackHealth` and `rightTrackHealth`. Everything else, crew
 included, uses the same names. `damage.law_devices` translates, so the
 copied stat tables keep working without being edited.
 
 Enemy turrets are animated through the appearance turret and gun matrix
-providers instead, which is what the 0.9.22 port does for a remote
+providers instead, which is what the 0.9.32 port does for a remote
 vehicle.
 
 The native body never simulates offline, so this port owns the pose. That
-matches the conclusion the mature 0.9.22 port reached on its own client,
+matches the conclusion the mature 0.9.32 port reached on its own client,
 which also integrates vehicle motion itself and uses the native filter
 only for presentation. `motion.py` and `world_collision.py` are copies of
 that law.
@@ -189,7 +189,7 @@ Zero track contacts plus a faulting `touchGround` mean the body is not
 attached to a physics world. Only the server-driven path attaches it, so
 offline the physics accepts state but produces no pose samples.
 
-Conclusion, matching the 0.9.22 port's `native_motion=False`: motion has
+Conclusion, matching the 0.9.32 port's `native_motion=False`: motion has
 to be owned in Python. That port computes the pose with its own
 integrator and applies it through the compound model matrix plus an
 entity pose overlay, using the native filter only for presentation.

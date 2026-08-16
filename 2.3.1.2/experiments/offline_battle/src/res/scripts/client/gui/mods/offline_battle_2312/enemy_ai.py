@@ -38,6 +38,10 @@ def aim_angles(shooter_position, shooter_yaw, target_position):
     return turret_yaw, -math.atan2(delta_y, flat)
 
 
+def vehicle_id_bound(bound, appearance):
+    return id(appearance) in bound
+
+
 def clamp_pitch(pitch, limits):
     try:
         return max(float(limits[0]), min(float(limits[1]), pitch))
@@ -60,6 +64,7 @@ class EnemyAI(object):
         self._shot_id = 0
         self._shots = 0
         self._aim_matrices = {}
+        self._nodes_bound = set()
         self._ticks = 0
 
     @property
@@ -173,6 +178,7 @@ class EnemyAI(object):
         # back at the filter, and it can finish after the first tick.
         appearance.turretMatrix.target = state[0]
         appearance.gunMatrix.target = state[1]
+        self._bind_nodes(appearance, state, trace)
         state[0].setRotateY(turret_yaw)
         if trace:
             self._stage('turret_provider',
@@ -184,6 +190,33 @@ class EnemyAI(object):
         state[1].setRotateX(pitch - calcGunPitchCorrection(
             turret_yaw, descriptor.hull.turretPitches[0],
             descriptor.turret.gunJointPitch))
+
+    def _bind_nodes(self, appearance, state, trace):
+        """Drive the model's own turret and gun nodes.
+
+        The providers hold the written angle and read it back, but the
+        turret does not move: the compound model's nodes are driven by
+        the filter in native code, and this build's filter cannot take
+        the turret sync offline."""
+        if vehicle_id_bound(self._nodes_bound, appearance):
+            return
+        from vehicle_systems.tankStructure import TankNodeNames
+        model = appearance.compoundModel
+        if model is None:
+            return
+        if trace:
+            self._stage('binding_nodes')
+        try:
+            model.node(TankNodeNames.TURRET_JOINT, state[0])
+            model.node(TankNodeNames.GUN_JOINT, state[1])
+        except Exception as error:
+            self._log('turret_node_bind_failed error=%s detail=%s'
+                      % (type(error).__name__, repr(error)[:120]))
+            self._nodes_bound.add(id(appearance))
+            return
+        self._nodes_bound.add(id(appearance))
+        if trace:
+            self._stage('bound_nodes')
 
     def _aim_point(self, player):
         """Aim at the hull centre, not at the ground under the hull."""

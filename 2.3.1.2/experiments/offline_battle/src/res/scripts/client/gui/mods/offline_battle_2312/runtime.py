@@ -774,6 +774,8 @@ class OfflineBattleRuntime(object):
 
         The material layers on these vehicles carry no device, so the
         interior model decides from the compartment the shell entered."""
+        if result == damage.TRACK_ABSORBED:
+            return ['chassisHealth']
         if result != damage.PIERCED:
             return []
         names = damage.module_hits(landing.collisions)
@@ -904,7 +906,8 @@ class OfflineBattleRuntime(object):
             own = vehicle.position
             yaw = feedback.hit_direction_yaw(
                 (own.x, own.y, own.z),
-                (shooter_pose[0], shooter_pose[1], shooter_pose[2]))
+                (shooter_pose[0], shooter_pose[1], shooter_pose[2]),
+                self._pose_yaw(vehicle))
             feedback.publish_received(
                 self._avatar, shooter_id, points if result is not None else 0,
                 len(crits), yaw)

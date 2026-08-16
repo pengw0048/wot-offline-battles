@@ -103,6 +103,24 @@ def pose_angles(front_y, rear_y, right_y, left_y, length, width):
     return pitch, roll
 
 
+def slope_fall_line(front_y, rear_y, right_y, left_y, length, width, yaw):
+    """(downhill x, downhill z, slope tangent) for the copied slide law.
+
+    Taken from the same four-point probe the pose comes from, so the
+    fall line and the hull attitude agree."""
+    gradient_forward = (rear_y - front_y) / length
+    gradient_right = (left_y - right_y) / width
+    tangent = math.sqrt(gradient_forward * gradient_forward +
+                        gradient_right * gradient_right)
+    sin_yaw, cos_yaw = math.sin(yaw), math.cos(yaw)
+    downhill_x = gradient_forward * sin_yaw + gradient_right * cos_yaw
+    downhill_z = gradient_forward * cos_yaw - gradient_right * sin_yaw
+    length_xz = math.sqrt(downhill_x * downhill_x + downhill_z * downhill_z)
+    if length_xz > 0.001:
+        return downhill_x / length_xz, downhill_z / length_xz, tangent
+    return 0.0, 0.0, tangent
+
+
 def smooth(previous, target):
     return previous + (target - previous) * POSE_SMOOTHING
 

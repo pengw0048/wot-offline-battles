@@ -182,13 +182,20 @@ def nearest_vehicle(vehicles, start, end):
     return best
 
 
+TRACK_ABSORBED = -1
+
+
 def resolve(shot, travelled, collisions, random_uniform=None):
-    """(result, damage) for one shell reaching one vehicle."""
+    """(result, damage) for one shell reaching one vehicle.
+
+    A result of TRACK_ABSORBED means the running gear swallowed the
+    shell before it reached structure. That is the track hit that breaks
+    a track, and it deals no hull damage."""
     converted = shot if isinstance(shot, dict) else legacy_shot(shot)
     resolved = combat_rules.resolve_hull_hit(converted, travelled, collisions,
                                              random_uniform=random_uniform)
     if resolved is None:
-        return None, 0
+        return (TRACK_ABSORBED if collisions else None), 0
     result = resolved[0]
     nominal = combat_rules.he_nominal_armor(collisions)
     return result, combat_rules.damage(converted, result, nominal,
