@@ -12,6 +12,10 @@ import math
 from gui.mods.offline_battle_2312 import projectiles
 
 TICK_SECONDS = 0.25
+TRACED_TICKS = 3
+# Binding an enemy appearance provider is the open suspect behind the
+# 0.7.1 and 0.8.0 load crashes. Off until a run proves the rest is clean.
+ANIMATE_TURRET = False
 ENGAGE_RANGE_METRES = 400.0
 FIRST_SHOT_DELAY_SECONDS = 6.0
 ALL_GUNS = -1
@@ -53,6 +57,7 @@ class EnemyAI(object):
         self._shot_id = 0
         self._shots = 0
         self._aim_matrices = {}
+        self._ticks = 0
 
     @property
     def shots(self):
@@ -67,20 +72,40 @@ class EnemyAI(object):
         self._stopped = True
 
     def _tick(self):
+        """Aim and fire, but never while the battle is still loading.
+
+        Touching an enemy appearance during the load reaches providers
+        CGF is still wiring."""
         import BigWorld
         if self._stopped:
             return
-        self._elapsed += TICK_SECONDS
-        player = BigWorld.entities.get(self._player_vehicle_id)
-        if player is not None and player.isStarted:
-            target = self._aim_point(player)
-            for vehicle in self._force.alive():
-                if not vehicle.isStarted:
-                    continue
-                self._engage(vehicle, target)
         self._schedule(TICK_SECONDS, self._tick)
+        avatar = BigWorld.player()
+        if avatar is None or not avatar.userSeesWorld():
+            return
+        self._elapsed += TICK_SECONDS
+        self._ticks += 1
+        trace = self._ticks <= TRACED_TICKS
+        if trace:
+            self._stage('tick_begin')
+        player = BigWorld.entities.get(self._player_vehicle_id)
+        if player is None or not player.isStarted:
+            return
+        target = self._aim_point(player)
+        if trace:
+            self._stage('aim_point')
+        for vehicle in self._force.alive():
+            if not vehicle.isStarted:
+                continue
+            self._engage(vehicle, target, trace)
+        if trace:
+            self._stage('tick_done')
 
-    def _engage(self, vehicle, target):
+    def _stage(self, name, detail=''):
+        self._log('enemy_ai_stage tick=%s name=%s%s'
+                  % (self._ticks, name, detail))
+
+    def _engage(self, vehicle, target, trace=False):
         import Math
         from gun_rotation_shared import encodeGunAngles
         pose = self._force.pose(vehicle.id)
@@ -99,8 +124,15 @@ class EnemyAI(object):
             (muzzle.x, muzzle.y, muzzle.z), pose[3],
             (target.x, target.y, target.z))
         pitch = clamp_pitch(pitch, limits)
+        if trace:
+            self._stage('aimed', ' id=%s yaw=%.3f pitch=%.3f'
+                        % (vehicle.id, turret_yaw, pitch))
         vehicle.gunAnglesPacked = encodeGunAngles(turret_yaw, pitch, limits)
-        self._point_turret(vehicle, descriptor, turret_yaw, pitch)
+        if trace:
+            self._stage('angles_written', ' id=%s' % (vehicle.id,))
+        self._point_turret(vehicle, descriptor, turret_yaw, pitch, trace)
+        if trace:
+            self._stage('turret_pointed', ' id=%s' % (vehicle.id,))
         ready_at = self._next_shot.get(vehicle.id, FIRST_SHOT_DELAY_SECONDS)
         if self._elapsed < ready_at:
             return
@@ -108,7 +140,8 @@ class EnemyAI(object):
                                        float(descriptor.gun.reloadTime))
         self._fire(vehicle, matrix, turret_yaw, pitch)
 
-    def _point_turret(self, vehicle, descriptor, turret_yaw, pitch):
+    def _point_turret(self, vehicle, descriptor, turret_yaw, pitch,
+                      trace=False):
         """Animate the turret without the native sync this build rejects.
 
         The appearance follows the filter's turret and gun matrices, so
@@ -116,14 +149,22 @@ class EnemyAI(object):
         drives them the way VehicleGunRotator drives the player's."""
         import Math
         from gun_rotation_shared import calcGunPitchCorrection
+        if not ANIMATE_TURRET:
+            return
         state = self._aim_matrices.get(vehicle.id)
         if state is None:
-            state = (Math.Matrix(), Math.Matrix())
             appearance = vehicle.appearance
             if appearance is None:
                 return
+            state = (Math.Matrix(), Math.Matrix())
+            state[0].setRotateY(turret_yaw)
+            state[1].setRotateX(pitch)
+            if trace:
+                self._stage('binding_turret', ' id=%s' % (vehicle.id,))
             appearance.turretMatrix.target = state[0]
             appearance.gunMatrix.target = state[1]
+            if trace:
+                self._stage('bound_turret', ' id=%s' % (vehicle.id,))
             self._aim_matrices[vehicle.id] = state
         state[0].setRotateY(turret_yaw)
         state[1].setRotateX(pitch - calcGunPitchCorrection(
@@ -172,12 +213,14 @@ class EnemyAI(object):
         start, velocity = self._muzzle(vehicle, matrix, turret_yaw, pitch)
         self._shot_id += 1
         shot_id = -self._shot_id
+        self._stage('firing', ' id=%s' % (vehicle.id,))
         vehicle.showShooting(1, ALL_GUNS, shell.kindIdx)
         avatar.showTracer(vehicle.id, shot_id, False, shell.effectsIndex,
                           INVALID_EFFECT_INDEX, shell.kindIdx, shell.caliber,
                           start, velocity, shot.gravity, shot.maxDistance,
                           0, 0)
         self._shots += 1
+        self._stage('tracer_shown', ' id=%s' % (vehicle.id,))
         player = BigWorld.entities.get(self._player_vehicle_id)
         targets = [player] if player is not None else []
         landing = projectiles.impact(
