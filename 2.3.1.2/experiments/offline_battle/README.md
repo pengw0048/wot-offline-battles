@@ -63,7 +63,7 @@ interfaces that 2.3.1.2 actually changed.
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.2.26.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.2.29.wotmod
 ```
 
 ## Current state (validated on the 2.3.1.2 Windows client)
@@ -92,6 +92,41 @@ plus terrain and collision probes) and owns the pose, using the native
 filter only for presentation. Driving in this port needs the same work:
 port the mature motion law, probe terrain with
 `BigWorld.wg_collideSegment`, and write the resulting pose each tick.
+
+## Native capability, measured on 2.3.1.2
+
+Probed in-game through the real method tables rather than inferred from
+another client version.
+
+The native `WGVehicleFilter` is alive and usable for presentation: it
+carries `bodyMatrix`, `turretMatrix`, `stabilisedMatrix`,
+`groundPlacingMatrix`, track scroll and `interpolateStabilisedMatrix`. It
+exposes `notifyInputKeysDown`, `transferInput`, `transferInputAsVehicle`
+and `setScriptInputCallback`, but **no position setter**: `setPosition`
+is absent from its method table on this client.
+
+The native `WGTankPhysics` can be created, configured and written to, but
+it never simulates offline:
+
+| probe | result |
+| --- | --- |
+| `vehicleID` | 0 after stock setup; writing the entity id succeeds |
+| `isFrozen` / `allowFreeze` | false / true; clearing `allowFreeze` changes nothing |
+| `staticMode` | already false |
+| `movementSignals` after `notifyInputKeysDown(1, 0)` | stays 0 |
+| `movementSignals` written directly | reads back 1, vehicle does not move |
+| `numLeftTrackContacts` / `numRightTrackContacts` | 0 |
+| `touchGround()` | native access violation |
+| `speed` getter | native access violation |
+
+Zero track contacts plus a faulting `touchGround` mean the body is not
+attached to a physics world. Only the server-driven path attaches it, so
+offline the physics accepts state but produces no pose samples.
+
+Conclusion, matching the 0.9.22 port's `native_motion=False`: motion has
+to be owned in Python. That port computes the pose with its own
+integrator and applies it through the compound model matrix plus an
+entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 

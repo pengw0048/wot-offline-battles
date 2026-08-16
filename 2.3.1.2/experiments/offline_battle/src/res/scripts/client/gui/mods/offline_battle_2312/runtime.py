@@ -16,6 +16,7 @@ import zlib
 from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
+from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
 from gui.mods.offline_battle_2312 import server_settings_setup
 from gui.mods.offline_battle_2312.avatar_server import AvatarServerBridge
@@ -35,6 +36,7 @@ class _BridgeState(object):
     active = False
     bridge = None
     sync_scope_vehicle = None
+    physics = None
 
 
 _state = _BridgeState()
@@ -67,6 +69,8 @@ class OfflineBattleRuntime(object):
         self._input_calls = 0
         self._last_input = None
         self._drive_probe_at = 0.0
+        self._native_probe_at = 0.0
+        self._native_step = 0
         self._world_patch = None
 
     # ------------------------------------------------------------------
@@ -228,6 +232,13 @@ class OfflineBattleRuntime(object):
                 return OfflineFilterProxy(value)
             return value
 
+        original_tank_physics = BigWorld.WGTankPhysics
+
+        def tank_physics():
+            physics = original_tank_physics()
+            _state.physics = physics
+            return physics
+
         original_start_physics = vehicle_cls._Vehicle__startWGPhysics
 
         def start_wg_physics(vehicle):
@@ -304,6 +315,7 @@ class OfflineBattleRuntime(object):
         avatar_cls.__getattribute__ = avatar_getattribute
         vehicle_cls.__getattribute__ = vehicle_getattribute
         vehicle_cls.set_remoteCamera = set_remote_camera
+        BigWorld.WGTankPhysics = tank_physics
         vehicle_cls._Vehicle__startWGPhysics = start_wg_physics
         avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData = (
             on_set_aux_physics)
@@ -314,6 +326,7 @@ class OfflineBattleRuntime(object):
              notify_input_keys_down),
             (vehicle_cls, 'set_gunAnglesPacked', original_set_gun_angles,
              set_gun_angles_packed),
+            (BigWorld, 'WGTankPhysics', original_tank_physics, tank_physics),
             (vehicle_cls, '_Vehicle__startWGPhysics', original_start_physics,
              start_wg_physics),
             (avatar_cls, '_PlayerAvatar__onSetOwnVehicleAuxPhysicsData',
@@ -605,6 +618,9 @@ class OfflineBattleRuntime(object):
                 self._report_ready(avatar, vehicle)
         elif self._stage == 'battle_ready':
             self._probe_drive(avatar)
+            vehicle = BigWorld.entities.get(self._vehicle_id)
+            if vehicle is not None:
+                self._probe_native(vehicle)
         self._schedule(POLL_INTERVAL_SECONDS, self._poll)
 
     def _push_battle_period(self, avatar):
@@ -647,6 +663,24 @@ class OfflineBattleRuntime(object):
                   self._bridge.client_ready_received, avatar.isOnArena,
                   type(avatar.gunRotator).__name__, avatar.arena.period)
         self._battle_ready = True
+
+    def _probe_native(self, vehicle):
+        if self._native_step is None:
+            return
+        if self._elapsed - self._native_probe_at < 1.0:
+            return
+        self._native_probe_at = self._elapsed
+        step = self._native_step
+        try:
+            if not native_probe.run_step(self._log, vehicle, _state.physics,
+                                         step):
+                self._native_step = None
+                return
+        except Exception as error:
+            detail = repr(error).replace('\n', ' ')[:160]
+            self._log('native_try step=%s failed error=%s detail=%s',
+                      step, type(error).__name__, detail)
+        self._native_step = step + 1
 
     def _probe_drive(self, avatar):
         """Report whether input reaches the filter and whether it moves."""
