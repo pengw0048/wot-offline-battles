@@ -43,7 +43,7 @@ TERRAIN_RAY_HEIGHT = 1000.0
 VEHICLE_TYPE_NAME = 'ussr:R11_MS-1'
 MAILBOX_NAMES = ('base', 'cell', 'server')
 _POSE_NAMES = ('matrix', 'position', 'cameraTargetMatrix')
-LOGGED_HIT_LAYERS = 6
+LOGGED_HIT_LAYERS = 24
 
 
 class _BridgeState(object):
@@ -451,6 +451,19 @@ class OfflineBattleRuntime(object):
 
         panel_cls._updateStun = spy_stun
         panel_cls._updateDebuff = spy_debuff
+        duration_name = '_DamagePanel__getStunDuration'
+        original_duration = getattr(panel_cls, duration_name)
+
+        def stun_duration(panel):
+            # BigWorld.serverTime() is -1 offline, so the stock
+            # max(0 - serverTime, 0) reports a phantom one-second stun.
+            if not panel._DamagePanel__stunSourcesData:
+                return 0
+            return original_duration(panel)
+
+        setattr(panel_cls, duration_name, stun_duration)
+        self._class_patches.append(
+            (panel_cls, duration_name, original_duration, stun_duration))
         thunder_name = '_updateThunderStrike'
         original_thunder = getattr(panel_cls, thunder_name)
 
@@ -992,6 +1005,8 @@ class OfflineBattleRuntime(object):
             health = self._enemies.apply_damage(target.id, points,
                                                 self._vehicle_id)
         killed = health is not None and health <= 0
+        if damage.track_hit(landing.collisions):
+            self._log('track_layer_present target=%s' % (target.id,))
         law_shell = damage.legacy_shot(shot)['shell']
         _unused, payload = critical_damage.apply_direct(
             target, landing.collisions, landing.segment_start,
@@ -1040,8 +1055,8 @@ class OfflineBattleRuntime(object):
             hull_yaw = self._pose_yaw(vehicle)
             camera_yaw = self._camera_yaw()
             # The cell sends the world yaw; the indicator subtracts the
-            # camera itself, every frame.
-            yaw = feedback.wrap_angle(world)
+            # camera itself. Measured in play: the frame is flipped.
+            yaw = feedback.wrap_angle(world + math.pi)
             feedback.publish_received(
                 self._avatar, shooter_id, points if result is not None else 0,
                 len(crits), yaw)

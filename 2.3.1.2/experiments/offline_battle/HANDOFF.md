@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.2.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.3.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.2.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.3.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.2.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.3.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -264,6 +264,28 @@ Hit direction stays under investigation: world yaw was still reported
 wrong; the `hit_direction` log lines carry every candidate frame, so
 one controlled observation (attacker dead ahead, camera straight) will
 name the right one.
+
+## What 0.12.3 adds
+
+The 0.12.2 log explained the death and the icon:
+
+- The player burned to death: the first hit lit the fuel tank, the fire
+  burned about half the health pool by the copied clock, and this
+  client's 50 DAMAGE_INFO codes carry no fire entries, so no warning
+  ever showed. `Vehicle.isOnFire` reads a server-fed dynamic component,
+  so critical_control now pushes VEHICLE_VIEW_STATE.FIRE directly and
+  the fire warning shows and clears.
+- The always-on 0s stun icon: BigWorld.serverTime() is -1 offline, and
+  the panel's stun duration is max(0 - serverTime, 0) = 1.0 with an
+  empty source list. The getter is patched to report 0 when no stun
+  source exists. Neither _updateStun nor _updateThunderStrike ever
+  fired; the arithmetic was the whole story.
+- The hit arrow was flipped half a turn per the field observation; the
+  sent yaw now carries + pi.
+- Track breaks still unproven: the run's logged hits never crossed
+  chassis geometry. The layer budget is 24 now and a chassis crossing
+  logs `track_layer_present`, so the next deliberate idler shot names
+  itself either way.
 
 ## What to check on the next run
 

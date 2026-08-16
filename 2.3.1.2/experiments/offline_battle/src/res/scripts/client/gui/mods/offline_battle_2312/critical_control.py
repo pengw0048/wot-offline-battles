@@ -152,3 +152,17 @@ class CriticalControl(object):
                 self._vehicle_id, index, extra, int(attacker_id or 0), 0)
             self._log('damage_info code=%s extra=%s name=%s'
                       % (code, extra, event.get('name')))
+        for event in payload.get('events') or ():
+            if event.get('kind') == 'fire':
+                self._show_fire(bool(event.get('state')))
+
+    def _show_fire(self, burning):
+        """'fire' lives in server-fed dynamicComponents; push the view
+        state it normally drives."""
+        from gui.battle_control.battle_constants import VEHICLE_VIEW_STATE
+        try:
+            self._avatar.guiSessionProvider.invalidateVehicleState(
+                VEHICLE_VIEW_STATE.FIRE, burning)
+            self._log('fire_state burning=%s' % (burning,))
+        except Exception as error:
+            self._log('fire_state_failed error=%s' % (repr(error)[:120],))
