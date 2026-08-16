@@ -26,6 +26,10 @@ class AvatarServerBridge(object):
         self._shoot_requests = 0
         self._shoot_logged = False
         self._gunnery = None
+        self._consumables = None
+
+    def set_consumables(self, consumables):
+        self._consumables = consumables
 
     def set_gunnery(self, gunnery):
         self._gunnery = gunnery
@@ -194,6 +198,11 @@ class AvatarServerBridge(object):
         pass
 
     def vehicle_changeSetting(self, code, value):
+        from constants import VEHICLE_SETTING
+        if (code == VEHICLE_SETTING.ACTIVATE_EQUIPMENT and
+                self._consumables is not None):
+            self._consumables.activate(value)
+            return
         if self._gunnery is not None:
             self._gunnery.change_setting(code, value)
 

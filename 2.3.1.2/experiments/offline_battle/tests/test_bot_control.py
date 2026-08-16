@@ -118,6 +118,7 @@ def make_control(clear):
     control._player_motion = None
     control._bodies = {}
     control._direction_clear = lambda body: (lambda yaw: clear)
+    control._scroll_tracks = lambda body: None
     return control
 
 

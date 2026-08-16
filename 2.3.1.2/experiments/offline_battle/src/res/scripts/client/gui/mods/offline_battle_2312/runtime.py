@@ -23,6 +23,7 @@ from gui.mods.offline_battle_2312.enemies import EnemyForce
 from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312.critical_control import CriticalControl
+from gui.mods.offline_battle_2312.consumables import Consumables
 from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
@@ -448,10 +449,48 @@ class OfflineBattleRuntime(object):
 
         panel_cls._updateStun = spy_stun
         panel_cls._updateDebuff = spy_debuff
+        timer_cls = damage_panel._ActionScriptTimer
+        original_show = timer_cls.showStatus
+
+        def spy_show(timer, time, animated, startTimer=True):
+            if budget['left'] > 0:
+                budget['left'] -= 1
+                log('ui_status_show timer=%s time=%r start=%r'
+                    % (type(timer).__name__, time, startTimer))
+            return original_show(timer, time, animated,
+                                 startTimer=startTimer)
+
+        timer_cls.showStatus = spy_show
         self._class_patches.extend([
             (panel_cls, '_updateStun', original_stun, spy_stun),
             (panel_cls, '_updateDebuff', original_debuff, spy_debuff),
+            (timer_cls, 'showStatus', original_show, spy_show),
         ])
+
+    def _schedule_turret_diag(self, vehicle_id, samples=5):
+        """Does anything consume the player's turret provider offline?"""
+        import BigWorld
+
+        def sample(remaining):
+            import Math
+            from vehicle_systems.tankStructure import TankNodeNames
+            vehicle = BigWorld.entities.get(vehicle_id)
+            avatar = BigWorld.player()
+            rotator = getattr(avatar, 'gunRotator', None)
+            if vehicle is None or rotator is None:
+                return
+            appearance = getattr(vehicle, 'appearance', None)
+            if appearance is None or appearance.compoundModel is None:
+                return
+            self._log('own_turret rotator=%.3f provider=%.3f node=%.3f'
+                      % (rotator.turretYaw,
+                         Math.Matrix(appearance.turretMatrix).yaw,
+                         Math.Matrix(appearance.compoundModel.node(
+                             TankNodeNames.TURRET_JOINT)).yaw))
+            if remaining > 1:
+                BigWorld.callback(2.0, lambda: sample(remaining - 1))
+
+        BigWorld.callback(2.0, lambda: sample(samples))
 
     def _restore_class_patches(self):
         _state.active = False
@@ -804,6 +843,11 @@ class OfflineBattleRuntime(object):
                 on_factors=self._set_stat_factors,
                 on_fire_damage=self._on_fire_damage)
             self._critical.start()
+            consumables = Consumables(avatar, vehicle.id, self._log,
+                                      self._critical)
+            consumables.publish()
+            self._bridge.set_consumables(consumables)
+            self._schedule_turret_diag(vehicle.id)
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
                                      self._on_player_hit,

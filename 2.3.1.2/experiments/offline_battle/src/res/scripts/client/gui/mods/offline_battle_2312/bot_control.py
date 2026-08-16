@@ -407,3 +407,14 @@ class BotControl(object):
             body.y = suspension.settle(body.y, ground, body.speed, dt)
         vx, _unused, vz = body.velocity()
         self._force.set_pose(body.id, body.pose, velocity=(vx, vz))
+        self._scroll_tracks(body)
+
+    def _scroll_tracks(self, body):
+        import BigWorld
+        vehicle = BigWorld.entities.get(body.id)
+        appearance = getattr(vehicle, 'appearance', None)
+        if appearance is None:
+            return
+        left, right = motion.track_scroll(body.params, body.speed,
+                                          body.omega)
+        appearance.updateTracksScroll(left, right)

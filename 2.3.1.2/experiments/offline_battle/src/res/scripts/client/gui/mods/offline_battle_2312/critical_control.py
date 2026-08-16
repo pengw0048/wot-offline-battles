@@ -112,6 +112,11 @@ class CriticalControl(object):
         if repair is not None or fire is not None:
             self._push_factors(vehicle)
 
+    def present(self, vehicle, payload, attacker_id=0):
+        """Publish one payload's events and refresh the stat factors."""
+        self._present(vehicle, payload, attacker_id)
+        self._push_factors(vehicle)
+
     def _push_factors(self, vehicle):
         if self._on_factors is None:
             return

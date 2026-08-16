@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.11.2.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.0.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.11.2.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.0.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.2.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.0.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -193,6 +193,30 @@ The 0.11.1 log answered three questions with hard evidence:
 The always-on 0s status icon is instrumented: `_updateStun` and
 `_updateDebuff` on the damage panel log their payloads (`ui_stun`,
 `ui_debuff`), so the next log names the pusher and the values.
+
+## What 0.12.0 adds
+
+The 0.11.2 log: `.local` binding succeeded but the node still follows
+only the hull, and the DamagePanel stun/debuff probes never fired, so
+the 0s icon is fed elsewhere. This batch:
+
+- Consumables. The player carries a small repair kit, a small first
+  aid kit and a hand extinguisher; the panel learns them through
+  updateVehicleAmmo, using one sends
+  cell.vehicle_changeSetting(ACTIVATE_EQUIPMENT, id) into the bridge,
+  and the effect is the copied law (repair_device, restore_crew,
+  use_extinguisher) with events on the damage panel. This answers the
+  field report: a dead driver or broken track was permanent without a
+  kit.
+- Enemy tracks scroll while the bots drive (updateTracksScroll from
+  the copied track_scroll law).
+- The status probe moved down to _ActionScriptTimer.showStatus, which
+  every shown status passes through (`ui_status_show`).
+- An own-turret diagnostic samples the player's gun rotator yaw, the
+  provider yaw and the actual TURRET_JOINT node yaw five times
+  (`own_turret`), deciding whether the provider chain works for anyone
+  offline. The kill-cam SimulatedVehicle proves client-only provider
+  consumption works in retail, so this narrows what our battle lacks.
 
 ## What to check on the next run
 
