@@ -39,43 +39,79 @@ class _Collision(object):
         self.compName = comp_name
 
 
+class _ShellType(object):
+    def __init__(self, name, explosion_radius=0.0):
+        self.name = name
+        self.explosionRadius = explosion_radius
+
+
 class _Shell(object):
-    kind = 'ARMOR_PIERCING'
-    caliber = 45
-    damage = (50.0, 40.0)
-    explosionRadius = 0.0
+    """Shaped like a 2.3.1.2 Shell item."""
+
+    def __init__(self, kind='ARMOR_PIERCING'):
+        self.type = _ShellType(kind)
+        self.caliber = 45
+        self.armorDamage = (50.0, 40.0)
+
+    @property
+    def kind(self):
+        return self.type.name
 
 
 class _Shot(object):
-    shell = _Shell()
-    piercingPower = (51.0, 40.0)
-    maxDistance = 720.0
+    def __init__(self, kind='ARMOR_PIERCING'):
+        self.shell = _Shell(kind)
+        self.piercingPower = (51.0, 40.0)
+        self.maxDistance = 720.0
 
 
 def _median(low, high):
     return (low + high) * 0.5
 
 
+class LegacyShotTests(unittest.TestCase):
+    def test_the_armour_damage_becomes_the_damage_the_law_reads(self):
+        converted = damage.legacy_shot(_Shot())
+        self.assertEqual(converted['shell']['damage'], (50.0, 40.0))
+        self.assertEqual(converted['shell']['kind'], 'ARMOR_PIERCING')
+        self.assertEqual(converted['piercingPower'], (51.0, 40.0))
+
+    def test_every_high_explosive_name_reaches_the_he_branch(self):
+        for kind in damage.HIGH_EXPLOSIVE_KINDS:
+            converted = damage.legacy_shot(_Shot(kind))
+            self.assertEqual(converted['shell']['kind'], 'HIGH_EXPLOSIVE')
+            self.assertTrue(combat_rules.is_he(converted))
+
+    def test_a_pierced_hit_rolls_real_damage(self):
+        collisions = [_Collision(1.0, 1.0, _MatInfo(16.0))]
+        _result, points = damage.resolve(_Shot(), 100.0, collisions,
+                                         random_uniform=_median)
+        self.assertEqual(points, 50)
+
+
 class PenetrationTests(unittest.TestCase):
     def test_a_thin_plate_square_on_is_pierced(self):
         result, _effective, _pierce = combat_rules.penetration(
-            _Shot(), 100.0, 20.0, 1.0, random_uniform=lambda a, b: 1.0)
+            damage.legacy_shot(_Shot()), 100.0, 20.0, 1.0,
+            random_uniform=lambda a, b: 1.0)
         self.assertEqual(result, damage.PIERCED)
 
     def test_a_thick_plate_is_not_pierced(self):
         result, _effective, _pierce = combat_rules.penetration(
-            _Shot(), 100.0, 200.0, 1.0, random_uniform=lambda a, b: 1.0)
+            damage.legacy_shot(_Shot()), 100.0, 200.0, 1.0,
+            random_uniform=lambda a, b: 1.0)
         self.assertEqual(result, damage.NOT_PIERCED)
 
     def test_a_very_shallow_angle_ricochets(self):
         result, _effective, _pierce = combat_rules.penetration(
-            _Shot(), 100.0, 40.0, math.cos(math.radians(80.0)),
-            random_uniform=lambda a, b: 1.0)
+            damage.legacy_shot(_Shot()), 100.0, 40.0,
+            math.cos(math.radians(80.0)), random_uniform=lambda a, b: 1.0)
         self.assertEqual(result, damage.RICOCHET)
 
     def test_penetration_falls_off_with_range(self):
-        near = combat_rules.range_piercing(_Shot(), 100.0)
-        far = combat_rules.range_piercing(_Shot(), 720.0)
+        shot = damage.legacy_shot(_Shot())
+        near = combat_rules.range_piercing(shot, 100.0)
+        far = combat_rules.range_piercing(shot, 720.0)
         self.assertGreater(near, far)
 
 

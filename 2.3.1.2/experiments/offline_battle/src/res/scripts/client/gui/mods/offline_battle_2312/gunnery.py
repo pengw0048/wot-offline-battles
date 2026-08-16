@@ -83,9 +83,21 @@ class Gunnery(object):
         self._schedule(0.0, self._fire)
 
     def change_setting(self, code, value):
+        """Confirm the setting, and end the reload a shell change starts.
+
+        Selecting a shell makes the client predict a reload it will not
+        leave until the gun reports itself loaded again."""
         avatar = self._avatar()
-        if avatar is not None:
-            avatar.updateVehicleSetting(self._vehicle_id, int(code), value)
+        if avatar is None:
+            return
+        avatar.updateVehicleSetting(self._vehicle_id, int(code), value)
+        if int(code) != CURRENT_SHELLS:
+            return
+        change_time = (float(self._descriptor.gun.forcedReloadTime) or
+                       self._reload_time)
+        avatar.updateVehicleGunReloadTime(self._vehicle_id, change_time,
+                                          self._reload_time)
+        self._schedule(change_time, self._reloaded)
 
     def _fire(self):
         import BigWorld

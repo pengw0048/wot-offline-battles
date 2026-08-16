@@ -9,7 +9,7 @@ import zipfile
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 MOD_ID = 'org.peng.offline_2312_battle'
-MOD_VERSION = '0.6.0'
+MOD_VERSION = '0.7.0'
 ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_battle.pyc'
 PACKAGE_ROOT = 'res/scripts/client/gui/mods/offline_battle_2312/'
 EXPECTED_PYC = {
@@ -21,6 +21,7 @@ EXPECTED_PYC = {
     PACKAGE_ROOT + 'damage.pyc',
     PACKAGE_ROOT + 'diagnostics.pyc',
     PACKAGE_ROOT + 'enemies.pyc',
+    PACKAGE_ROOT + 'enemy_ai.pyc',
     PACKAGE_ROOT + 'entity_setup.pyc',
     PACKAGE_ROOT + 'filter_proxy.pyc',
     PACKAGE_ROOT + 'gunnery.pyc',

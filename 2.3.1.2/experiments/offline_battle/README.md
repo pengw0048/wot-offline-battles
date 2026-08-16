@@ -81,13 +81,15 @@ interfaces that 2.3.1.2 actually changed.
   damage law, copied.
 - `.../offline_battle_2312/damage.py` — the 2.3.1.2 input adapter for
   that law.
+- `.../offline_battle_2312/enemy_ai.py` — enemy turret aim and return
+  fire.
 
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.6.0.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.0.wotmod
 ```
 
 ## Current state
@@ -106,8 +108,11 @@ Also validated in play: the hull turns beside a rock without sinking into
 it, a blocked hull slides along the obstacle, and the shell flies and
 explodes where it lands.
 
-Not yet validated in play: enemy vehicles, armour resolution, damage and
-kills.
+Also validated in play: enemy vehicles stand on the map, the shell hits
+them and the hit result plays its sound.
+
+Not yet validated in play: damage and kills after the shell-damage fix,
+shell switching, and enemy return fire.
 
 The native body never simulates offline, so this port owns the pose. That
 matches the conclusion the mature 0.9.22 port reached on its own client,
@@ -152,8 +157,9 @@ entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 
-- Enemy vehicles stand still. They do not drive, aim or shoot, so nothing
-  shoots back. Battle results are out of scope for this slice.
+- Enemy vehicles stand still. They aim and shoot, but they do not drive
+  and they do not miss on purpose. Battle results are out of scope for
+  this slice.
 - Damage covers direct hits only: no fire, no module or crew damage, no
   ramming, and no HE splash beyond the direct-hit law.
 - Only `spaces/01_karelia` has a proven spawn; other maps fall back to the

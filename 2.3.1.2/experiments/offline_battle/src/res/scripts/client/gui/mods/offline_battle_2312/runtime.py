@@ -18,6 +18,7 @@ from gui.mods.offline_battle_2312 import damage
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312.enemies import EnemyForce
+from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
@@ -81,6 +82,7 @@ class OfflineBattleRuntime(object):
         self._motion = None
         self._gunnery = None
         self._enemies = None
+        self._enemy_ai = None
         self._spawn_yaw = 0.0
         self._world_patch = None
 
@@ -707,6 +709,10 @@ class OfflineBattleRuntime(object):
                               targets=self._enemies.alive,
                               on_vehicle_hit=self._on_vehicle_hit)
             gunnery.publish()
+            self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
+                                     BigWorld.callback, self._log,
+                                     self._on_player_hit)
+            self._enemy_ai.start()
         except Exception as error:
             self._log('combat_setup_failed error=%s detail=%s'
                       % (type(error).__name__, repr(error)[:200]))
@@ -729,6 +735,26 @@ class OfflineBattleRuntime(object):
         self._log('shell_hit target=%s distance=%.1f result=%s damage=%s '
                   'health=%s' % (target.id, landing.travelled, result, points,
                                  health))
+
+    def _on_player_hit(self, landing, shot, shooter_id):
+        """Publish the damage an enemy shell does to the player."""
+        import BigWorld
+        vehicle = BigWorld.entities.get(self._vehicle_id)
+        if vehicle is None:
+            return
+        result, points = damage.resolve(shot, landing.travelled,
+                                        landing.collisions)
+        previous = int(vehicle.health)
+        health = previous
+        if result is not None and points:
+            health = max(0, previous - int(points))
+            vehicle.health = health
+            vehicle.onHealthChanged(health, previous, int(shooter_id), 0, 0)
+            self._avatar.updateVehicleHealth(self._vehicle_id, health, 0,
+                                             health > 0, False)
+        self._log('player_hit shooter=%s distance=%.1f result=%s damage=%s '
+                  'health=%s' % (shooter_id, landing.travelled, result,
+                                 points, health))
 
     def _start_motion(self, vehicle):
         """Own the pose: the native body never simulates offline."""
@@ -829,6 +855,9 @@ class OfflineBattleRuntime(object):
             self._motion.stop()
             self._motion = None
             _state.motion = None
+        if self._enemy_ai is not None:
+            self._enemy_ai.stop()
+            self._enemy_ai = None
         if self._enemies is not None:
             self._enemies.destroy()
             self._enemies = None

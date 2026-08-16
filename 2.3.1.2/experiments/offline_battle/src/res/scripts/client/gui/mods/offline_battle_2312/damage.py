@@ -42,6 +42,32 @@ def hit_flags(result, killed):
     return flags
 
 
+HIGH_EXPLOSIVE_KINDS = ('HIGH_EXPLOSIVE', 'HIGH_EXPLOSIVE_MODERN',
+                        'HIGH_EXPLOSIVE_LEGACY_STUN',
+                        'HIGH_EXPLOSIVE_LEGACY_NO_STUN')
+
+
+def legacy_shot(shot):
+    """The shot dict the copied law reads.
+
+    2.3.1.2 keeps the shell damage in `armorDamage` and the blast radius
+    on the shell type, and it splits high explosive into several kind
+    names the law only knows one of."""
+    shell = shot.shell
+    kind = shell.kind
+    return {
+        'shell': {
+            'kind': 'HIGH_EXPLOSIVE' if kind in HIGH_EXPLOSIVE_KINDS
+                    else kind,
+            'caliber': shell.caliber,
+            'damage': shell.armorDamage,
+            'explosionRadius': getattr(shell.type, 'explosionRadius', 0.0),
+        },
+        'piercingPower': shot.piercingPower,
+        'maxDistance': shot.maxDistance,
+    }
+
+
 def nearest_vehicle(vehicles, start, end):
     """(vehicle, distance along the chord, collisions) for the first hit."""
     best = None
@@ -57,11 +83,12 @@ def nearest_vehicle(vehicles, start, end):
 
 def resolve(shot, travelled, collisions, random_uniform=None):
     """(result, damage) for one shell reaching one vehicle."""
-    resolved = combat_rules.resolve_hull_hit(shot, travelled, collisions,
+    converted = shot if isinstance(shot, dict) else legacy_shot(shot)
+    resolved = combat_rules.resolve_hull_hit(converted, travelled, collisions,
                                              random_uniform=random_uniform)
     if resolved is None:
         return None, 0
     result = resolved[0]
     nominal = combat_rules.he_nominal_armor(collisions)
-    return result, combat_rules.damage(shot, result, nominal,
+    return result, combat_rules.damage(converted, result, nominal,
                                        random_uniform=random_uniform)

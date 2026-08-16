@@ -102,11 +102,9 @@ class EnemyForce(object):
         health = max(0, previous - int(damage))
         self._health[vehicle_id] = health
         vehicle.health = health
+        # onHealthChanged publishes the marker health itself.
         vehicle.onHealthChanged(health, previous, int(attacker_id),
                                 int(reason_id), 0)
-        provider = self._avatar.guiSessionProvider
-        provider.setVehicleHealth(False, vehicle_id, health,
-                                  int(attacker_id), int(reason_id))
         if health <= 0:
             self._kill(vehicle, attacker_id, reason_id)
         return health
