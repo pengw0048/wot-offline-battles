@@ -199,6 +199,11 @@ def install(log):
           'ConsistentMatrices.notifyVehicleLoaded')
     _wrap(BattleSessionProvider, 'setPlayerVehicle',
           'BattleSession.setPlayerVehicle')
+    _wrap(Vehicle.Vehicle, 'resetProperties', 'Vehicle.resetProperties')
+    _wrap(Vehicle.Vehicle, 'set_dotEffect', 'Vehicle.setDotEffect')
+    _wrap(Vehicle.Vehicle, 'set_burnoutLevel', 'Vehicle.setBurnoutLevel')
+    _wrap(Vehicle.Vehicle, 'set_engineMode', 'Vehicle.setEngineMode')
+    _wrap(Vehicle.Vehicle, 'set_gunAnglesPacked', 'Vehicle.setGunAngles')
     _wrap(Vehicle.Vehicle, 'onHealthChanged', 'Vehicle.onHealthChanged')
     _wrap(Vehicle.Vehicle, 'set_isCrewActive', 'Vehicle.setIsCrewActive')
     _wrap(Vehicle.Vehicle, '_Vehicle__onVehicleDeath', 'Vehicle.onDeath')

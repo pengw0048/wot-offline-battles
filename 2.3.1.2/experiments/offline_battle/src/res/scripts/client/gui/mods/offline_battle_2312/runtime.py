@@ -321,25 +321,6 @@ class OfflineBattleRuntime(object):
             finally:
                 _state.sync_scope_vehicle = outer
 
-        from battleground.simulated_scene import SimulatedScene
-        original_kill_snapshot = SimulatedScene.saveKillSnapshot
-
-        def save_kill_snapshot(scene):
-            """The kill cam replays a shot this battle never recorded."""
-            return None
-
-        from vehicle_systems.CompoundAppearance import CompoundAppearance
-        refresh_name = '_CompoundAppearance__requestModelsRefresh'
-        original_models_refresh = getattr(CompoundAppearance, refresh_name)
-
-        def request_models_refresh(appearance):
-            """Keep the intact model on death.
-
-            The destroyed model arrives through __onModelsRefresh, which
-            calls filter.syncGunAngles directly. A client-only vehicle
-            faults on that call, and the death effects do not need it."""
-            return None
-
         original_aux_physics = avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData
 
         def on_set_aux_physics(avatar, prev):
@@ -391,12 +372,44 @@ class OfflineBattleRuntime(object):
              vehicle_getattribute),
             (vehicle_cls, 'set_remoteCamera', original_set_remote_camera,
              set_remote_camera),
+        ]
+        _state.active = True
+
+    def _install_late_patches(self):
+        """Patches that must not import anything during the bootstrap.
+
+        CGF registers systems for a space when the space is created, and
+        an import that pulls in cgf_components before then changes what
+        the space gets. Both modules below are safe to import once the
+        space and the player vehicle exist."""
+        from battleground.simulated_scene import SimulatedScene
+        from vehicle_systems.CompoundAppearance import CompoundAppearance
+        original_kill_snapshot = SimulatedScene.saveKillSnapshot
+
+        def save_kill_snapshot(scene):
+            """The kill cam replays a shot this battle never recorded."""
+            return None
+
+        refresh_name = '_CompoundAppearance__requestModelsRefresh'
+        original_models_refresh = getattr(CompoundAppearance, refresh_name)
+
+        def request_models_refresh(appearance):
+            """Keep the intact model on death.
+
+            The destroyed model arrives through __onModelsRefresh, which
+            calls filter.syncGunAngles directly, and a client-only
+            vehicle faults on that call."""
+            return None
+
+        SimulatedScene.saveKillSnapshot = save_kill_snapshot
+        setattr(CompoundAppearance, refresh_name, request_models_refresh)
+        self._class_patches.extend([
             (SimulatedScene, 'saveKillSnapshot', original_kill_snapshot,
              save_kill_snapshot),
             (CompoundAppearance, refresh_name, original_models_refresh,
              request_models_refresh),
-        ]
-        _state.active = True
+        ])
+        self._log('late_patches_installed count=2')
 
     def _restore_class_patches(self):
         _state.active = False
@@ -722,6 +735,7 @@ class OfflineBattleRuntime(object):
                   self._bridge.client_ready_received, avatar.isOnArena,
                   type(avatar.gunRotator).__name__, avatar.arena.period)
         self._battle_ready = True
+        self._install_late_patches()
         self._start_motion(vehicle)
         self._start_combat(avatar, vehicle)
 
