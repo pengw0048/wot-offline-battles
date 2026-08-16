@@ -64,5 +64,31 @@ class OfflineBattlePackageTests(unittest.TestCase):
         self.assertGreater(count, 0)
 
 
+
+class FilterProxyScopeTests(unittest.TestCase):
+    """The native turret sync faults for every client-only vehicle.
+
+    A build that scoped the proxy to the player's vehicle killed the
+    client at the first enemy's property update, and cost four runs to
+    find, so the scope is asserted here.
+    """
+
+    def _source(self):
+        path = (ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' /
+                'mods' / 'offline_battle_2312' / 'runtime.py')
+        return path.read_text()
+
+    def test_the_scope_covers_every_vehicle(self):
+        source = self._source()
+        start = source.index('def set_gun_angles_packed')
+        body = source[start:source.index('original_aux_physics', start)]
+        self.assertNotIn('isPlayerVehicle', body)
+        self.assertIn('_state.sync_scope_vehicle = vehicle', body)
+
+    def test_the_proxy_is_returned_without_an_owner_test(self):
+        source = self._source()
+        self.assertIn("if name == 'filter' and "
+                      "_state.sync_scope_vehicle is vehicle:", source)
+
 if __name__ == '__main__':
     unittest.main()

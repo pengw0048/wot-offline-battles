@@ -310,10 +310,9 @@ class OfflineBattleRuntime(object):
         def set_gun_angles_packed(vehicle, previous=None):
             """Keep the stock handler, minus the unsubmittable sync.
 
-            Only the player's own filter rejects the sync. A remote
-            vehicle turns its turret through exactly this call."""
-            if not vehicle.isPlayerVehicle:
-                return original_set_gun_angles(vehicle, previous)
+            No vehicle can take the native turret sync offline, own or
+            remote: a client-only entity has no interpolation chain to
+            submit the sample into."""
             outer = _state.sync_scope_vehicle
             _state.sync_scope_vehicle = vehicle
             try:
