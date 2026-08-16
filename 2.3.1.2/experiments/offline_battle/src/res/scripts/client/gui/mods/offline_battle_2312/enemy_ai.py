@@ -72,7 +72,7 @@ class EnemyAI(object):
         self._elapsed += TICK_SECONDS
         player = BigWorld.entities.get(self._player_vehicle_id)
         if player is not None and player.isStarted:
-            target = player.position
+            target = self._aim_point(player)
             for vehicle in self._force.alive():
                 if not vehicle.isStarted:
                     continue
@@ -82,24 +82,45 @@ class EnemyAI(object):
     def _engage(self, vehicle, target):
         import Math
         from gun_rotation_shared import encodeGunAngles
-        matrix = Math.Matrix(vehicle.matrix)
-        position = matrix.translation
-        distance = (Math.Vector3(target) - position).length
+        pose = self._force.pose(vehicle.id)
+        if pose is None:
+            return
+        matrix = Math.Matrix()
+        matrix.setRotateY(pose[3])
+        matrix.translation = Math.Vector3(pose[0], pose[1], pose[2])
+        descriptor = vehicle.typeDescriptor
+        muzzle = self._muzzle_origin(descriptor, matrix)
+        distance = (target - muzzle).length
         if distance > ENGAGE_RANGE_METRES:
             return
-        descriptor = vehicle.typeDescriptor
         limits = descriptor.gun.pitchLimits['absolute']
         turret_yaw, pitch = aim_angles(
-            (position.x, position.y, position.z), matrix.yaw,
+            (muzzle.x, muzzle.y, muzzle.z), pose[3],
             (target.x, target.y, target.z))
         pitch = clamp_pitch(pitch, limits)
+        previous = vehicle.gunAnglesPacked
         vehicle.gunAnglesPacked = encodeGunAngles(turret_yaw, pitch, limits)
+        # Assigning the property does not notify; the server update does.
+        vehicle.set_gunAnglesPacked(previous)
         ready_at = self._next_shot.get(vehicle.id, FIRST_SHOT_DELAY_SECONDS)
         if self._elapsed < ready_at:
             return
         self._next_shot[vehicle.id] = (self._elapsed +
                                        float(descriptor.gun.reloadTime))
         self._fire(vehicle, matrix, turret_yaw, pitch)
+
+    def _aim_point(self, player):
+        """Aim at the hull centre, not at the ground under the hull."""
+        import Math
+        return self._muzzle_origin(player.typeDescriptor,
+                                   Math.Matrix(player.matrix))
+
+    @staticmethod
+    def _muzzle_origin(descriptor, matrix):
+        """Where this vehicle's gun sits, and what a shooter aims at."""
+        turret_offset = (descriptor.hull.turretPositions[0] +
+                         descriptor.chassis.hullPosition)
+        return matrix.applyPoint(turret_offset)
 
     def _muzzle(self, vehicle, matrix, turret_yaw, pitch):
         """Copy the client's own shot transform for a turret pose."""

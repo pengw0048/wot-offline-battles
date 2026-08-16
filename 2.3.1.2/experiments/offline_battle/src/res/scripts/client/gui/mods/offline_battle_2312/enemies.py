@@ -39,6 +39,8 @@ class EnemyForce(object):
         self._log = log
         self._ids = []
         self._health = {}
+        self._poses = {}
+        self._comp_descr = None
 
     @property
     def ids(self):
@@ -56,6 +58,10 @@ class EnemyForce(object):
     def health(self, vehicle_id):
         return self._health.get(vehicle_id, 0)
 
+    def pose(self, vehicle_id):
+        """(x, y, z, yaw) where this enemy was placed; it does not move."""
+        return self._poses.get(vehicle_id)
+
     def spawn(self, origin, yaw):
         import BigWorld
         import Math
@@ -64,6 +70,7 @@ class EnemyForce(object):
         descriptor = vehicles.VehicleDescr(typeName=ENEMY_TYPE_NAME)
         comp_descr = descriptor.makeCompactDescr()
         max_health = int(descriptor.maxHealth)
+        self._comp_descr = comp_descr
         roster = []
         for index, place in enumerate(formation(origin, yaw)):
             x, z, facing = place
@@ -80,6 +87,7 @@ class EnemyForce(object):
                 (0.0, 0.0, facing), properties)
             self._ids.append(vehicle_id)
             self._health[vehicle_id] = max_health
+            self._poses[vehicle_id] = (x, ground, z, facing)
             roster.append(entity_setup.roster_entry(
                 vehicle_id, comp_descr, max_health, name=name,
                 team=entity_setup.ENEMY_TEAM, session_id='enemy_%d' % index))
@@ -120,7 +128,8 @@ class EnemyForce(object):
         info['isAlive'] = False
         info['deathInfo'] = entity_setup.death_info(
             vehicle.id, int(attacker_id), int(reason_id))
-        arena.updateVehicleIsAlive(vehicle.id, info['compDescr'], False)
+        # The arena turns compDescr into vehicleType and drops the key.
+        arena.updateVehicleIsAlive(vehicle.id, self._comp_descr, False)
         self._log('enemy_killed id=%s attacker=%s' % (vehicle.id,
                                                       attacker_id))
 
@@ -131,3 +140,4 @@ class EnemyForce(object):
                 BigWorld.destroyEntity(vehicle_id)
         self._ids = []
         self._health = {}
+        self._poses = {}

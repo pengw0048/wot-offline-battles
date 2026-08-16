@@ -56,6 +56,17 @@ class FormationTests(unittest.TestCase):
             self.assertAlmostEqual(z, -50.0 + enemies.ENEMY_RANGE_METRES)
 
 
+class PoseTests(unittest.TestCase):
+    def test_a_force_remembers_where_it_placed_each_enemy(self):
+        force = enemies.EnemyForce(None, 1, lambda message: None)
+        force._poses[7] = (10.0, 20.0, 30.0, 1.5)
+        self.assertEqual(force.pose(7), (10.0, 20.0, 30.0, 1.5))
+
+    def test_an_unknown_vehicle_has_no_pose(self):
+        force = enemies.EnemyForce(None, 1, lambda message: None)
+        self.assertIsNone(force.pose(7))
+
+
 class PropertyTests(unittest.TestCase):
     def test_an_enemy_is_not_the_player_vehicle(self):
         properties = entity_setup.vehicle_properties(

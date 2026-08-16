@@ -303,13 +303,25 @@ class OfflineBattleRuntime(object):
         original_set_gun_angles = vehicle_cls.set_gunAnglesPacked
 
         def set_gun_angles_packed(vehicle, previous=None):
-            """Keep the stock handler, minus the unsubmittable sync."""
+            """Keep the stock handler, minus the unsubmittable sync.
+
+            Only the player's own filter rejects the sync. A remote
+            vehicle turns its turret through exactly this call."""
+            if not vehicle.isPlayerVehicle:
+                return original_set_gun_angles(vehicle, previous)
             outer = _state.sync_scope_vehicle
             _state.sync_scope_vehicle = vehicle
             try:
                 return original_set_gun_angles(vehicle, previous)
             finally:
                 _state.sync_scope_vehicle = outer
+
+        from battleground.simulated_scene import SimulatedScene
+        original_kill_snapshot = SimulatedScene.saveKillSnapshot
+
+        def save_kill_snapshot(scene):
+            """The kill cam replays a shot this battle never recorded."""
+            return None
 
         original_aux_physics = avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData
 
@@ -362,6 +374,8 @@ class OfflineBattleRuntime(object):
              vehicle_getattribute),
             (vehicle_cls, 'set_remoteCamera', original_set_remote_camera,
              set_remote_camera),
+            (SimulatedScene, 'saveKillSnapshot', original_kill_snapshot,
+             save_kill_snapshot),
         ]
         _state.active = True
 

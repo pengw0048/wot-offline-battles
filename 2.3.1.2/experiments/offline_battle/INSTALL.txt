@@ -1,11 +1,11 @@
-World of Tanks 2.3.1.2 offline battle 0.7.0
+World of Tanks 2.3.1.2 offline battle 0.7.1
 ===========================================
 
 1. Remove earlier offline probe or battle packages from:
      <World_of_Tanks>\mods\2.3.1.2\
 
 2. Copy this file there:
-     org.peng.offline_2312_battle_0.7.0.wotmod
+     org.peng.offline_2312_battle_0.7.1.wotmod
 
 3. Run from the client root:
      win64\WorldOfTanks.exe --script-arg offlineBattle --script-arg offline --script-arg spaces/01_karelia

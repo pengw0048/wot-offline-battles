@@ -89,7 +89,7 @@ interfaces that 2.3.1.2 actually changed.
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.0.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.1.wotmod
 ```
 
 ## Current state
@@ -111,8 +111,11 @@ explodes where it lands.
 Also validated in play: enemy vehicles stand on the map, the shell hits
 them and the hit result plays its sound.
 
-Not yet validated in play: damage and kills after the shell-damage fix,
-shell switching, and enemy return fire.
+Also validated in play: shells damage enemies, shell switching works, and
+the enemies shoot back.
+
+Not yet validated in play: a kill without a crash, enemy turret rotation,
+and enemy fire that leads the player.
 
 The native body never simulates offline, so this port owns the pose. That
 matches the conclusion the mature 0.9.22 port reached on its own client,
