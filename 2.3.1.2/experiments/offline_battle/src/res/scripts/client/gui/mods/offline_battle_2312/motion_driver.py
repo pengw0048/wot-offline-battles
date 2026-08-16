@@ -45,6 +45,8 @@ class MotionDriver(object):
         self._drive_history = []
         self._blocks = 0
         self._steps = 0
+        self._turns = 0
+        self._grind = 0
 
     @property
     def vehicle_id(self):
@@ -100,10 +102,54 @@ class MotionDriver(object):
             return
         self._callback_id = BigWorld.callback(TICK_SECONDS, self._tick)
 
-    def _blocked(self):
+    def _blocked(self, yaw=None):
         return world_collision.blocked(
-            self._space_id, (self._x, self._y, self._z), self._yaw,
-            self._speed, self._extents, TICK_SECONDS)
+            self._space_id, (self._x, self._y, self._z),
+            self._yaw if yaw is None else yaw, self._speed, self._extents,
+            TICK_SECONDS)
+
+    def _contacts(self, yaw):
+        return world_collision.hull_contacts(
+            self._space_id, (self._x, self._y, self._z), yaw, self._extents)
+
+    def _rotate(self):
+        """Turn, unless turning would push a hull corner into geometry."""
+        if not self._omega:
+            return
+        previous = self._yaw
+        self._yaw += self._omega * TICK_SECONDS
+        if self._contacts(self._yaw) > self._contacts(previous):
+            self._yaw = previous
+            self._omega = 0.0
+            self._turns += 1
+
+    def _translate(self):
+        """Advance, deflect along the obstacle, or grind to a stop."""
+        step = self._speed * TICK_SECONDS
+        if not step:
+            return
+        if not self._blocked():
+            self._x += math.sin(self._yaw) * step
+            self._z += math.cos(self._yaw) * step
+            self._grind = max(0, self._grind - 1)
+            return
+        self._blocks += 1
+        for delta in world_collision.SLIDE_YAWS:
+            slide_yaw = self._yaw + delta
+            if self._blocked(slide_yaw):
+                continue
+            if self._grind <= 0:
+                self._speed *= world_collision.SLIDE_FIRST_FACTOR
+            self._speed *= world_collision.SLIDE_DECAY ** (TICK_SECONDS * 60.0)
+            slide = self._speed * TICK_SECONDS
+            self._x += math.sin(slide_yaw) * slide
+            self._z += math.cos(slide_yaw) * slide
+            self._grind = 4
+            return
+        self._speed *= world_collision.STOP_DECAY ** (TICK_SECONDS * 60.0)
+        if abs(self._speed) < world_collision.STOP_SPEED:
+            self._speed = 0.0
+        self._grind = 4
 
     def _hull_pose(self):
         """Four-point suspension: front, back and both track lines."""
@@ -167,15 +213,9 @@ class MotionDriver(object):
             self._params, self._speed, self._movement, steering,
             self._drive_pitch, TICK_SECONDS)
 
-        self._yaw += self._omega * TICK_SECONDS
-        step = self._speed * TICK_SECONDS
-        if step and self._blocked():
-            self._speed = 0.0
-            step = 0.0
-            self._blocks += 1
+        self._rotate()
         start_x, start_z = self._x, self._z
-        self._x += math.sin(self._yaw) * step
-        self._z += math.cos(self._yaw) * step
+        self._translate()
         self._settle(start_x, start_z)
         self._hull_pose()
 
@@ -185,11 +225,11 @@ class MotionDriver(object):
             rotator = getattr(BigWorld.player(), 'gunRotator', None)
             self._log('motion_state pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f '
                       'pitch=%.3f roll=%.3f drive_pitch=%.3f input=(%s,%s) '
-                      'blocked=%s steps=%s turret=%s marker=%s'
+                      'blocked=%s steps=%s turns=%s turret=%s marker=%s'
                       % (self._x, self._y, self._z, self._yaw, self._speed,
                          self._pitch, self._roll, self._drive_pitch,
                          self._movement, self._rotation, self._blocks,
-                         self._steps,
+                         self._steps, self._turns,
                          getattr(rotator, 'turretYaw', None),
                          getattr(rotator, 'markerInfo', (None,))[0]))
         self._schedule()

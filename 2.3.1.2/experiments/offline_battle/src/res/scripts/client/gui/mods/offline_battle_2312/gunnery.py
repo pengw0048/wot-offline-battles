@@ -7,6 +7,8 @@ module calls them with values read from the vehicle descriptor.
 """
 from __future__ import absolute_import
 
+from gui.mods.offline_battle_2312.projectiles import ProjectileRunner
+
 ALL_GUNS = -1
 CURRENT_SHELLS = 0
 
@@ -43,6 +45,7 @@ class Gunnery(object):
         self._kinds = {}
         self._reload_time = float(self._descriptor.gun.reloadTime)
         self._shots_fired = 0
+        self._projectiles = ProjectileRunner(vehicle, scheduler, log)
 
     @property
     def shots_fired(self):
@@ -95,6 +98,7 @@ class Gunnery(object):
         state[0] -= 1
         burst = max(1, int(self._descriptor.gun.burst[0]))
         vehicle.showShooting(burst, ALL_GUNS, self._kinds.get(int_cd, 0))
+        self._projectiles.fire(avatar, self._descriptor.shot)
         avatar.updateVehicleAmmo(self._vehicle_id, int_cd, state[0], state[1],
                                  0, 0, 0)
         avatar.updateVehicleGunReloadTime(self._vehicle_id, self._reload_time,

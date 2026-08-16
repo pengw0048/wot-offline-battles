@@ -71,13 +71,17 @@ interfaces that 2.3.1.2 actually changed.
   cell normally sends, read from the vehicle descriptor.
 - `.../offline_battle_2312/gunnery.py` — ammo publication and the shot
   answer the cell normally gives.
+- `.../offline_battle_2312/suspension.py` — the 0.9.22 ground probes and
+  four-point hull pose, copied.
+- `.../offline_battle_2312/projectiles.py` — shell flight and the impact
+  the cell normally reports.
 
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.4.1.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.5.0.wotmod
 ```
 
 ## Current state
@@ -89,10 +93,11 @@ ArcadeCamera, gun rotator and battle HUD all run, `is_on_arena` is true,
 the avatar reaches `init_progress=63`, and exit teardown is clean.
 
 Also validated in play: the tank drives with W/A/S/D, follows the terrain,
-the camera follows it and the speedometer reads the real speed.
+the camera follows it, the speedometer reads the real speed, the aim
+circle tracks the mouse, and the gun fires and reloads.
 
-Not yet validated in play: obstacle collision, hull roll, track
-animation, the moving aim circle, and shooting.
+Not yet validated in play: obstacle collision and the hull pose after the
+suspension rewrite, track animation, and shell flight.
 
 The native body never simulates offline, so this port owns the pose. That
 matches the conclusion the mature 0.9.22 port reached on its own client,
@@ -137,9 +142,9 @@ entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 
-- Shooting plays the shot and spends a round, but there is no projectile
-  authority: nothing flies and nothing is hit. Bots, damage and battle
-  results are out of scope for this slice.
+- The shell flies and explodes where it lands, but nothing takes damage:
+  there are no other vehicles, and no penetration or damage rules. Bots,
+  damage and battle results are out of scope for this slice.
 - Only `spaces/01_karelia` has a proven spawn; other maps fall back to the
   stock spawn-point data.
 - The ammo bay is a full `gun.maxAmmo` load shared across the gun's shot

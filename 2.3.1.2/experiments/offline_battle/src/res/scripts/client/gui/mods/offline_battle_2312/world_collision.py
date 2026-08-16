@@ -14,6 +14,13 @@ MAX_DESCENDING_GRADIENT = 1.75
 MIN_DRIVABLE_HEIGHT_CHANGE = 0.15
 LOWER_RAY_HEIGHT = 0.6
 UPPER_RAY_HEIGHTS = (1.1, 1.6)
+CORNER_RAY_HEIGHTS = (0.6, 1.1)
+CORNER_MARGIN = 0.05
+SLIDE_YAWS = (0.55, -0.55, 1.0, -1.0)
+SLIDE_FIRST_FACTOR = 0.6
+SLIDE_DECAY = 0.85
+STOP_DECAY = 0.35
+STOP_SPEED = 0.05
 DEFAULT_HALF_WIDTH = 1.5
 DEFAULT_HALF_LENGTH = 3.5
 
@@ -130,6 +137,40 @@ def _upper_ray_hits(space_id, pos_y, x1, z1, x2, z2, target_length):
         if (collision.closestPoint - start).length < target_length:
             return True
     return False
+
+
+def hull_contacts(space_id, position, yaw, extents):
+    """Count hull corners that sit behind solid geometry.
+
+    The forward sweep only covers the travel direction, so a hull that
+    turns beside a rock walks into it sideways. A ray from the hull
+    centre outwards starts in open space, which a ray from inside the
+    rock would not."""
+    import BigWorld
+    import Math
+    half_width, hull_front, hull_back = extents
+    pos_x, pos_y, pos_z = position
+    cos_y = math.cos(yaw)
+    sin_y = math.sin(yaw)
+    contacts = 0
+    for offset_x, offset_z in ((half_width, hull_front),
+                               (-half_width, hull_front),
+                               (half_width, -hull_back),
+                               (-half_width, -hull_back)):
+        x = pos_x + sin_y * offset_z + cos_y * offset_x
+        z = pos_z + cos_y * offset_z - sin_y * offset_x
+        reach = (offset_x * offset_x + offset_z * offset_z) ** 0.5
+        for height in CORNER_RAY_HEIGHTS:
+            start = Math.Vector3(pos_x, pos_y + height, pos_z)
+            end = Math.Vector3(x, pos_y + height, z)
+            collision = BigWorld.wg_collideSegment(space_id, start, end,
+                                                   COLLISION_MASK)
+            if collision is None:
+                continue
+            if (collision.closestPoint - start).length < reach - CORNER_MARGIN:
+                contacts += 1
+                break
+    return contacts
 
 
 def blocked(space_id, position, yaw, velocity, extents, dt, airborne=False):

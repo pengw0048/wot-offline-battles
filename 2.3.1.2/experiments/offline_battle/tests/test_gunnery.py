@@ -1,10 +1,23 @@
 import importlib.util
+import sys
+import types
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODS = ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' / 'mods'
 
+
+def _stub_package():
+    """gunnery.py imports its sibling by the client package path."""
+    for name in ('gui', 'gui.mods', 'gui.mods.offline_battle_2312'):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    module = types.ModuleType('gui.mods.offline_battle_2312.projectiles')
+    module.ProjectileRunner = object
+    sys.modules['gui.mods.offline_battle_2312.projectiles'] = module
+
+
+_stub_package()
 _spec = importlib.util.spec_from_file_location(
     'offline_battle_gunnery', MODS / 'offline_battle_2312' / 'gunnery.py')
 gunnery = importlib.util.module_from_spec(_spec)

@@ -166,5 +166,48 @@ class BlockedTests(unittest.TestCase):
         self.assertTrue(any(abs(z) > 0.1 for _unused, z in seen))
 
 
+class HullContactTests(unittest.TestCase):
+    def test_open_space_has_no_contact(self):
+        _install_fakes(lambda *args: None)
+        self.assertEqual(
+            world_collision.hull_contacts(1, (0.0, 10.0, 0.0), 0.0, EXTENTS),
+            0)
+
+    def test_a_wall_on_the_right_catches_the_right_corners(self):
+        def collide(space, start, end, flags):
+            if end.x <= start.x:
+                return None
+            return _Hit(_Vector3(start.x + 0.2, start.y, start.z),
+                        _Vector3(-1.0, 0.0, 0.0))
+
+        _install_fakes(collide)
+        self.assertEqual(
+            world_collision.hull_contacts(1, (0.0, 10.0, 0.0), 0.0, EXTENTS),
+            2)
+
+    def test_a_far_hit_is_not_a_contact(self):
+        def collide(space, start, end, flags):
+            return _Hit(_Vector3(start.x + 50.0, start.y, start.z),
+                        _Vector3(-1.0, 0.0, 0.0))
+
+        _install_fakes(collide)
+        self.assertEqual(
+            world_collision.hull_contacts(1, (0.0, 10.0, 0.0), 0.0, EXTENTS),
+            0)
+
+    def test_the_corners_follow_the_yaw(self):
+        def collide(space, start, end, flags):
+            if end.z <= start.z:
+                return None
+            return _Hit(_Vector3(start.x, start.y, start.z + 0.2),
+                        _Vector3(0.0, 0.0, -1.0))
+
+        _install_fakes(collide)
+        self.assertEqual(
+            world_collision.hull_contacts(1, (0.0, 10.0, 0.0),
+                                          math.pi / 2.0, EXTENTS),
+            2)
+
+
 if __name__ == '__main__':
     unittest.main()
