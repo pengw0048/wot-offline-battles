@@ -756,7 +756,8 @@ class OfflineBattleRuntime(object):
                                 self._spawn_yaw)
             gunnery = Gunnery(vehicle, BigWorld.callback, self._log,
                               targets=self._enemies.alive,
-                              on_vehicle_hit=self._on_vehicle_hit)
+                              on_vehicle_hit=self._on_vehicle_hit,
+                              poses=self._enemies.pose)
             gunnery.publish()
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
@@ -793,6 +794,15 @@ class OfflineBattleRuntime(object):
                   'devices=%s' % (target.id, part, zone, local[0], local[1],
                                   names))
         return names
+
+    def _camera_yaw(self):
+        """World yaw the player is looking along."""
+        import BigWorld
+        import Math
+        camera = BigWorld.camera()
+        if camera is None:
+            return 0.0
+        return Math.Matrix(camera.invViewMatrix).yaw
 
     def _pose_yaw(self, vehicle):
         import Math
@@ -904,15 +914,20 @@ class OfflineBattleRuntime(object):
                         if self._enemies is not None else None)
         if shooter_pose is not None:
             own = vehicle.position
-            yaw = feedback.hit_direction_yaw(
+            world = feedback.hit_direction_yaw(
                 (own.x, own.y, own.z),
-                (shooter_pose[0], shooter_pose[1], shooter_pose[2]),
-                self._pose_yaw(vehicle))
+                (shooter_pose[0], shooter_pose[1], shooter_pose[2]))
+            hull_yaw = self._pose_yaw(vehicle)
+            camera_yaw = self._camera_yaw()
+            yaw = feedback.wrap_angle(world - camera_yaw)
             feedback.publish_received(
                 self._avatar, shooter_id, points if result is not None else 0,
                 len(crits), yaw)
-            self._log('hit_direction shooter=%s yaw=%.3f hull_yaw=%.3f'
-                      % (shooter_id, yaw, self._pose_yaw(vehicle)))
+            self._log('hit_direction shooter=%s sent=%.3f world=%.3f '
+                      'hull_relative=%.3f camera_yaw=%.3f hull_yaw=%.3f'
+                      % (shooter_id, yaw, world,
+                         feedback.wrap_angle(world - hull_yaw),
+                         camera_yaw, hull_yaw))
         self._log('player_hit shooter=%s distance=%.1f result=%s damage=%s '
                   'health=%s crits=%s' % (shooter_id, landing.travelled,
                                           result, points, health, crits))

@@ -13,6 +13,7 @@ from gui.mods.offline_battle_2312 import motion, suspension
 from gui.mods.offline_battle_2312 import tank_collision, world_collision
 
 TICK_SECONDS = 0.02
+TRACED_COAST_TICKS = 40
 
 
 class MotionDriver(object):
@@ -53,6 +54,7 @@ class MotionDriver(object):
         self._slide_speed = 0.0
         self._downhill = (0.0, 0.0)
         self._slope_tangent = 0.0
+        self._coast_traces = 0
         self._turns = 0
         self._grind = 0
 
@@ -279,10 +281,15 @@ class MotionDriver(object):
         self._rotate()
         start_x, start_z = self._x, self._z
         self._translate()
+        after_drive = (self._x, self._z)
         self._resolve_hulls()
+        after_hulls = (self._x, self._z)
         self._hull_pose()
         self._slide()
+        after_slide = (self._x, self._z)
         self._settle(start_x, start_z)
+        self._trace_coast((start_x, start_z), after_drive, after_hulls,
+                          after_slide)
 
         self._apply_pose(vehicle)
         self._ticks += 1
@@ -298,6 +305,29 @@ class MotionDriver(object):
                          self._steps, self._turns, self._pushes,
                          getattr(rotator, 'turretYaw', None),
                          getattr(rotator, 'markerInfo', (None,))[0]))
+
+    def _trace_coast(self, start, after_drive, after_hulls, after_slide):
+        """Name the mover that keeps the hull creeping with no throttle.
+
+        The driver reports itself stopped while the hull keeps covering
+        ground, so each mover's own displacement is recorded."""
+        if self._movement or self._coast_traces >= TRACED_COAST_TICKS:
+            return
+        drive = math.hypot(after_drive[0] - start[0],
+                           after_drive[1] - start[1])
+        hulls = math.hypot(after_hulls[0] - after_drive[0],
+                           after_hulls[1] - after_drive[1])
+        slide = math.hypot(after_slide[0] - after_hulls[0],
+                           after_slide[1] - after_hulls[1])
+        total = math.hypot(self._x - start[0], self._z - start[1])
+        if total < 0.0005:
+            return
+        self._coast_traces += 1
+        self._log('coast_step speed=%.4f drive=%.4f hulls=%.4f slide=%.4f '
+                  'total=%.4f drive_pitch=%.3f slide_speed=%.3f tangent=%.3f'
+                  % (self._speed, drive, hulls, slide, total,
+                     self._drive_pitch, self._slide_speed,
+                     self._slope_tangent))
 
     def _refresh_pose(self):
         import Math

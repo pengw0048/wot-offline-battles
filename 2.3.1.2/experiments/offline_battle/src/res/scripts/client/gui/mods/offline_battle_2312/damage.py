@@ -11,6 +11,7 @@ import random
 
 from gui.mods.offline_battle_2312 import combat_rules
 from gui.mods.offline_battle_2312 import device_damage
+from gui.mods.offline_battle_2312 import tank_collision
 
 RICOCHET = 0
 NOT_PIERCED = 1
@@ -169,14 +170,52 @@ def crit_flags(names):
     return flags
 
 
-def nearest_vehicle(vehicles, start, end):
-    """(vehicle, distance along the chord, collisions) for the first hit."""
+def running_gear_reach(vehicle, pose, start, end):
+    """Distance along the chord at which it crosses the running gear.
+
+    The client's collision layers never include the chassis, so a shell
+    aimed at a track or an idler reports nothing at all and flies on.
+    The chassis box comes from the vehicle's own hit tester."""
+    shape = tank_collision.chassis_shape(vehicle.typeDescriptor)
+    half_width, half_length = shape[0], shape[1]
+    lower = pose[1] + shape[2]
+    upper = pose[1] + shape[3]
+    sin_yaw, cos_yaw = math.sin(pose[3]), math.cos(pose[3])
+    steps = 12
+    for index in range(steps + 1):
+        fraction = index / float(steps)
+        x = start.x + (end.x - start.x) * fraction
+        y = start.y + (end.y - start.y) * fraction
+        z = start.z + (end.z - start.z) * fraction
+        if not lower <= y <= upper:
+            continue
+        delta_x, delta_z = x - pose[0], z - pose[2]
+        local_x = delta_x * cos_yaw - delta_z * sin_yaw
+        local_z = delta_x * sin_yaw + delta_z * cos_yaw
+        if abs(local_x) <= half_width and abs(local_z) <= half_length:
+            return math.sqrt((x - start.x) ** 2 + (y - start.y) ** 2 +
+                             (z - start.z) ** 2)
+    return None
+
+
+def nearest_vehicle(vehicles, start, end, poses=None):
+    """(vehicle, distance along the chord, collisions) for the first hit.
+
+    An empty collision list means the shell reached the running gear and
+    nothing else, which is the track hit the armour layers never show."""
     best = None
     for vehicle in vehicles:
         collisions = vehicle.collideSegmentExt(start, end)
-        if not collisions:
+        distance = None
+        if collisions:
+            distance = min(float(collision.dist) for collision in collisions)
+        elif poses is not None:
+            pose = poses(vehicle.id)
+            if pose is not None:
+                distance = running_gear_reach(vehicle, pose, start, end)
+                collisions = []
+        if distance is None:
             continue
-        distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
             best = (vehicle, distance, collisions)
     return best

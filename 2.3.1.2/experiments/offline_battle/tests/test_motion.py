@@ -129,5 +129,35 @@ class TraverseTests(unittest.TestCase):
         self.assertNotAlmostEqual(left, right)
 
 
+
+class CopyCompletenessTests(unittest.TestCase):
+    """The law is a copy; a partial copy is how the slide model went missing."""
+
+    SOURCE = Path('/Users/peng/wot-offline-2311-probe/0.9.22/src/res/scripts/'
+                  'client/gui/mods/offline_lan_0922/vehicle_physics.py')
+
+    def _names(self, text):
+        import re
+        return set(re.findall(r'^def (\w+)', text, re.M))
+
+    def _constants(self, text):
+        import re
+        return set(re.findall(r'^([A-Z_][A-Z_0-9]*)\s*=', text, re.M))
+
+    def test_every_function_of_the_source_is_here(self):
+        if not self.SOURCE.exists():
+            self.skipTest('the 0.9.22 source is not present')
+        source = self.SOURCE.read_text().expandtabs(4)
+        mine = (MODS / 'offline_battle_2312' / 'motion.py').read_text()
+        self.assertEqual(self._names(source) - self._names(mine), set())
+
+    def test_every_constant_of_the_source_is_here(self):
+        if not self.SOURCE.exists():
+            self.skipTest('the 0.9.22 source is not present')
+        source = self.SOURCE.read_text().expandtabs(4)
+        mine = (MODS / 'offline_battle_2312' / 'motion.py').read_text()
+        self.assertEqual(self._constants(source) - self._constants(mine),
+                         set())
+
 if __name__ == '__main__':
     unittest.main()

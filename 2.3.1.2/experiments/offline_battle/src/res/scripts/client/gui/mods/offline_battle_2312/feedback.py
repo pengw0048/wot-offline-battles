@@ -59,6 +59,15 @@ def received_events(attacker_id, damage, crit_count):
     return events
 
 
+def wrap_angle(value):
+    """The same angle, inside one turn."""
+    while value > math.pi:
+        value -= 2.0 * math.pi
+    while value < -math.pi:
+        value += 2.0 * math.pi
+    return value
+
+
 def hit_direction_yaw(target_position, attacker_position, target_yaw=0.0):
     """Bearing to the attacker in the target's own frame.
 
@@ -66,12 +75,7 @@ def hit_direction_yaw(target_position, attacker_position, target_yaw=0.0):
     points the arrow somewhere else as soon as the hull turns."""
     world = math.atan2(attacker_position[0] - target_position[0],
                        attacker_position[2] - target_position[2])
-    relative = world - float(target_yaw)
-    while relative > math.pi:
-        relative -= 2.0 * math.pi
-    while relative < -math.pi:
-        relative += 2.0 * math.pi
-    return relative
+    return wrap_angle(world - float(target_yaw))
 
 
 def publish_dealt(avatar, target_id, damage, crit_count, killed):
