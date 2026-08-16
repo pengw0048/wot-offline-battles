@@ -1088,6 +1088,10 @@ def tick_repair(vehicle, dt, repair_skill=100.0, has_big_kit=False):
     devices = getattr(vehicle, 'devices_hp', None) or {}
     destroyed = set(getattr(vehicle, '_destroyed_devices', None) or ())
     for name in list(devices):
+        # Only a destroyed device auto-repairs, and only up to critical;
+        # a damaged one keeps its damage until a repair kit.
+        if name not in destroyed:
+            continue
         cap = _device_damage.device_regen_hp(descriptor, name)
         if cap is None or devices[name] >= cap:
             continue

@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.6.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.7.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.6.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.7.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.6.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.7.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -337,6 +337,17 @@ yellow engine's 0.5 decayed the speed geometrically to a crawl within a
 second. The factor now scales the drive intent once, the same rule the
 bots already used, so a yellow engine costs half the drive power, not
 the whole tank.
+
+## What 0.12.7 adds
+
+A deliberate divergence from the copied file, on field evidence: the
+0.12.6 log showed a damaged track regenerating 20 -> 40 within three
+seconds, which made severing nearly impossible at range, and retail
+never regenerates a damaged module. `critical_damage.tick_repair` now
+repairs only devices in the destroyed set (up to critical, as before);
+a damaged one keeps its damage until a repair kit. This is the one
+edit inside a copied law file, made because the copied behavior
+contradicts the retail rule the port is meant to reproduce.
 
 ## What to check on the next run
 
