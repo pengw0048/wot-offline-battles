@@ -87,7 +87,9 @@ class CriticalControl(object):
         _unused, payload = critical_damage.apply_direct(
             vehicle, landing.collisions, landing.segment_start,
             landing.segment_end, int(hull_damage), law_shell,
-            int(attacker_id), penetrated=penetrated)
+            int(attacker_id), penetrated=penetrated,
+            by_explosion=(law_shell['kind'] == 'HIGH_EXPLOSIVE' and
+                          not penetrated))
         self._present(vehicle, payload, attacker_id)
         self._push_factors(vehicle)
         return payload

@@ -24,6 +24,7 @@ from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312.critical_control import CriticalControl
 from gui.mods.offline_battle_2312.consumables import Consumables
+from gui.mods.offline_battle_2312.turret_rig import TurretRigs
 from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
@@ -92,6 +93,8 @@ class OfflineBattleRuntime(object):
         self._enemy_ai = None
         self._bots = None
         self._critical = None
+        self._rigs = None
+        self._status_probe_done = False
         self._layers_logged = 0
         self._spawn_yaw = 0.0
         self._world_patch = None
@@ -421,7 +424,6 @@ class OfflineBattleRuntime(object):
             (CompoundAppearance, refresh_name, original_models_refresh,
              request_models_refresh),
         ])
-        self._install_status_probe()
         self._log('late_patches_installed count=2')
 
     def _install_status_probe(self):
@@ -734,6 +736,12 @@ class OfflineBattleRuntime(object):
         if self._failed:
             return
         self._elapsed += POLL_INTERVAL_SECONDS
+        if self._became_player and not self._status_probe_done:
+            self._status_probe_done = True
+            try:
+                self._install_status_probe()
+            except Exception as error:
+                self._log('status_probe_failed error=%s' % (repr(error)[:120],))
         if not self._battle_ready and self._elapsed >= BOOTSTRAP_TIMEOUT_SECONDS:
             self._report_timeout()
             return
@@ -847,11 +855,15 @@ class OfflineBattleRuntime(object):
                                       self._critical)
             consumables.publish()
             self._bridge.set_consumables(consumables)
+            self._rigs = TurretRigs(BigWorld.callback, self._log)
+            self._rigs.bind(vehicle, is_player=True)
+            self._rigs.start()
             self._schedule_turret_diag(vehicle.id)
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
                                      self._on_player_hit,
-                                     bodies=self._bot_bodies)
+                                     bodies=self._bot_bodies,
+                                     rigs=self._rigs)
             self._enemy_ai.start()
             self._start_bots(avatar)
         except Exception as error:
@@ -968,11 +980,13 @@ class OfflineBattleRuntime(object):
             health = self._enemies.apply_damage(target.id, points,
                                                 self._vehicle_id)
         killed = health is not None and health <= 0
+        law_shell = damage.legacy_shot(shot)['shell']
         _unused, payload = critical_damage.apply_direct(
             target, landing.collisions, landing.segment_start,
-            landing.segment_end, points or 0,
-            damage.legacy_shot(shot)['shell'], self._vehicle_id,
-            penetrated=result == damage.PIERCED)
+            landing.segment_end, points or 0, law_shell, self._vehicle_id,
+            penetrated=result == damage.PIERCED,
+            by_explosion=(law_shell['kind'] == 'HIGH_EXPLOSIVE' and
+                          result != damage.PIERCED))
         crits = [event.get('name') or event.get('kind')
                  for event in (payload or {}).get('events') or ()]
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
@@ -1013,7 +1027,9 @@ class OfflineBattleRuntime(object):
                 (shooter_pose[0], shooter_pose[1], shooter_pose[2]))
             hull_yaw = self._pose_yaw(vehicle)
             camera_yaw = self._camera_yaw()
-            yaw = feedback.wrap_angle(world - camera_yaw)
+            # The cell sends the world yaw; the indicator subtracts the
+            # camera itself, every frame.
+            yaw = feedback.wrap_angle(world)
             feedback.publish_received(
                 self._avatar, shooter_id, points if result is not None else 0,
                 len(crits), yaw)
@@ -1136,6 +1152,9 @@ class OfflineBattleRuntime(object):
         if self._critical is not None:
             self._critical.stop()
             self._critical = None
+        if self._rigs is not None:
+            self._rigs.stop()
+            self._rigs = None
         if self._enemies is not None:
             self._enemies.destroy()
             self._enemies = None

@@ -77,13 +77,14 @@ def clamp_pitch(pitch, limits):
 class EnemyAI(object):
 
     def __init__(self, force, player_vehicle_id, scheduler, log,
-                 on_player_hit=None, bodies=None):
+                 on_player_hit=None, bodies=None, rigs=None):
         self._force = force
         self._player_vehicle_id = player_vehicle_id
         self._schedule = scheduler
         self._log = log
         self._on_player_hit = on_player_hit
         self._bodies = bodies
+        self._rigs = rigs
         self._stopped = False
         self._elapsed = 0.0
         self._next_shot = {}
@@ -220,11 +221,8 @@ class EnemyAI(object):
             return
         state = self._aim_matrices.get(vehicle.id)
         if state is None:
-            state = (Math.Matrix(), Math.Matrix(), Math.Matrix(),
-                     Math.Matrix())
+            state = (Math.Matrix(), Math.Matrix())
             self._aim_matrices[vehicle.id] = state
-            self._bind_turret_nodes(vehicle.id, appearance, state[2],
-                                    state[3])
         # Rebind every tick: appearance activation points these providers
         # back at the filter, and it can finish after the first tick.
         appearance.turretMatrix.target = state[0]
@@ -234,42 +232,12 @@ class EnemyAI(object):
             turret_yaw, descriptor.hull.turretPitches[0],
             descriptor.turret.gunJointPitch)
         state[1].setRotateX(gun_pitch)
-        # The visible nodes, by the stock SimpleTurretRotator recipe:
-        # the full joint transform, rotation first.
-        turret_local = state[2]
-        turret_local.setRotateX(descriptor.hull.turretPitches[0])
-        turret_local.translation = descriptor.hull.turretPositions[0]
-        rotation = Math.Matrix()
-        rotation.setRotateY(turret_yaw)
-        turret_local.preMultiply(rotation)
-        gun_local = state[3]
-        gun_local.setRotateX(descriptor.turret.gunJointPitch + gun_pitch)
-        gun_local.translation = descriptor.turret.gunPosition
+        if self._rigs is not None:
+            self._rigs.ensure(vehicle)
+            self._rigs.aim(vehicle.id, turret_yaw, gun_pitch)
         if trace:
-            from vehicle_systems.tankStructure import TankNodeNames
-            self._stage('turret_provider',
-                        ' id=%s read_back=%.3f node_yaw=%.3f'
-                        % (vehicle.id,
-                           Math.Matrix(appearance.turretMatrix).yaw,
-                           Math.Matrix(appearance.compoundModel.node(
-                               TankNodeNames.TURRET_JOINT)).yaw))
-
-    def _bind_turret_nodes(self, vehicle_id, appearance, turret_local,
-                           gun_local):
-        """Drive the visible joints the way the stock hangar rotator does.
-
-        `node(...).local = matrix` is the binding SimpleTurretRotator
-        uses; the matrices carry the full joint transform and this AI
-        mutates them every tick."""
-        from vehicle_systems.tankStructure import TankNodeNames
-        try:
-            model = appearance.compoundModel
-            model.node(TankNodeNames.TURRET_JOINT).local = turret_local
-            model.node(TankNodeNames.GUN_JOINT).local = gun_local
-            self._log('turret_nodes_bound id=%s' % (vehicle_id,))
-        except Exception as error:
-            self._log('turret_nodes_bind_failed id=%s error=%s'
-                      % (vehicle_id, repr(error)[:120]))
+            self._stage('turret_provider', ' id=%s aimed=%.3f'
+                        % (vehicle.id, turret_yaw))
 
     def _may_fire(self, vehicle_id):
         """The copied planner's fire decision, when this enemy has one."""

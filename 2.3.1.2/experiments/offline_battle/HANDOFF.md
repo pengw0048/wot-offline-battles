@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.0.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.1.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.0.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.1.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.0.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.1.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -217,6 +217,30 @@ the 0s icon is fed elsewhere. This batch:
   (`own_turret`), deciding whether the provider chain works for anyone
   offline. The kill-cam SimulatedVehicle proves client-only provider
   consumption works in retail, so this narrows what our battle lacks.
+
+## What 0.12.1 adds
+
+The 0.12.0 log settled the turret mystery: rotator and provider agree
+while the node stays at hull yaw, for the player too, so offline
+nothing consumes the providers and the node.local drive is the only
+visible route (the choppy enemy rotation confirmed it works). This
+batch:
+
+- `turret_rig.py` drives every vehicle's TURRET_JOINT and GUN_JOINT at
+  render rate: the player snaps to the gun rotator each frame, the
+  enemies slew toward their aim at the descriptor's real turret
+  rotation speed, so their rotation stops stepping.
+- Running-gear stand-in: when the stock collision component reports
+  nothing (it carries no chassis geometry on this client), the shell is
+  tested against the chassis bbox at the drawn pose and reports a
+  chassis layer with a real track material. An idler shot finally
+  registers, absorbs by the copied track law, and can break the track.
+- Unpenetrated high-explosive hits roll module and crew damage through
+  the copied by_explosion saving throws, both directions.
+- The hit-direction indicator now receives the world yaw the cell
+  normally sends; the UI subtracts the camera itself, every frame.
+- The status probe installs at onBecomePlayer, early enough to catch
+  the push that shows the always-on 0s icon at panel start.
 
 ## What to check on the next run
 

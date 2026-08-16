@@ -8,6 +8,7 @@ from __future__ import absolute_import
 
 import math
 import random
+from collections import namedtuple
 
 from gui.mods.offline_battle_2312 import combat_rules
 from gui.mods.offline_battle_2312 import device_damage
@@ -215,6 +216,60 @@ def _named_parts(collisions):
     return result
 
 
+# The stock collision result shape, for the synthesized chassis layer.
+SegmentCollisionResultExt = namedtuple(
+    'SegmentCollisionResultExt',
+    ('dist', 'hitAngleCos', 'matInfo', 'compName'))
+
+
+def _segment_box_entry(a, b, low, high):
+    """Entry fraction of segment a-b into an axis box, or None."""
+    enter, leave = 0.0, 1.0
+    for axis in range(3):
+        direction = b[axis] - a[axis]
+        if abs(direction) < 1e-9:
+            if a[axis] < low[axis] or a[axis] > high[axis]:
+                return None
+            continue
+        near = (low[axis] - a[axis]) / direction
+        far = (high[axis] - a[axis]) / direction
+        if near > far:
+            near, far = far, near
+        enter = max(enter, near)
+        leave = min(leave, far)
+        if enter > leave:
+            return None
+    return enter
+
+
+def chassis_box_hit(vehicle, start, end):
+    """Running-gear stand-in: the stock collision component carries no
+    chassis geometry on this client, so an idler shot reports nothing."""
+    try:
+        import Math
+        descriptor = vehicle.typeDescriptor
+        low, high = descriptor.chassis.hitTester.bbox[:2]
+        materials = descriptor.chassis.materials
+    except (AttributeError, ImportError, IndexError, TypeError):
+        return None
+    world_to_vehicle = Math.Matrix(vehicle.matrix)
+    world_to_vehicle.invert()
+    a = world_to_vehicle.applyPoint(start)
+    b = world_to_vehicle.applyPoint(end)
+    entry = _segment_box_entry((a.x, a.y, a.z), (b.x, b.y, b.z),
+                               (low[0], low[1], low[2]),
+                               (high[0], high[1], high[2]))
+    if entry is None:
+        return None
+    mat_info = None
+    for value in (materials or {}).values():
+        mat_info = value
+        break
+    length = (Math.Vector3(end) - Math.Vector3(start)).length
+    return SegmentCollisionResultExt(entry * length, 1.0, mat_info,
+                                     'chassis')
+
+
 def nearest_vehicle(vehicles, start, end):
     """(vehicle, distance along the chord, collisions) for the first hit.
 
@@ -225,7 +280,10 @@ def nearest_vehicle(vehicles, start, end):
     for vehicle in vehicles:
         collisions = vehicle.collideSegmentExt(start, end)
         if not collisions:
-            continue
+            box_hit = chassis_box_hit(vehicle, start, end)
+            if box_hit is None:
+                continue
+            collisions = [box_hit]
         collisions = _named_parts(collisions)
         distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
