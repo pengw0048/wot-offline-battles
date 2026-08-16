@@ -52,6 +52,7 @@ class EnemyAI(object):
         self._next_shot = {}
         self._shot_id = 0
         self._shots = 0
+        self._aim_matrices = {}
 
     @property
     def shots(self):
@@ -98,16 +99,36 @@ class EnemyAI(object):
             (muzzle.x, muzzle.y, muzzle.z), pose[3],
             (target.x, target.y, target.z))
         pitch = clamp_pitch(pitch, limits)
-        previous = vehicle.gunAnglesPacked
         vehicle.gunAnglesPacked = encodeGunAngles(turret_yaw, pitch, limits)
-        # Assigning the property does not notify; the server update does.
-        vehicle.set_gunAnglesPacked(previous)
+        self._point_turret(vehicle, descriptor, turret_yaw, pitch)
         ready_at = self._next_shot.get(vehicle.id, FIRST_SHOT_DELAY_SECONDS)
         if self._elapsed < ready_at:
             return
         self._next_shot[vehicle.id] = (self._elapsed +
                                        float(descriptor.gun.reloadTime))
         self._fire(vehicle, matrix, turret_yaw, pitch)
+
+    def _point_turret(self, vehicle, descriptor, turret_yaw, pitch):
+        """Animate the turret without the native sync this build rejects.
+
+        The appearance follows the filter's turret and gun matrices, so
+        this points those providers at matrices the runtime owns and
+        drives them the way VehicleGunRotator drives the player's."""
+        import Math
+        from gun_rotation_shared import calcGunPitchCorrection
+        state = self._aim_matrices.get(vehicle.id)
+        if state is None:
+            state = (Math.Matrix(), Math.Matrix())
+            appearance = vehicle.appearance
+            if appearance is None:
+                return
+            appearance.turretMatrix.target = state[0]
+            appearance.gunMatrix.target = state[1]
+            self._aim_matrices[vehicle.id] = state
+        state[0].setRotateY(turret_yaw)
+        state[1].setRotateX(pitch - calcGunPitchCorrection(
+            turret_yaw, descriptor.hull.turretPitches[0],
+            descriptor.turret.gunJointPitch))
 
     def _aim_point(self, player):
         """Aim at the hull centre, not at the ground under the hull."""

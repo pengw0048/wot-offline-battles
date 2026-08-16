@@ -272,7 +272,9 @@ class OfflineBattleRuntime(object):
                 result = original_start_physics(vehicle)
             finally:
                 _state.sync_scope_vehicle = previous
-            if not getattr(vehicle, '_offlineBattlePhysicsReady', False):
+            if (vehicle.id == self._vehicle_id and
+                    not getattr(vehicle, '_offlineBattlePhysicsReady',
+                                False)):
                 vehicle._offlineBattlePhysicsReady = True
                 self._physics_ready = True
                 self._log('native_physics_ready id=%s', vehicle.id)

@@ -48,13 +48,22 @@ def trace_vehicle_enter_world(log, avatar):
         % (len(traced),))
 
 
+def _subject(args):
+    """Name the entity a traced step runs on, so a fault points at one."""
+    if not args:
+        return ''
+    identity = getattr(args[0], 'id', None)
+    return '' if identity is None else ' id=%s' % (identity,)
+
+
 def _wrap(owner, name, label):
     original = getattr(owner, name)
 
     def wrapper(*args, **kwargs):
-        _log('step_enter name=%s' % (label,))
+        subject = _subject(args)
+        _log('step_enter name=%s%s' % (label, subject))
         result = original(*args, **kwargs)
-        _log('step_exit name=%s' % (label,))
+        _log('step_exit name=%s%s' % (label, subject))
         return result
 
     setattr(owner, name, wrapper)
@@ -190,6 +199,9 @@ def install(log):
           'ConsistentMatrices.notifyVehicleLoaded')
     _wrap(BattleSessionProvider, 'setPlayerVehicle',
           'BattleSession.setPlayerVehicle')
+    _wrap(Vehicle.Vehicle, 'onHealthChanged', 'Vehicle.onHealthChanged')
+    _wrap(Vehicle.Vehicle, 'set_isCrewActive', 'Vehicle.setIsCrewActive')
+    _wrap(Vehicle.Vehicle, '_Vehicle__onVehicleDeath', 'Vehicle.onDeath')
     import BigWorld
     import ClientArena
     _install_input_trace(log)
@@ -197,6 +209,8 @@ def install(log):
     _wrap(ClientArena.ClientArena, 'startVsePlans', 'Arena.startVsePlans')
     _wrap(ClientArena.ClientArena, 'invalidateVehiclesPosition',
           'Arena.invalidateVehiclesPosition')
+    _wrap(ClientArena.ClientArena, 'updateVehicleIsAlive',
+          'Arena.updateVehicleIsAlive')
     log('step_trace_installed steps=%s' % (len(_patches),))
 
 
