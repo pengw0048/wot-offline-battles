@@ -36,7 +36,8 @@ def ammo_layout(gun, make_int_compact_descr):
 
 class Gunnery(object):
 
-    def __init__(self, vehicle, scheduler, log):
+    def __init__(self, vehicle, scheduler, log, targets=None,
+                 on_vehicle_hit=None):
         self._vehicle_id = vehicle.id
         self._descriptor = vehicle.typeDescriptor
         self._schedule = scheduler
@@ -45,7 +46,8 @@ class Gunnery(object):
         self._kinds = {}
         self._reload_time = float(self._descriptor.gun.reloadTime)
         self._shots_fired = 0
-        self._projectiles = ProjectileRunner(vehicle, scheduler, log)
+        self._projectiles = ProjectileRunner(
+            vehicle, scheduler, log, targets, on_vehicle_hit)
 
     @property
     def shots_fired(self):

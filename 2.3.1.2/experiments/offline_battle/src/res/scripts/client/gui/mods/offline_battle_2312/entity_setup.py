@@ -62,7 +62,8 @@ def public_vehicle_info(comp_descr, max_health, name=PLAYER_NAME,
 
 def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
                        arena_bonus_type, gun_angles_packed=0,
-                       name=PLAYER_NAME, team=PLAYER_TEAM):
+                       name=PLAYER_NAME, team=PLAYER_TEAM,
+                       is_my_vehicle=True):
     """Vehicle.def client property values for BigWorld.createEntity."""
     return {
         'publicInfo': public_vehicle_info(comp_descr, max_health, name, team),
@@ -94,7 +95,7 @@ def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
         'debuff': 0,
         'isSpeedCapturing': False,
         'isBlockingCapture': False,
-        'isMyVehicle': True,
+        'isMyVehicle': is_my_vehicle,
         'quickShellChangerFactor': 1.0,
         'onRespawnReloadTimeFactor': 1.0,
         'enableExternalRespawn': False,
@@ -122,7 +123,7 @@ def vehicle_properties(comp_descr, max_health, avatar_id, arena_type_id,
 
 
 def roster_entry(vehicle_id, comp_descr, max_health, name=PLAYER_NAME,
-                 team=PLAYER_TEAM):
+                 team=PLAYER_TEAM, session_id=PLAYER_SESSION_ID):
     """One VEHICLES_INFO dict for ClientArena.updateVehiclesList()."""
     return {
         'vehicleID': vehicle_id,
@@ -141,7 +142,7 @@ def roster_entry(vehicle_id, comp_descr, max_health, name=PLAYER_NAME,
         'isPrebattleCreator': False,
         'forbidInBattleInvitations': False,
         'igrType': 0,
-        'avatarSessionID': PLAYER_SESSION_ID,
+        'avatarSessionID': session_id,
         'overriddenBadge': 0,
         'customRoleSlotTypeId': 0,
         'botDisplayStatus': 0,
@@ -163,6 +164,17 @@ def roster_entry(vehicle_id, comp_descr, max_health, name=PLAYER_NAME,
         'fogOfWar': 0,
         'position': NONE_ROSTER_POSITION,
         '__generation': 1,
+    }
+
+
+def death_info(victim_id, killer_id, reason_id=0):
+    """The deathInfo dict ClientArena.updateVehicleIsAlive reads."""
+    return {
+        'victimID': victim_id,
+        'killerID': killer_id,
+        'equipmentID': 0,
+        'reasonID': reason_id,
+        'numVehiclesAffected': 0,
     }
 
 

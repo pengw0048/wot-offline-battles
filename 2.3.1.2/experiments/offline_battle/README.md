@@ -75,13 +75,19 @@ interfaces that 2.3.1.2 actually changed.
   four-point hull pose, copied.
 - `.../offline_battle_2312/projectiles.py` — shell flight and the impact
   the cell normally reports.
+- `.../offline_battle_2312/enemies.py` — enemy vehicles, their roster
+  entries and their health.
+- `.../offline_battle_2312/combat_rules.py` — the 0.9.22 armour and
+  damage law, copied.
+- `.../offline_battle_2312/damage.py` — the 2.3.1.2 input adapter for
+  that law.
 
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.5.0.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.6.0.wotmod
 ```
 
 ## Current state
@@ -96,8 +102,12 @@ Also validated in play: the tank drives with W/A/S/D, follows the terrain,
 the camera follows it, the speedometer reads the real speed, the aim
 circle tracks the mouse, and the gun fires and reloads.
 
-Not yet validated in play: obstacle collision and the hull pose after the
-suspension rewrite, track animation, and shell flight.
+Also validated in play: the hull turns beside a rock without sinking into
+it, a blocked hull slides along the obstacle, and the shell flies and
+explodes where it lands.
+
+Not yet validated in play: enemy vehicles, armour resolution, damage and
+kills.
 
 The native body never simulates offline, so this port owns the pose. That
 matches the conclusion the mature 0.9.22 port reached on its own client,
@@ -142,9 +152,10 @@ entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 
-- The shell flies and explodes where it lands, but nothing takes damage:
-  there are no other vehicles, and no penetration or damage rules. Bots,
-  damage and battle results are out of scope for this slice.
+- Enemy vehicles stand still. They do not drive, aim or shoot, so nothing
+  shoots back. Battle results are out of scope for this slice.
+- Damage covers direct hits only: no fire, no module or crew damage, no
+  ramming, and no HE splash beyond the direct-hit law.
 - Only `spaces/01_karelia` has a proven spawn; other maps fall back to the
   stock spawn-point data.
 - The ammo bay is a full `gun.maxAmmo` load shared across the gun's shot

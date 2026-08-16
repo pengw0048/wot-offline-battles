@@ -3,11 +3,14 @@
 `Avatar.showTracer` hands the shell to the native ballistics simulator,
 which flies it and detects its collision. The cell normally follows with
 `explodeProjectile` at the impact, so this module marches the same
-parabola in Python to find that point and that time.
+parabola in Python to find that point, that time, and whatever vehicle
+stands in the way.
 """
 from __future__ import absolute_import
 
 import math
+
+from gui.mods.offline_battle_2312 import damage
 
 COLLISION_MASK = 128
 MAX_FLIGHT_SECONDS = 20.0
@@ -31,33 +34,67 @@ def flight_seconds(velocity, gravity, max_distance):
     return min(MAX_FLIGHT_SECONDS, float(max_distance) / speed)
 
 
-def impact(space_id, start, velocity, gravity, max_distance,
+def _distance(first, second):
+    return math.sqrt(sum((second[axis] - first[axis]) ** 2
+                         for axis in range(3)))
+
+
+class Impact(object):
+    """Where a shell stopped, and on what."""
+
+    def __init__(self, point, elapsed, travelled, mat_kind=0, vehicle=None,
+                 collisions=None):
+        self.point = point
+        self.elapsed = elapsed
+        self.travelled = travelled
+        self.mat_kind = mat_kind
+        self.vehicle = vehicle
+        self.collisions = collisions
+
+
+def impact(space_id, start, velocity, gravity, max_distance, targets=(),
            step=STEP_SECONDS):
-    """(point, elapsed, matKind) where the parabola first meets the world."""
+    """March the parabola and report the first thing the shell meets."""
     import BigWorld
     import Math
     duration = flight_seconds(velocity, gravity, max_distance)
     if duration <= 0.0:
         return None
     count = max(1, int(math.ceil(duration / step)))
+    chord_seconds = duration / float(count)
     previous = trajectory_position(start, velocity, gravity, 0.0)
+    travelled = 0.0
     for index in range(1, count + 1):
-        elapsed = duration * index / float(count)
-        current = trajectory_position(start, velocity, gravity, elapsed)
-        collision = BigWorld.wg_collideSegment(
-            space_id, Math.Vector3(*previous), Math.Vector3(*current),
-            COLLISION_MASK)
-        if collision is not None:
-            point = collision.closestPoint
-            chord = math.sqrt(sum((current[axis] - previous[axis]) ** 2
-                                  for axis in range(3)))
-            hit = math.sqrt((point.x - previous[0]) ** 2 +
-                            (point.y - previous[1]) ** 2 +
-                            (point.z - previous[2]) ** 2)
-            fraction = hit / chord if chord > 0.0 else 0.0
-            reached = (elapsed - duration / float(count) +
-                       fraction * duration / float(count))
-            return point, reached, getattr(collision, 'matKind', 0)
+        current = trajectory_position(start, velocity, gravity,
+                                      chord_seconds * index)
+        chord = _distance(previous, current)
+        head = Math.Vector3(*previous)
+        tail = Math.Vector3(*current)
+        terrain = BigWorld.wg_collideSegment(space_id, head, tail,
+                                             COLLISION_MASK)
+        terrain_reach = None
+        if terrain is not None:
+            terrain_reach = (terrain.closestPoint - head).length
+        target = damage.nearest_vehicle(targets, head, tail)
+        if target is not None and (terrain_reach is None or
+                                   target[1] < terrain_reach):
+            vehicle, reach, collisions = target
+            fraction = reach / chord if chord else 0.0
+            point = Math.Vector3(
+                previous[0] + (current[0] - previous[0]) * fraction,
+                previous[1] + (current[1] - previous[1]) * fraction,
+                previous[2] + (current[2] - previous[2]) * fraction)
+            return Impact(point,
+                          chord_seconds * (index - 1 + fraction),
+                          travelled + reach, vehicle=vehicle,
+                          collisions=collisions)
+        if terrain is not None:
+            fraction = terrain_reach / chord if chord else 0.0
+            return Impact(terrain.closestPoint,
+                          chord_seconds * (index - 1 + fraction),
+                          travelled + terrain_reach,
+                          mat_kind=getattr(terrain, 'matKind', 0))
+        travelled += chord
         previous = current
     return None
 
@@ -71,11 +108,14 @@ def _effect_material_index(mat_kind):
 class ProjectileRunner(object):
     """Launch one shell per shot and end it at its impact."""
 
-    def __init__(self, vehicle, scheduler, log):
+    def __init__(self, vehicle, scheduler, log, targets=None,
+                 on_vehicle_hit=None):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
         self._schedule = scheduler
         self._log = log
+        self._targets = targets
+        self._on_vehicle_hit = on_vehicle_hit
         self._shot_id = 0
         self._launched = 0
 
@@ -83,8 +123,10 @@ class ProjectileRunner(object):
     def launched(self):
         return self._launched
 
+    def _live_targets(self):
+        return self._targets() if self._targets is not None else ()
+
     def fire(self, avatar, shot):
-        import BigWorld
         import Math
         from items.components.component_constants import INVALID_EFFECT_INDEX
         rotator = avatar.gunRotator
@@ -101,31 +143,33 @@ class ProjectileRunner(object):
                           shell.kindIdx, shell.caliber, start, velocity,
                           gravity, max_distance, 0, 0)
         self._launched += 1
-        landing = impact(self._space_id,
-                         (start.x, start.y, start.z),
-                         (velocity.x, velocity.y, velocity.z),
-                         gravity, max_distance)
+        landing = impact(self._space_id, (start.x, start.y, start.z),
+                         (velocity.x, velocity.y, velocity.z), gravity,
+                         max_distance, self._live_targets())
         if landing is None:
-            self._schedule(flight_seconds((velocity.x, velocity.y, velocity.z),
-                                          gravity, max_distance),
-                           lambda: self._expire(shot_id, start, velocity,
-                                                gravity, max_distance))
+            self._schedule(
+                flight_seconds((velocity.x, velocity.y, velocity.z), gravity,
+                               max_distance),
+                lambda: self._expire(shot_id, start, velocity, gravity,
+                                     max_distance))
             return
-        point, elapsed, mat_kind = landing
-        speed = Math.Vector3(velocity.x, velocity.y - gravity * elapsed,
+        speed = Math.Vector3(velocity.x,
+                             velocity.y - gravity * landing.elapsed,
                              velocity.z)
         direction = Math.Vector3(speed)
         direction.normalise()
-        material = _effect_material_index(mat_kind)
-        self._schedule(elapsed, lambda: self._explode(
-            shot_id, shell, point, direction, speed.length, material))
+        material = _effect_material_index(landing.mat_kind)
+        self._schedule(landing.elapsed, lambda: self._land(
+            shot_id, shell, shot, landing, direction, speed.length, material))
         if self._launched == 1:
-            self._log('projectile_launched shot=%s speed=%.0f gravity=%.1f '
-                      'flight=%.2f impact=(%.1f,%.1f,%.1f) material=%s'
-                      % (shot_id, velocity.length, gravity, elapsed,
-                         point.x, point.y, point.z, material))
+            self._log('projectile_launched shot=%s speed=%.0f flight=%.2f '
+                      'travelled=%.1f target=%s'
+                      % (shot_id, velocity.length, landing.elapsed,
+                         landing.travelled,
+                         landing.vehicle.id if landing.vehicle else None))
 
-    def _explode(self, shot_id, shell, point, direction, speed, material):
+    def _land(self, shot_id, shell, shot, landing, direction, speed,
+              material):
         import BigWorld
         from items.components.component_constants import INVALID_EFFECT_INDEX
         avatar = BigWorld.player()
@@ -133,8 +177,10 @@ class ProjectileRunner(object):
             return
         avatar.explodeProjectile(shot_id, shell.effectsIndex,
                                  INVALID_EFFECT_INDEX, material,
-                                 shell.kindIdx, shell.caliber, point,
+                                 shell.kindIdx, shell.caliber, landing.point,
                                  direction, speed, '')
+        if landing.vehicle is not None and self._on_vehicle_hit is not None:
+            self._on_vehicle_hit(landing, shot)
 
     def _expire(self, shot_id, start, velocity, gravity, max_distance):
         import BigWorld

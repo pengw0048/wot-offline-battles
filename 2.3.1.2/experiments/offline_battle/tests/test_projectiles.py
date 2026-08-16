@@ -13,6 +13,13 @@ class _Vector3(object):
     def __init__(self, x, y, z):
         self.x, self.y, self.z = float(x), float(y), float(z)
 
+    def __sub__(self, other):
+        return _Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+
+    @property
+    def length(self):
+        return (self.x ** 2 + self.y ** 2 + self.z ** 2) ** 0.5
+
 
 class _Hit(object):
     def __init__(self, x, y, z, mat_kind=3):
@@ -29,6 +36,19 @@ def _install_fakes(collide):
     sys.modules['BigWorld'] = bigworld
 
 
+def _stub_damage():
+    """projectiles.py imports its sibling by the client package path."""
+    package = 'gui.mods.offline_battle_2312'
+    for name in ('gui', 'gui.mods', package):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    module = types.ModuleType(package + '.damage')
+    module.nearest_vehicle = lambda targets, start, end: None
+    sys.modules[package + '.damage'] = module
+    setattr(sys.modules[package], 'damage', module)
+    return module
+
+
+_damage = _stub_damage()
 _install_fakes(lambda *args: None)
 _spec = importlib.util.spec_from_file_location(
     'offline_battle_projectiles',
@@ -64,6 +84,25 @@ class ImpactTests(unittest.TestCase):
         self.assertIsNone(projectiles.impact(
             1, (0.0, 10.0, 0.0), (0.0, 0.0, 400.0), 9.81, 800.0))
 
+    def test_a_vehicle_in_the_way_is_hit_before_the_ground(self):
+        vehicle = object()
+
+        def collide(space, start, end, flags):
+            return _Hit(0.0, 10.0, start.z + 15.0)
+
+        _install_fakes(collide)
+        _damage.nearest_vehicle = lambda targets, start, end: (
+            vehicle, 4.0, ['layer'])
+        try:
+            landing = projectiles.impact(
+                1, (0.0, 10.0, 0.0), (0.0, 0.0, 400.0), 9.81, 800.0,
+                targets=[vehicle])
+        finally:
+            _damage.nearest_vehicle = lambda targets, start, end: None
+        self.assertIs(landing.vehicle, vehicle)
+        self.assertEqual(landing.collisions, ['layer'])
+        self.assertAlmostEqual(landing.travelled, 4.0)
+
     def test_a_wall_reports_its_point_time_and_material(self):
         def collide(space, start, end, flags):
             if end.z < 100.0:
@@ -71,11 +110,12 @@ class ImpactTests(unittest.TestCase):
             return _Hit(0.0, 10.0, 100.0, mat_kind=7)
 
         _install_fakes(collide)
-        point, elapsed, mat_kind = projectiles.impact(
+        landing = projectiles.impact(
             1, (0.0, 10.0, 0.0), (0.0, 0.0, 400.0), 9.81, 800.0)
-        self.assertAlmostEqual(point.z, 100.0)
-        self.assertEqual(mat_kind, 7)
-        self.assertAlmostEqual(elapsed, 0.25, places=2)
+        self.assertAlmostEqual(landing.point.z, 100.0)
+        self.assertEqual(landing.mat_kind, 7)
+        self.assertAlmostEqual(landing.elapsed, 0.25, places=2)
+        self.assertAlmostEqual(landing.travelled, 100.0, places=1)
 
     def test_the_first_chord_hit_wins(self):
         hits = []
@@ -85,11 +125,11 @@ class ImpactTests(unittest.TestCase):
             return _Hit(0.0, 10.0, start.z + 1.0)
 
         _install_fakes(collide)
-        point, elapsed, _unused = projectiles.impact(
+        landing = projectiles.impact(
             1, (0.0, 10.0, 0.0), (0.0, 0.0, 400.0), 9.81, 800.0)
         self.assertEqual(len(hits), 1)
-        self.assertAlmostEqual(point.z, 1.0)
-        self.assertLess(elapsed, projectiles.STEP_SECONDS)
+        self.assertAlmostEqual(landing.point.z, 1.0)
+        self.assertLess(landing.elapsed, projectiles.STEP_SECONDS)
 
     def test_a_falling_shell_meets_the_ground_it_flew_over(self):
         def collide(space, start, end, flags):
@@ -101,9 +141,8 @@ class ImpactTests(unittest.TestCase):
         landing = projectiles.impact(1, (0.0, 20.0, 0.0),
                                      (0.0, 0.0, 100.0), 9.81, 800.0)
         self.assertIsNotNone(landing)
-        point, elapsed, _unused = landing
-        self.assertAlmostEqual(elapsed, math.sqrt(2.0 * 20.0 / 9.81),
-                               places=1)
+        self.assertAlmostEqual(landing.elapsed,
+                               math.sqrt(2.0 * 20.0 / 9.81), places=1)
 
 
 if __name__ == '__main__':
