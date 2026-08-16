@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.3.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.4.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.3.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.4.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.3.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.4.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -286,6 +286,26 @@ The 0.12.2 log explained the death and the icon:
   chassis geometry. The layer budget is 24 now and a chassis crossing
   logs `track_layer_present`, so the next deliberate idler shot names
   itself either way.
+
+## What 0.12.4 adds
+
+The 0.12.3 run confirmed the arrow flip and the stun fix in play, and
+one log line ended the track mystery:
+
+    hit_layer part=chassis dist=9.83 armor=5.0 factor=0.0
+    extra=rightTrack0Health
+
+The real track materials DO carry their device, but this client numbers
+them (`rightTrack0Health`) while the copied law tables know
+`rightTrackHealth`. `damage.law_track_name` folds the numbered names,
+so a track hit finally rolls a real saving throw with the material's
+own chance. The box stand-in keeps covering segments the collision
+component misses entirely.
+
+Enemy track animation stays open: `updateTracksScroll` no-ops without a
+`trackScrollController`, which nothing creates offline. The own-turret
+diagnostic now logs a `scroll_probe` line with the filter's scroll
+attribute names and the controller value, deciding the route next run.
 
 ## What to check on the next run
 

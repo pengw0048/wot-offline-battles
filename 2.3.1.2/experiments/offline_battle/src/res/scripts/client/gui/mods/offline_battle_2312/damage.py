@@ -8,6 +8,7 @@ from __future__ import absolute_import
 
 import math
 import random
+import re
 from collections import namedtuple
 
 from gui.mods.offline_battle_2312 import combat_rules
@@ -221,22 +222,29 @@ class _TrackExtra(object):
         self.name = name
 
 
-class _TrackMaterial(object):
-    """A chassis layer that can break its track.
+_TRACK_NAME = re.compile(r'^(left|right)Track\d+Health$')
 
-    Every material this client returns carries extra=None, so the copied
-    saving throws never see the track device; this keeps the real armor
-    and adds the device, the way the law's own interior stand-in does."""
+
+def law_track_name(name):
+    """This client numbers its track devices; the law tables do not."""
+    match = _TRACK_NAME.match(str(name or ''))
+    return match.group(1) + 'TrackHealth' if match else None
+
+
+class _TrackMaterial(object):
+    """A chassis layer whose device the copied law tables can find."""
 
     def __init__(self, source, name):
         self.extra = _TrackExtra(name)
         self.armor = float(getattr(source, 'armor', 0.0) or 15.0)
-        self.damageKind = 0
+        self.damageKind = int(getattr(source, 'damageKind', 0) or 0)
         self.vehicleDamageFactor = 0.0
-        self.chanceToHitByProjectile = device_damage.fallback_chance(
-            name, False)
-        self.chanceToHitByExplosion = device_damage.fallback_chance(
-            name, True)
+        self.chanceToHitByProjectile = float(
+            getattr(source, 'chanceToHitByProjectile', 0.0) or
+            device_damage.fallback_chance(name, False))
+        self.chanceToHitByExplosion = float(
+            getattr(source, 'chanceToHitByExplosion', 0.0) or
+            device_damage.fallback_chance(name, True))
 
 
 def _track_side(vehicle, dist, start, end):
@@ -254,9 +262,15 @@ def _track_side(vehicle, dist, start, end):
 
 
 def _trackify(vehicle, collision, start, end):
-    if (collision.compName != 'chassis' or
-            getattr(collision.matInfo, 'extra', None) is not None):
+    if collision.compName != 'chassis':
         return collision
+    name = getattr(getattr(collision.matInfo, 'extra', None), 'name', None)
+    if name:
+        law_name = law_track_name(name)
+        if law_name is None:
+            return collision
+        return collision._replace(
+            matInfo=_TrackMaterial(collision.matInfo, law_name))
     side = _track_side(vehicle, collision.dist, start, end)
     return collision._replace(
         matInfo=_TrackMaterial(collision.matInfo, side))

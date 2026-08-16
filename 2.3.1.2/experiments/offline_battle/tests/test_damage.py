@@ -354,6 +354,19 @@ class NearestVehicleTests(unittest.TestCase):
                                                  None))
 
 
+class LawTrackNameTests(unittest.TestCase):
+    def test_numbered_track_devices_fold_to_the_law_names(self):
+        self.assertEqual(damage.law_track_name('rightTrack0Health'),
+                         'rightTrackHealth')
+        self.assertEqual(damage.law_track_name('leftTrack1Health'),
+                         'leftTrackHealth')
+
+    def test_other_devices_stay_untouched(self):
+        self.assertIsNone(damage.law_track_name('engineHealth'))
+        self.assertIsNone(damage.law_track_name('leftTrackHealth'))
+        self.assertIsNone(damage.law_track_name(None))
+
+
 class PartNameTests(unittest.TestCase):
     def test_the_four_tank_part_indexes(self):
         self.assertEqual([damage.part_name(index) for index in range(4)],

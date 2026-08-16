@@ -509,6 +509,12 @@ class OfflineBattleRuntime(object):
             appearance = getattr(vehicle, 'appearance', None)
             if appearance is None or appearance.compoundModel is None:
                 return
+            if remaining == samples:
+                names = [n for n in dir(vehicle.filter)
+                         if 'croll' in n.lower()]
+                self._log('scroll_probe filter=%s controller=%s'
+                          % (names, getattr(appearance,
+                                            'trackScrollController', None)))
             self._log('own_turret rotator=%.3f provider=%.3f node=%.3f'
                       % (rotator.turretYaw,
                          Math.Matrix(appearance.turretMatrix).yaw,
