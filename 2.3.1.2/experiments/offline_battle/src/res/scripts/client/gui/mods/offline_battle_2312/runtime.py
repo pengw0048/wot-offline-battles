@@ -39,6 +39,7 @@ TERRAIN_RAY_HEIGHT = 1000.0
 VEHICLE_TYPE_NAME = 'ussr:R11_MS-1'
 MAILBOX_NAMES = ('base', 'cell', 'server')
 _POSE_NAMES = ('matrix', 'position', 'cameraTargetMatrix')
+LOGGED_HIT_LAYERS = 6
 
 
 class _BridgeState(object):
@@ -87,7 +88,7 @@ class OfflineBattleRuntime(object):
         self._enemy_ai = None
         self._devices = {}
         self._devices_destroyed = []
-        self._layers_logged = False
+        self._layers_logged = 0
         self._spawn_yaw = 0.0
         self._world_patch = None
 
@@ -773,9 +774,9 @@ class OfflineBattleRuntime(object):
 
         Crits have never fired, and the saving throws read the device
         off the material, so this says whether the layers carry one."""
-        if self._layers_logged or not collisions:
+        if self._layers_logged >= LOGGED_HIT_LAYERS or not collisions:
             return
-        self._layers_logged = True
+        self._layers_logged += 1
         for collision in collisions:
             material = collision.matInfo
             extra = getattr(material, 'extra', None)

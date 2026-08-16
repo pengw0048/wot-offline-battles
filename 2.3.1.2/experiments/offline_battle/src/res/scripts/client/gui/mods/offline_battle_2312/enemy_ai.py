@@ -21,7 +21,11 @@ ALL_GUNS = -1
 
 
 def aim_angles(shooter_position, shooter_yaw, target_position):
-    """(turret yaw relative to the hull, gun pitch) to reach the target."""
+    """(turret yaw relative to the hull, gun pitch) to reach the target.
+
+    The pitch is the client's, not the geometric one: a shot 0.101 above
+    the horizon flew into the ground five metres out, because
+    setRotateX(+pitch) aims the barrel down."""
     delta_x = target_position[0] - shooter_position[0]
     delta_y = target_position[1] - shooter_position[1]
     delta_z = target_position[2] - shooter_position[2]
@@ -31,7 +35,7 @@ def aim_angles(shooter_position, shooter_yaw, target_position):
         turret_yaw -= 2.0 * math.pi
     while turret_yaw < -math.pi:
         turret_yaw += 2.0 * math.pi
-    return turret_yaw, math.atan2(delta_y, flat)
+    return turret_yaw, -math.atan2(delta_y, flat)
 
 
 def clamp_pitch(pitch, limits):
@@ -132,8 +136,8 @@ class EnemyAI(object):
             (target.x, target.y, target.z))
         pitch = clamp_pitch(pitch, limits)
         if trace:
-            self._stage('aimed', ' id=%s yaw=%.3f pitch=%.3f'
-                        % (vehicle.id, turret_yaw, pitch))
+            self._stage('aimed', ' id=%s yaw=%.3f pitch=%.3f limits=%s'
+                        % (vehicle.id, turret_yaw, pitch, tuple(limits)))
         vehicle.gunAnglesPacked = encodeGunAngles(turret_yaw, pitch, limits)
         if trace:
             self._stage('angles_written', ' id=%s' % (vehicle.id,))
@@ -158,21 +162,17 @@ class EnemyAI(object):
         from gun_rotation_shared import calcGunPitchCorrection
         if not ANIMATE_TURRET:
             return
+        appearance = vehicle.appearance
+        if appearance is None:
+            return
         state = self._aim_matrices.get(vehicle.id)
         if state is None:
-            appearance = vehicle.appearance
-            if appearance is None:
-                return
             state = (Math.Matrix(), Math.Matrix())
-            state[0].setRotateY(turret_yaw)
-            state[1].setRotateX(pitch)
-            if trace:
-                self._stage('binding_turret', ' id=%s' % (vehicle.id,))
-            appearance.turretMatrix.target = state[0]
-            appearance.gunMatrix.target = state[1]
-            if trace:
-                self._stage('bound_turret', ' id=%s' % (vehicle.id,))
             self._aim_matrices[vehicle.id] = state
+        # Rebind every tick: appearance activation points these providers
+        # back at the filter, and it can finish after the first tick.
+        appearance.turretMatrix.target = state[0]
+        appearance.gunMatrix.target = state[1]
         state[0].setRotateY(turret_yaw)
         state[1].setRotateX(pitch - calcGunPitchCorrection(
             turret_yaw, descriptor.hull.turretPitches[0],

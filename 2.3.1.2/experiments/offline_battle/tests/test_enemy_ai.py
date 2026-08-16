@@ -42,15 +42,22 @@ class AimTests(unittest.TestCase):
                                           (0.0, 0.0, -100.0))
         self.assertLessEqual(abs(yaw), math.pi)
 
-    def test_a_target_below_gives_a_negative_pitch(self):
+    def test_a_target_below_raises_the_client_pitch(self):
+        """The client's gun pitch runs the other way: setRotateX(+pitch)
+        aims the barrel down, so a target below is a positive pitch."""
         _yaw, pitch = enemy_ai.aim_angles((0.0, 10.0, 0.0), 0.0,
                                           (0.0, 0.0, 100.0))
-        self.assertLess(pitch, 0.0)
+        self.assertGreater(pitch, 0.0)
 
-    def test_a_target_above_gives_a_positive_pitch(self):
+    def test_a_target_above_lowers_the_client_pitch(self):
         _yaw, pitch = enemy_ai.aim_angles((0.0, 0.0, 0.0), 0.0,
                                           (0.0, 10.0, 100.0))
-        self.assertGreater(pitch, 0.0)
+        self.assertLess(pitch, 0.0)
+
+    def test_the_pitch_matches_the_angle_it_must_shoot_at(self):
+        _yaw, pitch = enemy_ai.aim_angles((0.0, 0.0, 0.0), 0.0,
+                                          (0.0, 10.0, 10.0))
+        self.assertAlmostEqual(pitch, -math.pi / 4.0)
 
 
 class PitchLimitTests(unittest.TestCase):

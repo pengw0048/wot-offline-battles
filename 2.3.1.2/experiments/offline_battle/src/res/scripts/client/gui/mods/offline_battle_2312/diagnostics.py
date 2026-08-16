@@ -198,6 +198,18 @@ def _install_vehicle_state_trace(log):
     BattleSessionProvider.invalidateVehicleState = invalidate_vehicle_state
     _patches.append((BattleSessionProvider, 'invalidateVehicleState',
                      original, invalidate_vehicle_state))
+    from gui.battle_control.controllers.feedback_adaptor import (
+        BattleFeedbackAdaptor)
+    original_stun = BattleFeedbackAdaptor.invalidateStun
+
+    def invalidate_stun(adaptor, vehicle_id, duration):
+        log('stun_invalidated vehicle=%s duration=%s'
+            % (vehicle_id, duration))
+        return original_stun(adaptor, vehicle_id, duration)
+
+    BattleFeedbackAdaptor.invalidateStun = invalidate_stun
+    _patches.append((BattleFeedbackAdaptor, 'invalidateStun', original_stun,
+                     invalidate_stun))
 
 
 def install(log):
