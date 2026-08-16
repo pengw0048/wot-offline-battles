@@ -23,7 +23,6 @@ from gui.mods.offline_battle_2312.enemies import EnemyForce
 from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312 import native_probe
-from gui.mods.offline_battle_2312 import vehicle_collision
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
@@ -757,19 +756,14 @@ class OfflineBattleRuntime(object):
             self._enemies = EnemyForce(avatar, self._arena_type_id, self._log)
             self._enemies.spawn((vehicle.position.x, vehicle.position.z),
                                 self._spawn_yaw)
-            vehicle_collision.prepare(vehicle.typeDescriptor)
-            for enemy in self._enemies.alive():
-                vehicle_collision.prepare(enemy.typeDescriptor)
             gunnery = Gunnery(vehicle, BigWorld.callback, self._log,
                               targets=self._enemies.alive,
-                              on_vehicle_hit=self._on_vehicle_hit,
-                              poses=self._enemies.pose)
+                              on_vehicle_hit=self._on_vehicle_hit)
             gunnery.publish()
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
                                      self._on_player_hit,
-                                     bodies=self._bot_bodies,
-                                     player_pose=self._player_pose)
+                                     bodies=self._bot_bodies)
             self._enemy_ai.start()
             self._start_bots(avatar)
         except Exception as error:
@@ -869,17 +863,6 @@ class OfflineBattleRuntime(object):
 
     def _bot_bodies(self):
         return self._bots.bodies if self._bots is not None else {}
-
-    def _player_pose(self):
-        """(x, y, z, yaw) of the pose this runtime owns for the player."""
-        import Math
-        if self._motion is None:
-            return None
-        position = self._motion.position
-        if position is None:
-            return None
-        return (position.x, position.y, position.z,
-                Math.Matrix(self._motion.matrix).yaw)
 
     def _apply_module_hits(self, vehicle, shot, landing, result):
         """Roll the copied saving throws and keep the player's device state."""
@@ -1079,7 +1062,6 @@ class OfflineBattleRuntime(object):
         if self._enemies is not None:
             self._enemies.destroy()
             self._enemies = None
-        vehicle_collision.release_all()
         avatar = BigWorld.player()
         if self._vehicle_id and avatar is not None:
             vehicle = BigWorld.entities.get(self._vehicle_id)

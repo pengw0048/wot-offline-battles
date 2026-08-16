@@ -12,7 +12,6 @@ import random
 from gui.mods.offline_battle_2312 import combat_rules
 from gui.mods.offline_battle_2312 import device_damage
 from gui.mods.offline_battle_2312 import tank_collision
-from gui.mods.offline_battle_2312 import vehicle_collision
 
 RICOCHET = 0
 NOT_PIERCED = 1
@@ -186,32 +185,15 @@ def crit_flags(names):
     return flags
 
 
-def vehicle_matrix(pose):
-    """The visible pose as a matrix the collision routine can invert."""
-    import Math
-    matrix = Math.Matrix()
-    matrix.setRotateY(float(pose[3]))
-    matrix.translation = Math.Vector3(float(pose[0]), float(pose[1]),
-                                      float(pose[2]))
-    return matrix
-
-
-def nearest_vehicle(vehicles, start, end, poses=None):
+def nearest_vehicle(vehicles, start, end):
     """(vehicle, distance along the chord, collisions) for the first hit.
 
-    The layers come from each descriptor component's own hit tester, so
-    the chassis is included and a shell through a track or an idler is
-    the hit it should be."""
+    The stock collideSegmentExt is Python on this client and runs
+    appearance.collisions at the drawn compound-model pose, which is the
+    pose this runtime owns."""
     best = None
     for vehicle in vehicles:
-        collisions = None
-        if poses is not None:
-            pose = poses(vehicle.id)
-            if pose is not None:
-                collisions = vehicle_collision.collide_at_matrix(
-                    vehicle, vehicle_matrix(pose), start, end)
-        if collisions is None:
-            collisions = vehicle.collideSegmentExt(start, end)
+        collisions = vehicle.collideSegmentExt(start, end)
         if not collisions:
             continue
         distance = min(float(collision.dist) for collision in collisions)

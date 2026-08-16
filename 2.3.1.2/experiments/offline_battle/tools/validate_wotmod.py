@@ -9,7 +9,7 @@ import zipfile
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 MOD_ID = 'org.peng.offline_2312_battle'
-MOD_VERSION = '0.10.2'
+MOD_VERSION = '0.10.3'
 ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_battle.pyc'
 PACKAGE_ROOT = 'res/scripts/client/gui/mods/offline_battle_2312/'
 def _expected_pyc():

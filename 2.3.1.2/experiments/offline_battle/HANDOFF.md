@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.10.2.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.10.3.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.10.2.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.10.3.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.2.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.3.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -101,6 +101,18 @@ Copied but not wired: `spotting` (nothing is hidden by view range),
     step the mature port does in `prepare_descriptor`; without it every
     owned-pose hit test raised and no shell could hit any vehicle.
 
+- 0.10.3: the 0.10.2 run died in combat setup:
+  `vehicle_collision.prepare` raised because this client's BigWorld has
+  no `WGBspCollisionModel`, so `ModelHitTester.loadBspModel` is dead
+  code here and descriptor-local hit tests can never work. The stock
+  `Vehicle.collideSegmentExt` is Python on 2.3.1.2 and runs
+  `appearance.collisions.collideAllWorld` at the drawn compound-model
+  pose, the pose this runtime owns, so the whole owned-pose detour was
+  unnecessary. `vehicle_collision.py` is removed and every shell hit
+  test uses the stock route again. The earlier claim that the native
+  hit test sits at the spawn pose was wrong; the idler miss is back on
+  the open list without an explanation.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -111,7 +123,8 @@ name the vehicle and step.
 2. Bots do not pile into each other or into you; a blocked bot backs
    out instead of grinding a wall.
 3. Enemy fire starts after they decide to engage, and their shells hit
-   your hull where it actually is, tracks and idler included.
+   your hull where it actually is. Also shoot a moving enemy: a hit on
+   a moved hull proves appearance.collisions follows the driven model.
 4. Shooting an enemy takes health, and the hit sound matches the result.
 5. Killing an enemy does not end the client; the wreck stays put.
 6. Being killed does not end the client.
@@ -136,6 +149,9 @@ running. Neither is patched, because there is no evidence against them.
   the aim.
 - The coasting glide after releasing W, the permanent stun panel and
   the hit-arrow frame, all carried over from the 0.9.x runs.
+- A hit on the rear idler did not register in the 0.9.x runs. The
+  old spawn-pose explanation is withdrawn; needs fresh evidence
+  from hit_layer logs on a deliberate idler shot.
 - No fire, no crew injury effects, no ramming damage, no HE splash
   beyond the direct-hit law.
 - No battle result, so a finished fight has no ending.

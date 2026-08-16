@@ -48,14 +48,13 @@ def clamp_pitch(pitch, limits):
 class EnemyAI(object):
 
     def __init__(self, force, player_vehicle_id, scheduler, log,
-                 on_player_hit=None, bodies=None, player_pose=None):
+                 on_player_hit=None, bodies=None):
         self._force = force
         self._player_vehicle_id = player_vehicle_id
         self._schedule = scheduler
         self._log = log
         self._on_player_hit = on_player_hit
         self._bodies = bodies
-        self._player_pose = player_pose
         self._stopped = False
         self._elapsed = 0.0
         self._next_shot = {}
@@ -198,19 +197,6 @@ class EnemyAI(object):
             return True
         return body.fire_allowed
 
-    def _target_poses(self):
-        """The poses contract for the player, from the pose this runtime owns."""
-        if self._player_pose is None:
-            return None
-        pose = self._player_pose()
-        if pose is None:
-            return None
-
-        def poses(vehicle_id):
-            return pose if vehicle_id == self._player_vehicle_id else None
-
-        return poses
-
     def _aim_point(self, player):
         """Aim at the hull centre, not at the ground under the hull."""
         import Math
@@ -266,7 +252,7 @@ class EnemyAI(object):
         landing = projectiles.impact(
             vehicle.spaceID, (start.x, start.y, start.z),
             (velocity.x, velocity.y, velocity.z), float(shot.gravity),
-            float(shot.maxDistance), targets, poses=self._target_poses())
+            float(shot.maxDistance), targets)
         if self._shots <= TRACED_SHOTS:
             self._log_shot(vehicle, start, velocity, player, landing)
         if landing is None:

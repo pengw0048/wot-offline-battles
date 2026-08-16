@@ -42,7 +42,7 @@ def _stub_damage():
     for name in ('gui', 'gui.mods', package):
         sys.modules.setdefault(name, types.ModuleType(name))
     module = types.ModuleType(package + '.damage')
-    module.nearest_vehicle = lambda targets, start, end, poses=None: None
+    module.nearest_vehicle = lambda targets, start, end: None
     sys.modules[package + '.damage'] = module
     setattr(sys.modules[package], 'damage', module)
     runtime_path = (MODS / 'offline_battle_2312' / 'projectile_runtime.py')
@@ -98,14 +98,14 @@ class ImpactTests(unittest.TestCase):
             return _Hit(0.0, 10.0, start.z + 15.0)
 
         _install_fakes(collide)
-        _damage.nearest_vehicle = lambda targets, start, end, poses=None: (
+        _damage.nearest_vehicle = lambda targets, start, end: (
             vehicle, 4.0, ['layer'])
         try:
             landing = projectiles.impact(
                 1, (0.0, 10.0, 0.0), (0.0, 0.0, 400.0), 9.81, 800.0,
                 targets=[vehicle])
         finally:
-            _damage.nearest_vehicle = lambda targets, start, end, poses=None: None
+            _damage.nearest_vehicle = lambda targets, start, end: None
         self.assertIs(landing.vehicle, vehicle)
         self.assertEqual(landing.collisions, ['layer'])
         self.assertAlmostEqual(landing.travelled, 4.0)

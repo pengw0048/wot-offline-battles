@@ -55,7 +55,7 @@ class Impact(object):
 
 
 def impact(space_id, start, velocity, gravity, max_distance, targets=(),
-           step=STEP_SECONDS, poses=None):
+           step=STEP_SECONDS):
     """March the parabola and report the first thing the shell meets."""
     import BigWorld
     import Math
@@ -77,7 +77,7 @@ def impact(space_id, start, velocity, gravity, max_distance, targets=(),
         terrain_reach = None
         if terrain is not None:
             terrain_reach = (terrain.closestPoint - head).length
-        target = damage.nearest_vehicle(targets, head, tail, poses)
+        target = damage.nearest_vehicle(targets, head, tail)
         if target is not None and (terrain_reach is None or
                                    target[1] < terrain_reach):
             vehicle, reach, collisions = target
@@ -111,13 +111,12 @@ class ProjectileRunner(object):
     """Launch one shell per shot and end it at its impact."""
 
     def __init__(self, vehicle, scheduler, log, targets=None,
-                 on_vehicle_hit=None, poses=None):
+                 on_vehicle_hit=None):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
         self._schedule = scheduler
         self._log = log
         self._targets = targets
-        self._poses = poses
         self._on_vehicle_hit = on_vehicle_hit
         self._shot_id = 0
         self._launched = 0
@@ -148,8 +147,7 @@ class ProjectileRunner(object):
         self._launched += 1
         landing = impact(self._space_id, (start.x, start.y, start.z),
                          (velocity.x, velocity.y, velocity.z), gravity,
-                         max_distance, self._live_targets(),
-                         poses=self._poses)
+                         max_distance, self._live_targets())
         if landing is None:
             self._schedule(
                 flight_seconds((velocity.x, velocity.y, velocity.z), gravity,
