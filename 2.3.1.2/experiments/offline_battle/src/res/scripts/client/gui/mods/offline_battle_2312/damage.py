@@ -185,6 +185,30 @@ def crit_flags(names):
     return flags
 
 
+PART_NAMES = ('chassis', 'hull', 'turret', 'gun')
+
+
+def part_name(comp_name):
+    """collideSegmentExt carries TankPartIndexes ints on this client."""
+    if isinstance(comp_name, str):
+        return comp_name
+    try:
+        return PART_NAMES[int(comp_name)]
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _named_parts(collisions):
+    result = []
+    for collision in collisions:
+        try:
+            result.append(collision._replace(
+                compName=part_name(collision.compName)))
+        except (AttributeError, ValueError):
+            result.append(collision)
+    return result
+
+
 def nearest_vehicle(vehicles, start, end):
     """(vehicle, distance along the chord, collisions) for the first hit.
 
@@ -196,6 +220,7 @@ def nearest_vehicle(vehicles, start, end):
         collisions = vehicle.collideSegmentExt(start, end)
         if not collisions:
             continue
+        collisions = _named_parts(collisions)
         distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
             best = (vehicle, distance, collisions)

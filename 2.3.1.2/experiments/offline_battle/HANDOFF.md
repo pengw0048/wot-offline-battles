@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.10.3.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.11.0.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.10.3.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.11.0.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.3.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.0.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -112,6 +112,36 @@ Copied but not wired: `spotting` (nothing is hidden by view range),
   test uses the stock route again. The earlier claim that the native
   hit test sits at the spawn pose was wrong; the idler miss is back on
   the open list without an explanation.
+
+## What 0.11.0 adds
+
+The 0.10.3 run proved both fire directions and moving bots. This batch
+answers its four field reports:
+
+- Bots integrate every render frame with the real frame dt; decisions
+  and probes keep the mature 0.0975 s cadence. The 10 Hz pose stepping
+  was the visible jitter.
+- Enemy `matrix`/`position` reads now resolve to the runtime-owned live
+  matrices through the same class patch that already serves the player,
+  so the minimap and every stock reader follow the driven hulls.
+- Enemy shells scatter with the mature per-shot seeded gaussian
+  (`dispersed_angles`, from bot_runtime), so they no longer land on the
+  aim point every time. The turret presentation keeps the aimed pose.
+- Player module damage runs the copied `critical_damage` law:
+  `apply_direct` on every enemy shell, a 0.5 s `tick_repair` /
+  `tick_fire` loop, DAMAGE_INFO publication through the stock
+  `showVehicleDamageInfo`, and stat factors from the copied law. A
+  broken track now shows on the damage panel, repairs itself over the
+  copied repair time, and the repaired transition restores mobility.
+  Fire burns one health tick per second and stops by the copied clock.
+- `collideSegmentExt` part identities are TankPartIndexes ints on this
+  client; `damage.part_name` translates them, so a track or idler hit
+  finally counts as a chassis hit. This is the likely answer to the old
+  idler report.
+
+Known gaps kept small: no repair-progress percent bar yet
+(`updateDestroyedDevicesIsRepairing` semantics unproven), no consumable
+kits, and the ammo-rack death event is not yet a special explosion.
 
 ## What to check on the next run
 

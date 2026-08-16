@@ -130,6 +130,7 @@ class ApplyTests(unittest.TestCase):
         control = make_control(clear=True)
         body = make_body()
         control._apply(body, {'throttle': 1.0, 'turn': 0.0})
+        control._integrate(body, 0.1)
         self.assertGreater(body.z, 20.0)
         self.assertEqual(control._adapter.driver.failures, [])
         self.assertEqual(control._force.poses[9][0], body.pose)
@@ -140,7 +141,9 @@ class ApplyTests(unittest.TestCase):
         body.speed = 3.0
         control._apply(body, {'throttle': 1.0, 'turn': 0.0})
         self.assertEqual(body.throttle, 0.0)
+        self.assertFalse(body.clear)
         self.assertEqual(control._adapter.driver.failures, [(9, 0.0)])
+        control._integrate(body, 0.1)
         self.assertEqual((body.x, body.z), (10.0, 20.0))
         self.assertLess(abs(body.speed), 3.0 * 0.2 + 1e-6)
 
@@ -156,6 +159,7 @@ class ApplyTests(unittest.TestCase):
         body = make_body()
         control._apply(body, {'throttle': 0.0, 'turn': 0.0})
         self.assertEqual(control._adapter.driver.failures, [])
+        self.assertTrue(body.clear)
 
 
 class FakeVector(object):

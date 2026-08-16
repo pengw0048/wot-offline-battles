@@ -15,13 +15,13 @@ import zlib
 
 from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import damage
-from gui.mods.offline_battle_2312 import device_damage
 from gui.mods.offline_battle_2312 import feedback
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312.enemies import EnemyForce
 from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
+from gui.mods.offline_battle_2312.critical_control import CriticalControl
 from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
@@ -49,6 +49,7 @@ class _BridgeState(object):
     sync_scope_vehicle = None
     physics = None
     motion = None
+    enemies = None
 
 
 _state = _BridgeState()
@@ -88,8 +89,7 @@ class OfflineBattleRuntime(object):
         self._enemies = None
         self._enemy_ai = None
         self._bots = None
-        self._devices = {}
-        self._devices_destroyed = []
+        self._critical = None
         self._layers_logged = 0
         self._spawn_yaw = 0.0
         self._world_patch = None
@@ -248,16 +248,22 @@ class OfflineBattleRuntime(object):
         def vehicle_getattribute(vehicle, name):
             if name == 'cell' and _state.active and _state.bridge is not None:
                 return _state.bridge
-            driver = _state.motion
-            if (driver is not None and driver.matrix is not None
-                    and name in _POSE_NAMES
-                    and original_vehicle_getattribute(vehicle, 'id') ==
-                    driver.vehicle_id):
-                # Offline this runtime owns the pose, so every stock reader
-                # of the entity transform has to see it.
-                if name == 'position':
-                    return driver.position
-                return driver.matrix
+            if name in _POSE_NAMES:
+                # Offline this runtime owns every pose, so every stock
+                # reader of an entity transform has to see it.
+                vehicle_id = original_vehicle_getattribute(vehicle, 'id')
+                driver = _state.motion
+                if (driver is not None and driver.matrix is not None
+                        and vehicle_id == driver.vehicle_id):
+                    if name == 'position':
+                        return driver.position
+                    return driver.matrix
+                if _state.enemies is not None and name != 'cameraTargetMatrix':
+                    live = _state.enemies.live_matrix(vehicle_id)
+                    if live is not None:
+                        if name == 'position':
+                            return live.translation
+                        return live
             value = original_vehicle_getattribute(vehicle, name)
             if name == 'filter' and _state.sync_scope_vehicle is vehicle:
                 return OfflineFilterProxy(value)
@@ -756,10 +762,16 @@ class OfflineBattleRuntime(object):
             self._enemies = EnemyForce(avatar, self._arena_type_id, self._log)
             self._enemies.spawn((vehicle.position.x, vehicle.position.z),
                                 self._spawn_yaw)
+            _state.enemies = self._enemies
             gunnery = Gunnery(vehicle, BigWorld.callback, self._log,
                               targets=self._enemies.alive,
                               on_vehicle_hit=self._on_vehicle_hit)
             gunnery.publish()
+            self._critical = CriticalControl(
+                avatar, vehicle.id, BigWorld.callback, self._log,
+                on_factors=self._set_stat_factors,
+                on_fire_damage=self._on_fire_damage)
+            self._critical.start()
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
                                      self._on_player_hit,
@@ -864,34 +876,38 @@ class OfflineBattleRuntime(object):
     def _bot_bodies(self):
         return self._bots.bodies if self._bots is not None else {}
 
-    def _apply_module_hits(self, vehicle, shot, landing, result):
-        """Roll the copied saving throws and keep the player's device state."""
-        names = self._resolve_crits(vehicle, landing, result)
-        if not names:
-            return names
-        descriptor = vehicle.typeDescriptor
-        rolled = device_damage.module_damage_roll(
-            damage.legacy_shot(shot)['shell'])
-        for name in damage.law_devices(names):
-            if device_damage.has_hp_pool(descriptor, name) and rolled:
-                remaining = self._devices.get(
-                    name, device_damage.device_max_hp(descriptor, name) or 0.0)
-                remaining = max(0.0, remaining - rolled)
-                self._devices[name] = remaining
-                if remaining > 0.0:
-                    continue
-            if name not in self._devices_destroyed:
-                self._devices_destroyed.append(name)
+    def _apply_module_hits(self, vehicle, shot, landing, result, points,
+                           shooter_id):
+        """Run the copied crit law on the player and publish its events."""
+        if self._critical is None:
+            return []
+        payload = self._critical.apply_shot(
+            vehicle, landing, points or 0,
+            damage.legacy_shot(shot)['shell'], shooter_id,
+            penetrated=result == damage.PIERCED)
+        if payload is None:
+            return []
+        return [event.get('name') or event.get('kind')
+                for event in payload.get('events') or ()]
+
+    def _set_stat_factors(self, factors):
         if self._motion is not None:
-            self._motion.set_stat_factors({
-                'mobility': device_damage.module_stat_factor(
-                    self._devices, self._devices_destroyed, descriptor,
-                    'mobility'),
-                'traverse': device_damage.module_stat_factor(
-                    self._devices, self._devices_destroyed, descriptor,
-                    'traverse'),
-            })
-        return names
+            self._motion.set_stat_factors(factors)
+
+    def _on_fire_damage(self, points):
+        """One second of fire, published like any other health loss."""
+        import BigWorld
+        vehicle = BigWorld.entities.get(self._vehicle_id)
+        if vehicle is None:
+            return
+        previous = int(vehicle.health)
+        if previous <= 0:
+            return
+        health = max(0, previous - int(points))
+        vehicle.health = health
+        vehicle.onHealthChanged(health, previous, 0, 1, 0)
+        self._avatar.updateVehicleHealth(self._vehicle_id, health, 1,
+                                         health > 0, False)
 
     def _on_vehicle_hit(self, landing, shot):
         """Resolve the shell against the vehicle it reached."""
@@ -923,7 +939,8 @@ class OfflineBattleRuntime(object):
                                         landing.collisions)
         previous = int(vehicle.health)
         health = previous
-        crits = self._apply_module_hits(vehicle, shot, landing, result)
+        crits = self._apply_module_hits(vehicle, shot, landing, result,
+                                        points, shooter_id)
         if result is not None and points:
             health = max(0, previous - int(points))
             vehicle.health = health
@@ -1059,9 +1076,13 @@ class OfflineBattleRuntime(object):
         if self._enemy_ai is not None:
             self._enemy_ai.stop()
             self._enemy_ai = None
+        if self._critical is not None:
+            self._critical.stop()
+            self._critical = None
         if self._enemies is not None:
             self._enemies.destroy()
             self._enemies = None
+        _state.enemies = None
         avatar = BigWorld.player()
         if self._vehicle_id and avatar is not None:
             vehicle = BigWorld.entities.get(self._vehicle_id)

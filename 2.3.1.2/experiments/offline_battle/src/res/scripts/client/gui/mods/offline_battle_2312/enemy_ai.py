@@ -8,8 +8,11 @@ shot uses the client's own muzzle transform, copied from
 from __future__ import absolute_import
 
 import math
+import random
 
 from gui.mods.offline_battle_2312 import projectiles
+from gui.mods.offline_battle_2312.ai import driver as ai_driver
+from gui.mods.offline_battle_2312.bot_control import BATTLE_SEED
 
 TICK_SECONDS = 0.25
 TRACED_TICKS = 3
@@ -18,6 +21,32 @@ TRACED_SHOTS = 6
 ENGAGE_RANGE_METRES = 400.0
 FIRST_SHOT_DELAY_SECONDS = 6.0
 ALL_GUNS = -1
+
+
+def dispersed_angles(bot_id, round_id, fire_seq, yaw, pitch,
+                     dispersion_angle):
+    """The mature per-shot gaussian scatter, deterministic per shot.
+
+    yaw is the world barrel yaw; pitch uses the client convention where
+    positive aims down, matching barrel_direction."""
+    direction = list(ai_driver.barrel_direction(yaw, pitch))
+    seed = ((int(round_id) & 0xffff) * 1000003 +
+            (int(bot_id) & 0xffff) * 9176 +
+            (int(fire_seq) & 0x7fffffff) * 6113) & 0x7fffffff
+    generator = random.Random(seed)
+    sigma = float(dispersion_angle) / 3.0
+    direction[0] += generator.gauss(0.0, sigma)
+    direction[1] += generator.gauss(0.0, sigma)
+    direction[2] += generator.gauss(0.0, sigma)
+    length = math.sqrt(sum(value * value for value in direction))
+    if length <= 1e-9:
+        direction = [0.0, 0.0, 1.0]
+    else:
+        direction = [value / length for value in direction]
+    horizontal = math.sqrt(direction[0] * direction[0] +
+                           direction[2] * direction[2])
+    return (math.atan2(direction[0], direction[2]),
+            -math.atan2(direction[1], max(1e-9, horizontal)))
 
 
 def aim_angles(shooter_position, shooter_yaw, target_position):
@@ -152,7 +181,26 @@ class EnemyAI(object):
             return
         self._next_shot[vehicle.id] = (self._elapsed +
                                        float(descriptor.gun.reloadTime))
+        turret_yaw, pitch = self._disperse(vehicle, pose[3], turret_yaw,
+                                           pitch, limits)
         self._fire(vehicle, matrix, turret_yaw, pitch)
+
+    def _disperse(self, vehicle, hull_yaw, turret_yaw, pitch, limits):
+        """Scatter the fired shell only; the turret keeps the aimed pose."""
+        dispersion = float(getattr(vehicle.typeDescriptor.gun,
+                                   'shotDispersionAngle', 0.0) or 0.0)
+        if dispersion <= 0.0:
+            return turret_yaw, pitch
+        self._shot_id += 1
+        world_yaw, pitch = dispersed_angles(
+            vehicle.id, BATTLE_SEED, self._shot_id,
+            hull_yaw + turret_yaw, pitch, dispersion)
+        turret_yaw = world_yaw - hull_yaw
+        while turret_yaw > math.pi:
+            turret_yaw -= 2.0 * math.pi
+        while turret_yaw < -math.pi:
+            turret_yaw += 2.0 * math.pi
+        return turret_yaw, clamp_pitch(pitch, limits)
 
     def _point_turret(self, vehicle, descriptor, turret_yaw, pitch,
                       trace=False):

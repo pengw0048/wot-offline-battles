@@ -13,6 +13,18 @@ for _name in ('gui', 'gui.mods', 'gui.mods.offline_battle_2312'):
     sys.modules.setdefault(_name, types.ModuleType(_name))
 _projectiles = types.ModuleType('gui.mods.offline_battle_2312.projectiles')
 sys.modules['gui.mods.offline_battle_2312.projectiles'] = _projectiles
+_bot_control = types.ModuleType('gui.mods.offline_battle_2312.bot_control')
+_bot_control.BATTLE_SEED = 20260816
+sys.modules.setdefault('gui.mods.offline_battle_2312.bot_control',
+                       _bot_control)
+_ai_package = types.ModuleType('gui.mods.offline_battle_2312.ai')
+sys.modules.setdefault('gui.mods.offline_battle_2312.ai', _ai_package)
+_driver_spec = importlib.util.spec_from_file_location(
+    'gui.mods.offline_battle_2312.ai.driver', PACKAGE / 'ai' / 'driver.py')
+_driver = importlib.util.module_from_spec(_driver_spec)
+sys.modules.setdefault('gui.mods.offline_battle_2312.ai.driver', _driver)
+if sys.modules['gui.mods.offline_battle_2312.ai.driver'] is _driver:
+    _driver_spec.loader.exec_module(_driver)
 
 _spec = importlib.util.spec_from_file_location(
     'offline_battle_enemy_ai', PACKAGE / 'enemy_ai.py')
@@ -72,6 +84,23 @@ class PitchLimitTests(unittest.TestCase):
 
     def test_missing_limits_leave_the_pitch_alone(self):
         self.assertAlmostEqual(enemy_ai.clamp_pitch(0.2, None), 0.2)
+
+
+class DispersionTests(unittest.TestCase):
+    def test_the_same_shot_scatters_the_same_way(self):
+        first = enemy_ai.dispersed_angles(7, 1, 3, 0.4, -0.05, 0.004)
+        again = enemy_ai.dispersed_angles(7, 1, 3, 0.4, -0.05, 0.004)
+        self.assertEqual(first, again)
+
+    def test_the_next_shot_scatters_differently(self):
+        first = enemy_ai.dispersed_angles(7, 1, 3, 0.4, -0.05, 0.004)
+        other = enemy_ai.dispersed_angles(7, 1, 4, 0.4, -0.05, 0.004)
+        self.assertNotEqual(first, other)
+
+    def test_the_scatter_stays_near_the_aim(self):
+        yaw, pitch = enemy_ai.dispersed_angles(7, 1, 3, 0.4, -0.05, 0.004)
+        self.assertLess(abs(yaw - 0.4), 0.01)
+        self.assertLess(abs(pitch - -0.05), 0.01)
 
 
 if __name__ == '__main__':

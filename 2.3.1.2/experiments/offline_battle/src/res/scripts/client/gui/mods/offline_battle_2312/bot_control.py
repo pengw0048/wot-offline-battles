@@ -19,6 +19,8 @@ from gui.mods.offline_battle_2312 import world_collision
 from gui.mods.offline_battle_2312.ai.adapter import BotAdapter
 
 TICK_SECONDS = 0.1
+DECISION_SECONDS = 0.0975
+MAX_FRAME_SECONDS = 0.35
 BATTLE_SEED = 20260816
 HUMAN_TARGET_ID_BASE = 1000000
 
@@ -158,6 +160,9 @@ class BotBody(object):
         self.drive_history = []
         self.aim_position = None
         self.fire_allowed = False
+        self.clear = True
+        self.next_decision = 0.0
+        self.last_decision = None
 
     @property
     def pose(self):
@@ -200,7 +205,7 @@ class BotControl(object):
         self._log = log
         self._player_motion = player_motion
         self._bodies = {}
-        self._elapsed = 0.0
+        self._last_time = None
         self._stopped = False
         self._logged = 0
 
@@ -223,7 +228,7 @@ class BotControl(object):
 
     def start(self, scheduler):
         self._schedule = scheduler
-        self._schedule(TICK_SECONDS, self._tick)
+        self._schedule(0.0, self._tick)
         self._log('bot_control_started map=%s bots=%s tactical_map=%s'
                   % (self._adapter.director.map_name, len(self._bodies),
                      self._adapter.director.map_data is not None))
@@ -286,7 +291,8 @@ class BotControl(object):
             'velocity': body.velocity(),
             'health': float(self._force.health(body.id)),
             'max_health': body.max_health,
-            'dt': TICK_SECONDS,
+            'dt': (min(MAX_FRAME_SECONDS, now - body.last_decision)
+                   if body.last_decision is not None else DECISION_SECONDS),
             'now': now,
             'contacts': contacts,
             'neighbours': neighbours,
@@ -295,48 +301,57 @@ class BotControl(object):
         }
 
     def _tick(self):
+        """Decide at the mature cadence, integrate every render frame."""
         import BigWorld
         if self._stopped:
             return
-        self._schedule(TICK_SECONDS, self._tick)
+        self._schedule(0.0, self._tick)
+        now = BigWorld.time()
+        last = self._last_time
+        self._last_time = now
         avatar = BigWorld.player()
-        if avatar is None or not avatar.userSeesWorld():
+        if avatar is None or not avatar.userSeesWorld() or last is None:
             return
-        self._elapsed += TICK_SECONDS
+        dt = min(MAX_FRAME_SECONDS, max(0.0, now - last))
+        if dt <= 0.0:
+            return
         player = BigWorld.entities.get(avatar.playerVehicleID)
         for body in list(self._bodies.values()):
             if self._force.health(body.id) <= 0:
                 continue
-            state = self._state(body, player, self._elapsed)
-            command = self._adapter.decide(state,
-                                           self._direction_clear(body))
-            command['throttle'], waiting = traffic_throttle(
-                state, command, state['neighbours'])
-            if waiting:
-                self._adapter.driver.wait_for_traffic(body.id)
-            self._apply(body, command)
+            if now >= body.next_decision:
+                self._decide(body, player, now)
+            self._integrate(body, dt)
+
+    def _decide(self, body, player, now):
+        state = self._state(body, player, now)
+        command = self._adapter.decide(state, self._direction_clear(body))
+        command['throttle'], waiting = traffic_throttle(
+            state, command, state['neighbours'])
+        if waiting:
+            self._adapter.driver.wait_for_traffic(body.id)
+        self._apply(body, command)
+        body.last_decision = now
+        body.next_decision = now + DECISION_SECONDS
         if self._logged < 3:
             self._logged += 1
-            sample = list(self._bodies.values())[0] if self._bodies else None
-            if sample is not None:
-                self._log('bot_command id=%s throttle=%.2f turn=%.2f '
-                          'speed=%.2f pos=(%.1f,%.1f,%.1f) fire=%s'
-                          % (sample.id, sample.throttle, sample.turn,
-                             sample.speed, sample.x, sample.y, sample.z,
-                             sample.fire_allowed))
+            self._log('bot_command id=%s throttle=%.2f turn=%.2f '
+                      'speed=%.2f pos=(%.1f,%.1f,%.1f) fire=%s'
+                      % (body.id, body.throttle, body.turn, body.speed,
+                         body.x, body.y, body.z, body.fire_allowed))
 
     def _apply(self, body, command):
-        """Integrate the copied motion law the way the mature caller does."""
+        """Store one command, probing the travel direction it implies."""
         body.throttle = float(command.get('throttle', 0.0))
         body.turn = float(command.get('turn', 0.0))
         body.aim_position = command.get('aim_position')
         body.fire_allowed = bool(command.get('fire_allowed', False))
         travel_yaw = (body.yaw if body.throttle >= 0.0
                       else body.yaw + math.pi)
-        clear = True
+        body.clear = True
         if abs(body.throttle) > 0.01:
-            clear = self._direction_clear(body)(travel_yaw)
-            if not clear:
+            body.clear = self._direction_clear(body)(travel_yaw)
+            if not body.clear:
                 body.throttle = 0.0
                 self._adapter.driver.remember_failure(body.id, travel_yaw)
         body.drive_pitch = suspension.smooth(
@@ -345,26 +360,28 @@ class BotControl(object):
                 body.drive_history,
                 suspension.drive_pitch(self._space_id, body.position(),
                                        body.yaw)))
+
+    def _integrate(self, body, dt):
+        """Advance the copied motion law with the stored command."""
         body.omega = motion.traverse_step(
-            body.params, body.omega, body.turn, body.speed, TICK_SECONDS,
+            body.params, body.omega, body.turn, body.speed, dt,
             drive_intent=body.throttle)
-        body.yaw += body.omega * TICK_SECONDS
+        body.yaw += body.omega * dt
         while body.yaw > math.pi:
             body.yaw -= 2.0 * math.pi
         while body.yaw < -math.pi:
             body.yaw += 2.0 * math.pi
         body.speed = motion.longitudinal_step(
             body.params, body.speed, body.throttle, abs(body.turn) > 0.01,
-            body.drive_pitch, TICK_SECONDS)
-        if not clear:
+            body.drive_pitch, dt)
+        if not body.clear:
             body.speed *= 0.2
         else:
-            step = body.speed * TICK_SECONDS
+            step = body.speed * dt
             body.x += math.sin(body.yaw) * step
             body.z += math.cos(body.yaw) * step
         ground = suspension.ground_y(self._space_id, body.x, body.z, body.y)
         if ground is not None:
-            body.y = suspension.settle(body.y, ground, body.speed,
-                                       TICK_SECONDS)
+            body.y = suspension.settle(body.y, ground, body.speed, dt)
         vx, _unused, vz = body.velocity()
         self._force.set_pose(body.id, body.pose, velocity=(vx, vz))

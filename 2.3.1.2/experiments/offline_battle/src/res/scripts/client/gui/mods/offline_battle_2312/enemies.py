@@ -62,8 +62,12 @@ class EnemyForce(object):
         return self._health.get(vehicle_id, 0)
 
     def pose(self, vehicle_id):
-        """(x, y, z, yaw) where this enemy was placed; it does not move."""
+        """(x, y, z, yaw) this enemy is drawn at."""
         return self._poses.get(vehicle_id)
+
+    def live_matrix(self, vehicle_id):
+        """The matrix set_pose mutates, None before the first move."""
+        return self._matrices.get(vehicle_id)
 
     def set_pose(self, vehicle_id, pose, velocity=None):
         """Move an enemy: the runtime owns these poses, as it owns its own."""

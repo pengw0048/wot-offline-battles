@@ -45,13 +45,15 @@ class Impact(object):
     """Where a shell stopped, and on what."""
 
     def __init__(self, point, elapsed, travelled, mat_kind=0, vehicle=None,
-                 collisions=None):
+                 collisions=None, segment_start=None, segment_end=None):
         self.point = point
         self.elapsed = elapsed
         self.travelled = travelled
         self.mat_kind = mat_kind
         self.vehicle = vehicle
         self.collisions = collisions
+        self.segment_start = segment_start
+        self.segment_end = segment_end
 
 
 def impact(space_id, start, velocity, gravity, max_distance, targets=(),
@@ -89,7 +91,8 @@ def impact(space_id, start, velocity, gravity, max_distance, targets=(),
             return Impact(point,
                           chord_seconds * (index - 1 + fraction),
                           travelled + reach, vehicle=vehicle,
-                          collisions=collisions)
+                          collisions=collisions, segment_start=head,
+                          segment_end=tail)
         if terrain is not None:
             fraction = terrain_reach / chord if chord else 0.0
             return Impact(terrain.closestPoint,
