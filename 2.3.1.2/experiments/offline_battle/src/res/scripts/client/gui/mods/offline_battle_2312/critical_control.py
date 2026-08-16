@@ -20,6 +20,8 @@ CAUSE_SUFFIXES = {
 def extra_index(descriptor, name):
     """The descriptor extra index the stock damage panel keys on."""
     extra_name = str(name)
+    if extra_name in ('leftTrackHealth', 'rightTrackHealth'):
+        extra_name = 'chassisHealth'
     if not extra_name.endswith('Health'):
         extra_name += 'Health'
     for index, extra in enumerate(getattr(descriptor, 'extras', None) or ()):

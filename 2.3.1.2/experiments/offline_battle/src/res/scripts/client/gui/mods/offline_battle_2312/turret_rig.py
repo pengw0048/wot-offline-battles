@@ -127,6 +127,5 @@ class TurretRigs(object):
         for rig in self._rigs.values():
             if rig.vehicle_id == self._player_id:
                 if rotator is not None:
-                    rig.snap(rotator.turretYaw, rotator.gunPitch)
-            else:
-                rig.advance(dt)
+                    rig.aim(rotator.turretYaw, rotator.gunPitch)
+            rig.advance(dt)

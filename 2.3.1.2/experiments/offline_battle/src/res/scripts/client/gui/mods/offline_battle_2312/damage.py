@@ -216,6 +216,52 @@ def _named_parts(collisions):
     return result
 
 
+class _TrackExtra(object):
+    def __init__(self, name):
+        self.name = name
+
+
+class _TrackMaterial(object):
+    """A chassis layer that can break its track.
+
+    Every material this client returns carries extra=None, so the copied
+    saving throws never see the track device; this keeps the real armor
+    and adds the device, the way the law's own interior stand-in does."""
+
+    def __init__(self, source, name):
+        self.extra = _TrackExtra(name)
+        self.armor = float(getattr(source, 'armor', 0.0) or 15.0)
+        self.damageKind = 0
+        self.vehicleDamageFactor = 0.0
+        self.chanceToHitByProjectile = device_damage.fallback_chance(
+            name, False)
+        self.chanceToHitByExplosion = device_damage.fallback_chance(
+            name, True)
+
+
+def _track_side(vehicle, dist, start, end):
+    import Math
+    try:
+        direction = Math.Vector3(end) - Math.Vector3(start)
+        direction.normalise()
+        point = Math.Vector3(start) + direction * float(dist)
+        world_to_vehicle = Math.Matrix(vehicle.matrix)
+        world_to_vehicle.invert()
+        local = world_to_vehicle.applyPoint(point)
+        return 'rightTrackHealth' if local.x >= 0.0 else 'leftTrackHealth'
+    except Exception:
+        return 'leftTrackHealth'
+
+
+def _trackify(vehicle, collision, start, end):
+    if (collision.compName != 'chassis' or
+            getattr(collision.matInfo, 'extra', None) is not None):
+        return collision
+    side = _track_side(vehicle, collision.dist, start, end)
+    return collision._replace(
+        matInfo=_TrackMaterial(collision.matInfo, side))
+
+
 # The stock collision result shape, for the synthesized chassis layer.
 SegmentCollisionResultExt = namedtuple(
     'SegmentCollisionResultExt',
@@ -284,7 +330,8 @@ def nearest_vehicle(vehicles, start, end):
             if box_hit is None:
                 continue
             collisions = [box_hit]
-        collisions = _named_parts(collisions)
+        collisions = [_trackify(vehicle, collision, start, end)
+                      for collision in _named_parts(collisions)]
         distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
             best = (vehicle, distance, collisions)

@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.1.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.2.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.1.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.2.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.1.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.2.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -241,6 +241,29 @@ batch:
   normally sends; the UI subtracts the camera itself, every frame.
 - The status probe installs at onBecomePlayer, early enough to catch
   the push that shows the always-on 0s icon at panel start.
+
+## What 0.12.2 adds
+
+The 0.12.1 log: the chassis stand-in registers (`part=chassis`), but
+every material this client returns carries `extra=None`, so the copied
+track saving throw never saw a device. And the 0s icon's feeder is the
+panel's `_updateThunderStrike` stun source: a THUNDER_STRIKE state with
+duration 1.0 exists at panel start; the probe now logs its data and
+caller (`ui_thunder`).
+
+- Chassis layers now carry a `_TrackMaterial`: the real armor plus the
+  track device in `extra`, left or right by the hit side, the same
+  stand-in pattern the law uses for interior devices. A track or idler
+  hit can finally break a track, by shell or by HE blast, both
+  directions. The damage panel folds the law's track names back to this
+  client's one chassis extra.
+- The player's turret rig slews like the enemies' instead of snapping
+  to the rotator's stepped value, so its rotation stops twitching.
+
+Hit direction stays under investigation: world yaw was still reported
+wrong; the `hit_direction` log lines carry every candidate frame, so
+one controlled observation (attacker dead ahead, camera straight) will
+name the right one.
 
 ## What to check on the next run
 

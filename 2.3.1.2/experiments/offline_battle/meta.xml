@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <root>
   <id>org.peng.offline_2312_battle</id>
-  <version>0.12.1</version>
+  <version>0.12.2</version>
   <name>World of Tanks 2.3.1.2 offline battle</name>
   <description>Starts a stock battle session on an offline map: real PlayerAvatar, real Vehicle, AvatarInputHandler, ArcadeCamera, keyboard driving and mouse turret control.</description>
 </root>

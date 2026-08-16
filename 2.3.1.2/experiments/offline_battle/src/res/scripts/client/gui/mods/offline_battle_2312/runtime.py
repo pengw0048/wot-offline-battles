@@ -451,6 +451,18 @@ class OfflineBattleRuntime(object):
 
         panel_cls._updateStun = spy_stun
         panel_cls._updateDebuff = spy_debuff
+        thunder_name = '_updateThunderStrike'
+        original_thunder = getattr(panel_cls, thunder_name)
+
+        def spy_thunder(panel, data):
+            import sys
+            caller = sys._getframe(1).f_code.co_name
+            log('ui_thunder data=%r caller=%s' % (data, caller))
+            return original_thunder(panel, data)
+
+        setattr(panel_cls, thunder_name, spy_thunder)
+        self._class_patches.append(
+            (panel_cls, thunder_name, original_thunder, spy_thunder))
         timer_cls = damage_panel._ActionScriptTimer
         original_show = timer_cls.showStatus
 
