@@ -325,6 +325,18 @@ class OfflineBattleRuntime(object):
             """The kill cam replays a shot this battle never recorded."""
             return None
 
+        from vehicle_systems.CompoundAppearance import CompoundAppearance
+        refresh_name = '_CompoundAppearance__requestModelsRefresh'
+        original_models_refresh = getattr(CompoundAppearance, refresh_name)
+
+        def request_models_refresh(appearance):
+            """Keep the intact model on death.
+
+            The destroyed model arrives through __onModelsRefresh, which
+            calls filter.syncGunAngles directly. A client-only vehicle
+            faults on that call, and the death effects do not need it."""
+            return None
+
         original_aux_physics = avatar_cls._PlayerAvatar__onSetOwnVehicleAuxPhysicsData
 
         def on_set_aux_physics(avatar, prev):
@@ -378,6 +390,8 @@ class OfflineBattleRuntime(object):
              set_remote_camera),
             (SimulatedScene, 'saveKillSnapshot', original_kill_snapshot,
              save_kill_snapshot),
+            (CompoundAppearance, refresh_name, original_models_refresh,
+             request_models_refresh),
         ]
         _state.active = True
 

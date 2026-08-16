@@ -89,7 +89,7 @@ interfaces that 2.3.1.2 actually changed.
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.2.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.3.wotmod
 ```
 
 ## Current state
@@ -115,7 +115,30 @@ Also validated in play: shells damage enemies, shell switching works, and
 the enemies shoot back.
 
 Not yet validated in play: a kill without a crash, enemy turret rotation,
-and enemy fire that leads the player.
+and enemy fire that reaches the player.
+
+## Native calls a client-only vehicle cannot take
+
+`BigWorld.createEntity` gives a Vehicle no server-fed interpolation
+chain. Two filter calls submit their first sample into that missing
+chain and fault the client, for the player's vehicle and for every
+remote one:
+
+- `filter.syncGunAngles`
+- `filter.syncStabilisedYPR`
+
+Every caller in the client is accounted for:
+
+| caller | handling |
+| --- | --- |
+| `Vehicle.set_gunAnglesPacked` | scoped filter proxy |
+| `Vehicle.__startWGPhysics` | scoped filter proxy |
+| `CompoundAppearance.__onModelsRefresh` | unreachable: the model refresh is skipped |
+| `Avatar.__onSetOwnVehicleAuxPhysicsData` | deferred, then scoped |
+
+Enemy turrets are animated through the appearance turret and gun matrix
+providers instead, which is what the 0.9.22 port does for a remote
+vehicle.
 
 The native body never simulates offline, so this port owns the pose. That
 matches the conclusion the mature 0.9.22 port reached on its own client,
@@ -165,6 +188,12 @@ entity pose overlay, using the native filter only for presentation.
   this slice.
 - Damage covers direct hits only: no fire, no module or crew damage, no
   ramming, and no HE splash beyond the direct-hit law.
+- A destroyed vehicle keeps its intact model. The destroyed model arrives
+  through CompoundAppearance.__onModelsRefresh, which calls
+  filter.syncGunAngles directly, and a client-only vehicle faults on that
+  call. The death effect, the markers and the feedback all still run.
+- The kill camera is off: it replays the killing shot from server
+  simulation data this battle never records.
 - Only `spaces/01_karelia` has a proven spawn; other maps fall back to the
   stock spawn-point data.
 - The ammo bay is a full `gun.maxAmmo` load shared across the gun's shot
