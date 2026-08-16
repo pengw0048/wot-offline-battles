@@ -14,7 +14,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 SOURCE_ROOT = os.path.join(ROOT, 'src')
 META_PATH = os.path.join(ROOT, 'meta.xml')
 DIST_ROOT = os.path.join(ROOT, 'dist')
-OUTPUT_NAME = 'org.peng.offline_2312_battle_0.2.29.wotmod'
+OUTPUT_NAME = 'org.peng.offline_2312_battle_0.3.0.wotmod'
 PYTHON_27_MAGIC = '\x03\xf3\r\n'
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 

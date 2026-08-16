@@ -1,0 +1,140 @@
+"""Own the player vehicle pose, because the native body never simulates.
+
+Each tick this integrates the copied motion law, follows the terrain with
+`BigWorld.wg_collideSegment`, and writes the result to the compound model
+matrix. The native filter keeps doing what it can still do offline:
+turret, gun and track presentation.
+"""
+from __future__ import absolute_import
+
+import math
+
+from gui.mods.offline_battle_2312 import motion
+
+TICK_SECONDS = 0.02
+TERRAIN_COLLISION_MASK = 128
+TERRAIN_ONLY_FLAGS = 8
+TERRAIN_RAY_HEIGHT = 1000.0
+# Sampling the hull front and back gives the pitch the law integrates on.
+HULL_HALF_LENGTH = 2.0
+
+
+class MotionDriver(object):
+
+    def __init__(self, vehicle, position, yaw, log):
+        self._vehicle_id = vehicle.id
+        self._space_id = vehicle.spaceID
+        self._params = motion.derive_params(vehicle.typeDescriptor)
+        self._x = float(position.x)
+        self._y = float(position.y)
+        self._z = float(position.z)
+        self._yaw = float(yaw)
+        self._speed = 0.0
+        self._omega = 0.0
+        self._movement = 0
+        self._rotation = 0
+        self._log = log
+        self._callback_id = None
+        self._stopped = False
+        self._ticks = 0
+
+    @property
+    def speed(self):
+        return self._speed
+
+    def set_input(self, movement, rotation):
+        self._movement = int(movement)
+        self._rotation = int(rotation)
+
+    def start(self):
+        self._schedule()
+        self._log('motion_started mass=%.0f power=%.0f fwd=%.2f rot=%.3f'
+                  % (self._params['mass'], self._params['powerW'],
+                     self._params['speedFwd'], self._params['rotSpd']))
+
+    def stop(self):
+        import BigWorld
+        self._stopped = True
+        if self._callback_id is not None:
+            try:
+                BigWorld.cancelCallback(self._callback_id)
+            except Exception:
+                pass
+            self._callback_id = None
+
+    def _schedule(self):
+        import BigWorld
+        if self._stopped:
+            return
+        self._callback_id = BigWorld.callback(TICK_SECONDS, self._tick)
+
+    def _ground_height(self, x, z):
+        import BigWorld
+        import Math
+        collision = BigWorld.wg_collideSegment(
+            self._space_id, Math.Vector3(x, TERRAIN_RAY_HEIGHT, z),
+            Math.Vector3(x, -TERRAIN_RAY_HEIGHT, z), TERRAIN_COLLISION_MASK,
+            TERRAIN_ONLY_FLAGS)
+        if collision is None:
+            return None
+        return float(collision.closestPoint.y)
+
+    def _slope_pitch(self, x, z, sin_yaw, cos_yaw):
+        front = self._ground_height(x + sin_yaw * HULL_HALF_LENGTH,
+                                    z + cos_yaw * HULL_HALF_LENGTH)
+        back = self._ground_height(x - sin_yaw * HULL_HALF_LENGTH,
+                                   z - cos_yaw * HULL_HALF_LENGTH)
+        if front is None or back is None:
+            return 0.0
+        # BigWorld convention: nose up is a negative pitch.
+        return -math.atan2(front - back, 2.0 * HULL_HALF_LENGTH)
+
+    def _tick(self):
+        import BigWorld
+        self._callback_id = None
+        if self._stopped:
+            return
+        vehicle = BigWorld.entities.get(self._vehicle_id)
+        if vehicle is None or not vehicle.isStarted:
+            self._schedule()
+            return
+
+        sin_yaw = math.sin(self._yaw)
+        cos_yaw = math.cos(self._yaw)
+        pitch = self._slope_pitch(self._x, self._z, sin_yaw, cos_yaw)
+        steering = self._rotation != 0
+
+        self._omega = motion.traverse_step(
+            self._params, self._omega, self._rotation, self._speed,
+            TICK_SECONDS, drive_intent=self._movement)
+        self._speed = motion.longitudinal_step(
+            self._params, self._speed, self._movement, steering, pitch,
+            TICK_SECONDS)
+
+        self._yaw += self._omega * TICK_SECONDS
+        sin_yaw = math.sin(self._yaw)
+        cos_yaw = math.cos(self._yaw)
+        step = self._speed * TICK_SECONDS
+        x = self._x + sin_yaw * step
+        z = self._z + cos_yaw * step
+        ground = self._ground_height(x, z)
+        if ground is not None:
+            self._x, self._z, self._y = x, z, ground
+
+        self._apply_pose(vehicle, pitch)
+        self._ticks += 1
+        if self._ticks % 250 == 0:
+            self._log('motion_state pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f '
+                      'omega=%.3f input=(%s,%s)'
+                      % (self._x, self._y, self._z, self._yaw, self._speed,
+                         self._omega, self._movement, self._rotation))
+        self._schedule()
+
+    def _apply_pose(self, vehicle, pitch):
+        import Math
+        matrix = Math.Matrix()
+        matrix.setRotateYPR((self._yaw, pitch, 0.0))
+        matrix.translation = Math.Vector3(self._x, self._y, self._z)
+        model = getattr(vehicle, 'model', None)
+        if model is not None:
+            model.matrix = matrix

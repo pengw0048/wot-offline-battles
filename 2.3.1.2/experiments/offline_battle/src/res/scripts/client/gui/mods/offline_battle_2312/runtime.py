@@ -17,6 +17,7 @@ from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312 import native_probe
+from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
 from gui.mods.offline_battle_2312 import server_settings_setup
 from gui.mods.offline_battle_2312.avatar_server import AvatarServerBridge
@@ -70,7 +71,9 @@ class OfflineBattleRuntime(object):
         self._last_input = None
         self._drive_probe_at = 0.0
         self._native_probe_at = 0.0
-        self._native_step = 0
+        self._native_step = None
+        self._motion = None
+        self._spawn_yaw = 0.0
         self._world_patch = None
 
     # ------------------------------------------------------------------
@@ -272,6 +275,8 @@ class OfflineBattleRuntime(object):
                 return None
             self._input_calls += 1
             self._last_input = (movement, rotation, handbrake)
+            if self._motion is not None:
+                self._motion.set_input(movement, rotation)
             return original_notify_keys(vehicle, movement, rotation,
                                         handbrake)
 
@@ -554,6 +559,7 @@ class OfflineBattleRuntime(object):
             self._fail('vehicle_create_failed')
             return False
         self._vehicle_id = vehicle_id
+        self._spawn_yaw = yaw
         self._bridge.set_vehicle_id(vehicle_id)
         self._log('vehicle_created id=%s type=%s spawn=(%.3f,%.3f,%.3f) '
                   'yaw=%.6f source=%s descriptor_ready=%s', vehicle_id,
@@ -663,6 +669,15 @@ class OfflineBattleRuntime(object):
                   self._bridge.client_ready_received, avatar.isOnArena,
                   type(avatar.gunRotator).__name__, avatar.arena.period)
         self._battle_ready = True
+        self._start_motion(vehicle)
+
+    def _start_motion(self, vehicle):
+        """Own the pose: the native body never simulates offline."""
+        if self._motion is not None:
+            return
+        self._motion = MotionDriver(vehicle, vehicle.position,
+                                    self._spawn_yaw, self._log)
+        self._motion.start()
 
     def _probe_native(self, vehicle):
         if self._native_step is None:
@@ -730,6 +745,9 @@ class OfflineBattleRuntime(object):
                 pass
             self._callback_id = None
         self._battle_ready = True
+        if self._motion is not None:
+            self._motion.stop()
+            self._motion = None
         avatar = BigWorld.player()
         if self._vehicle_id and avatar is not None:
             vehicle = BigWorld.entities.get(self._vehicle_id)
