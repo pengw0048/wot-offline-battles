@@ -23,6 +23,7 @@ from gui.mods.offline_battle_2312.enemies import EnemyForce
 from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312 import native_probe
+from gui.mods.offline_battle_2312 import vehicle_collision
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
@@ -756,6 +757,9 @@ class OfflineBattleRuntime(object):
             self._enemies = EnemyForce(avatar, self._arena_type_id, self._log)
             self._enemies.spawn((vehicle.position.x, vehicle.position.z),
                                 self._spawn_yaw)
+            vehicle_collision.prepare(vehicle.typeDescriptor)
+            for enemy in self._enemies.alive():
+                vehicle_collision.prepare(enemy.typeDescriptor)
             gunnery = Gunnery(vehicle, BigWorld.callback, self._log,
                               targets=self._enemies.alive,
                               on_vehicle_hit=self._on_vehicle_hit,
@@ -1075,6 +1079,7 @@ class OfflineBattleRuntime(object):
         if self._enemies is not None:
             self._enemies.destroy()
             self._enemies = None
+        vehicle_collision.release_all()
         avatar = BigWorld.player()
         if self._vehicle_id and avatar is not None:
             vehicle = BigWorld.entities.get(self._vehicle_id)

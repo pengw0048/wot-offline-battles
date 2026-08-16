@@ -1481,29 +1481,23 @@ def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 def _decode_mat_info_1513(payload):
     """Translate the pinned 2.3.1.2 material-hit ABI to the 0.8.2 law.
 
-    The older engine returned six values and used ``None`` for a miss.  2.3.1.2
-    always returns seven values and carries the hit/miss bit in element zero.
-    Its native tail is ``(itemIndex, chunkID)``; the canonical copied law below
-    still consumes ``(chunkID, itemIndex)``.
-    Keeping that translation here lets the copied contact law retain its mature
-    internal field order without guessing at the native tuple shape.
+    This client returns ``(collided, hitPoint, surfNormal, matKind,
+    fileName)``, the shape the stock EffectMaterialCalculation unpacks.
+    The #1513 ``(itemIndex, chunkID)`` tail does not exist here, so both
+    identities decode as None and every registry consumer fails closed.
     """
     if not isinstance(payload, tuple):
         raise RuntimeError(
             '2.3.1.2 wg_getMatInfoNearPoint payload must be a tuple')
     width = len(payload)
-    if width != 7:
+    if width != 5:
         raise RuntimeError(
-            '2.3.1.2 wg_getMatInfoNearPoint payload must contain 7 items; got %d' %
+            '2.3.1.2 wg_getMatInfoNearPoint payload must contain 5 items; got %d' %
             width)
-    (collided, hitPt, surfNormal, matKind, fname,
-     itemIndex, chunkID) = payload
-    if type(collided) is not bool:
-        raise RuntimeError(
-            '2.3.1.2 wg_getMatInfoNearPoint collided flag must be bool')
+    collided, hitPt, surfNormal, matKind, fname = payload
     if not collided:
         return None
-    return hitPt, surfNormal, chunkID, itemIndex, matKind, fname
+    return hitPt, surfNormal, None, None, matKind, fname
 
 
 def _descriptor_value(value, name, default=None):

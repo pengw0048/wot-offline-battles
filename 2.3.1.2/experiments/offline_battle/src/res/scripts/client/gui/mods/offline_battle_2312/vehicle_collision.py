@@ -21,6 +21,34 @@ def _value(component, name, default=None):
     return getattr(component, name, default)
 
 
+_prepared = []
+
+
+def prepare(descriptor):
+    """Load the part BSPs; localHitTest returns nothing without them."""
+    for existing, _managers in _prepared:
+        if existing is descriptor:
+            return
+    managers = []
+    for manager in descriptor.getHitTesterManagers():
+        if manager is None:
+            continue
+        manager.loadHitTesters()
+        managers.append(manager)
+    _prepared.append((descriptor, managers))
+
+
+def release_all():
+    while _prepared:
+        _unused, managers = _prepared.pop()
+        for manager in managers:
+            for tester in (manager.modelHitTester,
+                           manager.crashedModelHitTester):
+                release = getattr(tester, 'releaseBspModel', None)
+                if callable(release):
+                    release()
+
+
 def pose_components(vehicle, math_module):
     """Descriptor hit-test transforms for one visible vehicle pose."""
     descriptor = vehicle.typeDescriptor

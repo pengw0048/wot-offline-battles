@@ -1,16 +1,16 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.10.1.wotmod`,
-built and validated, **not deployed**: the VM was off.
+Current candidate: `dist/org.peng.offline_2312_battle_0.10.2.wotmod`,
+built and validated.
 
 ## Deploy and run
 
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.10.1.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.10.2.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.1.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.2.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -86,6 +86,20 @@ Copied but not wired: `spotting` (nothing is hidden by view range),
     the same route that fixed idler hits on the enemies.
   - Bot velocities feed the tank-contact law, so a moving bot pushes
     with momentum.
+- 0.10.2 fixes the two faults the first 0.10.1 run measured, which
+  between them froze the bots, latched W, and ate every shell hit:
+  - `wg_getMatInfoNearPoint` returns five items on this client
+    (`collided, hitPoint, surfNormal, matKind, fileName`, proved from
+    the stock EffectMaterialCalculation bytecode), not the #1513 seven.
+    The strict decoder raised on every probe that touched a solid,
+    1145 times in one session, aborting bot and motion ticks mid-loop.
+    Both item identities now decode as None and the registries fail
+    closed, so nothing is crushable until real destructibles wiring.
+  - `ModelHitTester.localHitTest` returns nothing until the part BSPs
+    are loaded. `vehicle_collision.prepare` now runs each descriptor's
+    `getHitTesterManagers()[i].loadHitTesters()` at combat start, the
+    step the mature port does in `prepare_descriptor`; without it every
+    owned-pose hit test raised and no shell could hit any vehicle.
 
 ## What to check on the next run
 
