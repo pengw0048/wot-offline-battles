@@ -124,6 +124,8 @@ class EnemyAI(object):
         player = BigWorld.entities.get(self._player_vehicle_id)
         if player is None or not player.isStarted:
             return
+        if int(getattr(player, 'health', 0)) <= 0:
+            return
         target = self._aim_point(player)
         if trace:
             self._stage('aim_point')
@@ -220,21 +222,41 @@ class EnemyAI(object):
         if state is None:
             state = (Math.Matrix(), Math.Matrix())
             self._aim_matrices[vehicle.id] = state
+            self._bind_turret_nodes(vehicle.id, appearance)
         # Rebind every tick: appearance activation points these providers
         # back at the filter, and it can finish after the first tick.
         appearance.turretMatrix.target = state[0]
         appearance.gunMatrix.target = state[1]
         state[0].setRotateY(turret_yaw)
         if trace:
+            from vehicle_systems.tankStructure import TankPartNames
             self._stage('turret_provider',
-                        ' id=%s turret=%s gun=%s read_back=%.3f'
+                        ' id=%s turret=%s read_back=%.3f node_yaw=%.3f'
                         % (vehicle.id,
                            type(appearance.turretMatrix).__name__,
-                           type(appearance.gunMatrix).__name__,
-                           Math.Matrix(appearance.turretMatrix).yaw))
+                           Math.Matrix(appearance.turretMatrix).yaw,
+                           Math.Matrix(appearance.compoundModel.node(
+                               TankPartNames.TURRET)).yaw))
         state[1].setRotateX(pitch - calcGunPitchCorrection(
             turret_yaw, descriptor.hull.turretPitches[0],
             descriptor.turret.gunJointPitch))
+
+    def _bind_turret_nodes(self, vehicle_id, appearance):
+        """The stock TurretGunRotationAssembler binding, once per enemy.
+
+        For the player the assembler runs and the turret follows the
+        providers; this repeats its two lines in case it never ran for a
+        client-created enemy."""
+        from vehicle_systems.tankStructure import TankPartNames
+        try:
+            model = appearance.compoundModel
+            appearance.turretMatrix.localMatrix = model.node(
+                TankPartNames.TURRET)
+            appearance.gunMatrix.localMatrix = model.node(TankPartNames.GUN)
+            self._log('turret_nodes_bound id=%s' % (vehicle_id,))
+        except Exception as error:
+            self._log('turret_nodes_bind_failed id=%s error=%s'
+                      % (vehicle_id, repr(error)[:120]))
 
     def _may_fire(self, vehicle_id):
         """The copied planner's fire decision, when this enemy has one."""

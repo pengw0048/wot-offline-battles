@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.11.0.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.11.1.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.11.0.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.11.1.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.0.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.1.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -142,6 +142,33 @@ answers its four field reports:
 Known gaps kept small: no repair-progress percent bar yet
 (`updateDestroyedDevicesIsRepairing` semantics unproven), no consumable
 kits, and the ammo-rack death event is not yet a special explosion.
+
+## What 0.11.1 adds
+
+The 0.11.0 run validated smooth bot motion, both-way hits, the broken
+track on the player's damage panel and the dispersion. This batch takes
+its reports:
+
+- Enemy minimap icons: the live matrix now exists from spawn, so the
+  minimap binds the matrix the bots move instead of the native spawn
+  transform it bound before the bots started.
+- Enemy modules: shells on an enemy now run the same copied
+  critical_damage law as on the player. A tracked or engine-dead bot
+  stops (the mature bot rule), partial damage scales its throttle, its
+  repair clock runs at the decision cadence, and fire burns its health.
+- The player's wreck stops: death zeroes the drive input and the stat
+  factors, so the corpse no longer turns.
+- Enemy turret binding: the stock TurretGunRotationAssembler lines
+  (`turretMatrix.localMatrix = compoundModel.node(TURRET)`) are applied
+  once per enemy, in case the assembler never ran for a client-created
+  vehicle. `turret_provider` traces now log the actual node yaw, so the
+  next log says whether the model consumes the provider.
+- Enemies stop shooting a dead player.
+
+Known open, deliberately deferred: HE through a moving enemy exploding
+behind it. The whole flight is precomputed at fire time against the
+poses of that moment; the copied `projectile_manager` is the fix and is
+the next wiring step.
 
 ## What to check on the next run
 

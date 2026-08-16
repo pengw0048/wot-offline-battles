@@ -14,6 +14,7 @@ import math
 import zlib
 
 from gui.mods.offline_battle_2312 import account_setup
+from gui.mods.offline_battle_2312 import critical_damage
 from gui.mods.offline_battle_2312 import damage
 from gui.mods.offline_battle_2312 import feedback
 from gui.mods.offline_battle_2312 import diagnostics
@@ -785,34 +786,6 @@ class OfflineBattleRuntime(object):
         self._gunnery = gunnery
         self._bridge.set_gunnery(gunnery)
 
-    def _resolve_crits(self, target, landing, result, pose=None):
-        """Devices a penetrating shell reaches, by the copied law.
-
-        The material layers on these vehicles carry no device, so the
-        interior model decides from the compartment the shell entered."""
-        names = []
-        if damage.track_hit(landing.collisions):
-            names.append('chassisHealth')
-        if result not in (damage.PIERCED, damage.TRACK_ABSORBED):
-            return names
-        if result == damage.TRACK_ABSORBED:
-            return names
-        names.extend(damage.module_hits(landing.collisions))
-        if pose is None:
-            position = target.position
-            pose = (position.x, position.y, position.z,
-                    self._pose_yaw(target))
-        point = landing.point
-        local = damage.hull_local_point(pose, (point.x, point.y, point.z))
-        part = self._first_part(landing.collisions)
-        device, zone = damage.interior_hit(target.typeDescriptor, part, local)
-        if device is not None and device not in names:
-            names.append(device)
-        self._log('crit_resolved target=%s part=%s zone=%s local=(%.2f,%.2f) '
-                  'devices=%s' % (target.id, part, zone, local[0], local[1],
-                                  names))
-        return names
-
     def _camera_yaw(self):
         """World yaw the player is looking along."""
         import BigWorld
@@ -831,14 +804,6 @@ class OfflineBattleRuntime(object):
         if self._motion is not None and vehicle.id == self._vehicle_id:
             return Math.Matrix(self._motion.matrix).yaw
         return Math.Matrix(vehicle.matrix).yaw
-
-    @staticmethod
-    def _first_part(collisions):
-        best = None
-        for collision in collisions or ():
-            if best is None or collision.dist < best[0]:
-                best = (collision.dist, getattr(collision, 'compName', None))
-        return best[1] if best else None
 
     def _log_layers(self, collisions):
         """Record the material layers of one hit, once per battle.
@@ -908,6 +873,15 @@ class OfflineBattleRuntime(object):
         vehicle.onHealthChanged(health, previous, 0, 1, 0)
         self._avatar.updateVehicleHealth(self._vehicle_id, health, 1,
                                          health > 0, False)
+        if health <= 0:
+            self._stop_player_hull()
+
+    def _stop_player_hull(self):
+        """A wreck neither drives nor turns."""
+        if self._motion is None:
+            return
+        self._motion.set_input(0, 0)
+        self._motion.set_stat_factors({'mobility': 0.0, 'traverse': 0.0})
 
     def _on_vehicle_hit(self, landing, shot):
         """Resolve the shell against the vehicle it reached."""
@@ -919,7 +893,13 @@ class OfflineBattleRuntime(object):
             health = self._enemies.apply_damage(target.id, points,
                                                 self._vehicle_id)
         killed = health is not None and health <= 0
-        crits = self._resolve_crits(target, landing, result)
+        _unused, payload = critical_damage.apply_direct(
+            target, landing.collisions, landing.segment_start,
+            landing.segment_end, points or 0,
+            damage.legacy_shot(shot)['shell'], self._vehicle_id,
+            penetrated=result == damage.PIERCED)
+        crits = [event.get('name') or event.get('kind')
+                 for event in (payload or {}).get('events') or ()]
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
         self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
         feedback.publish_dealt(self._avatar, target.id, points, len(crits),
@@ -947,6 +927,8 @@ class OfflineBattleRuntime(object):
             vehicle.onHealthChanged(health, previous, int(shooter_id), 0, 0)
             self._avatar.updateVehicleHealth(self._vehicle_id, health, 0,
                                              health > 0, False)
+            if health <= 0:
+                self._stop_player_hull()
         shooter_pose = (self._enemies.pose(shooter_id)
                         if self._enemies is not None else None)
         if shooter_pose is not None:

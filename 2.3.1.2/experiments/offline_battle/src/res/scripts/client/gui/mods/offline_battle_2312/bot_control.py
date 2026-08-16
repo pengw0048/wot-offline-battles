@@ -11,6 +11,7 @@ from __future__ import absolute_import
 
 import math
 
+from gui.mods.offline_battle_2312 import critical_damage
 from gui.mods.offline_battle_2312 import engine_shim
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312 import motion
@@ -330,9 +331,30 @@ class BotControl(object):
             state, command, state['neighbours'])
         if waiting:
             self._adapter.driver.wait_for_traffic(body.id)
+        self._advance_criticals(body, command, state['dt'])
         self._apply(body, command)
         body.last_decision = now
         body.next_decision = now + DECISION_SECONDS
+
+    def _advance_criticals(self, body, command, dt):
+        """The mature bot rule: broken running gear stops the command."""
+        import BigWorld
+        vehicle = BigWorld.entities.get(body.id)
+        if vehicle is None:
+            return
+        critical_damage.tick_repair(vehicle, dt)
+        burn, _unused = critical_damage.tick_fire(vehicle, dt,
+                                                  BigWorld.time())
+        if burn:
+            self._force.apply_damage(body.id, burn, 0)
+        if (getattr(vehicle, 'is_tracked', False) or
+                getattr(vehicle, 'is_engine_dead', False)):
+            command['throttle'] = 0.0
+            command['turn'] = 0.0
+        else:
+            command['throttle'] = (float(command.get('throttle', 0.0)) *
+                                   critical_damage.stat_factor(vehicle,
+                                                               'mobility'))
         if self._logged < 3:
             self._logged += 1
             self._log('bot_command id=%s throttle=%.2f turn=%.2f '

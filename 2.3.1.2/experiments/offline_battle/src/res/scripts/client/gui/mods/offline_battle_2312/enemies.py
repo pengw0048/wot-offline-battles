@@ -135,7 +135,9 @@ class EnemyForce(object):
                 (0.0, 0.0, facing), properties)
             self._ids.append(vehicle_id)
             self._health[vehicle_id] = max_health
-            self._poses[vehicle_id] = (x, ground, z, facing)
+            # The live matrix exists from the start, so the minimap and
+            # every other reader binds the matrix the bots will move.
+            self.set_pose(vehicle_id, (x, ground, z, facing))
             roster.append(entity_setup.roster_entry(
                 vehicle_id, comp_descr, max_health, name=name,
                 team=entity_setup.ENEMY_TEAM, session_id='enemy_%d' % index))
