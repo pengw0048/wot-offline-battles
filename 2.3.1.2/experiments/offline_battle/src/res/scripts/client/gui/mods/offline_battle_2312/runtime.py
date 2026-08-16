@@ -17,9 +17,11 @@ from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312 import native_probe
+from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
 from gui.mods.offline_battle_2312 import server_settings_setup
+from gui.mods.offline_battle_2312 import targeting
 from gui.mods.offline_battle_2312.avatar_server import AvatarServerBridge
 
 LOG_PREFIX = '[OFFLINE_2312_BATTLE]'
@@ -31,6 +33,7 @@ TERRAIN_ONLY_FLAGS = 8
 TERRAIN_RAY_HEIGHT = 1000.0
 VEHICLE_TYPE_NAME = 'ussr:R11_MS-1'
 MAILBOX_NAMES = ('base', 'cell', 'server')
+_POSE_NAMES = ('matrix', 'position', 'cameraTargetMatrix')
 
 
 class _BridgeState(object):
@@ -38,6 +41,7 @@ class _BridgeState(object):
     bridge = None
     sync_scope_vehicle = None
     physics = None
+    motion = None
 
 
 _state = _BridgeState()
@@ -73,6 +77,7 @@ class OfflineBattleRuntime(object):
         self._native_probe_at = 0.0
         self._native_step = None
         self._motion = None
+        self._gunnery = None
         self._spawn_yaw = 0.0
         self._world_patch = None
 
@@ -230,6 +235,16 @@ class OfflineBattleRuntime(object):
         def vehicle_getattribute(vehicle, name):
             if name == 'cell' and _state.active and _state.bridge is not None:
                 return _state.bridge
+            driver = _state.motion
+            if (driver is not None and driver.matrix is not None
+                    and name in _POSE_NAMES
+                    and original_vehicle_getattribute(vehicle, 'id') ==
+                    driver.vehicle_id):
+                # Offline this runtime owns the pose, so every stock reader
+                # of the entity transform has to see it.
+                if name == 'position':
+                    return driver.position
+                return driver.matrix
             value = original_vehicle_getattribute(vehicle, name)
             if name == 'filter' and _state.sync_scope_vehicle is vehicle:
                 return OfflineFilterProxy(value)
@@ -670,6 +685,26 @@ class OfflineBattleRuntime(object):
                   type(avatar.gunRotator).__name__, avatar.arena.period)
         self._battle_ready = True
         self._start_motion(vehicle)
+        self._start_combat(avatar, vehicle)
+
+    def _start_combat(self, avatar, vehicle):
+        """Publish the two things the cell owns: aim speeds and ammo.
+
+        Driving and the camera are already live here, so a fault in this
+        step reports itself instead of taking the battle down with it."""
+        import BigWorld
+        if self._gunnery is not None:
+            return
+        try:
+            targeting.publish(self._log, avatar, vehicle)
+            gunnery = Gunnery(vehicle, BigWorld.callback, self._log)
+            gunnery.publish()
+        except Exception as error:
+            self._log('combat_setup_failed error=%s detail=%s'
+                      % (type(error).__name__, repr(error)[:200]))
+            return
+        self._gunnery = gunnery
+        self._bridge.set_gunnery(gunnery)
 
     def _start_motion(self, vehicle):
         """Own the pose: the native body never simulates offline."""
@@ -678,6 +713,27 @@ class OfflineBattleRuntime(object):
         self._motion = MotionDriver(vehicle, vehicle.position,
                                     self._spawn_yaw, self._log)
         self._motion.start()
+        _state.motion = self._motion
+        self._bind_pose_sources(vehicle)
+
+    def _bind_pose_sources(self, vehicle):
+        """Point the stock camera and aim providers at the owned pose.
+
+        They were bound to the native entity matrix while it was still
+        the only transform; rerun the stock links now that the entity
+        reports this runtime's matrix."""
+        avatar = self._avatar
+        matrices = avatar.consistentMatrices
+        matrices._ConsistentMatrices__linkOwnVehicle(vehicle)
+        matrices._ConsistentMatrices__setTarget(vehicle.cameraTargetMatrix,
+                                                False)
+        stabilised = getattr(avatar, '_PlayerAvatar__ownVehicleStabMProv',
+                             None)
+        if stabilised is not None:
+            stabilised.target = vehicle.matrix
+        self._log('pose_sources_bound own=%s attached=%s',
+                  type(matrices.ownVehicleMatrix).__name__,
+                  type(matrices.attachedVehicleMatrix).__name__)
 
     def _probe_native(self, vehicle):
         if self._native_step is None:
@@ -748,6 +804,7 @@ class OfflineBattleRuntime(object):
         if self._motion is not None:
             self._motion.stop()
             self._motion = None
+            _state.motion = None
         avatar = BigWorld.player()
         if self._vehicle_id and avatar is not None:
             vehicle = BigWorld.entities.get(self._vehicle_id)

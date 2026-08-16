@@ -25,6 +25,10 @@ class AvatarServerBridge(object):
         self._auto_aim_target = 0
         self._shoot_requests = 0
         self._shoot_logged = False
+        self._gunnery = None
+
+    def set_gunnery(self, gunnery):
+        self._gunnery = gunnery
 
     @property
     def client_ready_received(self):
@@ -174,9 +178,11 @@ class AvatarServerBridge(object):
 
     def vehicle_shoot(self):
         self._shoot_requests += 1
-        if not self._shoot_logged:
+        if self._gunnery is not None:
+            self._gunnery.request_shot()
+        elif not self._shoot_logged:
             self._shoot_logged = True
-            self._log('bridge_shoot_requested authority=deferred')
+            self._log('bridge_shoot_requested authority=none')
 
     def vehicle_trackWorldPointWithGun(self, point):
         pass
@@ -188,7 +194,8 @@ class AvatarServerBridge(object):
         pass
 
     def vehicle_changeSetting(self, code, value):
-        pass
+        if self._gunnery is not None:
+            self._gunnery.change_setting(code, value)
 
     def setServerMarker(self, enable):
         pass

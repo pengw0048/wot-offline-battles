@@ -37,11 +37,16 @@ interfaces that 2.3.1.2 actually changed.
    completes, then publishes `ARENA_PERIOD.BATTLE` through
    `Avatar.updateArena`. The four init bits and `PLAYER_READY` are set only
    by stock code paths.
-7. Movement and aiming stay stock: `AvatarInputHandler.start()` binds the
-   arcade control mode, `PlayerAvatar.moveVehicle` feeds
-   `Vehicle.notifyInputKeysDown` (native `WGVehicleFilter` prediction) and
-   `cell.vehicle_moveWith(flags)` lands in the bridge.
-8. Exit: `game.fini` destroys the Vehicle entity, retires the avatar with
+7. Input stays stock: `AvatarInputHandler.start()` binds the arcade
+   control mode, `PlayerAvatar.moveVehicle` feeds
+   `Vehicle.notifyInputKeysDown` and `cell.vehicle_moveWith(flags)` lands
+   in the bridge. The runtime reads the direction from
+   `notifyInputKeysDown` and integrates the pose itself, because the
+   native body never simulates offline.
+8. The runtime also publishes what the cell owns: the targeting speeds
+   that start `VehicleGunRotator`, and the ammo that lets the client
+   shoot.
+9. Exit: `game.fini` destroys the Vehicle entity, retires the avatar with
    the stock `onBecomeNonPlayer`, then runs `OfflineMapCreator.destroy()`
    and removes every class patch and the account repository.
 
@@ -57,41 +62,43 @@ interfaces that 2.3.1.2 actually changed.
   spawn schemas (pure data, unit-tested).
 - `.../offline_battle_2312/account_setup.py` — real client-side account
   repository install/remove.
+- `.../offline_battle_2312/motion.py` — the 0.9.22 motion law, copied.
+- `.../offline_battle_2312/motion_driver.py` — owns the pose each tick and
+  publishes it to the model, the camera and the speedometer.
+- `.../offline_battle_2312/world_collision.py` — the 0.9.22 horizontal
+  collision law, copied.
+- `.../offline_battle_2312/targeting.py` — the targeting parameters the
+  cell normally sends, read from the vehicle descriptor.
+- `.../offline_battle_2312/gunnery.py` — ammo publication and the shot
+  answer the cell normally gives.
 
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.3.0.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.4.0.wotmod
 ```
 
-## Current state (validated on the 2.3.1.2 Windows client)
+## Current state
 
-Working: the battle starts from the offline map, one real Vehicle entity
-spawns on the Karelia CTF spawn with its real appearance, the stock
-BattleSessionProvider, AvatarInputHandler, ArcadeCamera, gun rotator and
-battle HUD all run, `is_on_arena` is true, the avatar reaches
-`init_progress=63`, exit teardown is clean and there is no crash.
+Validated on the 2.3.1.2 Windows client: the battle starts from the
+offline map, one real Vehicle entity spawns on the Karelia CTF spawn with
+its real appearance, the stock BattleSessionProvider, AvatarInputHandler,
+ArcadeCamera, gun rotator and battle HUD all run, `is_on_arena` is true,
+the avatar reaches `init_progress=63`, and exit teardown is clean.
 
-Not working: the vehicle does not move. Keyboard input is proven to reach
-`Vehicle.notifyInputKeysDown` with the right directions, but the native
-`WGTankPhysics` produces no pose samples: position and velocity stay
-exactly zero.
+Also validated in play: the tank drives with W/A/S/D, follows the terrain,
+the camera follows it and the speedometer reads the real speed.
 
-This is a known boundary, not a missing call. The mature 0.9.22 offline
-port reached the same conclusion on its client and records it in
-`battle_runtime.py`:
+Not yet validated in play: obstacle collision, hull roll, track
+animation, the moving aim circle, and shooting.
 
-> A remote #1513 Vehicle has no retail server stream, so treating its
-> WGVehiclePhysics as authoritative leaves movement inputs without pose
-> samples.
-
-That port therefore integrates vehicle motion itself (`vehicle_physics.py`
-plus terrain and collision probes) and owns the pose, using the native
-filter only for presentation. Driving in this port needs the same work:
-port the mature motion law, probe terrain with
-`BigWorld.wg_collideSegment`, and write the resulting pose each tick.
+The native body never simulates offline, so this port owns the pose. That
+matches the conclusion the mature 0.9.22 port reached on its own client,
+which also integrates vehicle motion itself and uses the native filter
+only for presentation. `motion.py` and `world_collision.py` are copies of
+that law.
 
 ## Native capability, measured on 2.3.1.2
 
@@ -130,12 +137,12 @@ entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 
-- Shooting has no projectile authority yet: `vehicle_shoot()` is accepted
-  and logged. Bots, damage and battle results are out of scope for this
-  slice.
+- Shooting plays the shot and spends a round, but there is no projectile
+  authority: nothing flies and nothing is hit. Bots, damage and battle
+  results are out of scope for this slice.
 - Only `spaces/01_karelia` has a proven spawn; other maps fall back to the
   stock spawn-point data.
-- The battle HUD may be partial: ammo/reload data normally arrives through
-  the server-attached `OwnVehicle` component, which does not exist offline.
+- The ammo bay is a full `gun.maxAmmo` load shared across the gun's shot
+  types, because there is no account loadout offline.
 - Everything above the static tests still requires acceptance on the real
   Windows client.
