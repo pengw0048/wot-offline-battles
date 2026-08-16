@@ -90,5 +90,42 @@ class FilterProxyScopeTests(unittest.TestCase):
         self.assertIn("if name == 'filter' and "
                       "_state.sync_scope_vehicle is vehicle:", source)
 
+
+class AttributeShadowTests(unittest.TestCase):
+    """An attribute must not take the name of a method on its class.
+
+    `self._contacts = 0` shadowed the `_contacts()` the rotation guard
+    called, which killed the motion tick with a TypeError only a real
+    battle could show.
+    """
+
+    def _classes(self):
+        package = (ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' /
+                   'mods' / 'offline_battle_2312')
+        for path in sorted(package.glob('*.py')):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    yield path.name, node
+
+    def test_no_attribute_shadows_a_method(self):
+        collisions = []
+        for module, node in self._classes():
+            methods = set()
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    methods.add(item.name)
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Assign):
+                    continue
+                for target in child.targets:
+                    if (isinstance(target, ast.Attribute) and
+                            isinstance(target.value, ast.Name) and
+                            target.value.id == 'self' and
+                            target.attr in methods):
+                        collisions.append('%s.%s.%s' % (module, node.name,
+                                                        target.attr))
+        self.assertEqual(collisions, [])
+
 if __name__ == '__main__':
     unittest.main()

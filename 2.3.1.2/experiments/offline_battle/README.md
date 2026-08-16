@@ -95,7 +95,7 @@ above: `motion.py`, `world_collision.py`, `suspension.py`,
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.8.3.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.8.4.wotmod
 ```
 
 ## Current state

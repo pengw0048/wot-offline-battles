@@ -49,7 +49,7 @@ class MotionDriver(object):
         self._obstacles = obstacles
         self._shape = tank_collision.chassis_shape(descriptor)
         self._stat_factors = {}
-        self._contacts = 0
+        self._pushes = 0
         self._turns = 0
         self._grind = 0
 
@@ -183,7 +183,7 @@ class MotionDriver(object):
         self._z += correction_z
         delta_x, delta_z = result['delta_velocity']
         self._speed += sin_yaw * delta_x + cos_yaw * delta_z
-        self._contacts += 1
+        self._pushes += 1
 
     def _hull_pose(self):
         """Four-point suspension: front, back and both track lines."""
@@ -227,9 +227,10 @@ class MotionDriver(object):
         self._callback_id = None
         if self._stopped:
             return
+        # Reschedule first: a fault in one tick must not end driving.
+        self._schedule()
         vehicle = BigWorld.entities.get(self._vehicle_id)
         if vehicle is None or not vehicle.isStarted:
-            self._schedule()
             return
 
         self._drive_pitch = suspension.smooth(
@@ -262,15 +263,14 @@ class MotionDriver(object):
             rotator = getattr(BigWorld.player(), 'gunRotator', None)
             self._log('motion_state pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f '
                       'pitch=%.3f roll=%.3f drive_pitch=%.3f input=(%s,%s) '
-                      'blocked=%s steps=%s turns=%s contacts=%s '
+                      'blocked=%s steps=%s turns=%s pushes=%s '
                       'turret=%s marker=%s'
                       % (self._x, self._y, self._z, self._yaw, self._speed,
                          self._pitch, self._roll, self._drive_pitch,
                          self._movement, self._rotation, self._blocks,
-                         self._steps, self._turns, self._contacts,
+                         self._steps, self._turns, self._pushes,
                          getattr(rotator, 'turretYaw', None),
                          getattr(rotator, 'markerInfo', (None,))[0]))
-        self._schedule()
 
     def _refresh_pose(self):
         import Math
