@@ -354,5 +354,22 @@ class NearestVehicleTests(unittest.TestCase):
                                                  None))
 
 
+class PartNameTests(unittest.TestCase):
+    def test_the_four_tank_part_indexes(self):
+        self.assertEqual([damage.part_name(index) for index in range(4)],
+                         ['chassis', 'hull', 'turret', 'gun'])
+
+    def test_a_track_pair_index_is_chassis_geometry(self):
+        self.assertEqual(damage.part_name(4), 'chassis')
+        self.assertEqual(damage.part_name(7), 'chassis')
+
+    def test_a_name_passes_through(self):
+        self.assertEqual(damage.part_name('turret'), 'turret')
+
+    def test_garbage_reports_none(self):
+        self.assertIsNone(damage.part_name(None))
+        self.assertIsNone(damage.part_name(-1))
+
+
 if __name__ == '__main__':
     unittest.main()

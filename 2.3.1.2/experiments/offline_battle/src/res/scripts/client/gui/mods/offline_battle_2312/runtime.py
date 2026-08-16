@@ -420,7 +420,38 @@ class OfflineBattleRuntime(object):
             (CompoundAppearance, refresh_name, original_models_refresh,
              request_models_refresh),
         ])
+        self._install_status_probe()
         self._log('late_patches_installed count=2')
+
+    def _install_status_probe(self):
+        """Name whoever feeds the always-on 0s status icon, with values."""
+        from gui.Scaleform.daapi.view.battle.shared import damage_panel
+        panel_cls = damage_panel.DamagePanel
+        original_stun = panel_cls._updateStun
+        original_debuff = panel_cls._updateDebuff
+        log = self._log
+        budget = {'left': 12}
+
+        def spy_stun(panel, stun_info):
+            if budget['left'] > 0:
+                budget['left'] -= 1
+                log('ui_stun info=%r' % (stun_info,))
+            return original_stun(panel, stun_info)
+
+        def spy_debuff(panel, debuff_info):
+            if budget['left'] > 0:
+                budget['left'] -= 1
+                log('ui_debuff duration=%r animated=%r'
+                    % (getattr(debuff_info, 'duration', None),
+                       getattr(debuff_info, 'animated', None)))
+            return original_debuff(panel, debuff_info)
+
+        panel_cls._updateStun = spy_stun
+        panel_cls._updateDebuff = spy_debuff
+        self._class_patches.extend([
+            (panel_cls, '_updateStun', original_stun, spy_stun),
+            (panel_cls, '_updateDebuff', original_debuff, spy_debuff),
+        ])
 
     def _restore_class_patches(self):
         _state.active = False

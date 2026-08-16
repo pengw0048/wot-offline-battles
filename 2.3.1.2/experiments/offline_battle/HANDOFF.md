@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.11.1.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.11.2.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.11.1.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.11.2.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.1.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.11.2.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -169,6 +169,30 @@ Known open, deliberately deferred: HE through a moving enemy exploding
 behind it. The whole flight is precomputed at fire time against the
 poses of that moment; the copied `projectile_manager` is the fix and is
 the next wiring step.
+
+## What 0.11.2 adds
+
+The 0.11.1 log answered three questions with hard evidence:
+
+- The turret provider carries our aim (`read_back`) but the node yaw
+  equals the hull yaw: nothing consumes the provider for a
+  client-created enemy, and `.localMatrix` does not exist on this
+  build's provider, so the assembly-manager binding is editor-only
+  machinery. The visible joints are now driven the way the stock
+  hangar SimpleTurretRotator does it:
+  `compoundModel.node(TankNodeNames.TURRET_JOINT).local = matrix`,
+  where the matrix carries the full joint transform (turret pitch and
+  position, rotation pre-multiplied). Same for the gun joint.
+- Enemy track hits never arrived: collision part identities past GUN
+  (track pairs, wheels) fold to `chassis` now. The old idler report is
+  most likely this same missing fold.
+- Downhill coasting keeps speed on a 13-degree slope by the copied
+  law's own design (`coast_step` shows it); braking with S needs its
+  own field test before touching any law.
+
+The always-on 0s status icon is instrumented: `_updateStun` and
+`_updateDebuff` on the damage panel log their payloads (`ui_stun`,
+`ui_debuff`), so the next log names the pusher and the values.
 
 ## What to check on the next run
 

@@ -189,13 +189,19 @@ PART_NAMES = ('chassis', 'hull', 'turret', 'gun')
 
 
 def part_name(comp_name):
-    """collideSegmentExt carries TankPartIndexes ints on this client."""
+    """collideSegmentExt carries TankPartIndexes ints on this client.
+
+    Collision parts past GUN are the track pairs and wheels, which is
+    chassis geometry: an idler hit arrives with one of those indices."""
     if isinstance(comp_name, str):
         return comp_name
     try:
-        return PART_NAMES[int(comp_name)]
-    except (IndexError, TypeError, ValueError):
+        index = int(comp_name)
+    except (TypeError, ValueError):
         return None
+    if index >= len(PART_NAMES):
+        return 'chassis'
+    return PART_NAMES[index] if index >= 0 else None
 
 
 def _named_parts(collisions):

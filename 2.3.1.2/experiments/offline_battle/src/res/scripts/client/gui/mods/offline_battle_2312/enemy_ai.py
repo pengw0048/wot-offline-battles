@@ -220,39 +220,52 @@ class EnemyAI(object):
             return
         state = self._aim_matrices.get(vehicle.id)
         if state is None:
-            state = (Math.Matrix(), Math.Matrix())
+            state = (Math.Matrix(), Math.Matrix(), Math.Matrix(),
+                     Math.Matrix())
             self._aim_matrices[vehicle.id] = state
-            self._bind_turret_nodes(vehicle.id, appearance)
+            self._bind_turret_nodes(vehicle.id, appearance, state[2],
+                                    state[3])
         # Rebind every tick: appearance activation points these providers
         # back at the filter, and it can finish after the first tick.
         appearance.turretMatrix.target = state[0]
         appearance.gunMatrix.target = state[1]
         state[0].setRotateY(turret_yaw)
+        gun_pitch = pitch - calcGunPitchCorrection(
+            turret_yaw, descriptor.hull.turretPitches[0],
+            descriptor.turret.gunJointPitch)
+        state[1].setRotateX(gun_pitch)
+        # The visible nodes, by the stock SimpleTurretRotator recipe:
+        # the full joint transform, rotation first.
+        turret_local = state[2]
+        turret_local.setRotateX(descriptor.hull.turretPitches[0])
+        turret_local.translation = descriptor.hull.turretPositions[0]
+        rotation = Math.Matrix()
+        rotation.setRotateY(turret_yaw)
+        turret_local.preMultiply(rotation)
+        gun_local = state[3]
+        gun_local.setRotateX(descriptor.turret.gunJointPitch + gun_pitch)
+        gun_local.translation = descriptor.turret.gunPosition
         if trace:
-            from vehicle_systems.tankStructure import TankPartNames
+            from vehicle_systems.tankStructure import TankNodeNames
             self._stage('turret_provider',
-                        ' id=%s turret=%s read_back=%.3f node_yaw=%.3f'
+                        ' id=%s read_back=%.3f node_yaw=%.3f'
                         % (vehicle.id,
-                           type(appearance.turretMatrix).__name__,
                            Math.Matrix(appearance.turretMatrix).yaw,
                            Math.Matrix(appearance.compoundModel.node(
-                               TankPartNames.TURRET)).yaw))
-        state[1].setRotateX(pitch - calcGunPitchCorrection(
-            turret_yaw, descriptor.hull.turretPitches[0],
-            descriptor.turret.gunJointPitch))
+                               TankNodeNames.TURRET_JOINT)).yaw))
 
-    def _bind_turret_nodes(self, vehicle_id, appearance):
-        """The stock TurretGunRotationAssembler binding, once per enemy.
+    def _bind_turret_nodes(self, vehicle_id, appearance, turret_local,
+                           gun_local):
+        """Drive the visible joints the way the stock hangar rotator does.
 
-        For the player the assembler runs and the turret follows the
-        providers; this repeats its two lines in case it never ran for a
-        client-created enemy."""
-        from vehicle_systems.tankStructure import TankPartNames
+        `node(...).local = matrix` is the binding SimpleTurretRotator
+        uses; the matrices carry the full joint transform and this AI
+        mutates them every tick."""
+        from vehicle_systems.tankStructure import TankNodeNames
         try:
             model = appearance.compoundModel
-            appearance.turretMatrix.localMatrix = model.node(
-                TankPartNames.TURRET)
-            appearance.gunMatrix.localMatrix = model.node(TankPartNames.GUN)
+            model.node(TankNodeNames.TURRET_JOINT).local = turret_local
+            model.node(TankNodeNames.GUN_JOINT).local = gun_local
             self._log('turret_nodes_bound id=%s' % (vehicle_id,))
         except Exception as error:
             self._log('turret_nodes_bind_failed id=%s error=%s'
