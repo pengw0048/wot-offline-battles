@@ -37,7 +37,7 @@ def _install_fakes(collide):
 
 
 def _stub_damage():
-    """projectiles.py imports its sibling by the client package path."""
+    """projectiles.py imports its siblings by the client package path."""
     package = 'gui.mods.offline_battle_2312'
     for name in ('gui', 'gui.mods', package):
         sys.modules.setdefault(name, types.ModuleType(name))
@@ -45,6 +45,13 @@ def _stub_damage():
     module.nearest_vehicle = lambda targets, start, end: None
     sys.modules[package + '.damage'] = module
     setattr(sys.modules[package], 'damage', module)
+    runtime_path = (MODS / 'offline_battle_2312' / 'projectile_runtime.py')
+    spec = importlib.util.spec_from_file_location(
+        package + '.projectile_runtime', runtime_path)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    sys.modules[package + '.projectile_runtime'] = runtime
+    setattr(sys.modules[package], 'projectile_runtime', runtime)
     return module
 
 

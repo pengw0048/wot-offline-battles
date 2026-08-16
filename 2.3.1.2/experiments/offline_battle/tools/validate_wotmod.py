@@ -9,7 +9,7 @@ import zipfile
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 MOD_ID = 'org.peng.offline_2312_battle'
-MOD_VERSION = '0.7.3'
+MOD_VERSION = '0.8.0'
 ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_battle.pyc'
 PACKAGE_ROOT = 'res/scripts/client/gui/mods/offline_battle_2312/'
 EXPECTED_PYC = {
@@ -29,6 +29,12 @@ EXPECTED_PYC = {
     PACKAGE_ROOT + 'motion_driver.pyc',
     PACKAGE_ROOT + 'native_probe.pyc',
     PACKAGE_ROOT + 'projectiles.pyc',
+    PACKAGE_ROOT + 'ballistics.pyc',
+    PACKAGE_ROOT + 'device_damage.pyc',
+    PACKAGE_ROOT + 'gun_mechanics.pyc',
+    PACKAGE_ROOT + 'projectile_runtime.pyc',
+    PACKAGE_ROOT + 'spotting.pyc',
+    PACKAGE_ROOT + 'tank_collision.pyc',
     PACKAGE_ROOT + 'runtime.pyc',
     PACKAGE_ROOT + 'server_settings_setup.pyc',
     PACKAGE_ROOT + 'suspension.pyc',

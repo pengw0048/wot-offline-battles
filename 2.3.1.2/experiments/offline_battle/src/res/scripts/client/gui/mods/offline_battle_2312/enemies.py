@@ -9,6 +9,7 @@ from __future__ import absolute_import
 import math
 
 from gui.mods.offline_battle_2312 import entity_setup, suspension
+from gui.mods.offline_battle_2312 import tank_collision
 
 ENEMY_TYPE_NAME = 'ussr:R11_MS-1'
 ENEMY_COUNT = 3
@@ -61,6 +62,26 @@ class EnemyForce(object):
     def pose(self, vehicle_id):
         """(x, y, z, yaw) where this enemy was placed; it does not move."""
         return self._poses.get(vehicle_id)
+
+    def bodies(self):
+        """Plain-data hulls for the copied tank-against-tank law."""
+        import BigWorld
+        result = []
+        for vehicle_id in self._ids:
+            pose = self._poses.get(vehicle_id)
+            vehicle = BigWorld.entities.get(vehicle_id)
+            if pose is None or vehicle is None:
+                continue
+            descriptor = vehicle.typeDescriptor
+            result.append({
+                'id': vehicle_id,
+                'x': pose[0], 'y': pose[1], 'z': pose[2], 'yaw': pose[3],
+                'mass': float(descriptor.physics['weight']),
+                'vx': 0.0, 'vz': 0.0,
+                'alive': self._health.get(vehicle_id, 0) > 0,
+                'shape': tank_collision.chassis_shape(descriptor),
+            })
+        return result
 
     def spawn(self, origin, yaw):
         import BigWorld

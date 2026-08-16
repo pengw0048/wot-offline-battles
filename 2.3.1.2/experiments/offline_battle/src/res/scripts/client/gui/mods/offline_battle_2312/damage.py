@@ -6,7 +6,10 @@ port. This module only feeds it the 2.3.1.2 inputs: the collision layers
 """
 from __future__ import absolute_import
 
+import random
+
 from gui.mods.offline_battle_2312 import combat_rules
+from gui.mods.offline_battle_2312 import device_damage
 
 RICOCHET = 0
 NOT_PIERCED = 1
@@ -17,7 +20,13 @@ HIT_VEHICLE_KILLED = 1
 HIT_RICOCHET = 8
 HIT_PIERCED = 16
 HIT_NOT_PIERCED = 32
+HIT_DEVICE_DAMAGED = 1024
+HIT_CHASSIS_DAMAGED = 2048
+HIT_GUN_DAMAGED = 4096
 HIT_DIRECT_PROJECTILE = 1048576
+
+CHASSIS_DEVICES = ('leftTrackHealth', 'rightTrackHealth')
+GUN_DEVICES = ('gunHealth', 'turretRotatorHealth')
 
 
 class ShotResult(object):
@@ -61,11 +70,45 @@ def legacy_shot(shot):
                     else kind,
             'caliber': shell.caliber,
             'damage': shell.armorDamage,
+            'deviceDamage': shell.deviceDamage,
             'explosionRadius': getattr(shell.type, 'explosionRadius', 0.0),
         },
         'piercingPower': shot.piercingPower,
         'maxDistance': shot.maxDistance,
     }
+
+
+def module_hits(collisions, random_uniform=None):
+    """Devices this shell crits, by the copied saving throws.
+
+    A crit-only material carries the device it protects in `extra`, and
+    the material itself carries the chance the device is actually hit."""
+    sampler = random.uniform if random_uniform is None else random_uniform
+    names = []
+    for collision in collisions or ():
+        material = collision.matInfo
+        if material is None:
+            continue
+        extra = getattr(material, 'extra', None)
+        name = getattr(extra, 'name', None)
+        if not name or name in names:
+            continue
+        if sampler(0.0, 1.0) < device_damage.saving_throw(material, name):
+            names.append(name)
+    return names
+
+
+def crit_flags(names):
+    """Report a crit the way the cell reports one, by device group."""
+    flags = 0
+    for name in names or ():
+        if name in CHASSIS_DEVICES:
+            flags |= HIT_CHASSIS_DAMAGED
+        elif name in GUN_DEVICES:
+            flags |= HIT_GUN_DAMAGED
+        else:
+            flags |= HIT_DEVICE_DAMAGED
+    return flags
 
 
 def nearest_vehicle(vehicles, start, end):

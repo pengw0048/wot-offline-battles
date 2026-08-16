@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.7.3.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.8.0.wotmod`,
 built and validated, **not deployed**: the VM was off.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated, **not deployed**: the VM was off.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.7.3.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.8.0.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_0.7.1.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.7.3.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.8.0.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -20,7 +20,7 @@ Then launch from the client root:
 win64\WorldOfTanks.exe --script-arg offlineBattle --script-arg offline --script-arg spaces/01_karelia
 ```
 
-## What 0.7.2 and 0.7.3 fix
+## What 0.7.2 and 0.8.0 fix
 
 Both fixes come from one root cause found in the 0.7.1 log.
 
@@ -36,7 +36,7 @@ which is exactly where the log stops.
 - 0.7.2 puts the filter proxy back in front of every vehicle, and
   animates enemy turrets through the appearance turret and gun matrix
   providers instead, the way the 0.9.22 port animates a remote turret.
-- 0.7.3 removes the last unscoped caller:
+- 0.8.0 removes the last unscoped caller:
   `CompoundAppearance.__onModelsRefresh`, the destroyed-model load.
   That is why both deaths ended the client. A destroyed vehicle now
   keeps its intact model.

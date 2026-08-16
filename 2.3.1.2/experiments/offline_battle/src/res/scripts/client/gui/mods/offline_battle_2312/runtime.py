@@ -15,6 +15,7 @@ import zlib
 
 from gui.mods.offline_battle_2312 import account_setup
 from gui.mods.offline_battle_2312 import damage
+from gui.mods.offline_battle_2312 import device_damage
 from gui.mods.offline_battle_2312 import diagnostics
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312.enemies import EnemyForce
@@ -83,6 +84,8 @@ class OfflineBattleRuntime(object):
         self._gunnery = None
         self._enemies = None
         self._enemy_ai = None
+        self._devices = {}
+        self._devices_destroyed = []
         self._spawn_yaw = 0.0
         self._world_patch = None
 
@@ -750,6 +753,38 @@ class OfflineBattleRuntime(object):
         self._gunnery = gunnery
         self._bridge.set_gunnery(gunnery)
 
+    def _enemy_bodies(self):
+        return self._enemies.bodies() if self._enemies is not None else ()
+
+    def _apply_module_hits(self, vehicle, shot, collisions):
+        """Roll the copied saving throws and keep the player's device state."""
+        names = damage.module_hits(collisions)
+        if not names:
+            return names
+        descriptor = vehicle.typeDescriptor
+        rolled = device_damage.module_damage_roll(
+            damage.legacy_shot(shot)['shell'])
+        for name in names:
+            if device_damage.has_hp_pool(descriptor, name) and rolled:
+                remaining = self._devices.get(
+                    name, device_damage.device_max_hp(descriptor, name) or 0.0)
+                remaining = max(0.0, remaining - rolled)
+                self._devices[name] = remaining
+                if remaining > 0.0:
+                    continue
+            if name not in self._devices_destroyed:
+                self._devices_destroyed.append(name)
+        if self._motion is not None:
+            self._motion.set_stat_factors({
+                'mobility': device_damage.module_stat_factor(
+                    self._devices, self._devices_destroyed, descriptor,
+                    'mobility'),
+                'traverse': device_damage.module_stat_factor(
+                    self._devices, self._devices_destroyed, descriptor,
+                    'traverse'),
+            })
+        return names
+
     def _on_vehicle_hit(self, landing, shot):
         """Resolve the shell against the vehicle it reached."""
         target = landing.vehicle
@@ -760,11 +795,13 @@ class OfflineBattleRuntime(object):
             health = self._enemies.apply_damage(target.id, points,
                                                 self._vehicle_id)
         killed = health is not None and health <= 0
-        self._avatar.showShotResults([damage.ShotResult(
-            target.id, damage.hit_flags(result, killed))])
+        crits = (damage.module_hits(landing.collisions)
+                 if result == damage.PIERCED else [])
+        flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
+        self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
         self._log('shell_hit target=%s distance=%.1f result=%s damage=%s '
-                  'health=%s' % (target.id, landing.travelled, result, points,
-                                 health))
+                  'health=%s crits=%s' % (target.id, landing.travelled, result,
+                                          points, health, crits))
 
     def _on_player_hit(self, landing, shot, shooter_id):
         """Publish the damage an enemy shell does to the player."""
@@ -776,6 +813,8 @@ class OfflineBattleRuntime(object):
                                         landing.collisions)
         previous = int(vehicle.health)
         health = previous
+        crits = (self._apply_module_hits(vehicle, shot, landing.collisions)
+                 if result == damage.PIERCED else [])
         if result is not None and points:
             health = max(0, previous - int(points))
             vehicle.health = health
@@ -783,15 +822,16 @@ class OfflineBattleRuntime(object):
             self._avatar.updateVehicleHealth(self._vehicle_id, health, 0,
                                              health > 0, False)
         self._log('player_hit shooter=%s distance=%.1f result=%s damage=%s '
-                  'health=%s' % (shooter_id, landing.travelled, result,
-                                 points, health))
+                  'health=%s crits=%s' % (shooter_id, landing.travelled,
+                                          result, points, health, crits))
 
     def _start_motion(self, vehicle):
         """Own the pose: the native body never simulates offline."""
         if self._motion is not None:
             return
         self._motion = MotionDriver(vehicle, vehicle.position,
-                                    self._spawn_yaw, self._log)
+                                    self._spawn_yaw, self._log,
+                                    obstacles=self._enemy_bodies)
         self._motion.start()
         _state.motion = self._motion
         self._bind_pose_sources(vehicle)

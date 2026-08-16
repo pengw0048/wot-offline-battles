@@ -9,14 +9,15 @@ from __future__ import absolute_import
 
 import math
 
-from gui.mods.offline_battle_2312 import motion, suspension, world_collision
+from gui.mods.offline_battle_2312 import motion, suspension
+from gui.mods.offline_battle_2312 import tank_collision, world_collision
 
 TICK_SECONDS = 0.02
 
 
 class MotionDriver(object):
 
-    def __init__(self, vehicle, position, yaw, log):
+    def __init__(self, vehicle, position, yaw, log, obstacles=None):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
         descriptor = vehicle.typeDescriptor
@@ -45,6 +46,10 @@ class MotionDriver(object):
         self._drive_history = []
         self._blocks = 0
         self._steps = 0
+        self._obstacles = obstacles
+        self._shape = tank_collision.chassis_shape(descriptor)
+        self._stat_factors = {}
+        self._contacts = 0
         self._turns = 0
         self._grind = 0
 
@@ -151,6 +156,35 @@ class MotionDriver(object):
             self._speed = 0.0
         self._grind = 4
 
+    def set_stat_factors(self, factors):
+        """Module damage reaches the drive law as stat multipliers."""
+        self._stat_factors = dict(factors or {})
+
+    def _resolve_hulls(self):
+        """Copied tank-against-tank separation, so hulls are not ghosts."""
+        if self._obstacles is None:
+            return
+        others = self._obstacles()
+        if not others:
+            return
+        sin_yaw, cos_yaw = math.sin(self._yaw), math.cos(self._yaw)
+        tank = {
+            'id': self._vehicle_id,
+            'x': self._x, 'y': self._y, 'z': self._z, 'yaw': self._yaw,
+            'mass': float(self._params['mass']),
+            'vx': sin_yaw * self._speed, 'vz': cos_yaw * self._speed,
+            'alive': True, 'shape': self._shape,
+        }
+        result = tank_collision.resolve_tank(tank, others)
+        correction_x, correction_z = result['correction']
+        if not correction_x and not correction_z:
+            return
+        self._x += correction_x
+        self._z += correction_z
+        delta_x, delta_z = result['delta_velocity']
+        self._speed += sin_yaw * delta_x + cos_yaw * delta_z
+        self._contacts += 1
+
     def _hull_pose(self):
         """Four-point suspension: front, back and both track lines."""
         sin_yaw, cos_yaw = math.sin(self._yaw), math.cos(self._yaw)
@@ -212,10 +246,13 @@ class MotionDriver(object):
         self._speed = motion.longitudinal_step(
             self._params, self._speed, self._movement, steering,
             self._drive_pitch, TICK_SECONDS)
+        self._speed *= self._stat_factors.get('mobility', 1.0)
+        self._omega *= self._stat_factors.get('traverse', 1.0)
 
         self._rotate()
         start_x, start_z = self._x, self._z
         self._translate()
+        self._resolve_hulls()
         self._settle(start_x, start_z)
         self._hull_pose()
 
@@ -225,11 +262,12 @@ class MotionDriver(object):
             rotator = getattr(BigWorld.player(), 'gunRotator', None)
             self._log('motion_state pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f '
                       'pitch=%.3f roll=%.3f drive_pitch=%.3f input=(%s,%s) '
-                      'blocked=%s steps=%s turns=%s turret=%s marker=%s'
+                      'blocked=%s steps=%s turns=%s contacts=%s '
+                      'turret=%s marker=%s'
                       % (self._x, self._y, self._z, self._yaw, self._speed,
                          self._pitch, self._roll, self._drive_pitch,
                          self._movement, self._rotation, self._blocks,
-                         self._steps, self._turns,
+                         self._steps, self._turns, self._contacts,
                          getattr(rotator, 'turretYaw', None),
                          getattr(rotator, 'markerInfo', (None,))[0]))
         self._schedule()

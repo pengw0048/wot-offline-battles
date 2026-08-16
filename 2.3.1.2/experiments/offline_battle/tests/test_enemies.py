@@ -1,30 +1,17 @@
-import importlib.util
 import math
-import sys
-import types
 import unittest
+
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-MODS = ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' / 'mods'
-PACKAGE = MODS / 'offline_battle_2312'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import package_stub
 
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-entity_setup = _load('offline_battle_entity_setup',
-                     PACKAGE / 'entity_setup.py')
-for _name in ('gui', 'gui.mods', 'gui.mods.offline_battle_2312'):
-    sys.modules.setdefault(_name, types.ModuleType(_name))
-sys.modules['gui.mods.offline_battle_2312.entity_setup'] = entity_setup
-sys.modules['gui.mods.offline_battle_2312.suspension'] = types.ModuleType(
-    'gui.mods.offline_battle_2312.suspension')
-enemies = _load('offline_battle_enemies', PACKAGE / 'enemies.py')
+entity_setup = package_stub.load('entity_setup')
+package_stub.stub('suspension')
+package_stub.load('tank_collision')
+enemies = package_stub.load('enemies')
 
 
 class FormationTests(unittest.TestCase):

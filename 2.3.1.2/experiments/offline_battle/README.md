@@ -84,12 +84,18 @@ interfaces that 2.3.1.2 actually changed.
 - `.../offline_battle_2312/enemy_ai.py` — enemy turret aim and return
   fire.
 
+Law copied from the 0.9.22 port, unchanged, reached through the adapters
+above: `motion.py`, `world_collision.py`, `suspension.py`,
+`combat_rules.py`, `tank_collision.py`, `device_damage.py`,
+`ballistics.py`, `projectile_runtime.py`, `spotting.py`,
+`gun_mechanics.py`.
+
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.7.3.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.8.0.wotmod
 ```
 
 ## Current state
@@ -186,8 +192,12 @@ entity pose overlay, using the native filter only for presentation.
 - Enemy vehicles stand still. They aim and shoot, but they do not drive
   and they do not miss on purpose. Battle results are out of scope for
   this slice.
-- Damage covers direct hits only: no fire, no module or crew damage, no
-  ramming, and no HE splash beyond the direct-hit law.
+- Damage covers direct hits and module crits. No fire, no crew injury
+  effects, no ramming damage, and no HE splash beyond the direct-hit
+  law.
+- `spotting.py` and `gun_mechanics.py` are copied but not wired: nothing
+  is hidden by view range yet, and dispersion still comes from the stock
+  gun rotator.
 - A destroyed vehicle keeps its intact model. The destroyed model arrives
   through CompoundAppearance.__onModelsRefresh, which calls
   filter.syncGunAngles directly, and a client-only vehicle faults on that

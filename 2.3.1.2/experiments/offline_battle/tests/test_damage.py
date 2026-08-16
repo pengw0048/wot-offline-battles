@@ -1,28 +1,15 @@
-import importlib.util
 import math
-import sys
-import types
 import unittest
+
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-MODS = ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' / 'mods'
-PACKAGE = MODS / 'offline_battle_2312'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import package_stub
 
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-combat_rules = _load('offline_battle_combat_rules',
-                     PACKAGE / 'combat_rules.py')
-for _name in ('gui', 'gui.mods', 'gui.mods.offline_battle_2312'):
-    sys.modules.setdefault(_name, types.ModuleType(_name))
-sys.modules['gui.mods.offline_battle_2312.combat_rules'] = combat_rules
-damage = _load('offline_battle_damage', PACKAGE / 'damage.py')
+combat_rules = package_stub.load('combat_rules')
+damage = package_stub.load('damage')
 
 
 class _MatInfo(object):
@@ -52,6 +39,7 @@ class _Shell(object):
         self.type = _ShellType(kind)
         self.caliber = 45
         self.armorDamage = (50.0, 40.0)
+        self.deviceDamage = (25.0, 20.0)
 
     @property
     def kind(self):
@@ -162,6 +150,61 @@ class HitFlagTests(unittest.TestCase):
     def test_a_ricochet_is_reported(self):
         self.assertTrue(damage.hit_flags(damage.RICOCHET, False) &
                         damage.HIT_RICOCHET)
+
+
+class _Extra(object):
+    def __init__(self, name):
+        self.name = name
+
+
+class _DeviceMat(object):
+    def __init__(self, name, chance=1.0):
+        self.armor = 20.0
+        self.vehicleDamageFactor = 0.0
+        self.extra = _Extra(name)
+        self.chanceToHitByProjectile = chance
+
+
+class ModuleHitTests(unittest.TestCase):
+    def test_a_device_material_can_be_critted(self):
+        collisions = [_Collision(1.0, 1.0, _DeviceMat('engineHealth'))]
+        self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.5),
+                         ['engineHealth'])
+
+    def test_a_failed_saving_throw_leaves_the_device_alone(self):
+        collisions = [_Collision(1.0, 1.0, _DeviceMat('engineHealth', 0.2))]
+        self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.5), [])
+
+    def test_plain_armour_carries_no_device(self):
+        collisions = [_Collision(1.0, 1.0, _MatInfo(20.0))]
+        self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.0), [])
+
+    def test_one_device_is_reported_once(self):
+        collisions = [_Collision(1.0, 1.0, _DeviceMat('ammoBayHealth')),
+                      _Collision(2.0, 1.0, _DeviceMat('ammoBayHealth'))]
+        self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.0),
+                         ['ammoBayHealth'])
+
+    def test_a_missing_material_is_skipped(self):
+        collisions = [_Collision(1.0, 1.0, None)]
+        self.assertEqual(damage.module_hits(collisions, lambda a, b: 0.0), [])
+
+
+class CritFlagTests(unittest.TestCase):
+    def test_a_track_reports_a_chassis_crit(self):
+        self.assertTrue(damage.crit_flags(['leftTrackHealth']) &
+                        damage.HIT_CHASSIS_DAMAGED)
+
+    def test_a_gun_reports_a_gun_crit(self):
+        self.assertTrue(damage.crit_flags(['gunHealth']) &
+                        damage.HIT_GUN_DAMAGED)
+
+    def test_anything_else_reports_a_device_crit(self):
+        self.assertTrue(damage.crit_flags(['engineHealth']) &
+                        damage.HIT_DEVICE_DAMAGED)
+
+    def test_no_crit_reports_nothing(self):
+        self.assertEqual(damage.crit_flags([]), 0)
 
 
 class _Target(object):

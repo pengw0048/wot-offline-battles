@@ -11,6 +11,7 @@ from __future__ import absolute_import
 import math
 
 from gui.mods.offline_battle_2312 import damage
+from gui.mods.offline_battle_2312 import projectile_runtime
 
 COLLISION_MASK = 128
 MAX_FLIGHT_SECONDS = 20.0
@@ -19,11 +20,12 @@ DEFAULT_GRAVITY = 9.81
 
 
 def trajectory_position(start, velocity, gravity, elapsed):
-    """One absolute point on the shell parabola."""
-    time = max(0.0, float(elapsed))
-    return (start[0] + velocity[0] * time,
-            start[1] + velocity[1] * time - 0.5 * gravity * time * time,
-            start[2] + velocity[2] * time)
+    """One absolute point on the shell parabola.
+
+    The client hands gravity as a downward scalar; the copied law takes
+    a vector."""
+    return projectile_runtime.trajectory_position(
+        start, velocity, (0.0, -abs(float(gravity)), 0.0), elapsed)
 
 
 def flight_seconds(velocity, gravity, max_distance):
