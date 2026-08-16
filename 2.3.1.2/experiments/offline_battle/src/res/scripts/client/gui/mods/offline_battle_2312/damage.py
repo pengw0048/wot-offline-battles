@@ -12,6 +12,7 @@ import random
 from gui.mods.offline_battle_2312 import combat_rules
 from gui.mods.offline_battle_2312 import device_damage
 from gui.mods.offline_battle_2312 import tank_collision
+from gui.mods.offline_battle_2312 import vehicle_collision
 
 RICOCHET = 0
 NOT_PIERCED = 1
@@ -118,6 +119,8 @@ def law_devices(names):
 
 TURRET_PART_INDEX = 2
 GUN_PART_INDEX = 3
+TURRET_PART_NAMES = ('turret', 'gun')
+CHASSIS_PART_NAMES = ('chassis',)
 
 
 def hull_local_point(pose, point):
@@ -136,7 +139,8 @@ def interior_hit(descriptor, part_index, local_point, random_roll=None):
     The client's collision layers carry no device on this vehicle, so
     the copied interior model decides, from the compartment the shell
     entered and the crew this tank actually has."""
-    if part_index in (TURRET_PART_INDEX, GUN_PART_INDEX):
+    if (part_index in (TURRET_PART_INDEX, GUN_PART_INDEX) or
+            part_index in TURRET_PART_NAMES):
         zone = 'turret'
     else:
         try:
@@ -157,6 +161,18 @@ def interior_hit(descriptor, part_index, local_point, random_roll=None):
     return device_damage.pick_interior(candidates, random_roll), zone
 
 
+def track_hit(collisions):
+    """True when the shell crossed the running gear.
+
+    The chassis carries the tracks, the wheels and the idlers. Crossing
+    it is the hit that breaks a track, whether or not the shell carries
+    on into the hull behind it."""
+    for collision in collisions or ():
+        if getattr(collision, 'compName', None) in CHASSIS_PART_NAMES:
+            return True
+    return False
+
+
 def crit_flags(names):
     """Report a crit the way the cell reports one, by device group."""
     flags = 0
@@ -170,52 +186,35 @@ def crit_flags(names):
     return flags
 
 
-def running_gear_reach(vehicle, pose, start, end):
-    """Distance along the chord at which it crosses the running gear.
-
-    The client's collision layers never include the chassis, so a shell
-    aimed at a track or an idler reports nothing at all and flies on.
-    The chassis box comes from the vehicle's own hit tester."""
-    shape = tank_collision.chassis_shape(vehicle.typeDescriptor)
-    half_width, half_length = shape[0], shape[1]
-    lower = pose[1] + shape[2]
-    upper = pose[1] + shape[3]
-    sin_yaw, cos_yaw = math.sin(pose[3]), math.cos(pose[3])
-    steps = 12
-    for index in range(steps + 1):
-        fraction = index / float(steps)
-        x = start.x + (end.x - start.x) * fraction
-        y = start.y + (end.y - start.y) * fraction
-        z = start.z + (end.z - start.z) * fraction
-        if not lower <= y <= upper:
-            continue
-        delta_x, delta_z = x - pose[0], z - pose[2]
-        local_x = delta_x * cos_yaw - delta_z * sin_yaw
-        local_z = delta_x * sin_yaw + delta_z * cos_yaw
-        if abs(local_x) <= half_width and abs(local_z) <= half_length:
-            return math.sqrt((x - start.x) ** 2 + (y - start.y) ** 2 +
-                             (z - start.z) ** 2)
-    return None
+def vehicle_matrix(pose):
+    """The visible pose as a matrix the collision routine can invert."""
+    import Math
+    matrix = Math.Matrix()
+    matrix.setRotateY(float(pose[3]))
+    matrix.translation = Math.Vector3(float(pose[0]), float(pose[1]),
+                                      float(pose[2]))
+    return matrix
 
 
 def nearest_vehicle(vehicles, start, end, poses=None):
     """(vehicle, distance along the chord, collisions) for the first hit.
 
-    An empty collision list means the shell reached the running gear and
-    nothing else, which is the track hit the armour layers never show."""
+    The layers come from each descriptor component's own hit tester, so
+    the chassis is included and a shell through a track or an idler is
+    the hit it should be."""
     best = None
     for vehicle in vehicles:
-        collisions = vehicle.collideSegmentExt(start, end)
-        distance = None
-        if collisions:
-            distance = min(float(collision.dist) for collision in collisions)
-        elif poses is not None:
+        collisions = None
+        if poses is not None:
             pose = poses(vehicle.id)
             if pose is not None:
-                distance = running_gear_reach(vehicle, pose, start, end)
-                collisions = []
-        if distance is None:
+                collisions = vehicle_collision.collide_at_matrix(
+                    vehicle, vehicle_matrix(pose), start, end)
+        if collisions is None:
+            collisions = vehicle.collideSegmentExt(start, end)
+        if not collisions:
             continue
+        distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
             best = (vehicle, distance, collisions)
     return best

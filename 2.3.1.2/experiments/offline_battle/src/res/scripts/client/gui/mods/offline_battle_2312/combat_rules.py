@@ -1,10 +1,11 @@
-"""Armour and HE laws, taken from the 0.9.22 port.
+"""Armour and damage law, taken from the 0.9.22 port.
 
-The law is unchanged. Only the input adapter is version-local: 2.3.1.2
-hands the same GunShot objects and SegmentCollisionResultExt tuples the
-0.9.22 adapter already accepts.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
 """
 from __future__ import absolute_import
+from __future__ import print_function
+"""Exact 0.8.2 armour/HE laws behind a thin 2.3.1.2 input adapter."""
 
 import random
 

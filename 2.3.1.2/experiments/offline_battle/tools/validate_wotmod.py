@@ -9,39 +9,25 @@ import zipfile
 
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 MOD_ID = 'org.peng.offline_2312_battle'
-MOD_VERSION = '0.9.4'
+MOD_VERSION = '0.9.5'
 ENTRY = 'res/scripts/client/gui/mods/mod_offline_2312_battle.pyc'
 PACKAGE_ROOT = 'res/scripts/client/gui/mods/offline_battle_2312/'
-EXPECTED_PYC = {
-    ENTRY,
-    PACKAGE_ROOT + '__init__.pyc',
-    PACKAGE_ROOT + 'account_setup.pyc',
-    PACKAGE_ROOT + 'avatar_server.pyc',
-    PACKAGE_ROOT + 'combat_rules.pyc',
-    PACKAGE_ROOT + 'damage.pyc',
-    PACKAGE_ROOT + 'diagnostics.pyc',
-    PACKAGE_ROOT + 'enemies.pyc',
-    PACKAGE_ROOT + 'enemy_ai.pyc',
-    PACKAGE_ROOT + 'entity_setup.pyc',
-    PACKAGE_ROOT + 'feedback.pyc',
-    PACKAGE_ROOT + 'filter_proxy.pyc',
-    PACKAGE_ROOT + 'gunnery.pyc',
-    PACKAGE_ROOT + 'motion.pyc',
-    PACKAGE_ROOT + 'motion_driver.pyc',
-    PACKAGE_ROOT + 'native_probe.pyc',
-    PACKAGE_ROOT + 'projectiles.pyc',
-    PACKAGE_ROOT + 'ballistics.pyc',
-    PACKAGE_ROOT + 'device_damage.pyc',
-    PACKAGE_ROOT + 'gun_mechanics.pyc',
-    PACKAGE_ROOT + 'projectile_runtime.pyc',
-    PACKAGE_ROOT + 'spotting.pyc',
-    PACKAGE_ROOT + 'tank_collision.pyc',
-    PACKAGE_ROOT + 'runtime.pyc',
-    PACKAGE_ROOT + 'server_settings_setup.pyc',
-    PACKAGE_ROOT + 'suspension.pyc',
-    PACKAGE_ROOT + 'targeting.pyc',
-    PACKAGE_ROOT + 'world_collision.pyc',
-}
+def _expected_pyc():
+    """Every package source, as the compiled name the archive must carry.
+
+    Derived from the tree rather than listed by hand: the port copies
+    whole modules from 0.9.22, and a hand-kept list goes stale on every
+    copy."""
+    root = Path(__file__).resolve().parents[1] / 'src' / 'res'
+    names = {ENTRY}
+    package = root / 'scripts/client/gui/mods/offline_battle_2312'
+    for path in package.rglob('*.py'):
+        relative = path.relative_to(root).as_posix()
+        names.add('res/' + relative[:-3] + '.pyc')
+    return names
+
+
+EXPECTED_PYC = _expected_pyc()
 
 
 def validate(path):

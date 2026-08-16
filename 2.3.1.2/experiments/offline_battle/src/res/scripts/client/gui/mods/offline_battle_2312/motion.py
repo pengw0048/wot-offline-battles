@@ -1,18 +1,35 @@
-"""Vehicle motion law, copied from the mature 0.9.22 offline port.
+"""Vehicle motion law, taken from the 0.9.22 port.
 
-The native WGTankPhysics never simulates for a client-created Vehicle on
-2.3.1.2: the body is not attached to a physics world, so movement signals
-and track contacts stay at zero. Motion therefore has to be owned here.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
 
-Every formula and constant below is the mature port's
-`vehicle_physics.py`, unchanged apart from indentation. Parameters come
-from the real 2.3.1.2 vehicle descriptor, whose `physics` dict and
-`chassis.rotationSpeed` carry the same fields and units.
+Contract, from the original module:
+Uniform vehicle-physics laws for the offhangar mod (WoT 0.8.2 faithful).
+
+ONE set of formulas, applied identically to the player and every bot. All
+inputs come from the REAL vehicle descriptor (td.physics, built by
+items/vehicles.pyc from the item_defs XML):
+
+  weight            kg
+  enginePower       W        (engine XML 'power' - reader converts)
+  speedLimits       (fwd m/s, bwd m/s)
+  terrainResistance (firm, medium, soft) multipliers
+  specificFriction  mu*g in m/s^2 (chassis XML 0.07 x 9.81 = 0.6867 default)
+  brakeForce        N when the target reader supplies it.  Exact 2.3.1.2 leaves
+                       this legacy descriptor field at zero; braking therefore
+                       falls back to the shared track-grip limit.
+  trackCenterOffset half track gauge in m (chassis topRightCarryingPoint.x)
+  rotationSpeed     chassis, rad/s (reader applies radians())
+
+This module must stay importable with nothing but the stdlib: it sits right
+above paths.py at the bottom of the offhangar import graph.
 """
 from __future__ import absolute_import
-
 import math
 
+# ---- Wargaming's own tuning, extracted from scripts/common/physics_shared.pyc
+# (the module THIS client ships; it parameterizes the BigWorld rigid-body
+# vehicle sim). Names kept 1:1 where they exist there. ----
 G = 9.81
 GRAVITY_FACTOR = 1.25          # WG: tanks live under 1.25 g 'arcade gravity'
 GRAVITY = G * GRAVITY_FACTOR   # 12.26 m/s^2 - falls, slopes, all force laws
@@ -70,7 +87,7 @@ COH_DECAY_BOUND = 0.5
 SLOPE_COH_DECAY = 0.25
 SLOPE_COH_DECAY_Y = 0.72
 # ---- offline-model constants (no exact native transition curve recoverable) ----
-# Exact #1513 exposes per-vehicle mass, speed and terrain resistance plus the
+# Exact 2.3.1.2 exposes per-vehicle mass, speed and terrain resistance plus the
 # common WGVehiclePhysics brake/damping configuration, but the W-release curve
 # itself lives in native code.  Use a conservative share of the recovered track
 # grip: 0.65 shortens a Type 62 flat-road 60 km/h stop by about 15% versus the
@@ -121,7 +138,118 @@ OVERSPEED_BUILD = 0.20
 
 # ---- Live tuning: config.json "physics_tuning" can override these WITHOUT a
 # recompile (only a client restart). Key -> module global. Values you would
-# dial to match original WoT feel. ----
+# dial to match original WoT feel. See apply_tuning(). ----
+_TUNABLE = {
+    'gravity_factor':      'GRAVITY_FACTOR',
+    'cohesion':            'COHESION',
+    'drive_traction':      'DRIVE_TRACTION',
+    'slip_drag':           'SLIP_DRAG',
+    'slip_threshold_tan':  'SLIP_THRESHOLD_TAN',
+    'power_factor':        'POWER_FACTOR',
+    'bkwd_power_fraction': 'BKWD_POWER_FRACTION',
+    'traverse_accel_time': 'ANG_ACCELERATION_TIME',
+    'traverse_speed_cost': 'SPEED_AFFECT_ROT_DECREASE',
+    'coast_brake_share':   'COAST_BRAKE_SHARE',
+    'steer_resist_mult':   'STEER_RESIST_MULT',
+    'slide_max':           'SLIDE_MAX',
+    'slide_drag':          'SLIDE_DRAG',
+    'slide_hold_tan':      'SLIDE_HOLD_TAN',
+    'slide_kinetic':       'SLIDE_KINETIC',
+    'overspeed_max_factor': 'OVERSPEED_MAX_FACTOR',
+    'overspeed_damp':      'OVERSPEED_DAMP',
+    'overspeed_build':     'OVERSPEED_BUILD',
+    'slope_coh_decay':     'SLOPE_COH_DECAY',
+    'slope_coh_decay_y':   'SLOPE_COH_DECAY_Y',
+    'coh_decay_bound':     'COH_DECAY_BOUND',
+    'fall_safe_speed':     'FALL_SAFE_SPEED',
+    'fall_dmg_per_ms':     'FALL_DMG_PER_MS',
+    'ram_safe_speed':      'RAM_SAFE_SPEED',
+}
+
+
+def apply_tuning(overrides):
+    '''Overlay config.json "physics_tuning" onto the module constants. Returns
+    the list of applied "key=value" strings (for logging). GRAVITY is derived
+    from G*GRAVITY_FACTOR, so it is recomputed after any override.'''
+    applied = []
+    g = globals()
+    if isinstance(overrides, dict):
+        for k, gname in _TUNABLE.items():
+            if k in overrides:
+                try:
+                    g[gname] = float(overrides[k])
+                    applied.append('%s=%s' % (k, overrides[k]))
+                except (TypeError, ValueError):
+                    pass
+    g['GRAVITY'] = G * GRAVITY_FACTOR
+    # brakeDecel default is COHESION*GRAVITY, frozen at load - refresh it so a
+    # cohesion/gravity override reaches the no-brakeForce fallback too.
+    _DEFAULTS['brakeDecel'] = COHESION * GRAVITY
+    return applied
+
+
+def snapshot(p, v, omega, throttle, slope_pitch, airborne, slide_speed, tank='',
+             ground_kmh=None, pitch_deg=None, roll_deg=None, vert_ms=None,
+             deflect=None, dy=None, slide_slope=None, dy_tick=None, y_src=None, terr_spread=None):
+    '''One telemetry row: the live physics state + the force balance that
+    decides hold/climb/slide, PLUS the observable extras that the pure force
+    numbers miss - ACTUAL over-ground speed vs commanded v (catches wall-slide
+    sideways drift / clipping), hull pitch & roll (catches orientation glitches),
+    vertical speed & height delta (catches float/sink/teleport), and whether the
+    wall-slide deflection fired this frame. Returns (name, value) pairs.'''
+    grip = _grip_decel(p, slope_pitch)
+    grav_a = GRAVITY * math.sin(slope_pitch)
+    ef = engine_force(p, v, throttle, slope_pitch) / p['mass'] if throttle else 0.0
+    rows = [
+        ('tank', tank),
+        ('mass_kg', round(p['mass'], 0)),
+        ('power_hp', round(p['powerW'] / 735.49875, 0)),
+        ('pw_ratio_hp_t', round((p['powerW'] / 735.49875) / max(p['mass'] / 1000.0, 0.01), 1)),
+        ('speedFwd_kmh', round(p['speedFwd'] * 3.6, 1)),
+        ('v_kmh', round(v * 3.6, 2)),
+        ('throttle', throttle),
+        ('slope_deg', round(math.degrees(slope_pitch), 1)),
+        ('grip_ms2', round(grip, 2)),
+        ('grav_along_ms2', round(grav_a, 2)),
+        ('hold_margin_ms2', round(grip - abs(grav_a), 2)),   # <0 => slides
+        ('drive_accel_ms2', round(ef, 2)),
+        ('turn_degs', round(math.degrees(omega), 1)),
+        ('rotSpd_max_degs', round(math.degrees(p['rotSpd']), 1)),
+        ('airborne', 1 if airborne else 0),
+        ('slide_ms', round(slide_speed, 2)),
+        ('terrain_r0', p['terrainResist'][0]),
+        ('spec_friction', round(p['specificFriction'], 3)),
+        ('brake_ms2', round(p['brakeDecel'], 2)),
+    ]
+    # Observable extras (only when supplied by the caller):
+    if ground_kmh is not None:
+        # real over-ground speed; a big gap vs v_kmh = sideways wall-slide/clip
+        rows.append(('ground_kmh', round(ground_kmh, 2)))
+        rows.append(('drift_kmh', round(ground_kmh - abs(v * 3.6), 2)))
+    if pitch_deg is not None:
+        rows.append(('hull_pitch_deg', round(pitch_deg, 1)))
+    if roll_deg is not None:
+        rows.append(('hull_roll_deg', round(roll_deg, 1)))
+    if vert_ms is not None:
+        rows.append(('vert_ms', round(vert_ms, 2)))
+    if dy is not None:
+        rows.append(('dy_m', round(dy, 3)))   # per-tick height change (float/sink/teleport)
+    if slide_slope is not None:
+        # Raw ground gradient (a tangent) that DRIVES the slide gate - it includes
+        # the lateral/roll component and gets no spike rejection. slope_deg above is
+        # the hull-axis pitch the FORCE model actually integrated. When these two
+        # disagree, a 'flat ground + sliding' row is the two probes differing, NOT a
+        # physics contradiction. Log both so the CSV is honest about which is which.
+        rows.append(('slide_slope_deg', round(math.degrees(math.atan(slide_slope)), 1)))
+    if dy_tick is not None:
+        rows.append(('dy_tick_m', round(dy_tick, 3)))   # biggest single 60fps-tick height jump this window
+    if y_src is not None:
+        rows.append(('y_src', y_src))                    # which path set veh_pos.y at that jump
+    if terr_spread is not None:
+        rows.append(('terr_spread_m', round(terr_spread, 2)))   # height spread of the 4 footprint samples = edge sharpness
+    if deflect is not None:
+        rows.append(('wall_deflect', 1 if deflect else 0))
+    return rows
 
 
 _DEFAULTS = {
@@ -161,7 +289,7 @@ def derive_params(td):
         if 'specificFriction' in tdp:
             p['specificFriction'] = float(tdp['specificFriction'])
         if 'brakeForce' in tdp:
-            # Exact #1513 initializes this legacy field to zero and never reads
+            # Exact 2.3.1.2 initializes this legacy field to zero and never reads
             # the similarly named chassis XML value.  Zero means unavailable, not
             # a frictionless brake; retain the recovered track-grip fallback.
             raw_brake = float(tdp['brakeForce'])
@@ -185,13 +313,13 @@ def derive_params(td):
                          else getattr(ch, 'rotationSpeed', None))
             if raw_value is None:
                 raise RuntimeError(
-                    '#1513 chassis rotation speed is unavailable')
+                    '2.3.1.2 chassis rotation speed is unavailable')
             raw = float(raw_value)
             # reader stores radians; tolerate a raw-degrees dump
             p['rotSpd'] = math.radians(raw) if raw > 6.3 else raw
     except (AttributeError, TypeError, ValueError) as error:
         raise RuntimeError(
-            '#1513 chassis rotation speed is invalid: %s' % error)
+            '2.3.1.2 chassis rotation speed is invalid: %s' % error)
     return p
 
 
@@ -252,21 +380,6 @@ def brake_force(p, active, terrainIdx=0, slope_pitch=0.0):
         return p['mass'] * brake
     return (rolling_resist_force(p, terrainIdx, False) +
         p['mass'] * COAST_BRAKE_SHARE * brake)
-
-
-def slope_cohesion(ny):
-    '''Effective track cohesion for a ground normal.y (WG physics_shared slope
-    decay): full COHESION until normal.y drops below COH_DECAY_Y (~14 deg), then a
-    cubic decay COH_DECAY_FACTOR*(COH_DECAY_Y-ny)**COH_DECAY_POW, plus an extra
-    SLOPE_COH_DECAY step below SLOPE_COH_DECAY_Y (~44 deg), floored at
-    COH_DECAY_BOUND. The cubic term smooths the old single 44 deg grip cliff so
-    grip falls off gradually on steepening ground, as WG does.'''
-    coh = COHESION
-    if ny < COH_DECAY_Y:
-        coh -= COH_DECAY_FACTOR * (COH_DECAY_Y - ny) ** COH_DECAY_POW
-    if ny < SLOPE_COH_DECAY_Y:
-        coh -= SLOPE_COH_DECAY
-    return coh if coh > COH_DECAY_BOUND else COH_DECAY_BOUND
 
 
 def _grip_decel(p, slope_pitch):
@@ -463,6 +576,21 @@ def track_scroll(p, v, omega):
     return tls, trs
 
 
+def slope_cohesion(ny):
+    '''Effective track cohesion for a ground normal.y (WG physics_shared slope
+    decay): full COHESION until normal.y drops below COH_DECAY_Y (~14 deg), then a
+    cubic decay COH_DECAY_FACTOR*(COH_DECAY_Y-ny)**COH_DECAY_POW, plus an extra
+    SLOPE_COH_DECAY step below SLOPE_COH_DECAY_Y (~44 deg), floored at
+    COH_DECAY_BOUND. The cubic term smooths the old single 44 deg grip cliff so
+    grip falls off gradually on steepening ground, as WG does.'''
+    coh = COHESION
+    if ny < COH_DECAY_Y:
+        coh -= COH_DECAY_FACTOR * (COH_DECAY_Y - ny) ** COH_DECAY_POW
+    if ny < SLOPE_COH_DECAY_Y:
+        coh -= SLOPE_COH_DECAY
+    return coh if coh > COH_DECAY_BOUND else COH_DECAY_BOUND
+
+
 def slope_slide_speed(cur, slope_tan, dt):
     '''WG-faithful passive slope slide along the fall line. The tracks HOLD the
     hull while tan(theta) <= effective cohesion (~46 deg with slope decay,
@@ -508,130 +636,3 @@ def ram_damage(closing_speed, mass_self, mass_other):
     dmg_other = min(450, int(imp * 1.7 * max(0.35, min(2.6, ratio))))
     dmg_self = min(350, int(imp * 1.0 * max(0.25, min(2.2, 1.0 / ratio))))
     return dmg_other, dmg_self
-
-
-_TUNABLE = {
-    'gravity_factor':      'GRAVITY_FACTOR',
-    'cohesion':            'COHESION',
-    'drive_traction':      'DRIVE_TRACTION',
-    'slip_drag':           'SLIP_DRAG',
-    'slip_threshold_tan':  'SLIP_THRESHOLD_TAN',
-    'power_factor':        'POWER_FACTOR',
-    'bkwd_power_fraction': 'BKWD_POWER_FRACTION',
-    'traverse_accel_time': 'ANG_ACCELERATION_TIME',
-    'traverse_speed_cost': 'SPEED_AFFECT_ROT_DECREASE',
-    'coast_brake_share':   'COAST_BRAKE_SHARE',
-    'steer_resist_mult':   'STEER_RESIST_MULT',
-    'slide_max':           'SLIDE_MAX',
-    'slide_drag':          'SLIDE_DRAG',
-    'slide_hold_tan':      'SLIDE_HOLD_TAN',
-    'slide_kinetic':       'SLIDE_KINETIC',
-    'overspeed_max_factor': 'OVERSPEED_MAX_FACTOR',
-    'overspeed_damp':      'OVERSPEED_DAMP',
-    'overspeed_build':     'OVERSPEED_BUILD',
-    'slope_coh_decay':     'SLOPE_COH_DECAY',
-    'slope_coh_decay_y':   'SLOPE_COH_DECAY_Y',
-    'coh_decay_bound':     'COH_DECAY_BOUND',
-    'fall_safe_speed':     'FALL_SAFE_SPEED',
-    'fall_dmg_per_ms':     'FALL_DMG_PER_MS',
-    'ram_safe_speed':      'RAM_SAFE_SPEED',
-}
-
-
-def apply_tuning(overrides):
-    '''Overlay config.json "physics_tuning" onto the module constants. Returns
-    the list of applied "key=value" strings (for logging). GRAVITY is derived
-    from G*GRAVITY_FACTOR, so it is recomputed after any override.'''
-    applied = []
-    g = globals()
-    if isinstance(overrides, dict):
-        for k, gname in _TUNABLE.items():
-            if k in overrides:
-                try:
-                    g[gname] = float(overrides[k])
-                    applied.append('%s=%s' % (k, overrides[k]))
-                except (TypeError, ValueError):
-                    pass
-    g['GRAVITY'] = G * GRAVITY_FACTOR
-    # brakeDecel default is COHESION*GRAVITY, frozen at load - refresh it so a
-    # cohesion/gravity override reaches the no-brakeForce fallback too.
-    _DEFAULTS['brakeDecel'] = COHESION * GRAVITY
-    return applied
-
-
-def snapshot(p, v, omega, throttle, slope_pitch, airborne, slide_speed, tank='',
-             ground_kmh=None, pitch_deg=None, roll_deg=None, vert_ms=None,
-             deflect=None, dy=None, slide_slope=None, dy_tick=None, y_src=None, terr_spread=None):
-    '''One telemetry row: the live physics state + the force balance that
-    decides hold/climb/slide, PLUS the observable extras that the pure force
-    numbers miss - ACTUAL over-ground speed vs commanded v (catches wall-slide
-    sideways drift / clipping), hull pitch & roll (catches orientation glitches),
-    vertical speed & height delta (catches float/sink/teleport), and whether the
-    wall-slide deflection fired this frame. Returns (name, value) pairs.'''
-    grip = _grip_decel(p, slope_pitch)
-    grav_a = GRAVITY * math.sin(slope_pitch)
-    ef = engine_force(p, v, throttle, slope_pitch) / p['mass'] if throttle else 0.0
-    rows = [
-        ('tank', tank),
-        ('mass_kg', round(p['mass'], 0)),
-        ('power_hp', round(p['powerW'] / 735.49875, 0)),
-        ('pw_ratio_hp_t', round((p['powerW'] / 735.49875) / max(p['mass'] / 1000.0, 0.01), 1)),
-        ('speedFwd_kmh', round(p['speedFwd'] * 3.6, 1)),
-        ('v_kmh', round(v * 3.6, 2)),
-        ('throttle', throttle),
-        ('slope_deg', round(math.degrees(slope_pitch), 1)),
-        ('grip_ms2', round(grip, 2)),
-        ('grav_along_ms2', round(grav_a, 2)),
-        ('hold_margin_ms2', round(grip - abs(grav_a), 2)),   # <0 => slides
-        ('drive_accel_ms2', round(ef, 2)),
-        ('turn_degs', round(math.degrees(omega), 1)),
-        ('rotSpd_max_degs', round(math.degrees(p['rotSpd']), 1)),
-        ('airborne', 1 if airborne else 0),
-        ('slide_ms', round(slide_speed, 2)),
-        ('terrain_r0', p['terrainResist'][0]),
-        ('spec_friction', round(p['specificFriction'], 3)),
-        ('brake_ms2', round(p['brakeDecel'], 2)),
-    ]
-    # Observable extras (only when supplied by the caller):
-    if ground_kmh is not None:
-        # real over-ground speed; a big gap vs v_kmh = sideways wall-slide/clip
-        rows.append(('ground_kmh', round(ground_kmh, 2)))
-        rows.append(('drift_kmh', round(ground_kmh - abs(v * 3.6), 2)))
-    if pitch_deg is not None:
-        rows.append(('hull_pitch_deg', round(pitch_deg, 1)))
-    if roll_deg is not None:
-        rows.append(('hull_roll_deg', round(roll_deg, 1)))
-    if vert_ms is not None:
-        rows.append(('vert_ms', round(vert_ms, 2)))
-    if dy is not None:
-        rows.append(('dy_m', round(dy, 3)))   # per-tick height change (float/sink/teleport)
-    if slide_slope is not None:
-        # Raw ground gradient (a tangent) that DRIVES the slide gate - it includes
-        # the lateral/roll component and gets no spike rejection. slope_deg above is
-        # the hull-axis pitch the FORCE model actually integrated. When these two
-        # disagree, a 'flat ground + sliding' row is the two probes differing, NOT a
-        # physics contradiction. Log both so the CSV is honest about which is which.
-        rows.append(('slide_slope_deg', round(math.degrees(math.atan(slide_slope)), 1)))
-    if dy_tick is not None:
-        rows.append(('dy_tick_m', round(dy_tick, 3)))   # biggest single 60fps-tick height jump this window
-    if y_src is not None:
-        rows.append(('y_src', y_src))                    # which path set veh_pos.y at that jump
-    if terr_spread is not None:
-        rows.append(('terr_spread_m', round(terr_spread, 2)))   # height spread of the 4 footprint samples = edge sharpness
-    if deflect is not None:
-        rows.append(('wall_deflect', 1 if deflect else 0))
-    return rows
-
-
-_DEFAULTS = {
-    'mass': 5730.0,
-    'powerW': 45.0 * 735.49875,
-    'speedFwd': 32.0 / 3.6,
-    'speedBwd': 12.0 / 3.6,
-    'rotSpd': math.radians(38.0),
-    'terrainResist': (1.1, 1.4, 2.6),
-    'specificFriction': 0.6867,
-    'brakeDecel': COHESION * GRAVITY,
-    'trackCenter': 1.5,
-    'minPlaneNormalY': math.cos(math.radians(25.0)),
-}

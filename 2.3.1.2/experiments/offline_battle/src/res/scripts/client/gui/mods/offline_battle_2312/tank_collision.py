@@ -1,10 +1,11 @@
 """Vehicle-against-vehicle collision, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
-
-Contract, from the original module:
-Engine-free tank-to-tank collision laws from the current 0.8.2 runtime.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+"""
+from __future__ import absolute_import
+from __future__ import division
+"""Engine-free tank-to-tank collision laws from the current 0.8.2 runtime.
 
 The live runtime owns BigWorld entities, descriptors, health, and clocks.  This
 module deliberately owns none of them.  Callers convert each vehicle to a plain
@@ -25,8 +26,6 @@ updated cooldown mapping. Movement is never vetoed: existing spawn overlap is
 separated using inverse-mass weighting instead of becoming an "all directions
 blocked" local-avoidance deadlock.
 """
-from __future__ import absolute_import
-from __future__ import division
 
 import math
 

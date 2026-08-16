@@ -1,9 +1,42 @@
 """Module and crew damage law, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+
+Contract, from the original module:
+Era-accurate (WoT 0.8.2) module/device damage + repair model.
+
+Pure data + math: NO BigWorld imports, so it is desktop-testable (run this file
+directly under Python 2 or 3 to execute the self-test at the bottom). All the
+BigWorld/UI/sound side effects stay in offline_battle.py; this module only decides
+*which* device is hit, *how much* HP it loses, and *how fast* it repairs.
+
+Almost every constant here is EXACT, read from the running client's own data:
+  * device HP pools live on the vehicle type descriptor
+      engine        -> td.engine['maxHealth'] / ['maxRegenHealth']
+      ammo rack     -> td.hull['ammoBayHealth'][...]
+      fuel tank     -> td.fuelTank[...]
+      radio         -> td.radio[...]
+      tracks        -> td.chassis[...]        (one pool, either track)
+      gun           -> td.gun[...]
+      turret ring   -> td.turret['turretRotatorHealth'][...]
+      optics        -> td.turret['surveyingDeviceHealth'][...]
+  * per-material saving throw (chance the device is actually critted when the
+    shell ray enters its hitbox) is on the MaterialInfo object the collision
+    already returns: h_mat.chanceToHitByProjectile / .chanceToHitByExplosion
+  * shell module-damage = shell['damage'][1] ("devices"), rolled +/-25%
+  * equipment/crew health & repair-speed multipliers are pre-applied into
+    td.miscAttrs (repairSpeedFactor, ammoBayHealthFactor, engineHealthFactor,
+    fuelTankHealthFactor, chassisHealthFactor)
+
+The ONLY reconstructed (server-only in 2012, never shipped in the client)
+numbers are the ones flagged RECONSTRUCTED below: the base auto-repair rate,
+the critical/orange threshold, and the fire tick. Keep them here, documented,
+so they are the single place to tune against era footage.
 """
 from __future__ import absolute_import
+# -*- coding: utf-8 -*-
+
 import random
 
 # --- EXACT (from res/scripts/item_defs/vehicles/common/vehicle.xml) ---------

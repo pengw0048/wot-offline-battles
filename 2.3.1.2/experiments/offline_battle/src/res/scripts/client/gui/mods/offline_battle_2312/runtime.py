@@ -775,11 +775,14 @@ class OfflineBattleRuntime(object):
 
         The material layers on these vehicles carry no device, so the
         interior model decides from the compartment the shell entered."""
+        names = []
+        if damage.track_hit(landing.collisions):
+            names.append('chassisHealth')
+        if result not in (damage.PIERCED, damage.TRACK_ABSORBED):
+            return names
         if result == damage.TRACK_ABSORBED:
-            return ['chassisHealth']
-        if result != damage.PIERCED:
-            return []
-        names = damage.module_hits(landing.collisions)
+            return names
+        names.extend(damage.module_hits(landing.collisions))
         if pose is None:
             position = target.position
             pose = (position.x, position.y, position.z,

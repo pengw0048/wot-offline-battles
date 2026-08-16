@@ -10,6 +10,7 @@ from __future__ import absolute_import
 import math
 
 from gui.mods.offline_battle_2312 import motion, suspension
+from gui.mods.offline_battle_2312 import engine_shim
 from gui.mods.offline_battle_2312 import tank_collision, world_collision
 
 TICK_SECONDS = 0.02
@@ -39,7 +40,7 @@ class MotionDriver(object):
         self._position = None
         self._speed_provider = None
         self._pitch_limits = descriptor.gun.pitchLimits['absolute']
-        self._extents = world_collision.hull_extents(descriptor)
+        self._descriptor = descriptor
         self._length, self._width = suspension.hull_span(descriptor)
         self._pitch = 0.0
         self._roll = 0.0
@@ -90,10 +91,9 @@ class MotionDriver(object):
         self._refresh_pose()
         self._schedule()
         self._log('motion_started mass=%.0f power=%.0f fwd=%.2f rot=%.3f '
-                  'hull=(%.2f,%.2f,%.2f) span=(%.2f,%.2f)'
+                  'span=(%.2f,%.2f)'
                   % (self._params['mass'], self._params['powerW'],
                      self._params['speedFwd'], self._params['rotSpd'],
-                     self._extents[0], self._extents[1], self._extents[2],
                      self._length, self._width))
 
     def stop(self):
@@ -113,25 +113,22 @@ class MotionDriver(object):
         self._callback_id = BigWorld.callback(TICK_SECONDS, self._tick)
 
     def _blocked(self, yaw=None):
-        return world_collision.blocked(
-            self._space_id, (self._x, self._y, self._z),
-            self._yaw if yaw is None else yaw, self._speed, self._extents,
-            TICK_SECONDS)
-
-    def _contacts(self, yaw):
-        return world_collision.hull_contacts(
-            self._space_id, (self._x, self._y, self._z), yaw, self._extents)
+        """The copied horizontal law, through the engine shim."""
+        import BigWorld
+        import Math
+        return world_collision.check_horizontal_collision(
+            engine_shim.wrap(BigWorld), Math, self._space_id,
+            Math.Vector3(self._x, self._y, self._z),
+            self._yaw if yaw is None else yaw, self._speed, self._descriptor,
+            False, TICK_SECONDS)
 
     def _rotate(self):
-        """Turn, unless turning would push a hull corner into geometry."""
-        if not self._omega:
-            return
-        previous = self._yaw
+        """Turn. The mature driver does not gate rotation either."""
         self._yaw += self._omega * TICK_SECONDS
-        if self._contacts(self._yaw) > self._contacts(previous):
-            self._yaw = previous
-            self._omega = 0.0
-            self._turns += 1
+        while self._yaw > math.pi:
+            self._yaw -= 2.0 * math.pi
+        while self._yaw < -math.pi:
+            self._yaw += 2.0 * math.pi
 
     def _translate(self):
         """Advance, deflect along the obstacle, or grind to a stop."""

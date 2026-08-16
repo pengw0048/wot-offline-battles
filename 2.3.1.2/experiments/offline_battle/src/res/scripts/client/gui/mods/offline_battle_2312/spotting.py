@@ -1,9 +1,15 @@
 """Spotting law, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+
+Contract, from the original module:
+Engine-free legacy spotting and camouflage calculations for 2.3.1.2.
 """
 from __future__ import absolute_import
+# -*- coding: utf-8 -*-
+
+
 PROXIMITY_SPOT_DISTANCE = 50.0
 MAX_SPOT_DISTANCE = 500.0
 SPOT_MEMORY_SECONDS = 5.0

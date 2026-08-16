@@ -1,9 +1,18 @@
 """Shell trajectory maths, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+
+Contract, from the original module:
+Engine-free ballistic aiming and trajectory sampling helpers.
+
+Pitch follows the legacy BigWorld convention: negative pitch elevates the
+barrel. Gravity may be supplied with either sign and is treated as a downward
+magnitude by the scalar ballistic API.
 """
 from __future__ import absolute_import
+# -*- coding: utf-8 -*-
+
 import math
 
 

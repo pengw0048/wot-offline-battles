@@ -1,9 +1,17 @@
 """Projectile stepping helpers, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+
+Contract, from the original module:
+Engine-free swept-motion helpers for in-flight projectiles.
+
+All vectors are plain three-component sequences. The live adapter remains
+responsible for clocks, BigWorld collision queries, and vehicle matrices.
 """
 from __future__ import absolute_import
+# -*- coding: utf-8 -*-
+
 PROJECTILE_CALLBACK_SECONDS = 0.01
 PROJECTILE_MAX_SUBSTEP_SECONDS = 0.025
 PROJECTILE_BROADPHASE_RADIUS = 15.0

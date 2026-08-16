@@ -1,18 +1,17 @@
 """Gun state and dispersion, taken from the 0.9.22 port.
 
-The law is unchanged. The 2.3.1.2 inputs reach it through the
-adapters in damage.py and the callers in this package.
-
-Contract, from the original module:
-0.8.2 ammunition, reload and shot-scatter state for pinned 2.3.1.2.
+The law is unchanged. Version differences belong in the
+adapters in this package, never in this file.
+"""
+from __future__ import absolute_import
+from __future__ import print_function
+"""0.8.2 ammunition, reload and shot-scatter state for pinned 2.3.1.2.
 
 The source implementation keeps this state inside ``offline_battle.py``.
 These methods preserve its descriptor reads, bloom/convergence formulas,
 empty-at-countdown start, clip transitions and Gaussian shot dispersion.
 Only storage moved from a closure dictionary to an object.
 """
-from __future__ import absolute_import
-from __future__ import print_function
 
 import math
 import random

@@ -317,54 +317,26 @@ class _Target(object):
         return [_Collision(self._distance, 1.0, _MatInfo(20.0))]
 
 
-class _GearTarget(object):
-    """A vehicle whose armour layers never report the running gear."""
+class TrackHitTests(unittest.TestCase):
+    def test_a_chassis_layer_is_a_track_hit(self):
+        self.assertTrue(damage.track_hit(
+            [_Collision(1.0, 1.0, _MatInfo(20.0, 0.0), 'chassis')]))
 
-    def __init__(self, vehicle_id):
-        self.id = vehicle_id
-        self.typeDescriptor = types.SimpleNamespace(
-            chassis=types.SimpleNamespace(
-                hitTester=types.SimpleNamespace(
-                    bbox=((-1.2, -0.4, -2.0), (1.2, 0.6, 2.0), 0)),
-                hullPosition=(0.0, 0.4, 0.0)),
-            hull=types.SimpleNamespace(hitTester=types.SimpleNamespace(
-                bbox=((-1.0, 0.0, -1.8), (1.0, 1.2, 1.8), 0))))
+    def test_a_hull_layer_alone_is_not(self):
+        self.assertFalse(damage.track_hit(
+            [_Collision(1.0, 1.0, _MatInfo(16.0), 'hull')]))
 
-    def collideSegmentExt(self, start, end):
-        return None
+    def test_a_shell_through_the_track_into_the_hull_is_both(self):
+        collisions = [_Collision(0.5, 1.0, _MatInfo(20.0, 0.0), 'chassis'),
+                      _Collision(1.0, 1.0, _MatInfo(16.0), 'hull')]
+        self.assertTrue(damage.track_hit(collisions))
+        result, points = damage.resolve(_Shot(), 100.0, collisions,
+                                        random_uniform=_median)
+        self.assertEqual(result, damage.PIERCED)
+        self.assertGreater(points, 0)
 
-
-class _Point(object):
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = float(x), float(y), float(z)
-
-
-class RunningGearTests(unittest.TestCase):
-    def test_a_shell_through_the_tracks_is_a_hit(self):
-        target = _GearTarget(4)
-        found = damage.nearest_vehicle(
-            [target], _Point(0.0, 0.5, -20.0), _Point(0.0, 0.5, 20.0),
-            poses=lambda _id: (0.0, 0.0, 0.0, 0.0))
-        self.assertIsNotNone(found)
-        self.assertEqual(found[0].id, 4)
-        self.assertEqual(found[2], [])
-
-    def test_a_shell_that_misses_the_box_is_not_a_hit(self):
-        target = _GearTarget(4)
-        self.assertIsNone(damage.nearest_vehicle(
-            [target], _Point(50.0, 0.5, -20.0), _Point(50.0, 0.5, 20.0),
-            poses=lambda _id: (0.0, 0.0, 0.0, 0.0)))
-
-    def test_a_shell_above_the_hull_is_not_a_gear_hit(self):
-        target = _GearTarget(4)
-        self.assertIsNone(damage.nearest_vehicle(
-            [target], _Point(0.0, 40.0, -20.0), _Point(0.0, 40.0, 20.0),
-            poses=lambda _id: (0.0, 0.0, 0.0, 0.0)))
-
-    def test_without_a_pose_there_is_no_gear_test(self):
-        self.assertIsNone(damage.nearest_vehicle(
-            [_GearTarget(4)], _Point(0.0, 0.5, -20.0),
-            _Point(0.0, 0.5, 20.0)))
+    def test_nothing_crossed_is_not_a_track_hit(self):
+        self.assertFalse(damage.track_hit([]))
 
 
 class NearestVehicleTests(unittest.TestCase):
