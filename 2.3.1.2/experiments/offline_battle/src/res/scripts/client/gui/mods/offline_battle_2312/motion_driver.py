@@ -1,7 +1,7 @@
 """Own the player vehicle pose, because the native body never simulates.
 
-Each tick this integrates the copied motion law, follows the terrain with
-`BigWorld.wg_collideSegment`, and writes the result to the compound model
+Each tick this integrates the copied motion law, places the hull on the
+copied four-point suspension, and writes the result to the compound model
 matrix. The native filter keeps doing what it can still do offline:
 turret, gun and track presentation.
 """
@@ -9,16 +9,9 @@ from __future__ import absolute_import
 
 import math
 
-from gui.mods.offline_battle_2312 import motion, world_collision
+from gui.mods.offline_battle_2312 import motion, suspension, world_collision
 
 TICK_SECONDS = 0.02
-TERRAIN_COLLISION_MASK = 128
-TERRAIN_ONLY_FLAGS = 8
-TERRAIN_RAY_HEIGHT = 1000.0
-# Sampling the hull front and back gives the pitch the law integrates on,
-# and the sides give the roll the hull sits at.
-HULL_HALF_LENGTH = 2.0
-HULL_HALF_WIDTH = 1.2
 
 
 class MotionDriver(object):
@@ -26,7 +19,8 @@ class MotionDriver(object):
     def __init__(self, vehicle, position, yaw, log):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
-        self._params = motion.derive_params(vehicle.typeDescriptor)
+        descriptor = vehicle.typeDescriptor
+        self._params = motion.derive_params(descriptor)
         self._x = float(position.x)
         self._y = float(position.y)
         self._z = float(position.z)
@@ -42,8 +36,15 @@ class MotionDriver(object):
         self._matrix = None
         self._position = None
         self._speed_provider = None
-        self._pitch_limits = vehicle.typeDescriptor.gun.pitchLimits['absolute']
-        self._extents = world_collision.hull_extents(vehicle.typeDescriptor)
+        self._pitch_limits = descriptor.gun.pitchLimits['absolute']
+        self._extents = world_collision.hull_extents(descriptor)
+        self._length, self._width = suspension.hull_span(descriptor)
+        self._pitch = 0.0
+        self._roll = 0.0
+        self._drive_pitch = 0.0
+        self._drive_history = []
+        self._blocks = 0
+        self._steps = 0
 
     @property
     def vehicle_id(self):
@@ -71,13 +72,17 @@ class MotionDriver(object):
         self._matrix = Math.Matrix()
         self._position = Math.Vector3(self._x, self._y, self._z)
         self._speed_provider = Math.Vector4Basic()
-        self._refresh_pose(0.0)
+        ground = suspension.wide_ground_y(self._space_id, self._x, self._z)
+        if ground is not None:
+            self._y = ground
+        self._refresh_pose()
         self._schedule()
         self._log('motion_started mass=%.0f power=%.0f fwd=%.2f rot=%.3f '
-                  'hull=(%.2f,%.2f,%.2f)'
+                  'hull=(%.2f,%.2f,%.2f) span=(%.2f,%.2f)'
                   % (self._params['mass'], self._params['powerW'],
                      self._params['speedFwd'], self._params['rotSpd'],
-                     self._extents[0], self._extents[1], self._extents[2]))
+                     self._extents[0], self._extents[1], self._extents[2],
+                     self._length, self._width))
 
     def stop(self):
         import BigWorld
@@ -95,40 +100,47 @@ class MotionDriver(object):
             return
         self._callback_id = BigWorld.callback(TICK_SECONDS, self._tick)
 
-    def _ground_height(self, x, z):
-        import BigWorld
-        import Math
-        collision = BigWorld.wg_collideSegment(
-            self._space_id, Math.Vector3(x, TERRAIN_RAY_HEIGHT, z),
-            Math.Vector3(x, -TERRAIN_RAY_HEIGHT, z), TERRAIN_COLLISION_MASK,
-            TERRAIN_ONLY_FLAGS)
-        if collision is None:
-            return None
-        return float(collision.closestPoint.y)
-
     def _blocked(self):
         return world_collision.blocked(
             self._space_id, (self._x, self._y, self._z), self._yaw,
             self._speed, self._extents, TICK_SECONDS)
 
-    def _hull_roll(self, x, z, sin_yaw, cos_yaw):
-        left = self._ground_height(x - cos_yaw * HULL_HALF_WIDTH,
-                                   z + sin_yaw * HULL_HALF_WIDTH)
-        right = self._ground_height(x + cos_yaw * HULL_HALF_WIDTH,
-                                    z - sin_yaw * HULL_HALF_WIDTH)
-        if left is None or right is None:
-            return 0.0
-        return math.atan2(left - right, 2.0 * HULL_HALF_WIDTH)
+    def _hull_pose(self):
+        """Four-point suspension: front, back and both track lines."""
+        sin_yaw, cos_yaw = math.sin(self._yaw), math.cos(self._yaw)
+        half_length = self._length * 0.5
+        half_width = self._width * 0.5
+        samples = []
+        for offset_x, offset_z in ((0.0, half_length), (0.0, -half_length),
+                                   (half_width, 0.0), (-half_width, 0.0)):
+            x = self._x + sin_yaw * offset_z + cos_yaw * offset_x
+            z = self._z + cos_yaw * offset_z - sin_yaw * offset_x
+            samples.append(suspension.ground_y(self._space_id, x, z, self._y))
+        if None in samples:
+            return
+        pitch, roll = suspension.pose_angles(samples[0], samples[1],
+                                             samples[2], samples[3],
+                                             self._length, self._width)
+        self._pitch = suspension.smooth(self._pitch, pitch)
+        self._roll = suspension.smooth(self._roll, roll)
 
-    def _slope_pitch(self, x, z, sin_yaw, cos_yaw):
-        front = self._ground_height(x + sin_yaw * HULL_HALF_LENGTH,
-                                    z + cos_yaw * HULL_HALF_LENGTH)
-        back = self._ground_height(x - sin_yaw * HULL_HALF_LENGTH,
-                                   z - cos_yaw * HULL_HALF_LENGTH)
-        if front is None or back is None:
-            return 0.0
-        # BigWorld convention: nose up is a negative pitch.
-        return -math.atan2(front - back, 2.0 * HULL_HALF_LENGTH)
+    def _settle(self, start_x, start_z):
+        """Place the hull on its centre support, or reject a step."""
+        highest, centre = suspension.support(
+            self._space_id, (self._x, self._y, self._z), self._yaw,
+            self._length * 0.5)
+        ground = centre if centre is not None else highest
+        if ground is None:
+            return
+        if suspension.support_rise_is_obstacle(
+                self._y, centre, suspension.climb_limit(self._speed,
+                                                        TICK_SECONDS)):
+            self._x, self._z = start_x, start_z
+            self._speed = 0.0
+            self._steps += 1
+            return
+        self._y = suspension.settle(self._y, ground, self._speed,
+                                    TICK_SECONDS)
 
     def _tick(self):
         import BigWorld
@@ -140,58 +152,57 @@ class MotionDriver(object):
             self._schedule()
             return
 
-        sin_yaw = math.sin(self._yaw)
-        cos_yaw = math.cos(self._yaw)
-        pitch = self._slope_pitch(self._x, self._z, sin_yaw, cos_yaw)
+        self._drive_pitch = suspension.smooth(
+            self._drive_pitch,
+            suspension.median_pitch(
+                self._drive_history,
+                suspension.drive_pitch(self._space_id,
+                                       (self._x, self._y, self._z),
+                                       self._yaw)))
         steering = self._rotation != 0
-
         self._omega = motion.traverse_step(
             self._params, self._omega, self._rotation, self._speed,
             TICK_SECONDS, drive_intent=self._movement)
         self._speed = motion.longitudinal_step(
-            self._params, self._speed, self._movement, steering, pitch,
-            TICK_SECONDS)
+            self._params, self._speed, self._movement, steering,
+            self._drive_pitch, TICK_SECONDS)
 
         self._yaw += self._omega * TICK_SECONDS
-        sin_yaw = math.sin(self._yaw)
-        cos_yaw = math.cos(self._yaw)
         step = self._speed * TICK_SECONDS
         if step and self._blocked():
             self._speed = 0.0
             step = 0.0
-        x = self._x + sin_yaw * step
-        z = self._z + cos_yaw * step
-        ground = self._ground_height(x, z)
-        if ground is not None:
-            self._x, self._z, self._y = x, z, ground
-        roll = self._hull_roll(self._x, self._z, sin_yaw, cos_yaw)
+            self._blocks += 1
+        start_x, start_z = self._x, self._z
+        self._x += math.sin(self._yaw) * step
+        self._z += math.cos(self._yaw) * step
+        self._settle(start_x, start_z)
+        self._hull_pose()
 
-        self._apply_pose(vehicle, pitch, roll)
+        self._apply_pose(vehicle)
         self._ticks += 1
         if self._ticks % 250 == 0:
-            import BigWorld
             rotator = getattr(BigWorld.player(), 'gunRotator', None)
             self._log('motion_state pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f '
-                      'omega=%.3f input=(%s,%s) turret=%s pitch=%s '
-                      'marker=%s avatar_vehicle=%s'
+                      'pitch=%.3f roll=%.3f drive_pitch=%.3f input=(%s,%s) '
+                      'blocked=%s steps=%s turret=%s marker=%s'
                       % (self._x, self._y, self._z, self._yaw, self._speed,
-                         self._omega, self._movement, self._rotation,
+                         self._pitch, self._roll, self._drive_pitch,
+                         self._movement, self._rotation, self._blocks,
+                         self._steps,
                          getattr(rotator, 'turretYaw', None),
-                         getattr(rotator, 'gunPitch', None),
-                         getattr(rotator, 'markerInfo', (None,))[0],
-                         getattr(BigWorld.player(), 'vehicle', None)
-                         is not None))
+                         getattr(rotator, 'markerInfo', (None,))[0]))
         self._schedule()
 
-    def _refresh_pose(self, pitch, roll=0.0):
+    def _refresh_pose(self):
         import Math
-        self._matrix.setRotateYPR((self._yaw, pitch, roll))
+        self._matrix.setRotateYPR((self._yaw, self._pitch, self._roll))
         self._matrix.translation = Math.Vector3(self._x, self._y, self._z)
         self._position.set(Math.Vector3(self._x, self._y, self._z))
 
-    def _apply_pose(self, vehicle, pitch, roll=0.0):
+    def _apply_pose(self, vehicle):
         import Math
-        self._refresh_pose(pitch, roll)
+        self._refresh_pose()
         model = getattr(vehicle, 'model', None)
         if model is not None and model.matrix is not self._matrix:
             model.matrix = self._matrix
