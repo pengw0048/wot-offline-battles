@@ -65,6 +65,72 @@ class OfflineBattlePackageTests(unittest.TestCase):
 
 
 
+class PackageImportGraphTests(unittest.TestCase):
+    """Every package-internal import must name a file that ships.
+
+    ai/maps.py imported a reviewed-routes module the port script did not
+    copy, which no test executed, so the mod would have died at load."""
+
+    PACKAGE = 'gui.mods.offline_battle_2312'
+
+    def test_every_internal_import_target_exists(self):
+        package = MODS / 'offline_battle_2312'
+        missing = []
+        for path in sorted(package.rglob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            guarded = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try) and node.handlers:
+                    guarded.update(id(child) for child in ast.walk(node))
+            for node in ast.walk(tree):
+                if id(node) in guarded:
+                    continue
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if (alias.name.startswith(self.PACKAGE) and
+                                self._module(package, alias.name) is None):
+                            missing.append('%s -> %s' % (path.name,
+                                                         alias.name))
+                elif isinstance(node, ast.ImportFrom) and not node.level:
+                    module = node.module or ''
+                    if not module.startswith(self.PACKAGE):
+                        continue
+                    kind = self._module(package, module)
+                    if kind is None:
+                        missing.append('%s -> %s' % (path.name, module))
+                    elif kind == 'package':
+                        for alias in node.names:
+                            child = '%s.%s' % (module, alias.name)
+                            if (self._module(package, child) is None and
+                                    alias.name not in
+                                    self._bound(package, module)):
+                                missing.append('%s -> %s' % (path.name,
+                                                             child))
+        self.assertEqual(missing, [])
+
+    def _module(self, package, dotted):
+        relative = dotted[len(self.PACKAGE):].lstrip('.')
+        parts = relative.split('.') if relative else []
+        if package.joinpath(*parts).with_suffix('.py').is_file():
+            return 'module'
+        if package.joinpath(*parts, '__init__.py').is_file():
+            return 'package'
+        return None
+
+    def _bound(self, package, dotted):
+        relative = dotted[len(self.PACKAGE):].lstrip('.')
+        parts = relative.split('.') if relative else []
+        init = package.joinpath(*parts, '__init__.py')
+        names = set()
+        for node in ast.parse(init.read_text(encoding='utf-8')).body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                names.update(target.id for target in node.targets
+                             if isinstance(target, ast.Name))
+        return names
+
+
 class FilterProxyScopeTests(unittest.TestCase):
     """The native turret sync faults for every client-only vehicle.
 

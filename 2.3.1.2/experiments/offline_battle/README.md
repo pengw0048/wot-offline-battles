@@ -82,20 +82,25 @@ interfaces that 2.3.1.2 actually changed.
 - `.../offline_battle_2312/damage.py` — the 2.3.1.2 input adapter for
   that law.
 - `.../offline_battle_2312/enemy_ai.py` — enemy turret aim and return
-  fire.
+  fire, gated by the planner's fire decision.
+- `.../offline_battle_2312/bot_control.py` — the 2.3.1.2 side of the
+  copied bot adapter: state dicts in, throttle and turn integrated by
+  the copied motion law, plus the mature caller's traffic throttle and
+  failure memory.
 
 Law copied from the 0.9.22 port, unchanged, reached through the adapters
 above: `motion.py`, `world_collision.py`, `suspension.py`,
 `combat_rules.py`, `tank_collision.py`, `device_damage.py`,
 `ballistics.py`, `projectile_runtime.py`, `spotting.py`,
-`gun_mechanics.py`.
+`gun_mechanics.py`, and the whole `ai/` package (planner, driver,
+navigation, cover, tactical maps and reviewed routes).
 
 ## Build and test
 
 ```bash
 python3 -m unittest discover -s tests
 python2.7 build_wotmod.py
-python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.10.0.wotmod
+python3 tools/validate_wotmod.py dist/org.peng.offline_2312_battle_0.10.1.wotmod
 ```
 
 ## Current state
@@ -196,9 +201,9 @@ entity pose overlay, using the native filter only for presentation.
 
 ## Scope and known gaps
 
-- Enemy vehicles stand still. They aim and shoot, but they do not drive
-  and they do not miss on purpose. Battle results are out of scope for
-  this slice.
+- Enemy vehicles drive with the copied planner and driver, but no play
+  session has validated it yet. They still do not miss on purpose.
+  Battle results are out of scope for this slice.
 - Damage covers direct hits and module crits. No fire, no crew injury
   effects, no ramming damage, and no HE splash beyond the direct-hit
   law.

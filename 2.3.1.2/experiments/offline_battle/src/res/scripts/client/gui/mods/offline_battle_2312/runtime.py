@@ -763,7 +763,9 @@ class OfflineBattleRuntime(object):
             gunnery.publish()
             self._enemy_ai = EnemyAI(self._enemies, vehicle.id,
                                      BigWorld.callback, self._log,
-                                     self._on_player_hit)
+                                     self._on_player_hit,
+                                     bodies=self._bot_bodies,
+                                     player_pose=self._player_pose)
             self._enemy_ai.start()
             self._start_bots(avatar)
         except Exception as error:
@@ -851,7 +853,8 @@ class OfflineBattleRuntime(object):
         """Hand the enemies to the copied planner and driver."""
         import BigWorld
         control = BotControl(self._enemies, self._map_name, self._arena_type,
-                             avatar.spaceID, self._log)
+                             avatar.spaceID, self._log,
+                             player_motion=self._motion)
         for vehicle in self._enemies.alive():
             control.register(vehicle, entity_setup.ENEMY_TEAM)
         control.start(BigWorld.callback)
@@ -859,6 +862,20 @@ class OfflineBattleRuntime(object):
 
     def _enemy_bodies(self):
         return self._enemies.bodies() if self._enemies is not None else ()
+
+    def _bot_bodies(self):
+        return self._bots.bodies if self._bots is not None else {}
+
+    def _player_pose(self):
+        """(x, y, z, yaw) of the pose this runtime owns for the player."""
+        import Math
+        if self._motion is None:
+            return None
+        position = self._motion.position
+        if position is None:
+            return None
+        return (position.x, position.y, position.z,
+                Math.Matrix(self._motion.matrix).yaw)
 
     def _apply_module_hits(self, vehicle, shot, landing, result):
         """Roll the copied saving throws and keep the player's device state."""

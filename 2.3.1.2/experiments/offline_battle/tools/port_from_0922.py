@@ -43,6 +43,7 @@ MODULES = {
     'ai/maps_group_b.py': 'Tactical map data',
     'ai/maps_group_c.py': 'Tactical map data',
     'ai/maps_0922_extra.py': 'Tactical map data',
+    'ai/reviewed_routes_20260811.py': 'Reviewed route data maps.py imports',
     'ai/navigation.py': 'Bot navigation',
     'ai/planner.py': 'Bot planning',
     'ai/adapter.py': 'Bot driver adapter',

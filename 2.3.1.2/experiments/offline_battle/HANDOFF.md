@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.8.0.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.10.1.wotmod`,
 built and validated, **not deployed**: the VM was off.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated, **not deployed**: the VM was off.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.8.0.wotmod ~/Downloads/
-prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_0.7.1.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.8.0.wotmod $M\\mods\\2.3.1.2\\
+cp dist/org.peng.offline_2312_battle_0.10.1.wotmod ~/Downloads/
+prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.10.1.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -59,31 +59,55 @@ Newly wired:
 - A shot-out engine or track costs the player mobility and traverse.
 - The shell trajectory runs through the copied ballistics.
 
-Copied but not wired: `spotting` (nothing is hidden by view range) and
-`gun_mechanics` (dispersion still comes from the stock gun rotator).
+Copied but not wired: `spotting` (nothing is hidden by view range),
+`gun_mechanics` (dispersion still comes from the stock gun rotator),
+`critical_damage`, `projectile_manager`, `foliage` and
+`destructibles_sensor`.
 
-Deliberately not copied: `critical_damage` and the internal hit layouts,
-because they rest on 251 per-vehicle interior geometries built for the
-0.9.22 vehicle set. That is version data, not law.
+## What 0.10.x adds
+
+- 0.10.0: the whole `ai/` package is copied, and `bot_control.py`
+  drives the enemies with it.
+- 0.10.1 is a self-review pass over that wiring, against the mature
+  caller `bot_runtime.py`:
+  - The port script had skipped `ai/reviewed_routes_20260811.py`, which
+    `ai/maps.py` imports at module level, so 0.10.0 would have died at
+    mod load. A test now walks every internal import.
+  - The player now rides in each bot's `neighbours`, so the driver's
+    separation steering sees the human.
+  - The mature `_traffic_throttle` is copied: a follower yields to the
+    vehicle ahead, the lower id has right of way at a crossing, and
+    every bot yields to a human.
+  - A blocked travel direction now calls `driver.remember_failure`, so
+    the copied stuck recovery can run; a reversing bot probes the rear.
+  - Enemy fire is gated by the planner's `fire_allowed`.
+  - Enemy shells hit-test the player through the pose this runtime
+    owns, not through the native filter left at the spawn pose. This is
+    the same route that fixed idler hits on the enemies.
+  - Bot velocities feed the tank-contact law, so a moving bot pushes
+    with momentum.
 
 ## What to check on the next run
 
-The batch is large, so check in this order and stop at the first
-failure; the step trace will name the vehicle and step.
+Check in this order and stop at the first failure; the step trace will
+name the vehicle and step.
 
-1. The battle starts and three enemies appear.
-2. Enemy turrets track you as you move.
-3. Their shells reach you rather than passing over.
-4. You cannot drive through an enemy hull.
-5. Shooting an enemy takes health, and the hit sound matches the result.
-6. Some hits report a crit: look for `crits=[...]` in the log.
-7. Killing an enemy does not end the client.
-8. Being killed does not end the client.
-9. Taking an engine or track crit slows you down.
+1. The battle starts and three enemies appear, then drive off along a
+   route instead of standing.
+2. Bots do not pile into each other or into you; a blocked bot backs
+   out instead of grinding a wall.
+3. Enemy fire starts after they decide to engage, and their shells hit
+   your hull where it actually is, tracks and idler included.
+4. Shooting an enemy takes health, and the hit sound matches the result.
+5. Killing an enemy does not end the client; the wreck stays put.
+6. Being killed does not end the client.
+7. Do the enemy minimap icons and markers follow their moving hulls?
+   The entity position is never written offline, so this observation
+   decides whether a position publish path is needed.
 
-`python.log` markers: `enemies_spawned`, `enemy_ai_started`,
-`shell_hit ... crits=`, `enemy_killed`, `player_hit ... crits=`,
-`motion_state ... contacts=`.
+`python.log` markers: `enemies_spawned`, `bot_control_started`,
+`bot_command`, `enemy_ai_started`, `shell_hit ... crits=`,
+`enemy_killed`, `player_hit ... crits=`, `motion_state ... contacts=`.
 
 ## If a death still ends the client
 
@@ -94,7 +118,10 @@ running. Neither is patched, because there is no evidence against them.
 
 ## Still open
 
-- Enemy vehicles do not drive.
+- Enemy turret models still do not rotate visually; the providers hold
+  the aim.
+- The coasting glide after releasing W, the permanent stun panel and
+  the hit-arrow frame, all carried over from the 0.9.x runs.
 - No fire, no crew injury effects, no ramming damage, no HE splash
   beyond the direct-hit law.
 - No battle result, so a finished fight has no ending.

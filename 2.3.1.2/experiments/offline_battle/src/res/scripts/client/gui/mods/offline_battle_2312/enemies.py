@@ -43,6 +43,7 @@ class EnemyForce(object):
         self._poses = {}
         self._comp_descr = None
         self._matrices = {}
+        self._velocities = {}
 
     @property
     def ids(self):
@@ -64,11 +65,13 @@ class EnemyForce(object):
         """(x, y, z, yaw) where this enemy was placed; it does not move."""
         return self._poses.get(vehicle_id)
 
-    def set_pose(self, vehicle_id, pose):
+    def set_pose(self, vehicle_id, pose, velocity=None):
         """Move an enemy: the runtime owns these poses, as it owns its own."""
         import BigWorld
         import Math
         self._poses[vehicle_id] = pose
+        if velocity is not None:
+            self._velocities[vehicle_id] = velocity
         vehicle = BigWorld.entities.get(vehicle_id)
         if vehicle is None:
             return
@@ -92,11 +95,12 @@ class EnemyForce(object):
             if pose is None or vehicle is None:
                 continue
             descriptor = vehicle.typeDescriptor
+            vx, vz = self._velocities.get(vehicle_id, (0.0, 0.0))
             result.append({
                 'id': vehicle_id,
                 'x': pose[0], 'y': pose[1], 'z': pose[2], 'yaw': pose[3],
                 'mass': float(descriptor.physics['weight']),
-                'vx': 0.0, 'vz': 0.0,
+                'vx': vx, 'vz': vz,
                 'alive': self._health.get(vehicle_id, 0) > 0,
                 'shape': tank_collision.chassis_shape(descriptor),
             })
@@ -181,3 +185,4 @@ class EnemyForce(object):
         self._ids = []
         self._health = {}
         self._poses = {}
+        self._velocities = {}
