@@ -174,6 +174,13 @@ class EnemyAI(object):
         appearance.turretMatrix.target = state[0]
         appearance.gunMatrix.target = state[1]
         state[0].setRotateY(turret_yaw)
+        if trace:
+            self._stage('turret_provider',
+                        ' id=%s turret=%s gun=%s read_back=%.3f'
+                        % (vehicle.id,
+                           type(appearance.turretMatrix).__name__,
+                           type(appearance.gunMatrix).__name__,
+                           Math.Matrix(appearance.turretMatrix).yaw))
         state[1].setRotateX(pitch - calcGunPitchCorrection(
             turret_yaw, descriptor.hull.turretPitches[0],
             descriptor.turret.gunJointPitch))

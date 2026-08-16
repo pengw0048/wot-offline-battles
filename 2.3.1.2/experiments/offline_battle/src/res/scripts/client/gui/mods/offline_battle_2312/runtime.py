@@ -769,6 +769,47 @@ class OfflineBattleRuntime(object):
         self._gunnery = gunnery
         self._bridge.set_gunnery(gunnery)
 
+    def _resolve_crits(self, target, landing, result, pose=None):
+        """Devices a penetrating shell reaches, by the copied law.
+
+        The material layers on these vehicles carry no device, so the
+        interior model decides from the compartment the shell entered."""
+        if result != damage.PIERCED:
+            return []
+        names = damage.module_hits(landing.collisions)
+        if pose is None:
+            position = target.position
+            pose = (position.x, position.y, position.z,
+                    self._pose_yaw(target))
+        point = landing.point
+        local = damage.hull_local_point(pose, (point.x, point.y, point.z))
+        part = self._first_part(landing.collisions)
+        device, zone = damage.interior_hit(target.typeDescriptor, part, local)
+        if device is not None and device not in names:
+            names.append(device)
+        self._log('crit_resolved target=%s part=%s zone=%s local=(%.2f,%.2f) '
+                  'devices=%s' % (target.id, part, zone, local[0], local[1],
+                                  names))
+        return names
+
+    def _pose_yaw(self, vehicle):
+        import Math
+        if self._enemies is not None:
+            pose = self._enemies.pose(vehicle.id)
+            if pose is not None:
+                return pose[3]
+        if self._motion is not None and vehicle.id == self._vehicle_id:
+            return Math.Matrix(self._motion.matrix).yaw
+        return Math.Matrix(vehicle.matrix).yaw
+
+    @staticmethod
+    def _first_part(collisions):
+        best = None
+        for collision in collisions or ():
+            if best is None or collision.dist < best[0]:
+                best = (collision.dist, getattr(collision, 'compName', None))
+        return best[1] if best else None
+
     def _log_layers(self, collisions):
         """Record the material layers of one hit, once per battle.
 
@@ -791,9 +832,9 @@ class OfflineBattleRuntime(object):
     def _enemy_bodies(self):
         return self._enemies.bodies() if self._enemies is not None else ()
 
-    def _apply_module_hits(self, vehicle, shot, collisions):
+    def _apply_module_hits(self, vehicle, shot, landing, result):
         """Roll the copied saving throws and keep the player's device state."""
-        names = damage.module_hits(collisions)
+        names = self._resolve_crits(vehicle, landing, result)
         if not names:
             return names
         descriptor = vehicle.typeDescriptor
@@ -830,8 +871,7 @@ class OfflineBattleRuntime(object):
             health = self._enemies.apply_damage(target.id, points,
                                                 self._vehicle_id)
         killed = health is not None and health <= 0
-        crits = (damage.module_hits(landing.collisions)
-                 if result == damage.PIERCED else [])
+        crits = self._resolve_crits(target, landing, result)
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
         self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
         feedback.publish_dealt(self._avatar, target.id, points, len(crits),
@@ -851,23 +891,25 @@ class OfflineBattleRuntime(object):
                                         landing.collisions)
         previous = int(vehicle.health)
         health = previous
-        crits = (self._apply_module_hits(vehicle, shot, landing.collisions)
-                 if result == damage.PIERCED else [])
+        crits = self._apply_module_hits(vehicle, shot, landing, result)
         if result is not None and points:
             health = max(0, previous - int(points))
             vehicle.health = health
             vehicle.onHealthChanged(health, previous, int(shooter_id), 0, 0)
             self._avatar.updateVehicleHealth(self._vehicle_id, health, 0,
                                              health > 0, False)
-        shooter = BigWorld.entities.get(shooter_id)
-        if shooter is not None:
+        shooter_pose = (self._enemies.pose(shooter_id)
+                        if self._enemies is not None else None)
+        if shooter_pose is not None:
             own = vehicle.position
-            other = shooter.position
+            yaw = feedback.hit_direction_yaw(
+                (own.x, own.y, own.z),
+                (shooter_pose[0], shooter_pose[1], shooter_pose[2]))
             feedback.publish_received(
                 self._avatar, shooter_id, points if result is not None else 0,
-                len(crits),
-                feedback.hit_direction_yaw((own.x, own.y, own.z),
-                                           (other.x, other.y, other.z)))
+                len(crits), yaw)
+            self._log('hit_direction shooter=%s yaw=%.3f hull_yaw=%.3f'
+                      % (shooter_id, yaw, self._pose_yaw(vehicle)))
         self._log('player_hit shooter=%s distance=%.1f result=%s damage=%s '
                   'health=%s crits=%s' % (shooter_id, landing.travelled,
                                           result, points, health, crits))

@@ -210,6 +210,17 @@ def _install_vehicle_state_trace(log):
     BattleFeedbackAdaptor.invalidateStun = invalidate_stun
     _patches.append((BattleFeedbackAdaptor, 'invalidateStun', original_stun,
                      invalidate_stun))
+    original_debuff = BattleFeedbackAdaptor.invalidateDebuff
+
+    def invalidate_debuff(adaptor, vehicle_id, debuff_info):
+        log('debuff_invalidated vehicle=%s duration=%s info=%s'
+            % (vehicle_id, getattr(debuff_info, 'duration', None),
+               repr(debuff_info)[:80]))
+        return original_debuff(adaptor, vehicle_id, debuff_info)
+
+    BattleFeedbackAdaptor.invalidateDebuff = invalidate_debuff
+    _patches.append((BattleFeedbackAdaptor, 'invalidateDebuff',
+                     original_debuff, invalidate_debuff))
 
 
 def install(log):

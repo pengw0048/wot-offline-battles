@@ -6,6 +6,7 @@ port. This module only feeds it the 2.3.1.2 inputs: the collision layers
 """
 from __future__ import absolute_import
 
+import math
 import random
 
 from gui.mods.offline_battle_2312 import combat_rules
@@ -112,6 +113,47 @@ def law_devices(names):
             if mapped not in result:
                 result.append(mapped)
     return result
+
+
+TURRET_PART_INDEX = 2
+GUN_PART_INDEX = 3
+
+
+def hull_local_point(pose, point):
+    """A world point in hull-local metres: +z forward, +x right."""
+    delta_x = float(point[0]) - float(pose[0])
+    delta_z = float(point[2]) - float(pose[2])
+    sin_yaw = math.sin(float(pose[3]))
+    cos_yaw = math.cos(float(pose[3]))
+    return (delta_x * cos_yaw - delta_z * sin_yaw,
+            delta_x * sin_yaw + delta_z * cos_yaw)
+
+
+def interior_hit(descriptor, part_index, local_point, random_roll=None):
+    """The device a penetrating shell plausibly reaches inside.
+
+    The client's collision layers carry no device on this vehicle, so
+    the copied interior model decides, from the compartment the shell
+    entered and the crew this tank actually has."""
+    if part_index in (TURRET_PART_INDEX, GUN_PART_INDEX):
+        zone = 'turret'
+    else:
+        try:
+            bbox = descriptor.hull.hitTester.bbox
+            half_width = max(abs(float(bbox[0][0])), abs(float(bbox[1][0])))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            half_width = 1.0
+        try:
+            ring_z = float(descriptor.hull.turretPositions[0][2])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            ring_z = 0.0
+        zone = device_damage.interior_zone(local_point[0], local_point[1],
+                                           ring_z, half_width)
+    roster = []
+    for role in getattr(descriptor.type, 'crewRoles', ()) or ():
+        roster.extend(role if isinstance(role, (tuple, list)) else [role])
+    candidates = device_damage.interior_candidates(zone, roster, descriptor)
+    return device_damage.pick_interior(candidates, random_roll), zone
 
 
 def crit_flags(names):

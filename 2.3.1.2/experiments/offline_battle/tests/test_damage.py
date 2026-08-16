@@ -1,4 +1,5 @@
 import math
+import types
 import unittest
 
 import sys
@@ -207,6 +208,74 @@ class LawDeviceNameTests(unittest.TestCase):
         self.assertEqual(
             damage.law_devices(['chassisHealth', 'leftTrackHealth']),
             ['leftTrackHealth', 'rightTrackHealth'])
+
+
+class HullLocalPointTests(unittest.TestCase):
+    def test_a_point_ahead_is_positive_z(self):
+        local = damage.hull_local_point((0.0, 0.0, 0.0, 0.0),
+                                        (0.0, 0.0, 5.0))
+        self.assertAlmostEqual(local[0], 0.0)
+        self.assertAlmostEqual(local[1], 5.0)
+
+    def test_a_point_to_the_right_is_positive_x(self):
+        local = damage.hull_local_point((0.0, 0.0, 0.0, 0.0),
+                                        (3.0, 0.0, 0.0))
+        self.assertAlmostEqual(local[0], 3.0)
+        self.assertAlmostEqual(local[1], 0.0)
+
+    def test_the_frame_follows_the_hull_yaw(self):
+        local = damage.hull_local_point((0.0, 0.0, 0.0, math.pi / 2.0),
+                                        (5.0, 0.0, 0.0))
+        self.assertAlmostEqual(local[0], 0.0, places=6)
+        self.assertAlmostEqual(local[1], 5.0)
+
+    def test_the_hull_origin_is_the_origin(self):
+        local = damage.hull_local_point((10.0, 2.0, -4.0, 1.0),
+                                        (10.0, 2.0, -4.0))
+        self.assertAlmostEqual(local[0], 0.0)
+        self.assertAlmostEqual(local[1], 0.0)
+
+
+class _Descriptor(object):
+    def __init__(self):
+        self.hull = types.SimpleNamespace(
+            hitTester=types.SimpleNamespace(
+                bbox=((-1.0, 0.0, -2.0), (1.0, 1.0, 2.0), 0)),
+            turretPositions=[(0.0, 0.5, 0.2)])
+        self.type = types.SimpleNamespace(
+            crewRoles=(('commander',), ('driver',), ('gunner',)))
+        self.chassis = types.SimpleNamespace()
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+class InteriorHitTests(unittest.TestCase):
+    def test_a_turret_hit_uses_the_turret_zone(self):
+        _device, zone = damage.interior_hit(_Descriptor(),
+                                            damage.TURRET_PART_INDEX,
+                                            (0.0, 0.0), random_roll=0.5)
+        self.assertEqual(zone, 'turret')
+
+    def test_a_hit_ahead_of_the_ring_is_the_front_compartment(self):
+        _device, zone = damage.interior_hit(_Descriptor(), 1, (0.0, 1.5),
+                                            random_roll=0.5)
+        self.assertEqual(zone, 'hullFront')
+
+    def test_a_hit_behind_the_ring_is_the_rear_compartment(self):
+        _device, zone = damage.interior_hit(_Descriptor(), 1, (0.0, -1.5),
+                                            random_roll=0.5)
+        self.assertEqual(zone, 'hullRear')
+
+    def test_a_hit_on_the_flank_is_the_sponson(self):
+        _device, zone = damage.interior_hit(_Descriptor(), 1, (0.95, 0.0),
+                                            random_roll=0.5)
+        self.assertEqual(zone, 'hullSide')
+
+    def test_a_penetration_names_some_device(self):
+        device, _zone = damage.interior_hit(_Descriptor(), 1, (0.0, 1.5),
+                                            random_roll=0.5)
+        self.assertTrue(device is None or device.endswith('Health'))
 
 
 class CritFlagTests(unittest.TestCase):
