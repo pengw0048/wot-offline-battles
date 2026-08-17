@@ -4,6 +4,54 @@ from __future__ import absolute_import
 TRACKS = (('leftTrackHealth', True), ('rightTrackHealth', False))
 
 
+def ensure_scroll(vehicle, log=None):
+    """The stock _startSystems sequence, once: activate, then bind the
+    native filter. Without activate the controller ignores setExternal."""
+    state = getattr(vehicle, '_offh_scroll_state', None)
+    if state is not None:
+        return state == 'active'
+    appearance = getattr(vehicle, 'appearance', None)
+    controller = getattr(appearance, 'trackScrollController', None)
+    if controller is None:
+        vehicle._offh_scroll_state = 'missing'
+        if log is not None:
+            log('scroll_controller_missing id=%s' % vehicle.id)
+        return False
+    try:
+        controller.activate()
+        entity_filter = vehicle.filter
+        controller.setData(getattr(entity_filter, '_filter', entity_filter))
+    except Exception as err:
+        vehicle._offh_scroll_state = 'failed'
+        if log is not None:
+            log('scroll_activate_failed id=%s err=%r' % (vehicle.id, err))
+        return False
+    vehicle._offh_scroll_state = 'active'
+    if log is not None:
+        log('scroll_active id=%s' % vehicle.id)
+    return True
+
+
+def feed_scroll(vehicle, left, right):
+    """setExternal through the stock updateTracksScroll, plus the filter
+    attributes the bound controller reads. The filter write must reach
+    the native filter: the proxy's __slots__ rejects new attributes."""
+    appearance = getattr(vehicle, 'appearance', None)
+    if appearance is None:
+        return
+    try:
+        appearance.updateTracksScroll(left, right)
+    except Exception:
+        pass
+    entity_filter = getattr(vehicle, 'filter', None)
+    native = getattr(entity_filter, '_filter', entity_filter)
+    try:
+        native.leftTrackScroll = left
+        native.rightTrackScroll = right
+    except Exception:
+        pass
+
+
 def refresh(vehicle):
     appearance = getattr(vehicle, 'appearance', None)
     if appearance is None:

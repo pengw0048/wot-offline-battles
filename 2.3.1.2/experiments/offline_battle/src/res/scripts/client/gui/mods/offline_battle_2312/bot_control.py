@@ -414,14 +414,9 @@ class BotControl(object):
     def _scroll_tracks(self, body):
         import BigWorld
         vehicle = BigWorld.entities.get(body.id)
-        appearance = getattr(vehicle, 'appearance', None)
-        if appearance is None:
+        if vehicle is None:
             return
+        track_visuals.ensure_scroll(vehicle, self._log)
         left, right = motion.track_scroll(body.params, body.speed,
                                           body.omega)
-        appearance.updateTracksScroll(left, right)
-        try:
-            vehicle.filter.leftTrackScroll = left
-            vehicle.filter.rightTrackScroll = right
-        except Exception:
-            pass
+        track_visuals.feed_scroll(vehicle, left, right)

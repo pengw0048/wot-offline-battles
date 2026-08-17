@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.9.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.10.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.9.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.10.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.9.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.10.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -400,6 +400,39 @@ Measured from the law with the MS-1 parameters: releasing W on a
 holds; a 20-degree descent keeps the hull rolling at the limit. Whether
 those distances match retail needs a same-slope field comparison.
 
+## What 0.12.10 adds
+
+The 0.12.9 run reported three failures; the log and the client bytecode
+named a mechanism for each:
+
+- Releasing W still glided ~27 m downhill. The trace showed the law's
+  own downhill relief: it starts unloading the brake share at zero
+  slope, so a 7-degree descent kept only a quarter of it. The 0.8.2
+  source law has no relief at all; the copied file now fades the share
+  only between 80% and 100% of the static perch tangent, so every
+  parkable slope brakes like the flat (2-4 m from full speed) and a
+  descent past the perch limit slides for real instead of creeping.
+  This replaces the 0.9.22-line relief, a deliberate law edit on field
+  evidence.
+- Enemy tracks would not sever: the whole session produced exactly one
+  chassis crossing. The real track BSP is far narrower than the visual
+  track, so running-gear shots resolve only hull plates, and the old
+  box stand-in ran only when the collision reported nothing at all.
+  `track_band_hits` now tests the two track-band slabs of the chassis
+  bbox on every shot and injects that side's track layer whenever the
+  stock result carries no chassis crossing of its own.
+- Enemy tracks never scrolled, two mechanisms deep. The stock
+  `CompoundAppearance.updateTracksScroll` is `setExternal` on the
+  controller, but the client only honors it after the
+  `_startSystems` sequence `activate(); setData(filter)`, which nothing
+  ran offline (proved from the 2.3.1.2 bytecode). And the direct filter
+  writes never landed: the OfflineFilterProxy has `__slots__`, so
+  `filter.leftTrackScroll = x` raised into a silent except since
+  0.12.5. `track_visuals.ensure_scroll` now runs the stock start
+  sequence once per vehicle and logs `scroll_active`,
+  `scroll_controller_missing` or `scroll_activate_failed`;
+  `feed_scroll` writes the native filter behind the proxy.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -418,12 +451,19 @@ name the vehicle and step.
 7. Do the enemy minimap icons and markers follow their moving hulls?
    The entity position is never written offline, so this observation
    decides whether a position publish path is needed.
-8. Release W on the flat and on a descent: the tank glides and settles
-   instead of slamming to a stop, and once stopped on a moderate slope
-   it holds. Note the glide distance for the retail comparison.
+8. Release W on the flat and on a descent: the tank now brakes to a
+   stop within a few metres on any slope it can park on, and holds.
+   Compare the stop against retail feel.
 9. Get tracked, then get the engine shot out, on separate lives: a
    thrown track locks the hull even downhill; a dead engine coasts to a
    stop and neither drives nor turns until the repair.
+10. Shoot an enemy's running gear from the side: most hits should now
+    log `hit_layer part=chassis extra=...Track...`, and repeated hits
+    on one side should sever that track.
+11. Watch the enemy tracks while a bot drives, and find the
+    `scroll_active` / `scroll_controller_missing` /
+    `scroll_activate_failed` markers; they decide the track-animation
+    question either way.
 
 `python.log` markers: `enemies_spawned`, `bot_control_started`,
 `bot_command`, `enemy_ai_started`, `shell_hit ... crits=`,
@@ -441,8 +481,8 @@ running. Neither is patched, because there is no evidence against them.
 - The release-W glide distance against retail, on the same slope. The
   law's own behavior is measured and tested; only the retail comparison
   is missing.
-- Enemy track scroll animation: both candidate routes are fed and the
-  scroll probe lists the PyTrackScroll API; the next log decides.
+- Enemy track scroll animation: the stock activate/setData/setExternal
+  sequence is wired now; the `scroll_*` markers in the next log decide.
 - A hit on the rear idler did not register in the 0.9.x runs. The
   old spawn-pose explanation is withdrawn; needs fresh evidence
   from hit_layer logs on a deliberate idler shot.

@@ -354,6 +354,111 @@ class NearestVehicleTests(unittest.TestCase):
                                                  None))
 
 
+class _StubVector3(object):
+    def __init__(self, *args):
+        if len(args) == 1:
+            args = (args[0].x, args[0].y, args[0].z) \
+                if hasattr(args[0], 'x') else tuple(args[0])
+        self.x, self.y, self.z = (float(v) for v in args)
+
+    def __sub__(self, other):
+        return _StubVector3(self.x - other.x, self.y - other.y,
+                            self.z - other.z)
+
+    def __add__(self, other):
+        return _StubVector3(self.x + other.x, self.y + other.y,
+                            self.z + other.z)
+
+    def __mul__(self, scale):
+        return _StubVector3(self.x * scale, self.y * scale, self.z * scale)
+
+    @property
+    def length(self):
+        return math.sqrt(self.x * self.x + self.y * self.y +
+                         self.z * self.z)
+
+    def normalise(self):
+        size = self.length or 1.0
+        self.x, self.y, self.z = self.x / size, self.y / size, self.z / size
+
+
+class _StubMatrix(object):
+    """The identity pose: hull space equals world space."""
+
+    def __init__(self, source=None):
+        pass
+
+    def invert(self):
+        pass
+
+    def applyPoint(self, point):
+        return _StubVector3(point)
+
+
+class _BandVehicle(object):
+    """Chassis bbox x half 1.5, track centre 1.1 -> bands |x| in 0.7..1.5."""
+
+    def __init__(self, collisions):
+        self._collisions = collisions
+        self.id = 9
+        self.matrix = 'pose'
+        chassis = types.SimpleNamespace(
+            hitTester=types.SimpleNamespace(
+                bbox=((-1.5, 0.0, -3.0), (1.5, 1.2, 3.0), 2.0)),
+            materials={3: _MatInfo(10.0)})
+        self.typeDescriptor = types.SimpleNamespace(
+            chassis=chassis, physics={'trackCenterOffset': 1.1})
+
+    def collideSegmentExt(self, start, end):
+        return self._collisions
+
+
+class TrackBandTests(unittest.TestCase):
+    def setUp(self):
+        self._saved_math = sys.modules.get('Math')
+        stub = types.ModuleType('Math')
+        stub.Vector3 = _StubVector3
+        stub.Matrix = _StubMatrix
+        sys.modules['Math'] = stub
+
+    def tearDown(self):
+        if self._saved_math is None:
+            del sys.modules['Math']
+        else:
+            sys.modules['Math'] = self._saved_math
+
+    def test_a_side_shot_crosses_one_band_with_that_side_track(self):
+        hits = damage.track_band_hits(_BandVehicle([]),
+                                      (5.0, 0.5, 0.0), (0.0, 0.5, 0.0))
+        self.assertEqual(len(hits), 1)
+        hit = hits[0]
+        self.assertEqual(hit.compName, 'chassis')
+        self.assertEqual(hit.matInfo.extra.name, 'rightTrackHealth')
+        self.assertAlmostEqual(hit.dist, 3.5)
+
+    def test_an_under_belly_shot_crosses_no_band(self):
+        hits = damage.track_band_hits(_BandVehicle([]),
+                                      (0.0, 0.5, -5.0), (0.0, 0.5, 5.0))
+        self.assertEqual(hits, [])
+
+    def test_hull_only_stock_layers_gain_the_band_layer(self):
+        vehicle = _BandVehicle([_Collision(4.0, 1.0, _MatInfo(16.0),
+                                           'hull')])
+        found = damage.nearest_vehicle([vehicle],
+                                       (5.0, 0.5, 0.0), (0.0, 0.5, 0.0))
+        names = [c.compName for c in found[2]]
+        self.assertIn('chassis', names)
+        self.assertIn('hull', names)
+        self.assertAlmostEqual(found[1], 3.5)
+
+    def test_a_stock_chassis_layer_blocks_the_stand_in(self):
+        vehicle = _BandVehicle([damage.SegmentCollisionResultExt(
+            4.0, 1.0, _MatInfo(5.0), 'chassis')])
+        found = damage.nearest_vehicle([vehicle],
+                                       (5.0, 0.5, 0.0), (0.0, 0.5, 0.0))
+        self.assertEqual(len(found[2]), 1)
+
+
 class LawTrackNameTests(unittest.TestCase):
     def test_numbered_track_devices_fold_to_the_law_names(self):
         self.assertEqual(damage.law_track_name('rightTrack0Health'),

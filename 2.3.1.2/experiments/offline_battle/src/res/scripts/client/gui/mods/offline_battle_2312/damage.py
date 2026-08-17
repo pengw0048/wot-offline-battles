@@ -302,32 +302,55 @@ def _segment_box_entry(a, b, low, high):
     return enter
 
 
-def chassis_box_hit(vehicle, start, end):
-    """Running-gear stand-in: the stock collision component carries no
-    chassis geometry on this client, so an idler shot reports nothing."""
+def _track_band_inner_x(descriptor, half):
+    """Inner x edge of the track slabs, from the track centre offset."""
+    physics = getattr(descriptor, 'physics', None)
+    centre = (physics.get('trackCenterOffset')
+              if isinstance(physics, dict) else None)
+    if not centre:
+        return half * 0.5
+    inner = 2.0 * float(centre) - half
+    if inner <= 0.0 or inner >= half:
+        return half * 0.5
+    return inner
+
+
+def track_band_hits(vehicle, start, end):
+    """Running-gear stand-in: the real track BSP is far narrower than the
+    visual track, so most running-gear shots cross only hull plates. A
+    segment through a track-band slab of the chassis bbox reports a
+    chassis layer, at the drawn pose, carrying that side's track."""
     try:
         import Math
         descriptor = vehicle.typeDescriptor
         low, high = descriptor.chassis.hitTester.bbox[:2]
         materials = descriptor.chassis.materials
     except (AttributeError, ImportError, IndexError, TypeError):
-        return None
+        return []
+    half = float(high[0])
+    inner = _track_band_inner_x(descriptor, half)
     world_to_vehicle = Math.Matrix(vehicle.matrix)
     world_to_vehicle.invert()
     a = world_to_vehicle.applyPoint(start)
     b = world_to_vehicle.applyPoint(end)
-    entry = _segment_box_entry((a.x, a.y, a.z), (b.x, b.y, b.z),
-                               (low[0], low[1], low[2]),
-                               (high[0], high[1], high[2]))
-    if entry is None:
-        return None
     mat_info = None
     for value in (materials or {}).values():
         mat_info = value
         break
     length = (Math.Vector3(end) - Math.Vector3(start)).length
-    return SegmentCollisionResultExt(entry * length, 1.0, mat_info,
-                                     'chassis')
+    hits = []
+    for name, band_low, band_high in (
+            ('leftTrackHealth',
+             (low[0], low[1], low[2]), (-inner, high[1], high[2])),
+            ('rightTrackHealth',
+             (inner, low[1], low[2]), (half, high[1], high[2]))):
+        entry = _segment_box_entry((a.x, a.y, a.z), (b.x, b.y, b.z),
+                                   band_low, band_high)
+        if entry is not None:
+            hits.append(SegmentCollisionResultExt(
+                entry * length, 1.0, _TrackMaterial(mat_info, name),
+                'chassis'))
+    return hits
 
 
 def nearest_vehicle(vehicles, start, end):
@@ -338,14 +361,15 @@ def nearest_vehicle(vehicles, start, end):
     pose this runtime owns."""
     best = None
     for vehicle in vehicles:
-        collisions = vehicle.collideSegmentExt(start, end)
+        collisions = _named_parts(vehicle.collideSegmentExt(start, end)
+                                  or ())
+        if not any(getattr(collision, 'compName', None) == 'chassis'
+                   for collision in collisions):
+            collisions = collisions + track_band_hits(vehicle, start, end)
         if not collisions:
-            box_hit = chassis_box_hit(vehicle, start, end)
-            if box_hit is None:
-                continue
-            collisions = [box_hit]
+            continue
         collisions = [_trackify(vehicle, collision, start, end)
-                      for collision in _named_parts(collisions)]
+                      for collision in collisions]
         distance = min(float(collision.dist) for collision in collisions)
         if best is None or distance < best[1]:
             best = (vehicle, distance, collisions)

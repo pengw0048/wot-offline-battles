@@ -469,17 +469,18 @@ def longitudinal_step(p, v, throttle, steering, slope_pitch, dt,
                 return 0.0                        # tracks hold - no creep on ordinary hills
             accel = grav_a - (_hold if grav_a > 0.0 else -_hold)   # slides off a too-steep parked slope
         else:
-            # Preserve the established flat-road settling distance, but unload the
-            # drivetrain drag as the current direction points downhill.  The ratio is
-            # direction-aware: coasting uphill receives no relief.  At/past the static
-            # perch tangent gravity owns the descent and only rolling resistance remains.
+            # The 0.8.2 coast law: rolling + partial grip brake oppose the
+            # motion; gravity still acts. The 0.9.22-line downhill relief
+            # started at zero slope and glided ~27 m on a 7-degree field
+            # descent; the share now fades only NEAR the static perch limit,
+            # so a slope the parked hold cannot keep slides instead of
+            # creeping, and every parkable slope brakes like the flat.
             motion_sign = 1.0 if v > 0.0 else -1.0
-            downhill_tangent = max(
-                0.0, math.tan(slope_pitch) * motion_sign)
-            downhill_relief = min(
-                1.0, downhill_tangent / SLIDE_HOLD_TAN) ** 0.4
-            coast_share = COAST_BRAKE_SHARE * (1.0 - downhill_relief)
-            resist = rr + coast_share * grip
+            downhill_tangent = max(0.0, math.tan(slope_pitch) * motion_sign)
+            fade_start = 0.8 * SLIDE_HOLD_TAN
+            fade = min(1.0, max(0.0, (downhill_tangent - fade_start) /
+                                (SLIDE_HOLD_TAN - fade_start)))
+            resist = rr + COAST_BRAKE_SHARE * (1.0 - fade) * grip
             accel = grav_a - (resist if v > 0.0 else -resist)
 
     # TRACK-SLIP DRAG: rolling UP a grade steeper than the tracks can pull, they

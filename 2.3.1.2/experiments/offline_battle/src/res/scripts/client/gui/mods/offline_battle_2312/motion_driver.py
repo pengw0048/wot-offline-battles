@@ -12,6 +12,7 @@ import math
 from gui.mods.offline_battle_2312 import motion, suspension
 from gui.mods.offline_battle_2312 import engine_shim
 from gui.mods.offline_battle_2312 import tank_collision, world_collision
+from gui.mods.offline_battle_2312 import track_visuals
 
 TICK_SECONDS = 0.02
 TRACED_COAST_TICKS = 40
@@ -364,16 +365,10 @@ class MotionDriver(object):
         if speed_info is not None:
             speed_info.set(self._speed_provider)
         self._publish_gun_angles(vehicle)
-        appearance = getattr(vehicle, 'appearance', None)
-        if appearance is not None:
-            left, right = motion.track_scroll(self._params, self._speed,
-                                              self._omega)
-            appearance.updateTracksScroll(left, right)
-            try:
-                vehicle.filter.leftTrackScroll = left
-                vehicle.filter.rightTrackScroll = right
-            except Exception:
-                pass
+        track_visuals.ensure_scroll(vehicle, self._log)
+        left, right = motion.track_scroll(self._params, self._speed,
+                                          self._omega)
+        track_visuals.feed_scroll(vehicle, left, right)
 
     def _publish_gun_angles(self, vehicle):
         """Offline this runtime is the authority the turret syncs against.

@@ -111,24 +111,24 @@ class LongitudinalTests(unittest.TestCase):
                                              math.radians(13.0), 0.02)
         self.assertEqual(speed, 0.0)
 
-    def test_coasting_glides_then_settles_on_a_moderate_slope(self):
+    def test_released_throttle_stops_on_a_parkable_descent(self):
         params = _params()
         speed = 6.0
-        for _unused in range(200):
+        for _unused in range(15):
             speed = motion.longitudinal_step(params, speed, 0, False,
                                              math.radians(13.0), 0.02)
-        self.assertGreater(speed, 2.0)
-        for _unused in range(800):
+        self.assertGreater(speed, 0.0)
+        for _unused in range(100):
             speed = motion.longitudinal_step(params, speed, 0, False,
                                              math.radians(13.0), 0.02)
         self.assertEqual(speed, 0.0)
 
-    def test_a_steep_descent_keeps_the_hull_rolling(self):
+    def test_a_descent_past_the_perch_limit_keeps_sliding(self):
         params = _params()
         speed = 6.0
         for _unused in range(1000):
             speed = motion.longitudinal_step(params, speed, 0, False,
-                                             math.radians(20.0), 0.02)
+                                             math.radians(30.0), 0.02)
         self.assertGreater(speed, 5.0)
 
     def test_the_handbrake_stops_and_holds_downhill(self):
