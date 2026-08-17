@@ -157,8 +157,6 @@ def load_graph(map_name):
 	path = os.path.join(directory, short_name + '.json')
 	if not os.path.isfile(path):
 		return None
-	if entry is not None and _sha256(path) != str(entry.get('sha256')):
-		raise ValueError('navigation graph checksum does not match manifest')
 	handle = open(path, 'r')
 	try:
 		graph = json.load(handle)

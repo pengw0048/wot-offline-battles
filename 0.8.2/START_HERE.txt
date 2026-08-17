@@ -1,4 +1,4 @@
-World of Tanks 0.8.2 native bot physics experiment 1.8.58
+World of Tanks 0.8.2 native bot physics experiment 1.8.59
 =========================================================
 
 This package does NOT contain the World of Tanks client. You must already have
@@ -44,7 +44,7 @@ LAN SERVER (only one machine needs this)
 
 The expected startup line is similar to:
 
-   LAN battle server listening on 0.0.0.0:28782 (... protocol=8, build=1.8.58-native-experimental-20260815)
+   LAN battle server listening on 0.0.0.0:28782 (... protocol=8, build=1.8.59-native-experimental-20260815)
 
 
 JOIN THE SAME LAN BATTLE
@@ -58,7 +58,7 @@ JOIN THE SAME LAN BATTLE
 6. In the waiting room, choose a map and click START BATTLE.
 
 Every client and the server must come from this same protocol-8/
-build-1.8.58-native-experimental-20260815 package.
+build-1.8.59-native-experimental-20260815 package.
 
 
 IF SOMETHING DOES NOT LOAD

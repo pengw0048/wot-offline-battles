@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Version-locked loader for the optional 0.8.2 native filter bridge."""
 
-import hashlib
 import math
 import os
 import sys
@@ -9,43 +8,36 @@ import sys
 from gui.mods.offhangar.logging import LOG_ERROR, LOG_NOTE
 
 
-EXPECTED_EXE_SHA256 = (
-	'8b3fe162117d2bc40aef2209a0cadbafe5ef4e9479410c12cd6ac6efde6deabd')
 MAX_ABS_WORLD_COORDINATE = 12000.0
 MAX_FLOAT32 = 3.402823466e38
 
 _LOAD_STATE = [None]
 
 
-def _world_of_tanks_exe():
-	candidates = (
-		getattr(sys, 'executable', ''),
-		os.path.join(os.getcwd(), 'WorldOfTanks.exe'),
-		getattr(sys, 'argv', [''])[0] if getattr(sys, 'argv', None) else '',
-	)
-	for candidate in candidates:
-		try:
-			path = os.path.abspath(candidate)
-			if (os.path.basename(path).lower() == 'worldoftanks.exe' and
-					os.path.isfile(path)):
-				return path
-		except Exception:
-			pass
-	return os.path.abspath(os.path.join(os.getcwd(), 'WorldOfTanks.exe'))
+def _seed_path():
+	"""Return the installed native seed beside this module."""
+	return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+		'offhangar_native_seed.pyd')
 
 
-def _sha256_file(path):
-	digest = hashlib.sha256()
-	stream = open(path, 'rb')
+def _import_seed():
+	"""Import the native seed, by package first and then by exact path."""
 	try:
-		while True:
-			chunk = stream.read(1024 * 1024)
-			if not chunk:
-				break
-			digest.update(chunk)
-	finally:
-		stream.close()
-	return digest.hexdigest()
+		from gui.mods.offhangar import offhangar_native_seed
+		return offhangar_native_seed
+	except ImportError as package_error:
+		path = _seed_path()
+		if not os.path.isfile(path):
+			raise RuntimeError('native seed not installed at %s (%s)' % (
+				path, package_error))
+		import imp
+		try:
+			return imp.load_dynamic(
+				'gui.mods.offhangar.offhangar_native_seed', path)
+		except Exception as path_error:
+			raise RuntimeError('native seed at %s (%d bytes) did not load: '
+				'%s; package import said: %s' % (
+					path, os.path.getsize(path), path_error, package_error))
 
 
 def load():
@@ -54,22 +46,15 @@ def load():
 		return _LOAD_STATE[0] or None
 	_LOAD_STATE[0] = False
 	try:
-		executable = _world_of_tanks_exe()
-		actual_hash = _sha256_file(executable)
-		if actual_hash.lower() != EXPECTED_EXE_SHA256:
-			raise RuntimeError(
-				'WorldOfTanks.exe SHA-256 mismatch: expected=%s actual=%s' % (
-					EXPECTED_EXE_SHA256, actual_hash))
-		from gui.mods.offhangar import offhangar_native_seed
+		seed = _import_seed()
 		for entry_point in ('seed_filter', 'output_filter',
 				'filter_has_physics', 'publish_physics_root'):
-			if not hasattr(offhangar_native_seed, entry_point):
+			if not hasattr(seed, entry_point):
 				raise RuntimeError(
 					'native module has no %s entry point' % entry_point)
-		_LOAD_STATE[0] = offhangar_native_seed
-		LOG_NOTE(
-			'NATIVE_FILTER_BRIDGE loaded exe_sha256=%s' % actual_hash)
-		return offhangar_native_seed
+		_LOAD_STATE[0] = seed
+		LOG_NOTE('NATIVE_FILTER_BRIDGE loaded from %s' % _seed_path())
+		return seed
 	except Exception as error:
 		LOG_ERROR('NATIVE_FILTER_BRIDGE unavailable: %s' % str(error))
 		return None

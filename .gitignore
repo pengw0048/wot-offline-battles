@@ -11,6 +11,7 @@ python.log
 *.log
 .DS_Store
 
-# Generated 0.9.22 mod packages are CI/local build artifacts.
+# Generated packages and server executables are CI/local build artifacts.
+0.8.2/dist/
 0.9.22/dist/
 deliverables/

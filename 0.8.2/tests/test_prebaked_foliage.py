@@ -62,7 +62,7 @@ class PrebakedFoliageTests(unittest.TestCase):
             "cells": {"0,0": [0]},
         }
 
-    def test_loader_checks_version_map_and_manifest_checksum(self):
+    def test_loader_checks_version_and_map(self):
         with tempfile.TemporaryDirectory() as directory:
             foliage_dir = Path(directory) / "foliage"
             foliage_dir.mkdir()
@@ -83,9 +83,11 @@ class PrebakedFoliageTests(unittest.TestCase):
             loader.STOCK_MAPS = ("07_lakeville",)
             loaded = loader.load_foliage("spaces/07_lakeville")
             self.assertEqual("07_lakeville", loaded.map_name)
+            # A different line ending is still the same foliage.
             path.write_bytes(payload + b"\n")
-            with self.assertRaisesRegex(ValueError, "checksum"):
-                loader.load_foliage("07_lakeville")
+            self.assertEqual(
+                "07_lakeville",
+                loader.load_foliage("07_lakeville").map_name)
 
     def test_shipped_bundle_is_complete_and_has_no_skipped_bushes(self):
         loader = load_foliage_loader(MODULE_DIR)

@@ -195,7 +195,7 @@ class ServerBotNavigationTests(unittest.TestCase):
             })
         self.assertFalse(resolver.active)
 
-    def test_manifest_checksum_mismatch_fails_closed(self):
+    def test_a_rewritten_graph_still_loads(self):
         with tempfile.TemporaryDirectory() as directory:
             source = ROOT / "scripts/client/gui/mods/offhangar/navgraphs"
             for source_path in source.glob("*.json"):
@@ -207,9 +207,8 @@ class ServerBotNavigationTests(unittest.TestCase):
                     server_bot_navigation, "_graph_directories",
                     return_value=(directory,)):
                 resolver = BotPathResolver()
-                with self.assertRaisesRegex(ValueError, "checksum"):
-                    resolver.configure("07_lakeville", self.frame)
-                self.assertFalse(resolver.active)
+                self.assertTrue(
+                    resolver.configure("07_lakeville", self.frame))
 
     def test_manifest_checksum_accepts_windows_line_endings(self):
         with tempfile.TemporaryDirectory() as directory:

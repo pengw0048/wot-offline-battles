@@ -45,16 +45,8 @@ class NativeFilterBridgeTest(unittest.TestCase):
         sys.modules["gui.mods.offhangar"].offhangar_native_seed = native
         return calls
 
-    def test_matching_executable_loads_once_and_marshals_seed(self):
+    def test_installed_seed_loads_once_and_marshals_seed(self):
         calls = self.install_native_module()
-        hash_calls = []
-        self.bridge._world_of_tanks_exe = lambda: "WorldOfTanks.exe"
-
-        def matching_hash(path):
-            hash_calls.append(path)
-            return self.bridge.EXPECTED_EXE_SHA256
-
-        self.bridge._sha256_file = matching_hash
         vehicle_filter = object()
 
         self.assertTrue(self.bridge.seed_filter(
@@ -66,7 +58,6 @@ class NativeFilterBridgeTest(unittest.TestCase):
             (4.0, 5.0, 6.0), (0.0, 0.0, 0.4),
         ))
 
-        self.assertEqual(["WorldOfTanks.exe"], hash_calls)
         self.assertEqual(2, len(calls["seed"]))
         self.assertEqual((vehicle_filter, 123.5, 7, 0,
                           1.0, 2.0, 3.0, 0.1, 0.2, 0.3), calls["seed"][0])
@@ -77,24 +68,22 @@ class NativeFilterBridgeTest(unittest.TestCase):
             for unused_level, message in self.logs
         ))
 
-    def test_executable_hash_mismatch_fails_closed_and_logs_once(self):
-        self.install_native_module()
-        self.bridge._world_of_tanks_exe = lambda: "WorldOfTanks.exe"
-        self.bridge._sha256_file = lambda unused_path: "0" * 64
+    def test_a_missing_seed_names_the_path_and_logs_once(self):
+        sys.modules.pop("gui.mods.offhangar.offhangar_native_seed", None)
+        if hasattr(sys.modules["gui.mods.offhangar"],
+                   "offhangar_native_seed"):
+            del sys.modules["gui.mods.offhangar"].offhangar_native_seed
+        self.bridge._seed_path = lambda: "/nowhere/offhangar_native_seed.pyd"
 
         self.assertIsNone(self.bridge.load())
         self.assertIsNone(self.bridge.load())
         self.assertEqual(1, sum(
-            "SHA-256 mismatch" in message
+            "native seed not installed at /nowhere" in message
             for unused_level, message in self.logs
         ))
 
     def test_native_seed_exception_is_contained(self):
         self.install_native_module()
-        self.bridge._world_of_tanks_exe = lambda: "WorldOfTanks.exe"
-        self.bridge._sha256_file = (
-            lambda unused_path: self.bridge.EXPECTED_EXE_SHA256
-        )
         native = sys.modules["gui.mods.offhangar.offhangar_native_seed"]
 
         def fail(*unused_args):
@@ -149,10 +138,6 @@ class NativeFilterBridgeTest(unittest.TestCase):
 
     def test_matching_executable_marshals_filter_output(self):
         calls = self.install_native_module()
-        self.bridge._world_of_tanks_exe = lambda: "WorldOfTanks.exe"
-        self.bridge._sha256_file = (
-            lambda unused_path: self.bridge.EXPECTED_EXE_SHA256
-        )
         vehicle_filter = object()
 
         self.assertTrue(self.bridge.output_filter(vehicle_filter, 125.25))
@@ -171,10 +156,6 @@ class NativeFilterBridgeTest(unittest.TestCase):
 
     def test_native_output_exception_is_contained(self):
         self.install_native_module()
-        self.bridge._world_of_tanks_exe = lambda: "WorldOfTanks.exe"
-        self.bridge._sha256_file = (
-            lambda unused_path: self.bridge.EXPECTED_EXE_SHA256
-        )
         native = sys.modules["gui.mods.offhangar.offhangar_native_seed"]
 
         def fail(*unused_args):

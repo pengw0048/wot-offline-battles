@@ -1,5 +1,5 @@
-Package: native bot physics experiment 1.8.58
+Package: native bot physics experiment 1.8.59
 Game client: World of Tanks 0.8.2 (Windows)
 LAN protocol: 8
-Client build: 1.8.58-native-experimental-20260815
-Diagnostic client revision: 1.8.58-native-experimental-20260815
+Client build: 1.8.59-native-experimental-20260815
+Diagnostic client revision: 1.8.59-native-experimental-20260815

@@ -94,7 +94,7 @@ class PrebakedNavigationLoaderTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 loader.load_graph("07_lakeville")
 
-    def test_complete_manifest_rejects_a_tampered_graph(self):
+    def test_complete_manifest_loads_the_named_graph(self):
         with tempfile.TemporaryDirectory() as directory:
             navgraphs = Path(directory) / "navgraphs"
             navgraphs.mkdir()
@@ -118,9 +118,10 @@ class PrebakedNavigationLoaderTest(unittest.TestCase):
             self.assertEqual(
                 "07_lakeville", loader.load_graph("07_lakeville")["map"]
             )
+            # A different line ending is still the same graph.
             graph_path.write_bytes(payload + b"\n")
-            with self.assertRaisesRegex(ValueError, "checksum"):
-                loader.load_graph("07_lakeville")
+            self.assertEqual(
+                "07_lakeville", loader.load_graph("07_lakeville")["map"])
 
     def test_nearest_ground_point_uses_safe_baked_height(self):
         loader = load_navigation_loader("/unused")

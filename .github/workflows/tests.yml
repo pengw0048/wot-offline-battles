@@ -40,7 +40,7 @@ jobs:
         run: >-
           python 0.8.2/tools/package_native_experiment.py
           --output-dir "$RUNNER_TEMP/wot-082"
-          --version 1.8.58
+          --version 1.8.59
       - name: Audit 0.9.22 battle source provenance
         run: python 0.9.22/tools/audit_battle_sources.py
       - name: Build Python 2.7 0.9.22 LAN client
@@ -230,4 +230,62 @@ jobs:
             0.9.22/dist/WoT-0.9.22-LAN-Server-Windows.zip
             0.9.22/dist/server/WoT-0.9.22-LAN-Server.exe
             0.9.22/dist/server/README.txt
+          if-no-files-found: error
+      - name: Build zero-configuration 0.8.2 Windows LAN server
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -File
+          0.8.2/tools/build_windows_server.ps1
+      - name: Audit the navigation data bundled in the 0.8.2 server
+        run: >-
+          python 0.8.2/tools/audit_windows_server.py
+          0.8.2/dist/server/WoT-0.8.2-LAN-Server.exe
+      - name: Verify the 0.8.2 server binds its fixed listener
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $serverExe = Join-Path $PWD "0.8.2\dist\server\WoT-0.8.2-LAN-Server.exe"
+          $stdout = Join-Path $env:RUNNER_TEMP "wot-082-server.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "wot-082-server.stderr.log"
+          $process = Start-Process `
+              -FilePath $serverExe `
+              -PassThru `
+              -RedirectStandardOutput $stdout `
+              -RedirectStandardError $stderr
+          try {
+              $deadline = (Get-Date).AddSeconds(30)
+              $listening = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) {
+                      throw "0.8.2 server exited before opening port 28782"
+                  }
+                  $listeners = Get-NetTCPConnection `
+                      -LocalPort 28782 -State Listen -ErrorAction SilentlyContinue
+                  if ($listeners | Where-Object { $_.LocalAddress -eq "0.0.0.0" }) {
+                      $listening = $true
+                      break
+                  }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $listening) {
+                  throw "0.8.2 server did not bind 0.0.0.0:28782"
+              }
+          }
+          finally {
+              if (-not $process.HasExited) {
+                  & taskkill.exe /PID $process.Id /T /F | Out-Null
+              }
+              if (Test-Path $stdout) {
+                  Write-Host "--- 0.8.2 server stdout ---"
+                  Get-Content $stdout
+              }
+              if (Test-Path $stderr) {
+                  Write-Host "--- 0.8.2 server stderr ---"
+                  Get-Content $stderr
+              }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.8.2-lan-server-windows
+          path: 0.8.2/dist/server/WoT-0.8.2-LAN-Server.exe
           if-no-files-found: error

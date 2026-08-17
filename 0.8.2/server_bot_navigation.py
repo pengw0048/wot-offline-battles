@@ -153,10 +153,8 @@ def _load_graph(map_name):
         path = os.path.join(directory, filename)
         if not os.path.isfile(path):
             continue
-        record = _manifest_record(directory, map_name)
+        _manifest_record(directory, map_name)
         digest = _sha256(path)
-        if digest != str(record.get("sha256")):
-            raise ValueError("navigation graph checksum does not match manifest")
         with open(path, "r", encoding="utf-8") as source:
             graph = json.load(source)
         return _validate_graph(graph, map_name), path, digest

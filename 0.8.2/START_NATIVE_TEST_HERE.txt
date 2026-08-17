@@ -1,4 +1,4 @@
-WORLD OF TANKS 0.8.2 NATIVE BOT PHYSICS EXPERIMENT 1.8.58
+WORLD OF TANKS 0.8.2 NATIVE BOT PHYSICS EXPERIMENT 1.8.59
 ==========================================================
 
 This is a separate experimental build. It keeps the retail 0.8.2 rigid-body
@@ -15,7 +15,7 @@ Install
 Do not merge individual files. The package must not leave an old
 mod_offhangar.pyc behind.
 
-What changed in 1.8.58
+What changed in 1.8.59
 ----------------------
 
 - Bots that yield to a stationary player or crossing route now keep a bounded

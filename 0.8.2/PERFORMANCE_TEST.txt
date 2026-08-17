@@ -111,7 +111,7 @@ maximum search budget near 6 ms or lower. A short non-zero `pending` count
 during the opening second is expected; an `oldest` value that keeps growing is
 not.
 
-Build 1.8.58 prints one `SERVER PERF` line every five seconds during a
+Build 1.8.59 prints one `SERVER PERF` line every five seconds during a
 battle. `cpu_core` is process CPU as a percentage of one core; `avg`, `p95`
 and `max` are complete server-tick times. `stage` separates movement, planning,
 navigation, snapshots, diagnostics and dispatch, while `wire` separates JSON
