@@ -96,8 +96,18 @@ def refresh(vehicle):
     for name, is_left in TRACKS:
         broken = name in destroyed
         if broken and name not in shown:
+            # The kill-cam entry: stock addCrashedTrack reads the hit
+            # point from server-fed extras this battle never sets.
+            controller = getattr(appearance, 'crashedTracksController', None)
             try:
-                appearance.addCrashedTrack(is_left, 0, 0)
+                pairs = max(1, int(controller.getPairsCnt()))
+            except Exception:
+                pairs = 1
+            in_air = (bool(getattr(appearance, 'isLeftSideFlying', False)),
+                      bool(getattr(appearance, 'isRightSideFlying', False)))
+            try:
+                appearance.addSimulatedCrashedTrack(
+                    0 if is_left else pairs, in_air)
             except Exception:
                 continue
             shown.add(name)

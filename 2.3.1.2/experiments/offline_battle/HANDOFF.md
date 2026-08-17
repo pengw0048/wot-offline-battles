@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.12.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.13.0.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.12.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.13.0.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.12.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.13.0.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -479,6 +479,45 @@ brake takes over — measured: released at 104% of the limit on a
 4-degree descent, standstill within ~1 s; a driven 20-degree descent
 still builds to the 105% cap.
 
+## What 0.13.0 adds
+
+The 0.12.12 run confirmed braking, track breaks with repairs, and
+scrolling tracks. This batch fixes the two new reports and wires three
+open subsystems:
+
+- Sniper outline: the stock `PlayerAvatar.vehicle_onAppearanceReady`
+  sets `vehicle.targetCaps = [1]` on every remote hull, which is what
+  makes the native targeting focus it; without focus, `targetFocus`
+  never runs `entity.drawEdge()`. The spawn now sets the same caps on
+  every enemy, so hovering an enemy should draw the red edge and the
+  aim marker should react, in every view.
+- Crashed tracks: the stock `addCrashedTrack` reads the wreck point
+  from `vehicle.getExtraHitPoint(index)`, a server-fed extra this
+  battle never sets — that garbage point is why the broken track lay
+  at a random angle. The kill cam's own `addSimulatedCrashedTrack`
+  takes an explicit point and defaults to the stock
+  DEFAULT_TRACK_HIT_VECTOR; the refresh now uses it, with the side
+  encoded as the controller's pair index.
+- Ram damage: `tank_collision.resolve_tank` always computed ram events
+  with the copied 0.8.2 law (cooldown, closing speed, mass split), but
+  the caller passed `now=None`, which disables admission. The player's
+  hull now passes the clock and a callback: both hulls pay their share,
+  reason 2, with the attacker's damage feedback and a `ram` log line.
+  Bot-against-bot rams stay off, matching the mature caller.
+- HE splash: every shell terminal — vehicle hit, near miss into the
+  ground, both fire directions — now runs the copied splash law:
+  `he_radius`, `he_hull_armor`, `he_splash_damage` with distance
+  falloff. Splash is health-only for vehicles the shell did not hit
+  (no module crits yet); the direct target keeps the full by_explosion
+  law. Your own HE can hurt you at point blank, the retail rule.
+  Marker: `he_splash target=... fraction=... damage=...`.
+- The battle ends: when the last enemy dies, or the player does, the
+  runtime pushes ARENA_PERIOD.AFTERBATTLE (the same channel that
+  pushed BATTLE), freezes the bots (`hold()`: no decisions, no fire,
+  coast to a stop), and logs `battle_finished winner=... reason=...`.
+  There is no result window yet; the period switch and the frozen
+  field are the ending.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -512,6 +551,16 @@ name the vehicle and step.
 12. Shoot an enemy with AP and HE: the armor hit shows its effect at
     the hit point (spark for AP, explosion for HE, pen or no pen), and
     being hit flashes and shakes the player's own view.
+13. Hover the reticle over an enemy, arcade and sniper: the red edge
+    draws and clears when the reticle leaves.
+14. Break a track and look at the wreckage: the crashed track lies
+    along the running gear, not at a random angle.
+15. Ram an enemy at speed: both take damage (`ram` log line), repeated
+    grinding does not re-damage inside the cooldown.
+16. Land an HE shell next to a tank: the near miss damages it
+    (`he_splash` log line); kill the last enemy: the period flips to
+    after-battle, the bots freeze, and `battle_finished` logs the
+    winner. Die instead: same ending, other winner.
 
 `python.log` markers: `enemies_spawned`, `bot_control_started`,
 `bot_command`, `enemy_ai_started`, `shell_hit ... crits=`,
@@ -532,9 +581,13 @@ running. Neither is patched, because there is no evidence against them.
 - A hit on the rear idler did not register in the 0.9.x runs. The
   old spawn-pose explanation is withdrawn; needs fresh evidence
   from hit_layer logs on a deliberate idler shot.
-- No ramming damage, and no HE splash onto vehicles the shell did not
-  hit; the copied `projectile_manager` is the planned fix for both the
-  splash and the moving-target HE flight.
-- No battle result, so a finished fight has no ending.
+- Splash victims take health damage only; module and crew crits from
+  blast reach only the directly hit vehicle so far.
+- HE through a moving enemy still explodes behind it: the flight is
+  precomputed at fire time; the copied `projectile_manager` is the
+  planned fix.
+- Bot-against-bot ram damage is off, as in the mature caller.
+- No battle result window; the fight ends with the AFTERBATTLE period
+  and a frozen field.
 - Borderless-window flicker and colour, untouched and deliberately
   deferred.

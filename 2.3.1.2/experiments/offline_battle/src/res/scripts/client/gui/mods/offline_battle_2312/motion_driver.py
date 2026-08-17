@@ -29,7 +29,8 @@ def resolve_drive(movement, rotation, handbrake,
 
 class MotionDriver(object):
 
-    def __init__(self, vehicle, position, yaw, log, obstacles=None):
+    def __init__(self, vehicle, position, yaw, log, obstacles=None,
+                 on_ram=None):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
         descriptor = vehicle.typeDescriptor
@@ -60,6 +61,8 @@ class MotionDriver(object):
         self._blocks = 0
         self._steps = 0
         self._obstacles = obstacles
+        self._on_ram = on_ram
+        self._ram_cooldowns = {}
         self._shape = tank_collision.chassis_shape(descriptor)
         self._stat_factors = {}
         self._pushes = 0
@@ -189,7 +192,14 @@ class MotionDriver(object):
             'vx': sin_yaw * self._speed, 'vz': cos_yaw * self._speed,
             'alive': True, 'shape': self._shape,
         }
-        result = tank_collision.resolve_tank(tank, others)
+        import BigWorld
+        result = tank_collision.resolve_tank(
+            tank, others, now=BigWorld.time(),
+            ram_cooldowns=self._ram_cooldowns)
+        self._ram_cooldowns = dict(result.get('cooldowns') or {})
+        if self._on_ram is not None:
+            for event in result.get('ram_events') or ():
+                self._on_ram(event)
         correction_x, correction_z = result['correction']
         if not correction_x and not correction_z:
             return

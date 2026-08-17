@@ -14,6 +14,7 @@ import math
 import zlib
 
 from gui.mods.offline_battle_2312 import account_setup
+from gui.mods.offline_battle_2312 import combat_rules
 from gui.mods.offline_battle_2312 import critical_damage
 from gui.mods.offline_battle_2312 import damage
 from gui.mods.offline_battle_2312 import feedback
@@ -39,6 +40,7 @@ LOG_PREFIX = '[OFFLINE_2312_BATTLE]'
 POLL_INTERVAL_SECONDS = 0.25
 BOOTSTRAP_TIMEOUT_SECONDS = 180.0
 BATTLE_PERIOD_LENGTH_SECONDS = 3600.0
+AFTERBATTLE_PERIOD_LENGTH_SECONDS = 30.0
 TERRAIN_COLLISION_MASK = 128
 TERRAIN_ONLY_FLAGS = 8
 TERRAIN_RAY_HEIGHT = 1000.0
@@ -74,6 +76,7 @@ class OfflineBattleRuntime(object):
         self._became_player = False
         self._client_ready_requested = False
         self._period_pushed = False
+        self._battle_finished = False
         self._avatar = None
         self._bridge = None
         self._vehicle_id = 0
@@ -1000,6 +1003,9 @@ class OfflineBattleRuntime(object):
 
     def _on_fire_damage(self, points):
         """One second of fire, published like any other health loss."""
+        self._damage_player(points, 0, reason=1)
+
+    def _damage_player(self, points, attacker_id, reason=0):
         import BigWorld
         vehicle = BigWorld.entities.get(self._vehicle_id)
         if vehicle is None:
@@ -1009,22 +1015,124 @@ class OfflineBattleRuntime(object):
             return
         health = max(0, previous - int(points))
         vehicle.health = health
-        vehicle.onHealthChanged(health, previous, 0, 1, 0)
-        self._avatar.updateVehicleHealth(self._vehicle_id, health, 1,
+        vehicle.onHealthChanged(health, previous, int(attacker_id), reason, 0)
+        self._avatar.updateVehicleHealth(self._vehicle_id, health, reason,
                                          health > 0, False)
         if health <= 0:
             self._stop_player_hull()
 
+    def _on_ram_event(self, event):
+        """Both hulls pay the copied ram law; the cell reason is 2."""
+        other_id = event.get('other_id')
+        dealt = int(event.get('damage_to_other') or 0)
+        taken = int(event.get('damage_to_self') or 0)
+        if dealt and self._enemies is not None:
+            health = self._enemies.apply_damage(other_id, dealt,
+                                                self._vehicle_id, reason_id=2)
+            feedback.publish_dealt(self._avatar, other_id, dealt, 0,
+                                   health is not None and health <= 0)
+            if health is not None and health <= 0:
+                self._check_victory()
+        if taken:
+            self._damage_player(taken, other_id, reason=2)
+        self._log('ram other=%s speed=%.1f dealt=%s taken=%s'
+                  % (other_id, float(event.get('closing_speed') or 0.0),
+                     dealt, taken))
+
+    def _he_splash(self, shot, point, attacker_id, exclude_id=None):
+        """The copied HE splash law at any shell terminal, health only."""
+        import BigWorld
+        import Math
+        try:
+            if not combat_rules.is_he(shot):
+                return
+            radius = float(combat_rules.he_radius(shot) or 0.0)
+        except Exception:
+            return
+        if radius <= 0.0:
+            return
+        centre = Math.Vector3(point)
+        victims = []
+        if self._enemies is not None:
+            for vehicle_id in self._enemies.ids():
+                health = self._enemies.health(vehicle_id)
+                if vehicle_id != exclude_id and health is not None \
+                        and health > 0:
+                    victims.append(vehicle_id)
+        if exclude_id != self._vehicle_id:
+            victims.append(self._vehicle_id)
+        for vehicle_id in victims:
+            vehicle = BigWorld.entities.get(vehicle_id)
+            if vehicle is None:
+                continue
+            fraction = (Math.Vector3(vehicle.position) -
+                        centre).length / radius
+            if fraction >= 1.0:
+                continue
+            try:
+                armor = combat_rules.he_hull_armor(vehicle.typeDescriptor)
+                points = int(combat_rules.he_splash_damage(shot, armor,
+                                                           fraction))
+            except Exception:
+                continue
+            if points <= 0:
+                continue
+            if vehicle_id == self._vehicle_id:
+                if int(vehicle.health) <= 0:
+                    continue
+                self._damage_player(points, attacker_id)
+                feedback.publish_received(self._avatar, attacker_id, points,
+                                          0, 0.0)
+            else:
+                health = self._enemies.apply_damage(vehicle_id, points,
+                                                    attacker_id)
+                if attacker_id == self._vehicle_id:
+                    feedback.publish_dealt(self._avatar, vehicle_id, points,
+                                           0, health is not None and
+                                           health <= 0)
+                if health is not None and health <= 0:
+                    self._check_victory()
+            self._log('he_splash target=%s fraction=%.2f damage=%s'
+                      % (vehicle_id, fraction, points))
+
+    def _check_victory(self):
+        if self._battle_finished or self._enemies is None:
+            return
+        for vehicle_id in self._enemies.ids():
+            health = self._enemies.health(vehicle_id)
+            if health is not None and health > 0:
+                return
+        self._finish_battle(entity_setup.PLAYER_TEAM, 'enemies_destroyed')
+
+    def _finish_battle(self, winner, reason):
+        """Push AFTERBATTLE the way the cell ends a fight."""
+        if self._battle_finished:
+            return
+        self._battle_finished = True
+        import BigWorld
+        from constants import ARENA_PERIOD, ARENA_UPDATE
+        if self._bots is not None:
+            self._bots.hold()
+        payload = zlib.compress(cPickle.dumps(
+            (ARENA_PERIOD.AFTERBATTLE,
+             BigWorld.serverTime() + AFTERBATTLE_PERIOD_LENGTH_SECONDS,
+             AFTERBATTLE_PERIOD_LENGTH_SECONDS, ()), -1))
+        self._avatar.updateArena(ARENA_UPDATE.PERIOD, payload)
+        self._log('battle_finished winner=%s reason=%s' % (winner, reason))
+
     def _stop_player_hull(self):
         """A wreck neither drives nor turns."""
-        if self._motion is None:
-            return
-        self._motion.set_input(0, 0)
-        self._motion.set_stat_factors({'mobility': 0.0, 'traverse': 0.0})
+        if self._motion is not None:
+            self._motion.set_input(0, 0)
+            self._motion.set_stat_factors({'mobility': 0.0, 'traverse': 0.0})
+        self._finish_battle(entity_setup.ENEMY_TEAM, 'player_destroyed')
 
     def _on_vehicle_hit(self, landing, shot):
         """Resolve the shell against the vehicle it reached."""
         target = landing.vehicle
+        if target is None:
+            self._he_splash(shot, landing.point, self._vehicle_id)
+            return
         result, points = damage.resolve(shot, landing.travelled,
                                         landing.collisions)
         health = self._enemies.health(target.id)
@@ -1055,10 +1163,17 @@ class OfflineBattleRuntime(object):
                   'health=%s crits=%s devices=%s'
                   % (target.id, landing.travelled, result, points, health,
                      crits, getattr(target, 'devices_hp', None)))
+        self._he_splash(shot, landing.point, self._vehicle_id,
+                        exclude_id=target.id)
+        if killed:
+            self._check_victory()
 
     def _on_player_hit(self, landing, shot, shooter_id):
         """Publish the damage an enemy shell does to the player."""
         import BigWorld
+        if landing.vehicle is None:
+            self._he_splash(shot, landing.point, shooter_id)
+            return
         vehicle = BigWorld.entities.get(self._vehicle_id)
         if vehicle is None:
             return
@@ -1102,6 +1217,8 @@ class OfflineBattleRuntime(object):
                   'health=%s crits=%s' % (shooter_id, landing.travelled,
                                           result, points, health, crits))
         self._log_layers(landing.collisions)
+        self._he_splash(shot, landing.point, shooter_id,
+                        exclude_id=self._vehicle_id)
 
     def _start_motion(self, vehicle):
         """Own the pose: the native body never simulates offline."""
@@ -1109,7 +1226,8 @@ class OfflineBattleRuntime(object):
             return
         self._motion = MotionDriver(vehicle, vehicle.position,
                                     self._spawn_yaw, self._log,
-                                    obstacles=self._enemy_bodies)
+                                    obstacles=self._enemy_bodies,
+                                    on_ram=self._on_ram_event)
         self._motion.start()
         _state.motion = self._motion
         self._bind_pose_sources(vehicle)

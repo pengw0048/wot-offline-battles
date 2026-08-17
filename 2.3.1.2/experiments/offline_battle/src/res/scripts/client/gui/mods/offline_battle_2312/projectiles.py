@@ -184,7 +184,7 @@ class ProjectileRunner(object):
                                  INVALID_EFFECT_INDEX, material,
                                  shell.kindIdx, shell.caliber, landing.point,
                                  direction, speed, '')
-        if landing.vehicle is not None and self._on_vehicle_hit is not None:
+        if self._on_vehicle_hit is not None:
             self._on_vehicle_hit(landing, shot)
 
     def _expire(self, shot_id, start, velocity, gravity, max_distance):

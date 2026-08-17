@@ -209,7 +209,16 @@ class BotControl(object):
         self._bodies = {}
         self._last_time = None
         self._stopped = False
+        self._held = False
         self._logged = 0
+
+    def hold(self):
+        """Freeze every bot: the after-battle rule."""
+        self._held = True
+        for body in self._bodies.values():
+            body.throttle = 0.0
+            body.turn = 0.0
+            body.fire_allowed = False
 
     @property
     def bodies(self):
@@ -321,7 +330,7 @@ class BotControl(object):
         for body in list(self._bodies.values()):
             if self._force.health(body.id) <= 0:
                 continue
-            if now >= body.next_decision:
+            if not self._held and now >= body.next_decision:
                 self._decide(body, player, now)
             self._integrate(body, dt)
 

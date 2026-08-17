@@ -349,5 +349,5 @@ class EnemyAI(object):
                                  INVALID_EFFECT_INDEX, 0, shell.kindIdx,
                                  shell.caliber, landing.point, direction,
                                  float(shot.speed), '')
-        if landing.vehicle is not None and self._on_player_hit is not None:
+        if self._on_player_hit is not None:
             self._on_player_hit(landing, shot, shooter_id)

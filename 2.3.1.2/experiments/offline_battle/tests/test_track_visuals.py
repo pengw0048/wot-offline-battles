@@ -53,6 +53,46 @@ class DriveEngineTests(unittest.TestCase):
         self.assertEqual(vehicle.engineMode, (1, 0))
 
 
+class _CrashController(object):
+    def getPairsCnt(self):
+        return 2
+
+
+class _CrashAppearance(object):
+    def __init__(self):
+        self.calls = []
+        self.crashedTracksController = _CrashController()
+        self.isLeftSideFlying = False
+        self.isRightSideFlying = False
+
+    def addSimulatedCrashedTrack(self, index, in_air, hitPoint=None):
+        self.calls.append(('add', index, in_air))
+
+    def delCrashedTrack(self, is_left, pair):
+        self.calls.append(('del', is_left, pair))
+
+
+class RefreshTests(unittest.TestCase):
+    def test_a_broken_track_uses_the_simulated_entry(self):
+        vehicle = types.SimpleNamespace(
+            appearance=_CrashAppearance(),
+            _destroyed_devices={'rightTrackHealth'})
+        track_visuals.refresh(vehicle)
+        self.assertEqual(vehicle.appearance.calls,
+                         [('add', 2, (False, False))])
+        vehicle._destroyed_devices = set()
+        track_visuals.refresh(vehicle)
+        self.assertEqual(vehicle.appearance.calls[-1], ('del', False, 0))
+
+    def test_a_left_track_takes_index_zero(self):
+        vehicle = types.SimpleNamespace(
+            appearance=_CrashAppearance(),
+            _destroyed_devices={'leftTrackHealth'})
+        track_visuals.refresh(vehicle)
+        self.assertEqual(vehicle.appearance.calls,
+                         [('add', 0, (False, False))])
+
+
 class EnsureScrollTests(unittest.TestCase):
     def test_a_missing_controller_reports_once(self):
         vehicle = _Vehicle()

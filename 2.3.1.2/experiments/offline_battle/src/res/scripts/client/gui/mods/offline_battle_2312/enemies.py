@@ -135,6 +135,11 @@ class EnemyForce(object):
                 (0.0, 0.0, facing), properties)
             self._ids.append(vehicle_id)
             self._health[vehicle_id] = max_health
+            spawned = BigWorld.entities.get(vehicle_id)
+            if spawned is not None:
+                # The stock vehicle_onAppearanceReady line for a remote
+                # hull; without it the native targeting never focuses it.
+                spawned.targetCaps = [1]
             # The live matrix exists from the start, so the minimap and
             # every other reader binds the matrix the bots will move.
             self.set_pose(vehicle_id, (x, ground, z, facing))
