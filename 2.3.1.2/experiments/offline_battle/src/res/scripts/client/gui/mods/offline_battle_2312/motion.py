@@ -526,7 +526,10 @@ def longitudinal_step(p, v, throttle, steering, slope_pitch, dt,
         _prev_ex = abs(v) - _lim
         if _prev_ex < 0.0:
             _prev_ex = 0.0
-        if (grav_a * _dir) > 0.05:
+        # Gravity holds the surplus only while the throttle still drives the
+        # motion. A released throttle brakes, so the surplus bleeds; the field
+        # run stayed pinned at the limit down the whole descent without this.
+        if throttle * _dir > 0.0 and (grav_a * _dir) > 0.05:
             _excess = _prev_ex + OVERSPEED_BUILD * math.sin(abs(slope_pitch)) * dt
         else:
             _excess = _prev_ex - (rr + OVERSPEED_DAMP) * dt

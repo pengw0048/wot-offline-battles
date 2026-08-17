@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.11.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.12.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.11.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.12.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.11.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.12.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -463,6 +463,22 @@ client-bytecode mechanisms close the batch:
   on the armor, pen or no pen, and the player's own hull flashes and
   shakes when hit.
 
+## What 0.12.12 adds
+
+The 0.12.11 run: track scroll works. Releasing W on a descent still ran
+on, and the coast trace named the real branch at last: the speed sat
+pinned just above the descriptor's speed limit, creeping up — the
+GRAVITY OVERSPEED clamp, not the coast law. Its build condition only
+checked that gravity pushes along the motion, so a released throttle
+kept the surplus all the way down the slope, and both earlier downhill
+reports were this same branch (the fade fix was law hygiene, but tests
+started below the limit and never entered the clamp). The 0.8.2 source
+has the same gap. The build now also requires the throttle to drive the
+motion direction; a released throttle bleeds the surplus and the coast
+brake takes over — measured: released at 104% of the limit on a
+4-degree descent, standstill within ~1 s; a driven 20-degree descent
+still builds to the 105% cap.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -510,11 +526,9 @@ running. Neither is patched, because there is no evidence against them.
 
 ## Still open
 
-- The release-W glide distance against retail, on the same slope. The
-  law's own behavior is measured and tested; only the retail comparison
-  is missing.
-- Enemy track scroll animation: the stock activate/setData/setExternal
-  sequence is wired now; the `scroll_*` markers in the next log decide.
+- The release-W stop distance against retail, on the same slope. Both
+  glide mechanisms (coast relief, overspeed build) are now gated and
+  test-pinned; only the retail comparison is missing.
 - A hit on the rear idler did not register in the 0.9.x runs. The
   old spawn-pose explanation is withdrawn; needs fresh evidence
   from hit_layer logs on a deliberate idler shot.

@@ -131,6 +131,23 @@ class LongitudinalTests(unittest.TestCase):
                                              math.radians(30.0), 0.02)
         self.assertGreater(speed, 5.0)
 
+    def test_released_throttle_bleeds_the_gravity_overspeed(self):
+        params = _params()
+        speed = params['speedFwd'] * 1.04
+        for _unused in range(100):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(4.0), 0.02)
+        self.assertEqual(speed, 0.0)
+
+    def test_a_driven_descent_keeps_the_gravity_overspeed(self):
+        params = _params()
+        speed = params['speedFwd']
+        for _unused in range(250):
+            speed = motion.longitudinal_step(params, speed, 1, False,
+                                             math.radians(20.0), 0.02)
+        self.assertGreater(speed, params['speedFwd'])
+        self.assertLessEqual(speed, params['speedFwd'] * 1.05)
+
     def test_the_handbrake_stops_and_holds_downhill(self):
         params = _params()
         speed = 6.0
