@@ -32,6 +32,38 @@ def ensure_scroll(vehicle, log=None):
     return True
 
 
+def engine_mode(speed, omega, engine_dead):
+    """The kill-cam law: (2, direction bits) moving, (1, 0) idle."""
+    if engine_dead:
+        return (0, 0)
+    if abs(speed) > 0.01 or abs(omega) > 0.01:
+        if speed > 0.01:
+            direction = 1
+        elif speed < -0.01:
+            direction = 2
+        else:
+            direction = 4 if omega > 0.0 else 8
+        return (2, direction)
+    return (1, 0)
+
+
+def drive_engine(vehicle, speed, omega, engine_dead):
+    """Feed the engine mode the cell normally sends. The activated
+    scroll controller only scrolls a running engine."""
+    mode = engine_mode(speed, omega, engine_dead)
+    if getattr(vehicle, '_offh_engine_mode', None) == mode:
+        return
+    vehicle._offh_engine_mode = mode
+    vehicle.engineMode = mode
+    appearance = getattr(vehicle, 'appearance', None)
+    if appearance is None:
+        return
+    try:
+        appearance.changeEngineMode(mode)
+    except Exception:
+        pass
+
+
 def feed_scroll(vehicle, left, right):
     """setExternal through the stock updateTracksScroll, plus the filter
     attributes the bound controller reads. The filter write must reach

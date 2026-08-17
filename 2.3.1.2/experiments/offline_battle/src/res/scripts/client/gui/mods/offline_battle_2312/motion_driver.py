@@ -366,6 +366,9 @@ class MotionDriver(object):
             speed_info.set(self._speed_provider)
         self._publish_gun_angles(vehicle)
         track_visuals.ensure_scroll(vehicle, self._log)
+        track_visuals.drive_engine(
+            vehicle, self._speed, self._omega,
+            bool(getattr(vehicle, 'is_engine_dead', False)))
         left, right = motion.track_scroll(self._params, self._speed,
                                           self._omega)
         track_visuals.feed_scroll(vehicle, left, right)

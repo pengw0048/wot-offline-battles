@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.10.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.11.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.10.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.11.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.10.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.11.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -433,6 +433,36 @@ named a mechanism for each:
   `scroll_controller_missing` or `scroll_activate_failed`;
   `feed_scroll` writes the native filter behind the proxy.
 
+## What 0.12.11 adds
+
+The 0.12.10 run: braking fixed, tracks sever and repair, scroll still
+dead even though every vehicle logged `scroll_active`. Two more
+client-bytecode mechanisms close the batch:
+
+- Engine mode. `Vehicle.__onActivateAppearance` runs
+  `changeEngineMode(self.engineMode)`, which also calls
+  `trackScrollController.setMode(mode)`, and the offline default
+  property is `(0, 0)`: every vehicle's scroll controller sits in
+  engine-off mode, so the external scroll values are ignored. The kill
+  cam synthesizes the tuple per section — `(2, direction)` moving with
+  direction bits 1/2/4/8, `(1, 0)` at rest — and calls
+  `changeEngineMode` every tick. `track_visuals.drive_engine` now feeds
+  the same law from the owned speed and turn rate, on the player and
+  the bots, publishing only changes. A dead engine publishes `(0, 0)`.
+- Armor-hit effects. Peng asked where the HE explosion on a vehicle
+  went: nowhere — vehicle-hit visuals in stock come from
+  `Vehicle.showDamageFromShot`, which this port never ran, and
+  `explodeProjectile` only plays terrain materials. The stock body
+  decodes cell-encoded points and ends in
+  `appearance.boundEffects.addNewToNode(node, matrix, effects,
+  keyPoints, ...)` plus `receiveShotImpulse` and the camera shake.
+  `hit_effects.show` builds that call directly from the owned hit data:
+  the shell's `shotEffects` entry, the group by our resolved result
+  (ricochet / crit / pierce / resist), the node-local hit matrix from
+  the drawn pose. Both directions are wired, so an HE hit now explodes
+  on the armor, pen or no pen, and the player's own hull flashes and
+  shakes when hit.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -460,10 +490,12 @@ name the vehicle and step.
 10. Shoot an enemy's running gear from the side: most hits should now
     log `hit_layer part=chassis extra=...Track...`, and repeated hits
     on one side should sever that track.
-11. Watch the enemy tracks while a bot drives, and find the
-    `scroll_active` / `scroll_controller_missing` /
-    `scroll_activate_failed` markers; they decide the track-animation
-    question either way.
+11. Watch the enemy tracks while a bot drives; the engine mode now
+    starts the controller, so scroll should finally move. Engine sound
+    may also change with driving, a side effect of the same feed.
+12. Shoot an enemy with AP and HE: the armor hit shows its effect at
+    the hit point (spark for AP, explosion for HE, pen or no pen), and
+    being hit flashes and shakes the player's own view.
 
 `python.log` markers: `enemies_spawned`, `bot_control_started`,
 `bot_command`, `enemy_ai_started`, `shell_hit ... crits=`,

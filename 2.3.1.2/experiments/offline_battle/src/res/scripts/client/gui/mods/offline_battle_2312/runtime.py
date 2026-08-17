@@ -29,6 +29,7 @@ from gui.mods.offline_battle_2312 import native_probe
 from gui.mods.offline_battle_2312.gunnery import Gunnery
 from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
+from gui.mods.offline_battle_2312 import hit_effects
 from gui.mods.offline_battle_2312 import server_settings_setup
 from gui.mods.offline_battle_2312 import targeting
 from gui.mods.offline_battle_2312 import track_visuals
@@ -1043,6 +1044,8 @@ class OfflineBattleRuntime(object):
         crits = [event.get('name') or event.get('kind')
                  for event in (payload or {}).get('events') or ()]
         track_visuals.refresh(target)
+        hit_effects.show(target, shot.shell, landing, result, crits,
+                         self._vehicle_id, points)
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
         self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
         feedback.publish_dealt(self._avatar, target.id, points, len(crits),
@@ -1065,6 +1068,8 @@ class OfflineBattleRuntime(object):
         health = previous
         crits = self._apply_module_hits(vehicle, shot, landing, result,
                                         points, shooter_id)
+        hit_effects.show(vehicle, shot.shell, landing, result, crits,
+                         shooter_id, points)
         if result is not None and points:
             health = max(0, previous - int(points))
             vehicle.health = health

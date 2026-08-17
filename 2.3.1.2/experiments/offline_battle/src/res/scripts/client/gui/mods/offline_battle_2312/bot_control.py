@@ -417,6 +417,8 @@ class BotControl(object):
         if vehicle is None:
             return
         track_visuals.ensure_scroll(vehicle, self._log)
+        track_visuals.drive_engine(vehicle, body.speed, body.omega,
+                                   getattr(vehicle, 'is_engine_dead', False))
         left, right = motion.track_scroll(body.params, body.speed,
                                           body.omega)
         track_visuals.feed_scroll(vehicle, left, right)
