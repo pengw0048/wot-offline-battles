@@ -158,15 +158,15 @@ def crew_impaired_roles(ko_names):
 # A KO role is impaired, not zero: other crew partially cover, so we approximate.
 CREW_KO_RELOAD_FACTOR = 2.5       # loader out -> much slower reload (higher = worse)
 CREW_KO_DISPERSION_FACTOR = 2.0   # gunner out -> much worse accuracy (higher = worse)
-CREW_KO_MOBILITY_FACTOR = 0.57    # driver out -> 0% training level (0.57 + 0.43 * level)
+CREW_KO_MOBILITY_FACTOR = 0.5 / 0.875  # driver at 0% training: the wiki crew formula floor
 CREW_KO_VISION_FACTOR = 0.75      # commander/radioman out -> less view range
 CREW_KO_COMMANDER_MALUS = 1.1     # commander out nudges reload/dispersion worse (~ -10% crew)
 
 
 def crew_stat_factor(ko_names, stat):
     """Multiplier for a stat given the knocked-out crew. stat in
-    ('reload','dispersion','mobility','vision'). >1 worsens reload/dispersion;
-    <1 worsens mobility/vision."""
+    ('reload','dispersion','mobility','traverse','vision'). >1 worsens
+    reload/dispersion; <1 worsens mobility/traverse/vision."""
     roles = crew_impaired_roles(ko_names)
     f = 1.0
     if stat == 'reload':
@@ -179,7 +179,8 @@ def crew_stat_factor(ko_names, stat):
             f *= CREW_KO_DISPERSION_FACTOR
         if 'commander' in roles:
             f *= CREW_KO_COMMANDER_MALUS
-    elif stat == 'mobility':
+    elif stat in ('mobility', 'traverse'):
+        # The wiki driver list: acceleration, top speed, hull traverse.
         if 'driver' in roles:
             f *= CREW_KO_MOBILITY_FACTOR
         if 'commander' in roles:
@@ -651,7 +652,8 @@ if __name__ == '__main__':
     check('impaired roles', crew_impaired_roles(['gunner1', 'commander']) == set(['gunner', 'commander']))
     check('gunner KO worsens dispersion', crew_stat_factor(['gunner1'], 'dispersion') >= 2.0)
     check('loader KO slows reload', crew_stat_factor(['loader1'], 'reload') >= 2.5)
-    check('driver KO halves mobility', abs(crew_stat_factor(['driver'], 'mobility') - 0.5) < 1e-9)
+    check('driver KO -> the wiki 0% floor', abs(crew_stat_factor(['driver'], 'mobility') - 0.5 / 0.875) < 1e-9)
+    check('driver KO slows hull traverse too', abs(crew_stat_factor(['driver'], 'traverse') - 0.5 / 0.875) < 1e-9)
     check('commander KO cuts vision', crew_stat_factor(['commander'], 'vision') <= 0.75 + 1e-9)
     check('healthy crew = no penalty', crew_stat_factor([], 'reload') == 1.0)
     check('crew health names', 'gunner1Health' in CREW_HEALTH_NAMES and 'engineHealth' not in CREW_HEALTH_NAMES)

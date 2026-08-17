@@ -103,6 +103,43 @@ class LongitudinalTests(unittest.TestCase):
             motion.longitudinal_step(params, 5.0, 1, False, 0.0, 0.02,
                                      airborne=True), 5.0)
 
+    def test_parked_holds_on_a_moderate_slope(self):
+        params = _params()
+        speed = 0.0
+        for _unused in range(200):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(13.0), 0.02)
+        self.assertEqual(speed, 0.0)
+
+    def test_coasting_glides_then_settles_on_a_moderate_slope(self):
+        params = _params()
+        speed = 6.0
+        for _unused in range(200):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(13.0), 0.02)
+        self.assertGreater(speed, 2.0)
+        for _unused in range(800):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(13.0), 0.02)
+        self.assertEqual(speed, 0.0)
+
+    def test_a_steep_descent_keeps_the_hull_rolling(self):
+        params = _params()
+        speed = 6.0
+        for _unused in range(1000):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(20.0), 0.02)
+        self.assertGreater(speed, 5.0)
+
+    def test_the_handbrake_stops_and_holds_downhill(self):
+        params = _params()
+        speed = 6.0
+        for _unused in range(400):
+            speed = motion.longitudinal_step(params, speed, 0, False,
+                                             math.radians(13.0), 0.02,
+                                             False, 0, True)
+        self.assertEqual(speed, 0.0)
+
 
 class TraverseTests(unittest.TestCase):
     def test_traverse_builds_towards_the_chassis_rate(self):

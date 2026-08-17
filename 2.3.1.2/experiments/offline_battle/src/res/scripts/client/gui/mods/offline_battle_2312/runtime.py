@@ -318,7 +318,7 @@ class OfflineBattleRuntime(object):
             self._input_calls += 1
             self._last_input = (movement, rotation, handbrake)
             if self._motion is not None:
-                self._motion.set_input(movement, rotation)
+                self._motion.set_input(movement, rotation, handbrake)
             return original_notify_keys(vehicle, movement, rotation,
                                         handbrake)
 

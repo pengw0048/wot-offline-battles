@@ -17,6 +17,15 @@ TICK_SECONDS = 0.02
 TRACED_COAST_TICKS = 40
 
 
+def resolve_drive(movement, rotation, handbrake,
+                  is_tracked, is_engine_dead, mobility, traverse):
+    """The 0.9.22 drive gate: a thrown track locks the tracks, a dead
+    engine only removes drive torque, and damage scales the intent once."""
+    if is_tracked or is_engine_dead:
+        return 0.0, 0.0, bool(handbrake) or is_tracked
+    return movement * mobility, rotation * traverse, bool(handbrake)
+
+
 class MotionDriver(object):
 
     def __init__(self, vehicle, position, yaw, log, obstacles=None):
@@ -32,6 +41,7 @@ class MotionDriver(object):
         self._omega = 0.0
         self._movement = 0
         self._rotation = 0
+        self._handbrake = False
         self._log = log
         self._callback_id = None
         self._stopped = False
@@ -76,9 +86,10 @@ class MotionDriver(object):
     def position(self):
         return self._position
 
-    def set_input(self, movement, rotation):
+    def set_input(self, movement, rotation, handbrake=False):
         self._movement = int(movement)
         self._rotation = int(rotation)
+        self._handbrake = bool(handbrake)
 
     def start(self):
         import Math
@@ -265,15 +276,16 @@ class MotionDriver(object):
                 suspension.drive_pitch(self._space_id,
                                        (self._x, self._y, self._z),
                                        self._yaw)))
-        steering = self._rotation != 0
-        # Module damage scales the drive intent, the mature bot rule; a
-        # per-tick multiplier on the velocity decays it geometrically.
-        mobility = self._stat_factors.get('mobility', 1.0)
-        movement = self._movement * mobility
-        rotation = self._rotation * self._stat_factors.get('traverse', 1.0)
-        # Idle applies the brakes the way the cell does, and a thrown
-        # track is physically locked.
-        handbrake = self._movement == 0 or mobility <= 0.0
+        is_tracked = bool(getattr(vehicle, 'is_tracked', False))
+        is_engine_dead = bool(getattr(vehicle, 'is_engine_dead', False))
+        movement, rotation, handbrake = resolve_drive(
+            self._movement, self._rotation, self._handbrake,
+            is_tracked, is_engine_dead,
+            self._stat_factors.get('mobility', 1.0),
+            self._stat_factors.get('traverse', 1.0))
+        if is_tracked or is_engine_dead:
+            self._omega = 0.0
+        steering = rotation != 0
         self._omega = motion.traverse_step(
             self._params, self._omega, rotation, self._speed,
             TICK_SECONDS, drive_intent=movement)

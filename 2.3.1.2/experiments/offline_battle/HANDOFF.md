@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.8.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.9.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.8.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.9.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.8.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.9.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -368,6 +368,38 @@ level rule):
 - The scroll probe also lists the PyTrackScroll API for the still-open
   track animation question.
 
+## What 0.12.9 adds
+
+Peng challenged two 0.12.8 changes, and the evidence agreed with him:
+
+- Idle is not a handbrake. The mature 0.9.22 tick brakes only on the
+  real handbrake input (`flags & 64`) or a thrown track. Its comment is
+  explicit: a dead engine "only removes drive torque, so existing
+  momentum continues to coast". Idle runs the coast law: rolling drag
+  plus a brake share while moving, and the ~27-degree parked hold once
+  stopped. Retail agrees. The handbrake is a player input the 9.14
+  physics added for skid turns, and the wiki says a destroyed engine
+  drops power to zero. The 0.12.8 `mobility <= 0` handbrake actually
+  fired on a dead engine (only `engineHealth` zeroes the mobility
+  factor) and never on a thrown track, which zeroes `traverse` instead.
+  A tracked player also never stopped, because nothing gated the
+  player's drive on `is_tracked`. `resolve_drive` now copies the mature
+  gate: thrown track locks the tracks and zeroes the turn, dead engine
+  zeroes drive and turn and coasts, damage scales the intent once. The
+  stock `notifyInputKeysDown` handbrake argument now reaches the law
+  instead of being dropped.
+- `CREW_KO_MOBILITY_FACTOR` is now the exact wiki floor `0.5 / 0.875`
+  (~0.5714): the Battle Mechanics crew formula
+  `stat = nominal / 0.875 * (0.00375 * skill + 0.5)` at the 0% skill a
+  knocked-out crewman works at. The wiki driver list is acceleration,
+  top speed, terrain resistance and hull traverse, so a knocked-out
+  driver now also scales the hull traverse intent.
+
+Measured from the law with the MS-1 parameters: releasing W on a
+13-degree descent glides for seconds, settles to a stop by ~10 s and
+holds; a 20-degree descent keeps the hull rolling at the limit. Whether
+those distances match retail needs a same-slope field comparison.
+
 ## What to check on the next run
 
 Check in this order and stop at the first failure; the step trace will
@@ -386,6 +418,12 @@ name the vehicle and step.
 7. Do the enemy minimap icons and markers follow their moving hulls?
    The entity position is never written offline, so this observation
    decides whether a position publish path is needed.
+8. Release W on the flat and on a descent: the tank glides and settles
+   instead of slamming to a stop, and once stopped on a moderate slope
+   it holds. Note the glide distance for the retail comparison.
+9. Get tracked, then get the engine shot out, on separate lives: a
+   thrown track locks the hull even downhill; a dead engine coasts to a
+   stop and neither drives nor turns until the repair.
 
 `python.log` markers: `enemies_spawned`, `bot_control_started`,
 `bot_command`, `enemy_ai_started`, `shell_hit ... crits=`,
@@ -400,15 +438,17 @@ running. Neither is patched, because there is no evidence against them.
 
 ## Still open
 
-- Enemy turret models still do not rotate visually; the providers hold
-  the aim.
-- The coasting glide after releasing W, the permanent stun panel and
-  the hit-arrow frame, all carried over from the 0.9.x runs.
+- The release-W glide distance against retail, on the same slope. The
+  law's own behavior is measured and tested; only the retail comparison
+  is missing.
+- Enemy track scroll animation: both candidate routes are fed and the
+  scroll probe lists the PyTrackScroll API; the next log decides.
 - A hit on the rear idler did not register in the 0.9.x runs. The
   old spawn-pose explanation is withdrawn; needs fresh evidence
   from hit_layer logs on a deliberate idler shot.
-- No fire, no crew injury effects, no ramming damage, no HE splash
-  beyond the direct-hit law.
+- No ramming damage, and no HE splash onto vehicles the shell did not
+  hit; the copied `projectile_manager` is the planned fix for both the
+  splash and the moving-target HE flight.
 - No battle result, so a finished fight has no ending.
 - Borderless-window flicker and colour, untouched and deliberately
   deferred.
