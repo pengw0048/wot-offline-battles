@@ -158,7 +158,7 @@ def crew_impaired_roles(ko_names):
 # A KO role is impaired, not zero: other crew partially cover, so we approximate.
 CREW_KO_RELOAD_FACTOR = 2.5       # loader out -> much slower reload (higher = worse)
 CREW_KO_DISPERSION_FACTOR = 2.0   # gunner out -> much worse accuracy (higher = worse)
-CREW_KO_MOBILITY_FACTOR = 0.5     # driver out -> half throttle (lower = worse)
+CREW_KO_MOBILITY_FACTOR = 0.57    # driver out -> 0% training level (0.57 + 0.43 * level)
 CREW_KO_VISION_FACTOR = 0.75      # commander/radioman out -> less view range
 CREW_KO_COMMANDER_MALUS = 1.1     # commander out nudges reload/dispersion worse (~ -10% crew)
 

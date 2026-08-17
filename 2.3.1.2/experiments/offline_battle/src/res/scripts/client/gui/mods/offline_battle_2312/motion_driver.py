@@ -268,14 +268,18 @@ class MotionDriver(object):
         steering = self._rotation != 0
         # Module damage scales the drive intent, the mature bot rule; a
         # per-tick multiplier on the velocity decays it geometrically.
-        movement = self._movement * self._stat_factors.get('mobility', 1.0)
+        mobility = self._stat_factors.get('mobility', 1.0)
+        movement = self._movement * mobility
         rotation = self._rotation * self._stat_factors.get('traverse', 1.0)
+        # Idle applies the brakes the way the cell does, and a thrown
+        # track is physically locked.
+        handbrake = self._movement == 0 or mobility <= 0.0
         self._omega = motion.traverse_step(
             self._params, self._omega, rotation, self._speed,
             TICK_SECONDS, drive_intent=movement)
         self._speed = motion.longitudinal_step(
             self._params, self._speed, movement, steering,
-            self._drive_pitch, TICK_SECONDS)
+            self._drive_pitch, TICK_SECONDS, False, 0, handbrake)
 
         self._rotate()
         start_x, start_z = self._x, self._z

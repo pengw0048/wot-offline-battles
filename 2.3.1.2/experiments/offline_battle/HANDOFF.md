@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.12.7.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.12.8.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.12.7.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.12.8.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.7.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.12.8.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -348,6 +348,25 @@ repairs only devices in the destroyed set (up to critical, as before);
 a damaged one keeps its damage until a repair kit. This is the one
 edit inside a copied law file, made because the copied behavior
 contradicts the retail rule the port is meant to reproduce.
+
+## What 0.12.8 adds
+
+Field reports plus the retail numbers (wiki: a damaged engine halves
+power; a knocked-out crewman works at 0% training, the 0.57 + 0.43 *
+level rule):
+
+- CREW_KO_MOBILITY_FACTOR corrected 0.5 -> 0.57, so engine-yellow plus
+  driver-out is ~0.29 of drive power, not 0.25.
+- Idle now applies the brakes the way the cell does (handbrake=True
+  when no movement key is down), so releasing W stops the tank downhill
+  too; a dead drive also brakes instead of coasting.
+- A dead drive zeroes the stored input, so a repaired engine no longer
+  resumes the key held before the repair.
+- Crashed track models: track_visuals adds/removes the stock crashed
+  track (addCrashedTrack/delCrashedTrack) whenever a track's destroyed
+  state changes, on the player and the enemies.
+- The scroll probe also lists the PyTrackScroll API for the still-open
+  track animation question.
 
 ## What to check on the next run
 

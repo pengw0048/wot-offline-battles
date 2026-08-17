@@ -16,6 +16,7 @@ from gui.mods.offline_battle_2312 import engine_shim
 from gui.mods.offline_battle_2312 import entity_setup
 from gui.mods.offline_battle_2312 import motion
 from gui.mods.offline_battle_2312 import suspension
+from gui.mods.offline_battle_2312 import track_visuals
 from gui.mods.offline_battle_2312 import world_collision
 from gui.mods.offline_battle_2312.ai.adapter import BotAdapter
 
@@ -345,6 +346,7 @@ class BotControl(object):
         critical_damage.tick_repair(vehicle, dt)
         burn, _unused = critical_damage.tick_fire(vehicle, dt,
                                                   BigWorld.time())
+        track_visuals.refresh(vehicle)
         if burn:
             self._force.apply_damage(body.id, burn, 0)
         if (getattr(vehicle, 'is_tracked', False) or

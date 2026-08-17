@@ -8,6 +8,7 @@ from __future__ import absolute_import
 
 from gui.mods.offline_battle_2312 import critical_damage
 from gui.mods.offline_battle_2312 import device_damage
+from gui.mods.offline_battle_2312 import track_visuals
 
 TICK_SECONDS = 0.5
 CAUSE_SUFFIXES = {
@@ -155,6 +156,7 @@ class CriticalControl(object):
         })
 
     def _present(self, vehicle, payload, attacker_id):
+        track_visuals.refresh(vehicle)
         if payload is None:
             return
         descriptor = vehicle.typeDescriptor

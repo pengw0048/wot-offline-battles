@@ -31,6 +31,7 @@ from gui.mods.offline_battle_2312.motion_driver import MotionDriver
 from gui.mods.offline_battle_2312.filter_proxy import OfflineFilterProxy
 from gui.mods.offline_battle_2312 import server_settings_setup
 from gui.mods.offline_battle_2312 import targeting
+from gui.mods.offline_battle_2312 import track_visuals
 from gui.mods.offline_battle_2312.avatar_server import AvatarServerBridge
 
 LOG_PREFIX = '[OFFLINE_2312_BATTLE]'
@@ -523,9 +524,12 @@ class OfflineBattleRuntime(object):
             if remaining == samples:
                 names = [n for n in dir(vehicle.filter)
                          if 'croll' in n.lower()]
-                self._log('scroll_probe filter=%s controller=%s'
-                          % (names, getattr(appearance,
-                                            'trackScrollController', None)))
+                controller = getattr(appearance, 'trackScrollController',
+                                     None)
+                self._log('scroll_probe filter=%s controller=%s api=%s'
+                          % (names, controller,
+                             [n for n in dir(controller)
+                              if not n.startswith('__')]))
             self._log('own_turret rotator=%.3f provider=%.3f node=%.3f'
                       % (rotator.turretYaw,
                          Math.Matrix(appearance.turretMatrix).yaw,
@@ -985,8 +989,13 @@ class OfflineBattleRuntime(object):
                 for event in payload.get('events') or ()]
 
     def _set_stat_factors(self, factors):
-        if self._motion is not None:
-            self._motion.set_stat_factors(factors)
+        if self._motion is None:
+            return
+        self._motion.set_stat_factors(factors)
+        if factors.get('mobility', 1.0) <= 0.0:
+            # The stock client stops sending key updates while the drive
+            # is dead, so the held key must not resume after the repair.
+            self._motion.set_input(0, 0)
 
     def _on_fire_damage(self, points):
         """One second of fire, published like any other health loss."""
@@ -1033,6 +1042,7 @@ class OfflineBattleRuntime(object):
                           result != damage.PIERCED))
         crits = [event.get('name') or event.get('kind')
                  for event in (payload or {}).get('events') or ()]
+        track_visuals.refresh(target)
         flags = damage.hit_flags(result, killed) | damage.crit_flags(crits)
         self._avatar.showShotResults([damage.ShotResult(target.id, flags)])
         feedback.publish_dealt(self._avatar, target.id, points, len(crits),
