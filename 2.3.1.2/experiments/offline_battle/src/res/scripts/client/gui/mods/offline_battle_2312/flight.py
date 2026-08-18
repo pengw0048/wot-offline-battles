@@ -55,6 +55,8 @@ class FlightDeck(object):
             BigWorld.time(), max(0.01, max_time), float(max_distance))
         if accepted:
             self._meta[key] = (targets, on_terminal)
+        else:
+            self._log('flight_rejected key=%s' % (key,))
         return bool(accepted)
 
     def _tick(self):
@@ -62,9 +64,9 @@ class FlightDeck(object):
         if self._stopped:
             return
         self._callback_id = BigWorld.callback(0.0, self._tick)
-        if self._meta:
-            self._manager.advance(BigWorld.time(), self._chord,
-                                  self._terminal)
+        # Advance even while empty: launch() rejects a shell whose launch
+        # time is ahead of the manager clock, so the clock must track now.
+        self._manager.advance(BigWorld.time(), self._chord, self._terminal)
 
     def _chord(self, state, start, end, absolute_start, absolute_end):
         import BigWorld
@@ -121,7 +123,10 @@ class FlightDeck(object):
             hit = projectiles.Impact(
                 Math.Vector3(*state['position']), state['elapsed'],
                 state['distance'])
+        reason = str(result.get('reason') or '')
+        if reason not in ('vehicle', 'terrain', 'max_time', 'max_distance'):
+            self._log('flight_odd_terminal key=%s reason=%s' % (key, reason))
         try:
-            meta[1](hit, str(result.get('reason') or ''))
+            meta[1](hit, reason)
         except Exception as err:
             self._log('flight_terminal_error key=%s err=%r' % (key, err))

@@ -151,16 +151,16 @@ class ProjectileRunner(object):
         self._launched += 1
         if self._deck is not None:
             data = (shot_id, shell, shot, velocity, gravity)
-            self._deck.launch(
-                ('player', shot_id), (start.x, start.y, start.z),
-                (velocity.x, velocity.y, velocity.z), gravity, max_distance,
-                self._live_targets,
-                lambda hit, reason, data=data: self._terminal(data, hit,
-                                                              reason))
-            if self._launched == 1:
-                self._log('projectile_launched shot=%s speed=%.0f '
-                          'flight=live' % (shot_id, velocity.length))
-            return
+            if self._deck.launch(
+                    ('player', shot_id), (start.x, start.y, start.z),
+                    (velocity.x, velocity.y, velocity.z), gravity,
+                    max_distance, self._live_targets,
+                    lambda hit, reason, data=data: self._terminal(data, hit,
+                                                                  reason)):
+                if self._launched == 1:
+                    self._log('projectile_launched shot=%s speed=%.0f '
+                              'flight=live' % (shot_id, velocity.length))
+                return
         landing = impact(self._space_id, (start.x, start.y, start.z),
                          (velocity.x, velocity.y, velocity.z), gravity,
                          max_distance, self._live_targets())

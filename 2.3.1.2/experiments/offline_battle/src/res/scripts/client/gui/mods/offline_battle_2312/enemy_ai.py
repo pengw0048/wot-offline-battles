@@ -303,14 +303,15 @@ class EnemyAI(object):
         if self._deck is not None:
             data = (shot_id, shot, vehicle.id, velocity,
                     float(shot.gravity))
-            self._deck.launch(
-                ('enemy', vehicle.id, shot_id),
-                (start.x, start.y, start.z),
-                (velocity.x, velocity.y, velocity.z), float(shot.gravity),
-                float(shot.maxDistance), self._player_targets,
-                lambda hit, reason, data=data: self._terminal(data, hit,
-                                                              reason))
-            return
+            if self._deck.launch(
+                    ('enemy', vehicle.id, shot_id),
+                    (start.x, start.y, start.z),
+                    (velocity.x, velocity.y, velocity.z),
+                    float(shot.gravity), float(shot.maxDistance),
+                    self._player_targets,
+                    lambda hit, reason, data=data: self._terminal(data, hit,
+                                                                  reason)):
+                return
         targets = [player] if player is not None else []
         landing = projectiles.impact(
             vehicle.spaceID, (start.x, start.y, start.z),

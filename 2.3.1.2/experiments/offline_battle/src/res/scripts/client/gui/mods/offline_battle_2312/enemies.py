@@ -88,6 +88,30 @@ class EnemyForce(object):
         matrix.translation = Math.Vector3(pose[0], pose[1], pose[2])
         if model is not None and model.matrix is not matrix:
             model.matrix = matrix
+        self._input_native_pose(vehicle, pose)
+
+    def _input_native_pose(self, vehicle, pose):
+        """The kill-cam route: filter.input moves the native entity, so
+        the native targeting sees the hull where it is drawn."""
+        import BigWorld
+        import Math
+        state = getattr(vehicle, '_offh_pose_input', None)
+        if state == 'failed':
+            return
+        entity_filter = getattr(vehicle, 'filter', None)
+        native = getattr(entity_filter, '_filter', entity_filter)
+        try:
+            native.input(BigWorld.time(), vehicle.spaceID, 0,
+                         Math.Vector3(pose[0], pose[1], pose[2]),
+                         Math.Vector3(0.0, 0.0, 0.0),
+                         Math.Vector3(0.0, 0.0, pose[3]))
+        except Exception as err:
+            vehicle._offh_pose_input = 'failed'
+            self._log('pose_input_failed id=%s err=%r' % (vehicle.id, err))
+            return
+        if state is None:
+            vehicle._offh_pose_input = 'active'
+            self._log('pose_input_active id=%s' % (vehicle.id,))
 
     def bodies(self):
         """Plain-data hulls for the copied tank-against-tank law."""

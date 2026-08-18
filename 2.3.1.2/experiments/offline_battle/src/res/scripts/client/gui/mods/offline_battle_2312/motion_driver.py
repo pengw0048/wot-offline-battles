@@ -156,20 +156,21 @@ class MotionDriver(object):
             self._grind = max(0, self._grind - 1)
             return
         self._blocks += 1
-        for delta in world_collision.SLIDE_YAWS:
+        # The mature deflection: try the four slide yaws, else grind down.
+        for delta in (0.55, -0.55, 1.0, -1.0):
             slide_yaw = self._yaw + delta
             if self._blocked(slide_yaw):
                 continue
             if self._grind <= 0:
-                self._speed *= world_collision.SLIDE_FIRST_FACTOR
-            self._speed *= world_collision.SLIDE_DECAY ** (TICK_SECONDS * 60.0)
+                self._speed *= 0.6
+            self._speed *= 0.85 ** (TICK_SECONDS * 60.0)
             slide = self._speed * TICK_SECONDS
             self._x += math.sin(slide_yaw) * slide
             self._z += math.cos(slide_yaw) * slide
             self._grind = 4
             return
-        self._speed *= world_collision.STOP_DECAY ** (TICK_SECONDS * 60.0)
-        if abs(self._speed) < world_collision.STOP_SPEED:
+        self._speed *= 0.35 ** (TICK_SECONDS * 60.0)
+        if abs(self._speed) < 0.05:
             self._speed = 0.0
         self._grind = 4
 
