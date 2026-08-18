@@ -86,7 +86,7 @@ class SpottingControl(object):
             camouflage_pair(player.typeDescriptor),
             moving=player_speed > MOVING_SPEED)
         anyone_sees = False
-        for vehicle_id in self._enemies.ids():
+        for vehicle_id in self._enemies.ids:
             health = self._enemies.health(vehicle_id)
             enemy = BigWorld.entities.get(vehicle_id)
             if enemy is None:

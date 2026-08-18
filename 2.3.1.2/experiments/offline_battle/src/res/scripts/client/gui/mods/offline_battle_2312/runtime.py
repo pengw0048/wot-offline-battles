@@ -903,6 +903,10 @@ class OfflineBattleRuntime(object):
                               on_vehicle_hit=self._on_vehicle_hit,
                               deck=self._flight)
             gunnery.publish()
+            # Wire the gun into the bridge NOW: a fault in any later,
+            # optional subsystem must not take the whole gun down.
+            self._gunnery = gunnery
+            self._bridge.set_gunnery(gunnery)
             self._critical = CriticalControl(
                 avatar, vehicle.id, BigWorld.callback, self._log,
                 on_factors=self._set_stat_factors,
@@ -932,9 +936,6 @@ class OfflineBattleRuntime(object):
         except Exception as error:
             self._log('combat_setup_failed error=%s detail=%s'
                       % (type(error).__name__, repr(error)[:200]))
-            return
-        self._gunnery = gunnery
-        self._bridge.set_gunnery(gunnery)
 
     def _camera_yaw(self):
         """World yaw the player is looking along."""
@@ -1072,7 +1073,7 @@ class OfflineBattleRuntime(object):
         law_shell = damage.legacy_shot(shot)['shell']
         victims = []
         if self._enemies is not None:
-            for vehicle_id in self._enemies.ids():
+            for vehicle_id in self._enemies.ids:
                 health = self._enemies.health(vehicle_id)
                 if vehicle_id != exclude_id and health is not None \
                         and health > 0:
@@ -1124,7 +1125,7 @@ class OfflineBattleRuntime(object):
     def _check_victory(self):
         if self._battle_finished or self._enemies is None:
             return
-        for vehicle_id in self._enemies.ids():
+        for vehicle_id in self._enemies.ids:
             health = self._enemies.health(vehicle_id)
             if health is not None and health > 0:
                 return
