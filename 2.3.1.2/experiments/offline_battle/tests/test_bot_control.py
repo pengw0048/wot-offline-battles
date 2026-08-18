@@ -116,6 +116,7 @@ def make_control(clear):
     control._space_id = 0
     control._log = lambda message: None
     control._player_motion = None
+    control._spotting = None
     control._bodies = {}
     control._direction_clear = lambda body: (lambda yaw: clear)
     control._scroll_tracks = lambda body: None

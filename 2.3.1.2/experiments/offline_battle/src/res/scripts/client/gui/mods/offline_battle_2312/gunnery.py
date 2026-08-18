@@ -45,7 +45,9 @@ class Gunnery(object):
         self._ammo = {}
         self._kinds = {}
         self._reload_time = float(self._descriptor.gun.reloadTime)
+        self._loaded_at = 0.0
         self._shots_fired = 0
+        self._blocked_logged = 0
         self._projectiles = ProjectileRunner(
             vehicle, scheduler, log, targets, on_vehicle_hit, deck)
 
@@ -93,8 +95,10 @@ class Gunnery(object):
         avatar.updateVehicleSetting(self._vehicle_id, int(code), value)
         if int(code) != CURRENT_SHELLS:
             return
+        import BigWorld
         change_time = (float(self._descriptor.gun.forcedReloadTime) or
                        self._reload_time)
+        self._loaded_at = BigWorld.time() + change_time
         avatar.updateVehicleGunReloadTime(self._vehicle_id, change_time,
                                           self._reload_time)
         self._schedule(change_time, self._reloaded)
@@ -105,11 +109,20 @@ class Gunnery(object):
         vehicle = BigWorld.entities.get(self._vehicle_id)
         if avatar is None or vehicle is None or not vehicle.isStarted:
             return
+        now = BigWorld.time()
+        if now < self._loaded_at - 0.05:
+            # The cell refuses a shot from an unloaded gun.
+            if self._blocked_logged < 3:
+                self._blocked_logged += 1
+                self._log('shot_blocked_reloading left=%.1f'
+                          % (self._loaded_at - now,))
+            return
         int_cd = avatar.guiSessionProvider.shared.ammo.getCurrentShellCD()
         state = self._ammo.get(int_cd)
         if state is None or state[0] <= 0:
             return
         state[0] -= 1
+        self._loaded_at = now + self._reload_time
         burst = max(1, int(self._descriptor.gun.burst[0]))
         vehicle.showShooting(burst, ALL_GUNS, self._kinds.get(int_cd, 0))
         self._projectiles.fire(avatar, self._descriptor.shot)

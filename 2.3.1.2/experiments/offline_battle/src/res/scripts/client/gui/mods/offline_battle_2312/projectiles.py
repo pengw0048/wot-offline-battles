@@ -9,6 +9,7 @@ stands in the way.
 from __future__ import absolute_import
 
 import math
+import random
 
 from gui.mods.offline_battle_2312 import damage
 from gui.mods.offline_battle_2312 import projectile_runtime
@@ -104,6 +105,22 @@ def impact(space_id, start, velocity, gravity, max_distance, targets=(),
     return None
 
 
+def scattered_direction(direction, dispersion_angle, gauss=None):
+    """The mature per-shot scatter: sigma is a third of the full angle.
+
+    direction is a plain (x, y, z) unit tuple; the scattered tuple is
+    renormalised."""
+    sigma = float(dispersion_angle) / 3.0
+    if sigma <= 0.0:
+        return direction
+    gauss = gauss or random.gauss
+    x = direction[0] + gauss(0.0, sigma)
+    y = direction[1] + gauss(0.0, sigma)
+    z = direction[2] + gauss(0.0, sigma)
+    size = math.sqrt(x * x + y * y + z * z) or 1.0
+    return (x / size, y / size, z / size)
+
+
 def _effect_material_index(mat_kind):
     import material_kinds
     indexes = material_kinds.EFFECT_MATERIAL_INDEXES_BY_IDS or {}
@@ -139,6 +156,19 @@ class ProjectileRunner(object):
         if rotator is None:
             return
         start, velocity = rotator.getCurShotPosition()
+        # The cell scatters each shot inside the CURRENT aim circle.
+        try:
+            dispersion = float(rotator.getCurShotDispersionAngles()[0])
+        except Exception:
+            dispersion = float(getattr(rotator, 'dispersionAngle', 0.0)
+                               or 0.0)
+        speed = velocity.length
+        if speed > 0.0 and dispersion > 0.0:
+            unit = (velocity.x / speed, velocity.y / speed,
+                    velocity.z / speed)
+            unit = scattered_direction(unit, dispersion)
+            velocity = Math.Vector3(unit[0] * speed, unit[1] * speed,
+                                    unit[2] * speed)
         gravity = float(getattr(shot, 'gravity', DEFAULT_GRAVITY))
         max_distance = float(shot.maxDistance)
         shell = shot.shell

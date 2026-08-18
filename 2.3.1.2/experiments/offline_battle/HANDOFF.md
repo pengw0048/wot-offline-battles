@@ -1,6 +1,6 @@
 # Where this stands
 
-Current candidate: `dist/org.peng.offline_2312_battle_0.14.1.wotmod`,
+Current candidate: `dist/org.peng.offline_2312_battle_0.15.0.wotmod`,
 built and validated.
 
 ## Deploy and run
@@ -8,9 +8,9 @@ built and validated.
 ```bash
 V='{f3b03401-2c79-4bba-bfe9-75b1bcbf7f66}'
 M=C:\\Games\\World_of_Tanks_NA
-cp dist/org.peng.offline_2312_battle_0.14.1.wotmod ~/Downloads/
+cp dist/org.peng.offline_2312_battle_0.15.0.wotmod ~/Downloads/
 prlctl exec $V cmd /c del /q $M\\mods\\2.3.1.2\\org.peng.offline_2312_battle_*.wotmod
-prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.14.1.wotmod $M\\mods\\2.3.1.2\\
+prlctl exec $V cmd /c copy /y \\\\Mac\\Home\\Downloads\\org.peng.offline_2312_battle_0.15.0.wotmod $M\\mods\\2.3.1.2\\
 prlctl exec $V cmd /c del /q $M\\python.log
 ```
 
@@ -479,7 +479,7 @@ brake takes over — measured: released at 104% of the limit on a
 4-degree descent, standstill within ~1 s; a driven 20-degree descent
 still builds to the 105% cap.
 
-## What 0.14.1 adds
+## What 0.15.0 adds
 
 The 0.12.12 run confirmed braking, track breaks with repairs, and
 scrolling tracks. This batch fixes the two new reports and wires three

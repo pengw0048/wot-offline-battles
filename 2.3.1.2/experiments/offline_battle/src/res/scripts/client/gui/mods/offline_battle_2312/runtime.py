@@ -25,6 +25,7 @@ from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312.critical_control import CriticalControl
 from gui.mods.offline_battle_2312.flight import FlightDeck
+from gui.mods.offline_battle_2312.spotting_control import SpottingControl
 from gui.mods.offline_battle_2312.consumables import Consumables
 from gui.mods.offline_battle_2312.turret_rig import TurretRigs
 from gui.mods.offline_battle_2312 import native_probe
@@ -99,6 +100,7 @@ class OfflineBattleRuntime(object):
         self._enemy_ai = None
         self._bots = None
         self._flight = None
+        self._spotting = None
         self._critical = None
         self._rigs = None
         self._status_probe_done = False
@@ -921,6 +923,11 @@ class OfflineBattleRuntime(object):
                                      rigs=self._rigs,
                                      deck=self._flight)
             self._enemy_ai.start()
+            self._spotting = SpottingControl(
+                avatar, vehicle.id, self._enemies, self._log,
+                player_speed=lambda: (self._motion.speed
+                                      if self._motion is not None else 0.0))
+            self._spotting.start()
             self._start_bots(avatar)
         except Exception as error:
             self._log('combat_setup_failed error=%s detail=%s'
@@ -972,7 +979,10 @@ class OfflineBattleRuntime(object):
         import BigWorld
         control = BotControl(self._enemies, self._map_name, self._arena_type,
                              avatar.spaceID, self._log,
-                             player_motion=self._motion)
+                             player_motion=self._motion,
+                             spotting=(self._spotting.enemy_sees
+                                       if self._spotting is not None
+                                       else None))
         for vehicle in self._enemies.alive():
             control.register(vehicle, entity_setup.ENEMY_TEAM)
         control.start(BigWorld.callback)
@@ -1025,6 +1035,7 @@ class OfflineBattleRuntime(object):
         self._avatar.updateVehicleHealth(self._vehicle_id, health, reason,
                                          health > 0, False)
         if health <= 0:
+            hit_effects.show_ammo_rack(vehicle, self._log)
             self._stop_player_hull()
 
     def _on_ram_event(self, event):
@@ -1058,6 +1069,7 @@ class OfflineBattleRuntime(object):
         if radius <= 0.0:
             return
         centre = Math.Vector3(point)
+        law_shell = damage.legacy_shot(shot)['shell']
         victims = []
         if self._enemies is not None:
             for vehicle_id in self._enemies.ids():
@@ -1071,6 +1083,8 @@ class OfflineBattleRuntime(object):
             vehicle = BigWorld.entities.get(vehicle_id)
             if vehicle is None:
                 continue
+            if vehicle_id == self._vehicle_id and int(vehicle.health) <= 0:
+                continue
             fraction = (Math.Vector3(vehicle.position) -
                         centre).length / radius
             if fraction >= 1.0:
@@ -1083,23 +1097,29 @@ class OfflineBattleRuntime(object):
                 continue
             if points <= 0:
                 continue
+            _unused, payload = critical_damage.apply_direct(
+                vehicle, (), (centre.x, centre.y, centre.z),
+                (vehicle.position.x, vehicle.position.y,
+                 vehicle.position.z), points, law_shell, attacker_id,
+                penetrated=False, by_explosion=True)
+            crits = [event.get('name') or event.get('kind')
+                     for event in (payload or {}).get('events') or ()]
+            track_visuals.refresh(vehicle)
             if vehicle_id == self._vehicle_id:
-                if int(vehicle.health) <= 0:
-                    continue
                 self._damage_player(points, attacker_id)
                 feedback.publish_received(self._avatar, attacker_id, points,
-                                          0, 0.0)
+                                          len(crits), 0.0)
             else:
                 health = self._enemies.apply_damage(vehicle_id, points,
                                                     attacker_id)
                 if attacker_id == self._vehicle_id:
                     feedback.publish_dealt(self._avatar, vehicle_id, points,
-                                           0, health is not None and
+                                           len(crits), health is not None and
                                            health <= 0)
                 if health is not None and health <= 0:
                     self._check_victory()
-            self._log('he_splash target=%s fraction=%.2f damage=%s'
-                      % (vehicle_id, fraction, points))
+            self._log('he_splash target=%s fraction=%.2f damage=%s crits=%s'
+                      % (vehicle_id, fraction, points, crits))
 
     def _check_victory(self):
         if self._battle_finished or self._enemies is None:
@@ -1333,6 +1353,9 @@ class OfflineBattleRuntime(object):
         if self._flight is not None:
             self._flight.stop()
             self._flight = None
+        if self._spotting is not None:
+            self._spotting.stop()
+            self._spotting = None
         if self._enemy_ai is not None:
             self._enemy_ai.stop()
             self._enemy_ai = None

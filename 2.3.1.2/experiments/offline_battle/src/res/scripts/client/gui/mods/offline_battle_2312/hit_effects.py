@@ -26,6 +26,18 @@ def effect_group(result, crits):
     return 'armorResisted'
 
 
+def show_ammo_rack(vehicle, log):
+    """The stock ammo-bay detonation effect on a rack-destroyed kill."""
+    destroyed = getattr(vehicle, '_destroyed_devices', None) or ()
+    if 'ammoBayHealth' not in destroyed:
+        return
+    try:
+        vehicle.appearance.showAmmoBayEffect(1, 0.0)
+        log('ammo_rack_explosion id=%s' % (vehicle.id,))
+    except Exception as error:
+        log('ammo_rack_effect_failed id=%s error=%r' % (vehicle.id, error))
+
+
 def _nearest_part(collisions):
     best_name, best_dist = 'hull', None
     for collision in collisions or ():

@@ -192,7 +192,7 @@ class BotBody(object):
 class BotControl(object):
 
     def __init__(self, force, map_name, arena_type, space_id, log,
-                 player_motion=None):
+                 player_motion=None, spotting=None):
         bounds = None
         box = getattr(arena_type, 'boundingBox', None)
         if box is not None:
@@ -206,6 +206,7 @@ class BotControl(object):
         self._space_id = space_id
         self._log = log
         self._player_motion = player_motion
+        self._spotting = spotting
         self._bodies = {}
         self._last_time = None
         self._stopped = False
@@ -290,7 +291,8 @@ class BotControl(object):
                 'max_health': float(getattr(player.typeDescriptor,
                                             'maxHealth', 1)),
                 'speed': speed,
-                'visible': True,
+                'visible': (bool(self._spotting(body.id))
+                            if self._spotting is not None else True),
             })
             neighbours.append(self._player_neighbour(player))
         return {

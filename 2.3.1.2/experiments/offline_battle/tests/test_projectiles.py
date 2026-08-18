@@ -154,3 +154,26 @@ class ImpactTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ScatterTests(unittest.TestCase):
+    def test_sigma_is_a_third_of_the_angle(self):
+        seen = []
+
+        def gauss(mean, sigma):
+            seen.append(sigma)
+            return 0.0
+
+        projectiles.scattered_direction((0.0, 0.0, 1.0), 0.09, gauss)
+        self.assertAlmostEqual(seen[0], 0.03)
+
+    def test_the_scattered_direction_stays_unit_length(self):
+        direction = projectiles.scattered_direction(
+            (0.0, 0.0, 1.0), 0.2, lambda mean, sigma: 0.1)
+        size = sum(axis * axis for axis in direction) ** 0.5
+        self.assertAlmostEqual(size, 1.0)
+
+    def test_zero_dispersion_keeps_the_aim(self):
+        self.assertEqual(
+            projectiles.scattered_direction((0.0, 0.0, 1.0), 0.0),
+            (0.0, 0.0, 1.0))

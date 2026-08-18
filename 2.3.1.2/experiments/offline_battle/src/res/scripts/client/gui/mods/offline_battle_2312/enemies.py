@@ -197,6 +197,8 @@ class EnemyForce(object):
         return health
 
     def _kill(self, vehicle, attacker_id, reason_id):
+        from gui.mods.offline_battle_2312 import hit_effects
+        hit_effects.show_ammo_rack(vehicle, self._log)
         was_active = vehicle.isCrewActive
         vehicle.isCrewActive = False
         vehicle.set_isCrewActive(was_active)
