@@ -4,6 +4,20 @@ from __future__ import absolute_import
 TRACKS = (('leftTrackHealth', True), ('rightTrackHealth', False))
 
 
+def _track_world_point(vehicle, is_left):
+    """The broken track's world point, at the side of the hull."""
+    try:
+        import Math
+        physics = getattr(vehicle.typeDescriptor, 'physics', None)
+        offset = (float(physics.get('trackCenterOffset', 1.0))
+                  if isinstance(physics, dict) else 1.0)
+        matrix = Math.Matrix(vehicle.matrix)
+        return matrix.applyPoint(
+            Math.Vector3(-offset if is_left else offset, 0.3, 0.0))
+    except Exception:
+        return None
+
+
 def ensure_scroll(vehicle, log=None):
     """The stock _startSystems sequence, once: activate, then bind the
     native filter. Without activate the controller ignores setExternal."""
@@ -97,7 +111,9 @@ def refresh(vehicle):
         broken = name in destroyed
         if broken and name not in shown:
             # The kill-cam entry: stock addCrashedTrack reads the hit
-            # point from server-fed extras this battle never sets.
+            # point from server-fed extras this battle never sets. The
+            # point is world space; the module default anchors the
+            # wreck ribbon near the map origin.
             controller = getattr(appearance, 'crashedTracksController', None)
             try:
                 pairs = max(1, int(controller.getPairsCnt()))
@@ -107,7 +123,8 @@ def refresh(vehicle):
                       bool(getattr(appearance, 'isRightSideFlying', False)))
             try:
                 appearance.addSimulatedCrashedTrack(
-                    0 if is_left else pairs, in_air)
+                    0 if is_left else pairs, in_air,
+                    _track_world_point(vehicle, is_left))
             except Exception:
                 continue
             shown.add(name)

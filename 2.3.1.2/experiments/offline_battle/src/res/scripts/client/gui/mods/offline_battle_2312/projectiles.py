@@ -114,13 +114,14 @@ class ProjectileRunner(object):
     """Launch one shell per shot and end it at its impact."""
 
     def __init__(self, vehicle, scheduler, log, targets=None,
-                 on_vehicle_hit=None):
+                 on_vehicle_hit=None, deck=None):
         self._vehicle_id = vehicle.id
         self._space_id = vehicle.spaceID
         self._schedule = scheduler
         self._log = log
         self._targets = targets
         self._on_vehicle_hit = on_vehicle_hit
+        self._deck = deck
         self._shot_id = 0
         self._launched = 0
 
@@ -148,6 +149,18 @@ class ProjectileRunner(object):
                           shell.kindIdx, shell.caliber, start, velocity,
                           gravity, max_distance, 0, 0)
         self._launched += 1
+        if self._deck is not None:
+            data = (shot_id, shell, shot, velocity, gravity)
+            self._deck.launch(
+                ('player', shot_id), (start.x, start.y, start.z),
+                (velocity.x, velocity.y, velocity.z), gravity, max_distance,
+                self._live_targets,
+                lambda hit, reason, data=data: self._terminal(data, hit,
+                                                              reason))
+            if self._launched == 1:
+                self._log('projectile_launched shot=%s speed=%.0f '
+                          'flight=live' % (shot_id, velocity.length))
+            return
         landing = impact(self._space_id, (start.x, start.y, start.z),
                          (velocity.x, velocity.y, velocity.z), gravity,
                          max_distance, self._live_targets())
@@ -172,6 +185,25 @@ class ProjectileRunner(object):
                       % (shot_id, velocity.length, landing.elapsed,
                          landing.travelled,
                          landing.vehicle.id if landing.vehicle else None))
+
+    def _terminal(self, data, hit, reason):
+        """One live-flight terminal: explode on a surface, expire in air."""
+        import BigWorld
+        import Math
+        shot_id, shell, shot, velocity, gravity = data
+        avatar = BigWorld.player()
+        if avatar is None:
+            return
+        if reason not in ('vehicle', 'terrain'):
+            avatar.stopTracer(shot_id, Math.Vector3(hit.point))
+            return
+        speed = Math.Vector3(velocity.x,
+                             velocity.y - gravity * float(hit.elapsed),
+                             velocity.z)
+        direction = Math.Vector3(speed)
+        direction.normalise()
+        self._land(shot_id, shell, shot, hit, direction, speed.length,
+                   _effect_material_index(hit.mat_kind))
 
     def _land(self, shot_id, shell, shot, landing, direction, speed,
               material):

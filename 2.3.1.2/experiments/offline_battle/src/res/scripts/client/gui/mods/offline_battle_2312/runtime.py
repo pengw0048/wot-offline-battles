@@ -24,6 +24,7 @@ from gui.mods.offline_battle_2312.enemies import EnemyForce
 from gui.mods.offline_battle_2312.bot_control import BotControl
 from gui.mods.offline_battle_2312.enemy_ai import EnemyAI
 from gui.mods.offline_battle_2312.critical_control import CriticalControl
+from gui.mods.offline_battle_2312.flight import FlightDeck
 from gui.mods.offline_battle_2312.consumables import Consumables
 from gui.mods.offline_battle_2312.turret_rig import TurretRigs
 from gui.mods.offline_battle_2312 import native_probe
@@ -97,6 +98,7 @@ class OfflineBattleRuntime(object):
         self._enemies = None
         self._enemy_ai = None
         self._bots = None
+        self._flight = None
         self._critical = None
         self._rigs = None
         self._status_probe_done = False
@@ -892,9 +894,12 @@ class OfflineBattleRuntime(object):
             self._enemies.spawn((vehicle.position.x, vehicle.position.z),
                                 self._spawn_yaw)
             _state.enemies = self._enemies
+            self._flight = FlightDeck(vehicle.spaceID, self._log)
+            self._flight.start()
             gunnery = Gunnery(vehicle, BigWorld.callback, self._log,
                               targets=self._enemies.alive,
-                              on_vehicle_hit=self._on_vehicle_hit)
+                              on_vehicle_hit=self._on_vehicle_hit,
+                              deck=self._flight)
             gunnery.publish()
             self._critical = CriticalControl(
                 avatar, vehicle.id, BigWorld.callback, self._log,
@@ -913,7 +918,8 @@ class OfflineBattleRuntime(object):
                                      BigWorld.callback, self._log,
                                      self._on_player_hit,
                                      bodies=self._bot_bodies,
-                                     rigs=self._rigs)
+                                     rigs=self._rigs,
+                                     deck=self._flight)
             self._enemy_ai.start()
             self._start_bots(avatar)
         except Exception as error:
@@ -1324,6 +1330,9 @@ class OfflineBattleRuntime(object):
         if self._bots is not None:
             self._bots.stop()
             self._bots = None
+        if self._flight is not None:
+            self._flight.stop()
+            self._flight = None
         if self._enemy_ai is not None:
             self._enemy_ai.stop()
             self._enemy_ai = None

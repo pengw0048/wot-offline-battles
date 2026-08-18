@@ -77,7 +77,7 @@ def clamp_pitch(pitch, limits):
 class EnemyAI(object):
 
     def __init__(self, force, player_vehicle_id, scheduler, log,
-                 on_player_hit=None, bodies=None, rigs=None):
+                 on_player_hit=None, bodies=None, rigs=None, deck=None):
         self._force = force
         self._player_vehicle_id = player_vehicle_id
         self._schedule = scheduler
@@ -85,6 +85,7 @@ class EnemyAI(object):
         self._on_player_hit = on_player_hit
         self._bodies = bodies
         self._rigs = rigs
+        self._deck = deck
         self._stopped = False
         self._elapsed = 0.0
         self._next_shot = {}
@@ -299,6 +300,17 @@ class EnemyAI(object):
         self._shots += 1
         self._stage('tracer_shown', ' id=%s' % (vehicle.id,))
         player = BigWorld.entities.get(self._player_vehicle_id)
+        if self._deck is not None:
+            data = (shot_id, shot, vehicle.id, velocity,
+                    float(shot.gravity))
+            self._deck.launch(
+                ('enemy', vehicle.id, shot_id),
+                (start.x, start.y, start.z),
+                (velocity.x, velocity.y, velocity.z), float(shot.gravity),
+                float(shot.maxDistance), self._player_targets,
+                lambda hit, reason, data=data: self._terminal(data, hit,
+                                                              reason))
+            return
         targets = [player] if player is not None else []
         landing = projectiles.impact(
             vehicle.spaceID, (start.x, start.y, start.z),
@@ -335,6 +347,37 @@ class EnemyAI(object):
                      '(%.1f,%.1f,%.1f)' % (landing.point.x, landing.point.y,
                                            landing.point.z)
                      if landing else None))
+
+    def _player_targets(self):
+        import BigWorld
+        player = BigWorld.entities.get(self._player_vehicle_id)
+        return [player] if player is not None else []
+
+    def _terminal(self, data, hit, reason):
+        """One live-flight terminal for an enemy shell."""
+        import BigWorld
+        import Math
+        from items.components.component_constants import INVALID_EFFECT_INDEX
+        shot_id, shot, shooter_id, velocity, gravity = data
+        avatar = BigWorld.player()
+        if avatar is None:
+            return
+        if reason not in ('vehicle', 'terrain'):
+            avatar.stopTracer(shot_id, Math.Vector3(hit.point))
+            return
+        shell = shot.shell
+        speed = Math.Vector3(velocity.x,
+                             velocity.y - gravity * float(hit.elapsed),
+                             velocity.z)
+        direction = Math.Vector3(speed)
+        direction.normalise()
+        avatar.explodeProjectile(
+            shot_id, shell.effectsIndex, INVALID_EFFECT_INDEX,
+            projectiles._effect_material_index(hit.mat_kind),
+            shell.kindIdx, shell.caliber, hit.point, direction,
+            speed.length, '')
+        if self._on_player_hit is not None:
+            self._on_player_hit(hit, shot, shooter_id)
 
     def _land(self, shot_id, shot, shooter_id, landing):
         import BigWorld
