@@ -10,7 +10,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PORT_ROOT = ROOT / '0.9.22'
 CLIENT_SCRIPTS = PORT_ROOT / 'src' / 'res' / 'scripts' / 'client'
-sys.path.insert(0, str(PORT_ROOT / 'server'))
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922.ai import cover, maps, reviewed_routes_20260811
@@ -23,7 +22,7 @@ from gui.mods.offline_lan_0922.ai.navigation import (
     BAKED_SHALLOW_WATER, TerrainGrid, TerrainNavigator,
 )
 from gui.mods.offline_lan_0922 import prebaked_navigation
-from lan_battle_server import MAP_POOL
+from gui.mods.offline_lan_0922.navigation_graph_schema import SUPPORTED_MAPS
 
 
 class _StrictNoLegacyStuff(object):
@@ -105,10 +104,10 @@ class BotAiPortTests(unittest.TestCase):
             os.path.normpath(prebaked_navigation.mod_dir()))
 
     def test_preserves_annotated_standard_maps(self):
-        # The server pool is the exact #1513 standard-mode candidate set.
+        # The navigation schema is the exact #1513 standard-mode candidate set.
         # TACTICAL_MAPS also retains older annotations that are useful for
         # other supported clients, so it may be a strict superset.
-        self.assertTrue(set(MAP_POOL).issubset(set(maps.TACTICAL_MAPS)))
+        self.assertTrue(set(SUPPORTED_MAPS).issubset(set(maps.TACTICAL_MAPS)))
         karelia = maps.get_tactical_map('spaces/01_karelia')
         self.assertEqual('01_karelia', karelia['name'])
         self.assertTrue(karelia['routes'][1])

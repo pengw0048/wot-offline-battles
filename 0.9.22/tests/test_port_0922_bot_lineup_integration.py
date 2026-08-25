@@ -1,22 +1,22 @@
+import json
 from pathlib import Path
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_ROOT = ROOT / "launcher"
 PORT_ROOT = ROOT / "0.9.22"
 CLIENT_ROOT = PORT_ROOT / "src" / "res" / "scripts" / "client"
-SERVER_ROOT = PORT_ROOT / "server"
-for path in (LAUNCHER_ROOT, SERVER_ROOT, CLIENT_ROOT):
+for path in (LAUNCHER_ROOT, CLIENT_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 import bot_lineup_profiles  # noqa: E402
 import bot_lineup_ui  # noqa: E402
 import core as launcher_core  # noqa: E402
-import windows_server  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_blacklist  # noqa: E402
 from gui.mods.offline_lan_0922 import descriptor_donation  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_configuration  # noqa: E402
@@ -85,8 +85,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
         environment = launcher_core.server_environment(
             launcher_core.PORT_0_9_22, "/game", {},
             bot_lineup=assignments)
-        server_lineup = windows_server._bot_lineup_from_environment(
-            environment)
+        server_lineup = json.loads(environment["WOT_0922_BOT_LINEUP"])
         self.assertEqual(assignments, server_lineup)
 
         roster = ({"id": 21, "team": 2, "slot": 0},)
@@ -118,11 +117,16 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 "vehicle": "ussr:R11_MS-1",
             }],
             "bots": list(roster),
+            "bot_manifest": [{
+                "id": 21, "team": 2, "slot": 0,
+                "vehicle": expected_name,
+            }],
             "bot_tier_mode": "same",
             "bot_lineup": server_lineup,
         }
         battle.client = types.SimpleNamespace(team=1, player_id=1)
         battle._resolve_descriptor = descriptors.__getitem__
+        battle._resolve_canonical_bot_descriptor = descriptors.__getitem__
 
         self.assertTrue(battle._prepare_bot_vehicle_assignments(
             descriptors["ussr:R11_MS-1"]))
@@ -188,9 +192,16 @@ class BotLineupIntegrationTests(unittest.TestCase):
         battle._start_message = {
             "round_id": 1, "map": "01_karelia",
             "players": [], "bots": list(roster),
+            "bot_manifest": [{
+                "id": 21, "team": 2, "slot": 0,
+                "vehicle": "germany:Missing",
+            }],
             "bot_tier_mode": "same", "bot_lineup": lineup,
         }
         battle.client = types.SimpleNamespace(team=1, player_id=1)
+        battle._resolve_descriptor = mock.Mock(
+            side_effect=KeyError("germany:Missing"))
+        battle._resolve_canonical_bot_descriptor = battle._resolve_descriptor
 
         self.assertFalse(battle._prepare_bot_vehicle_assignments(
             _descriptor("ussr:R11_MS-1")))

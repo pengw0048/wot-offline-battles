@@ -102,7 +102,10 @@ _CLIENT_RUNTIME_FILES_0_9_22 = (
 
 _SERVER_ENTRIES = {
     PORT_0_8_2: (os.path.join("0.8.2"), "lan_battle_server.py"),
-    PORT_0_9_22: (os.path.join("0.9.22", "server"), "windows_server.py"),
+    PORT_0_9_22: (
+        os.path.join("0.9.22", "dist", "server"),
+        "WoT-0.9.22-LAN-Server.exe",
+    ),
 }
 
 _SERVER_ARGUMENTS = {
@@ -123,15 +126,21 @@ _SERVER_PROBES = {
         "client_build": "wot-0.9.22.0.1-cn-1513",
         "vehicle": "ussr:R11_MS-1",
         "capabilities": (
-            "projectile_ledger_v2", "destructible_catalog_v5",
-            "ram_contact_ledger_v2", "human_ram_timeline_v1",
+            "projectile_ledger_v2", "ricochet_continuation_v1",
+            "destructible_catalog_v5", "lean_snapshot_manifest_v1",
+            "ram_contact_ledger_v3", "human_ram_timeline_v1",
             "player_fire_intent_v4", "player_environment_v2",
-            "effective_params_v1", "ricochet_continuation_v1"),
+            "effective_params_v1", "player_ammo_authority_v1",
+            "player_authority_loadout_v1"),
         "server_capabilities": (
-            "destructible_catalog_v5", "ram_contact_ledger_v2",
-            "human_ram_timeline_v1", "player_fire_intent_v4",
+            "destructible_catalog_v5", "lean_snapshot_manifest_v1",
+            "ram_contact_ledger_v3",
+            "human_ram_timeline_v1", "he_explosion_evidence_v1",
+            "player_fire_intent_v4",
             "player_environment_v2", "effective_params_v1",
-            "ricochet_continuation_v1"),
+            "ricochet_continuation_v1", "player_ammo_authority_v1",
+            "player_authority_loadout_v1", "oracle_backed_server_v1",
+            "native_oracle_v1"),
     },
 }
 
@@ -253,7 +262,7 @@ def worker_environment(game_root, host=LOCAL_HOST,
                        port=DEFAULT_SERVER_PORT,
                        team_size=DEFAULT_TEAM_SIZE, environment=None,
                        team1_size=None, team2_size=None):
-    """Build the endpoint inherited by the hidden simulation client."""
+    """Build the endpoint inherited by the hidden native-world oracle."""
     environment = server_environment(
         PORT_0_9_22, game_root, environment, team_size=team_size,
         team1_size=team1_size, team2_size=team2_size)
@@ -1476,8 +1485,10 @@ def server_environment(port_version, game_root, environment=None,
 
 
 def server_child_command(port_version, launcher_script=None, executable=None,
-                         frozen=None):
-    """Build the command that runs one server in a child of this launcher."""
+                         frozen=None, base_dir=None):
+    """Build the command whose process lifetime the launcher owns directly."""
+    if port_version == PORT_0_9_22:
+        return server_argv(port_version, base_dir)
     executable = executable or sys.executable
     if frozen is None:
         frozen = bool(getattr(sys, "frozen", False))
@@ -1490,24 +1501,34 @@ def server_child_command(port_version, launcher_script=None, executable=None,
 
 
 def run_server_payload(port_version, base_dir=None):
-    """Run one bundled server inside this process."""
-    import runpy
-
-    # The packaged launcher carries the server sources as data, so their
-    # standard-library imports reach PyInstaller only through this module.
-    import server_imports  # noqa: F401
-
+    """Run one bundled server payload and wait for its exit status."""
     argv = server_argv(port_version, base_dir)
     if argv is None:
         raise LauncherError("Unknown client port: %s" % port_version)
-    script = argv[0]
-    if not os.path.isfile(script):
-        raise LauncherError("The bundled server is missing: %s" % script)
-    directory = os.path.dirname(script)
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
-    sys.argv = list(argv)
-    runpy.run_path(script, run_name="__main__")
+    server = argv[0]
+    if not os.path.isfile(server):
+        raise LauncherError("The bundled server is missing: %s" % server)
+    if port_version == PORT_0_8_2:
+        import runpy
+
+        directory = os.path.dirname(server)
+        if directory not in sys.path:
+            sys.path.insert(0, directory)
+        sys.argv = list(argv)
+        runpy.run_path(server, run_name="__main__")
+        return 0
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        while True:
+            chunk = process.stdout.readline()
+            if not chunk:
+                break
+            sys.stdout.write(chunk.decode("utf-8", "replace"))
+            sys.stdout.flush()
+    finally:
+        process.stdout.close()
+    return process.wait()
 
 
 def connection_report(mode, host, port, answered):
@@ -2037,8 +2058,8 @@ def wait_for_paired_player_exit(
     they no longer participate in the shutdown decision.
 
     If the required hidden worker exits, retire the paired player job instead
-    of leaving a visible client running without its simulation authority. The
-    second return value records whether that authority loss caused the close.
+    of leaving a visible client running without its native-world oracle.
+    The second return value records whether that oracle loss caused the close.
     """
     import time as time_module
 

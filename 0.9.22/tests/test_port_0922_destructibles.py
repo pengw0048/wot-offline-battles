@@ -5257,10 +5257,12 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         fence_row = by_wire[(31, 4)]
         self.assertEqual(0.75 * 15, fence_row[3])
         self.assertIsNone(fence_row[4])
+        self.assertEqual(fence.lower(), fence_row[5])
         house_row = by_wire[(31, 7)]
         self.assertIsNone(house_row[3])
         self.assertEqual([1.25 * 40, 12.0], house_row[4]['73'])
         self.assertEqual([1.25 * 60, 0.0], house_row[4]['74'])
+        self.assertEqual(house.lower(), house_row[5])
         self.assertIn((0.75, 15), scaled_calls)
         self.assertIn((1.25, 40), scaled_calls)
         self.assertIn((1.25, 60), scaled_calls)
@@ -5281,6 +5283,28 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                 'wire_identity_mismatch', 31, 4)
 
         self.assertIsNone(destructibles_sensor.donation_rows_1513())
+
+    def test_installed_catalog_proof_fences_space_and_complete_coverage(self):
+        unused_fence, unused_house, catalog = self._donation_catalog()
+        destructibles_sensor.set_catalog(catalog)
+        manager = _Manager()
+        manager.space_id = 7
+        modules = self._donation_environment({})
+        modules['AreaDestructibles'].g_destructiblesManager = manager
+
+        with mock.patch.dict(sys.modules, modules):
+            self.assertEqual({
+                'native_space_id': 7,
+                'expected_instances': 2,
+                'installed_instances': 2,
+            }, destructibles_sensor.installed_catalog_proof_1513(7))
+            with self.assertRaisesRegex(RuntimeError, 'oracle space'):
+                destructibles_sensor.installed_catalog_proof_1513(8)
+
+            destructibles_sensor._destructible_catalog[
+                'baked_instances'].pop((31, 7))
+            with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                destructibles_sensor.installed_catalog_proof_1513(7)
 
     def test_one_bad_descriptor_fails_the_whole_donation(self):
         fence, house, catalog = self._donation_catalog()
@@ -5622,6 +5646,381 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             registry, _Vector(), vehicle_box))
 
         self.assertEqual([233], [value[0] for value in nearby])
+
+    def _install_oracle_registered_instances(self, specs):
+        resources = {}
+        descriptors = {}
+        for spec in specs:
+            resources[spec['filename']] = {
+                'kind': spec['kind'], 'boxes': spec['boxes'],
+            }
+            if spec['kind'] == 'structure':
+                descriptors[spec['filename']] = {
+                    'type': 4,
+                    'modules': spec['modules'],
+                    'kineticDamageCorrection': spec.get('correction', 0.0),
+                }
+            else:
+                descriptors[spec['filename']] = {
+                    'type': 2 if spec['kind'] == 'falling' else 3,
+                    'health': spec['health'],
+                    'kineticDamageCorrection': spec.get('correction', 0.0),
+                }
+        destructibles_sensor.set_catalog(_catalog(resources))
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        instances = {}
+        bins = {}
+        for spec in specs:
+            record = destructibles_sensor._destructible_catalog[
+                'resources'][spec['filename'].lower()]
+            instance = {
+                'filename': spec['filename'].lower(),
+                'descriptor_filename': spec['filename'],
+                'kind': spec['kind'],
+                'boxes': destructibles_sensor._world_catalog_boxes(
+                    record, _ItemMatrix(), _Vector(), math_module,
+                    0 if spec['kind'] != 'structure' else None),
+                'item_scale': float(spec.get('scale', 1.0)),
+            }
+            identity = tuple(spec['identity'])
+            instances[identity] = instance
+            destructibles_sensor._index_catalog_instance_1513(
+                bins, identity, instance)
+        destructibles_sensor.g_offh_destr_instances = instances
+        destructibles_sensor.g_offh_destr_contact_bins = bins
+
+        area = types.ModuleType('AreaDestructibles')
+        area.DESTR_TYPE_TREE = 1
+        area.DESTR_TYPE_FALLING_ATOM = 2
+        area.DESTR_TYPE_FRAGILE = 3
+        area.DESTR_TYPE_STRUCTURE = 4
+        area.g_cache = types.SimpleNamespace(
+            unitVehicleMass=10000.0,
+            getDescByFilename=lambda filename: descriptors.get(filename))
+        cache = types.ModuleType('DestructiblesCache')
+        cache.scaledDestructibleHealth = (
+            lambda scale, health: float(scale) * float(health))
+        return area, cache, math_module
+
+    def _read_only_oracle_authority(self, destroyed=None):
+        ledger = set(destroyed or ())
+        native_calls = []
+
+        def is_destroyed(chunk_id, item_index, mat_kind=None):
+            return ((chunk_id, item_index, mat_kind) in ledger or
+                    (chunk_id, item_index, None) in ledger)
+
+        def forbidden_native_destroy(*args):
+            native_calls.append(args)
+            raise AssertionError('read-only evidence called native destroy')
+
+        authority = types.SimpleNamespace(
+            is_destroyed=is_destroyed,
+            destroyed_keys=lambda chunk_id: set(
+                (item, mat) for chunk, item, mat in ledger
+                if chunk == chunk_id),
+            destroy_tree=forbidden_native_destroy,
+            destroy_column=forbidden_native_destroy,
+            destroy_fragile=forbidden_native_destroy,
+            destroy_module=forbidden_native_destroy)
+        return authority, ledger, native_calls
+
+    def test_read_only_shot_evidence_keeps_ap_health_and_backing_wall(self):
+        filename = 'content/Environment/oracle/fence.model'
+        area, cache, math_module = self._install_oracle_registered_instances([{
+            'filename': filename,
+            'kind': 'fragile',
+            'boxes': [[-1.0, -1.0, 4.0, 1.0, 2.0, 6.0, None]],
+            'identity': (22, 37),
+            'health': 30.0,
+            'scale': 0.5,
+        }])
+        authority, ledger, native_calls = self._read_only_oracle_authority()
+        events = []
+        destructibles_sensor.set_event_sink(
+            lambda event: events.append(event) or True)
+        before_instances = dict(destructibles_sensor.g_offh_destr_instances)
+        before_bins = dict((key, set(value)) for key, value in
+                           destructibles_sensor.g_offh_destr_contact_bins.items())
+        candidate_skin = _Vector(0.0, 0.0, 4.0)
+        backing_wall = _Vector(0.0, 0.0, 6.01)
+        filter_results = []
+
+        def collide(unused_space, unused_start, unused_end, unused_mask,
+                    collision_filter=None):
+            if collision_filter is None:
+                return (candidate_skin, _Vector(0.0, 0.0, -1.0))
+            keep_skin = collision_filter(73, 0, 37, 22)
+            filter_results.append(keep_skin)
+            return ((candidate_skin if keep_skin else backing_wall),
+                    _Vector(0.0, 0.0, -1.0))
+
+        bigworld = types.SimpleNamespace(wg_collideSegment=collide)
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.shot_destructible_evidence_1513(
+                bigworld, 1, _Vector(), _Vector(0.0, 0.0, 10.0),
+                'ARMOR_PIERCING')
+
+        self.assertTrue(evidence['complete'])
+        self.assertFalse(evidence['fail_closed'])
+        self.assertEqual([False], filter_results)
+        self.assertEqual(1, len(evidence['candidates']))
+        candidate = evidence['candidates'][0]
+        self.assertEqual((22, 37, None), (
+            candidate['chunk_id'], candidate['item_index'],
+            candidate['mat_kind']))
+        self.assertEqual(4.0, candidate['entry_distance'])
+        self.assertEqual(6.0, candidate['exit_distance'])
+        self.assertEqual((0.0, 0.0, 4.0), candidate['impact_point'])
+        self.assertEqual(0.5, candidate['item_scale'])
+        self.assertEqual(15.0, candidate['scaled_health'])
+        self.assertTrue(candidate['ap_through'])
+        self.assertEqual(25.0, candidate['piercing_loss'])
+        self.assertAlmostEqual(
+            6.01, evidence['static_collision']['distance'])
+        self.assertEqual(set(), ledger)
+        self.assertEqual([], native_calls)
+        self.assertEqual([], events)
+        self.assertEqual(before_instances,
+                         destructibles_sensor.g_offh_destr_instances)
+        self.assertEqual(before_bins,
+                         destructibles_sensor.g_offh_destr_contact_bins)
+        self.assertNotIn('g_offh_destr_pending',
+                         destructibles_sensor.__dict__)
+
+    def test_read_only_shot_evidence_marks_equal_exact_hits_ambiguous(self):
+        specs = []
+        for item_index, suffix in ((37, 'a'), (38, 'b')):
+            specs.append({
+                'filename': 'content/Environment/oracle/%s.model' % suffix,
+                'kind': 'fragile',
+                'boxes': [[-1.0, -1.0, 4.0, 1.0, 2.0, 6.0, None]],
+                'identity': (22, item_index),
+                'health': 15.0,
+            })
+        area, cache, math_module = self._install_oracle_registered_instances(
+            specs)
+        authority, unused_ledger, native_calls = (
+            self._read_only_oracle_authority())
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=lambda *unused: None)
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.shot_destructible_evidence_1513(
+                bigworld, 1, _Vector(), _Vector(0.0, 0.0, 10.0),
+                'ARMOR_PIERCING')
+
+        self.assertTrue(evidence['fail_closed'])
+        self.assertTrue(evidence['ambiguous'])
+        self.assertIn('ambiguous_exact_candidates', evidence['reasons'])
+        self.assertEqual(2, len(evidence['candidates']))
+        self.assertTrue(all(row['ambiguous']
+                            for row in evidence['candidates']))
+        self.assertEqual([], native_calls)
+
+    def test_read_only_shot_evidence_skips_destroyed_from_result_and_wall(self):
+        filename = 'content/Environment/oracle/broken.model'
+        area, cache, math_module = self._install_oracle_registered_instances([{
+            'filename': filename,
+            'kind': 'fragile',
+            'boxes': [[-1.0, -1.0, 4.0, 1.0, 2.0, 6.0, None]],
+            'identity': (22, 37),
+            'health': 15.0,
+        }])
+        authority, ledger, native_calls = self._read_only_oracle_authority(
+            set([(22, 37, None)]))
+        backing_wall = _Vector(0.0, 0.0, 6.02)
+
+        def collide(unused_space, unused_start, unused_end, unused_mask,
+                    collision_filter=None):
+            self.assertIsNotNone(collision_filter)
+            self.assertFalse(collision_filter(73, 0, 37, 22))
+            return (backing_wall, _Vector(0.0, 0.0, -1.0))
+
+        bigworld = types.SimpleNamespace(wg_collideSegment=collide)
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.shot_destructible_evidence_1513(
+                bigworld, 1, _Vector(), _Vector(0.0, 0.0, 10.0),
+                'ARMOR_PIERCING')
+
+        self.assertTrue(evidence['complete'])
+        self.assertEqual((), evidence['candidates'])
+        self.assertEqual(1, evidence['destroyed_skipped'])
+        self.assertAlmostEqual(
+            6.02, evidence['static_collision']['distance'])
+        self.assertEqual(set([(22, 37, None)]), ledger)
+        self.assertEqual([], native_calls)
+
+    def test_read_only_shot_evidence_live_validates_without_registering(self):
+        filename = 'content/Environment/oracle/live.model'
+        chunk_translation = _Vector()
+        matrix = _ItemMatrix()
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        math_module.Matrix = lambda value: value
+        signature = destructibles_sensor._locator_signature(
+            matrix, chunk_translation, math_module, 1000)
+        destructibles_sensor.set_catalog(_catalog({
+            filename: {
+                'kind': 'fragile',
+                'boxes': [[-1.0, -1.0, 4.0, 1.0, 2.0, 6.0, None]],
+            },
+        }, [list(signature) + [filename, 0, 22, 0, 1.0]]))
+        manager = _Manager()
+        manager.space_id = 1
+        manager.set_chunk_count(22, 1)
+        area = types.ModuleType('AreaDestructibles')
+        area.g_destructiblesManager = manager
+        area.DESTR_TYPE_TREE = 1
+        area.DESTR_TYPE_FALLING_ATOM = 2
+        area.DESTR_TYPE_FRAGILE = 3
+        area.DESTR_TYPE_STRUCTURE = 4
+        area.g_cache = types.SimpleNamespace(
+            unitVehicleMass=10000.0,
+            getDescByFilename=lambda value: (
+                {'type': 3, 'health': 15.0,
+                 'kineticDamageCorrection': 0.0}
+                if value == filename else None))
+        cache = types.ModuleType('DestructiblesCache')
+        cache.scaledDestructibleHealth = (
+            lambda scale, health: float(scale) * float(health))
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_getChunkDestrFilenames = lambda *unused: (filename,)
+        bigworld.wg_getChunkMatrix = lambda *unused: types.SimpleNamespace(
+            translation=chunk_translation)
+        bigworld.wg_getDestructibleMatrix = lambda *unused: matrix
+        bigworld.wg_getDestructibleEffectCategory = lambda *unused: 3
+
+        def collide(unused_space, unused_start, unused_end, unused_mask,
+                    collision_filter=None):
+            self.assertIsNotNone(collision_filter)
+            self.assertFalse(collision_filter(73, 0, 0, 22))
+            return (_Vector(0.0, 0.0, 6.1),
+                    _Vector(0.0, 0.0, -1.0))
+
+        bigworld.wg_collideSegment = collide
+        authority, unused_ledger, native_calls = (
+            self._read_only_oracle_authority())
+        self.assertNotIn('g_offh_destr_instances',
+                         destructibles_sensor.__dict__)
+        self.assertNotIn('g_offh_destr_contact_bins',
+                         destructibles_sensor.__dict__)
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.shot_destructible_evidence_1513(
+                bigworld, 1, _Vector(), _Vector(0.0, 0.0, 10.0),
+                'ARMOR_PIERCING')
+
+        self.assertTrue(evidence['complete'])
+        self.assertEqual(1, len(evidence['candidates']))
+        self.assertEqual(15.0,
+                         evidence['candidates'][0]['scaled_health'])
+        self.assertAlmostEqual(
+            6.1, evidence['static_collision']['distance'])
+        self.assertNotIn('g_offh_destr_instances',
+                         destructibles_sensor.__dict__)
+        self.assertNotIn('g_offh_destr_contact_bins',
+                         destructibles_sensor.__dict__)
+        self.assertEqual([], native_calls)
+
+    def test_read_only_shot_evidence_fails_closed_without_live_validation(self):
+        filename = 'content/Environment/oracle/pending.model'
+        signature = [0, 0, 0,
+                     1000, 0, 0, 0, 1000, 0, 0, 0, 1000]
+        destructibles_sensor.set_catalog(_catalog({
+            filename: {
+                'kind': 'fragile',
+                'boxes': [[-1.0, -1.0, 4.0, 1.0, 2.0, 6.0, None]],
+            },
+        }, [signature + [filename, 0, 22, 37, 1.0]]))
+        area = types.ModuleType('AreaDestructibles')
+        area.g_destructiblesManager = None
+        authority, unused_ledger, native_calls = (
+            self._read_only_oracle_authority())
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=lambda *unused: None)
+
+        with mock.patch.dict(sys.modules, {'AreaDestructibles': area}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.shot_destructible_evidence_1513(
+                bigworld, 1, _Vector(), _Vector(0.0, 0.0, 10.0),
+                'ARMOR_PIERCING')
+
+        self.assertTrue(evidence['fail_closed'])
+        self.assertIn('live_validation_unavailable', evidence['reasons'])
+        self.assertEqual((), evidence['candidates'])
+        self.assertIsNotNone(evidence['uncertain_distance'])
+        self.assertNotIn('g_offh_destr_instances',
+                         destructibles_sensor.__dict__)
+        self.assertEqual([], native_calls)
+
+    def test_read_only_hull_evidence_contains_no_kinetic_verdict(self):
+        filename = 'content/Environment/oracle/gate.model'
+        area, cache, math_module = self._install_oracle_registered_instances([{
+            'filename': filename,
+            'kind': 'fragile',
+            'boxes': [[-0.3, -0.2, 3.5, 0.3, 1.5, 4.0, None]],
+            'identity': (22, 37),
+            'health': 5.0,
+            'correction': 0.0,
+        }])
+        authority, ledger, native_calls = self._read_only_oracle_authority()
+        events = []
+        destructibles_sensor.set_event_sink(
+            lambda event: events.append(event) or True)
+        bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
+        before_instances = dict(destructibles_sensor.g_offh_destr_instances)
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            evidence = destructibles_sensor.hull_destructible_evidence_1513(
+                1, _Vector(), 0.0, bbox, 0.3)
+
+        self.assertTrue(evidence['complete'])
+        self.assertEqual(1, len(evidence['candidates']))
+        self.assertEqual({
+            'chunk_id', 'item_index', 'mat_kind', 'kind', 'obb_center',
+        }, set(evidence['candidates'][0]))
+        self.assertEqual(set(), ledger)
+        self.assertEqual([], native_calls)
+        self.assertEqual([], events)
+        self.assertEqual(before_instances,
+                         destructibles_sensor.g_offh_destr_instances)
+        self.assertNotIn('g_offh_destr_pending',
+                         destructibles_sensor.__dict__)
 
 
 if __name__ == '__main__':

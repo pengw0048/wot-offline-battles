@@ -31,7 +31,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Payload staging failed with exit code $LASTEXITCODE"
 }
 
-foreach ($entry in @("servers\0.9.22\server\windows_server.py",
+foreach ($entry in @("servers\0.9.22\dist\server\WoT-0.9.22-LAN-Server.exe",
                      "client\0.9.22.zip")) {
     if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot $entry))) {
         throw "Payload is incomplete: $entry"
@@ -74,6 +74,14 @@ if ($ClientPayloads.Count -ne 1 -or
 if ($ServerPayloads.Count -ne 1 -or
         $ServerPayloads[0].Name -ne "0.9.22") {
     throw "Launcher must carry only the 0.9.22 server payload"
+}
+$ExpectedServerExecutable = Join-Path $ServerPayloadRoot `
+    "0.9.22\dist\server\WoT-0.9.22-LAN-Server.exe"
+$ServerPayloadFiles = @(
+    Get-ChildItem -LiteralPath $ServerPayloadRoot -File -Recurse -Force)
+if ($ServerPayloadFiles.Count -ne 1 -or
+        $ServerPayloadFiles[0].FullName -ne $ExpectedServerExecutable) {
+    throw "Launcher must carry only the Rust 0.9.22 server executable"
 }
 $ForbiddenEntries = @(
     Get-ChildItem -LiteralPath $AppRoot -Recurse -Force |

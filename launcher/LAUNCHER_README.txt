@@ -1,9 +1,10 @@
 WoT Offline Battles Launcher
 ================================
 
-The launcher prepares one battle before the game starts. It installs the mod,
-writes the server address, runs the LAN server when you host, starts World of
-Tanks, and stops that server when the game closes.
+The launcher installs the mod, writes the server address, and starts World of
+Tanks. Single player owns one Rust LAN server and one hidden native-world
+oracle for that session. An Online LAN room owns one persistent Rust server
+and exactly one hidden oracle until Stop LAN room is clicked.
 
 1. Start WoT-Offline-Battles-Launcher.exe from this folder. Keep the folder
    together; the launcher needs the files beside it.
@@ -12,13 +13,12 @@ Tanks, and stops that server when the game closes.
    Use Browse... for a folder that is not in the list. The launcher reports
    which client it found. The only supported client is the exact Chinese HD
    0.9.22.0.1 #1513 build; another build is not compatible.
-3. Select a mode:
+3. Select a tab:
    - Single player: you play alone against bots. The launcher runs the LAN
      server for you, because every battle is a server battle.
-   - Host a LAN battle on this PC: other players join this PC. The launcher
-     prints the address they should type.
-   - Join a LAN battle: type the address of the PC that hosts the battle, for
-     example 192.168.1.20 or 192.168.1.20:28782.
+   - Online: to host, click Start LAN room and use the address the launcher
+     prints; then start the game on this PC. To join, type the host PC's
+     address, for example 192.168.1.20 or 192.168.1.20:28782.
 4. Type a player name. Other players see it in the LAN room. Test connection
    checks the address you typed, or reports whether port 28782 on this PC is
    already taken when you host.
@@ -76,7 +76,7 @@ engine_config.xml overlay from another tool is reported as a conflict and is
 left unchanged.
 
 The client sometimes closes its first process and starts another one while it
-starts up. The launcher waits half a minute after the last game process before
+starts up. The launcher waits eight seconds after the last game process before
 it stops the server, so that restart does not end your battle.
 
 Your 0.9.22 saved address, account state, garage, pending post-battle results
@@ -89,14 +89,14 @@ large-address-aware and can normally address about 4 GB on 64-bit Windows, but
 a very long session can still run out of memory and exit. Restart the client
 between long sessions.
 
-When you host, approve the UAC prompt that opens TCP 28782 for this launcher.
-Cancelling is nonfatal, but other PCs may remain unable to connect. Run this
-trusted-LAN server only on a network you trust.
+When you host, approve the UAC prompt that opens TCP 28782 for the bundled
+WoT-0.9.22-LAN-Server.exe. Cancelling is nonfatal, but other PCs may remain
+unable to connect. Run this trusted-LAN server only on a network you trust.
 
 The launcher keeps its settings in
 %LOCALAPPDATA%\WoTOfflineBattles\launcher.json. For the exact 0.9.22 client,
 crash report collection is enabled by default on the launch page. It monitors
-both the visible client and the hidden simulation client. If either one closes
+both the visible client and the hidden native-world oracle. If either one closes
 unexpectedly, the launcher creates a ZIP and asks whether you want to report
 the crash. Choosing Yes only selects that ZIP in Windows Explorer; the launcher
 never uploads it. Choosing No deletes that newly created ZIP.

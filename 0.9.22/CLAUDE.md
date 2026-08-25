@@ -224,16 +224,18 @@ print('CPython 2.7 source compile passed: %d files' % len(paths))
 PY
 ```
 
-The server and test harness use Python 3. Keep protocol payloads plain JSON at
-the boundary so neither runtime depends on the other's object model.
+The test harness and repository tools use Python 3, while the LAN server is
+Rust. Keep protocol payloads plain JSON at the boundary so neither runtime
+depends on the other's object model.
 
 ## LAN, authority, and asynchronous work
 
-- Every room has one mandatory hidden native worker. The only simulation path
-  is visible client -> LAN server -> hidden worker -> LAN server -> replicas.
-  Visible clients submit player input and fire intent and never become Bot or
-  projectile authority. The removed visible-client and pure-Python simulation
-  fallbacks must not be reintroduced.
+- Every room has one mandatory hidden native-world oracle. The Rust LAN server
+  owns the fixed-tick simulation and requests only version-locked BigWorld
+  facts through Rust server -> hidden oracle -> Rust server. Visible clients
+  submit player input and fire intent and never become gameplay or native-query
+  authority. The removed visible-client and pure-Python server fallbacks must
+  not be reintroduced.
 - A client `_send()` returning true may mean only that an immutable payload was
   admitted to a local sender queue. It is not a server acknowledgement.
 - Freeze or project mutable state at the wire boundary. JSON mapping keys must
@@ -257,11 +259,11 @@ the boundary so neither runtime depends on the other's object model.
   transitions. Apply elapsed time when a legal update is delayed instead of
   silently discarding the interval.
 
-The server owns room admission, round lifecycle, timing and shared ledgers.
-The hidden worker is the sole native simulation authority for Bot movement,
-map collision and projectile progression; the server validates and commits
-its shared outcomes. Do not infer authority from which side happens to
-calculate a presentation value.
+The Rust server owns room admission, round lifecycle, fixed-tick Bot movement,
+projectile progression, combat, timing and shared ledgers. The hidden worker is
+the sole oracle for native map, collision, node, water and destructible facts;
+it does not advance gameplay state. Do not infer authority from which side
+happens to calculate a presentation value.
 
 ## Performance investigations
 

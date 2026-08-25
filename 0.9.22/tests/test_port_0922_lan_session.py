@@ -77,6 +77,7 @@ class _Client(object):
         self.selections = []
         self.team_selections = []
         self.team_size_selections = []
+        self.descriptor_bundles = []
         self.receipt_acks = []
 
     def start(self):
@@ -121,6 +122,16 @@ class _Client(object):
                 self.player_id != self.host_player_id):
             return False
         self.team_size_selections.append((team, size))
+        return True
+
+    def send_descriptor_bundle(self, projections, requested=None,
+                               failures=None, complete=True):
+        self.descriptor_bundles.append({
+            'projections': dict(projections or {}),
+            'requested': list(requested or ()),
+            'failures': list(failures or ()),
+            'complete': complete,
+        })
         return True
 
     def acknowledge_battle_receipt(self, receipt_id):
@@ -200,6 +211,7 @@ class _BattleRuntime(object):
         self.events = []
         self.rosters = []
         self.observations = []
+        self.ammo_intent_results = []
         self.restore_pending = False
 
     def start(self, config, message=None, lan_client=None,
@@ -224,6 +236,9 @@ class _BattleRuntime(object):
 
     def on_bot_observation(self, message):
         self.observations.append(message)
+
+    def on_ammo_intent_result(self, message):
+        self.ammo_intent_results.append(message)
 
     def stop(self, show_login=True, restore_account=True):
         self.stopped.append(show_login)
@@ -270,6 +285,11 @@ class LANSessionTests(unittest.TestCase):
             battle_runtime=self.battle_runtime,
             vehicle_provider=lambda: ('ussr:R11_MS-1', 90),
             vehicle_compact_provider=lambda: 'YQ==',
+            ammo_provider=lambda: {'remaining': [30], 'loaded_shell': 0},
+            authority_loadout_provider=lambda: {
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            },
             on_snapshot=self.snapshots.append,
             status_notifier=self.statuses.append,
             queue_screen_factory=queue_screen_factory)
@@ -371,6 +391,21 @@ class LANSessionTests(unittest.TestCase):
 
         self.assertFalse(self.session.set_team_size(1, 4))
         self.assertEqual([], self.client.team_size_selections)
+
+    def test_selected_vehicle_publishes_connection_scoped_loadout(self):
+        self.client.ready = True
+        self.client.phase = 'waiting'
+        self.session.state = 'waiting'
+        calls = []
+        self.client.select_vehicle = (
+            lambda *args: calls.append(args) or True)
+
+        self.assertTrue(self.session._publish_selected_vehicle())
+
+        self.assertEqual({
+            'repair': {'available': False},
+            'spotting': {'available': False},
+        }, calls[0][7])
 
     def test_postbattle_request_retries_after_failure_then_completes_once(self):
         class Store(object):
@@ -838,6 +873,60 @@ class LANSessionTests(unittest.TestCase):
     def test_donation_runtime_is_none_without_the_exact_modules(self):
         self.assertIsNone(self.session._donation_runtime())
 
+    def test_descriptor_request_with_no_runtime_sends_terminal_failures(self):
+        self.session._donation_runtime = lambda: None
+
+        self.emit('descriptor_request', {
+            'round_id': 1,
+            'names': ['ussr:R11_MS-1', 'usa:T1_Cunningham'],
+        })
+
+        self.assertEqual([{
+            'projections': {},
+            'requested': ['ussr:R11_MS-1', 'usa:T1_Cunningham'],
+            'failures': ['ussr:R11_MS-1', 'usa:T1_Cunningham'],
+            'complete': True,
+        }], self.client.descriptor_bundles)
+
+    def test_descriptor_chunks_repeat_request_and_end_with_completion(self):
+        from gui.mods.offline_lan_0922 import descriptor_donation
+        names = ['test:vehicle_%02d' % index for index in range(13)]
+        projections = dict((name, {'name': name}) for name in names)
+        self.session._donation_runtime = lambda: object()
+        with mock.patch.object(
+                descriptor_donation, 'project_vehicles',
+                return_value=projections):
+            self.emit('descriptor_request', {'round_id': 1, 'names': names})
+
+        self.assertEqual(2, len(self.client.descriptor_bundles))
+        first, final = self.client.descriptor_bundles
+        self.assertEqual(names, first['requested'])
+        self.assertEqual(names, final['requested'])
+        self.assertEqual([], first['failures'])
+        self.assertFalse(first['complete'])
+        self.assertTrue(final['complete'])
+        self.assertEqual(set(names), set(first['projections']) |
+                         set(final['projections']))
+
+    def test_descriptor_projection_failures_are_explicit_on_completion(self):
+        from gui.mods.offline_lan_0922 import descriptor_donation
+        names = ['test:good', 'test:bad']
+
+        def project(unused_runtime, requested, failures=None, fittings=None):
+            failures.append('test:bad')
+            return {'test:good': {'name': 'test:good'}}
+
+        self.session._donation_runtime = lambda: object()
+        with mock.patch.object(
+                descriptor_donation, 'project_vehicles', side_effect=project):
+            self.emit('descriptor_request', {'round_id': 1, 'names': names})
+
+        self.assertEqual(1, len(self.client.descriptor_bundles))
+        terminal = self.client.descriptor_bundles[0]
+        self.assertEqual(names, terminal['requested'])
+        self.assertEqual(['test:bad'], terminal['failures'])
+        self.assertTrue(terminal['complete'])
+
     def test_waiting_messages_install_and_open_picker_once(self):
         self.emit('welcome', {
             'phase': 'waiting', 'map_pool': ['01_karelia']})
@@ -1193,6 +1282,49 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual(1300, clients[0].max_health)
         self.assertEqual('usa:A12_T32', clients[1].vehicle)
         self.assertEqual(1550, clients[1].max_health)
+
+    def test_unavailable_ammo_never_connects_and_next_join_rebuilds(self):
+        clients = []
+        statuses = []
+        ammo_reads = [
+            RuntimeError('garage ammunition is not ready'),
+            {'remaining': [30], 'loaded_shell': 0},
+        ]
+
+        def client_factory(*args, **kwargs):
+            client = _Client(*args, **kwargs)
+            clients.append(client)
+            return client
+
+        def ammo_provider():
+            result = ammo_reads.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        session = self.module.LANSession(
+            {'host': '10.0.0.5', 'port': 28782},
+            client_factory=client_factory,
+            vehicle_provider=lambda: ('ussr:R11_MS-1', 90),
+            ammo_provider=ammo_provider,
+            authority_loadout_provider=lambda: {
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            },
+            status_notifier=statuses.append)
+
+        self.assertFalse(session.start())
+        self.assertEqual('ready_to_join', session.state)
+        self.assertIsNone(session.client)
+        self.assertEqual(0, clients[0].start_calls)
+        self.assertEqual(
+            [self.module.VEHICLE_SELECTION_WARNING], statuses)
+
+        self.assertTrue(session.start())
+        self.assertEqual('connecting', session.state)
+        self.assertEqual(1, clients[1].start_calls)
+        self.assertEqual([30], clients[1].ammo_remaining)
+        self.assertEqual(0, clients[1].ammo_loaded_shell)
 
     def test_first_join_with_no_selected_vehicle_stays_ready_to_join(self):
         clients = []
@@ -2357,6 +2489,22 @@ class LANSessionTests(unittest.TestCase):
         self.assertIs(current, self.session.snapshot)
         self.assertEqual([current], self.battle_runtime.snapshots)
         self.assertEqual([], self.battle_runtime.events)
+
+    def test_only_current_round_ammo_intent_results_reach_the_runtime(self):
+        start = {'round_id': 7, 'map': '01_karelia', 'players': [{
+            'id': 'p1', 'x': 1, 'y': 2, 'z': 3,
+            'vehicle': 'ussr:T-34'}]}
+        self.emit('battle_start', start)
+        stale = {'type': 'ammo_intent_result', 'round_id': 6,
+                 'intent_seq': 1}
+        current = {'type': 'ammo_intent_result', 'round_id': 7,
+                   'intent_seq': 1}
+
+        self.emit('ammo_intent_result', stale)
+        self.emit('ammo_intent_result', current)
+
+        self.assertEqual([current],
+                         self.battle_runtime.ammo_intent_results)
 
     def test_stop_is_idempotent_and_releases_every_owned_boundary_once(self):
         self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})

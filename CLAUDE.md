@@ -100,11 +100,12 @@ owns memory safely, or feels identical to retail.
 
 ## Current 0.9.22 operating model
 
-- Every room has one mandatory hidden native worker. The only simulation path
-  is `visible client -> LAN server -> hidden worker -> LAN server -> replicas`.
-  Visible clients submit player input and fire intent; they never become Bot or
-  projectile authority. Do not restore visible-client authority or the removed
-  pure-Python simulation fallback.
+- Every room has one mandatory hidden native-world oracle. The Rust LAN server
+  owns the fixed-tick simulation, Bots, projectiles, combat, results and
+  replication. When it needs version-locked BigWorld facts, the path is
+  `Rust server -> hidden oracle -> Rust server`; visible clients submit player
+  input and fire intent and never become gameplay or native-query authority.
+  Do not restore visible-client authority or the removed pure-Python server.
 - The launcher installs and starts the matching server and worker together.
   Do not build speculative compatibility machinery for combinations it never
   creates. This is a trusted-LAN product, not an anti-cheat boundary.

@@ -4,9 +4,9 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
-import sys
 import tempfile
 import unittest
 import zipfile
@@ -14,7 +14,6 @@ from unittest import mock
 
 import core
 import preferences_overlay
-import server_imports
 import stage_payload
 
 
@@ -579,12 +578,16 @@ class ServerPayloadTest(unittest.TestCase):
             os.path.join(os.path.dirname(core.__file__), "server.log"),
             core.server_log_path(frozen=False))
 
-    def test_repository_layout_resolves_both_servers(self):
-        base = core.server_root()
-        self.assertTrue(os.path.isfile(core.server_script(core.PORT_0_8_2,
-                                                          base)))
-        self.assertTrue(os.path.isfile(core.server_script(core.PORT_0_9_22,
-                                                          base)))
+    def test_built_rust_server_resolves_from_the_payload(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        server = core.server_script(core.PORT_0_9_22, base)
+        os.makedirs(os.path.dirname(server))
+        with open(server, "wb") as stream:
+            stream.write(b"MZ")
+
+        self.assertTrue(os.path.isfile(server))
+        self.assertTrue(server.endswith("WoT-0.9.22-LAN-Server.exe"))
 
     def test_0_8_2_server_receives_bind_arguments(self):
         argv = core.server_argv(core.PORT_0_8_2, "/payload")
@@ -601,13 +604,22 @@ class ServerPayloadTest(unittest.TestCase):
         self.assertEqual(command, ["C:\\launcher.exe", core.SERVE_FLAG,
                                    core.PORT_0_8_2])
 
-    def test_source_command_passes_the_launcher_script(self):
+    def test_0_9_22_command_is_the_rust_process_the_launcher_stops(self):
         command = core.server_child_command(
             core.PORT_0_9_22, launcher_script="/repo/launcher/wot_launcher.py",
+            executable="/usr/bin/python3", frozen=False,
+            base_dir="C:\\payload")
+        self.assertEqual(command, [os.path.join(
+            "C:\\payload", "0.9.22", "dist", "server",
+            "WoT-0.9.22-LAN-Server.exe")])
+
+    def test_0_8_2_command_keeps_the_python_launcher_wrapper(self):
+        command = core.server_child_command(
+            core.PORT_0_8_2, launcher_script="/repo/launcher/wot_launcher.py",
             executable="/usr/bin/python3", frozen=False)
         self.assertEqual(command, ["/usr/bin/python3",
                                    "/repo/launcher/wot_launcher.py",
-                                   core.SERVE_FLAG, core.PORT_0_9_22])
+                                   core.SERVE_FLAG, core.PORT_0_8_2])
 
     def test_server_environment_keeps_only_live_server_inputs(self):
         environment = core.server_environment(core.PORT_0_8_2, "/game", {})
@@ -719,6 +731,27 @@ class ServerPayloadTest(unittest.TestCase):
     def test_missing_payload_reports_a_launcher_error(self):
         self.assertRaises(core.LauncherError, core.run_server_payload,
                           core.PORT_0_8_2, tempfile.mkdtemp())
+
+    def test_run_server_payload_waits_for_the_rust_executable(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        server = core.server_script(core.PORT_0_9_22, base)
+        os.makedirs(os.path.dirname(server))
+        with open(server, "wb") as stream:
+            stream.write(b"MZ")
+        process = mock.Mock()
+        process.stdout.readline.side_effect = [b"rust server\n", b""]
+        process.wait.return_value = 7
+        output = io.StringIO()
+        with mock.patch("core.subprocess.Popen", return_value=process) as popen, \
+                mock.patch("core.sys.stdout", output):
+            self.assertEqual(7, core.run_server_payload(
+                core.PORT_0_9_22, base))
+        popen.assert_called_once_with(
+            [server], stdout=core.subprocess.PIPE,
+            stderr=core.subprocess.STDOUT)
+        process.stdout.close.assert_called_once_with()
+        self.assertEqual("rust server\n", output.getvalue())
 
 
 class ClientInstallTest(unittest.TestCase):
@@ -1336,9 +1369,16 @@ class ClientInstallTest(unittest.TestCase):
 
 class PayloadStagingTest(unittest.TestCase):
     def setUp(self):
-        self.root = os.path.join(tempfile.mkdtemp(), "payload")
-        self.addCleanup(shutil.rmtree, os.path.dirname(self.root), True)
-        self.written = stage_payload.stage(self.root, include_clients=False)
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.root = os.path.join(self.work, "payload")
+        self.source = os.path.join(self.work, "repo")
+        server = core.server_script(core.PORT_0_9_22, self.source)
+        os.makedirs(os.path.dirname(server))
+        with open(server, "wb") as stream:
+            stream.write(b"MZ")
+        self.written = stage_payload.stage(
+            self.root, self.source, include_clients=False)
         self.target = os.path.join(self.root, stage_payload.SERVER_DIR)
 
     @staticmethod
@@ -1386,7 +1426,6 @@ class PayloadStagingTest(unittest.TestCase):
     def test_supported_server_entry_points_are_staged(self):
         expected_ports = {core.PORT_0_9_22}
         self.assertEqual(expected_ports, set(stage_payload.PAYLOAD_FILES))
-        self.assertEqual(expected_ports, set(stage_payload.PAYLOAD_TREES))
         self.assertEqual(expected_ports, set(stage_payload.CLIENT_TREES))
         self.assertEqual(expected_ports, set(stage_payload.CLIENT_FILES))
         for port_version in core.SUPPORTED_PORTS:
@@ -1423,18 +1462,14 @@ class PayloadStagingTest(unittest.TestCase):
         self.assertNotIn("procdump.exe", script.lower())
         self.assertNotIn('"_internal\\tools\\Eula.txt"', script)
 
-    def test_the_0_9_22_server_finds_its_client_modules(self):
-        self.assertTrue(os.path.isfile(os.path.join(
-            self.target, "0.9.22", "src", "res", "scripts", "client", "gui",
-            "mods", "offline_lan_0922", "ai", "maps.py")))
-
-    def test_the_0_9_22_server_stages_its_reward_module(self):
-        self.assertTrue(os.path.isfile(os.path.join(
-            self.target, "0.9.22", "server", "offline_rewards.py")))
-
-    def test_the_0_9_22_server_stages_its_vehicle_overlay_store(self):
-        self.assertTrue(os.path.isfile(os.path.join(
-            self.target, "0.9.22", "server", "vehicle_overlay_store.py")))
+    def test_the_0_9_22_server_payload_is_only_the_rust_executable(self):
+        relative_files = sorted(os.path.relpath(path, self.target)
+                                for path in self.written)
+        self.assertEqual([
+            os.path.join("0.9.22", "dist", "server",
+                         "WoT-0.9.22-LAN-Server.exe")
+        ], relative_files)
+        self.assertFalse(any(path.endswith(".py") for path in relative_files))
 
     def test_the_navigation_graphs_stay_out_of_the_bundle(self):
         self.assertFalse(any(
@@ -1505,7 +1540,8 @@ class PayloadStagingTest(unittest.TestCase):
         stale = os.path.join(self.root, "stale.txt")
         with open(stale, "w") as stream:
             stream.write("old")
-        stage_payload.stage(self.root, include_clients=False)
+        stage_payload.stage(
+            self.root, self.source, include_clients=False)
         self.assertFalse(os.path.exists(stale))
 
     def test_staging_excludes_development_junk(self):
@@ -1570,87 +1606,6 @@ class PayloadStagingTest(unittest.TestCase):
                           "0.9.22", source)
 
 
-class ServerImportTest(unittest.TestCase):
-    """The bundle must carry every module the servers import.
-
-    PyInstaller cannot see through ``runpy``, so a server import that is not
-    declared in ``server_imports`` is missing from the packaged launcher.
-    """
-
-    ENTRY_POINTS = {
-        core.PORT_0_9_22: ('server/windows_server.py',),
-    }
-
-    def setUp(self):
-        root = os.path.join(tempfile.mkdtemp(), "payload")
-        self.addCleanup(shutil.rmtree, os.path.dirname(root), True)
-        stage_payload.stage(root, include_clients=False)
-        self.payload = os.path.join(root, stage_payload.SERVER_DIR)
-
-    def _module_file(self, root, name):
-        relative = name.replace('.', os.path.sep)
-        for candidate in (relative + '.py',
-                          os.path.join(relative, '__init__.py')):
-            path = os.path.join(root, candidate)
-            if os.path.isfile(path):
-                return path
-        return None
-
-    def _imports(self, path):
-        with open(path, 'rb') as stream:
-            tree = ast.parse(stream.read())
-        names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    names.add(alias.name)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                if node.module:
-                    names.add(node.module)
-        return names
-
-    def _closure(self, port_version):
-        port_root = os.path.join(self.payload, port_version)
-        search_roots = [port_root]
-        if port_version == core.PORT_0_9_22:
-            search_roots.append(os.path.join(port_root, 'server'))
-            search_roots.append(os.path.join(
-                port_root, 'src', 'res', 'scripts', 'client'))
-        pending = [os.path.join(port_root, *entry.split('/'))
-                   for entry in self.ENTRY_POINTS[port_version]]
-        seen = set()
-        external = set()
-        while pending:
-            path = pending.pop()
-            if path in seen:
-                continue
-            seen.add(path)
-            for name in self._imports(path):
-                local = None
-                for root in search_roots:
-                    local = self._module_file(root, name)
-                    if local is not None:
-                        break
-                if local is None:
-                    external.add(name.split('.')[0])
-                else:
-                    pending.append(local)
-        return external
-
-    def test_every_server_import_is_declared(self):
-        declared = set(server_imports.SERVER_STDLIB_MODULES)
-        for port_version in core.SUPPORTED_PORTS:
-            external = self._closure(port_version)
-            required = {name for name in external
-                        if name in sys.stdlib_module_names and
-                        name != '__future__'}
-            self.assertLessEqual(required, declared, port_version)
-
-    def test_the_declared_modules_all_import(self):
-        for name in server_imports.SERVER_STDLIB_MODULES:
-            self.assertIn(name, sys.modules, name)
-
-
 class ListenerTest(unittest.TestCase):
     class _ProtocolConnection(object):
         def __init__(self, reply_overrides=None):
@@ -1673,10 +1628,16 @@ class ListenerTest(unittest.TestCase):
                 "client_build": hello["client_build"],
                 "capabilities": hello.get("capabilities", []),
                 "server_capabilities": [
-                    "destructible_catalog_v5", "ram_contact_ledger_v2",
-                    "human_ram_timeline_v1", "player_fire_intent_v4",
+                    "destructible_catalog_v5",
+                    "lean_snapshot_manifest_v1",
+                    "ram_contact_ledger_v3",
+                    "human_ram_timeline_v1", "he_explosion_evidence_v1",
+                    "player_fire_intent_v4",
                     "player_environment_v2", "effective_params_v1",
-                    "ricochet_continuation_v1"],
+                    "ricochet_continuation_v1",
+                    "player_ammo_authority_v1",
+                    "player_authority_loadout_v1",
+                    "oracle_backed_server_v1", "native_oracle_v1"],
             }
             reply.update(self.reply_overrides)
             self.reply = (json.dumps(reply) + "\n").encode("utf-8")
@@ -1748,6 +1709,35 @@ class ListenerTest(unittest.TestCase):
             connect=lambda address, timeout: connection))
         self.assertEqual("probe", connection.hello["role"])
         self.assertEqual("AA==", connection.hello["vehicle_compact_descr"])
+        self.assertIn("player_ammo_authority_v1",
+                      connection.hello["capabilities"])
+        self.assertIn("player_authority_loadout_v1",
+                      connection.hello["capabilities"])
+
+    def test_0922_probe_rejects_a_non_rust_reference_server(self):
+        connection = self._ProtocolConnection({
+            "server_capabilities": [
+                capability for capability in
+                core._SERVER_PROBES[core.PORT_0_9_22]["server_capabilities"]
+                if capability not in (
+                    "oracle_backed_server_v1", "native_oracle_v1")
+            ]})
+
+        self.assertFalse(core.probe_server_protocol(
+            core.PORT_0_9_22, "127.0.0.1", 28782,
+            connect=lambda address, timeout: connection))
+
+    def test_0922_probe_requires_he_explosion_evidence_server_capability(self):
+        connection = self._ProtocolConnection({
+            "server_capabilities": [
+                capability for capability in
+                core._SERVER_PROBES[core.PORT_0_9_22]["server_capabilities"]
+                if capability != "he_explosion_evidence_v1"
+            ]})
+
+        self.assertFalse(core.probe_server_protocol(
+            core.PORT_0_9_22, "127.0.0.1", 28782,
+            connect=lambda address, timeout: connection))
 
     def test_listener_status_distinguishes_protocol_from_raw_tcp(self):
         endpoint = lambda host, port, timeout=None: True
@@ -1795,35 +1785,41 @@ class ListenerTest(unittest.TestCase):
 
         server082 = constants(os.path.join(
             stage_payload.repository_root(), "0.8.2", "lan_battle_server.py"))
-        server0922 = constants(os.path.join(
-            stage_payload.repository_root(), "0.9.22", "server",
-            "lan_battle_server.py"))
+        rust_root = os.path.join(
+            stage_payload.repository_root(), "0.9.22", "rust_server", "src")
+        with open(os.path.join(rust_root, "lan.rs"), "r",
+                  encoding="utf-8") as stream:
+            lan_source = stream.read()
+        with open(os.path.join(rust_root, "wire.rs"), "r",
+                  encoding="utf-8") as stream:
+            wire_source = stream.read()
+        server0922 = dict(re.findall(
+            r'pub const ([A-Z0-9_]+): &str = "([^"]+)";', lan_source))
         self.assertEqual(server082["PROTOCOL_VERSION"],
                          core._SERVER_PROBES[core.PORT_0_8_2]["protocol"])
         self.assertEqual(server082["CLIENT_BUILD"],
                          core._SERVER_PROBES[core.PORT_0_8_2]["client_build"])
-        self.assertEqual(server0922["PROTOCOL_VERSION"],
-                         core._SERVER_PROBES[core.PORT_0_9_22]["protocol"])
+        self.assertIn(
+            "pub const LAN_PROTOCOL_VERSION: u64 = %d;" %
+            core._SERVER_PROBES[core.PORT_0_9_22]["protocol"],
+            wire_source)
         self.assertEqual(server0922["CLIENT_BUILD_0922"],
                          core._SERVER_PROBES[core.PORT_0_9_22]["client_build"])
         probe = core._SERVER_PROBES[core.PORT_0_9_22]
         for name in (
-                "PROJECTILE_CAPABILITY",
-                "DESTRUCTIBLE_CATALOG_V5_CAPABILITY",
-                "RAM_CONTACT_LEDGER_CAPABILITY",
-                "HUMAN_RAM_TIMELINE_CAPABILITY",
-                "PLAYER_FIRE_INTENT_CAPABILITY",
-                "PLAYER_ENVIRONMENT_CAPABILITY",
-                "RICOCHET_CONTINUATION_CAPABILITY"):
+                "PROJECTILE_LEDGER_V2",
+                "DESTRUCTIBLE_CATALOG_V5",
+                "RAM_CONTACT_LEDGER_V3",
+                "HUMAN_RAM_TIMELINE_V1",
+                "PLAYER_FIRE_INTENT_V4"):
             self.assertIn(server0922[name], probe["capabilities"])
         self.assertIn("effective_params_v1", probe["capabilities"])
         for name in (
-                "DESTRUCTIBLE_CATALOG_V5_CAPABILITY",
-                "RAM_CONTACT_LEDGER_CAPABILITY",
-                "HUMAN_RAM_TIMELINE_CAPABILITY",
-                "PLAYER_FIRE_INTENT_CAPABILITY",
-                "PLAYER_ENVIRONMENT_CAPABILITY",
-                "RICOCHET_CONTINUATION_CAPABILITY"):
+                "DESTRUCTIBLE_CATALOG_V5",
+                "RAM_CONTACT_LEDGER_V3",
+                "HUMAN_RAM_TIMELINE_V1",
+                "HE_EXPLOSION_EVIDENCE_V1",
+                "PLAYER_FIRE_INTENT_V4"):
             self.assertIn(server0922[name], probe["server_capabilities"])
         self.assertIn("effective_params_v1", probe["server_capabilities"])
 

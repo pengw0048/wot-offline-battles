@@ -2010,7 +2010,7 @@ class BotRuntime(object):
                     raise ValueError('navigation graph route is invalid')
                 waypoints = route.get('waypoints')
                 if (not isinstance(waypoints, (list, tuple)) or
-                        not waypoints or len(waypoints) > 16):
+                        not waypoints or len(waypoints) > 32):
                     raise ValueError(
                         'navigation graph route waypoint count is invalid')
                 for point in waypoints:
@@ -3599,9 +3599,9 @@ class BotRuntime(object):
         result['world_pose'] = True
         route = state.get('route') or {}
         waypoints = route.get('waypoints', ()) or ()
-        if len(waypoints) > 16:
+        if len(waypoints) > 32:
             raise ValueError(
-                'bot route exceeds the 16-waypoint LAN protocol limit')
+                'bot route exceeds the 32-waypoint LAN protocol limit')
         result['route'] = {
             'id': route.get('id', 'map_route'),
             'waypoints': [

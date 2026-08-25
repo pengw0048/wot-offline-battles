@@ -15,6 +15,11 @@ _SOLID_CONTACT_NORMAL_DOT_1513 = 0.5
 _CATALOG_POINT_EPSILON = 0.075
 _SHOT_RAY_EPSILON = 1.0e-4
 _SOFT_STATIC_MAX_SKIPS = 4
+_ORACLE_BIN_LIMIT_1513 = 16384
+_ORACLE_SCAN_LIMIT_1513 = 4096
+_ORACLE_IDENTITY_LIMIT_1513 = 256
+_ORACLE_SHOT_CANDIDATE_LIMIT_1513 = 64
+_ORACLE_HULL_CANDIDATE_LIMIT_1513 = 32
 _NATIVE_HIDE_MIN_SECONDS = 0.2
 _FALLING_REFRESH_SECONDS = 1.0 / 60.0
 _DIAGNOSTICS_ENABLED = False
@@ -1016,21 +1021,19 @@ def _validate_native_effect_categories_1513(
 	return True
 
 
-def _stream_baked_shot_instance_1513(spaceID, identity):
-	"""Validate and register one baked wire when its chunk is streamed.
+def _live_baked_shot_instance_1513(spaceID, identity):
+	"""Return one freshly live-validated baked wire without registering it.
 
 	The complete catalog is safe for broad-phase geometry only.  A shell may
 	reach a visible chunk before the vehicle-near scanner visits it, so admit
 	the candidate only after the same live matrix, exact wire, descriptor kind
-	and native effect-category checks used by the proximity registry.
+	and native effect-category checks used by the proximity registry. Keeping
+	this helper free of registry writes is important for the hidden native
+	oracle: asking for evidence must not alter later authority decisions.
 	"""
 	chunk_id, item_index = identity
 	if _destructible_isolated_1513(chunk_id, item_index):
 		return None
-	instances = globals().setdefault('g_offh_destr_instances', {})
-	instance = instances.get(identity)
-	if instance is not None:
-		return instance
 	catalog = _destructible_catalog
 	if catalog is None:
 		return None
@@ -1147,6 +1150,18 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 		'box_index': located['box_index'], 'signature': signature,
 		'chunk_translation': chunk_translation_value,
 	}
+	return instance
+
+
+def _stream_baked_shot_instance_1513(spaceID, identity):
+	"""Validate and register one baked wire when its chunk is streamed."""
+	instances = globals().setdefault('g_offh_destr_instances', {})
+	instance = instances.get(identity)
+	if instance is not None:
+		return instance
+	instance = _live_baked_shot_instance_1513(spaceID, identity)
+	if instance is None:
+		return None
 	instances[identity] = instance
 	_index_catalog_instance_1513(
 		globals().setdefault('g_offh_destr_contact_bins', {}),
@@ -3200,7 +3215,7 @@ def donation_rows_1513():
 					desc.get('kineticDamageCorrection', 0.0) or 0.0),
 			}
 		rows.append([list(signature), int(wire[0]), int(wire[1]),
-			scaled_health, modules])
+			scaled_health, modules, normalized])
 	if not rows:
 		return None
 	return {
@@ -3208,6 +3223,51 @@ def donation_rows_1513():
 			AreaDestructibles.g_cache.unitVehicleMass),
 		'resources': resources,
 		'instances': rows,
+	}
+
+
+def installed_catalog_proof_1513(space_id):
+	"""Prove complete baked-catalog coverage in the active native space.
+
+	The immutable catalog is installed into this module by ``set_catalog``.
+	This boundary independently walks both its signature index and its native
+	wire index, and also fences the proof to AreaDestructibles' current space.
+	Rust must not treat receipt of the donated JSON as installation proof.
+	"""
+	if (isinstance(space_id, bool) or
+			not isinstance(space_id, _INTEGER_TYPES) or space_id <= 0):
+		raise RuntimeError('native destructible space id is invalid')
+	import AreaDestructibles
+	mgr = getattr(AreaDestructibles, 'g_destructiblesManager', None)
+	if mgr is None or int(mgr.getSpaceID()) != int(space_id):
+		raise RuntimeError(
+			'native destructible manager is not installed in oracle space')
+	catalog = _destructible_catalog
+	if catalog is None or not catalog.get('has_instance_index'):
+		raise RuntimeError('native destructible catalog is not installed')
+	by_signature = catalog.get('instances')
+	by_wire = catalog.get('baked_instances')
+	if not isinstance(by_signature, dict) or not isinstance(by_wire, dict):
+		raise RuntimeError('native destructible catalog coverage is invalid')
+	expected = len(by_signature)
+	installed = len(by_wire)
+	if expected <= 0 or installed != expected:
+		raise RuntimeError('native destructible catalog coverage is incomplete')
+	seen_wires = set()
+	for signature, instance in by_signature.items():
+		wire = instance.get('wire') if isinstance(instance, dict) else None
+		installed_row = by_wire.get(wire)
+		if (wire in seen_wires or not isinstance(installed_row, dict) or
+				installed_row.get('signature') != signature or
+				installed_row.get('filename') != instance.get('filename') or
+				installed_row.get('kind') != instance.get('kind')):
+			raise RuntimeError(
+				'native destructible catalog coverage is inconsistent')
+		seen_wires.add(wire)
+	return {
+		'native_space_id': int(space_id),
+		'expected_instances': int(expected),
+		'installed_instances': int(installed),
 	}
 
 
@@ -3434,6 +3494,437 @@ def _scaled_shot_through_health_1513(desc, mat_kind, item_scale):
 			float(item_scale), health))
 	except (AttributeError, ImportError, TypeError, ValueError):
 		return None
+
+
+def _oracle_add_reason_1513(reasons, reason):
+	if reason not in reasons:
+		reasons.append(reason)
+
+
+def _oracle_finite_1513(value):
+	try:
+		import math
+		value = float(value)
+		return not math.isnan(value) and not math.isinf(value)
+	except (TypeError, ValueError, OverflowError):
+		return False
+
+
+def _oracle_catalog_identities_1513(bounds, intersects=None):
+	"""Return a bounded set of catalog wires touching an X/Z query box."""
+	instances = globals().get('g_offh_destr_instances', {})
+	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	baked_bins = (_destructible_catalog or {}).get('baked_shot_bins', {})
+	identities = set()
+	considered = set()
+	bin_count = 0
+	for bin_key in _baked_bin_keys_for_bounds_1513(*bounds):
+		bin_count += 1
+		if bin_count > _ORACLE_BIN_LIMIT_1513:
+			return (), True
+		for source in (contact_bins, baked_bins):
+			for identity in sorted(source.get(bin_key, ())):
+				identity = (int(identity[0]), int(identity[1]))
+				if identity in considered:
+					continue
+				considered.add(identity)
+				if len(considered) > _ORACLE_SCAN_LIMIT_1513:
+					return (), True
+				if intersects is not None and not intersects(identity):
+					continue
+				identities.add(identity)
+				if len(identities) > _ORACLE_IDENTITY_LIMIT_1513:
+					return (), True
+	# A pre-v4 compatibility catalog has no baked spatial index.  Runtime
+	# registrations are normally indexed above; fail closed on an incomplete
+	# injected registry rather than silently omitting a live identity.
+	if instances and not contact_bins:
+		return (), True
+	return tuple(sorted(identities)), False
+
+
+def _oracle_live_instance_1513(spaceID, identity):
+	"""Read one exact instance, validating baked-only rows without caching."""
+	instance = globals().get('g_offh_destr_instances', {}).get(identity)
+	if instance is not None:
+		return instance
+	return _live_baked_shot_instance_1513(spaceID, identity)
+
+
+def _oracle_indexed_boxes_1513(identity):
+	instance = globals().get('g_offh_destr_instances', {}).get(identity)
+	if instance is not None:
+		return instance.get('boxes', ()), 0.0
+	baked = (_destructible_catalog or {}).get(
+		'baked_instances', {}).get(identity)
+	if baked is None:
+		return (), 0.0
+	return baked.get('boxes', ()), baked.get('broad_phase_margin', 0.0)
+
+
+def _oracle_identity_intersects_segment_1513(
+		identity, start_pos, end_pos):
+	boxes, padding = _oracle_indexed_boxes_1513(identity)
+	for world_box in boxes:
+		if _segment_world_box_interval(
+				start_pos, end_pos, world_box, padding) is not None:
+			return True
+	return False
+
+
+def _oracle_identity_intersects_hull_1513(identity, hull_box):
+	boxes, padding = _oracle_indexed_boxes_1513(identity)
+	for world_box in boxes:
+		if _boxes_intersect(
+				hull_box, _oracle_padded_world_box_1513(
+					world_box, padding)):
+			return True
+	return False
+
+
+def _oracle_padded_world_box_1513(world_box, padding):
+	"""Conservatively expand an OBB by one isotropic validation margin."""
+	padding = max(0.0, float(padding))
+	half_axes = []
+	for axis in world_box[1]:
+		length = _vector_dot(axis, axis) ** 0.5
+		if length <= 1.0e-12:
+			return world_box
+		factor = (length + padding) / length
+		half_axes.append(tuple(float(value) * factor for value in axis))
+	return (world_box[0], tuple(half_axes), world_box[2])
+
+
+def _oracle_baked_intersects_segment_1513(
+		identity, start_pos, end_pos, segment_length):
+	baked = (_destructible_catalog or {}).get(
+		'baked_instances', {}).get(identity)
+	if baked is None:
+		return None
+	nearest = None
+	for world_box in baked.get('boxes', ()):
+		interval = _segment_world_box_interval(
+			start_pos, end_pos, world_box,
+			baked.get('broad_phase_margin', 0.0))
+		if interval is None:
+			continue
+		distance = float(interval[0]) * segment_length
+		if nearest is None or distance < nearest:
+			nearest = distance
+	return nearest
+
+
+def _oracle_baked_intersects_hull_1513(identity, hull_box):
+	baked = (_destructible_catalog or {}).get(
+		'baked_instances', {}).get(identity)
+	if baked is None:
+		return False
+	padding = baked.get('broad_phase_margin', 0.0)
+	for world_box in baked.get('boxes', ()):
+		if _boxes_intersect(
+				hull_box, _oracle_padded_world_box_1513(
+					world_box, padding)):
+			return True
+	return False
+
+
+def _oracle_descriptor_evidence_1513(instance, mat_kind):
+	"""Return descriptor-derived health and kinetic inputs, or ``None``."""
+	try:
+		import AreaDestructibles
+		desc = AreaDestructibles.g_cache.getDescByFilename(
+			_instance_descriptor_filename_1513(instance))
+		if desc is None:
+			return None
+		health = _scaled_shot_through_health_1513(
+			desc, mat_kind, instance.get('item_scale'))
+		if health is None:
+			return None
+		correction = float(desc.get('kineticDamageCorrection', 0.0) or 0.0)
+		if (not _oracle_finite_1513(health) or
+				not _oracle_finite_1513(correction)):
+			return None
+		return desc, float(health), correction
+	except (AttributeError, ImportError, KeyError, TypeError, ValueError,
+			OverflowError):
+		return None
+
+
+def _oracle_static_collision_1513(
+		bigworld, spaceID, start_pos, end_pos, filter_keys):
+	"""Read the nearest native hit while skipping only proved exact skins."""
+	def skip_exact_candidate(mat_kind, unused_flags, item_index, chunk_id):
+		try:
+			identity = (int(chunk_id), int(item_index))
+		except (TypeError, ValueError, OverflowError):
+			return True
+		if identity + (None,) in filter_keys:
+			return False
+		try:
+			key = identity + (int(mat_kind),)
+		except (TypeError, ValueError, OverflowError):
+			return True
+		return key not in filter_keys
+
+	if filter_keys:
+		collision = bigworld.wg_collideSegment(
+			spaceID, start_pos, end_pos, 128, skip_exact_candidate)
+	else:
+		collision = bigworld.wg_collideSegment(
+			spaceID, start_pos, end_pos, 128)
+	if collision is None:
+		return None
+	try:
+		point = collision[0]
+		distance = float((point - start_pos).length)
+		position = _position_payload(point)
+	except (AttributeError, IndexError, TypeError, ValueError):
+		raise RuntimeError('#1513 native static collision payload is invalid')
+	normal = None
+	try:
+		normal = _position_payload(collision[1])
+	except (AttributeError, IndexError, TypeError, ValueError):
+		pass
+	return {
+		'distance': distance,
+		'point': position,
+		'normal': normal,
+	}
+
+
+def shot_destructible_evidence_1513(
+		bigworld, spaceID, start_pos, end_pos, shell_kind=None):
+	"""Return read-only exact destructible and backing-wall shell evidence.
+
+	Every candidate comes from a registered live instance or a fresh native
+	validation of its immutable baked wire.  The native collision callback skips
+	only those exact identities, so a wall immediately behind a destructible is
+	still returned.  No native destroy, authority commit, hide note, event sink,
+	or runtime-registry write is performed by this query.
+	"""
+	reasons = []
+	try:
+		segment = end_pos - start_pos
+		segment_length = float(segment.length)
+	except (AttributeError, TypeError, ValueError):
+		segment_length = 0.0
+	coordinates = ()
+	try:
+		coordinates = (start_pos.x, start_pos.y, start_pos.z,
+			end_pos.x, end_pos.y, end_pos.z)
+	except AttributeError:
+		pass
+	if (segment_length <= 1.0e-9 or
+			not _oracle_finite_1513(segment_length) or
+			len(coordinates) != 6 or
+			not all(_oracle_finite_1513(value) for value in coordinates)):
+		return {
+			'complete': False, 'fail_closed': True,
+			'ambiguous': False, 'reasons': ('invalid_segment',),
+			'candidates': (), 'destroyed_skipped': 0,
+			'uncertain_distance': None, 'static_collision': None,
+		}
+	if shell_kind is not None:
+		shell_kind = str(shell_kind)
+		if shell_kind not in (
+				'ARMOR_PIERCING', 'ARMOR_PIERCING_HE',
+				'ARMOR_PIERCING_CR', 'HOLLOW_CHARGE', 'HIGH_EXPLOSIVE'):
+			_oracle_add_reason_1513(reasons, 'invalid_shell_kind')
+	bounds = (min(float(start_pos.x), float(end_pos.x)),
+		max(float(start_pos.x), float(end_pos.x)),
+		min(float(start_pos.z), float(end_pos.z)),
+		max(float(start_pos.z), float(end_pos.z)))
+	identities, overflow = _oracle_catalog_identities_1513(
+		bounds, lambda identity: _oracle_identity_intersects_segment_1513(
+			identity, start_pos, end_pos))
+	if overflow:
+		_oracle_add_reason_1513(reasons, 'identity_limit')
+
+	authority = _get_destr_authority()
+	rows = {}
+	filter_keys = set()
+	destroyed = set()
+	uncertain_distance = None
+	if not overflow:
+		for identity in identities:
+			try:
+				instance = _oracle_live_instance_1513(spaceID, identity)
+			except Exception:
+				instance = None
+				_oracle_add_reason_1513(reasons, 'live_validation_failed')
+			if instance is None:
+				distance = _oracle_baked_intersects_segment_1513(
+					identity, start_pos, end_pos, segment_length)
+				if distance is not None:
+					_oracle_add_reason_1513(
+						reasons, 'live_validation_unavailable')
+					if (uncertain_distance is None or
+							distance < uncertain_distance):
+						uncertain_distance = distance
+				continue
+			for world_box in instance.get('boxes', ()):
+				interval = _segment_world_box_interval(
+					start_pos, end_pos, world_box, 0.0)
+				if interval is None:
+					continue
+				mat_kind = (world_box[2]
+					if instance.get('kind') == 'structure' else None)
+				key = identity + (mat_kind,)
+				filter_keys.add(key)
+				try:
+					is_destroyed = authority.is_destroyed(
+						identity[0], identity[1], mat_kind)
+				except Exception:
+					is_destroyed = False
+					_oracle_add_reason_1513(
+						reasons, 'authority_ledger_unavailable')
+				if is_destroyed:
+					destroyed.add(key)
+					continue
+				entry_distance = float(interval[0]) * segment_length
+				exit_distance = float(interval[1]) * segment_length
+				previous = rows.get(key)
+				if (previous is not None and
+						previous['entry_distance'] <= entry_distance):
+					continue
+				point = start_pos + segment.scale(float(interval[0]))
+				try:
+					item_scale = float(instance.get('item_scale'))
+				except (TypeError, ValueError, OverflowError):
+					item_scale = None
+					_oracle_add_reason_1513(
+						reasons, 'item_scale_unavailable')
+				descriptor = _oracle_descriptor_evidence_1513(
+					instance, mat_kind)
+				if descriptor is None:
+					scaled_health = None
+					_oracle_add_reason_1513(
+						reasons, 'descriptor_health_unavailable')
+				else:
+					unused_desc, scaled_health, unused_correction = descriptor
+				ap_through = bool(
+					shell_kind in _SHOT_AP_KINDS_1513 and
+					scaled_health is not None and
+					scaled_health <= _SHOT_THROUGH_MAX_HP_1513)
+				rows[key] = {
+					'chunk_id': int(identity[0]),
+					'item_index': int(identity[1]),
+					'mat_kind': mat_kind,
+					'kind': instance.get('kind'),
+					'entry_distance': entry_distance,
+					'exit_distance': exit_distance,
+					'impact_point': _position_payload(point),
+					'item_scale': item_scale,
+					'scaled_health': scaled_health,
+					'ap_through': ap_through,
+					'piercing_loss': (
+						_SHOT_THROUGH_MIN_REDUCTION_1513
+						if ap_through else 0.0),
+					'ambiguous': False,
+				}
+
+	ordered = sorted(rows.values(), key=lambda row: (
+		row['entry_distance'], row['exit_distance'], row['chunk_id'],
+		row['item_index'], -1 if row['mat_kind'] is None else row['mat_kind']))
+	if len(ordered) > _ORACLE_SHOT_CANDIDATE_LIMIT_1513:
+		ordered = ordered[:_ORACLE_SHOT_CANDIDATE_LIMIT_1513]
+		_oracle_add_reason_1513(reasons, 'candidate_limit')
+	ambiguous = False
+	for index in range(1, len(ordered)):
+		if abs(ordered[index]['entry_distance'] -
+				ordered[index - 1]['entry_distance']) <= _CATALOG_POINT_EPSILON:
+			ordered[index - 1]['ambiguous'] = True
+			ordered[index]['ambiguous'] = True
+			ambiguous = True
+	if ambiguous:
+		_oracle_add_reason_1513(reasons, 'ambiguous_exact_candidates')
+	try:
+		static_collision = _oracle_static_collision_1513(
+			bigworld, spaceID, start_pos, end_pos, filter_keys)
+	except Exception:
+		static_collision = None
+		_oracle_add_reason_1513(reasons, 'native_static_query_failed')
+	return {
+		'complete': not reasons,
+		'fail_closed': bool(reasons),
+		'ambiguous': bool(ambiguous),
+		'reasons': tuple(reasons),
+		'candidates': tuple(ordered),
+		'destroyed_skipped': len(destroyed),
+		'uncertain_distance': uncertain_distance,
+		'static_collision': static_collision,
+	}
+
+
+def hull_destructible_evidence_1513(spaceID, pos, yaw, bbox, frame_travel):
+	"""Return only frozen native hull overlap and wire/material identity."""
+	reasons = []
+	try:
+		frame_travel = float(frame_travel)
+		yaw = float(yaw)
+		minimum, maximum = bbox[:2]
+		values = (frame_travel, yaw,
+			pos.x, pos.y, pos.z,
+			minimum[0], minimum[1], minimum[2],
+			maximum[0], maximum[1], maximum[2])
+		if not all(_oracle_finite_1513(value) for value in values):
+			raise ValueError()
+		hull_box = _vehicle_contact_box(
+			pos, yaw, bbox, travel=frame_travel)
+	except (AttributeError, IndexError, TypeError, ValueError):
+		return {
+			'complete': False, 'fail_closed': True,
+			'ambiguous': False, 'reasons': ('invalid_hull_query',),
+			'candidates': (), 'frame_travel': None,
+		}
+	bounds = _box_xz_bounds(hull_box)
+	identities, overflow = _oracle_catalog_identities_1513(
+		bounds, lambda identity: _oracle_identity_intersects_hull_1513(
+			identity, hull_box))
+	if overflow:
+		_oracle_add_reason_1513(reasons, 'identity_limit')
+	rows = {}
+	if not overflow:
+		for identity in identities:
+			try:
+				instance = _oracle_live_instance_1513(spaceID, identity)
+			except Exception:
+				instance = None
+				_oracle_add_reason_1513(reasons, 'live_validation_failed')
+			if instance is None:
+				if _oracle_baked_intersects_hull_1513(identity, hull_box):
+					_oracle_add_reason_1513(
+						reasons, 'live_validation_unavailable')
+				continue
+			for world_box in _catalog_intersections(
+					instance.get('boxes', ()), hull_box):
+				mat_kind = (world_box[2]
+					if instance.get('kind') == 'structure' else None)
+				key = identity + (mat_kind,)
+				if key in rows:
+					continue
+				rows[key] = {
+					'chunk_id': int(identity[0]),
+					'item_index': int(identity[1]),
+					'mat_kind': mat_kind,
+					'kind': instance.get('kind'),
+					'obb_center': tuple(float(value)
+						for value in world_box[0]),
+				}
+	ordered = sorted(rows.values(), key=lambda row: (
+		row['chunk_id'], row['item_index'],
+		-1 if row['mat_kind'] is None else row['mat_kind']))
+	if len(ordered) > _ORACLE_HULL_CANDIDATE_LIMIT_1513:
+		ordered = ordered[:_ORACLE_HULL_CANDIDATE_LIMIT_1513]
+		_oracle_add_reason_1513(reasons, 'candidate_limit')
+	return {
+		'complete': not reasons,
+		'fail_closed': bool(reasons),
+		'ambiguous': False,
+		'reasons': tuple(reasons),
+		'candidates': tuple(ordered),
+		'frame_travel': frame_travel,
+	}
 
 
 def _typed_shot_result_1513(world_distance, stop_distance=None,

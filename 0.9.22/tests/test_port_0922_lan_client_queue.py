@@ -88,6 +88,49 @@ class LanClientQueueTests(unittest.TestCase):
             0.017, events[0][1]['_client_dispatch_delay'])
         self.assertNotIn('_client_dispatch_delay', message)
 
+    def test_memory_contact_with_shooters_is_dropped_without_disconnect(self):
+        received = []
+        client = self.activate()
+        client.ready = True
+        client.phase = 'battle'
+        client.round_id = 7
+        client.on_event = (
+            lambda kind, message: received.append((kind, message)))
+        memory_contact = {
+            'type': 'bot_observation',
+            'protocol': lan_client_module.PROTOCOL_VERSION,
+            'round_id': 7,
+            'contacts': [{
+                'observing_team': 1,
+                'target_team': 2,
+                'target_kind': 'bot',
+                'target_id': 17,
+                'visible': True,
+                'fresh': False,
+                'time_left': 8.0,
+                'visible_by_bot_ids': [],
+                'visible_by_player_ids': [],
+                'shootable_by_bot_ids': [],
+            }],
+        }
+
+        client._handle_message(memory_contact)
+
+        self.assertEqual(
+            ['bot_observation'], [kind for kind, unused in received])
+        self.assertTrue(client.running)
+
+        malformed = dict(memory_contact)
+        malformed['contacts'] = [dict(
+            memory_contact['contacts'][0], shootable_by_bot_ids=[11])]
+        client._handle_message(malformed)
+
+        self.assertTrue(client.running)
+        self.assertIsNone(client.last_error)
+        self.assertEqual(
+            ['bot_observation'], [kind for kind, unused in received])
+        self.assertIn('bot_observation', client._runtime_drop_diagnostics)
+
     def test_receive_overflow_never_evicts_terminal_protocol_messages(self):
         client = self.activate()
         protected = [
@@ -95,9 +138,11 @@ class LanClientQueueTests(unittest.TestCase):
             {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
+            {'type': 'ammo_intent_result', 'player_id': 1,
+             'intent_seq': 3},
         ]
         original_limit = lan_client_module.MAX_PENDING_MESSAGES
-        lan_client_module.MAX_PENDING_MESSAGES = 4
+        lan_client_module.MAX_PENDING_MESSAGES = 5
         try:
             client._pending = protected + [{'type': 'pong'}]
             incoming = {
@@ -174,13 +219,15 @@ class LanClientQueueTests(unittest.TestCase):
             {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
+            {'type': 'ammo_intent_result', 'player_id': 1,
+             'intent_seq': 3},
         ]
         original_limit = lan_client_module.MAX_PENDING_MESSAGES
         lan_client_module.MAX_PENDING_MESSAGES = len(protected)
         try:
             for message_type in (
                     'battle_receipt', 'fire_intent',
-                    'fire_intent_result'):
+                    'fire_intent_result', 'ammo_intent_result'):
                 client._pending = list(protected)
                 with self.subTest(message_type=message_type):
                     with self.assertRaises(RuntimeError):
@@ -599,7 +646,12 @@ class LanClientQueueTests(unittest.TestCase):
     def test_worker_keeps_hello_first_then_starts_sender(self):
         client = LANClient(
             '127.0.0.1', 28782, 'P', 'ussr:MS-1',
-            bigworld=QueueBigWorld(), effective_params=effective_params())
+            bigworld=QueueBigWorld(), effective_params=effective_params(),
+            ammo_remaining=[30], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
         outer = self
 
         class ConnectedSocket(RecordingSocket):
@@ -649,9 +701,46 @@ class LanClientQueueTests(unittest.TestCase):
         messages = [json.loads(payload.decode('utf-8'))
                     for payload in connected_socket.sent]
         self.assertEqual('hello', messages[0]['type'])
+        self.assertEqual([30], messages[0]['ammo_remaining'])
+        self.assertEqual(0, messages[0]['ammo_loaded_shell'])
+        self.assertEqual({
+            'repair': {'available': False},
+            'spotting': {'available': False},
+        }, messages[0]['player_authority_loadout'])
         self.assertEqual('ping', messages[1]['type'])
         self.assertEqual(1, messages[1]['seq'])
         self.assertEqual([], client._outbound_queue)
+
+    def test_missing_exact_player_loadout_sends_no_hello(self):
+        client = LANClient(
+            '127.0.0.1', 28782, 'P', 'ussr:MS-1',
+            bigworld=QueueBigWorld(), effective_params=effective_params(),
+            ammo_remaining=[30], ammo_loaded_shell=0)
+
+        class ConnectedSocket(RecordingSocket):
+            def settimeout(self, unused_timeout):
+                pass
+
+            def connect(self, unused_address):
+                pass
+
+            def setsockopt(self, *unused_args):
+                pass
+
+        connected_socket = ConnectedSocket()
+        original_socket = lan_client_module.socket.socket
+        lan_client_module.socket.socket = (
+            lambda *unused_args: connected_socket)
+        client.running = True
+        client._transport_generation = 1
+        try:
+            client._worker(1)
+        finally:
+            lan_client_module.socket.socket = original_socket
+
+        self.assertEqual([], connected_socket.sent)
+        self.assertTrue(connected_socket.closed)
+        self.assertIn('authority loadout', client.last_error)
 
     def test_stale_worker_cannot_replace_reconnected_socket(self):
         client = self.activate()
@@ -685,7 +774,12 @@ class LanClientQueueTests(unittest.TestCase):
     def test_stop_start_generation_barrier_rejects_old_hello_worker(self):
         client = LANClient(
             '127.0.0.1', 28782, 'P', 'ussr:MS-1',
-            bigworld=QueueBigWorld(), effective_params=effective_params())
+            bigworld=QueueBigWorld(), effective_params=effective_params(),
+            ammo_remaining=[30], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
         old_at_publish = threading.Event()
         release_old = threading.Event()
         old_finished = threading.Event()

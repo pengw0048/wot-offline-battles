@@ -15,16 +15,8 @@ CLIENT_DIR = "client"
 
 PAYLOAD_FILES = {
     "0.9.22": (
-        "server/lan_battle_server.py",
-        "server/offline_rewards.py",
-        "server/server_bot_ai.py",
-        "server/vehicle_overlay_store.py",
-        "server/windows_server.py",
+        "dist/server/WoT-0.9.22-LAN-Server.exe",
     ),
-}
-
-PAYLOAD_TREES = {
-    "0.9.22": ("src/res/scripts/client/gui/mods/offline_lan_0922",),
 }
 
 # Client mod trees, as (source directory, path inside the game folder).
@@ -113,15 +105,12 @@ def stage_servers(target_root, source_root=None):
                                   *relative_path.split("/"))
             target = os.path.join(target_root, port_version,
                                   *relative_path.split("/"))
+            if not os.path.isfile(source):
+                raise ValueError(
+                    "built %s server is missing: %s" %
+                    (port_version, source))
             _copy_file(source, target)
             written.append(target)
-    for port_version, relative_dirs in PAYLOAD_TREES.items():
-        for relative_dir in relative_dirs:
-            source = os.path.join(source_root, port_version,
-                                  *relative_dir.split("/"))
-            target = os.path.join(target_root, port_version,
-                                  *relative_dir.split("/"))
-            written.extend(_copy_tree(source, target, suffixes=(".py",)))
     return written
 
 

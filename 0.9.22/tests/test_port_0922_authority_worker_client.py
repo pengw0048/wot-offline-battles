@@ -17,11 +17,14 @@ from gui.mods.offline_lan_0922 import lan_client as lan_client_module
 from gui.mods.offline_lan_0922.account_rpc.state import AccountState
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient, WORKER_BUSY_RETRY_SECONDS, WORKER_DUMMY_Y,
-    WORKER_RETRY_SECONDS, WORKER_ROLE, WorkerSession, _WorldDrawLease)
+    WORKER_RETRY_SECONDS, WORKER_ROLE, WorkerSession,
+    _NativeOracleEntities, _WorldDrawLease)
 from gui.mods.offline_lan_0922.lan_client import (
     CLIENT_BUILD, CLIENT_CAPABILITIES, LANClient, PROTOCOL_VERSION,
     SIMULATION_WORKER_CAPABILITY, WORKER_AUTHORITY_ID)
 from effective_params_fixture import effective_params
+from gui.mods.offline_lan_0922.native_oracle_bridge import (
+    HE_EXPLOSION_EVIDENCE_CAPABILITY, NATIVE_ORACLE_CAPABILITY)
 
 
 class _DrawWorld(object):
@@ -61,10 +64,29 @@ class _WorkerClient(object):
         self.on_event = None
         self.stopped = False
         self.progress = []
+        self.native_oracle = True
+        self.oracle_runtime = None
+        self.oracle_stops = 0
 
     def is_bot_authority(self):
         return (self.bot_authority_id == WORKER_AUTHORITY_ID and
                 self.phase in ('loading', 'battle'))
+
+    def is_native_oracle(self):
+        return self.native_oracle
+
+    def start_native_oracle(self, runtime):
+        if self.oracle_runtime is not None:
+            return self.oracle_runtime is runtime
+        self.oracle_runtime = runtime
+        return True
+
+    def stop_native_oracle(self):
+        if self.oracle_runtime is None:
+            return False
+        self.oracle_runtime = None
+        self.oracle_stops += 1
+        return True
 
     def stop(self):
         self.stopped = True
@@ -130,6 +152,58 @@ class _WorkerRuntime(object):
         return True
 
 
+class _OracleRuntime(_WorkerRuntime):
+    def __init__(self, client=None, world=None, calls=None):
+        _WorkerRuntime.__init__(self, client, world, calls)
+        self.anchor = object()
+        self.human = object()
+        self.bot = object()
+        self.entities = {
+            900: self.anchor, 1000: self.human, 1001: self.bot}
+        self.bot_consumable_resolutions = 0
+        self.bot_consumables = tuple({
+            'name': name, 'kind': kind, 'id': 20 + index,
+            'compactDescr': 420 + index,
+            'tags': ([] if kind == 'extinguisher' else [kind]),
+            'reuseCount': 1, 'cooldownSeconds': 90.0,
+            'autoactivate': kind == 'extinguisher',
+            'fireStartingChanceFactor': (
+                0.9 if kind == 'extinguisher' else 1.0),
+            'repairAll': kind in ('medkit', 'repairkit'),
+            'bonusValue': 0.0, 'crewLevelIncrease': 0.0,
+            'enginePowerFactor': 1.0,
+            'turretRotationSpeedFactor': 1.0,
+            'engineHpLossPerSecond': 0.0,
+            'autoReactionSeconds': 0.0,
+        } for index, (name, kind) in enumerate((
+            ('autoExtinguishers', 'extinguisher'),
+            ('largeMedkit', 'medkit'),
+            ('largeRepairkit', 'repairkit')), 1))
+
+    def native_oracle_entity_rows(self):
+        return (
+            ('human', 3, 1000, self.human),
+            ('bot', 16, 1001, self.bot),
+        )
+
+    def resolve_native_oracle_entity(self, entity_id):
+        return self.entities.get(entity_id)
+
+    def native_oracle_space_anchor(self):
+        return 900, self.anchor
+
+    def native_oracle_world_proof(self):
+        return {
+            'native_space_id': 7,
+            'expected_instances': 457,
+            'installed_instances': 457,
+        }
+
+    def _default_bot_equipment_contracts(self):
+        self.bot_consumable_resolutions += 1
+        return tuple(dict(value) for value in self.bot_consumables)
+
+
 def _human(player_id=1):
     return {
         'id': player_id,
@@ -189,6 +263,36 @@ def _projected_bot_state(bot_id=11):
     }
 
 
+def _worker_welcome():
+    return {
+        'type': 'welcome', 'protocol': PROTOCOL_VERSION,
+        'role': WORKER_ROLE, 'worker_id': WORKER_AUTHORITY_ID,
+        'client_build': CLIENT_BUILD,
+        'capabilities': list(CLIENT_CAPABILITIES) + [
+            HE_EXPLOSION_EVIDENCE_CAPABILITY,
+            SIMULATION_WORKER_CAPABILITY, NATIVE_ORACLE_CAPABILITY],
+        'server_capabilities': [
+            lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
+            lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
+            lan_client_module.LEAN_SNAPSHOT_MANIFEST_CAPABILITY,
+            lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
+            HE_EXPLOSION_EVIDENCE_CAPABILITY,
+            lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+            lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
+            lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
+            lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
+            lan_client_module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
+            lan_client_module.RANDOM_MAP_CAPABILITY,
+            NATIVE_ORACLE_CAPABILITY],
+        'oracle_generation': 1,
+        'map': '01_karelia', 'map_pool': ['01_karelia'],
+        'host_player_id': 1, 'phase': 'waiting', 'round_id': 0,
+        'state_revision': 1,
+        'bot_authority_id': 0,
+        'authority_epoch': 0, 'server_time_ms': 10, 'team_size': 15,
+    }
+
+
 class AuthorityWorkerClientTests(unittest.TestCase):
     @staticmethod
     def _active_client():
@@ -200,6 +304,12 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         client.phase = 'battle'
         client.round_id = 7
         client.bot_authority_id = WORKER_AUTHORITY_ID
+        client.authority_epoch = 3
+        client.capabilities = list(CLIENT_CAPABILITIES) + [
+            HE_EXPLOSION_EVIDENCE_CAPABILITY,
+            SIMULATION_WORKER_CAPABILITY, NATIVE_ORACLE_CAPABILITY]
+        client.server_capabilities = [NATIVE_ORACLE_CAPABILITY]
+        client._native_oracle_negotiated = True
         client._stopping = False
         with client._outbound_lock:
             client._outbound_accepting = True
@@ -221,11 +331,17 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 environ={port_config.CLIENT_MODE_ENV: 'unexpected'})
 
     def test_player_hello_wire_shape_advertises_required_capabilities(self):
+        loadout = {
+            'repair': {'available': False},
+            'spotting': {'available': False},
+        }
         client = LANClient(
             '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
             max_health=90, account_key='account', outfits={},
             vehicle_compact_descr='dGVzdA==',
-            effective_params=effective_params())
+            effective_params=effective_params(),
+            ammo_remaining=[51, 4], ammo_loaded_shell=0,
+            player_authority_loadout=loadout)
 
         self.assertEqual({
             'type': 'hello',
@@ -239,8 +355,31 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'outfits': {},
             'vehicle_compact_descr': 'dGVzdA==',
             'effective_params': effective_params(),
+            'ammo_remaining': [51, 4],
+            'ammo_loaded_shell': 0,
+            'player_authority_loadout': loadout,
         }, client._hello_payload())
         self.assertNotIn('role', client._hello_payload())
+
+    def test_player_hello_requires_exact_ammo_and_authority_loadout(self):
+        common = {
+            'vehicle_compact_descr': 'dGVzdA==',
+            'effective_params': effective_params(),
+        }
+        missing_ammo = LANClient(
+            '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            }, **common)
+        missing_loadout = LANClient(
+            '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
+            ammo_remaining=[51], ammo_loaded_shell=0, **common)
+
+        with self.assertRaisesRegex(ValueError, 'ammunition'):
+            missing_ammo._hello_payload()
+        with self.assertRaisesRegex(ValueError, 'loadout'):
+            missing_loadout._hello_payload()
 
     def test_worker_hello_has_no_player_or_dummy_fields(self):
         client = AuthorityWorkerLANClient('127.0.0.1', 28782)
@@ -251,8 +390,10 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'protocol': PROTOCOL_VERSION,
             'client_build': CLIENT_BUILD,
             'capabilities': list(CLIENT_CAPABILITIES) + [
-                SIMULATION_WORKER_CAPABILITY],
+                HE_EXPLOSION_EVIDENCE_CAPABILITY,
+                SIMULATION_WORKER_CAPABILITY, NATIVE_ORACLE_CAPABILITY],
             'role': WORKER_ROLE,
+            'oracle_generation': 1,
         }, hello)
         self.assertTrue(set(hello).isdisjoint({
             'name', 'vehicle', 'max_health', 'account_key', 'outfits',
@@ -292,6 +433,118 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
         self.assertFalse(client.send_player_environment([], 1))
         client._send.assert_not_called()
+
+    def test_embedded_oracle_donates_world_and_reuses_worker_transport(self):
+        client = self._active_client()
+        client.bot_authority_id = 0
+        runtime = _OracleRuntime(client)
+
+        self.assertTrue(client.start_native_oracle(runtime))
+        self.assertEqual(1, runtime.bot_consumable_resolutions)
+        bridge = client._native_oracle_bridge
+        self.assertIsNone(bridge._thread)
+        self.assertIsNone(bridge._socket)
+        donation = client._dequeue_outbound(client._transport_generation)
+        wire = json.loads(donation[1].payload.decode('utf-8'))
+        self.assertEqual({
+            'type': 'oracle_world_ready', 'protocol': 5,
+            'round_id': 7, 'authority_epoch': 3,
+            'oracle_generation': 1, 'entity_revision': 1,
+            'complete': True,
+            'oracle_space': {'entity_id': 900, 'generation': 1},
+            'entities': [{
+                'kind': 'human', 'logical_id': 3,
+                'native': {'entity_id': 1000, 'generation': 1},
+            }, {
+                'kind': 'bot', 'logical_id': 16,
+                'native': {'entity_id': 1001, 'generation': 1},
+            }],
+            'destructibles': {
+                'native_space_id': 7,
+                'expected_instances': 457,
+                'installed_instances': 457,
+            },
+            'bot_consumables': list(runtime.bot_consumables),
+        }, wire)
+        self.assertEqual(7, bridge.world._space_id())
+        self.assertTrue(client.start_native_oracle(runtime))
+        self.assertEqual(1, runtime.bot_consumable_resolutions)
+        self.assertIsNone(client._dequeue_outbound(
+            client._transport_generation))
+
+        bridge.world.execute = lambda query: {
+            'result': 'ground_sample', 'value': {'sample': None}}
+        client._handle_message({
+            'type': 'query_batch',
+            'payload': {
+                'protocol_version': 1, 'round_id': 7,
+                'authority_epoch': 3, 'oracle_generation': 1,
+                'batch_seq': 1, 'issued_tick': 4, 'apply_tick': 7,
+                'world_revision': 2,
+                'queries': [{
+                    'query_id': 1, 'key': 'ground:space',
+                    'query_generation': 1,
+                    'entity': {'entity_id': 900, 'generation': 1},
+                    'operation': {
+                        'operation': 'ground_sample',
+                        'arguments': {
+                            'position': {'x': 1.0, 'y': 2.0, 'z': 3.0},
+                        },
+                    },
+                }],
+            },
+        })
+        self.assertEqual(1, client._process_native_oracle_frame())
+        reply = client._dequeue_outbound(client._transport_generation)
+        reply_wire = json.loads(reply[1].payload.decode('utf-8'))
+        self.assertEqual('query_reply', reply_wire['type'])
+        self.assertEqual(7, reply_wire['payload']['apply_tick'])
+        self.assertEqual('ok', reply_wire['payload']['results'][0]['status'][
+            'status'])
+
+        self.assertTrue(client.stop_native_oracle())
+        self.assertFalse(client.stop_native_oracle())
+
+    def test_native_entity_generation_advances_on_new_hidden_space(self):
+        generations = {}
+        first_runtime = _OracleRuntime()
+        first = _NativeOracleEntities(first_runtime, generations)
+        first_wire = first.donation(
+            7, 3, 1, 1, first_runtime.bot_consumables)
+        self.assertEqual([1, 1], sorted(
+            row['native']['generation']
+            for row in first_wire['entities']))
+        self.assertEqual(
+            {'entity_id': 900, 'generation': 1},
+            first_wire['oracle_space'])
+
+        first_runtime.entities[1000] = object()
+        self.assertEqual((None, 1), first.resolve({
+            'entity_id': 1000, 'generation': 1}))
+
+        second_runtime = _OracleRuntime()
+        second = _NativeOracleEntities(second_runtime, generations)
+        second_wire = second.donation(
+            8, 4, 1, 2, second_runtime.bot_consumables)
+        self.assertEqual([2, 2], sorted(
+            row['native']['generation']
+            for row in second_wire['entities']))
+        self.assertEqual(
+            {'entity_id': 900, 'generation': 2},
+            second_wire['oracle_space'])
+
+    def test_oracle_query_before_world_ready_fails_closed(self):
+        client = self._active_client()
+        sock = client.sock
+
+        client._handle_message({'type': 'query_batch', 'payload': {}})
+
+        self.assertFalse(client.running)
+        self.assertFalse(client.connected)
+        self.assertTrue(sock.closed)
+        self.assertEqual(
+            'native oracle query arrived outside ready space',
+            client.last_error)
 
     def test_worker_bot_state_is_encoded_once_and_frozen_as_queue_bytes(self):
         client = self._active_client()
@@ -564,18 +817,21 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'role': WORKER_ROLE,
             'worker_id': WORKER_AUTHORITY_ID,
             'capabilities': list(CLIENT_CAPABILITIES) + [
-                SIMULATION_WORKER_CAPABILITY],
+                HE_EXPLOSION_EVIDENCE_CAPABILITY,
+                SIMULATION_WORKER_CAPABILITY, NATIVE_ORACLE_CAPABILITY],
             'server_capabilities': [
                 lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
+                HE_EXPLOSION_EVIDENCE_CAPABILITY,
                 lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
+                NATIVE_ORACLE_CAPABILITY,
             ],
             'state_revision': 1, 'round_id': 0, 'host_player_id': 1,
             'authority_epoch': 0, 'server_time_ms': 10, 'team_size': 15,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'phase': 'waiting', 'map': '01_karelia',
         }
 
@@ -584,32 +840,30 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
     def test_worker_welcome_negotiates_protocol_and_build_labels(self):
         client = AuthorityWorkerLANClient('127.0.0.1', 28782)
-        message = {
-            'type': 'welcome', 'protocol': PROTOCOL_VERSION + 1,
-            'client_build': 'launcher-local-server',
-            'role': WORKER_ROLE,
-            'worker_id': WORKER_AUTHORITY_ID,
-            'capabilities': list(CLIENT_CAPABILITIES) + [
-                SIMULATION_WORKER_CAPABILITY],
-            'server_capabilities': [
-                lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
-                lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
-                lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
-                lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
-                lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
-                lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
-            ],
-            'state_revision': 1, 'round_id': 0, 'host_player_id': 1,
-            'authority_epoch': 0, 'server_time_ms': 10, 'team_size': 15,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
-            'phase': 'waiting', 'map': '01_karelia',
-        }
+        message = _worker_welcome()
+        message['protocol'] = PROTOCOL_VERSION + 1
+        message['client_build'] = 'launcher-local-server'
 
         self.assertTrue(client._handle_worker_welcome(message))
         self.assertTrue(client.ready)
         self.assertTrue(client._schema_negotiated)
+        self.assertTrue(client._native_oracle_negotiated)
         self.assertIsNone(client.last_error)
+
+    def test_worker_welcome_requires_he_evidence_in_both_directions(self):
+        missing_echo = _worker_welcome()
+        missing_echo['capabilities'].remove(
+            HE_EXPLOSION_EVIDENCE_CAPABILITY)
+        client = AuthorityWorkerLANClient('127.0.0.1', 28782)
+        self.assertFalse(client._handle_worker_welcome(missing_echo))
+        self.assertEqual('invalid worker welcome', client.last_error)
+
+        missing_server = _worker_welcome()
+        missing_server['server_capabilities'].remove(
+            HE_EXPLOSION_EVIDENCE_CAPABILITY)
+        client = AuthorityWorkerLANClient('127.0.0.1', 28782)
+        self.assertFalse(client._handle_worker_welcome(missing_server))
+        self.assertEqual('invalid worker welcome', client.last_error)
 
     def test_welcome_roster_and_runtime_projection_keep_dummy_local(self):
         events = []
@@ -622,41 +876,21 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         client = AuthorityWorkerLANClient(
             '127.0.0.1', 28782,
             on_event=lambda kind, message: events.append((kind, message)))
-        welcome = {
-            'type': 'welcome', 'protocol': PROTOCOL_VERSION,
-            'role': WORKER_ROLE, 'worker_id': WORKER_AUTHORITY_ID,
-            'client_build': CLIENT_BUILD,
-            'capabilities': list(CLIENT_CAPABILITIES) + [
-                SIMULATION_WORKER_CAPABILITY],
-            'server_capabilities': [
-                lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
-                lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.LEAN_SNAPSHOT_MANIFEST_CAPABILITY,
-                lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
-                lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
-                lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
-                lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
-                lan_client_module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
-                lan_client_module.RANDOM_MAP_CAPABILITY],
-            'map': '01_karelia', 'map_pool': ['01_karelia'],
-            'host_player_id': 1, 'phase': 'waiting', 'round_id': 0,
-            'state_revision': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
-            'authority_epoch': 0, 'server_time_ms': 10, 'team_size': 15,
-        }
+        welcome = _worker_welcome()
         client._handle_message(welcome)
         roster = {
             'type': 'roster', 'protocol': PROTOCOL_VERSION,
             'map': '01_karelia', 'map_pool': ['01_karelia'],
             'host_player_id': 1, 'phase': 'waiting', 'round_id': 0,
             'state_revision': 2,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 0, 'players': [dict(human)],
         }
         client._handle_message(roster)
 
         self.assertTrue(client.ready)
+        self.assertTrue(client.is_native_oracle())
+        self.assertFalse(client.is_bot_authority())
         self.assertEqual(10, client.server_time_ms)
         self.assertEqual([1], [value['id'] for value in client.roster])
 
@@ -665,7 +899,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'battle_start', 'protocol': PROTOCOL_VERSION,
             'map': '01_karelia', 'phase': 'loading', 'round_id': 1,
             'state_revision': 3, 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 0, 'server_time_ms': 11,
             'players': start_players, 'bots': [],
         }
@@ -693,13 +927,15 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             dummy['equipment_intent_result'])
         self.assertEqual(1, client.max_health)
         self.assertEqual(WORKER_AUTHORITY_ID, client.player_id)
+        self.assertEqual(0, client.bot_authority_id)
+        self.assertFalse(client.is_bot_authority())
 
         snapshot = {
             'type': 'snapshot', 'protocol': PROTOCOL_VERSION,
             'round_id': 1, 'server_tick': 0, 'server_time_ms': 12,
             'authority_epoch': 0, 'projectile_revision': 0,
             'bot_state_revision': 0,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'bot_manifest': [], 'players': [dict(human)], 'bots': [],
             'projectiles': [],
         }
@@ -712,6 +948,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual('germany:G54_E-50', snapshot_dummy['vehicle'])
         self.assertEqual(1, snapshot_dummy['health'])
         self.assertEqual(1, snapshot_dummy['max_health'])
+        self.assertEqual(0, client.bot_authority_id)
+        self.assertFalse(client.is_bot_authority())
         self.assertIsNone(client.last_error)
 
     def test_battle_ready_carries_no_dummy_or_participant_identity(self):
@@ -749,6 +987,25 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'frame_seq': 45,
         }, sent[0])
 
+    def test_wire_authority_event_keeps_rust_gameplay_authority(self):
+        events = []
+        client = self._active_client()
+        client.on_event = lambda kind, message: events.append(kind)
+
+        client._handle_message({
+            'type': 'events', 'protocol': PROTOCOL_VERSION,
+            'round_id': 7, 'server_tick': 8, 'server_time_ms': 100,
+            'authority_epoch': 4,
+            'events': [{
+                'kind': 'authority', 'player_id': 0,
+                'authority_epoch': 4,
+            }],
+        })
+
+        self.assertEqual(0, client.bot_authority_id)
+        self.assertFalse(client.is_bot_authority())
+        self.assertEqual(['events'], events)
+
     def test_newer_roster_cannot_demote_or_strip_dummy_from_start(self):
         events = []
         client = AuthorityWorkerLANClient(
@@ -768,7 +1025,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': PROTOCOL_VERSION,
             'round_id': 4, 'state_revision': 8, 'phase': 'waiting',
             'map': '01_karelia', 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 2, 'server_time_ms': 100,
             'players': [_human()],
         }
@@ -781,7 +1038,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'battle_start', 'protocol': PROTOCOL_VERSION,
             'round_id': 4, 'state_revision': 7, 'phase': 'loading',
             'map': '01_karelia', 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 2, 'server_time_ms': 99,
             'players': [_human()], 'bots': [],
         }
@@ -814,7 +1071,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': PROTOCOL_VERSION,
             'round_id': 4, 'state_revision': 9, 'phase': 'battle',
             'map': '01_karelia', 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 2, 'server_time_ms': 99,
             'players': [_human()],
         })
@@ -828,7 +1085,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': PROTOCOL_VERSION,
             'round_id': 5, 'state_revision': 0, 'phase': 'waiting',
             'map': '01_karelia', 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 3,
             'players': [_human()],
         })
@@ -841,7 +1098,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'type': 'battle_start', 'protocol': PROTOCOL_VERSION,
             'round_id': 5, 'state_revision': 1, 'phase': 'loading',
             'map': '01_karelia', 'host_player_id': 1,
-            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_authority_id': 0,
             'authority_epoch': 3, 'server_time_ms': 0,
             'players': [_human()], 'bots': [],
         })
@@ -888,6 +1145,66 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual('battle', session.state)
         self.assertFalse(world.enabled)
         self.assertEqual([False], world.transitions)
+
+    def test_server_authority_zero_starts_only_native_oracle(self):
+        world = _DrawWorld()
+        client = _WorkerClient()
+        client.bot_authority_id = 0
+        runtime = _WorkerRuntime(client, world)
+        with tempfile.TemporaryDirectory() as directory:
+            session = WorkerSession(
+                {}, bigworld=world,
+                status_path=str(Path(directory) / 'status.json'))
+            session.client = client
+            session.runtime = runtime
+            session._active_round_id = 6
+            session._draw = _WorldDrawLease(world)
+            session._callback = lambda unused_delay, unused_callback: 1
+
+            session._monitor()
+
+        self.assertIs(runtime, client.oracle_runtime)
+        self.assertEqual([], client.progress)
+        self.assertEqual('battle', session.state)
+        self.assertFalse(world.enabled)
+
+    def test_oracle_stops_before_hidden_native_runtime(self):
+        world = _DrawWorld()
+        client = _WorkerClient()
+        calls = []
+
+        def stop_oracle():
+            calls.append(('oracle_stop', world.enabled))
+            client.oracle_runtime = None
+            return True
+
+        client.stop_native_oracle = stop_oracle
+        runtime = _WorkerRuntime(client, world)
+
+        def stop_runtime(show_login=False, restore_account=True):
+            calls.append((
+                'runtime_stop', world.enabled,
+                show_login, restore_account))
+            runtime.state = 'stopped'
+
+        runtime.stop = stop_runtime
+        with tempfile.TemporaryDirectory() as directory:
+            session = WorkerSession(
+                {}, bigworld=world,
+                status_path=str(Path(directory) / 'status.json'))
+            session.client = client
+            session.runtime = runtime
+            session._active_round_id = 7
+            session._draw = _WorldDrawLease(world)
+            session._draw.acquire()
+
+            self.assertTrue(session._retire_runtime('round_complete'))
+
+        self.assertEqual([
+            ('oracle_stop', False),
+            ('runtime_stop', False, False, True),
+        ], calls)
+        self.assertTrue(world.enabled)
 
     def test_worker_progress_only_publishes_an_advancing_frame(self):
         world = _DrawWorld()

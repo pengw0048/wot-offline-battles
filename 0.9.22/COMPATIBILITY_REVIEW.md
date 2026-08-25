@@ -16,12 +16,12 @@ creation. It does not replace explicit `showBrowser`, disable
 `BrowserController`, affect the training-settings picker or intercept browsers
 opened later by the player.
 
-The x64 Windows server artifact is a PyInstaller deployment of the same Python
-3 service. Its launcher fixes `0.0.0.0:28782`, `server_random` and 30 players;
-the Windows CI gate checks the PE architecture, listener and v5 welcome. This
-does not change the client/server protocol or the 32-bit x86 game client. The
-artifact is currently unsigned, so SmartScreen trust remains a distribution
-boundary rather than a compatibility claim.
+The x64 Windows server artifact is the Rust protocol-v5 service built for the
+MSVC x64 target. It defaults to `0.0.0.0:28782`, `server_random` and 30
+players; the Windows CI gate checks the PE architecture, listener and v5
+welcome. This does not change the 32-bit x86 game client. The artifact is
+currently unsigned, so SmartScreen trust remains a distribution boundary
+rather than a compatibility claim.
 
 Version 0.3.76 restored exact #1513's frozen PREBATTLE aiming boundary. After
 one initial camera/gun alignment, the physical gun, stock marker and server
@@ -924,64 +924,47 @@ published to other handlers until its own `welcome` has been sent under the
 same state lock, so another player cannot start a battle whose first message to
 the new client would arrive before its identity and round assignment.
 
-The elected authority client runs tactical bots using standard-map annotations,
-vehicle roles, persistent randomized personalities, bounded line-of-sight
-caching and local avoidance of terrain, water, steep slopes, obstacles and
-nearby vehicles. The Python server remains canonical for room phase, HP, shot
-events, elimination, capture, timeout and the copied five-second result
-interval. The next waiting roster
-is a synchronization barrier: the previous battle runtime is destroyed before
-either the map picker or a queued next battle can cross the native Lobby/Hangar
-readiness gate. Per-round phase is monotonic, so a delayed same-round waiting
-roster or start denial cannot cancel an accepted battle, and snapshots cannot
-be reordered across that barrier.
+The Rust LAN server owns the fixed 30 Hz room simulation: tactical Bot state,
+projectile and combat admission, HP and critical state, capture, timeout,
+replication, results and durable receipts. Visible clients submit fenced player
+input and fire intent and render server-admitted state; they never become Bot,
+projectile or result authority. There is no Python gameplay-server fallback.
 
-The pure-data server planner emits revisioned global `bot_orders`, which the
-0.9.22 authority now uses for macro targets after reporting bounded visibility
-observations. BigWorld terrain, collision, water and slope probes remain local,
-and the client planner is a fallback when no server order is available. The
-server copies the 0.8.2 standard-mode capture law: a 50-metre radius, one
-update per second, at most three capture points per update, defender stop,
-empty-base reset and victory at 100 points. Standard battles end by
-elimination, capture or the server-owned 15-minute timeout.
+The next waiting roster is a synchronization barrier: the previous battle
+runtime is destroyed before either the map picker or a queued next battle can
+cross the native Lobby/Hangar readiness gate. Per-round phase is monotonic, so
+a delayed same-round waiting roster or start denial cannot cancel an accepted
+battle, and snapshots cannot be reordered across that barrier.
 
-The same canonical update drives a narrow defense context for the server
-planner. One, two or three invaders request at most one, two or three eligible
-responders respectively, selected by distance and vehicle profile speed and
-sent only to a base that is currently invaded. The selection is stable across
-updates and retains a short clear grace; dead, ungrounded, engine-destroyed or
-double-tracked Bots are replaced. Travel overrides route movement but preserves
-ordinary visible-target aim and fire admission. No unspotted invader position
-is included in a Bot order.
+The Rust planner uses the standard-map tactical catalogue, actor descriptors,
+vehicle roles and server-owned contacts. The copied standard-mode capture law
+uses a 50-metre radius, one update per second, at most three capture points per
+update, defender stop, empty-base reset and victory at 100 points. Standard
+battles end by elimination, capture or the server-owned 15-minute timeout.
 
-This source wiring is not the same as final bot-behavior acceptance. The
-finalized 0.8.2 spawn-congestion/OBB, reverse-steering and baked-route changes
-are migrated as source-derived changes; real-client acceptance still has to
-check them against #1513 terrain and presentation timing.
+This source wiring is not the same as final native-client acceptance. The
+spawn-congestion, reverse-steering, route, collision and presentation changes
+still require the final two-client #1513 Windows run described below.
 
-## Hidden-worker authority
+## Rust authority and hidden native oracle
 
-Every 0.9.22 LAN room has one mandatory, room-owned hidden native worker. The
-only simulation path is visible client -> LAN server -> hidden worker -> LAN
-server -> replicas. Visible clients submit player input and fire intent, and
-render server-admitted snapshots; they never become bot or projectile authority.
+Every 0.9.22 LAN room has one mandatory, room-owned hidden #1513 native-world
+oracle. The launcher starts the Rust server first, then the oracle, and exposes
+the room only after both are ready. A missing oracle refuses battle start. An
+oracle loss ends the active round as a technical failure and leaves the room
+unavailable until the owner restarts it.
 
-The launcher starts the server first, then the hidden worker, and advertises the
-room only after both are ready. A missing worker refuses battle start. A worker
-loss ends the active round as a technical failure without battle receipts and
-leaves the room unavailable until the owner stops and starts a new room. The
-server retains shared roster, timing, hit, receipt and result-ledger admission.
+The oracle performs only version-locked BigWorld operations that portable Rust
+cannot reproduce safely: bounded terrain, water, collision, destructible and
+native hit queries over frozen server requests. It donates exact descriptors
+and native identities, but it does not advance Bots, projectiles, timers, HP or
+results. Rust validates the query lineage and owns every gameplay decision that
+consumes those facts. Visible clients are never used as an oracle fallback.
 
-Native BigWorld worker code owns bot movement, map collision, projectile
-progress, water sensing and native critical-state proposals. The server keeps the
-ten-second drowning timer, then validates and commits the worker proposal; it
-does not reconstruct vehicle descriptors, map collision, destructible identities
-or a BigWorld-equivalent simulation.
-
-The former pure-Python server authority, baked world, descriptor-projection
-donation and destructible-map donation paths have been removed. The remaining
-vehicle catalog is waiting-room metadata for vehicle tiers and does not provide
-combat descriptors.
+The obsolete standalone `WOT_LAN_AUTHORITY=server` pure-data mode and its baked
+world have been removed. The retained descriptor and destructible donations are
+read-only prerequisites for the Rust authority; they are not Python simulation
+or client-side verdict paths.
 
 ## Known deterministic parity gaps
 
@@ -1057,12 +1040,18 @@ The source audit deliberately keeps the following differences visible:
 - the server publishes terminal winner/reason/base team plus live frags and the
   human team-killer flag, but not the complete 0.8.2
   `personal`/`players`/`vehicles` battle-result record;
-- the complete stun penalty/medical-kit loop remains open. Bot movement and
-  both Bot and human projectile trajectories run in the mandatory hidden
-  native worker, while the LAN server admits their ordered results and shared
-  ledgers. Each human client still originates its own input, pose and gun-state
-  checkpoint. This is a trusted-LAN architecture, not an anti-cheat design or
-  a claim that every calculation runs inside the Python server.
+- Rust now owns the canonical stun ledger when a trusted projectile effect
+  supplies an end time: direct and splash effects, ordered events, Bot and
+  player snapshots, expiry, stun assist and the medical-kit end-time CAS share
+  one transactional state. Exact retries must carry the same stun value. The
+  production projectile path deliberately does not invent that end time,
+  because a #1513 stun-duration law has not yet been established; real SPG
+  hits therefore still do not create stun, and duration statistics remain
+  zero. Rust advances Bot movement and both Bot and human projectile
+  trajectories; the native oracle answers bounded collision and hit queries
+  over frozen Rust requests. Each human client still originates its own input,
+  pose and gun-state checkpoint. This is a trusted-LAN architecture, not an
+  anti-cheat design.
 
 The local player path does include server-relayed critical state, fire,
 drowning, exact fall/landing attribution, small repair/medkit/extinguisher

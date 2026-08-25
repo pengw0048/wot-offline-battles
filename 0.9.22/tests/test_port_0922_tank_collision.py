@@ -613,21 +613,14 @@ class TankCollisionTests(unittest.TestCase):
                           'vehicle_physics.py').read_text()
         lan_source = (CLIENT_SCRIPTS / 'gui' / 'mods' /
                       'offline_lan_0922' / 'lan_client.py').read_text()
-        server_source = (ROOT / '0.9.22' / 'server' /
-                         'lan_battle_server.py').read_text()
-
         for retired in (
                 'RAM_SAFE_SPEED', 'RAM_COOLDOWN', 'ratio_to_other',
                 'ratio_to_self', 'min(350',
                 'RAM_ARMOR_ABSORPTION_FACTOR = 1.3'):
             self.assertNotIn(retired, collision_source)
         self.assertNotIn("'ram_safe_speed'", physics_source)
-        self.assertNotIn('RAM_COOLDOWN_SECONDS', server_source)
-        self.assertNotIn('bot_ram_cooldowns', server_source)
         self.assertNotIn('min(int(damage_to_bot or 0), 500)', lan_source)
         self.assertNotIn('min(int(damage_to_target or 0), 500)', lan_source)
-        self.assertNotIn('message["damage_to_bot"])), 500)', server_source)
-        self.assertNotIn('message["damage_to_target"])), 500)', server_source)
 
     def test_wreck_blocks_the_mover_without_moving_or_dealing_ram_damage(self):
         mover = _tank(1, 0.0, 0.0, mass=25000.0, vx=10.0)

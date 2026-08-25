@@ -1,372 +1,258 @@
 from pathlib import Path
-import os
-import sys
 import unittest
-from unittest import mock
 
 
 PORT_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PORT_ROOT.parent
+RUST_ROOT = PORT_ROOT / 'rust_server'
 SERVER_ROOT = PORT_ROOT / 'server'
-sys.path.insert(0, str(SERVER_ROOT))
-
-import windows_server  # noqa: E402
 
 
-class WindowsServerLauncherTests(unittest.TestCase):
-    def test_double_click_entry_uses_fixed_zero_configuration_contract(self):
-        run_server = mock.Mock()
-        with mock.patch.object(
-                windows_server, '_load_server',
-                return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule') as ensure:
-            with mock.patch.object(sys, 'argv', ['server.exe', '--port', '1']):
-                self.assertEqual(0, windows_server.main())
 
-        ensure.assert_called_once_with(28782)
-        run_server.assert_called_once_with(
-            '0.0.0.0', 28782, 'server_random', 30,
-            team_size=15,
-            team1_size=15, team2_size=15,
-            bot_lineup=[],
-            vehicle_overlay_root=None,
+class RustWindowsServerContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.config_source = (
+            RUST_ROOT / 'src' / 'config.rs'
+        ).read_text(encoding='utf-8')
+        cls.firewall_source = (
+            RUST_ROOT / 'src' / 'windows_firewall.rs'
+        ).read_text(encoding='utf-8')
+        cls.main_source = (
+            RUST_ROOT / 'src' / 'main.rs'
+        ).read_text(encoding='utf-8')
+        cls.build_source = (
+            SERVER_ROOT / 'build_windows_server.ps1'
+        ).read_text(encoding='utf-8')
+        cls.readme = (
+            SERVER_ROOT / 'WINDOWS_SERVER_README.txt'
+        ).read_text(encoding='utf-8')
+        cls.acceptance_source = (
+            PORT_ROOT / 'tools' / 'windows_migration_acceptance.ps1'
+        ).read_text(encoding='utf-8')
+        cls.acceptance_readme = (
+            PORT_ROOT / 'tools' / 'WINDOWS_MIGRATION_ACCEPTANCE.md'
+        ).read_text(encoding='utf-8')
+        cls.workflow = (
+            REPOSITORY_ROOT / '.github' / 'workflows' / 'tests.yml'
+        ).read_text(encoding='utf-8')
+        cls.windows_server_job = cls.workflow.split(
+            '\n  windows-server:', 1
+        )[1].split('\n  windows-launcher:', 1)[0]
+
+    def test_retired_python_server_sources_are_absent(self):
+        for name in (
+                'descriptor_projection.py', 'lan_battle_server.py',
+                'offline_rewards.py', 'server_battle_authority.py',
+                'server_bot_ai.py', 'server_world.py',
+                'vehicle_overlay_store.py', 'windows_server.py'):
+            self.assertFalse((SERVER_ROOT / name).exists(), name)
+        for name in (
+                'build_windows_server.ps1', 'WINDOWS_SERVER_README.txt'):
+            self.assertTrue((SERVER_ROOT / name).is_file(), name)
+
+    def test_firewall_check_precedes_direct_server_bind(self):
+        firewall = 'match ensure_for_bind(&config.host, config.port)?'
+        bind = 'ServerApp::bind(config)?'
+
+        self.assertIn(firewall, self.main_source)
+        self.assertIn(bind, self.main_source)
+        self.assertLess(
+            self.main_source.index(firewall),
+            self.main_source.index(bind),
         )
 
-    def test_firewall_request_precedes_server_bind(self):
-        events = []
-
-        def ensure(port):
-            events.append(('firewall', port))
-
-        def run_server(host, port, map_name, max_players, **options):
-            events.append(('server', host, port, map_name, max_players,
-                           options['team_size'],
-                           options['team1_size'], options['team2_size']))
-
-        with mock.patch.object(
-                windows_server, '_load_server',
-                return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule',
-                    side_effect=ensure):
-            self.assertEqual(0, windows_server.main())
-
-        self.assertEqual([
-            ('firewall', 28782),
-            ('server', '0.0.0.0', 28782, 'server_random', 30, 15, 15, 15),
-        ], events)
-
-    def test_hidden_coordinator_loopback_mode_skips_firewall(self):
-        run_server = mock.Mock()
-        with mock.patch.dict(
-                os.environ,
-                {windows_server.SERVER_LOOPBACK_ONLY_ENV: '1'}), \
-                mock.patch.object(
-                    windows_server, '_load_server',
-                    return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server,
-                    '_ensure_windows_firewall_rule') as ensure:
-            self.assertEqual(0, windows_server.main())
-
-        ensure.assert_not_called()
-        run_server.assert_called_once_with(
-            '127.0.0.1', 28782, 'server_random', 30,
-            team_size=15,
-            team1_size=15, team2_size=15,
-            bot_lineup=[],
-            vehicle_overlay_root=None,
-        )
-
-    def test_launcher_environment_selects_the_total_tanks_per_team(self):
-        run_server = mock.Mock()
-        with mock.patch.dict(
-                os.environ, {windows_server.SERVER_TEAM_SIZE_ENV: '4'}), \
-                mock.patch.object(
-                    windows_server, '_load_server',
-                    return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule'):
-            self.assertEqual(0, windows_server.main())
-
-        self.assertEqual(4, run_server.call_args.kwargs['team1_size'])
-        self.assertEqual(4, run_server.call_args.kwargs['team2_size'])
-
-    def test_launcher_environment_selects_independent_team_capacities(self):
-        run_server = mock.Mock()
-        with mock.patch.dict(os.environ, {
-                windows_server.SERVER_TEAM1_SIZE_ENV: '3',
-                windows_server.SERVER_TEAM2_SIZE_ENV: '8',
-        }), mock.patch.object(
-                windows_server, '_load_server',
-                return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule'):
-            self.assertEqual(0, windows_server.main())
-
-        self.assertEqual(3, run_server.call_args.kwargs['team1_size'])
-        self.assertEqual(8, run_server.call_args.kwargs['team2_size'])
-
-    def test_launcher_environment_forwards_the_exact_bot_lineup(self):
-        run_server = mock.Mock()
-        lineup = [{
-            'team': 2, 'slot': 4, 'vehicle': 'germany:G12_Ltraktor',
-        }]
-        with mock.patch.dict(os.environ, {
-                windows_server.SERVER_BOT_LINEUP_ENV:
-                    '[{"team":2,"slot":4,'
-                    '"vehicle":"germany:G12_Ltraktor"}]',
-        }), mock.patch.object(
-                windows_server, '_load_server',
-                return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule'):
-            self.assertEqual(0, windows_server.main())
-
-        self.assertEqual(lineup, run_server.call_args.kwargs['bot_lineup'])
-
-    def test_invalid_exact_bot_lineup_json_fails_before_server_bind(self):
-        run_server = mock.Mock()
-        with mock.patch.dict(
-                os.environ,
-                {windows_server.SERVER_BOT_LINEUP_ENV: '{bad json'}), \
-                mock.patch.object(
-                    windows_server, '_load_server',
-                    return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server,
-                    '_ensure_windows_firewall_rule') as ensure, \
-                mock.patch.object(windows_server, '_pause_after_error'), \
-                mock.patch.object(windows_server.traceback, 'print_exc'):
-            self.assertEqual(1, windows_server.main())
-
-        ensure.assert_not_called()
-        run_server.assert_not_called()
-
-    def test_invalid_launcher_team_size_fails_before_server_bind(self):
-        run_server = mock.Mock()
-        with mock.patch.dict(
-                os.environ, {windows_server.SERVER_TEAM_SIZE_ENV: '16'}), \
-                mock.patch.object(
-                    windows_server, '_load_server',
-                    return_value=('server_random', run_server)), \
-                mock.patch.object(
-                    windows_server, '_ensure_windows_firewall_rule') as ensure, \
-                mock.patch.object(windows_server, '_pause_after_error'), \
-                mock.patch.object(windows_server.traceback, 'print_exc'):
-            self.assertEqual(1, windows_server.main())
-
-        ensure.assert_not_called()
-        run_server.assert_not_called()
-
-    def test_source_process_never_checks_or_changes_firewall(self):
-        with mock.patch.object(
-                windows_server, '_is_frozen_windows_executable',
-                return_value=False), \
-                mock.patch.object(
-                    windows_server, '_windows_firewall_rule_exists') as exists, \
-                mock.patch.object(
-                    windows_server, '_request_windows_firewall_rule') as request:
-            self.assertFalse(
-                windows_server._ensure_windows_firewall_rule(28782))
-
-        exists.assert_not_called()
-        request.assert_not_called()
-
-    def test_existing_rule_does_not_request_uac_again(self):
-        with mock.patch.object(
-                windows_server, '_is_frozen_windows_executable',
-                return_value=True), \
-                mock.patch.object(
-                    windows_server, '_windows_firewall_rule_exists',
-                    return_value=True) as exists, \
-                mock.patch.object(
-                    windows_server, '_request_windows_firewall_rule') as request:
-            self.assertTrue(
-                windows_server._ensure_windows_firewall_rule(28782))
-
-        exists.assert_called_once()
-        request.assert_not_called()
-
-    def test_missing_rule_requests_narrow_elevated_netsh_rule(self):
-        calls = []
-
-        def shell_execute(*args):
-            calls.append(args)
-            return 42
-
-        path = r'C:\Games\WoT LAN\WoT-0.9.22-LAN-Server.exe'
-        netsh_path = r'C:\Windows\System32\netsh.exe'
-        rule_name = windows_server._windows_firewall_rule_name(path, 28782)
-
-        self.assertTrue(windows_server._request_windows_firewall_rule(
-            rule_name, path, 28782, shell_execute=shell_execute,
-            netsh_path=netsh_path))
-        self.assertEqual(1, len(calls))
-        _, verb, executable, arguments, _, _ = calls[0]
-        self.assertEqual('runas', verb)
-        self.assertEqual(netsh_path, executable)
-        self.assertIn('dir=in', arguments)
-        self.assertIn('action=allow', arguments)
-        self.assertIn('protocol=TCP', arguments)
-        self.assertIn('localport=28782', arguments)
-        self.assertIn('remoteip=any', arguments)
-        self.assertIn('program=' + path, arguments)
-
-    def test_rule_identity_is_stable_across_windows_path_case(self):
-        first = windows_server._windows_firewall_rule_name(
-            r'C:\Games\WoT\server.exe', 28782)
-        second = windows_server._windows_firewall_rule_name(
-            r'c:/games/wot/SERVER.EXE', 28782)
-        self.assertEqual(first, second)
-        self.assertFalse(set('*?[') & set(first))
-
-    def test_rule_lookup_is_bounded_and_uses_literal_safe_identity(self):
-        result = mock.Mock(returncode=0)
-        runner = mock.Mock(return_value=result)
-        powershell_path = (
-            r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
-        rule_name = windows_server._windows_firewall_rule_name(
-            r'C:\Games\WoT\server.exe', 28782)
-
-        self.assertTrue(windows_server._windows_firewall_rule_exists(
-            rule_name, runner=runner, powershell_path=powershell_path))
-
-        args, kwargs = runner.call_args
-        self.assertEqual(powershell_path, args[0][0])
-        script = args[0][-1]
-        self.assertIn(rule_name, script)
-        self.assertIn("$_.Direction -eq 'Inbound'", script)
-        self.assertIn("$_.Enabled -eq 'True'", script)
-        self.assertIn("$_.Action -eq 'Allow'", script)
-        self.assertNotIn('-Direction Inbound', script)
-        self.assertNotIn('-Enabled True', script)
-        self.assertNotIn('-Action Allow', script)
-        self.assertEqual(windows_server.FIREWALL_QUERY_TIMEOUT_SECONDS,
-                         kwargs['timeout'])
-
-    def test_uac_cancellation_is_nonfatal(self):
-        self.assertFalse(windows_server._request_windows_firewall_rule(
-            'test', r'C:\server.exe', 28782,
-            shell_execute=lambda *args: 5,
-            netsh_path=r'C:\Windows\System32\netsh.exe'))
-
-    def test_netsh_path_comes_from_windows_system_directory(self):
-        calls = []
-
-        def get_system_directory(buffer, size):
-            calls.append(size)
-            buffer.value = r'C:\Windows\System32'
-            return len(buffer.value)
-
-        self.assertEqual(
-            r'C:\Windows\System32\netsh.exe',
-            windows_server._windows_system_netsh_path(
-                get_system_directory=get_system_directory))
-        self.assertEqual([32768], calls)
-
-    def test_powershell_path_comes_from_windows_system_directory(self):
-        def get_system_directory(buffer, size):
-            buffer.value = r'C:\Windows\System32'
-            return len(buffer.value)
-
-        self.assertEqual(
-            r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
-            windows_server._windows_system_path(
-                r'WindowsPowerShell\v1.0\powershell.exe',
-                get_system_directory=get_system_directory))
-
-    def test_startup_error_returns_failure_without_hiding_the_traceback(self):
-        run_server = mock.Mock(side_effect=OSError('busy'))
-        with mock.patch.object(
-                windows_server, '_load_server',
-                return_value=('server_random', run_server)):
-            with mock.patch.object(windows_server, '_pause_after_error') as pause:
-                with mock.patch.object(windows_server.traceback,
-                                       'print_exc') as print_exc:
-                    self.assertEqual(1, windows_server.main())
-
-        print_exc.assert_called_once_with()
-        pause.assert_called_once_with()
-
-    def test_packaged_import_error_is_visible_and_keeps_console_open(self):
-        with mock.patch.object(
-                windows_server, '_load_server',
-                side_effect=ImportError('missing bundled module')):
-            with mock.patch.object(windows_server, '_pause_after_error') as pause:
-                with mock.patch.object(windows_server.traceback,
-                                       'print_exc') as print_exc:
-                    self.assertEqual(1, windows_server.main())
-
-        print_exc.assert_called_once_with()
-        pause.assert_called_once_with()
-
-    def test_windows_build_dependency_is_pinned(self):
-        requirements = (
-            SERVER_ROOT / 'requirements-windows-build.txt'
-        ).read_text(encoding='utf-8').splitlines()
-        self.assertEqual(['pyinstaller==6.21.0'], requirements)
-
-    def test_build_recreates_and_verifies_the_exact_delivery_directory(self):
-        source = (SERVER_ROOT / 'build_windows_server.ps1').read_text(
-            encoding='utf-8')
-        remove = 'Remove-Item -LiteralPath $DistRoot -Recurse -Force'
-        create = 'New-Item -ItemType Directory -Force -Path $DistRoot'
-        package = 'python -m PyInstaller'
-
-        self.assertIn(remove, source)
-        self.assertLess(source.index(remove), source.index(create))
-        self.assertLess(source.index(create), source.index(package))
+    def test_rule_is_exact_executable_and_tcp_28782(self):
         self.assertIn(
-            '$ExpectedFiles = @("README.txt", '
-            '"WoT-0.9.22-LAN-Server.exe")', source)
-        self.assertIn('Get-ChildItem -LiteralPath $DistRoot -Force', source)
-        self.assertNotIn('Remove-Item -LiteralPath $PortRoot', source)
+            'pub const DEFAULT_PORT: u16 = 28_782;',
+            self.config_source,
+        )
+        for required in (
+                'std::env::current_exe()',
+                'firewall_rule_name(executable_text, port)',
+                'format!("program={executable}")',
+                '"protocol=TCP".to_owned()',
+                'format!("localport={port}")',
+                'format!("remoteip={FIREWALL_REMOTE_IP}")',
+                'Get-NetFirewallApplicationFilter',
+                '$_.Program -eq {executable}',
+                'Get-NetFirewallPortFilter',
+                "$_.Protocol -eq 'TCP'",
+                "LocalPort -eq '{port}'",
+                'WoT 0.9.22 LAN Server TCP 28782 - 318c4e959012'):
+            self.assertIn(required, self.firewall_source)
 
-    def test_workflow_here_strings_are_at_the_powershell_block_baseline(self):
-        workflow = (PORT_ROOT.parent / '.github' / 'workflows' /
-                    'tests.yml').read_text(encoding='utf-8')
+    def test_firewall_tools_use_the_trusted_windows_system_directory(self):
+        for required in (
+                'GetSystemDirectoryW',
+                'trusted_system_path('
+                'r"WindowsPowerShell\\v1.0\\powershell.exe")',
+                'trusted_system_path("netsh.exe")',
+                'Command::new(powershell)',
+                'elevated_add_script(netsh, arguments)',
+                'Start-Process -FilePath',
+                '-Verb RunAs -WindowStyle Normal -Wait -PassThru'):
+            self.assertIn(required, self.firewall_source)
 
-        self.assertIn('python-version: "3.11.9"', workflow)
+        self.assertNotIn('Command::new("powershell', self.firewall_source)
+        self.assertNotIn('Command::new("netsh', self.firewall_source)
+
+    def test_loopback_skips_platform_work_and_uac_cancel_is_nonfatal(self):
+        ensure = self.firewall_source.index('pub fn ensure_for_bind')
+        loopback = self.firewall_source.index(
+            'if host_is_loopback(host)', ensure)
+        windows = self.firewall_source.index('#[cfg(windows)]', loopback)
+
+        self.assertLess(loopback, windows)
+        self.assertIn(
+            'return Ok(FirewallOutcome::SkippedLoopback);',
+            self.firewall_source,
+        )
+        self.assertIn('address.is_loopback()', self.firewall_source)
+        self.assertIn(
+            'const ELEVATION_CANCELLED_EXIT: i32 = 5;',
+            self.firewall_source,
+        )
+        self.assertIn(
+            'Some(ELEVATION_CANCELLED_EXIT)',
+            self.firewall_source,
+        )
+        self.assertIn(
+            'Ok(ElevationRequest::Cancelled)',
+            self.firewall_source,
+        )
+        self.assertIn(
+            'Err(FirewallError::ElevationExit(other))',
+            self.firewall_source,
+        )
+        self.assertIn(
+            'ElevationRequest::Completed => match query_existing_rule',
+            self.firewall_source,
+        )
+        self.assertIn(
+            'FirewallOutcome::RequestCancelled => eprintln!(',
+            self.main_source,
+        )
+
+    def test_other_startup_errors_are_user_visible_and_fatal(self):
+        self.assertIn(
+            'match ensure_for_bind(&config.host, config.port)?',
+            self.main_source,
+        )
+        self.assertIn('eprintln!("error: {error}");', self.main_source)
+        self.assertIn('ExitCode::from(2)', self.main_source)
+        for required in (
+                'QuerySpawn',
+                'QueryWait',
+                'QueryTimeout',
+                'QueryExit',
+                'RuleMismatch',
+                'ElevationSpawn',
+                'ElevationWait',
+                'ElevationTimeout',
+                'ElevationExit',
+                'RuleCreationMissing'):
+            self.assertIn(required, self.firewall_source)
+
+    def test_build_delivers_the_direct_x64_rust_executable(self):
+        for required in (
+                '$RustRoot = Join-Path $PortRoot "rust_server"',
+                '$Target = "x86_64-pc-windows-msvc"',
+                'offline-rust-server.exe',
+                'cargo build `',
+                '--manifest-path (Join-Path $RustRoot "Cargo.toml")',
+                '--locked `',
+                '--release `',
+                '--target $Target',
+                'Copy-Item -LiteralPath $BuiltExe '
+                '-Destination $PackagedExe -Force',
+                '$ExpectedFiles = @("README.txt", '
+                '"WoT-0.9.22-LAN-Server.exe")'):
+            self.assertIn(required, self.build_source)
+
+        self.assertNotIn('PyInstaller', self.build_source)
+        self.assertNotIn('windows_server.py', self.build_source)
+
+    def test_windows_workflow_gates_the_rust_firewall_rule(self):
+        job = self.windows_server_job
+        for required in (
+                'rustup target add x86_64-pc-windows-msvc',
+                'Build Rust x64 LAN server',
+                '$serverExe = Join-Path $serverRoot '
+                '"WoT-0.9.22-LAN-Server.exe"',
+                '$identity = "$normalizedExe|28782|any"',
+                'WoT 0.9.22 LAN Server TCP 28782 - $digest',
+                'Start-Process `\n              -FilePath $serverExe',
+                'Get-NetFirewallRule',
+                '$_.Direction -eq "Inbound"',
+                'Get-NetFirewallApplicationFilter',
+                '$application.Program -ne $serverExe',
+                'Get-NetFirewallPortFilter',
+                '$portFilter.Protocol -ne "TCP"',
+                '$portFilter.LocalPort -ne "28782"',
+                'Rust server did not create its firewall rule',
+                'Remove-NetFirewallRule'):
+            self.assertIn(required, job)
+
+        self.assertNotIn('PyInstaller', job)
+        self.assertNotIn('windows_server.py', job)
+        self.assertNotIn('requirements-windows-build.txt', job)
+        self.assertIn(
+            'cargo test --manifest-path 0.9.22/rust_server/Cargo.toml',
+            self.workflow,
+        )
+        self.assertIn('--all-targets --locked', self.workflow)
+        self.assertIn(
+            "assert 'he_explosion_evidence_v1' in "
+            "reply['server_capabilities'], reply",
+            self.workflow,
+        )
+
+    def test_workflow_here_strings_stay_at_the_powershell_baseline(self):
+        self.assertIn('python-version: "3.11.9"', self.windows_server_job)
         self.assertIn(
             "\n          $ProtocolProbe = @'\n          import json\n",
-            workflow)
-        self.assertIn("\n          '@\n\n          $process", workflow)
-        self.assertNotIn("\n              @'\n", workflow)
-        self.assertIn('Get-NetFirewallRule', workflow)
-        self.assertIn('Get-NetFirewallApplicationFilter', workflow)
-        self.assertIn('Get-NetFirewallPortFilter', workflow)
-        self.assertIn('Remove-NetFirewallRule', workflow)
-        self.assertIn('$_.Direction -eq "Inbound"', workflow)
-        self.assertNotIn('-Direction Inbound', workflow)
-        self.assertNotIn('-Enabled True', workflow)
-        self.assertNotIn('-Action Allow', workflow)
+            self.windows_server_job,
+        )
         self.assertIn(
-            'Packaged server did not create its firewall rule', workflow)
-        self.assertIn(
-            'WoT 0.9.22 LAN Server TCP 28782 - $digest', workflow)
+            "\n          '@\n\n          $process",
+            self.windows_server_job,
+        )
+        self.assertNotIn("\n              @'\n", self.windows_server_job)
 
-    def test_windows_readme_carries_source_and_runtime_license_notices(self):
-        readme = (SERVER_ROOT / 'WINDOWS_SERVER_README.txt').read_text(
-            encoding='utf-8')
-
+    def test_windows_readme_describes_the_rust_firewall_contract(self):
         for required in (
+                'x64 Rust LAN server',
+                'exact executable and TCP 28782 before binding',
+                'Cancelling is nonfatal',
+                'Loopback-only single player does not request a firewall rule',
                 'GNU GPL',
-                '/tree/peng/0922-feedback-candidate',
-                'any remote address/profile',
-                'trusted-LAN server',
-                'CPython 3.11.9',
-                'docs.python.org/3.11/license.html',
-                'PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2',
-                'Copyright (c) 2001, 2002, 2003, 2004, 2005',
-                '2023 Python Software Foundation;',
-                'All Rights Reserved',
-                'BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0',
-                'CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1',
-                'CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2',
-                'PyInstaller 6.21.0',
-                'v6.21.0/COPYING.txt'):
-            self.assertIn(required, readme)
+                'Cargo.lock',
+                'THIRD_PARTY_NOTICES.md'):
+            self.assertIn(required, self.readme)
+
+    def test_migration_acceptance_uses_the_full_modern_probe_contract(self):
+        for required in (
+                'role = "probe"',
+                '"projectile_ledger_v2"',
+                '"ram_contact_ledger_v3"',
+                '"he_explosion_evidence_v1"',
+                '$echoedCapabilities.Count -eq $ProbeCapabilities.Count',
+                '$serverCapabilities.Count -eq '
+                '$RequiredServerCapabilities.Count',
+                'foreach ($capability in $ProbeCapabilities)',
+                'foreach ($capability in $RequiredServerCapabilities)'):
+            self.assertIn(required, self.acceptance_source)
+        self.assertNotIn(
+            'capabilities = @("projectile_ledger_v1")',
+            self.acceptance_source,
+        )
+
+    def test_migration_acceptance_requires_direct_and_splash_he_evidence(self):
+        for source in (self.acceptance_source, self.acceptance_readme):
+            self.assertIn('one HE direct hit', source)
+            self.assertIn('one nearby HE splash', source)
+            self.assertIn('both visible clients', source)
 
 
 if __name__ == '__main__':

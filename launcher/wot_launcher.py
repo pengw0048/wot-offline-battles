@@ -2,7 +2,7 @@
 """Desktop launcher for the supported World of Tanks offline-battle client.
 
 The launcher installs client payloads, manages the hidden single-player
-authority, and can run a persistent LAN server explicitly.
+native-world oracle, and can run a persistent LAN server explicitly.
 """
 
 from __future__ import annotations
@@ -2113,7 +2113,8 @@ class LauncherWindow(object):
         self._server_persistent = bool(persistent)
         self._server_context = requested_context
         pump = threading.Thread(
-            target=self._pump_server_output, args=(self._server,))
+            target=self._pump_server_output,
+            args=(self._server, server_log_path))
         pump.daemon = True
         pump.start()
         if not core.wait_for_server(
@@ -2135,12 +2136,31 @@ class LauncherWindow(object):
         self.root.after(0, self._update_action_controls)
         return True
 
-    def _pump_server_output(self, server=None):
+    def _pump_server_output(self, server=None, log_path=None):
         server = server or self._server
         if server is None or server.stdout is None:
             return
-        for line in iter(server.stdout.readline, b""):
-            self._log("[server] " + line.decode("utf-8", "replace").rstrip())
+        log_stream = None
+        try:
+            if log_path is not None:
+                directory = os.path.dirname(log_path)
+                if directory and not os.path.isdir(directory):
+                    os.makedirs(directory)
+                log_stream = _BoundedLogStream(log_path)
+            for line in iter(server.stdout.readline, b""):
+                text = line.decode("utf-8", "replace")
+                if log_stream is not None:
+                    log_stream.write(text)
+                    log_stream.flush()
+                self._log("[server] " + text.rstrip())
+        except Exception as error:
+            self._log("The server output log stopped: %s" % error)
+        finally:
+            if log_stream is not None:
+                try:
+                    log_stream.close()
+                except Exception:
+                    pass
         if server is self._server:
             exit_code = server.poll()
             if self._room_worker_is_running():
@@ -2513,7 +2533,7 @@ def _serve(argv):
     print("Starting the %s LAN server from %s" %
           (port_version, core.server_root()))
     try:
-        core.run_server_payload(port_version)
+        return_code = core.run_server_payload(port_version)
     except Exception:
         # A windowed build turns an unhandled exception into a dialog that
         # waits for a user who is not there. Report it and exit instead.
@@ -2522,7 +2542,7 @@ def _serve(argv):
         print("The %s LAN server stopped: %s" %
               (port_version, traceback.format_exc()))
         return 1
-    return 0
+    return int(return_code or 0)
 
 
 def main(argv=None):

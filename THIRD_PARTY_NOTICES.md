@@ -34,8 +34,7 @@ that vendored directory.
 
 ## Windows download runtimes and packager
 
-The downloadable Windows LAN server and the desktop launcher bundle
-CPython 3.11.9, distributed under
+The desktop launcher bundles CPython 3.11.9, distributed under
 the Python Software Foundation License Version 2 together with the licenses
 and notices for software incorporated into Python. The complete terms and
 source release are published by the Python Software Foundation at
@@ -43,16 +42,21 @@ source release are published by the Python Software Foundation at
 and
 [`python.org/downloads/release/python-3119`](https://www.python.org/downloads/release/python-3119/).
 
-The launcher window uses Tk, so the launcher executable also bundles Tcl/Tk 8.6
+The launcher window uses Tk, so its executable also bundles Tcl/Tk 8.6
 under the BSD-style Tcl/Tk license. The complete terms are published at
 [`tcl-lang.org/software/tcltk/license.html`](https://www.tcl-lang.org/software/tcltk/license.html).
 
-Both executables are produced with PyInstaller 6.21.0. Its bootloader and loader
+The launcher executable is produced with PyInstaller 6.21.0. Its bootloader and loader
 are GPL-2.0-or-later with the PyInstaller bootloader exception, its runtime
 hooks are under Apache License 2.0, and its isolated helper is additionally
 available under the MIT license. The complete version-pinned licensing terms
 are retained upstream in
 [`PyInstaller v6.21.0 COPYING.txt`](https://github.com/pyinstaller/pyinstaller/blob/v6.21.0/COPYING.txt).
+
+The x64 Windows LAN server is built from Rust. The Rust standard library is
+dual-licensed under Apache License 2.0 and MIT; its license texts are published
+with the Rust source distribution. The server's Rust crate dependencies and
+their locked versions are listed in `0.9.22/rust_server/Cargo.lock`.
 
 ## Microsoft Sysinternals ProcDump
 

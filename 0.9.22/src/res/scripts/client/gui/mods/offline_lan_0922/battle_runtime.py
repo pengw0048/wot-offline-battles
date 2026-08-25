@@ -49,7 +49,7 @@ from gui.mods.offline_lan_0922 import (
     loadout as loadout_law, prebaked_destructibles, prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision,
-    vehicle_blacklist, vehicle_configuration, vehicle_physics,
+    vehicle_configuration, vehicle_physics,
     world_collision)
 
 
@@ -1084,6 +1084,15 @@ class _LANInputSender(object):
             self.owner, 'local_ram_contacts', None)
         ram_contacts = (ram_contacts_getter()
                         if callable(ram_contacts_getter) else None)
+        player_ram_contacts_getter = getattr(
+            self.owner, 'local_player_ram_contacts', None)
+        player_ram_contacts = (
+            player_ram_contacts_getter()
+            if callable(player_ram_contacts_getter) else None)
+        ram_velocity_getter = getattr(
+            self.owner, 'local_ram_velocity', None)
+        ram_velocity = (ram_velocity_getter()
+                        if callable(ram_velocity_getter) else None)
         destructible_contacts_getter = getattr(
             self.owner, 'local_destructible_contacts', None)
         destructible_contacts = (
@@ -1094,8 +1103,16 @@ class _LANInputSender(object):
             'pitch': getattr(self.owner, '_local_pitch', 0.0),
             'roll': getattr(self.owner, '_local_roll', 0.0),
             'ram_contacts': ram_contacts,
+            'player_ram_contacts': player_ram_contacts,
             'destructible_contacts': destructible_contacts,
         }
+        if isinstance(ram_velocity, (list, tuple)) and len(
+                ram_velocity) >= 3:
+            keyword_args.update({
+                'ram_vx': ram_velocity[0],
+                'ram_vy': ram_velocity[1],
+                'ram_vz': ram_velocity[2],
+            })
         up_cosine = getattr(self.owner, '_local_surface_up_cosine', None)
         if up_cosine is None:
             up_cosine = math.cos(keyword_args['pitch']) * math.cos(
@@ -1146,21 +1163,13 @@ class _LANInputSender(object):
             if callable(enqueued):
                 enqueued()
             enqueued = getattr(
+                self.owner, '_player_ram_contacts_enqueued', None)
+            if player_ram_contacts and callable(enqueued):
+                enqueued()
+            enqueued = getattr(
                 self.owner, '_destructible_contacts_enqueued', None)
             if destructible_contacts and callable(enqueued):
                 enqueued()
-            report_getter = getattr(
-                self.owner, 'local_damage_report', None)
-            report = (report_getter()
-                      if callable(report_getter) else None)
-            repair_sender = getattr(
-                self.owner.client, 'send_track_repair', None)
-            if (isinstance(report, dict) and report.get('tracks') and
-                    callable(repair_sender)):
-                repair_sender(
-                    report['tracks'],
-                    report.get('critical_base_revision'),
-                    report.get('critical_seq'))
         return result
 
 
@@ -1257,10 +1266,17 @@ class BattleRuntime(object):
         self._local_ram_receipts = collections.OrderedDict()
         self._local_ram_admitted_seq = 0
         self._native_ram_contact_hook = None
-        self._native_ram_contact_proofs = collections.OrderedDict()
-        self._native_ram_contact_failures = set()
-        self._native_ram_event_seq = 0
+        self._local_ram_pending_contacts = {}
+        self._local_ram_receipt_sources = {}
+        self._local_ram_result_outcomes = {}
+        self._local_ram_source_epochs = {}
+        self._local_ram_contact_presence = frozenset()
         self._local_ram_episode_contacts = frozenset()
+        self._local_player_ram_seq = 0
+        self._local_player_ram_receipts = collections.OrderedDict()
+        self._local_player_ram_admitted_seq = 0
+        self._local_player_ram_resolved_seq = 0
+        self._local_player_ram_contact_presence = frozenset()
         self._local_ram_profile_cache = None
         self._remote_ram_profile_cache = {}
         self._local_destructible_contact_seq = 0
@@ -1322,6 +1338,8 @@ class BattleRuntime(object):
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
         self._local_fire_intent = None
+        self._ammo_intent_result_seq = 0
+        self._ammo_intent_result_identity = None
         self._ammo_signature = None
         self._targeting_signature = None
         self._reload_event = None
@@ -1361,6 +1379,7 @@ class BattleRuntime(object):
         self._spawn_cache = {}
         self._rules_state = {'bases': {}}
         self._ready_sent = False
+        self._destructible_map_donated = False
         self._destructibles = None
         self._local_damage_report = None
         self._local_critical_base_revision = 0
@@ -1517,7 +1536,17 @@ class BattleRuntime(object):
         self._local_ram_receipt = None
         self._local_ram_receipts = collections.OrderedDict()
         self._local_ram_admitted_seq = 0
+        self._local_ram_pending_contacts = {}
+        self._local_ram_receipt_sources = {}
+        self._local_ram_result_outcomes = {}
+        self._local_ram_source_epochs = {}
+        self._local_ram_contact_presence = frozenset()
         self._local_ram_episode_contacts = frozenset()
+        self._local_player_ram_seq = 0
+        self._local_player_ram_receipts = collections.OrderedDict()
+        self._local_player_ram_admitted_seq = 0
+        self._local_player_ram_resolved_seq = 0
+        self._local_player_ram_contact_presence = frozenset()
         self._local_ram_profile_cache = None
         self._remote_ram_profile_cache = {}
         self._local_destructible_contact_seq = 0
@@ -1579,6 +1608,8 @@ class BattleRuntime(object):
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
         self._local_fire_intent = None
+        self._ammo_intent_result_seq = 0
+        self._ammo_intent_result_identity = None
         self._ammo_signature = None
         self._targeting_signature = None
         self._reload_event = None
@@ -1616,6 +1647,7 @@ class BattleRuntime(object):
         self._spawn_cache = {}
         self._rules_state = {'bases': {}}
         self._ready_sent = False
+        self._destructible_map_donated = False
         self._lobby_retire_started = False
         self._local_damage_report = None
         self._local_critical_base_revision = 0
@@ -2827,6 +2859,17 @@ class BattleRuntime(object):
                                 'kind': 'bot', 'id': state['id'],
                                 'state': state})
                 self._send_bot_message(outgoing)
+            if self._worker_mode and not self._bots.is_authority():
+                # Rust owns bot simulation, but its native oracle still needs
+                # one client-side compound for every authoritative bot. Build
+                # those presentations from the server's frozen manifest; do
+                # not start the legacy Python BotRuntime authority to get it.
+                for state in self._native_oracle_server_bot_states():
+                    self._queue_bot_create({
+                        'type': 'create',
+                        'entity': 'bot:%s' % state['id'],
+                        'kind': 'bot', 'id': state['id'],
+                        'state': state})
             if self._last_snapshot is not None:
                 self._bots.apply_snapshot(self._last_snapshot)
                 self._remember_ram_bot_snapshot(self._last_snapshot)
@@ -3565,61 +3608,6 @@ class BattleRuntime(object):
             return True
         return False
 
-    def _queue_local_track_repair(self, critical):
-        """Queue only monotonic repair facts for a canonically damaged track."""
-        if (not isinstance(critical, dict) or
-                self._local_critical_base_revision <= 0):
-            return None
-        repaired = set()
-        for event in critical.get('events') or ():
-            if (isinstance(event, dict) and
-                    event.get('kind') == 'device' and
-                    event.get('name') in (
-                        'leftTrackHealth', 'rightTrackHealth') and
-                    event.get('old_state') == 'destroyed' and
-                    event.get('state') == 'critical' and
-                    event.get('cause') == 'repair'):
-                repaired.add(event.get('name'))
-        destroyed = set(critical.get('destroyed') or ())
-        rows = []
-        for raw in critical.get('devices') or ():
-            if not isinstance(raw, dict):
-                continue
-            name = raw.get('name')
-            if (name not in ('leftTrackHealth', 'rightTrackHealth') or
-                    (name not in destroyed and name not in repaired)):
-                continue
-            state = raw.get('state')
-            if state not in ('destroyed', 'critical'):
-                continue
-            try:
-                hp = max(0.0, float(raw.get('hp')))
-                maximum = max(1.0, float(raw.get('max_hp')))
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if state == 'destroyed' and hp <= 0.001:
-                continue
-            rows.append({
-                'name': name,
-                'hp': round(min(hp, maximum), 3),
-                'max_hp': round(maximum, 3),
-                'state': state,
-            })
-        rows.sort(key=lambda row: row['name'])
-        if not rows:
-            return None
-        report = dict(self._local_damage_report or {})
-        if rows != report.get('tracks'):
-            self._local_critical_next_seq += 1
-        report = {
-            'tracks': rows,
-            'critical_base_revision': self._local_critical_base_revision,
-            'critical_seq': self._local_critical_next_seq,
-        }
-        self._local_damage_report = report
-        self._local_critical_owned = True
-        return report
-
     def _queue_local_damage_report(self, critical=None, reason=None,
                                    display_health=None,
                                    attribute_attacker=True):
@@ -3658,6 +3646,26 @@ class BattleRuntime(object):
         raise RuntimeError(
             '#1513 vehicle %r has no loadable substitute: %s' %
             (vehicle_name, failure))
+
+    def _resolve_canonical_bot_descriptor(self, vehicle_name):
+        """Prepare exactly the Rust-manifest vehicle without substitution."""
+        cached = self._descriptor_cache.get(vehicle_name)
+        if cached is not None:
+            return cached
+        if self._remote_factory is None:
+            raise RuntimeError(
+                '#1513 vehicle descriptor geometry owner is unavailable')
+        descriptor = self._runtime.vehicles.VehicleDescr(
+            typeName=vehicle_name)
+        actual = str(getattr(descriptor.type, 'name', '') or '')
+        if actual != vehicle_name:
+            raise RuntimeError(
+                'canonical bot vehicle descriptor type mismatch')
+        prepared = self._remote_factory.prepare_descriptor(descriptor)
+        self._descriptor_cache[vehicle_name] = prepared
+        if vehicle_name not in self._prepared_vehicle_names:
+            self._prepared_vehicle_names.append(vehicle_name)
+        return prepared
 
     def _resolve_player_descriptor(self, state):
         """Prepare the exact mounted human descriptor donated at join time."""
@@ -3746,213 +3754,89 @@ class BattleRuntime(object):
             (int(raw.get('team', 1)), int(raw.get('slot', 0))),
             self._config['vehicle'])
 
-    @staticmethod
-    def _vehicle_excluded(entry):
-        name = _field(entry, 'name')
-        if vehicle_blacklist.is_unusable(name):
-            return True
-        return not vehicle_configuration.is_standard_battle_vehicle(entry)
-
-    @staticmethod
-    def _vehicle_class_order(entry):
-        tags = _field(entry, 'tags', ()) or ()
-        for tag, order in (('heavyTank', 0), ('mediumTank', 1),
-                           ('AT-SPG', 2), ('lightTank', 3), ('SPG', 4)):
-            if tag in tags:
-                return order
-        return 1
-
-    @staticmethod
-    def _vehicle_profile(entry):
-        """Convert a #1513 vehicle item or descriptor type to AI data."""
-        return {
-            'name': str(_field(entry, 'name', '')),
-            'level': int(_field(entry, 'level', 1) or 1),
-            'tags': _field(entry, 'tags', ()) or (),
-        }
-
     def _prepare_bot_vehicle_assignments(self, player_descriptor):
-        """Build the mature mirrored 0.8.2 line-up afresh per battle.
+        """Adopt the one canonical lineup already planned by Rust.
 
-        There is deliberately no process-wide vehicle pool.  The selected
-        battle tiers and role template are shared by both teams, humans remove
-        their matching slots, and bots fill the remainder from the complete
-        eligible #1513 vehicle catalog.  Every process derives the same local
-        random stream from the server roster; otherwise the hidden worker and
-        visible client pre-load different tanks before the canonical manifest
-        arrives and the real line-up is loaded again during the countdown.
+        The client is a native-resource consumer here.  It validates the
+        roster/manifest fence and resolves only the selected descriptors; it
+        must not scan the retail catalog or run a second matchmaking planner
+        on the render thread.
         """
         try:
-            planning_descriptor = player_descriptor
-            server_players = []
-            for raw in self._start_message.get('players') or ():
-                if not isinstance(raw, dict):
-                    continue
-                try:
-                    player_id = int(raw.get('id'))
-                    if player_id <= 0:
-                        continue
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                server_players.append((player_id, raw))
-            server_players.sort(key=lambda value: value[0])
-            if server_players:
-                # The off-map worker Avatar is only an engine loading carrier.
-                # Visible LAN clients must use this same canonical anchor too;
-                # anchoring each process to its own selected tank gives every
-                # client a different speculative roster in a mixed-tier room.
-                anchor_id, anchor = server_players[0]
-                vehicle_name = anchor.get('vehicle')
-                if vehicle_name and not (
-                        not self._worker_mode and
-                        anchor_id == getattr(
-                            self.client, 'player_id', None)):
-                    planning_descriptor = self._resolve_descriptor(
-                        vehicle_name)
-            player_profile = self._vehicle_profile(
-                planning_descriptor.type)
-            tier = int(player_profile['level'])
-            tier_mode = bot_planner.normalize_bot_tier_mode(
-                self._start_message.get('bot_tier_mode'))
-            all_candidates = []
-            for nation in self._runtime.nations.AVAILABLE_NAMES:
-                nation_id = self._runtime.nations.INDICES[nation]
-                values = self._runtime.vehicles.g_list.getList(nation_id)
-                iterator = getattr(values, 'itervalues', None)
-                entries = iterator() if callable(iterator) else values.values()
-                for entry in entries:
-                    if not self._vehicle_excluded(entry):
-                        all_candidates.append(self._vehicle_profile(entry))
-            candidates = [
-                candidate for candidate in all_candidates
-                if bot_planner.vehicle_in_bot_tier_mode(
-                    tier, candidate['level'], tier_mode)
-            ]
-            if not candidates:
-                return False
-            candidates.sort(key=lambda value: (
-                int(value.get('level', 0)),
-                self._vehicle_class_order(value),
-                str(value.get('name', ''))))
-
-            seed_players = ';'.join(
-                '%d,%s,%s,%s' % (
-                    player_id, raw.get('team', ''), raw.get('slot', ''),
-                    raw.get('vehicle', ''))
-                for player_id, raw in server_players)
-            seed_bots = ';'.join(
-                '%s,%s,%s' % (
-                    raw.get('id', ''), raw.get('team', ''),
-                    raw.get('slot', ''))
-                for raw in sorted(
-                    (value for value in
-                     (self._start_message.get('bots') or ())
-                     if isinstance(value, dict)),
-                    key=lambda value: (
-                        int(value.get('team', 0)),
-                        int(value.get('slot', 0)),
-                        int(value.get('id', 0)))))
-            lineup_random = random.Random(bot_planner.stable_seed(
-                'battle-lineup-v1', self._start_message.get('round_id'),
-                self._start_message.get('map'), seed_players, seed_bots))
-
             roster = self._start_message.get('bots') or ()
-            bots_by_team = dict((team, sorted(
-                (raw for raw in roster if isinstance(raw, dict) and
-                 int(raw.get('team', 0)) == team),
-                key=lambda raw: int(raw.get('slot', 0))))
-                for team in (1, 2))
-            humans_by_team = {1: [], 2: []}
-            for raw in self._start_message.get('players') or ():
+            manifest = self._start_message.get('bot_manifest') or ()
+            if (not isinstance(roster, (list, tuple)) or
+                    not isinstance(manifest, (list, tuple)) or
+                    len(roster) != len(manifest) or len(roster) > 30):
+                return False
+            roster_by_id = {}
+            roster_slots = set()
+            for raw in roster:
                 if not isinstance(raw, dict):
-                    continue
-                if self._worker_mode:
-                    try:
-                        if int(raw.get('id')) <= 0:
-                            continue
-                    except (TypeError, ValueError, OverflowError):
-                        continue
-                team = int(raw.get('team', 0) or 0)
-                if team not in humans_by_team:
-                    continue
-                try:
-                    if (not self._worker_mode and raw.get('id') == getattr(
-                            self.client, 'player_id', None)):
-                        descriptor = player_descriptor
-                    else:
-                        descriptor = self._resolve_descriptor(
-                            raw.get('vehicle'))
-                    humans_by_team[team].append(
-                        self._vehicle_profile(descriptor.type))
-                except Exception:
-                    pass
-            if not humans_by_team[1] and not humans_by_team[2]:
-                team = int(getattr(self.client, 'team', 1) or 1)
-                humans_by_team[1 if team != 2 else 2].append(player_profile)
-
-            available_tiers = sorted(set(
-                int(candidate['level']) for candidate in candidates))
-            match_tiers = list(bot_planner.bot_match_tiers(
-                tier, tier_mode, lineup_random.random(),
-                lineup_random.random(), available_tiers))
-            for profiles in humans_by_team.values():
-                for profile in profiles:
-                    if profile['level'] not in match_tiers:
-                        match_tiers.append(profile['level'])
-                    if not any(
-                            candidate['level'] == profile['level'] and
-                            bot_planner.vehicle_match_class(candidate) ==
-                            bot_planner.vehicle_match_class(profile)
-                            for candidate in candidates):
-                        candidates.append(profile)
-            match_tiers = tuple(sorted(set(match_tiers)))
-            team_size = max(
-                len(humans_by_team[team]) + len(bots_by_team[team])
-                for team in (1, 2))
-            requirements = bot_planner.shared_human_requirements(
-                humans_by_team)
-            template = bot_planner.build_match_template(
-                candidates, team_size, player_profile, match_tiers,
-                lineup_random, requirements)
-
-            assignments = {}
-            for team in (1, 2):
-                team_bots = bots_by_team[team]
-                picked = bot_planner.remaining_match_template(
-                    template, humans_by_team[team])
-                if len(picked) < len(team_bots):
-                    picked = bot_planner.select_bot_lineup(
-                        picked or candidates, len(team_bots), 1, candidates)
-                picked = list(picked[:len(team_bots)])
-                lineup_random.shuffle(picked)
-                picked.sort(key=self._vehicle_class_order)
-                for raw, entry in zip(team_bots, picked):
-                    assignments[(team, int(raw.get('slot', 0)))] = \
-                        entry['name']
-            allowed_names = set(
-                candidate['name'] for candidate in all_candidates)
-            for raw in self._start_message.get('bot_lineup') or ():
-                if not isinstance(raw, dict):
-                    self._bot_vehicle_assignments = {}
                     return False
-                try:
-                    team = int(raw.get('team'))
-                    slot = int(raw.get('slot'))
-                except (TypeError, ValueError, OverflowError):
-                    self._bot_vehicle_assignments = {}
+                bot_id = raw.get('id')
+                team = raw.get('team')
+                slot = raw.get('slot')
+                if (isinstance(bot_id, bool) or
+                        not isinstance(bot_id, _INTEGER_TYPES) or
+                        bot_id <= 0 or bot_id in roster_by_id or
+                        isinstance(team, bool) or
+                        not isinstance(team, _INTEGER_TYPES) or
+                        team not in (1, 2) or isinstance(slot, bool) or
+                        not isinstance(slot, _INTEGER_TYPES) or
+                        not 0 <= slot < 15 or
+                        (team, slot) in roster_slots):
+                    return False
+                roster_by_id[int(bot_id)] = (int(team), int(slot))
+                roster_slots.add((int(team), int(slot)))
+            assignments = {}
+            seen_ids = set()
+            for raw in manifest:
+                if not isinstance(raw, dict):
+                    return False
+                bot_id = raw.get('id')
+                if (isinstance(bot_id, bool) or
+                        not isinstance(bot_id, _INTEGER_TYPES) or
+                        int(bot_id) not in roster_by_id or
+                        int(bot_id) in seen_ids):
+                    return False
+                team_slot = roster_by_id[int(bot_id)]
+                if (raw.get('team') != team_slot[0] or
+                        raw.get('slot') != team_slot[1]):
                     return False
                 vehicle = raw.get('vehicle')
-                if (team not in (1, 2) or not 0 <= slot < 15 or
-                        vehicle not in allowed_names):
-                    self._bot_vehicle_assignments = {}
+                if (not isinstance(vehicle, _STRING_TYPES) or
+                        not vehicle or len(vehicle) > 96):
                     return False
-                if (team, slot) in assignments:
-                    assignments[(team, slot)] = vehicle
+                assignments[team_slot] = vehicle
+                seen_ids.add(int(bot_id))
+            if seen_ids != set(roster_by_id):
+                return False
+            for raw in self._start_message.get('bot_lineup') or ():
+                if not isinstance(raw, dict):
+                    return False
+                team = raw.get('team')
+                slot = raw.get('slot')
+                vehicle = raw.get('vehicle')
+                if (isinstance(team, bool) or
+                        not isinstance(team, _INTEGER_TYPES) or
+                        team not in (1, 2) or isinstance(slot, bool) or
+                        not isinstance(slot, _INTEGER_TYPES) or
+                        not 0 <= slot < 15 or
+                        not isinstance(vehicle, _STRING_TYPES) or
+                        not vehicle or len(vehicle) > 96):
+                    return False
+                key = (int(team), int(slot))
+                if key in assignments and assignments[key] != vehicle:
+                    return False
+            for vehicle in sorted(set(assignments.values())):
+                self._resolve_canonical_bot_descriptor(vehicle)
             self._bot_vehicle_assignments = assignments
             return True
         except Exception:
-            # The local tank remains a valid descriptor fallback. The complete
-            # roster table itself is a #1513 retail API and is ABI-audited.
+            # A malformed or unloadable canonical manifest is a round-start
+            # failure. Falling back would let each native process load a
+            # different collision model for the same Rust bot identity.
             self._bot_vehicle_assignments = {}
             return False
 
@@ -3969,6 +3853,59 @@ class BattleRuntime(object):
         result = self._spawn_planner.pose(key[0], key[1])
         self._spawn_cache[key] = result
         return result
+
+    def _native_oracle_server_bot_states(self):
+        """Project Rust's complete bot manifest into native model states."""
+        roster = self._start_message.get('bots') or ()
+        manifest = self._start_message.get('bot_manifest') or ()
+        if not roster and not manifest:
+            return ()
+        if (not isinstance(roster, (list, tuple)) or
+                not isinstance(manifest, (list, tuple)) or
+                len(roster) != len(manifest) or len(roster) > 30):
+            raise RuntimeError('native oracle bot manifest is incomplete')
+        roster_by_id = {}
+        for raw in roster:
+            bot_id = raw.get('id') if isinstance(raw, dict) else None
+            if (isinstance(bot_id, bool) or
+                    not isinstance(bot_id, _INTEGER_TYPES) or bot_id <= 0 or
+                    bot_id in roster_by_id):
+                raise RuntimeError('native oracle bot roster is invalid')
+            roster_by_id[int(bot_id)] = raw
+        result = []
+        seen = set()
+        for raw in manifest:
+            if not isinstance(raw, dict):
+                raise RuntimeError('native oracle bot manifest is invalid')
+            bot_id = raw.get('id')
+            if (isinstance(bot_id, bool) or
+                    not isinstance(bot_id, _INTEGER_TYPES) or bot_id <= 0 or
+                    bot_id in seen or bot_id not in roster_by_id):
+                raise RuntimeError('native oracle bot manifest is invalid')
+            seen.add(bot_id)
+            roster_row = roster_by_id[bot_id]
+            if (raw.get('team') != roster_row.get('team') or
+                    raw.get('slot') != roster_row.get('slot')):
+                raise RuntimeError(
+                    'native oracle bot manifest does not match roster')
+            team = int(raw.get('team'))
+            slot = int(raw.get('slot'))
+            formation_position, formation_yaw = self._formation_pose(
+                team, slot)
+            position = formation_position
+            state = dict(raw)
+            state.update({
+                'id': int(bot_id),
+                'x': float(position[0]), 'y': float(position[1]),
+                'z': float(position[2]), 'yaw': float(formation_yaw),
+                'aim_yaw': 0.0, 'gun_pitch': 0.0, 'speed': 0.0,
+                'world_pose': True,
+                'alive': int(raw.get('health', 0) or 0) > 0,
+            })
+            result.append(state)
+        if seen != set(roster_by_id):
+            raise RuntimeError('native oracle bot manifest is incomplete')
+        return tuple(result)
 
     def _state_world_pose(self, state):
         if bool(state.get('world_pose', False)):
@@ -4548,7 +4485,16 @@ class BattleRuntime(object):
         return changed
 
     def _publish_player_environment(self, dt, now):
-        """Send native-world water observations from the hidden worker."""
+        """Keep the legacy hook presentation-only.
+
+        Rust requests frozen water and ground evidence through the native
+        oracle bridge.  The hidden client must never publish an environment
+        verdict or advance a second authority clock.
+        """
+        return False
+        # Retained below only as the historical wire parser while the current
+        # protocol transition is being rebased.  It is deliberately
+        # unreachable from both visible and hidden clients.
         if (not self._worker_mode or dt <= 0.0 or
                 self.client is None or
                 not self.client.is_bot_authority()):
@@ -6152,19 +6098,6 @@ class BattleRuntime(object):
                 critical_damage.stat_factor(entity, 'vision')))
         return True
 
-    def _roll_loader_intuition(self):
-        """Roll the finished ``loader_intuition`` perk for one shell swap.
-
-        The #1513 skill text stacks two loaders, so each finished perk rolls
-        its own ``INTUITION_CHANCE``.
-        """
-        chances = loadout_law.intuition_chances(
-            self._garage_loadout_snapshot()['crew'])
-        for unused_index in range(chances):
-            if random.random() < loadout_law.INTUITION_CHANCE:
-                return True
-        return False
-
     def _present_loader_intuition(self):
         """Play the stock intuition notification for an instant shell swap."""
         status_group = getattr(
@@ -6258,16 +6191,11 @@ class BattleRuntime(object):
             return self._activate_equipment(value)
         partial_clip = getattr(settings, 'RELOAD_PARTIAL_CLIP', None)
         if code == partial_clip:
-            if self._gun_state is None:
+            sender = getattr(self.client, 'send_ammo_intent', None)
+            if (self._gun_state is None or self._sender is None or
+                    not callable(sender) or not self._sender.send_current()):
                 return False
-            state = self._gun_state
-            pending_fire = self._local_fire_intent
-            if isinstance(pending_fire, dict):
-                if state.clip_size <= 1 or not state.shots:
-                    return False
-                pending_fire['deferred_partial_clip_reload'] = True
-                return True
-            return self._reload_partial_clip_now(state)
+            return bool(sender('reload_partial_clip'))
         current_shells = getattr(settings, 'CURRENT_SHELLS', None)
         next_shells = getattr(settings, 'NEXT_SHELLS', None)
         if code not in (current_shells, next_shells) or self._gun_state is None:
@@ -6277,37 +6205,13 @@ class BattleRuntime(object):
             shell = _field(shot, 'shell', {})
             if int(_field(shell, 'compactDescr', 0)) != int(value):
                 continue
-            previous_reload = state.reload_time
-            previous_duration = state.reload_duration
-            previous_selection = (
-                int(state.shot_index), state.pending_index)
-            if code == current_shells:
-                pending_fire = self._local_fire_intent
-                if isinstance(pending_fire, dict):
-                    # The physical round was frozen at the trigger edge. Keep
-                    # it loaded until that shot is accepted or rejected; the
-                    # requested shell can still be queued for the shot boundary.
-                    state.request_shell_index(index)
-                    pending_fire['deferred_current_shell_index'] = int(index)
-                    if previous_selection != (
-                            int(state.shot_index), state.pending_index):
-                        self._sender.send_current()
-                    return True
-                self._switch_current_shell(state, index)
-                return True
-            changed = state.request_shell_index(index)
-            if changed:
-                self._publish_loaded_shell_change(
-                    state, previous_reload, previous_duration)
-            elif previous_selection != (
-                    int(state.shot_index), state.pending_index):
-                # NEXT_SHELLS changes no loaded-round HUD state, but it is a
-                # real ordered player input. Donate it now so the hidden gun
-                # authority promotes the same shell at the canonical shot
-                # boundary instead of silently loading the old type again.
-                self._sender.send_current()
-            # The stock ammo panel already blinks a queued shell locally.
-            return True
+            sender = getattr(self.client, 'send_ammo_intent', None)
+            if (self._sender is None or not callable(sender) or
+                    not self._sender.send_current()):
+                return False
+            action = ('select_next' if code == next_shells
+                      else 'select_current')
+            return bool(sender(action, index))
         return False
 
     def on_snapshot(self, message):
@@ -6318,6 +6222,7 @@ class BattleRuntime(object):
             self._restore_local_equipment_snapshot(
                 self._last_snapshot, present=True)
             self._ack_local_ram_contacts(self._last_snapshot)
+            self._ack_local_player_ram_contacts(self._last_snapshot)
             self._ack_local_destructible_contacts(self._last_snapshot)
             self._observe_destructibles_disabled(self._last_snapshot)
             self._observe_projectile_message(self._last_snapshot)
@@ -6330,6 +6235,13 @@ class BattleRuntime(object):
             if 'destructibles' in self._last_snapshot:
                 self._apply_destructible_state(
                     self._last_snapshot.get('destructibles'))
+            if 'contacts' in self._last_snapshot:
+                self.on_bot_observation({
+                    'type': 'bot_observation',
+                    'round_id': self._last_snapshot.get('round_id'),
+                    'contacts': self._last_snapshot.get('contacts') or (),
+                })
+            self._apply_local_ammo_snapshot(self._last_snapshot)
             if self._bots is not None:
                 if 'bot_authority_id' in self._last_snapshot:
                     self._reconcile_bot_authority(
@@ -6340,6 +6252,43 @@ class BattleRuntime(object):
                 self._sync.snapshot(message)
         except Exception as error:
             self._fail(error)
+
+    def _apply_local_ammo_snapshot(self, snapshot):
+        """Correct presentation inventory from the Rust player ledger."""
+        state = self._gun_state
+        client = self.client
+        if state is None or client is None or not isinstance(snapshot, dict):
+            return False
+        local = next((
+            player for player in (snapshot.get('players') or ())
+            if isinstance(player, dict) and
+            player.get('id') == client.player_id), None)
+        if local is None:
+            return False
+        remaining = local.get('ammo_remaining')
+        if (not isinstance(remaining, list) or
+                len(remaining) != len(state.shots)):
+            return False
+        try:
+            remaining = [max(0, int(count)) for count in remaining]
+            loaded = int(local.get('shell_index'))
+            next_shell = int(local.get('next_shell_index'))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (not 0 <= loaded < len(remaining) or
+                not 0 <= next_shell < len(remaining)):
+            return False
+        changed = (state.ammo != remaining or
+                   state.shot_index != loaded or
+                   state.pending_index != (
+                       next_shell if local.get('ammo_reload_pending') and
+                       next_shell != loaded else None))
+        state.ammo = remaining
+        state.shot_index = loaded
+        state.pending_index = (
+            next_shell if local.get('ammo_reload_pending') and
+            next_shell != loaded else None)
+        return changed
 
     def _remember_ram_bot_snapshot(self, snapshot):
         """Retain the canonical bot bodies referenced by player contacts."""
@@ -6558,11 +6507,18 @@ class BattleRuntime(object):
             return False
         self._observe_projectile_message(message)
         player_id = message.get('bot_authority_id')
-        self._start_message['bot_authority_id'] = player_id
+        try:
+            authority_id = int(player_id)
+        except (TypeError, ValueError, OverflowError):
+            raise RuntimeError('Rust bot authority identity is invalid')
+        if isinstance(player_id, bool) or authority_id != 0:
+            raise RuntimeError(
+                'LAN roster attempted to elect a client bot authority')
+        self._start_message['bot_authority_id'] = authority_id
         self._observe_destructibles_disabled(message)
         if self._bots is None:
             return True
-        return self._reconcile_bot_authority(player_id)
+        return self._reconcile_bot_authority(authority_id)
 
     def on_bot_observation(self, message):
         """Consume one server-admitted observation without relaying it."""
@@ -6584,8 +6540,15 @@ class BattleRuntime(object):
 
     def _reconcile_bot_authority(self, player_id):
         """Recover authority changes even if the one-shot event was missed."""
+        try:
+            authority_id = int(player_id)
+        except (TypeError, ValueError, OverflowError):
+            raise RuntimeError('Rust bot authority identity is invalid')
+        if isinstance(player_id, bool) or authority_id != 0:
+            raise RuntimeError(
+                'LAN battle attempted to elect a client bot authority')
         if (self._bots is None or
-                getattr(self._bots, 'authority_id', None) == player_id):
+                getattr(self._bots, 'authority_id', None) == authority_id):
             return False
         # Arc jobs and completed launch receipts are native-world proofs made
         # by one authority.  They must never survive an ownership handoff,
@@ -6596,7 +6559,17 @@ class BattleRuntime(object):
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
         start = dict(self._start_message or {})
-        start['bot_authority_id'] = player_id
+        start['bot_authority_id'] = authority_id
+        outgoing = tuple(self._bots.battle_start(start))
+        if outgoing or self._bots.is_authority():
+            raise RuntimeError(
+                'native oracle attempted to start Python bot authority')
+        self._set_bot_presentation_interpolation(authority_id)
+        return True
+
+        # The former client-authority takeover path remains below only as
+        # historical context during the protocol rebase.  The strict Rust
+        # authority fence above makes it unreachable.
         if (self._worker_mode and
                 lan_protocol.HUMAN_RAM_TIMELINE_CAPABILITY in
                 getattr(self.client, 'capabilities', ()) and
@@ -6648,7 +6621,10 @@ class BattleRuntime(object):
         return True
 
     def on_fire_intent(self, message):
-        """Queue one server-admitted trigger for worker-side resolution."""
+        """Reject the retired worker-side player-fire authority path."""
+        return False
+        # Rust owns the input-bound gun ledger and projectile launch.  The
+        # parser below is intentionally unreachable during the transition.
         if not self._worker_mode or self.state != 'running':
             return False
         required = {
@@ -6729,7 +6705,9 @@ class BattleRuntime(object):
         return True
 
     def on_player_destructible_contact(self, message):
-        """Resolve one server-admitted player hull contact immediately."""
+        """Reject the retired worker-side hull-contact authority path."""
+        return False
+        # Rust queries frozen hull evidence from native_oracle_bridge instead.
         if not self._worker_mode or self.state != 'running':
             return False
         required = {
@@ -6849,6 +6827,63 @@ class BattleRuntime(object):
             self._switch_current_shell(self._gun_state, deferred_shell)
         if deferred_partial_reload and self._gun_state is not None:
             self._reload_partial_clip_now(self._gun_state)
+        return True
+
+    def on_ammo_intent_result(self, message):
+        """Present one ordered Rust-owned visible-player ammo outcome."""
+        if self._worker_mode or not isinstance(message, dict):
+            return False
+        required = {
+            'type', 'round_id', 'authority_epoch', 'player_id',
+            'intent_seq', 'input_seq', 'outcome'}
+        transport = {
+            '_client_received_time', '_client_dispatch_delay'}
+        outcome = message.get('outcome')
+        fields = set(message) - transport
+        if outcome == 'unchanged':
+            expected = required
+            shell_index = None
+        elif outcome in ('queued', 'reloading', 'intuition_loaded'):
+            expected = required | {'shell_index'}
+            shell_index = message.get('shell_index')
+        else:
+            return False
+        values = (
+            message.get('round_id'), message.get('authority_epoch'),
+            message.get('player_id'), message.get('intent_seq'),
+            message.get('input_seq'))
+        if (fields != expected or message.get('type') !=
+                'ammo_intent_result' or
+                any(isinstance(value, bool) or
+                    not isinstance(value, _INTEGER_TYPES)
+                    for value in values) or
+                (shell_index is not None and
+                 (isinstance(shell_index, bool) or
+                  not isinstance(shell_index, _INTEGER_TYPES)))):
+            return False
+        round_id, authority_epoch, player_id, sequence, input_seq = (
+            int(value) for value in values)
+        if (round_id != (self._start_message or {}).get('round_id') or
+                self.client is None or
+                player_id != getattr(self.client, 'player_id', None) or
+                authority_epoch < 0 or sequence <= 0 or input_seq <= 0 or
+                (shell_index is not None and not 0 <= shell_index <= 9)):
+            return False
+        client_epoch = getattr(self.client, 'authority_epoch', None)
+        if (client_epoch is not None and
+                authority_epoch != client_epoch):
+            return False
+        identity = (
+            round_id, authority_epoch, player_id, sequence, input_seq,
+            outcome, shell_index)
+        if sequence == self._ammo_intent_result_seq:
+            return identity == self._ammo_intent_result_identity
+        if sequence != self._ammo_intent_result_seq + 1:
+            return False
+        self._ammo_intent_result_seq = sequence
+        self._ammo_intent_result_identity = identity
+        if outcome == 'intuition_loaded':
+            self._present_loader_intuition()
         return True
 
     def _cancel_native_shot_wait(self):
@@ -7483,6 +7518,13 @@ class BattleRuntime(object):
         return False
 
     def _report_destructible(self, event):
+        oracle_backed = getattr(
+            self.client, 'has_oracle_backed_server', None)
+        if callable(oracle_backed) and oracle_backed():
+            # The Rust authority accepts only evidence requested through its
+            # fenced native-oracle pipeline. A visible client's local contact
+            # may update presentation, but it is never a gameplay verdict.
+            return True
         context = self._projectile_destructible_context
         if context is not None:
             projectile_id = context
@@ -8562,48 +8604,8 @@ class BattleRuntime(object):
             return False
         return True
 
-    @staticmethod
-    def _tick_local_track_repair(entity, dt, loadout):
-        """Advance only the existing owner-CAS track repair checkpoint."""
-        before = critical_damage._state(entity)
-        devices = getattr(entity, 'devices_hp', None) or {}
-        destroyed = set(getattr(entity, '_destroyed_devices', None) or ())
-        critical = set(getattr(entity, '_critical_devices', None) or ())
-        changed = False
-        for name in ('leftTrackHealth', 'rightTrackHealth'):
-            if name not in destroyed or name not in devices:
-                continue
-            cap = critical_damage._device_damage.device_regen_hp(
-                entity.typeDescriptor, name)
-            if cap is None or devices[name] >= cap:
-                continue
-            repaired = critical_damage._device_damage.repair_step_hp(
-                devices[name], name, entity.typeDescriptor, dt,
-                has_big_repairkit=bool(loadout['has_big_kit']),
-                repair_factor=loadout['repair_factor'])
-            if repaired <= devices[name]:
-                continue
-            devices[name] = repaired
-            changed = True
-            if repaired >= cap:
-                destroyed.discard(name)
-                critical.add(name)
-        if not changed:
-            return None
-        entity.devices_hp = devices
-        entity._destroyed_devices = destroyed
-        entity._critical_devices = critical
-        critical_damage._refresh_mobility_flags(entity)
-        after = critical_damage._state(entity)
-        # The owner-CAS echo is suppressed, so this local edge is the only
-        # chance to restore the stock crashed-track model.
-        critical_damage._sync_crashed_track(entity, before, after)
-        return critical_damage._payload(
-            before, after,
-            entity.typeDescriptor, 'repair')
-
     def _tick_critical_states(self, dt):
-        """Present canonical state while retaining owner-CAS track repair."""
+        """Present the Rust-owned critical and equipment state."""
         if dt <= 0.0:
             return
         record = self._records.get('player:%s' % self.client.player_id)
@@ -8617,24 +8619,6 @@ class BattleRuntime(object):
         if not hasattr(entity, 'maxHealth'):
             entity.maxHealth = int(entity.typeDescriptor.maxHealth)
         now = self._clock()
-        loadout = self._local_loadout(entity.typeDescriptor)
-        payload = self._tick_local_track_repair(
-            entity, dt, loadout)
-        if payload is not None:
-            record['critical_state'] = self._critical_state(payload)
-            state = dict(record.get('state') or {})
-            state['critical'] = record['critical_state']
-            record['state'] = state
-            # Match the mature 0.8.2 lifecycle: close the repair timer before
-            # publishing the repaired-device transition.
-            self._present_repair_progress(entity)
-            self._present_critical(
-                record, payload.get('events'), record['engine_id'])
-            if (payload.get('events') or
-                    now >= self._next_critical_report_time):
-                self._queue_local_track_repair(payload)
-                self._next_critical_report_time = (
-                    now + CRITICAL_REPAIR_NETWORK_SECONDS)
         self._tick_equipment_cooldowns(now)
         self._present_repair_progress(entity)
 
@@ -8759,6 +8743,7 @@ class BattleRuntime(object):
         return changed
 
     def _accept_player_fire_commit(self, event, record):
+        """Commit presentation ammo only after Rust admits the frozen input."""
         if event.get('shooter_kind') != 'player':
             return False
         try:
@@ -8770,37 +8755,25 @@ class BattleRuntime(object):
         except (TypeError, ValueError, OverflowError):
             raise RuntimeError(
                 'canonical player shot has no fire-intent identity')
-        if self._worker_mode:
-            pending = self._player_fire_launch_pending.get(player_id)
-            gun = self._player_authority_guns.get(player_id)
-            if (not isinstance(pending, dict) or gun is None or
-                    intent_seq != int(pending.get('intent_seq', 0)) or
-                    input_seq != int(pending.get('input_seq', 0)) or
-                    shot_seq != int(pending.get('shot_seq', 0))):
-                raise RuntimeError(
-                    'canonical player shot does not acknowledge worker intent')
-            entity = self._server_entity(record.get('engine_id'))
-            reload_factor = (1.0 if entity is None else
-                             critical_damage.stat_factor(entity, 'reload'))
-            if (shell_index != gun.shot_index or
-                    not gun.commit_fire(reload_factor)):
-                raise RuntimeError(
-                    'canonical player shot violates worker gun state')
-            self._player_fire_launch_pending.pop(player_id, None)
-            return True
-        if not record.get('local'):
+        if (player_id <= 0 or intent_seq <= 0 or input_seq <= 0 or
+                shot_seq <= 0 or shell_index < 0 or shell_index > 9):
+            raise RuntimeError(
+                'canonical player shot has invalid fire-intent identity')
+        if self._worker_mode or not record.get('local'):
             return False
         pending = self._local_fire_intent
-        if (not isinstance(pending, dict) or
+        if (player_id != int(self.client.player_id) or
+                not isinstance(pending, dict) or
                 intent_seq != int(pending.get('intent_seq', 0)) or
                 input_seq != int(pending.get('input_seq', 0))):
             raise RuntimeError(
                 'canonical local shot does not acknowledge its trigger')
         gun = self._gun_state
         if gun is not None:
-            if shell_index != gun.shot_index or not gun.commit_fire(
-                    critical_damage.stat_factor(
-                        self._server_entity(record['engine_id']), 'reload')):
+            entity = self._server_entity(record['engine_id'])
+            if (entity is None or shell_index != gun.shot_index or
+                    not gun.commit_fire(
+                        critical_damage.stat_factor(entity, 'reload'))):
                 raise RuntimeError(
                     'canonical local shot violates presented gun state')
             if pending.get('deferred_partial_clip_reload'):
@@ -8808,8 +8781,6 @@ class BattleRuntime(object):
             self._publish_ammo_state(gun, force=True)
             self._publish_reload_event(
                 gun.reload_time, gun.reload_duration, force=True)
-            if self._sender is not None:
-                self._sender.send_current()
         self._local_fire_intent = None
         return True
 
@@ -10248,6 +10219,31 @@ class BattleRuntime(object):
             target, descriptor, matrix, position, appearance,
             self._runtime.math)
 
+    def native_explosion_evidence_at_pose(self, target, pose, start, end):
+        """Return frozen native geometry facts without a gameplay verdict."""
+        position = pose.get('position') if isinstance(pose, dict) else None
+        if not isinstance(position, dict):
+            return None
+        frozen_pose = dict(pose)
+        frozen_pose.update({
+            'x': position.get('x'),
+            'y': position.get('y'),
+            'z': position.get('z'),
+        })
+        descriptor = self._projectile_descriptor_at_pose(
+            target, frozen_pose)
+        if (descriptor is None or
+                self._projectile_pitch_hull_aiming(descriptor)):
+            return None
+        frozen_target = self._projectile_frozen_target(target, frozen_pose)
+        if frozen_target is None:
+            return None
+        evidence = tuple(_collide_vehicle_evidence_at_matrix(
+            frozen_target, frozen_target.matrix, start, end,
+            self._runtime.math) or ())
+        return (frozen_target, descriptor,
+                tuple(item.collision for item in evidence))
+
     def _projectile_vehicle_collisions(self, record, target, start, end,
                                        pose=None):
         """Return retail ABI collisions plus private world-normal evidence."""
@@ -11386,6 +11382,130 @@ class BattleRuntime(object):
                 return False
         return bool(self._records)
 
+    def native_oracle_entity_rows(self):
+        """Return the complete ready human/bot to native-entity mapping."""
+        if not self.authority_worker_ready_for_draw_off():
+            raise RuntimeError('native oracle entities are not ready')
+        expected = set()
+        start = self._start_message or {}
+        for kind, values in (
+                ('human', start.get('players')),
+                ('bot', start.get('bots'))):
+            if not isinstance(values, (list, tuple)):
+                raise RuntimeError(
+                    'native oracle logical manifest is unavailable')
+            for value in values:
+                logical_id = value.get('id') \
+                    if isinstance(value, dict) else None
+                if (kind == 'human' and logical_id ==
+                        getattr(self.client, 'player_id', None) and
+                        isinstance(logical_id, _INTEGER_TYPES) and
+                        not isinstance(logical_id, bool) and
+                        logical_id <= 0):
+                    continue
+                if (isinstance(logical_id, bool) or
+                        not isinstance(logical_id, _INTEGER_TYPES) or
+                        logical_id <= 0 or
+                        (kind, int(logical_id)) in expected):
+                    raise RuntimeError(
+                        'native oracle logical manifest is invalid')
+                expected.add((kind, int(logical_id)))
+        if not expected:
+            raise RuntimeError('native oracle logical manifest is empty')
+        result = []
+        logical_keys = set()
+        native_ids = set()
+        for key in sorted(self._records):
+            record = self._records[key]
+            if record.get('local') or record.get('tombstone'):
+                continue
+            kind = record.get('kind')
+            wire_kind = 'human' if kind == 'player' else kind
+            logical_id = record.get('network_id')
+            entity_id = record.get('engine_id')
+            if (wire_kind not in ('human', 'bot') or
+                    isinstance(logical_id, bool) or
+                    not isinstance(logical_id, _INTEGER_TYPES) or
+                    logical_id <= 0 or isinstance(entity_id, bool) or
+                    not isinstance(entity_id, _INTEGER_TYPES) or
+                    entity_id <= 0 or not record.get('ready')):
+                raise RuntimeError('native oracle entity row is invalid')
+            logical_key = (wire_kind, int(logical_id))
+            entity_id = int(entity_id)
+            if logical_key in logical_keys or entity_id in native_ids:
+                raise RuntimeError('native oracle entity mapping is ambiguous')
+            entity = self._server_entity(entity_id)
+            if entity is None:
+                raise RuntimeError('native oracle entity is unavailable')
+            logical_keys.add(logical_key)
+            native_ids.add(entity_id)
+            result.append((wire_kind, int(logical_id), entity_id, entity))
+        if logical_keys != expected:
+            raise RuntimeError('native oracle entity mapping is incomplete')
+        return tuple(result)
+
+    def native_oracle_space_anchor(self):
+        """Return the ready local carrier that anchors this native space."""
+        if not self.authority_worker_ready_for_draw_off():
+            raise RuntimeError('native oracle space anchor is not ready')
+        records = [record for record in self._records.values()
+                   if (record.get('local') and
+                       not record.get('tombstone') and
+                       record.get('ready'))]
+        if len(records) != 1:
+            raise RuntimeError('native oracle space anchor is ambiguous')
+        entity_id = records[0].get('engine_id')
+        if (isinstance(entity_id, bool) or
+                not isinstance(entity_id, _INTEGER_TYPES) or entity_id <= 0):
+            raise RuntimeError('native oracle space anchor is invalid')
+        entity = self._server_entity(int(entity_id))
+        if entity is None:
+            raise RuntimeError('native oracle space anchor is unavailable')
+        return int(entity_id), entity
+
+    def native_oracle_world_proof(self):
+        """Prove the oracle space and complete destructible installation."""
+        if not self.authority_worker_ready_for_draw_off():
+            raise RuntimeError('native oracle world is not ready')
+        provider = getattr(
+            self._destructibles, 'installed_catalog_proof_1513', None)
+        if not callable(provider):
+            raise RuntimeError(
+                'native destructible installation proof is unavailable')
+        space_id = getattr(self._avatar, 'spaceID', None)
+        if space_id is None:
+            player = getattr(self._runtime.bigworld, 'player', None)
+            player = player() if callable(player) else None
+            space_id = getattr(player, 'spaceID', None)
+        if (isinstance(space_id, bool) or
+                not isinstance(space_id, _INTEGER_TYPES) or space_id <= 0):
+            raise RuntimeError('native oracle space id is invalid')
+        proof = provider(int(space_id))
+        if (not isinstance(proof, dict) or
+                set(proof) != set((
+                    'native_space_id', 'expected_instances',
+                    'installed_instances')) or
+                proof.get('native_space_id') != int(space_id) or
+                proof.get('expected_instances', 0) <= 0 or
+                proof.get('installed_instances') !=
+                proof.get('expected_instances')):
+            raise RuntimeError(
+                'native destructible installation proof is incomplete')
+        return dict(proof)
+
+    def resolve_native_oracle_entity(self, entity_id):
+        """Resolve one donated ready vehicle or the local space anchor."""
+        if (isinstance(entity_id, bool) or
+                not isinstance(entity_id, _INTEGER_TYPES) or entity_id <= 0):
+            return None
+        matches = [record for record in self._records.values()
+                   if (not record.get('tombstone') and
+                       record.get('ready') and
+                       record.get('engine_id') == entity_id)]
+        if len(matches) != 1:
+            return None
+        return self._server_entity(int(entity_id))
+
     def _advance_authority_worker_probe(self):
         """Advance the opt-in probe without making diagnostics authoritative."""
         if self._worker_mode:
@@ -11538,9 +11658,6 @@ class BattleRuntime(object):
                 boundary = next_boundary
             if self._sync is not None:
                 self._sync.advance(now)
-            if self._battle_live and self._worker_mode:
-                self._advance_player_fire_authority(rule_dt, now)
-                self._publish_player_environment(rule_dt, now)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['sync'] = max(0.0, next_boundary - boundary)
@@ -11632,10 +11749,7 @@ class BattleRuntime(object):
                 # with the complete live suffix now.  Do not defer that time
                 # to another render callback and do not include countdown
                 # time in battle rules.
-                if self._worker_mode:
-                    self._advance_player_fire_authority(rule_dt, now)
-                    self._publish_player_environment(rule_dt, now)
-                else:
+                if not self._worker_mode:
                     self._tick_critical_states(rule_dt)
                     self._tick_drowning(rule_dt, now)
                     self._tick_overturn(rule_dt, now)
@@ -12493,6 +12607,34 @@ class BattleRuntime(object):
         self._sixth_sense.observe(visible, now)
         return visible
 
+    def _maybe_donate_destructible_map(self):
+        """Upload the complete frozen map only from its descriptor donor."""
+        if not self._start_message.get('need_destructible_map'):
+            return True
+        try:
+            donor_id = int(self._start_message.get('requested_by'))
+            player_id = int(self.client.player_id)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+        if self._worker_mode or player_id != donor_id:
+            return True
+        if self._destructible_map_donated:
+            return True
+        if self._destructibles is None:
+            return False
+        projector = getattr(self._destructibles, 'donation_rows_1513', None)
+        sender = getattr(self.client, 'send_destructible_map', None)
+        if not callable(projector) or not callable(sender):
+            return False
+        donation = projector()
+        if not isinstance(donation, dict):
+            return False
+        map_name = self._start_message.get('map')
+        if not sender(map_name, donation):
+            return False
+        self._destructible_map_donated = True
+        return True
+
     def _maybe_send_battle_ready(self):
         """Open the shared countdown after the complete line-up has entered.
 
@@ -12502,6 +12644,15 @@ class BattleRuntime(object):
         loading the line-up that will shortly begin moving.
         """
         if self._ready_sent or self._battle_live:
+            return False
+        oracle_ready = getattr(
+            self.client, 'native_oracle_ready_for_battle', None)
+        if callable(oracle_ready) and not oracle_ready():
+            # WorkerSession starts the embedded bridge and queues the complete
+            # entity donation only after every native compound is ready.
+            return False
+        if (self._start_message.get('need_destructible_map') and
+                not self._maybe_donate_destructible_map()):
             return False
         expected_players = len(self._start_message.get('players') or ())
         player_records = [record for record in self._records.values()
@@ -12740,7 +12891,17 @@ class BattleRuntime(object):
                     self._destructibles, 'commit_local_prediction', None)
                 predictor = getattr(
                     self._destructibles, 'begin_local_prediction', None)
-                if token is not None and callable(committer):
+                oracle_backed = getattr(
+                    self.client, 'has_oracle_backed_server', None)
+                oracle_backed = bool(
+                    callable(oracle_backed) and oracle_backed())
+                if oracle_backed:
+                    # Rust commits only the hidden oracle's fenced hull
+                    # evidence. The visible process may classify this native
+                    # surface as passable, but must not mutate it or open a
+                    # second proposal/ack ledger.
+                    predicted = False
+                elif token is not None and callable(committer):
                     predicted = bool(committer(
                         self._avatar.spaceID, token,
                         self._vector(position), yaw, speed))
@@ -12760,6 +12921,8 @@ class BattleRuntime(object):
                         self._clear_local_destructible_prediction(token)
                     self._local_motion_status = 'hard'
                     return False
+                if oracle_backed:
+                    return True
                 previous_seq = self._local_destructible_contact_seq
                 if not self._queue_local_destructible_contact(
                         proposal, position, yaw, speed, dt):
@@ -13017,6 +13180,18 @@ class BattleRuntime(object):
             return None
         return normal_x / length, normal_z / length
 
+    def _native_ram_player_record(self, vehicle):
+        try:
+            engine_id = int(vehicle.id)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        for record in self._records.values():
+            if (record.get('kind') == 'player' and
+                    not record.get('local') and record.get('ready') and
+                    int(record.get('engine_id', 0)) == engine_id):
+                return record
+        return None
+
     def _native_ram_vehicle_armor(self, vehicle, matrix, hit_point,
                                   inward_normal, chassis_matrix=None):
         """Return structural armour from a contact-normal probe."""
@@ -13255,10 +13430,49 @@ class BattleRuntime(object):
         velocity = getattr(getattr(vehicle, 'filter', None), 'velocity', None)
         if velocity is None:
             return None
-        values = _xyz(velocity)
+        try:
+            values = tuple(float(velocity[index]) for index in range(3))
+        except (IndexError, TypeError, ValueError, OverflowError):
+            try:
+                values = tuple(float(getattr(velocity, name))
+                               for name in ('x', 'y', 'z'))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return None
         if any(math.isnan(value) or math.isinf(value) for value in values):
             return None
         return values
+
+    def local_ram_velocity(self):
+        """Return the local native presentation velocity for ordered input."""
+        if self._worker_mode or self._server is None:
+            return None
+        try:
+            vehicle = self._server_entity(self._server.vehicle_id)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        return self._native_ram_velocity(vehicle)
+
+    @staticmethod
+    def _native_ram_aim_pose(vehicle):
+        """Freeze the local component pose at the contact source edge."""
+        getter = getattr(vehicle, 'getAimParams', None)
+        if not callable(getter):
+            return None
+        try:
+            aim = getter()
+            turret_yaw = float(aim[0])
+            gun_pitch = float(aim[1])
+            siege_state = getattr(vehicle, 'siegeState')
+        except (AttributeError, IndexError, TypeError, ValueError,
+                OverflowError):
+            return None
+        if (any(math.isnan(value) or math.isinf(value)
+                for value in (turret_yaw, gun_pitch)) or
+                isinstance(siege_state, bool) or
+                not isinstance(siege_state, _INTEGER_TYPES) or
+                not 0 <= siege_state <= 3):
+            return None
+        return turret_yaw, gun_pitch, int(siege_state)
 
     def _ram_pose_matrix(self, position, yaw, pitch=0.0, roll=0.0):
         matrix = self._runtime.math.Matrix()
@@ -13269,71 +13483,102 @@ class BattleRuntime(object):
     def _queue_ram_contact_proof(self, record, local_vehicle, bot_vehicle,
                                  hit_point, player_velocity, bot_velocity,
                                  contact_time_us, own_pose=None,
-                                 bot_pose=None, player_ram_profile=None,
-                                 contact_normal=None):
-        """Queue one immutable contact episode without applying HP locally."""
-        if len(self._native_ram_contact_proofs) >= 16:
+                                 bot_pose=None, player_ram_profile=None):
+        """Queue immutable contact geometry for the Rust/native authority.
+
+        The visible client no longer measures armour or submits a damage-law
+        input.  It owns only the contact episode it actually presented.  The
+        hidden oracle replays this frozen pose/point against both generation-
+        fenced native entities, and Rust owns profiles plus final HP.
+        """
+        if len(self._local_ram_receipts) >= 16:
             return False
         bot_id = int(record['network_id'])
+        if (bot_id in self._local_ram_episode_contacts or
+                bot_id in self._local_ram_pending_contacts):
+            return False
         if own_pose is None:
             own_pose = (
                 self._local_position[0], self._local_position[1],
                 self._local_position[2], self._local_yaw,
                 self._local_pitch, self._local_roll)
-        if bot_pose is None:
-            bot_position = _xyz(getattr(
-                bot_vehicle, 'position', (0.0, 0.0, 0.0)))
-            bot_matrix = getattr(bot_vehicle, 'matrix', None)
-            bot_pose = (
-                bot_position[0], bot_position[1], bot_position[2],
-                float(getattr(bot_matrix, 'yaw', 0.0)), 0.0, 0.0)
-        if player_ram_profile is None:
-            player_ram_profile = self._ram_profile(
-                local_vehicle.typeDescriptor, local=True)
-        if contact_normal is None:
-            player_shape = self._collision_shape(local_vehicle.typeDescriptor)
-            bot_shape = self._collision_shape(bot_vehicle.typeDescriptor)
-            contact = tank_collision.obb_impact_contact(
-                own_pose[0], own_pose[2], own_pose[3], player_shape,
-                (player_velocity[0], player_velocity[2]),
-                bot_pose[0], bot_pose[2], bot_pose[3], bot_shape,
-                (bot_velocity[0], bot_velocity[2]))
-            contact_normal = self._validated_ram_contact_normal(contact)
-        else:
-            contact_normal = self._validated_ram_contact_normal(
-                contact_normal)
-        player_spall = float(player_ram_profile['spall_coefficient'])
-        player_bonus = float(player_ram_profile['ramming_bonus'])
-        proof = {
+        source_time_us = int(contact_time_us)
+        revision = self._ram_bot_revision_at(bot_id, source_time_us)
+        if revision is None:
+            return False
+        hit = _xyz(hit_point)
+        aim_pose = self._native_ram_aim_pose(local_vehicle)
+        if aim_pose is None:
+            return False
+        try:
+            player_velocity = tuple(
+                float(player_velocity[index]) for index in range(3))
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return False
+        values = tuple(float(value) for value in (
+            own_pose[0], own_pose[1], own_pose[2], own_pose[3],
+            own_pose[4], own_pose[5], hit[0], hit[1], hit[2],
+            player_velocity[0], player_velocity[1], player_velocity[2],
+            aim_pose[0], aim_pose[1]))
+        if any(math.isnan(value) or math.isinf(value) for value in values):
+            return False
+        self._local_ram_seq += 1
+        source_epoch = int(self._local_ram_source_epochs.get(bot_id, 0))
+        receipt = {
+            'seq': self._local_ram_seq,
             'bot_id': bot_id,
-            'record': record,
-            'local_vehicle': local_vehicle,
-            'bot_vehicle': bot_vehicle,
-            'hit_point': _xyz(hit_point),
-            'native_contact_time_us': int(contact_time_us),
+            'bot_state_revision': int(revision),
+            'presentation_time_us': source_time_us,
+            'contact_x': float(hit[0]),
+            'contact_y': float(hit[1]),
+            'contact_z': float(hit[2]),
             'x': float(own_pose[0]), 'y': float(own_pose[1]),
             'z': float(own_pose[2]), 'yaw': float(own_pose[3]),
             'pitch': float(own_pose[4]), 'roll': float(own_pose[5]),
-            'local_matrix': self._ram_pose_matrix(
-                own_pose[:3], own_pose[3], own_pose[4], own_pose[5]),
-            'bot_matrix': self._ram_pose_matrix(
-                bot_pose[:3], bot_pose[3], bot_pose[4], bot_pose[5]),
-            'contact_normal': contact_normal,
-            'contact_spall_player': player_spall,
-            'contact_bonus_player': player_bonus,
             'vx': float(player_velocity[0]),
             'vy': float(player_velocity[1]),
             'vz': float(player_velocity[2]),
-            'bot_vx': float(bot_velocity[0]),
-            'bot_vy': float(bot_velocity[1]),
-            'bot_vz': float(bot_velocity[2]),
-            'attempts': 0,
+            'turret_yaw': float(aim_pose[0]),
+            'gun_pitch': float(aim_pose[1]),
+            'siege_state': int(aim_pose[2]),
         }
-        self._native_ram_event_seq += 1
-        event_seq = self._native_ram_event_seq
-        proof['event_seq'] = event_seq
-        self._native_ram_contact_proofs[event_seq] = proof
-        return self._retry_native_ram_contact_proof(event_seq)
+        self._local_ram_receipt = receipt
+        self._local_ram_receipts[self._local_ram_seq] = dict(receipt)
+        source = (bot_id, source_epoch)
+        self._local_ram_receipt_sources[self._local_ram_seq] = source
+        self._local_ram_pending_contacts[bot_id] = (
+            self._local_ram_seq, source_epoch)
+        return True
+
+    def _queue_player_ram_contact_receipt(
+            self, target_player_id, presentation_time_us):
+        """Queue one fact-only player contact receipt for the lower id."""
+        if (self.client is None or len(self._local_player_ram_receipts) >= 16 or
+                self._local_player_ram_seq >= lan_protocol.MAX_PROJECTILE_ID):
+            return False
+        reporter_player_id = lan_protocol._exact_int(
+            getattr(self.client, 'player_id', None))
+        target_player_id = lan_protocol._exact_int(target_player_id)
+        presentation_time_us = lan_protocol._exact_int(
+            presentation_time_us)
+        if (reporter_player_id is None or target_player_id is None or
+                presentation_time_us is None):
+            return False
+        if (reporter_player_id <= 0 or
+                reporter_player_id >= target_player_id or
+                target_player_id > lan_protocol.MAX_PROJECTILE_ID or
+                presentation_time_us < 0 or
+                presentation_time_us >
+                lan_protocol.MAX_MOTION_TIME_US):
+            return False
+        self._local_player_ram_seq += 1
+        sequence = self._local_player_ram_seq
+        self._local_player_ram_receipts[sequence] = {
+            'seq': sequence,
+            'target_player_id': target_player_id,
+            'presentation_time_us': presentation_time_us,
+        }
+        return True
 
     def _observe_native_ram_contact(self, veh_a, veh_b, hit_point,
                                     contact_time):
@@ -13346,14 +13591,29 @@ class BattleRuntime(object):
         other = veh_b if local is veh_a else veh_a
         record = self._native_ram_bot_record(other)
         if record is None:
+            record = self._native_ram_player_record(other)
+        if record is None:
             return False
         record_team = int(_number(
             (record.get('state') or {}).get('team')))
         local_team = int(_number(getattr(self.client, 'team', 0)))
         if record_team in (1, 2) and record_team == local_team:
             return False
+        if record.get('kind') == 'player':
+            target_player_id = int(record['network_id'])
+            if target_player_id in self._local_player_ram_contact_presence:
+                return False
+            estimated = self._estimated_motion_time_us(self._clock())
+            if estimated is None or not self._queue_player_ram_contact_receipt(
+                    target_player_id, estimated):
+                return False
+            self._local_player_ram_contact_presence = frozenset(
+                set(self._local_player_ram_contact_presence) |
+                {target_player_id})
+            return True
         bot_id = int(record['network_id'])
-        if bot_id in self._local_ram_episode_contacts:
+        if (bot_id in self._local_ram_episode_contacts or
+                bot_id in self._local_ram_pending_contacts):
             return False
         try:
             contact_time = float(contact_time)
@@ -13368,93 +13628,12 @@ class BattleRuntime(object):
         estimated = self._estimated_motion_time_us(self._clock())
         if estimated is None:
             return False
+        self._local_ram_contact_presence = frozenset(
+            set(self._local_ram_contact_presence) | {bot_id})
         queued = self._queue_ram_contact_proof(
             record, local, other, hit_point,
             velocity, bot_velocity, estimated)
-        if queued or any(
-                proof.get('bot_id') == bot_id for proof in
-                self._native_ram_contact_proofs.values()):
-            self._local_ram_episode_contacts = frozenset(
-                set(self._local_ram_episode_contacts) | {bot_id})
         return queued
-
-    def _retry_native_ram_contact_proof(self, event_seq):
-        proof = self._native_ram_contact_proofs.get(event_seq)
-        if proof is None:
-            return False
-        bot_id = proof['bot_id']
-        proof['attempts'] += 1
-        record = proof['record']
-        presentation_time_us = record.get('presentation_time_us')
-        revision = self._ram_bot_revision_at(bot_id, presentation_time_us)
-        local_matrix = proof['local_matrix']
-        bot_matrix = proof['bot_matrix']
-        contact_normal = proof.get('contact_normal')
-        if contact_normal is None:
-            player_plate = bot_plate = None
-        else:
-            player_plate = self._native_ram_vehicle_armor(
-                proof['local_vehicle'], local_matrix, proof['hit_point'],
-                contact_normal)
-            bot_plate = self._native_ram_vehicle_armor(
-                proof['bot_vehicle'], bot_matrix, proof['hit_point'],
-                (-contact_normal[0], -contact_normal[1]))
-        if (revision is None or presentation_time_us is None or
-                player_plate is None or bot_plate is None):
-            if proof['attempts'] < 2:
-                return False
-            self._native_ram_contact_proofs.pop(event_seq, None)
-            signature = (bot_id, player_plate is None, bot_plate is None)
-            if signature not in self._native_ram_contact_failures:
-                self._native_ram_contact_failures.add(signature)
-                sys.stdout.write(
-                    '[Offline LAN 0.9.22] RAM native contact unsupported '
-                    'bot_id=%d player_plate=%s bot_plate=%s\n' % (
-                        bot_id, player_plate, bot_plate))
-            return False
-        if len(self._local_ram_receipts) >= 16:
-            return False
-        self._local_ram_seq += 1
-        hit = proof['hit_point']
-        player_armor = player_plate['armor']
-        bot_armor = bot_plate['armor']
-        receipt = {
-            'seq': self._local_ram_seq,
-            'bot_id': bot_id,
-            'bot_state_revision': int(revision),
-            'presentation_time_us': int(presentation_time_us),
-            'native_contact_time_us': int(
-                proof['native_contact_time_us']),
-            'contact_x': float(hit[0]),
-            'contact_y': float(hit[1]),
-            'contact_z': float(hit[2]),
-            'contact_normal_x': float(contact_normal[0]),
-            'contact_normal_z': float(contact_normal[1]),
-            'contact_armor_player': float(player_armor),
-            'contact_armor_bot': float(bot_armor),
-            'contact_screened_player': bool(player_plate['screened']),
-            'contact_screened_bot': bool(bot_plate['screened']),
-            'contact_spall_player': proof['contact_spall_player'],
-            'contact_bonus_player': proof['contact_bonus_player'],
-            'x': proof['x'], 'y': proof['y'], 'z': proof['z'],
-            'yaw': proof['yaw'], 'pitch': proof['pitch'],
-            'roll': proof['roll'], 'vx': proof['vx'], 'vy': proof['vy'],
-            'vz': proof['vz'],
-            'bot_vx': proof['bot_vx'], 'bot_vy': proof['bot_vy'],
-            'bot_vz': proof['bot_vz'],
-        }
-        self._local_ram_receipt = receipt
-        self._local_ram_receipts[self._local_ram_seq] = dict(receipt)
-        self._native_ram_contact_proofs.pop(event_seq, None)
-        sys.stdout.write(
-            '[Offline LAN 0.9.22] RAM native contact accepted '
-            'bot_id=%d player_armor=%.3f bot_armor=%.3f\n' % (
-                bot_id, player_armor, bot_armor))
-        return True
-
-    def _retry_native_ram_contact_proofs(self):
-        for event_seq in tuple(self._native_ram_contact_proofs):
-            self._retry_native_ram_contact_proof(event_seq)
 
     @staticmethod
     def _ram_obb_vertices(body):
@@ -13523,24 +13702,36 @@ class BattleRuntime(object):
         """Turn exact OBB compression episodes into immutable RAM proofs.
 
         Synthetic remote Vehicles do not participate in BigWorld's native
-        vehicle-collision callback. The copied collision solver is therefore
-        the authoritative contact fact for player-bot physics. It supplies
-        only geometry: plate thickness still comes from each live descriptor
-        hit tester in ``_retry_native_ram_contact_proof``.
+        vehicle-collision callback. The copied collision solver therefore
+        supplies only the visible client's frozen contact geometry; the
+        hidden native oracle measures both structural plates later.
         """
-        previous = set(self._local_ram_episode_contacts)
+        previous = set(self._local_ram_contact_presence)
+        previous_players = set(
+            self._local_player_ram_contact_presence)
         overlapping = set()
+        player_overlapping = set()
         closing_gaps = set()
-        newly_armed = set()
+        player_closing_gaps = set()
+        newly_queued = set()
         for other in others:
             if (not other.get('alive', True) or
-                    other.get('kind') != 'bot'):
+                    other.get('kind') not in ('bot', 'player')):
                 continue
             own_team = int(_number(own.get('team')))
             other_team = int(_number(other.get('team')))
             if own_team in (1, 2) and own_team == other_team:
                 continue
-            bot_id = int(other['network_id'])
+            other_kind = other.get('kind')
+            target_id = int(other['network_id'])
+            if (other_kind == 'player' and
+                    (self.client is None or
+                     int(self.client.player_id) >= target_id)):
+                continue
+            prior_contacts = (previous_players
+                              if other_kind == 'player' else previous)
+            gap_contacts = (player_closing_gaps
+                            if other_kind == 'player' else closing_gaps)
             own_center_y = float(own['y']) + (
                 float(own['shape'][2]) +
                 float(own['shape'][3])) * 0.5
@@ -13557,8 +13748,8 @@ class BattleRuntime(object):
                 # A coincident synthetic spawn has no geometrically provable
                 # approach side. Keep an existing episode armed and do not
                 # invent another HP event from the ambiguous pose.
-                if bot_id in previous:
-                    closing_gaps.add(bot_id)
+                if target_id in prior_contacts:
+                    gap_contacts.add(target_id)
                 continue
             relative_velocity = (
                 own['vx'] - other['vx'],
@@ -13586,17 +13777,13 @@ class BattleRuntime(object):
                 # That is not physical separation and must not turn sustained
                 # pressure into another HP event.  A contact episode is only
                 # released after the clear hulls are no longer approaching.
-                if bot_id in previous and relative_normal < 0.0:
-                    closing_gaps.add(bot_id)
+                if target_id in prior_contacts and relative_normal < 0.0:
+                    gap_contacts.add(target_id)
                 continue
-            overlapping.add(bot_id)
-            impact_contact = tank_collision.obb_impact_contact(
-                own['x'], own['z'], own['yaw'], own['shape'],
-                (own['vx'], own['vz']),
-                other['x'], other['z'], other['yaw'], other['shape'],
-                (other['vx'], other['vz']))
-            if impact_contact is None:
-                continue
+            if other_kind == 'player':
+                player_overlapping.add(target_id)
+            else:
+                overlapping.add(target_id)
             overlap_point = self._ram_obb_overlap_point(own, other)
             if overlap_point is None:
                 continue
@@ -13606,13 +13793,20 @@ class BattleRuntime(object):
             high = min(
                 float(own['y']) + float(own['shape'][3]),
                 float(other['y']) + float(other['shape'][3]))
-            if relative_normal >= 0.0 or bot_id in previous:
+            if relative_normal >= 0.0:
+                continue
+            estimated = self._estimated_motion_time_us(self._clock())
+            if other_kind == 'player':
+                if (estimated is not None and
+                        target_id not in previous_players and
+                        self._queue_player_ram_contact_receipt(
+                            target_id, estimated)):
+                    newly_queued.add(('player', target_id))
                 continue
             hit_point = self._vector((
                 overlap_point[0],
                 (low + high) * 0.5,
                 overlap_point[1]))
-            estimated = self._estimated_motion_time_us(self._clock())
             record = other.get('_record')
             bot_vehicle = other.get('_vehicle')
             if (estimated is None or record is None or bot_vehicle is None):
@@ -13627,18 +13821,29 @@ class BattleRuntime(object):
                 bot_pose=(other['x'], other['y'], other['z'], other['yaw'],
                           _number(other.get('pitch')),
                           _number(other.get('roll'))),
-                player_ram_profile=own['ram_profile'],
-                contact_normal=impact_contact[:2])
-            # Queue admission, including one next-frame plate retry, owns the
-            # episode. A sustained overlap must never generate another HP
-            # proposal merely because rendering/polling continues.
-            if queued or any(
-                    proof.get('bot_id') == bot_id for proof in
-                    self._native_ram_contact_proofs.values()):
-                newly_armed.add(bot_id)
-        self._local_ram_episode_contacts = frozenset(
-            (previous & (overlapping | closing_gaps)) | newly_armed)
-        return bool(newly_armed)
+                player_ram_profile=own['ram_profile'])
+            if queued:
+                newly_queued.add(('bot', target_id))
+        # Physical presence advances the local source epoch. Queue admission
+        # only reserves one receipt; a matching server Damage result is the
+        # sole transition that arms the damaging episode until separation.
+        current = overlapping | (previous & closing_gaps)
+        separated = previous - current
+        if separated:
+            damaging = set(self._local_ram_episode_contacts)
+            damaging.difference_update(separated)
+            self._local_ram_episode_contacts = frozenset(damaging)
+            for bot_id in separated:
+                self._local_ram_source_epochs[bot_id] = int(
+                    self._local_ram_source_epochs.get(bot_id, 0)) + 1
+                self._local_ram_pending_contacts.pop(bot_id, None)
+        self._local_ram_contact_presence = frozenset(current)
+        player_current = (
+            player_overlapping |
+            (previous_players & player_closing_gaps))
+        self._local_player_ram_contact_presence = frozenset(
+            player_current)
+        return bool(newly_queued)
 
     def _contact_tanks(self):
         """Return current non-local chassis bodies for 0.8.2 contact physics."""
@@ -13723,7 +13928,6 @@ class BattleRuntime(object):
 
     def _resolve_local_tank_contacts(self, entity, position, yaw, dt):
         """Apply chassis OBB separation without pushing a tank into walls."""
-        self._retry_native_ram_contact_proofs()
         others = self._contact_tanks()
         own_mass = _number(
             (self._local_physics or {}).get('mass'), 25000.0)
@@ -13803,6 +14007,13 @@ class BattleRuntime(object):
             dict(value) for seq, value in self._local_ram_receipts.items()
             if seq > self._local_ram_admitted_seq]
 
+    def local_player_ram_contacts(self):
+        """Return fact-only player contact receipts awaiting admission."""
+        return [
+            dict(value)
+            for seq, value in self._local_player_ram_receipts.items()
+            if seq > self._local_player_ram_admitted_seq]
+
     def _ram_contacts_enqueued(self):
         """Require durable server acknowledgement for every contact proof."""
         capabilities = getattr(self.client, 'server_capabilities', ()) or ()
@@ -13810,12 +14021,55 @@ class BattleRuntime(object):
             raise RuntimeError('server lost the RAM contact ledger contract')
         return False
 
+    def _player_ram_contacts_enqueued(self):
+        capabilities = getattr(self.client, 'server_capabilities', ()) or ()
+        if lan_protocol.HUMAN_RAM_TIMELINE_CAPABILITY not in capabilities:
+            raise RuntimeError('server lost the player RAM timeline contract')
+        return False
+
+    def _ack_local_player_ram_contacts(self, snapshot):
+        """Retire player-pair receipts only after ordered server resolution."""
+        if self.client is None or not isinstance(snapshot, dict):
+            return False
+        local_id = lan_protocol._exact_int(
+            getattr(self.client, 'player_id', None))
+        if local_id is None or local_id <= 0:
+            return False
+        admitted = None
+        resolved = None
+        for raw in snapshot.get('players') or ():
+            if not isinstance(raw, dict):
+                continue
+            if lan_protocol._exact_int(raw.get('id')) != local_id:
+                continue
+            admitted = lan_protocol._exact_int(
+                raw.get('player_ram_contact_admitted_seq'))
+            resolved = lan_protocol._exact_int(
+                raw.get('player_ram_contact_resolved_seq'))
+            break
+        if (admitted is None or resolved is None or admitted < 0 or
+                admitted > self._local_player_ram_seq or
+                admitted < self._local_player_ram_admitted_seq or
+                resolved < self._local_player_ram_resolved_seq or
+                resolved > admitted):
+            return False
+        changed = bool(
+            admitted > self._local_player_ram_admitted_seq or
+            resolved > self._local_player_ram_resolved_seq)
+        self._local_player_ram_admitted_seq = admitted
+        self._local_player_ram_resolved_seq = resolved
+        for sequence in list(self._local_player_ram_receipts):
+            if sequence <= resolved:
+                self._local_player_ram_receipts.pop(sequence, None)
+        return changed
+
     def _ack_local_ram_contacts(self, snapshot):
         if self.client is None or not isinstance(snapshot, dict):
             return False
         local_id = int(self.client.player_id)
         admitted = None
         resolved = None
+        results = ()
         for raw in snapshot.get('players') or ():
             if not isinstance(raw, dict):
                 continue
@@ -13824,6 +14078,7 @@ class BattleRuntime(object):
                     continue
                 admitted = int(raw.get('ram_contact_admitted_seq', 0))
                 resolved = int(raw.get('ram_contact_resolved_seq', 0))
+                results = raw.get('ram_contact_results', ())
             except (TypeError, ValueError, OverflowError):
                 admitted = None
                 resolved = None
@@ -13831,13 +14086,69 @@ class BattleRuntime(object):
         if (admitted is None or resolved is None or admitted < 0 or
                 resolved < 0 or resolved > admitted):
             return False
+        if results is None:
+            results = ()
+        if (not isinstance(results, (list, tuple)) or
+                len(results) > 16):
+            return False
+        parsed_results = []
+        seen_results = set()
+        for result in results:
+            if (not isinstance(result, dict) or len(result) != 2 or
+                    set(result) != set(('seq', 'outcome'))):
+                return False
+            sequence = result.get('seq')
+            outcome = result.get('outcome')
+            if (isinstance(sequence, bool) or
+                    not isinstance(sequence, _INTEGER_TYPES) or
+                    not 1 <= sequence <= admitted or
+                    not isinstance(outcome, _STRING_TYPES) or
+                    outcome not in ('damage', 'contact', 'unavailable') or
+                    sequence in seen_results):
+                return False
+            seen_results.add(sequence)
+            previous_outcome = self._local_ram_result_outcomes.get(sequence)
+            if previous_outcome is not None and previous_outcome != outcome:
+                return False
+            parsed_results.append((int(sequence), outcome))
         changed = admitted > self._local_ram_admitted_seq
         self._local_ram_admitted_seq = max(
             self._local_ram_admitted_seq, admitted)
+        damaging = set(self._local_ram_episode_contacts)
+        for sequence, outcome in parsed_results:
+            if sequence in self._local_ram_result_outcomes:
+                continue
+            self._local_ram_result_outcomes[sequence] = outcome
+            changed = True
+            source = self._local_ram_receipt_sources.get(sequence)
+            if source is None:
+                continue
+            bot_id, source_epoch = source
+            pending = (sequence, source_epoch)
+            if (self._local_ram_source_epochs.get(bot_id, 0) !=
+                    source_epoch or
+                    self._local_ram_pending_contacts.get(bot_id) != pending):
+                continue
+            self._local_ram_pending_contacts.pop(bot_id, None)
+            if (outcome == 'damage' and
+                    bot_id in self._local_ram_contact_presence):
+                damaging.add(bot_id)
+        self._local_ram_episode_contacts = frozenset(damaging)
         for seq in list(self._local_ram_receipts):
             if seq <= resolved:
                 self._local_ram_receipts.pop(seq, None)
                 changed = True
+        for seq in list(self._local_ram_receipt_sources):
+            if seq > resolved:
+                continue
+            source = self._local_ram_receipt_sources.pop(seq)
+            bot_id, source_epoch = source
+            if self._local_ram_pending_contacts.get(bot_id) == (
+                    seq, source_epoch):
+                self._local_ram_pending_contacts.pop(bot_id, None)
+        for seq in list(self._local_ram_result_outcomes):
+            if seq <= resolved:
+                self._local_ram_result_outcomes.pop(seq, None)
         self._local_ram_receipt = (
             dict(next(reversed(self._local_ram_receipts.values())))
             if self._local_ram_receipts else None)
@@ -13921,6 +14232,17 @@ class BattleRuntime(object):
     def _ack_local_destructible_contacts(self, snapshot):
         if self.client is None or not isinstance(snapshot, dict):
             return False
+        oracle_backed = getattr(
+            self.client, 'has_oracle_backed_server', None)
+        if callable(oracle_backed) and oracle_backed():
+            changed = bool(self._local_destructible_contacts or
+                           self._local_destructible_safe_poses)
+            for pending in self._local_destructible_contacts.values():
+                self._clear_local_destructible_prediction(
+                    self._destructible_contact_token(pending.get('token')))
+            self._local_destructible_contacts.clear()
+            self._local_destructible_safe_poses.clear()
+            return changed
         local_id = int(self.client.player_id)
         resolved = None
         rejected = ()
@@ -14057,19 +14379,24 @@ class BattleRuntime(object):
 
     def _apply_fall_damage(self, entity, impact_speed):
         """Queue a physical impact observation without mutating canonical HP."""
-        maximum = max(1, int(getattr(
-            entity.typeDescriptor, 'maxHealth', getattr(entity, 'health', 1))))
-        damage = vehicle_physics.fall_damage(maximum, impact_speed)
-        if damage <= 0:
+        try:
+            impact_speed = abs(float(impact_speed))
+        except (TypeError, ValueError):
+            return 0
+        if math.isnan(impact_speed) or math.isinf(impact_speed):
             return 0
         impact_speed = min(
             lan_protocol.PLAYER_LANDING_MAX_IMPACT_SPEED,
-            abs(float(impact_speed)))
+            impact_speed)
         if len(self._pending_landing_impacts) >= \
                 MAX_PENDING_LANDING_IMPACTS:
             raise RuntimeError('landing observation queue exceeded limit')
         self._pending_landing_impacts.append(impact_speed)
-        return damage
+        maximum = max(1, int(getattr(
+            entity.typeDescriptor, 'maxHealth', getattr(entity, 'health', 1))))
+        # This value is presentation-only. Rust evaluates the canonical fall
+        # law for every admitted observation, including safe-speed landings.
+        return vehicle_physics.fall_damage(maximum, impact_speed)
 
     def _flush_landing_observation(self):
         """Bind a queued landing to the next admitted local pose sample."""
@@ -15277,13 +15604,12 @@ class BattleRuntime(object):
         return False
 
     def _enqueue_bot_message(self, message):
-        """Join one state enqueue with ordered physical-launch progress."""
-        accepted = self._send_bot_message(message)
-        if accepted:
-            self._resolve_bot_fire(message)
-        return accepted
+        """Forward presentation messages without publishing projectiles."""
+        return self._send_bot_message(message)
 
     def _resolve_bot_fire(self, message):
+        """The Rust server owns every physical Bot projectile edge."""
+        return False
         if message.get('type') != 'bot_state':
             return False
         launches = message.get('launches') or ()
@@ -15418,6 +15744,7 @@ class BattleRuntime(object):
 
     def _advance_player_fire_authority(self, dt, now):
         """Resolve visible triggers from their input-bound client gun edge."""
+        return False
         if not self._worker_mode or not self._projectile_is_authority():
             return False
         live_players = set()
@@ -15544,6 +15871,7 @@ class BattleRuntime(object):
 
     def _launch_bot_projectile(self, state, shot_seq):
         """Publish one Bot launch; damage waits for the canonical projectile."""
+        return False
         try:
             bot_id = int(state.get('id'))
             shot_seq = int(shot_seq)
@@ -18340,8 +18668,6 @@ class BattleRuntime(object):
             self._restore_native_ram_contact_hook()
         except Exception as error:
             cleanup_error = error
-        self._native_ram_contact_proofs.clear()
-        self._native_ram_contact_failures.clear()
         try:
             self._stop_authority_worker_probe('battle_cleanup')
         except Exception as error:
@@ -18551,6 +18877,8 @@ class BattleRuntime(object):
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
         self._local_fire_intent = None
+        self._ammo_intent_result_seq = 0
+        self._ammo_intent_result_identity = None
         self._ammo_signature = None
         self._targeting_signature = None
         self._equipment_state = None

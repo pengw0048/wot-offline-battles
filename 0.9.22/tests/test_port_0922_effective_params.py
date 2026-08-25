@@ -1,4 +1,3 @@
-import math
 from pathlib import Path
 import sys
 import unittest
@@ -8,9 +7,7 @@ import types
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT_ROOT = ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'
-SERVER_ROOT = ROOT / '0.9.22' / 'server'
 sys.path.insert(0, str(CLIENT_ROOT))
-sys.path.insert(0, str(SERVER_ROOT))
 
 from effective_params_fixture import effective_params
 from gui.mods.offline_lan_0922 import effective_params as contract
@@ -18,38 +15,6 @@ from gui.mods.offline_lan_0922 import lan_session
 from gui.mods.offline_lan_0922 import loadout
 from gui.mods.offline_lan_0922.lan_client import (
     CLIENT_CAPABILITIES, EFFECTIVE_PARAMS_CAPABILITY, LANClient)
-from lan_battle_server import (
-    BattleState, CLIENT_BUILD_0922, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
-    EFFECTIVE_PARAMS_CAPABILITY as SERVER_EFFECTIVE_PARAMS_CAPABILITY,
-    HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_ENVIRONMENT_CAPABILITY,
-    PLAYER_FIRE_INTENT_CAPABILITY,
-    PROJECTILE_CAPABILITY,
-    RAM_CONTACT_LEDGER_CAPABILITY,
-    RICOCHET_CONTINUATION_CAPABILITY)
-
-
-class _Connection(object):
-    def sendall(self, payload):
-        del payload
-
-
-def _hello(params=None):
-    return {
-        'client_build': CLIENT_BUILD_0922,
-        'capabilities': [
-            PROJECTILE_CAPABILITY, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
-            HUMAN_RAM_TIMELINE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
-            PLAYER_FIRE_INTENT_CAPABILITY, PLAYER_ENVIRONMENT_CAPABILITY,
-            SERVER_EFFECTIVE_PARAMS_CAPABILITY,
-            RICOCHET_CONTINUATION_CAPABILITY],
-        'name': 'Player',
-        'vehicle': 'ussr:R11_MS-1',
-        'max_health': 90,
-        'account_key': 'effective-params-test',
-        'outfits': {},
-        'vehicle_compact_descr': 'dGVzdA==',
-        'effective_params': effective_params() if params is None else params,
-    }
 
 
 class EffectiveParamsContractTests(unittest.TestCase):
@@ -340,7 +305,12 @@ class EffectiveParamsContractTests(unittest.TestCase):
             '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
             max_health=90, account_key='account', outfits={},
             vehicle_compact_descr='dGVzdA==',
-            effective_params=effective_params())
+            effective_params=effective_params(),
+            ammo_remaining=[51], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
 
         hello = client._hello_payload()
 
@@ -354,81 +324,6 @@ class EffectiveParamsContractTests(unittest.TestCase):
             vehicle_compact_descr='dGVzdA==')
         with self.assertRaises(ValueError):
             invalid._hello_payload()
-
-    def test_server_stores_updates_and_omits_snapshot_only_on_lean_rows(self):
-        state = BattleState()
-        player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 2000), _hello())
-        self.assertIsNone(error)
-        self.assertEqual(0.96,
-                         player.effective_params['loadout']['reload_factor'])
-        self.assertIn('effective_params', state._public_player(player))
-        self.assertNotIn(
-            'effective_params',
-            state._public_player(player, include_outfits=False))
-
-        updated = effective_params()
-        updated['loadout']['reload_factor'] = 0.81
-        self.assertTrue(state.select_vehicle(player.player_id, {
-            'vehicle': 'ussr:R11_MS-1',
-            'max_health': 90,
-            'outfits': {},
-            'vehicle_compact_descr': 'dGVzdA==',
-            'effective_params': updated,
-        }))
-        self.assertEqual(0.81,
-                         player.effective_params['loadout']['reload_factor'])
-
-    def test_server_rejects_invalid_snapshot_without_storing_player(self):
-        state = BattleState()
-        invalid = effective_params()
-        invalid['camouflage']['shot_factor'] = math.inf
-
-        player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 2000), _hello(invalid))
-
-        self.assertIsNone(player)
-        self.assertEqual('invalid_effective_params', error)
-        self.assertEqual({}, state.players)
-
-    def test_start_gate_rechecks_capability_and_canonical_snapshot(self):
-        state = BattleState()
-        player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 2000), _hello())
-        self.assertIsNone(error)
-        state.simulation_worker = types.SimpleNamespace(
-            connected=True,
-            capabilities=tuple(_hello()['capabilities']))
-
-        player.capabilities = tuple(
-            value for value in player.capabilities
-            if value != SERVER_EFFECTIVE_PARAMS_CAPABILITY)
-        message, error = state.request_start(player.player_id)
-        self.assertIsNone(message)
-        self.assertEqual('missing_effective_params_capability', error)
-
-        player.capabilities += (SERVER_EFFECTIVE_PARAMS_CAPABILITY,)
-        player.effective_params['loadout']['from_client_factors'] = False
-        message, error = state.request_start(player.player_id)
-        self.assertIsNone(message)
-        self.assertEqual('invalid_effective_params', error)
-
-    def test_battle_phase_rejects_mid_round_critical_projection_change(self):
-        state = BattleState()
-        player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 2000), _hello())
-        self.assertIsNone(error)
-        original = player.effective_params
-        changed = effective_params()
-        changed['critical']['devices'][0]['max_hp'] = 999.0
-        state.phase = 'battle'
-
-        self.assertFalse(state.select_vehicle(player.player_id, {
-            'vehicle': player.vehicle, 'max_health': player.max_health,
-            'outfits': {}, 'vehicle_compact_descr': 'dGVzdA==',
-            'effective_params': changed,
-        }))
-        self.assertEqual(original, player.effective_params)
 
     def test_lean_snapshot_inherits_canonical_static_parameters(self):
         client = LANClient(

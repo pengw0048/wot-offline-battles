@@ -18,6 +18,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+      - name: Run Rust 0.9.22 LAN server suite
+        run: >-
+          cargo test --manifest-path 0.9.22/rust_server/Cargo.toml
+          --all-targets --locked
       - name: Install pinned test dependencies
         run: python -m pip install Pillow==12.3.0
       - name: Run 0.8.2 and shared test suite
@@ -76,11 +80,9 @@ jobs:
         with:
           python-version: "3.11.9"
           architecture: "x64"
-      - name: Install pinned Windows server packager
-        run: >-
-          python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
-      - name: Build zero-configuration Windows LAN server
+      - name: Install Rust Windows target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Build Rust x64 LAN server
         shell: pwsh
         run: >-
           pwsh -NoProfile -File
@@ -134,18 +136,20 @@ jobs:
 
           hello = {
               'type': 'hello',
-              'role': 'probe',
               'protocol': 5,
               'client_build': 'wot-0.9.22.0.1-cn-1513',
+              'role': 'probe',
               'capabilities': ['projectile_ledger_v2',
                                'destructible_catalog_v5',
                                'lean_snapshot_manifest_v1',
-                               'ram_contact_ledger_v2',
+                               'ram_contact_ledger_v3',
                                'human_ram_timeline_v1',
                                'player_fire_intent_v4',
                                'player_environment_v2',
                                'effective_params_v1',
-                               'ricochet_continuation_v1'],
+                               'ricochet_continuation_v1',
+                               'player_ammo_authority_v1',
+                               'player_authority_loadout_v1'],
               'name': 'CI-Smoke',
               'vehicle': 'ussr:R11_MS-1',
               'vehicle_compact_descr': 'AA==',
@@ -162,6 +166,9 @@ jobs:
           assert reply['protocol'] == 5, reply
           assert reply['client_build'] == hello['client_build'], reply
           assert 'projectile_ledger_v2' in reply['capabilities'], reply
+          assert 'oracle_backed_server_v1' in reply['server_capabilities'], reply
+          assert 'native_oracle_v1' in reply['server_capabilities'], reply
+          assert 'he_explosion_evidence_v1' in reply['server_capabilities'], reply
           '@
 
           $process = Start-Process `
@@ -209,12 +216,12 @@ jobs:
                   Start-Sleep -Milliseconds 250
               }
               if ($null -eq $firewallRule) {
-                  throw "Packaged server did not create its firewall rule"
+                  throw "Rust server did not create its firewall rule"
               }
               $application = $firewallRule | Get-NetFirewallApplicationFilter
               $portFilter = $firewallRule | Get-NetFirewallPortFilter
               if ($application.Program -ne $serverExe) {
-                  throw "Firewall rule is not scoped to the packaged EXE"
+                  throw "Firewall rule is not scoped to the Rust server EXE"
               }
               if ($portFilter.Protocol -ne "TCP" -or
                       $portFilter.LocalPort -ne "28782") {
@@ -264,7 +271,7 @@ jobs:
       - name: Install pinned Windows packager
         run: >-
           python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
+          -r launcher/requirements-windows-build.txt
       - name: Take the built 0.9.22 client package
         uses: actions/download-artifact@v4
         with:

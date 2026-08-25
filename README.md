@@ -1,16 +1,17 @@
 # World of Tanks Offline Battles
 
-Play standard battles with bots in two legacy Windows clients, alone or with
-friends on a LAN:
+Play standard battles with bots in legacy Windows clients, alone or with
+friends on a LAN. The packaged launcher currently targets 0.9.22; the 0.8.2
+port remains available from source:
 
 | Port | Supported client |
 | --- | --- |
 | [`0.8.2`](0.8.2/) | World of Tanks 0.8.2 |
 | [`0.9.22`](0.9.22/) | Chinese HD client 0.9.22.0.1 #1513 |
 
-You supply your own client. The client still provides the maps, vehicles,
-rendering, HUD and physics. This repository provides the client mod, the bot
-and battle logic, a small LAN server and a launcher.
+You supply your own client. It provides maps, vehicles, rendering, HUD and
+version-locked native geometry queries. This repository provides the client
+mod, Rust bot and battle authority, LAN server and launcher.
 
 ## Play
 
@@ -30,7 +31,8 @@ and battle logic, a small LAN server and a launcher.
    host picks the map and clicks **START BATTLE**. **LEAVE** returns you to
    the garage.
 
-When you host, approve the UAC prompt that opens TCP 28782 for the launcher.
+When you host, approve the UAC prompt that opens TCP 28782 for the bundled Rust
+server executable.
 Run the server only on a network you trust.
 
 ## The garage
@@ -58,7 +60,7 @@ activated only for that session and removed when the game closes. In a LAN
 room the host's profile is pinned for the whole room: the room server shares
 the modified package members with every joining launcher, which installs the
 same temporary overlay before the game starts, so every client (host, hidden
-simulation worker and joiners) runs identical modified vehicle data. A room
+native-world oracle and joiners) runs identical modified vehicle data. A room
 whose profile changed after it started must be restarted first.
 
 ## What is in the battle
@@ -79,7 +81,8 @@ whose profile changed after it started must be restarted first.
   that counts down each cooldown.
 - A LAN match is one shared battle: lineups, countdown, orders, projectiles,
   health, critical damage, destructibles, capture and results stay
-  synchronized, and the match survives the loss of the current bot controller.
+  synchronized. Losing the mandatory native-world oracle ends the active round
+  as a technical failure instead of transferring authority to a player.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,
@@ -88,17 +91,18 @@ physics and frame pacing can only be judged in the Windows client.
 ## Build it yourself
 
 ```bash
-# 0.8.2 client package
-python3 0.8.2/tools/package_native_experiment.py --output-dir dist --version 1.8.60
+# 0.9.22 x64 Rust LAN server (Windows)
+pwsh -NoProfile -File 0.9.22/server/build_windows_server.ps1
 # 0.9.22 client package, with CPython 2.7
 python2.7 0.9.22/build_wotmod.py
 # Windows launcher, after the 0.9.22 package exists
 pwsh -NoProfile -File launcher/build_launcher.ps1
 ```
 
-The launcher carries both LAN servers and both client mods. It writes the
-server address into the file each port already reads at startup, installs the
-mod, starts the game and stops the server when the game closes.
+The launcher carries the Rust LAN server and the exact 0.9.22 client mod. It
+writes the server address, installs the mod, starts the hidden native-world
+oracle and visible game client, and stops its child processes when the game
+closes.
 The `Build Windows launcher` GitHub Actions workflow can also be run manually;
 it publishes the complete Windows launcher ZIP as one artifact.
 

@@ -544,6 +544,12 @@ class PortSourceTests(unittest.TestCase):
             self.assertTrue(
                 (Path(overlay) / 'tools' /
                  'authority_worker_probe_supervisor.py').is_file())
+            self.assertTrue(
+                (Path(overlay) / 'tools' /
+                 'WINDOWS_MIGRATION_ACCEPTANCE.md').is_file())
+            self.assertTrue(
+                (Path(overlay) / 'tools' /
+                 'windows_migration_acceptance.ps1').is_file())
             self.assertTrue(Path(archive).is_file())
 
     def test_navigation_release_gate_rejects_wrong_41_map_names(self):
@@ -5049,7 +5055,12 @@ class LANClientTests(unittest.TestCase):
         client = module.LANClient(
             '127.0.0.1', listener.getsockname()[1], 'Loopback',
             'china:Ch01_Type59', 1300, bigworld=_LANBigWorld(),
-            effective_params=effective_params())
+            effective_params=effective_params(),
+            ammo_remaining=[51], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
         try:
             self.assertTrue(client.start())
             connection, unused_address = listener.accept()
@@ -5077,10 +5088,20 @@ class LANClientTests(unittest.TestCase):
         module = _load_port_source('lan_client')
         automatic = module.LANClient(
             '127.0.0.1', 28782, 'Auto', 'ussr:R11_MS-1',
-            effective_params=effective_params())
+            effective_params=effective_params(),
+            ammo_remaining=[51], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
         selected = module.LANClient(
             '127.0.0.1', 28782, 'TeamTwo', 'ussr:R11_MS-1',
-            requested_team=2, effective_params=effective_params())
+            requested_team=2, effective_params=effective_params(),
+            ammo_remaining=[51], ammo_loaded_shell=0,
+            player_authority_loadout={
+                'repair': {'available': False},
+                'spotting': {'available': False},
+            })
 
         self.assertNotIn('requested_team', automatic._hello_payload())
         self.assertEqual(2, selected._hello_payload()['requested_team'])
@@ -5134,6 +5155,7 @@ class LANClientTests(unittest.TestCase):
                 module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
+                module.HE_EXPLOSION_EVIDENCE_CAPABILITY,
                 module.PLAYER_FIRE_INTENT_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY,
@@ -5262,7 +5284,7 @@ class LANClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': 5, 'round_id': 3,
             'state_revision': 6, 'phase': 'battle',
             'map': '01_karelia', 'host_player_id': 2,
-            'bot_authority_id': -1,
+            'bot_authority_id': 0,
             'players': [wire_player(2, name='NewHost')]})
         stale_start = {
             'type': 'battle_start', 'protocol': 5, 'round_id': 3,
@@ -5285,8 +5307,8 @@ class LANClientTests(unittest.TestCase):
         delivered = events[-1][1]
         self.assertEqual(6, delivered['state_revision'])
         self.assertEqual(2, delivered['host_player_id'])
-        self.assertEqual(-1, delivered['bot_authority_id'])
-        self.assertEqual(-1, client.bot_authority_id)
+        self.assertEqual(0, delivered['bot_authority_id'])
+        self.assertEqual(0, client.bot_authority_id)
         self.assertEqual([2], [value['id']
                               for value in delivered['players']])
 
@@ -5298,31 +5320,31 @@ class LANClientTests(unittest.TestCase):
             'type': 'snapshot', 'protocol': 5,
             'round_id': 4, 'server_tick': 0,
             'bot_state_revision': 0,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._queue_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 4, 'server_tick': 1,
             'bot_state_revision': 1,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._queue_message({
             'type': 'roster', 'protocol': 5,
             'round_id': 4, 'state_revision': 2, 'phase': 'battle',
             'map': '01_karelia', 'host_player_id': 7,
-            'bot_authority_id': -1,
+            'bot_authority_id': 0,
             'players': [wire_player(7)]})
         client._queue_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 4, 'server_tick': 2,
             'bot_state_revision': 2,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._queue_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 4, 'server_tick': 3,
             'bot_state_revision': 3,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._poll()
 
@@ -5366,6 +5388,7 @@ class LANClientTests(unittest.TestCase):
                 module.PLAYER_FIRE_INTENT_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY,
+                module.HE_EXPLOSION_EVIDENCE_CAPABILITY,
             ],
             'authority_epoch': 1,
             'player_id': 7, 'host_player_id': 7, 'name': 'Player',
@@ -5395,7 +5418,7 @@ class LANClientTests(unittest.TestCase):
         current = {'type': 'snapshot', 'protocol': 5,
                    'round_id': 5, 'server_tick': 3,
                    'bot_state_revision': 3,
-                   'bot_authority_id': -1, 'bot_manifest': [],
+                   'bot_authority_id': 0, 'bot_manifest': [],
                    'players': [], 'bots': []}
         client._handle_message(current)
 
@@ -5438,6 +5461,7 @@ class LANClientTests(unittest.TestCase):
                 module.RICOCHET_CONTINUATION_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
+                module.HE_EXPLOSION_EVIDENCE_CAPABILITY,
                 module.PLAYER_FIRE_INTENT_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY],
@@ -5467,6 +5491,7 @@ class LANClientTests(unittest.TestCase):
                 module.RICOCHET_CONTINUATION_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
+                module.HE_EXPLOSION_EVIDENCE_CAPABILITY,
                 module.PLAYER_FIRE_INTENT_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY],
@@ -5508,7 +5533,7 @@ class LANClientTests(unittest.TestCase):
             'type': 'battle_start', 'protocol': 5, 'round_id': 3,
             'state_revision': 4, 'phase': 'loading',
             'map': '01_karelia', 'host_player_id': 8,
-            'bot_authority_id': -1,
+            'bot_authority_id': 0,
             'players': [wire_player(7)]})
 
         self.assertFalse(client.running)
@@ -5548,13 +5573,13 @@ class LANClientTests(unittest.TestCase):
             'type': 'snapshot', 'protocol': 5,
             'round_id': 3, 'server_tick': 4,
             'bot_state_revision': 5,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 3, 'server_tick': 5,
             'bot_state_revision': 4,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
 
         self.assertFalse(client.running)
@@ -5569,7 +5594,7 @@ class LANClientTests(unittest.TestCase):
             'round_id': 3, 'server_tick': 4,
             'bot_state_revision': 5,
             'motion_time_us': 120000, 'bot_state_time_us': 90000,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         self.assertTrue(client.running)
 
@@ -5578,7 +5603,7 @@ class LANClientTests(unittest.TestCase):
             'round_id': 3, 'server_tick': 5,
             'bot_state_revision': 5,
             'motion_time_us': 150000, 'bot_state_time_us': 100000,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         self.assertFalse(client.running)
         self.assertEqual('invalid snapshot message', client.last_error)
@@ -5591,13 +5616,13 @@ class LANClientTests(unittest.TestCase):
             'round_id': 3, 'server_tick': 4,
             'bot_state_revision': 5,
             'motion_time_us': 120000, 'bot_state_time_us': 90000,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 3, 'server_tick': 5,
             'bot_state_revision': 6,
-            'bot_authority_id': -1, 'bot_manifest': [],
+            'bot_authority_id': 0, 'bot_manifest': [],
             'players': [], 'bots': []})
         self.assertFalse(client.running)
         self.assertEqual('invalid snapshot message', client.last_error)

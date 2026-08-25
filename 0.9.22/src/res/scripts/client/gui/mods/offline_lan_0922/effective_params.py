@@ -9,7 +9,7 @@ hidden native worker validate and relay this immutable round input; neither
 endpoint reconstructs a second loadout from a bare descriptor.
 
 This module intentionally depends only on the standard library and remains
-importable on both the embedded Python 2 client and the Python 3 server.
+importable on both the embedded Python 2 client and the Python 3 test harness.
 """
 
 import math

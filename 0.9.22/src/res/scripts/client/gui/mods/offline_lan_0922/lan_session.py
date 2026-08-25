@@ -214,7 +214,6 @@ def _selected_vehicle_effective_params():
     from gui.mods.offline_lan_0922 import player_critical_mechanics
     from gui.mods.offline_lan_0922 import vehicle_physics
     from items import vehicles
-
     item = g_currentVehicle.item
     if item is None:
         raise ValueError('the current garage vehicle is not available')
@@ -410,6 +409,56 @@ def _selected_vehicle_effective_params():
     return result
 
 
+def _selected_vehicle_ammo_remaining():
+    """Return exact garage inventory and initially loaded shell index."""
+    from CurrentVehicle import g_currentVehicle
+
+    if not g_currentVehicle.isPresent():
+        raise ValueError('the current garage vehicle is not available')
+    item = g_currentVehicle.item
+    if item is None:
+        raise ValueError('the current garage vehicle is not available')
+    descriptor = item.descriptor
+    shots = tuple(getattr(descriptor.gun, 'shots', None) or ())
+    if not shots or len(shots) > 16:
+        raise ValueError('the mounted gun ammunition contract is invalid')
+
+    inventory = {}
+    for shell in (getattr(item, 'shells', None) or ()):
+        compact_descr = int(shell.intCD)
+        count = int(shell.count)
+        if (compact_descr <= 0 or compact_descr in inventory or
+                count < 0 or count > 1000):
+            raise ValueError('the garage ammunition layout is invalid')
+        inventory[compact_descr] = count
+
+    remaining = []
+    seen = set()
+    for shot in shots:
+        compact_descr = int(getattr(shot.shell, 'compactDescr'))
+        if compact_descr <= 0 or compact_descr in seen:
+            raise ValueError('the mounted gun shell identity is invalid')
+        seen.add(compact_descr)
+        remaining.append(inventory.get(compact_descr, 0))
+    if sum(remaining) > 1000:
+        raise ValueError('the garage ammunition layout is too large')
+    try:
+        loaded_shell = int(descriptor.activeGunShotIndex)
+    except (AttributeError, TypeError, ValueError):
+        loaded_shell = 0
+    loaded_shell = max(0, min(loaded_shell, len(remaining) - 1))
+    if sum(remaining) and not remaining[loaded_shell]:
+        loaded_shell = next(
+            index for index, count in enumerate(remaining) if count)
+    return {'remaining': remaining, 'loaded_shell': loaded_shell}
+
+
+def _selected_vehicle_authority_loadout():
+    """Return this garage actor's exact repair and spotting donation."""
+    from gui.mods.offline_lan_0922 import descriptor_donation
+    return descriptor_donation.current_player_authority_loadout()
+
+
 def _message_value(message, name, default=None):
     if isinstance(message, dict):
         return message.get(name, default)
@@ -438,7 +487,8 @@ class LANSession(object):
                  vehicle_provider=None, room_factory=None,
                  queue_screen_factory=None, postbattle_store=None,
                  vehicle_compact_provider=None,
-                 effective_params_provider=None):
+                 effective_params_provider=None, ammo_provider=None,
+                 authority_loadout_provider=None):
         self._config = dict(config or {})
         self._client_factory = client_factory or _load_client
         self._queue_factory = queue_factory or queue_ui.QueueUI
@@ -457,6 +507,14 @@ class LANSession(object):
         self._cancel_callback = cancel_callback
         self._status_notifier = status_notifier or _show_status
         self._vehicle_provider = vehicle_provider or _selected_vehicle_details
+        self._ammo_provider = ammo_provider
+        self._authority_loadout_provider = authority_loadout_provider
+        if client_factory is None:
+            if self._ammo_provider is None:
+                self._ammo_provider = _selected_vehicle_ammo_remaining
+            if self._authority_loadout_provider is None:
+                self._authority_loadout_provider = \
+                    _selected_vehicle_authority_loadout
         self._outfit_provider = _selected_vehicle_outfits
         self._vehicle_compact_provider = (
             vehicle_compact_provider or _selected_vehicle_compact_descr)
@@ -568,6 +626,34 @@ class LANSession(object):
             except Exception as error:
                 sys.stdout.write(
                     '[Offline LAN 0.9.22] selected vehicle projection '
+                    'failed: %s\n' % error)
+                raise _VehicleSelectionError()
+        if self._ammo_provider is not None:
+            try:
+                ammo = self._ammo_provider()
+                client.ammo_remaining = list(ammo['remaining'])
+                client.ammo_loaded_shell = int(ammo['loaded_shell'])
+            except Exception as error:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] selected vehicle ammunition '
+                    'failed: %s\n' % error)
+                raise _VehicleSelectionError()
+        if self._authority_loadout_provider is not None:
+            try:
+                client.player_authority_loadout = (
+                    self._authority_loadout_provider())
+            except Exception as error:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] selected vehicle authority '
+                    'loadout failed: %s\n' % error)
+                raise _VehicleSelectionError()
+        validate_hello = getattr(client, '_hello_payload', None)
+        if callable(validate_hello):
+            try:
+                validate_hello()
+            except (TypeError, ValueError) as error:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] selected vehicle LAN payload '
                     'failed: %s\n' % error)
                 raise _VehicleSelectionError()
         return client
@@ -830,6 +916,10 @@ class LANSession(object):
             vehicle_compact_descr = self._vehicle_compact_provider()
             effective_params = (None if self._effective_params_provider is None
                                 else self._effective_params_provider())
+            ammo = self._ammo_provider()
+            ammo_remaining = list(ammo['remaining'])
+            ammo_loaded_shell = int(ammo['loaded_shell'])
+            authority_loadout = self._authority_loadout_provider()
         except Exception:
             # A lobby transition can hide the garage selection.  Keep the
             # vehicle the server already holds for this player.
@@ -837,12 +927,10 @@ class LANSession(object):
         if not vehicle or max_health < 1:
             return False
         try:
-            if effective_params is None:
-                return bool(select(
-                    vehicle, max_health, outfits, vehicle_compact_descr))
             return bool(select(
                 vehicle, max_health, outfits, vehicle_compact_descr,
-                effective_params))
+                effective_params, ammo_remaining, ammo_loaded_shell,
+                authority_loadout))
         except TypeError:
             # Test doubles and the first protocol-v5 client accepted only the
             # original vehicle and max-health arguments.
@@ -2149,6 +2237,55 @@ class LANSession(object):
             print('[Offline LAN 0.9.22] vehicle catalog donation was not '
                   'accepted by the transport (%d rows)' % len(rows))
 
+    @staticmethod
+    def _local_fitting():
+        """Map the selected vehicle's type name to its mounted descriptor."""
+        try:
+            from CurrentVehicle import g_currentVehicle
+            descriptor = g_currentVehicle.item.descriptor
+            return {str(descriptor.type.name): descriptor.makeCompactDescr()}
+        except Exception:
+            return {}
+
+    def _donate_descriptors(self, message):
+        """Answer one server request for battle descriptor projections."""
+        names = message.get('names') if isinstance(message, dict) else None
+        if not isinstance(names, (list, tuple)) or not names:
+            return
+        requested = []
+        for raw_name in names[:64]:
+            name = str(raw_name)
+            if name and name not in requested:
+                requested.append(name)
+        if not requested:
+            return
+        failures = []
+        projections = {}
+        runtime = self._donation_runtime()
+        try:
+            if runtime is None:
+                failures.extend(requested)
+            else:
+                from gui.mods.offline_lan_0922 import descriptor_donation
+                projections = descriptor_donation.project_vehicles(
+                    runtime, requested, failures=failures,
+                    fittings=self._local_fitting())
+        except Exception as error:
+            print('[Offline LAN 0.9.22] descriptor donation '
+                  'failed: %s' % error)
+            projections = {}
+            failures = list(requested)
+        items = sorted(projections.items())
+        if not items:
+            self.client.send_descriptor_bundle(
+                {}, requested=requested, failures=failures, complete=True)
+            return
+        for start in range(0, len(items), 12):
+            end = start + 12
+            self.client.send_descriptor_bundle(
+                dict(items[start:end]), requested=requested,
+                failures=failures, complete=end >= len(items))
+
     def _on_event(self, kind, message):
         if self._stopped:
             return
@@ -2156,6 +2293,8 @@ class LANSession(object):
             if kind == 'welcome':
                 self._send_vehicle_catalog()
             self._waiting_event(message)
+        elif kind == 'descriptor_request':
+            self._donate_descriptors(message)
         elif kind == 'start_denied':
             # Concurrent start requests can produce an accepted battle_start
             # and a denial for this client's losing request in either order.
@@ -2301,6 +2440,12 @@ class LANSession(object):
                     round_id == self._active_round_id and
                     self._battle_runtime is not None):
                 self._battle_runtime.on_fire_intent_result(message)
+        elif kind == 'ammo_intent_result':
+            round_id = _message_value(message, 'round_id')
+            if (self._battle_started and
+                    round_id == self._active_round_id and
+                    self._battle_runtime is not None):
+                self._battle_runtime.on_ammo_intent_result(message)
         elif kind == 'player_destructible_contact_result':
             round_id = _message_value(message, 'round_id')
             if (self._battle_started and

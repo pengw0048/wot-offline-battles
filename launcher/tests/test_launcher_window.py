@@ -1721,6 +1721,20 @@ class WindowTest(unittest.TestCase):
         self.assertIn("Server log: %s" % dedicated, self._log_text())
         self.window._stop_server(force=True)
 
+    def test_direct_rust_output_is_written_to_the_selected_server_log(self):
+        log_path = os.path.join(self.settings_dir, "direct-server.log")
+        server = _Process(
+            exit_code=0,
+            stdout=io.BytesIO(
+                b"LAN battle server listening on 0.0.0.0:28782\n"))
+
+        self.window._pump_server_output(server, log_path)
+
+        with open(log_path, encoding="utf-8") as stream:
+            self.assertEqual(
+                "LAN battle server listening on 0.0.0.0:28782\n",
+                stream.read())
+
     def test_server_entry_uses_the_session_log_selected_by_environment(self):
         selected = os.path.join(self.settings_dir, "selected-server.log")
         with mock.patch.object(
@@ -1728,12 +1742,20 @@ class WindowTest(unittest.TestCase):
                 return_value=selected), mock.patch.object(
                     wot_launcher, "_open_server_log") as open_log, \
                 mock.patch("core.server_root", return_value="/server"), \
-                mock.patch("core.run_server_payload") as run:
+                mock.patch("core.run_server_payload", return_value=0) as run:
             self.assertEqual(0, wot_launcher._serve(
                 [core.SERVE_FLAG, core.PORT_0_9_22]))
 
         open_log.assert_called_once_with(selected)
         run.assert_called_once_with(core.PORT_0_9_22)
+
+    def test_server_entry_propagates_the_server_exit_code(self):
+        with mock.patch.object(
+                wot_launcher, "_open_server_log"), mock.patch(
+                    "core.server_root", return_value="/server"), mock.patch(
+                        "core.run_server_payload", return_value=7):
+            self.assertEqual(7, wot_launcher._serve(
+                [core.SERVE_FLAG, core.PORT_0_9_22]))
 
     def test_server_process_output_is_teed_to_the_live_pipe_and_log_file(self):
         stdout = io.StringIO()

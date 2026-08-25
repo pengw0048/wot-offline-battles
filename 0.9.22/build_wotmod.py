@@ -243,7 +243,9 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
     os.makedirs(tools_root)
     for filename in (
             'AUTHORITY_WORKER_PROBE.md',
-            'authority_worker_probe_supervisor.py'):
+            'authority_worker_probe_supervisor.py',
+            'WINDOWS_MIGRATION_ACCEPTANCE.md',
+            'windows_migration_acceptance.ps1'):
         shutil.copy2(
             os.path.join(os.path.dirname(__file__), 'tools', filename),
             tools_root)

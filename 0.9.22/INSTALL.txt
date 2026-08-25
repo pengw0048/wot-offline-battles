@@ -9,15 +9,22 @@ directory that contains WorldOfTanks.exe. It contains:
   mods\configs\offline_lan_0922\navgraphs\
   mods\configs\offline_lan_0922\foliage\
   mods\configs\offline_lan_0922\destructibles\
+  WoT-0.9.22-LAN-Server.exe
+  offline_worker_starter.exe
   START_OFFLINE_0922.bat
+  START_LAN_CLIENT_0922.bat
   START_SIMULATION_WORKER_0922.bat
   tools\AUTHORITY_WORKER_PROBE.md
   tools\authority_worker_probe_supervisor.py
+  tools\WINDOWS_MIGRATION_ACCEPTANCE.md
+  tools\windows_migration_acceptance.ps1
 
 Move every older org.peng.offline_lan_0922*.wotmod out of
-mods\0.9.22.0.1 before copying this version. Start the LAN server on one PC,
-then edit mods\configs\offline_lan_0922\server_endpoint.json when the server is
-not 127.0.0.1:28782. That user-owned file is never shipped in this package.
+mods\0.9.22.0.1 before copying this version. The normal host path is the
+desktop launcher's Online tab: click Start LAN room, then start the host game.
+A joining PC enters the host address in the same tab. START_OFFLINE_0922.bat is
+a diagnostic visible-client entry point only; it does not start the Rust server
+or hidden native-world oracle.
 
 Start the client with START_OFFLINE_0922.bat. It passes the #1513-supported
 preferences leaf `preferences.offline-player.xml`, so it never reads or writes
@@ -28,7 +35,7 @@ Play
 ----
 
 1. In the launcher, select LAN and click Start LAN room. It starts the LAN
-   server and its one hidden simulation worker; a room never uses a visible
+   server and its one hidden native-world oracle; a room never uses a visible
    player client as a fallback authority. Start the client without logging
    into an online account. On a fresh profile, accept the stock EULA once.
 2. Fit a tank in the garage and click Battle!. The client joins the LAN room.
@@ -38,10 +45,9 @@ Play
    screen. The first player is the room host: the host selects a standard map
    with < and >, then clicks START BATTLE. LEAVE closes the room and returns
    you to the garage.
-4. The server fills each team to WOT_0922_TEAM_SIZE total tanks, including
-   human players (1 through 15, default 15). Set that environment variable in
-   the batch file that starts the server. Movement and firing unlock when the
-   countdown reaches battle.
+4. The room host chooses 1 through 15 total tanks for each team, including
+   human players. Movement and firing unlock when the countdown reaches
+   battle.
 5. After a team is eliminated the round freezes, every connected player
    returns to the waiting room after five seconds, and the stock battle-results
    notification is requested. A player who left after dying receives the same
@@ -71,7 +77,7 @@ never changes scripts.pkg. In single player the selected profile is active only
 for that session and removed when the game closes. In a LAN room the host's
 profile is pinned for the whole room: the server shares the modified package
 members with every joining Launcher, which installs the same temporary overlay
-before the game starts, so the host client, the hidden worker and every joiner
+before the game starts, so the host client, the hidden oracle and every joiner
 run identical modified vehicle data. A room whose profile changed after it
 started must be restarted first.
 
@@ -79,18 +85,20 @@ Requirements
 ------------
 
 - The exact Chinese HD client 0.9.22.0.1 #1513.
-- The LAN server from the same repository revision, on one PC. It always
-  listens on 0.0.0.0:28782 and supports up to 30 players. A single-player round
-  also uses it.
+- The x64 Rust LAN server and hidden native-world oracle from the same
+  repository revision, on the host PC. A LAN room listens on 0.0.0.0:28782
+  and supports up to 30 players. A single-player round also uses both.
 
 Manual diagnostic entry points
 ------------------------------
 
-The Launcher normally starts the LAN server, mandatory hidden worker and
-visible client together. For diagnostics only, start the server, then
+The Launcher normally starts the Rust LAN server, mandatory hidden oracle and
+visible client in the required order. For diagnostics only, start the server, then
 START_SIMULATION_WORKER_0922.bat, then START_OFFLINE_0922.bat. The hidden
-worker does not occupy a player slot; without it the room cannot start a
-battle.
+oracle supplies version-locked BigWorld collision and geometry observations
+and does not occupy a player slot. The Rust process owns the room, portable
+simulation, combat, replication and results; without the oracle it fails
+closed instead of assigning authority to a visible player.
 
 Troubleshooting
 ---------------

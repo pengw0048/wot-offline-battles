@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-"""Dedicated #1513 client lifecycle for native bot simulation authority.
+"""Dedicated #1513 client lifecycle for the Rust native-world oracle.
 
 The worker is not a player.  It keeps one private, off-map Avatar only because
 the exact client exposes terrain, model nodes and hit testers through a loaded
@@ -30,6 +30,9 @@ from gui.mods.offline_lan_0922.lan_client import (
     _canonical_wire_outfits,
     _exact_int, _project_human_ram_armors, _projectile_int_range, _safe_text,
     _strict_capabilities, _strict_mapping_list)
+from gui.mods.offline_lan_0922.native_oracle_bridge import (
+    HE_EXPLOSION_EVIDENCE_CAPABILITY, NATIVE_ORACLE_CAPABILITY,
+    NativeOracleBridge)
 
 
 WORKER_ROLE = 'simulation_worker'
@@ -152,7 +155,7 @@ def _trusted_projected_bot_states(bots):
 
 def _authority_id(value):
     parsed = _exact_int(value)
-    if parsed in (None, WORKER_AUTHORITY_ID):
+    if parsed in (None, 0, WORKER_AUTHORITY_ID):
         return parsed
     return _projectile_int_range(parsed, 1, MAX_PROJECTILE_ID)
 
@@ -160,6 +163,112 @@ def _authority_id(value):
 def _load_battle_runtime():
     from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime
     return BattleRuntime
+
+
+class _NativeOracleEntities(object):
+    """One complete, fenced view of the hidden native vehicle space."""
+
+    def __init__(self, runtime, generations):
+        provider = getattr(runtime, 'native_oracle_entity_rows', None)
+        resolver = getattr(runtime, 'resolve_native_oracle_entity', None)
+        space_anchor = getattr(runtime, 'native_oracle_space_anchor', None)
+        world_proof = getattr(runtime, 'native_oracle_world_proof', None)
+        if (not callable(provider) or not callable(resolver) or
+                not callable(space_anchor) or not callable(world_proof)):
+            raise RuntimeError(
+                'native oracle entity mapping boundary is unavailable')
+        self._resolver = resolver
+        self._entities = {}
+        self._donation = []
+        logical = set()
+        for kind, logical_id, entity_id, entity in provider():
+            if (kind not in ('human', 'bot') or
+                    _projectile_int_range(
+                        logical_id, 1, MAX_PROJECTILE_ID) is None or
+                    _projectile_int_range(
+                        entity_id, 1, MAX_PROJECTILE_ID) is None or
+                    entity is None):
+                raise RuntimeError('native oracle entity row is invalid')
+            key = (kind, int(logical_id))
+            entity_id = int(entity_id)
+            if key in logical or entity_id in self._entities:
+                raise RuntimeError(
+                    'native oracle entity mapping contains duplicates')
+            generation = int(generations.get(entity_id, 0)) + 1
+            if generation > MAX_PROJECTILE_ID:
+                raise RuntimeError(
+                    'native oracle entity generation exhausted')
+            generations[entity_id] = generation
+            logical.add(key)
+            self._entities[entity_id] = (entity, generation)
+            self._donation.append({
+                'kind': kind,
+                'logical_id': int(logical_id),
+                'native': {
+                    'entity_id': entity_id,
+                    'generation': generation,
+                },
+            })
+        if not self._donation:
+            raise RuntimeError('native oracle entity mapping is empty')
+        self._donation.sort(key=lambda value: (
+            0 if value['kind'] == 'human' else 1,
+            value['logical_id']))
+        anchor = space_anchor()
+        if (not isinstance(anchor, (list, tuple)) or len(anchor) != 2 or
+                _projectile_int_range(
+                    anchor[0], 1, MAX_PROJECTILE_ID) is None or
+                anchor[1] is None):
+            raise RuntimeError('native oracle space anchor is invalid')
+        anchor_id = int(anchor[0])
+        if anchor_id in self._entities:
+            raise RuntimeError(
+                'native oracle space anchor overlaps an oracle entity')
+        anchor_generation = int(generations.get(anchor_id, 0)) + 1
+        if anchor_generation > MAX_PROJECTILE_ID:
+            raise RuntimeError('native oracle space generation exhausted')
+        generations[anchor_id] = anchor_generation
+        self._entities[anchor_id] = (anchor[1], anchor_generation)
+        self._oracle_space = {
+            'entity_id': anchor_id,
+            'generation': anchor_generation,
+        }
+        self._world_proof = world_proof()
+
+    def space_id(self):
+        """Return the native space fenced by this immutable donation."""
+        return self._world_proof.get('native_space_id')
+
+    def resolve(self, entity_ref):
+        entity_id = _exact_int(
+            entity_ref.get('entity_id') if isinstance(entity_ref, dict)
+            else None)
+        generation = _exact_int(
+            entity_ref.get('generation') if isinstance(entity_ref, dict)
+            else None)
+        stored = self._entities.get(entity_id)
+        if stored is None or generation != stored[1]:
+            return None, generation
+        current = self._resolver(entity_id)
+        if current is not stored[0]:
+            return None, generation
+        return current, generation
+
+    def donation(self, round_id, authority_epoch, oracle_generation,
+                 entity_revision, bot_consumables):
+        return {
+            'type': 'oracle_world_ready',
+            'protocol': PROTOCOL_VERSION,
+            'round_id': int(round_id),
+            'authority_epoch': int(authority_epoch),
+            'oracle_generation': int(oracle_generation),
+            'entity_revision': int(entity_revision),
+            'complete': True,
+            'oracle_space': dict(self._oracle_space),
+            'entities': [dict(value) for value in self._donation],
+            'destructibles': dict(self._world_proof),
+            'bot_consumables': [dict(value) for value in bot_consumables],
+        }
 
 
 class AuthorityWorkerLANClient(LANClient):
@@ -178,6 +287,23 @@ class AuthorityWorkerLANClient(LANClient):
         self.spawn = {
             'x': 0.0, 'y': WORKER_DUMMY_Y, 'z': 0.0, 'yaw': 0.0}
         self._worker_avatar = None
+        self.oracle_generation = 1
+        self._native_oracle_negotiated = False
+        self._native_oracle_bridge = None
+        self._native_oracle_runtime = None
+        self._native_oracle_entities = None
+        self._native_entity_generations = {}
+        self._native_entity_revision = 0
+        self._native_oracle_ready = False
+
+    def configure_native_oracle_generation(self, generation):
+        """Bind the next hello to one process-local reconnect generation."""
+        generation = _projectile_int_range(
+            generation, 1, MAX_PROJECTILE_ID)
+        if generation is None or self.running:
+            return False
+        self.oracle_generation = generation
+        return True
 
     def is_bot_authority(self):
         """Only the dedicated worker identity may own bot simulation."""
@@ -204,9 +330,123 @@ class AuthorityWorkerLANClient(LANClient):
             'protocol': PROTOCOL_VERSION,
             'client_build': CLIENT_BUILD,
             'capabilities': list(CLIENT_CAPABILITIES) + [
-                SIMULATION_WORKER_CAPABILITY],
+                HE_EXPLOSION_EVIDENCE_CAPABILITY,
+                SIMULATION_WORKER_CAPABILITY, NATIVE_ORACLE_CAPABILITY],
             'role': WORKER_ROLE,
+            'oracle_generation': int(self.oracle_generation),
         }
+
+    def is_native_oracle(self):
+        """Whether this connection owns native queries, not gameplay state."""
+        return bool(
+            self.ready and self._native_oracle_negotiated and
+            self.oracle_generation > 0)
+
+    def start_native_oracle(self, runtime):
+        """Start the render-thread bridge on this worker's existing socket."""
+        bridge = self._native_oracle_bridge
+        if bridge is not None:
+            return bool(
+                self._native_oracle_runtime is runtime and bridge.running and
+                self._native_oracle_ready)
+        if (not self.is_native_oracle() or runtime is None or
+                getattr(runtime, 'state', None) != 'running' or
+                self.round_id is None or self.authority_epoch is None):
+            return False
+        try:
+            consumable_resolver = getattr(
+                runtime, '_default_bot_equipment_contracts', None)
+            if not callable(consumable_resolver):
+                raise RuntimeError(
+                    'native oracle bot consumable projection is unavailable')
+            bot_consumables = consumable_resolver()
+            if (not isinstance(bot_consumables, (list, tuple)) or
+                    len(bot_consumables) != 3 or
+                    any(not isinstance(value, dict)
+                        for value in bot_consumables)):
+                raise RuntimeError(
+                    'native oracle bot consumable projection is invalid')
+            entities = _NativeOracleEntities(
+                runtime, self._native_entity_generations)
+            revision = self._native_entity_revision + 1
+            bridge = NativeOracleBridge(
+                host=self.host, port=self.port, bigworld=self.bigworld,
+                entity_resolver=entities.resolve,
+                space_id_provider=entities.space_id,
+                on_disconnect=self._native_oracle_disconnected)
+            bridge._begin_embedded_session(self.oracle_generation)
+            donation = entities.donation(
+                self.round_id, self.authority_epoch,
+                self.oracle_generation, revision, bot_consumables)
+        except Exception:
+            if bridge is not None:
+                bridge.stop()
+            raise
+        self._native_oracle_bridge = bridge
+        self._native_oracle_runtime = runtime
+        self._native_oracle_entities = entities
+        if not self._send_preencoded_trusted(donation):
+            self.stop_native_oracle()
+            return False
+        self._native_entity_revision = revision
+        self._native_oracle_ready = True
+        return True
+
+    def native_oracle_ready_for_battle(self):
+        bridge = self._native_oracle_bridge
+        return bool(
+            self.is_native_oracle() and self._native_oracle_ready and
+            self.phase in ('loading', 'battle') and
+            bridge is not None and bridge.running)
+
+    def stop_native_oracle(self):
+        """Fence queries before any hidden native entity is destroyed."""
+        bridge = self._native_oracle_bridge
+        self._native_oracle_bridge = None
+        self._native_oracle_runtime = None
+        self._native_oracle_entities = None
+        self._native_oracle_ready = False
+        if bridge is None:
+            return False
+        bridge.stop()
+        return True
+
+    def _native_oracle_disconnected(self, reason):
+        if self.running:
+            self._invalid_worker_message(
+                'native oracle failed closed: %s' % reason)
+
+    def _process_native_oracle_frame(self):
+        bridge = self._native_oracle_bridge
+        if bridge is None:
+            return 0
+        processed = bridge.process_render_frame()
+        if not bridge.running:
+            if self.running:
+                self._invalid_worker_message(
+                    bridge.last_error or 'native oracle stopped')
+            return 0
+        replies = bridge._drain_outbound_messages()
+        for reply in replies:
+            if not self._send_preencoded_trusted(reply):
+                self._invalid_worker_message(
+                    'native oracle reply could not be queued')
+                return 0
+        return processed
+
+    def _poll(self):
+        LANClient._poll(self)
+        if self.running and self._native_oracle_bridge is not None:
+            try:
+                self._process_native_oracle_frame()
+            except Exception as error:
+                self._invalid_worker_message(
+                    'native oracle render failure: %s' % error)
+
+    def stop(self):
+        self.stop_native_oracle()
+        self._native_oracle_negotiated = False
+        LANClient.stop(self)
 
     def send_projected_bot_state(self, bots, sample_time_us=None,
                                  source_batch_horizon_us=None,
@@ -277,6 +517,8 @@ class AuthorityWorkerLANClient(LANClient):
                 message.get('server_time_ms'), 0, MAX_PROJECTILE_ID)
         team_size = _exact_int(message.get('team_size'))
         authority_id = _authority_id(message.get('bot_authority_id'))
+        oracle_generation = _projectile_int_range(
+            message.get('oracle_generation'), 1, MAX_PROJECTILE_ID)
         phase = _safe_text(message.get('phase'), '', 16)
         map_name = _safe_text(message.get('map'), '', 80)
         protocol = _exact_int(message.get('protocol'))
@@ -292,12 +534,15 @@ class AuthorityWorkerLANClient(LANClient):
                 SIMULATION_WORKER_CAPABILITY not in capabilities or
                 RAM_CONTACT_LEDGER_CAPABILITY not in capabilities or
                 HUMAN_RAM_TIMELINE_CAPABILITY not in capabilities or
+                HE_EXPLOSION_EVIDENCE_CAPABILITY not in capabilities or
                 PLAYER_FIRE_INTENT_CAPABILITY not in capabilities or
                 PLAYER_ENVIRONMENT_CAPABILITY not in capabilities or
                 EFFECTIVE_PARAMS_CAPABILITY not in capabilities or
                 RICOCHET_CONTINUATION_CAPABILITY not in capabilities or
                 RAM_CONTACT_LEDGER_CAPABILITY not in server_capabilities or
                 HUMAN_RAM_TIMELINE_CAPABILITY not in server_capabilities or
+                HE_EXPLOSION_EVIDENCE_CAPABILITY not in
+                server_capabilities or
                 PLAYER_FIRE_INTENT_CAPABILITY not in
                 server_capabilities or
                 PLAYER_ENVIRONMENT_CAPABILITY not in
@@ -305,12 +550,15 @@ class AuthorityWorkerLANClient(LANClient):
                 EFFECTIVE_PARAMS_CAPABILITY not in server_capabilities or
                 RICOCHET_CONTINUATION_CAPABILITY not in
                 server_capabilities or
+                NATIVE_ORACLE_CAPABILITY not in capabilities or
+                NATIVE_ORACLE_CAPABILITY not in server_capabilities or
+                oracle_generation != self.oracle_generation or
                 state_revision is None or state_revision < 0 or
                 round_id is None or round_id < 0 or
                 (host_player_id is not None and host_player_id <= 0) or
                 authority_epoch is None or server_time_ms is None or
                 team_size is None or not 1 <= team_size <= 15 or
-                authority_id != WORKER_AUTHORITY_ID or
+                authority_id != 0 or
                 phase not in ('waiting', 'loading', 'battle') or
                 not map_name):
             return self._invalid_worker_message('invalid worker welcome')
@@ -329,6 +577,7 @@ class AuthorityWorkerLANClient(LANClient):
         self.capabilities = capabilities
         self.server_capabilities = server_capabilities
         self._schema_negotiated = True
+        self._native_oracle_negotiated = True
         self._notify('welcome', message)
         return True
 
@@ -367,7 +616,7 @@ class AuthorityWorkerLANClient(LANClient):
                 not compacts_valid or not effective_params_valid or
                 ((players and host_player_id not in player_ids) or
                  (not players and host_player_id is not None)) or
-                authority_id != WORKER_AUTHORITY_ID or
+                authority_id != 0 or
                 authority_epoch is None or
                 ('server_time_ms' in message and server_time_ms is None)):
             return self._invalid_worker_message('invalid worker roster')
@@ -507,7 +756,7 @@ class AuthorityWorkerLANClient(LANClient):
         if self.host_player_id is not None:
             refreshed['host_player_id'] = self.host_player_id
         if self.bot_authority_id is not None:
-            refreshed['bot_authority_id'] = self.bot_authority_id
+            refreshed['bot_authority_id'] = 0
         if self.authority_epoch is not None:
             refreshed['authority_epoch'] = self.authority_epoch
         if self.server_time_ms is not None:
@@ -536,6 +785,14 @@ class AuthorityWorkerLANClient(LANClient):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
+        if kind == 'query_batch':
+            bridge = self._native_oracle_bridge
+            if (bridge is None or not self._native_oracle_ready or
+                    not bridge._accept_server_message(message)):
+                if self.running:
+                    self._invalid_worker_message(
+                        'native oracle query arrived outside ready space')
+            return
         if kind == 'welcome':
             self._handle_worker_welcome(message)
             return
@@ -544,7 +801,7 @@ class AuthorityWorkerLANClient(LANClient):
             return
         if (kind in ('battle_start', 'snapshot') and
                 _authority_id(message.get('bot_authority_id')) !=
-                WORKER_AUTHORITY_ID):
+                0):
             self._invalid_worker_message(
                 'worker authority identity changed')
             return
@@ -711,6 +968,11 @@ class WorkerSession(object):
             bigworld=self._bigworld)
         self.state = 'connecting'
         try:
+            configure = getattr(
+                self.client, 'configure_native_oracle_generation', None)
+            if callable(configure) and not configure(generation):
+                raise RuntimeError(
+                    'worker oracle generation could not be configured')
             if not self.client.start():
                 raise RuntimeError('worker LAN client could not start')
         except Exception as error:
@@ -789,7 +1051,7 @@ class WorkerSession(object):
             return
         if self.runtime is None and self._pending_start is not None:
             if (self.client is None or
-                    not self.client.is_bot_authority()):
+                    not self.client.is_native_oracle()):
                 self._pending_start = None
                 self._pending_start_deadline = None
                 self.state = 'standby'
@@ -812,16 +1074,21 @@ class WorkerSession(object):
                     return
         runtime = self.runtime
         if runtime is not None:
-            if (self.client is None or not self.client.is_bot_authority() or
+            if (self.client is None or not self.client.is_native_oracle() or
                     self._active_round_id in self._retired_rounds):
-                if not self._retire_or_fail('authority_lost'):
+                if not self._retire_or_fail('oracle_lost'):
                     return
             elif runtime.state == 'running':
-                try:
-                    self._publish_simulation_progress(runtime)
-                except Exception as error:
-                    self._worker_failure(error)
-                    return
+                # The Rust process owns all gameplay simulation. Retain the
+                # legacy publisher only when an old server explicitly grants
+                # that separate authority; native-oracle role alone never
+                # emits bot state or simulation progress.
+                if self.client.is_bot_authority():
+                    try:
+                        self._publish_simulation_progress(runtime)
+                    except Exception as error:
+                        self._worker_failure(error)
+                        return
                 ready_for_draw = getattr(
                     runtime, 'authority_worker_ready_for_draw_off', None)
                 if not callable(ready_for_draw):
@@ -832,6 +1099,21 @@ class WorkerSession(object):
                     self.state = 'loading_models'
                     self._write_status()
                     self._schedule_monitor()
+                    return
+                starter = getattr(
+                    self.client, 'start_native_oracle', None)
+                if not callable(starter):
+                    self._worker_failure(RuntimeError(
+                        'native oracle lifecycle boundary is unavailable'))
+                    return
+                try:
+                    oracle_ready = starter(runtime)
+                except Exception as error:
+                    self._worker_failure(error)
+                    return
+                if not oracle_ready:
+                    self._worker_failure(RuntimeError(
+                        'native oracle world proof could not be queued'))
                     return
                 try:
                     self._draw.acquire()
@@ -849,7 +1131,7 @@ class WorkerSession(object):
     def _start_round(self, message):
         round_id = _exact_int(message.get('round_id'))
         if (round_id is None or round_id in self._retired_rounds or
-                self.client is None or not self.client.is_bot_authority()):
+                self.client is None or not self.client.is_native_oracle()):
             return False
         if self.runtime is not None and round_id == self._active_round_id:
             return False
@@ -945,7 +1227,14 @@ class WorkerSession(object):
             self.client.bot_authority_id = None
         errors = []
         try:
-            if runtime is not None:
+            stopper = getattr(self.client, 'stop_native_oracle', None) \
+                if self.client is not None else None
+            if callable(stopper):
+                stopper()
+        except Exception as error:
+            errors.append(error)
+        try:
+            if runtime is not None and runtime.state != 'failed':
                 runtime.stop(show_login=False, restore_account=True)
         except Exception as error:
             errors.append(error)
@@ -1048,12 +1337,12 @@ class WorkerSession(object):
             if kind == 'welcome':
                 self._retry_delay = WORKER_RETRY_SECONDS
             if (self.client is not None and
-                    not self.client.is_bot_authority()):
+                    not self.client.is_native_oracle()):
                 self._pending_start = None
                 self._pending_start_deadline = None
             if (self.runtime is not None and
-                    not self.client.is_bot_authority()):
-                if not self._retire_or_fail('authority_lost'):
+                    not self.client.is_native_oracle()):
+                if not self._retire_or_fail('oracle_lost'):
                     return
             if message.get('phase') == 'waiting':
                 self._pending_start = None
@@ -1065,7 +1354,7 @@ class WorkerSession(object):
             elif self.runtime is None:
                 self.state = 'standby'
         elif kind == 'battle_start':
-            if self.client.is_bot_authority():
+            if self.client.is_native_oracle():
                 self._start_round(message)
             else:
                 self.state = 'standby'
@@ -1074,8 +1363,8 @@ class WorkerSession(object):
                       'player_destructible_contact',
                       'fire_intent_result'):
             if (self.runtime is not None and
-                    not self.client.is_bot_authority()):
-                self._retire_or_fail('authority_lost')
+                    not self.client.is_native_oracle()):
+                self._retire_or_fail('oracle_lost')
                 return
             if self.runtime is None:
                 return
@@ -1224,6 +1513,13 @@ class WorkerSession(object):
         if client is not None:
             client.bot_authority_id = None
         cleanup_error = None
+        stopper = getattr(client, 'stop_native_oracle', None) \
+            if client is not None else None
+        try:
+            if callable(stopper):
+                stopper()
+        except Exception as error:
+            cleanup_error = error
         try:
             if self.runtime is not None:
                 runtime = self.runtime
@@ -1240,7 +1536,8 @@ class WorkerSession(object):
             elif self._draw is not None:
                 self._draw.restore()
         except Exception as error:
-            cleanup_error = error
+            if cleanup_error is None:
+                cleanup_error = error
         finally:
             if client is not None:
                 try:

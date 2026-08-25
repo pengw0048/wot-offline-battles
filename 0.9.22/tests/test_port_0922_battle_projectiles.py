@@ -247,7 +247,7 @@ class BattleProjectileTests(unittest.TestCase):
                 RuntimeError, 'canonical projectile launch changed'):
             battle._install_projectile_meta(lowered)
 
-    def test_bot_authority_change_invalidates_artillery_proofs_once(self):
+    def test_client_bot_authority_is_rejected(self):
         battle, unused_bigworld = _battle()
 
         class _Bots(object):
@@ -264,15 +264,15 @@ class BattleProjectileTests(unittest.TestCase):
         battle._bots = _Bots()
         battle._artillery = types.SimpleNamespace(reset=mock.Mock())
         battle._start_message = {
-            'round_id': 1, 'bot_authority_id': 1, 'bot_manifest': []}
+            'round_id': 1, 'bot_authority_id': 0, 'bot_manifest': []}
         battle._last_snapshot = {'bots': []}
 
-        self.assertFalse(battle._reconcile_bot_authority(1))
+        battle._bots.authority_id = 0
+        self.assertFalse(battle._reconcile_bot_authority(0))
         battle._artillery.reset.assert_not_called()
-        self.assertTrue(battle._reconcile_bot_authority(2))
-        battle._artillery.reset.assert_called_once_with()
-        self.assertFalse(battle._reconcile_bot_authority(2))
-        battle._artillery.reset.assert_called_once_with()
+        with self.assertRaisesRegex(RuntimeError, 'client bot authority'):
+            battle._reconcile_bot_authority(2)
+        battle._artillery.reset.assert_not_called()
 
     def test_artillery_final_probe_uses_exact_native_muzzle(self):
         battle, unused_bigworld = _battle()
@@ -335,7 +335,7 @@ class BattleProjectileTests(unittest.TestCase):
         }, 1))
         self.assertEqual([], battle.client.launches)
 
-    def test_direct_launch_reuses_muzzle_frozen_before_pose_update(self):
+    def test_hidden_oracle_cannot_launch_direct_bot_projectiles(self):
         battle, unused_bigworld = _battle()
         battle._bot_barrel_point = mock.Mock(
             return_value=(4.0, 5.0, 6.0))
@@ -384,15 +384,11 @@ class BattleProjectileTests(unittest.TestCase):
             'launch_pose': (1.0, 2.0, 3.0, 0.0, 0.0, 0.0),
         }
 
-        self.assertTrue(battle._launch_bot_projectile(state, 1))
-        args, kwargs = battle.client.launches[-1]
-        self.assertEqual(list(frozen_origin), args[4])
-        self.assertEqual([0.0, 0.0, speed], args[5])
-        self.assertEqual(
-            [390.0, 150.0], kwargs['source_shot']['shell']['damage'])
+        self.assertFalse(battle._launch_bot_projectile(state, 1))
+        self.assertEqual([], battle.client.launches)
         source.model.node.assert_not_called()
 
-    def test_spg_launch_reuses_the_proved_origin_and_velocity(self):
+    def test_hidden_oracle_cannot_launch_spg_projectiles(self):
         battle, unused_bigworld = _battle()
         speed = 10.0
         yaw = 0.25
@@ -433,22 +429,13 @@ class BattleProjectileTests(unittest.TestCase):
             'launch_pose': (1.0, 2.0, 3.0, 0.0, 0.0, 0.0),
         }
 
-        self.assertTrue(battle._launch_bot_projectile(state, 4))
-        args, kwargs = battle.client.launches[-1]
-        self.assertEqual(list(origin), args[4])
-        self.assertEqual(list(velocity), args[5])
-        self.assertEqual(20000, args[8])
-        self.assertEqual(10.0, kwargs['source_shot']['speed'])
-        first_kwargs = dict(kwargs)
+        self.assertFalse(battle._launch_bot_projectile(state, 4))
+        self.assertEqual([], battle.client.launches)
         source.model.node.assert_not_called()
 
         state['shot_velocity'] = (velocity[0] + 0.01,) + velocity[1:]
-        battle.client.launches = []
-        self.assertTrue(battle._launch_bot_projectile(state, 4))
-        retry_args, retry_kwargs = battle.client.launches[-1]
-        self.assertEqual(list(origin), retry_args[4])
-        self.assertEqual(list(velocity), retry_args[5])
-        self.assertEqual(first_kwargs, retry_kwargs)
+        self.assertFalse(battle._launch_bot_projectile(state, 4))
+        self.assertEqual([], battle.client.launches)
 
     def test_spg_without_final_path_receipt_never_launches(self):
         battle, unused_bigworld = _battle()
@@ -1531,6 +1518,51 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual((collision,), collisions)
         self.assertEqual(4, len(collisions[0]))
         self.assertEqual((evidence,), returned_evidence)
+
+    def test_native_explosion_helper_uses_typed_frozen_pose_without_live_fallback(
+            self):
+        battle, unused_bigworld = _battle()
+
+        class _PoseMatrix(object):
+            def __init__(self):
+                self.ypr = None
+                self.translation = None
+
+            def setRotateYPR(self, value):
+                self.ypr = tuple(value)
+
+        battle._runtime.math.Matrix = _PoseMatrix
+        descriptor = types.SimpleNamespace(
+            hasSiegeMode=False, isPitchHullAimingAvailable=False)
+        target = types.SimpleNamespace(
+            typeDescriptor=descriptor, collideSegmentExt=mock.Mock())
+        collision = object()
+        evidence = types.SimpleNamespace(collision=collision)
+        pose = {
+            'position': {'x': 4.0, 'y': 5.0, 'z': 6.0},
+            'yaw': 0.1, 'pitch': 0.2, 'roll': 0.3,
+            'turret_yaw': 0.4, 'gun_pitch': -0.5,
+            'siege_state': 0,
+        }
+        start = _Vector()
+        end = _Vector((10.0, 0.0, 0.0))
+        module = sys.modules[BattleRuntime.__module__]
+
+        with mock.patch.object(
+                module, '_collide_vehicle_evidence_at_matrix',
+                return_value=(evidence,)) as collide:
+            frozen, returned_descriptor, collisions = \
+                battle.native_explosion_evidence_at_pose(
+                    target, pose, start, end)
+
+        self.assertIs(descriptor, returned_descriptor)
+        self.assertIs(descriptor, frozen.typeDescriptor)
+        self.assertEqual((0.1, 0.2, 0.3), frozen.matrix.ypr)
+        self.assertEqual((4.0, 5.0, 6.0), tuple(frozen.matrix.translation))
+        self.assertEqual((collision,), collisions)
+        collide.assert_called_once_with(
+            frozen, frozen.matrix, start, end, battle._runtime.math)
+        target.collideSegmentExt.assert_not_called()
 
     def test_frozen_collision_uses_active_descriptor_static_gun_angles(self):
         battle, unused_bigworld = _battle()

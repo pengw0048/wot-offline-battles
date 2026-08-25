@@ -1,0 +1,19 @@
+[package]
+name = "offline-rust-server"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Rust authority core and native-oracle protocol for WoT 0.9.22 offline battles"
+
+[[bin]]
+name = "offline-rust-server"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+
+[dev-dependencies]

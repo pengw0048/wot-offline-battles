@@ -842,7 +842,7 @@ class BattleDirector(object):
 			bot_id, team, build_vehicle_profile(descriptor), display_name)
 
 	def register_profile(self, bot_id, team, profile, display_name='Bot'):
-		"""Register serialized profile data on either client or LAN server."""
+		"""Register serialized profile data in this client-side planner."""
 		bot_id = int(bot_id)
 		agent = self.agents.get(bot_id)
 		if agent is not None:

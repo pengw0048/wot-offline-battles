@@ -2,36 +2,32 @@ $ErrorActionPreference = "Stop"
 
 $ServerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PortRoot = Split-Path -Parent $ServerRoot
-$ClientScripts = Join-Path $PortRoot "src\res\scripts\client"
+$RustRoot = Join-Path $PortRoot "rust_server"
 $DistRoot = Join-Path $PortRoot "dist\server"
-$WorkRoot = Join-Path $PortRoot "dist\.pyinstaller\windows-server"
-$SpecRoot = Join-Path $WorkRoot "spec"
+$Target = "x86_64-pc-windows-msvc"
+$BuiltExe = Join-Path $RustRoot `
+    "target\$Target\release\offline-rust-server.exe"
+$PackagedExe = Join-Path $DistRoot "WoT-0.9.22-LAN-Server.exe"
 
 if (Test-Path -LiteralPath $DistRoot) {
     Remove-Item -LiteralPath $DistRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $SpecRoot | Out-Null
 
-python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --onefile `
-    --console `
-    --noupx `
-    --name "WoT-0.9.22-LAN-Server" `
-    --distpath $DistRoot `
-    --workpath $WorkRoot `
-    --specpath $SpecRoot `
-    --paths $ServerRoot `
-    --paths $ClientScripts `
-    (Join-Path $ServerRoot "windows_server.py")
+cargo build `
+    --manifest-path (Join-Path $RustRoot "Cargo.toml") `
+    --locked `
+    --release `
+    --target $Target
 
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller failed with exit code $LASTEXITCODE"
+    throw "Rust server build failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path -LiteralPath $BuiltExe -PathType Leaf)) {
+    throw "Rust server build did not produce $BuiltExe"
 }
 
+Copy-Item -LiteralPath $BuiltExe -Destination $PackagedExe -Force
 Copy-Item -Force `
     (Join-Path $ServerRoot "WINDOWS_SERVER_README.txt") `
     (Join-Path $DistRoot "README.txt")
@@ -43,4 +39,4 @@ if ($UnexpectedFiles) {
     throw "Unexpected file in Windows server delivery directory: $($UnexpectedFiles.Name -join ', ')"
 }
 
-Write-Host "Built $DistRoot\WoT-0.9.22-LAN-Server.exe"
+Write-Host "Built $PackagedExe"
