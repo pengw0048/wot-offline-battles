@@ -30,7 +30,12 @@ HARD_CONTACT_EDGE_PENALTY = 240.0
 
 SEARCH_EXPANSIONS_PER_SECOND = 960.0
 MAX_SEARCH_EXPANSIONS_PER_FRAME = 96
-MAX_SEARCH_CREDIT = float(MAX_SEARCH_EXPANSIONS_PER_FRAME)
+SEARCH_CATCH_UP_FRAMES = 4
+# One catch-up frame may spend four nominal frames of credit, so the rate holds
+# down to 4 Hz render callbacks and one stall cannot spend an unbounded backlog.
+MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME = (
+	MAX_SEARCH_EXPANSIONS_PER_FRAME * SEARCH_CATCH_UP_FRAMES)
+MAX_SEARCH_CREDIT = float(MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME)
 
 
 def _distance_2d(first, second):
@@ -1110,21 +1115,27 @@ class TerrainNavigator(object):
 				self.searches.pop(key, None)
 				self.search_times.pop(key, None)
 
+	def _accrue_search_credit(self, elapsed):
+		"""Earn elapsed credit and size this frame's expansion ceiling from it."""
+		self.search_credit = min(
+			MAX_SEARCH_CREDIT,
+			self.search_credit +
+			max(0.0, float(elapsed)) * SEARCH_EXPANSIONS_PER_SECOND)
+		self.search_frame_budget = min(
+			MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME,
+			max(MAX_SEARCH_EXPANSIONS_PER_FRAME, int(self.search_credit)))
+
 	def begin_frame(self, elapsed):
 		"""Accrue deterministic A* work once for one render callback.
 
-		Search progress is paid with simulation elapsed rather than CPU wall time.
-		A long callback can therefore earn work without forcing the complete debt
-		into that same render frame.  Unspent credit is retained up to one bounded
-		frame, and the rotating queue below preserves fairness between jobs.
+		Search progress is paid with simulation elapsed rather than CPU wall time,
+		so a given elapsed interval buys the same expansions at any frame rate.
+		Credit is retained across frames up to a bounded catch-up reserve, and the
+		rotating queue below preserves fairness between jobs.
 		"""
-		elapsed = max(0.0, float(elapsed))
 		self.search_frame_serial += 1
-		self.search_frame_budget = MAX_SEARCH_EXPANSIONS_PER_FRAME
 		self.search_frame_open = True
-		self.search_credit = min(
-			MAX_SEARCH_CREDIT,
-			self.search_credit + elapsed * SEARCH_EXPANSIONS_PER_SECOND)
+		self._accrue_search_credit(elapsed)
 
 	def end_frame(self):
 		"""Close an explicit render-frame work budget."""
@@ -1143,10 +1154,7 @@ class TerrainNavigator(object):
 		           max(0.0, now - self.search_auto_time))
 		self.search_auto_time = now
 		self.search_frame_serial += 1
-		self.search_frame_budget = MAX_SEARCH_EXPANSIONS_PER_FRAME
-		self.search_credit = min(
-			MAX_SEARCH_CREDIT,
-			self.search_credit + elapsed * SEARCH_EXPANSIONS_PER_SECOND)
+		self._accrue_search_credit(elapsed)
 
 	def _advance_searches(self, now):
 		"""Give every pending A* task a deterministic fair frame share.

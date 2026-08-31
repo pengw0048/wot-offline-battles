@@ -20,8 +20,9 @@ from gui.mods.offline_lan_0922.ai.planner import (
     BattleDirector, build_vehicle_profile,
 )
 from gui.mods.offline_lan_0922.ai.navigation import (
-    BAKED_SHALLOW_WATER, MAX_SEARCH_EXPANSIONS_PER_FRAME,
-    SEARCH_EXPANSIONS_PER_SECOND, TerrainGrid, TerrainNavigator,
+    BAKED_SHALLOW_WATER, MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME,
+    MAX_SEARCH_EXPANSIONS_PER_FRAME, SEARCH_EXPANSIONS_PER_SECOND,
+    TerrainGrid, TerrainNavigator,
 )
 from gui.mods.offline_lan_0922 import prebaked_navigation
 from lan_battle_server import MAP_POOL
@@ -47,6 +48,17 @@ class _StrictNoLegacyStuff(object):
     __contains__ = _forbidden
     __iter__ = _forbidden
     __len__ = _forbidden
+
+
+class _PendingSearch(object):
+    """A* job double that counts expansions and never completes."""
+    def __init__(self):
+        self.done = False
+        self.last_frame = None
+        self.steps = 0
+
+    def step(self, count):
+        self.steps += int(count)
 
 
 class BotAiPortTests(unittest.TestCase):
@@ -721,21 +733,17 @@ class BotAiPortTests(unittest.TestCase):
             ('prune', 2.1), ('trim', None),
         ], calls)
 
-    def test_astar_work_uses_elapsed_credit_with_a_hard_frame_cap(self):
-        class PendingSearch(object):
-            def __init__(self):
-                self.done = False
-                self.last_frame = None
-                self.steps = 0
-
-            def step(self, count):
-                self.steps += int(count)
-
+    @staticmethod
+    def _pending_search_navigator(count):
         navigator = TerrainNavigator(lambda *unused: 0.0)
-        searches = [PendingSearch() for unused in range(4)]
+        searches = [_PendingSearch() for unused in range(count)]
         navigator.searches = dict(
             (('job', index), search)
             for index, search in enumerate(searches))
+        return navigator, searches
+
+    def test_astar_work_uses_elapsed_credit_with_a_hard_frame_cap(self):
+        navigator, searches = self._pending_search_navigator(4)
 
         navigator.begin_frame(0.05)
         navigator.tick(1.0)
@@ -752,11 +760,87 @@ class BotAiPortTests(unittest.TestCase):
         navigator.end_frame()
 
         self.assertEqual(
-            earned + MAX_SEARCH_EXPANSIONS_PER_FRAME,
+            earned + MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME,
             sum(search.steps for search in searches))
         self.assertLessEqual(
             max(search.steps for search in searches) -
             min(search.steps for search in searches), 1)
+
+    def _drive_search_frames(self, frame_interval, seconds, job_count=8):
+        """Return total and peak-frame expansions for one simulated frame rate."""
+        navigator, searches = self._pending_search_navigator(job_count)
+        frames = int(round(float(seconds) / float(frame_interval)))
+        now = 0.0
+        peak = 0
+        for unused in range(frames):
+            before = sum(search.steps for search in searches)
+            now += frame_interval
+            navigator.begin_frame(frame_interval)
+            navigator.tick(now)
+            navigator.end_frame()
+            peak = max(peak, sum(search.steps for search in searches) - before)
+        spread = (max(search.steps for search in searches) -
+                  min(search.steps for search in searches))
+        return sum(search.steps for search in searches), peak, spread
+
+    def test_astar_throughput_is_independent_of_render_frame_rate(self):
+        seconds = 2.4
+        results = dict(
+            (fps, self._drive_search_frames(1.0 / fps, seconds))
+            for fps in (5, 10, 30, 60))
+        expected = int(seconds * SEARCH_EXPANSIONS_PER_SECOND)
+
+        for fps, (total, peak, spread) in sorted(results.items()):
+            self.assertEqual(expected, total, 'throughput differs at %d fps' % fps)
+            self.assertLessEqual(
+                peak, MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME)
+            self.assertLessEqual(spread, 1)
+
+        self.assertEqual(
+            MAX_SEARCH_EXPANSIONS_PER_FRAME, results[10][1])
+        self.assertEqual(
+            MAX_SEARCH_EXPANSIONS_PER_FRAME * 2, results[5][1])
+        self.assertEqual(
+            int(SEARCH_EXPANSIONS_PER_SECOND / 60.0), results[60][1])
+
+    def test_astar_catch_up_after_a_stall_stays_bounded(self):
+        navigator, searches = self._pending_search_navigator(8)
+
+        navigator.begin_frame(5.0)
+        navigator.tick(5.0)
+        navigator.end_frame()
+
+        self.assertEqual(
+            MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME,
+            sum(search.steps for search in searches))
+        self.assertEqual(0.0, navigator.search_credit)
+
+        navigator.begin_frame(0.1)
+        navigator.tick(5.1)
+        navigator.end_frame()
+
+        self.assertEqual(
+            MAX_SEARCH_EXPANSIONS_PER_CATCH_UP_FRAME +
+            MAX_SEARCH_EXPANSIONS_PER_FRAME,
+            sum(search.steps for search in searches))
+
+    def test_astar_frame_share_starves_no_pending_search(self):
+        navigator, searches = self._pending_search_navigator(29)
+
+        now = 0.0
+        for unused in range(20):
+            now += 0.2
+            navigator.begin_frame(0.2)
+            navigator.tick(now)
+            navigator.end_frame()
+
+        self.assertEqual(
+            int(4.0 * SEARCH_EXPANSIONS_PER_SECOND),
+            sum(search.steps for search in searches))
+        self.assertLessEqual(
+            max(search.steps for search in searches) -
+            min(search.steps for search in searches), 1)
+        self.assertTrue(all(search.steps > 0 for search in searches))
 
     def test_empty_failed_edge_table_skips_route_segment_scans(self):
         grid = TerrainGrid(lambda *unused: 0.0)
