@@ -10864,7 +10864,10 @@ class BattleRuntime(object):
             record, critical_target, shot, trace_start, trace_end,
             collisions, result,
             historic=isinstance(collision_pose, dict))
-        damage = combat_rules.damage(shot, result, armor)
+        damage = combat_rules.damage(
+            shot, result, armor,
+            spall_coefficient=tank_collision.descriptor_spall_coefficient(
+                getattr(critical_target, 'typeDescriptor', None)))
         hull_damage = damage
         legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
         attacker_id = int(getattr(
@@ -10957,7 +10960,9 @@ class BattleRuntime(object):
                 nominal = combat_rules.he_hull_armor(
                     target.typeDescriptor)
             damage = combat_rules.he_splash_damage(
-                shot, nominal, distance / radius)
+                shot, nominal, distance / radius,
+                spall_coefficient=tank_collision.descriptor_spall_coefficient(
+                    target.typeDescriptor))
             if damage <= 0:
                 continue
             hull_damage = damage
@@ -18173,7 +18178,9 @@ class BattleRuntime(object):
                 collisions = ()
                 nominal = combat_rules.he_hull_armor(target.typeDescriptor)
             damage = combat_rules.he_splash_damage(
-                shot, nominal, distance / radius)
+                shot, nominal, distance / radius,
+                spall_coefficient=tank_collision.descriptor_spall_coefficient(
+                    target.typeDescriptor))
             if damage <= 0:
                 continue
             hull_damage = damage
@@ -18310,7 +18317,10 @@ class BattleRuntime(object):
         # result, and HE still detonates on the part it reached.
         result = 1 if contact is None else contact['result']
         armor = combat_rules.he_nominal_armor(collisions, target_descriptor)
-        return combat_rules.damage(shot, result, armor), result
+        return combat_rules.damage(
+            shot, result, armor,
+            spall_coefficient=tank_collision.descriptor_spall_coefficient(
+                target_descriptor)), result
 
     def _defer_avatar_leave(self):
         """Finish the native leaveArena stack before retiring its Avatar."""
