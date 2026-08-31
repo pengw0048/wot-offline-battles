@@ -11,6 +11,8 @@ import math
 
 WAYPOINT_ARRIVAL_RADIUS = 1.5
 TRAFFIC_WAIT_LEASE_SECONDS = 1.5
+# First avoidance branch of the steering fan.
+FIRST_CANDIDATE_OFFSET = 0.42
 # Fifteen-degree circular buckets centre both the +/-pi seam and cardinal yaws.
 FAILED_YAW_BUCKET_COUNT = 24
 
@@ -120,7 +122,8 @@ class LocalDriver(object):
 	treated as blocked.
 	"""
 	_CANDIDATE_OFFSETS = (
-		0.0, 0.42, -0.42, 0.78, -0.78, 1.18, -1.18, 1.55, -1.55)
+		0.0, FIRST_CANDIDATE_OFFSET, -FIRST_CANDIDATE_OFFSET,
+		0.78, -0.78, 1.18, -1.18, 1.55, -1.55)
 	gun_yaw_limits = staticmethod(gun_yaw_limits)
 	combat_hull_aim = staticmethod(combat_hull_aim)
 	gun_aligned = staticmethod(gun_aligned)

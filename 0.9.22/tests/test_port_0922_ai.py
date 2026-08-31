@@ -20,7 +20,8 @@ from gui.mods.offline_lan_0922.ai.planner import (
     BattleDirector, build_vehicle_profile,
 )
 from gui.mods.offline_lan_0922.ai.navigation import (
-    BAKED_SHALLOW_WATER, MAX_SEARCH_EXPANSIONS_PER_FRAME,
+    BAKED_FATAL_HAZARDS, BAKED_SHALLOW_WATER,
+    MAX_SEARCH_EXPANSIONS_PER_FRAME,
     SEARCH_EXPANSIONS_PER_SECOND, TerrainGrid, TerrainNavigator,
 )
 from gui.mods.offline_lan_0922 import prebaked_navigation
@@ -686,7 +687,7 @@ class BotAiPortTests(unittest.TestCase):
         self.assertTrue(navigator.controlled_shallow_step(
             7, current, math.pi * 0.5))
         self.assertFalse(navigator.controlled_shallow_step(
-            7, current, math.pi * 0.5 + 0.42))
+            7, current, math.pi * 0.5 + 0.78))
 
         retained = navigator.next_target(
             7, current, goal, ('route', 1, 'only-ford'), 1.2)
@@ -694,6 +695,180 @@ class BotAiPortTests(unittest.TestCase):
         self.assertNotIn(7, navigator.fallback_modes)
         self.assertTrue(navigator.controlled_shallow_step(
             7, current, math.pi * 0.5))
+
+    def _planned_ford(self, bot_id=7):
+        """Return a navigator whose only route crosses one shallow cell."""
+        graph = self._baked_graph(3, 1)
+        graph['hazards'] = [0, BAKED_SHALLOW_WATER, 0]
+        navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
+        current = (10.0, 0.0, 20.0)
+        goal = (18.0, 0.0, 20.0)
+        route_key = ('route', 1, 'only-ford')
+        navigator.next_target(bot_id, current, goal, route_key, 1.0)
+        self.assertEqual((14.0, 0.0, 20.0), navigator.next_target(
+            bot_id, current, goal, route_key, 1.1))
+        return navigator, current, goal
+
+    def test_fallback_bot_still_follows_the_planner_selected_ford(self):
+        for mode, local in (('safe_local', (10.0, 0.0, 22.0)),
+                            ('reactive', None)):
+            navigator, current, goal = self._planned_ford()
+            navigator._path = lambda *unused: (('search-result',), ())
+            navigator.grid.safe_local_target = (
+                lambda *unused, **kwargs: local)
+
+            navigator.next_target(
+                7, current, goal, ('route', 1, 'only-ford'), 1.2)
+
+            self.assertEqual(mode, navigator.fallback_modes[7])
+            self.assertTrue(navigator.controlled_shallow_step(
+                7, current, math.pi * 0.5))
+
+    def test_first_steering_candidate_offset_may_enter_the_planned_ford(self):
+        navigator, current, unused_goal = self._planned_ford()
+        offsets = sorted(set(abs(value)
+                             for value in LocalDriver._CANDIDATE_OFFSETS))
+        bearing = math.pi * 0.5
+
+        self.assertEqual(0.0, offsets[0])
+        for sign in (1.0, -1.0):
+            self.assertTrue(navigator.controlled_shallow_step(
+                7, current, bearing + sign * offsets[1]))
+            self.assertFalse(navigator.controlled_shallow_step(
+                7, current, bearing + sign * offsets[2]))
+
+    def test_fallback_drops_a_ford_target_behind_deep_water(self):
+        graph = self._baked_graph(3, 1, blocked=((1, 0),))
+        graph['hazards'] = [0, 1, 0]
+        navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
+        current = (10.0, 0.0, 20.0)
+        goal = (18.0, 0.0, 20.0)
+        state = {'controlled_shallow_target': goal}
+        navigator.bot_states[7] = state
+
+        navigator._fallback_target(7, current, goal, 1.0, None, state, False)
+
+        self.assertTrue(navigator.grid.segment_has_baked_hazard(
+            current, goal, BAKED_FATAL_HAZARDS))
+        self.assertNotIn('controlled_shallow_target', state)
+        self.assertFalse(navigator.controlled_shallow_step(
+            7, current, math.pi * 0.5))
+
+    def test_fallback_drops_a_ford_this_bot_escalated_away_from(self):
+        graph = self._baked_graph(3, 1)
+        navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
+        current = (10.0, 0.0, 20.0)
+        ford = (18.0, 0.0, 20.0)
+        state = {'controlled_shallow_target': ford}
+        navigator.bot_states[7] = state
+        navigator.bot_states[8] = {'controlled_shallow_target': ford}
+
+        navigator._fallback_target(7, current, ford, 1.0, None, state, False)
+        self.assertEqual(ford, state['controlled_shallow_target'])
+
+        edge = navigator.grid._edge_cells_for_segment(current, ford)
+        navigator.bot_failed_edges[7] = {edge: (60.0, 240.0)}
+        navigator._fallback_target(7, current, ford, 1.0, None, state, False)
+
+        self.assertIsNone(state.get('controlled_shallow_target'))
+        # The peer never escalated, so its own ford survives.
+        peer = navigator.bot_states[8]
+        navigator._fallback_target(8, current, ford, 1.0, None, peer, False)
+        self.assertEqual(ford, peer['controlled_shallow_target'])
+        self.assertFalse(navigator.grid._failed_edges)
+
+    def test_blocked_step_escalation_reroutes_only_the_reporting_bot(self):
+        graph = self._baked_graph(5, 3, blocked=((2, 1),))
+        navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
+        current = (10.0, 0.0, 24.0)
+        goal = (26.0, 0.0, 24.0)
+        route_key = ('route', 1, 'veto-detour')
+        now = 1.0
+        for unused_step in range(12):
+            now += 0.02
+            vetoed = navigator.next_target(11, current, goal, route_key, now)
+            peer = navigator.next_target(12, current, goal, route_key, now)
+
+        for offset in (0.0, 0.34, 0.68, 1.02):
+            navigator.report_blocked_step(11, current, vetoed, now + offset)
+        now += 1.02
+        replanned = current
+        for unused_step in range(30):
+            now += 0.02
+            replanned = navigator.next_target(11, current, goal, route_key, now)
+
+        self.assertEqual(vetoed, peer)
+        self.assertNotEqual(vetoed, replanned)
+        self.assertEqual(peer, navigator.next_target(
+            12, current, goal, route_key, now + 0.02))
+        self.assertFalse(navigator.grid._failed_edges)
+        self.assertNotIn(12, navigator.bot_failed_edges)
+        self.assertEqual(
+            1, navigator.bot_states[11]['blocked_step_replans'])
+        self.assertEqual(0, navigator.bot_states[12].get(
+            'blocked_step_replans', 0))
+
+    def test_shore_ford_episode_crosses_instead_of_oscillating(self):
+        open_cells = set(((0, 2), (1, 2), (2, 2), (3, 2)))
+        for x in range(4, 7):
+            for z in range(5):
+                open_cells.add((x, z))
+        graph = self._baked_graph(7, 5, blocked=tuple(
+            (x, z) for z in range(5) for x in range(7)
+            if (x, z) not in open_cells))
+        graph['hazards'][2 * 7 + 3] = BAKED_SHALLOW_WATER
+        navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
+        grid = navigator.grid
+        driver = LocalDriver()
+        goal = (34.0, 0.0, 28.0)
+        route_key = ('route', 1, 'shore-ford')
+        position = [10.0, 0.0, 28.0]
+        yaw = [0.0]
+        planned = navigator._path
+
+        def shore_search(path_key, start, target, now, avoid_points):
+            # A search near the shore fails after A* has selected the ford.
+            if position[0] >= 17.0:
+                return (('shore-search-failed',), ())
+            return planned(path_key, start, target, now, avoid_points)
+
+        def direction_clear(sample_yaw):
+            # Same one-cell corridor rule as the runtime planner gate.
+            end = (position[0] + math.sin(sample_yaw) * grid.cell_size,
+                   position[1],
+                   position[2] + math.cos(sample_yaw) * grid.cell_size)
+            mask = BAKED_FATAL_HAZARDS
+            if not navigator.controlled_shallow_step(
+                    9, tuple(position), sample_yaw):
+                mask |= BAKED_SHALLOW_WATER
+            return (not grid.segment_has_baked_hazard(
+                        tuple(position), end, mask) and
+                    grid.segment_clear(tuple(position), end))
+
+        navigator._path = shore_search
+        now = 1.0
+        near_bank_fallbacks = set()
+        for unused_step in range(200):
+            target = navigator.next_target(
+                9, tuple(position), goal, route_key, now)
+            mode = navigator.fallback_modes.get(9)
+            if position[0] < 22.0 and mode in ('safe_local', 'reactive'):
+                near_bank_fallbacks.add(mode)
+            command = driver.drive(
+                9, tuple(position), yaw[0], 0.0, 0.1, target, (),
+                direction_clear)
+            yaw[0] = float(command['target_yaw'])
+            throttle = float(command['throttle'])
+            travel = yaw[0] if throttle >= 0.0 else yaw[0] + math.pi
+            if abs(throttle) > 0.0 and direction_clear(travel):
+                position[0] += math.sin(travel) * 4.0 * abs(throttle) * 0.1
+                position[2] += math.cos(travel) * 4.0 * abs(throttle) * 0.1
+            now += 0.1
+
+        self.assertTrue(near_bank_fallbacks)
+        self.assertGreater(position[0], 30.0)
+        self.assertFalse(grid.point_has_baked_hazard(
+            tuple(position), BAKED_FATAL_HAZARDS | BAKED_SHALLOW_WATER))
 
     def test_prebaked_segment_rejects_destination_beyond_map_bounds(self):
         graph = self._baked_graph(3, 1)
@@ -778,7 +953,7 @@ class BotAiPortTests(unittest.TestCase):
         self.assertTrue(grid.path_has_penalty((
             (0.0, 0.0, 0.0), (4.0, 0.0, 0.0)), 1.0))
 
-    def test_repeated_hard_contact_replans_only_the_blocked_bot(self):
+    def test_repeated_blocked_step_replans_only_the_blocked_bot(self):
         graph = self._baked_graph(5, 3)
         navigator = TerrainNavigator(
             lambda *unused: None, baked_graph=graph)
@@ -787,7 +962,7 @@ class BotAiPortTests(unittest.TestCase):
         route_key = ('route', 1, 'contact-detour')
         navigator.next_target(11, current, goal, route_key, 1.0)
 
-        escalated = [navigator.report_hard_contact(
+        escalated = [navigator.report_blocked_step(
             11, current, goal, now) for now in (1.0, 1.34, 1.68, 2.02)]
 
         self.assertEqual([False, False, False, True], escalated)
@@ -798,7 +973,7 @@ class BotAiPortTests(unittest.TestCase):
         navigator.next_target(11, current, goal, route_key, 2.04)
         active_key = navigator.bot_states[11]['path_key']
         self.assertEqual('recovery', active_key[0][0])
-        self.assertEqual(1, navigator.bot_states[11]['hard_contact_replans'])
+        self.assertEqual(1, navigator.bot_states[11]['blocked_step_replans'])
 
     def test_superseded_route_join_search_is_cancelled_for_its_bot(self):
         navigator = TerrainNavigator(lambda *unused: 0.0)

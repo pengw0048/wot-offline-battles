@@ -11,7 +11,8 @@ probes so it can be tested outside the legacy client.
 import heapq
 import math
 
-from gui.mods.offline_lan_0922.ai.driver import WAYPOINT_ARRIVAL_RADIUS
+from gui.mods.offline_lan_0922.ai.driver import (
+	FIRST_CANDIDATE_OFFSET, WAYPOINT_ARRIVAL_RADIUS)
 
 
 SQRT_TWO = math.sqrt(2.0)
@@ -23,10 +24,12 @@ BAKED_SHALLOW_WATER_PENALTY = 4.0
 BAKED_EDGE_CLEARANCE_WEIGHT = 0.20
 BAKED_FORMAT_NAME = 'offline-lan-0922-navgraph'
 BAKED_FORMAT_VERSION = 2
-HARD_CONTACT_REPLAN_SECONDS = 1.0
-HARD_CONTACT_REPLAN_VERDICTS = 4
-HARD_CONTACT_EDGE_TTL = 12.0
-HARD_CONTACT_EDGE_PENALTY = 240.0
+BLOCKED_STEP_REPLAN_SECONDS = 1.0
+BLOCKED_STEP_REPLAN_VERDICTS = 4
+BLOCKED_STEP_EDGE_TTL = 12.0
+BLOCKED_STEP_EDGE_PENALTY = 240.0
+# A controlled ford admits LocalDriver's first avoidance branch, and no wider.
+CONTROLLED_SHALLOW_YAW_WINDOW = FIRST_CANDIDATE_OFFSET + 0.03
 
 SEARCH_EXPANSIONS_PER_SECOND = 960.0
 MAX_SEARCH_EXPANSIONS_PER_FRAME = 96
@@ -256,19 +259,6 @@ class TerrainGrid(object):
 					cache.popitem()
 				except Exception:
 					break
-
-	def remember_failed_segment(self, start, end, now, ttl=18.0, penalty=240.0):
-		"""Penalize the first coarse edge of a route that made no progress."""
-		key = self._edge_cells_for_segment(start, end)
-		if key is None:
-			return
-		self._failed_edges[key] = (float(now) + max(1.0, float(ttl)),
-		                           max(0.0, float(penalty)))
-		if len(self._failed_edges) > 512:
-			alive = [(edge, value) for edge, value in self._failed_edges.items()
-			         if value[0] > float(now)]
-			alive.sort(key=lambda item: item[1][0], reverse=True)
-			self._failed_edges = dict(alive[:384])
 
 	def _failed_edge_penalty(self, first_cell, second_cell, now):
 		key = tuple(sorted((first_cell, second_cell)))
@@ -927,8 +917,8 @@ class TerrainNavigator(object):
 				'tick_age_ms': int(max(0.0, float(now) - self.search_now) * 1000.0)
 					if now is not None else 0,
 			},
-			'hard_contact_replans': sum(
-				int(state.get('hard_contact_replans', 0))
+			'blocked_step_replans': sum(
+				int(state.get('blocked_step_replans', 0))
 				for state in self.bot_states.values()),
 		}
 
@@ -941,7 +931,16 @@ class TerrainNavigator(object):
 		as steering intent for LocalDriver. The caller still probes every candidate
 		vehicle-width corridor and can only throttle into one that is locally safe.
 		"""
-		state.pop('controlled_shallow_target', None)
+		# A fallback replaces the route decision, not the ford the planner already
+		# selected. Drop that ford only once it stops being a reachable safe edge.
+		ford = state.get('controlled_shallow_target')
+		if ford is not None and (
+				_distance_2d(current, ford) <= WAYPOINT_ARRIVAL_RADIUS or
+				self._bot_edges_penalized(bot_id, current, ford, now) or
+				self.grid.segment_has_baked_hazard(
+					current, ford, BAKED_FATAL_HAZARDS) or
+				not self.grid.segment_clear(current, ford)):
+			state.pop('controlled_shallow_target', None)
 		if allow_safe_local:
 			fallback = self.grid.safe_local_target(
 				current, goal, now, avoid_points,
@@ -1008,8 +1007,15 @@ class TerrainNavigator(object):
 			self.bot_failed_edges.pop(int(bot_id), None)
 		return result or None
 
-	def report_hard_contact(self, bot_id, current, target, now):
-		"""Escalate repeated completed contact into a bot-local route replan."""
+	def _bot_edges_penalized(self, bot_id, start, end, now):
+		"""True when this bot's own escalation covers any edge of the segment."""
+		penalties = self._active_bot_edge_penalties(bot_id, now)
+		return bool(penalties and any(
+			edge in penalties
+			for edge in self.grid._edge_keys_for_segment(start, end)))
+
+	def report_blocked_step(self, bot_id, current, target, now):
+		"""Escalate a repeated contact or planner veto into a bot-local replan."""
 		bot_id = int(bot_id)
 		state = self.bot_states.get(bot_id)
 		if state is None or target is None:
@@ -1024,34 +1030,34 @@ class TerrainNavigator(object):
 		if key is None:
 			return False
 		now = float(now)
-		if now < float(state.get('hard_contact_escalated_until', 0.0)):
+		if now < float(state.get('blocked_step_escalated_until', 0.0)):
 			return False
-		tracker = state.get('hard_contact_tracker')
-		same_contact = bool(
+		tracker = state.get('blocked_step_tracker')
+		same_edge = bool(
 			isinstance(tracker, dict) and tracker.get('key') == key and
 			now - float(tracker.get('last_at', now)) <= 0.5 and
 			_distance_2d(current, tracker.get('origin', current)) <=
 			max(1.5, self.grid.cell_size * 0.5))
-		if same_contact:
+		if same_edge:
 			tracker['count'] = int(tracker.get('count', 0)) + 1
 			tracker['last_at'] = now
 		else:
 			tracker = {
 				'key': key, 'count': 1, 'first_at': now,
 				'last_at': now, 'origin': tuple(current)}
-			state['hard_contact_tracker'] = tracker
-		if (int(tracker['count']) < HARD_CONTACT_REPLAN_VERDICTS or
-				now - float(tracker['first_at']) < HARD_CONTACT_REPLAN_SECONDS):
+			state['blocked_step_tracker'] = tracker
+		if (int(tracker['count']) < BLOCKED_STEP_REPLAN_VERDICTS or
+				now - float(tracker['first_at']) < BLOCKED_STEP_REPLAN_SECONDS):
 			return False
 		failed = self.bot_failed_edges.setdefault(bot_id, {})
 		failed[key] = (
-			now + HARD_CONTACT_EDGE_TTL, HARD_CONTACT_EDGE_PENALTY)
+			now + BLOCKED_STEP_EDGE_TTL, BLOCKED_STEP_EDGE_PENALTY)
 		state['replan_generation'] = int(
 			state.get('replan_generation', 0)) + 1
-		state['hard_contact_replans'] = int(
-			state.get('hard_contact_replans', 0)) + 1
-		state['hard_contact_escalated_until'] = now + 2.0
-		state['hard_contact_tracker'] = None
+		state['blocked_step_replans'] = int(
+			state.get('blocked_step_replans', 0)) + 1
+		state['blocked_step_escalated_until'] = now + 2.0
+		state['blocked_step_tracker'] = None
 		state['path_key'] = None
 		state['index'] = 0
 		state['recovery_start'] = tuple(current)
@@ -1346,9 +1352,9 @@ class TerrainNavigator(object):
 			         'planned_at': 0.0, 'navigation_status': 'pending',
 			         'target_is_terminal': False,
 			         'replan_generation': 0, 'replan_active': False,
-			         'hard_contact_replans': 0,
-			         'hard_contact_tracker': None,
-			         'hard_contact_escalated_until': 0.0}
+			         'blocked_step_replans': 0,
+			         'blocked_step_tracker': None,
+			         'blocked_step_escalated_until': 0.0}
 			self.bot_states[bot_id] = state
 		path_identity = tuple(path_key)
 		planned_goal = state.get('planned_goal')
@@ -1546,11 +1552,10 @@ class TerrainNavigator(object):
 		return bool(state is not None and state.get('target_is_terminal'))
 
 	def controlled_shallow_step(self, bot_id, current, sample_yaw,
-			maximum_yaw_error=0.20):
-		"""Admit only the A*-selected heading into a passable shallow cell."""
+			maximum_yaw_error=CONTROLLED_SHALLOW_YAW_WINDOW):
+		"""Admit only headings toward the A*-selected ford into a shallow cell."""
 		state = self.bot_states.get(int(bot_id))
-		if (state is None or
-				self.fallback_modes.get(int(bot_id)) not in (None, 'pending')):
+		if state is None:
 			return False
 		target = state.get('controlled_shallow_target')
 		if target is None:

@@ -1458,6 +1458,62 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertTrue(runtime._planner_corridor_clear(
             (0.0, 0.0, 0.0), 0.0, 0.0, allow_shallow=True))
 
+    def test_controlled_shallow_step_cannot_admit_a_fatal_baked_hazard(self):
+        class Grid(object):
+            prebaked = True
+            cell_size = 4.0
+
+            def near_baked_navigation(self, unused_position, unused_radius):
+                return True
+
+            def segment_has_baked_hazard(
+                    self, unused_start, unused_end, hazard_mask):
+                return bool(hazard_mask & self_module.BAKED_FATAL_HAZARDS)
+
+            def segment_clear(self, unused_start, unused_end):
+                raise AssertionError('fatal hazard should decide first')
+
+        self_module = self.module
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = types.SimpleNamespace(grid=Grid())
+        runtime.baked_graph = {'bake': {
+            'vehicle_half_width': 2.15,
+            'edge_clearance_radii': (3.0,),
+        }}
+
+        self.assertFalse(runtime._planner_corridor_clear(
+            (0.0, 0.0, 0.0), 0.0, 0.0, allow_shallow=True))
+
+    def test_repeated_water_veto_reports_a_blocked_step_for_that_bot(self):
+        aim = (0.0, 0.0, 200.0)
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'aim_position': aim, 'face_position': aim, 'move_position': aim,
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': False, 'collision': False, 'water': True,
+                'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start(self.start)
+        reports = []
+        runtime.navigator.report_blocked_step = (
+            lambda *args: reports.append(args))
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True)
+
+        runtime.update(.04, 1.0)
+
+        self.assertEqual([(11, (0.0, 0.0, 0.0), aim, 1.0)], reports)
+        self.assertEqual((0.0, 0.0), (state['x'], state['z']))
+
     def test_post_turn_travel_yaw_cannot_enter_unplanned_shallow(self):
         graph = _graph()
         graph['hazards'] = (0, self.module.BAKED_SHALLOW_WATER, 0)
@@ -3031,7 +3087,7 @@ class BotRuntimeTests(unittest.TestCase):
             spawn_resolver=_spawn_resolver, baked_graph=_graph())
         runtime.battle_start(self.start)
         contact_reports = []
-        runtime.navigator.report_hard_contact = (
+        runtime.navigator.report_blocked_step = (
             lambda *args: contact_reports.append(args))
         state = runtime.states[11]
         state.update(x=0.0, y=0.0, z=0.0, yaw=attempted_yaw,

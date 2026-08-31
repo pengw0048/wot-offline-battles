@@ -8319,6 +8319,15 @@ class BotRuntime(object):
                 remember = getattr(driver, 'remember_failure', None)
                 if callable(remember) and not probe_deferred:
                     remember(state['id'], travel_yaw)
+                report_blocked = getattr(
+                    self.navigator, 'report_blocked_step', None)
+                # A hull contact escalates from its realised status below.
+                if (callable(report_blocked) and not probe_deferred and
+                        not (isinstance(motion_probe, dict) and
+                             motion_probe.get('collision', False)) and
+                        command.get('move_position') is not None):
+                    report_blocked(state['id'], position,
+                                   command.get('move_position'), now)
             steer_dir = 0
             if abs(turn) > 0.01:
                 # LocalDriver already inverts reverse recovery steering for the
@@ -8466,7 +8475,7 @@ class BotRuntime(object):
                             state, position, state['yaw'], speed,
                             descriptor, step, now)
                     report_contact = getattr(
-                        self.navigator, 'report_hard_contact', None)
+                        self.navigator, 'report_blocked_step', None)
                     if (callable(report_contact) and
                             command.get('move_position') is not None):
                         report_contact(
