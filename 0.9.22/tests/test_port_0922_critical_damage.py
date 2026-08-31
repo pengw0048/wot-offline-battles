@@ -1129,6 +1129,34 @@ class CriticalDamageTests(unittest.TestCase):
             {'kind': 'fire', 'state': False, 'cause': 'fire'},
             payload['events'])
 
+    def test_terminal_state_schedules_no_delayed_native_callback(self):
+        scheduled = []
+        self.bigworld.callback = lambda delay, function: scheduled.append(
+            (delay, function))
+        self.bigworld.cancelCallback = lambda handle: scheduled.clear()
+        panel = mock.Mock()
+        windows_manager = types.ModuleType('gui.WindowsManager')
+        windows_manager.g_windowsManager = types.SimpleNamespace(
+            battleWindow=types.SimpleNamespace(damagePanel=panel))
+
+        for cause, terminal in (
+                ('drowning', critical_damage.apply_drowning),
+                ('shot', lambda vehicle: critical_damage.apply_death(
+                    vehicle, 'shot'))):
+            vehicle = types.SimpleNamespace(
+                typeDescriptor=_descriptor(), health=0, id=999,
+                devices_hp={}, _destroyed_devices=set(), _crew_ko=set(),
+                is_on_fire=False)
+            with mock.patch.dict(sys.modules, {
+                    'BigWorld': self.bigworld, 'Math': self.math,
+                    'gui.WindowsManager': windows_manager}):
+                terminal(vehicle)
+            self.assertEqual([], scheduled, cause)
+            self.assertEqual([], panel.method_calls, cause)
+            self.assertEqual(
+                set(critical_damage._OFFH_DEATH_DEVICES),
+                vehicle._destroyed_devices, cause)
+
     def test_destroyed_track_repairs_to_descriptor_regen_cap(self):
         vehicle = types.SimpleNamespace(
             typeDescriptor=_descriptor(), health=500,
