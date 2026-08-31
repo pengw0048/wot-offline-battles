@@ -134,7 +134,6 @@ class BotAdapter(object):
                 bot_id, position, float(state.get('yaw', 0.0)),
                 float(state.get('speed', 0.0)), float(state.get('dt', 0.0)),
                 target, state.get('neighbours', ()), direction_clear,
-                velocity=state.get('velocity'),
                 half_length=float(state.get('half_length', 3.5)),
                 half_width=float(state.get('half_width', 1.7)),
                 movement_intent=movement_intent,

@@ -946,7 +946,6 @@ class BotAiPortTests(unittest.TestCase):
             133, (0.0, 0.0, 0.0), 0.0, 8.0, 0.1,
             (0.0, 0.0, 50.0), (neighbour,),
             lambda unused_yaw: True,
-            velocity=(0.0, 0.0, 8.0),
             half_length=3.5, half_width=1.7)
 
         self.assertEqual('drive', order['recovery_mode'])

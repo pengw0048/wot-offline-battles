@@ -218,17 +218,17 @@ class SpawnDepartureTests(unittest.TestCase):
                     return order
 
                 runtime.adapter.driver.drive = drive
-                original_traffic = runtime._traffic_throttle
+                original_traffic = runtime._traffic_follow_throttle
 
-                def traffic_throttle(
-                        source, command, neighbours, physics_params=None):
+                def traffic_follow_throttle(
+                        source, command, neighbours, physics_params, step):
                     throttle, waiting = original_traffic(
-                        source, command, neighbours, physics_params)
+                        source, command, neighbours, physics_params, step)
                     monitor.record(
                         'traffic', int(source['id']), waiting, now[0])
                     return throttle, waiting
 
-                runtime._traffic_throttle = traffic_throttle
+                runtime._traffic_follow_throttle = traffic_follow_throttle
 
                 for frame in range(1, fps * 30 + 1):
                     now[0] = frame / float(fps)

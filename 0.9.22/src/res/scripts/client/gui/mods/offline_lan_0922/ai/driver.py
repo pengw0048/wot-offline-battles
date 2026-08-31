@@ -311,17 +311,6 @@ class LocalDriver(object):
 		except Exception:
 			return False
 
-	def _velocity(self, value):
-		if value is None:
-			return (0.0, 0.0)
-		try:
-			return (float(value[0]), float(value[2]))
-		except Exception:
-			try:
-				return (float(value[0]), float(value[1]))
-			except Exception:
-				return (0.0, 0.0)
-
 	def _obb_overlap(self, first, first_yaw, first_length, first_width,
 				 second, second_yaw, second_length, second_width):
 		"""2D rectangle SAT, using yaw convention atan2(x, z)."""
@@ -345,67 +334,8 @@ class LocalDriver(object):
 				return False
 		return True
 
-	def _prediction_clear(self, position, candidate_yaw, speed, velocity,
-				neighbours, half_length, half_width):
-		"""Reject a locally clear ray if its next 1.2s overlaps another OBB."""
-		own_speed = max(0.0, abs(float(speed)))
-		# At walking pace there is not enough velocity for an OBB extrapolation
-		# to be useful.  In a dense line-up it instead predicts every neighbour's
-		# acceleration against a nearly stationary hull and vetoes all exits.
-		# Separation steering and the physical tank resolver remain active; resume
-		# predictive collision avoidance once the bot has actually got moving.
-		if own_speed < 1.25:
-			return True
-		desired_vx = math.sin(candidate_yaw) * own_speed
-		desired_vz = math.cos(candidate_yaw) * own_speed
-		actual_vx, actual_vz = self._velocity(velocity)
-		# Tanks cannot instantaneously rotate their velocity vector.  Blend the
-		# observed velocity into the short prediction whenever the caller has it.
-		if abs(actual_vx) + abs(actual_vz) > 0.05:
-			own_vx = actual_vx * 0.45 + desired_vx * 0.55
-			own_vz = actual_vz * 0.45 + desired_vz * 0.55
-		else:
-			own_vx = desired_vx
-			own_vz = desired_vz
-		for neighbour in neighbours or ():
-			other = self._neighbour_position(neighbour)
-			if other is None:
-				continue
-			try:
-				if abs(float(other[1]) - float(position[1])) > 5.0:
-					continue
-			except Exception:
-				pass
-			other_yaw = 0.0
-			other_velocity = None
-			other_length = half_length
-			other_width = half_width
-			if isinstance(neighbour, dict):
-				other_yaw = float(neighbour.get('yaw', 0.0) or 0.0)
-				other_velocity = neighbour.get('velocity') or neighbour.get('vel')
-				other_length = float(neighbour.get('half_length', half_length) or half_length)
-				other_width = float(neighbour.get('half_width', half_width) or half_width)
-			other_vx, other_vz = self._velocity(other_velocity)
-			# Spawn formations can place two hull boxes slightly inside each other.
-			# Treating that existing overlap as a future collision rejects every
-			# steering candidate, so all bots stop and enter the recovery turn loop.
-			# Separation steering already handles this case; predictive vetoes resume
-			# as soon as the hulls have moved apart.
-			if self._obb_overlap(position, candidate_yaw, half_length, half_width,
-					other, other_yaw, other_length, other_width):
-				continue
-			for horizon in (0.35, 0.75, 1.20):
-				own = (float(position[0]) + own_vx * horizon, 0.0,
-				       float(position[2]) + own_vz * horizon)
-				predicted = (float(other[0]) + other_vx * horizon, 0.0,
-				             float(other[2]) + other_vz * horizon)
-				if self._obb_overlap(own, candidate_yaw, half_length, half_width,
-						predicted, other_yaw, other_length, other_width):
-					return False
-		return True
-
-	def _choose_yaw(self, state, desired_yaw, current_yaw, position, speed,
-			velocity, neighbours, direction_clear, half_length, half_width):
+	def _choose_yaw(self, state, desired_yaw, current_yaw, position,
+			neighbours, direction_clear, half_length, half_width):
 		separation = self._separation_yaw(
 			position, current_yaw, neighbours, half_length, half_width)
 		candidates = []
@@ -432,7 +362,7 @@ class LocalDriver(object):
 		return None
 
 	def drive(self, bot_id, position, yaw, speed, dt, target, neighbours,
-			direction_clear, velocity=None, half_length=3.5, half_width=1.7,
+			direction_clear, half_length=3.5, half_width=1.7,
 			movement_intent=True, stopping_distance=None,
 			stop_at_target=True, decision_horizon=0.0):
 		"""Return ``throttle``, ``turn``, ``target_yaw`` and ``recovery_mode``.
@@ -564,7 +494,7 @@ class LocalDriver(object):
 			chosen_yaw = old_yaw
 		if chosen_yaw is None:
 			chosen_yaw = self._choose_yaw(
-				state, desired_yaw, yaw, position, speed, velocity, neighbours,
+				state, desired_yaw, yaw, position, neighbours,
 				direction_clear, own_half_length, own_half_width)
 			state['plan_age'] = 0.0
 		if chosen_yaw is None:

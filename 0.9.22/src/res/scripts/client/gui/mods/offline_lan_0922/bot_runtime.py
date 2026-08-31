@@ -116,11 +116,16 @@ MOTION_PROBE_FORWARD_BUDGET = 3.5
 # A validated baked edge needs enough native lookahead to react, not a ray past
 # its next turn. Expand from one grid cell to a 1.5-second horizon with speed.
 BAKED_MOTION_LOOKAHEAD_SECONDS = 1.5
-# Friendly following uses the same one-second time gap that the former hard
-# cutoff attempted to enforce.  Keep its standstill gap separate from hull
-# extents: ``clearance`` below is already measured edge-to-edge.
+# Friendly following ramps throttle over a one-second time gap and settles one
+# standstill gap behind the hull ahead.  ``clearance`` is edge-to-edge, so this
+# gap stays separate from hull extents.
 TRAFFIC_HEADWAY_SECONDS = 1.0
 TRAFFIC_STANDSTILL_CLEARANCE = 1.5
+# A queue that never moves is released at a crawl: the follower may work
+# past the hull ahead, but never at approach speed.
+TRAFFIC_RELEASE_THROTTLE = 0.35
+# Below this the column counts as stalled rather than following.
+TRAFFIC_PROGRESS_SPEED = 1.0
 # Match the copied longitudinal integrator's parked-speed boundary when
 # integrating the remaining coast distance.  A parked hull still keeps its
 # physical yaw for same-lane versus crossing classification.
@@ -1894,6 +1899,7 @@ class BotRuntime(object):
         self._decision_cache = {}
         self._motion_probe_cache = {}
         self._traffic_stopping_cache = {}
+        self._traffic_leases = {}
         self._slope_pose_cursor = 0
         self._flip_diary = {}
         self.debug_logging = False
@@ -2308,6 +2314,7 @@ class BotRuntime(object):
         self._spotting_profiles.pop(('bot', bot_id), None)
         self._motion_probe_cache.pop(bot_id, None)
         self._traffic_stopping_cache.pop(bot_id, None)
+        self._traffic_leases.pop(bot_id, None)
         self._cancel_artillery_intent(bot_id)
         if state is not None:
             half_length, half_width = _hull_dimensions(descriptor)
@@ -2605,6 +2612,7 @@ class BotRuntime(object):
             self._decision_cache = {}
             self._motion_probe_cache = {}
             self._traffic_stopping_cache = {}
+            self._traffic_leases = {}
             self._slope_pose_cursor = 0
             self._world_receipt_waiting = []
             self._world_receipt_frame = None
@@ -2648,6 +2656,7 @@ class BotRuntime(object):
             self._decision_cache = {}
             self._motion_probe_cache = {}
             self._traffic_stopping_cache = {}
+            self._traffic_leases = {}
             self._world_receipt_waiting = []
             self._world_receipt_frame = None
             self._prewarm_receipt_cursor = 0
@@ -5310,44 +5319,25 @@ class BotRuntime(object):
         return entry
 
     @staticmethod
-    def _traffic_throttle(source, command, neighbours, physics_params=None,
-                          stopping_distance_resolver=None):
-        """Return ``(throttle, waiting)`` for nearby friendly traffic.
+    def _traffic_blocker(source, neighbours):
+        """Return ``(id, clearance, crossing)`` for the teammate ahead.
 
-        Same-lane followers always respect the vehicle ahead. At a crossing or
-        merge, the lower bot id has deterministic right of way; every bot yields
-        to a human.  A following vehicle uses a continuous time-gap controller
-        translated through its copied drivetrain.  The former absolute-speed
-        cutoff alternated full throttle and coast braking whenever a dense
-        spawn row crossed ``clearance == speed`` even if both tanks had the
-        same velocity.
+        Only the nearest friendly hull inside this bot's own travel corridor
+        which is stopped or no faster counts.  ``crossing`` reports a hull
+        which does not travel along that corridor.
         """
-        throttle = max(-1.0, min(1.0, _number(command.get('throttle'))))
-        if throttle <= 0.01:
-            return throttle, False
         position = _position(source)
-        source_team = int(_number(source.get('team')))
-        if source_team not in (1, 2):
-            return throttle, False
         yaw = _number(source.get('yaw'))
+        sine, cosine = math.sin(yaw), math.cos(yaw)
+        team = int(_number(source.get('team')))
         own_speed = abs(_number(source.get('speed')))
         own_length = max(0.5, _number(source.get('half_length'), 3.5))
         own_width = max(0.3, _number(source.get('half_width'), 1.7))
-        if physics_params is None:
-            physics_params = vehicle_physics.derive_params({})
-        slope_pitch = _number(source.get('last_drive_pitch'))
-        steering = abs(_number(command.get('turn'))) > 0.01
-        stopping_clearance = None
-        scan_clearance = None
-        sine, cosine = math.sin(yaw), math.cos(yaw)
-        target_yaw = _number(command.get('target_yaw'), yaw)
-        target_sine = math.sin(target_yaw)
-        target_cosine = math.cos(target_yaw)
         nearest = None
         for raw in neighbours or ():
             if not isinstance(raw, dict):
                 continue
-            if int(_number(raw.get('team'))) != source_team:
+            if int(_number(raw.get('team'))) != team:
                 continue
             other = raw.get('position') or raw.get('pos')
             if other is None:
@@ -5359,141 +5349,90 @@ class BotRuntime(object):
                     continue
             except (TypeError, ValueError, IndexError):
                 continue
-            forward = dx * sine + dz * cosine
-            lateral = abs(dx * cosine - dz * sine)
-            corridor_yaw = yaw
-            if abs(_angle_delta(target_yaw, yaw)) > 0.20:
-                target_forward = dx * target_sine + dz * target_cosine
-                target_lateral = abs(
-                    dx * target_cosine - dz * target_sine)
-                if (target_forward > 0.0 and
-                        target_lateral < lateral):
-                    forward = target_forward
-                    lateral = target_lateral
-                    corridor_yaw = target_yaw
-            if forward <= 0.0:
+            if dx * sine + dz * cosine <= 0.0:
                 continue
-            other_length = max(
-                0.5, _number(raw.get('half_length'), 3.5))
-            other_width = max(
-                0.3, _number(raw.get('half_width'), 1.7))
+            other_length = max(0.5, _number(raw.get('half_length'), 3.5))
+            other_width = max(0.3, _number(raw.get('half_width'), 1.7))
             # The sum of both OBB circumradii is a strict separating bound.
-            # Outside it, no forward translation along this corridor can make
-            # the hulls overlap, so the four-axis continuous SAT is needless.
+            # Outside it no forward travel can make the hulls meet, so the
+            # four-axis continuous SAT below is needless.
             if BotRuntime._traffic_lateral_separated(
-                    lateral, own_width, own_length,
+                    abs(dx * cosine - dz * sine), own_width, own_length,
                     other_width, other_length):
                 continue
-            other_velocity = raw.get('velocity') or raw.get('vel')
+            velocity = raw.get('velocity') or raw.get('vel')
             try:
-                other_vx = float(other_velocity[0])
-                other_vz = float(other_velocity[2])
+                leader_speed = (float(velocity[0]) * sine +
+                                float(velocity[2]) * cosine)
             except (TypeError, ValueError, IndexError):
-                other_vx = 0.0
-                other_vz = 0.0
-            other_yaw = _number(raw.get('yaw'), corridor_yaw)
-            # Velocity has no direction once a teammate is parked.  Its hull
-            # yaw still tells us whether it occupies this lane longitudinally
-            # or crosses it, and therefore whether deterministic right of way
-            # can break a spawn-grid deadlock.  The physical near-field gate
-            # below still makes both ids brake inside the copied stopping
-            # distance.
-            same_direction = abs(
-                _angle_delta(other_yaw, corridor_yaw)) < 0.65
-            clearance = BotRuntime._traffic_obb_clearance(
-                dx, dz, corridor_yaw, yaw, own_width, own_length,
-                other_yaw, other_width, other_length)
-            if stopping_clearance is None:
-                stopping_distance = (
-                    stopping_distance_resolver(
-                        source, command, physics_params)
-                    if callable(stopping_distance_resolver) else
-                    BotRuntime._traffic_stopping_distance(
-                        own_speed, physics_params, slope_pitch, steering))
-                stopping_clearance = (
-                    TRAFFIC_STANDSTILL_CLEARANCE + stopping_distance)
-                scan_clearance = max(
-                    9.0, TRAFFIC_STANDSTILL_CLEARANCE +
-                    own_speed * TRAFFIC_HEADWAY_SECONDS,
-                    stopping_clearance)
-            if clearance > scan_clearance:
+                leader_speed = 0.0
+            if leader_speed >= own_speed + TRAFFIC_DIRECTION_SPEED_EPSILON:
                 continue
-            if (not same_direction and raw.get('id') is not None and
-                    source.get('id') is not None):
+            other_yaw = _number(raw.get('yaw'), yaw)
+            clearance = BotRuntime._traffic_obb_clearance(
+                dx, dz, yaw, yaw, own_width, own_length,
+                other_yaw, other_width, other_length)
+            if math.isinf(clearance):
+                continue
+            if nearest is None or clearance < nearest[1]:
                 try:
                     other_id = int(raw.get('id'))
-                    if (other_id < HUMAN_TARGET_ID_BASE and
-                            other_id > int(source.get('id')) and
-                            clearance > stopping_clearance):
-                        continue
                 except (TypeError, ValueError):
-                    pass
-            corridor_sine = math.sin(corridor_yaw)
-            corridor_cosine = math.cos(corridor_yaw)
-            other_forward = max(
-                0.0, other_vx * corridor_sine +
-                other_vz * corridor_cosine)
-            candidate = (clearance, other_forward, same_direction)
-            if nearest is None or candidate[0] < nearest[0]:
-                nearest = candidate
-        if nearest is None:
+                    other_id = -1
+                nearest = (other_id, clearance,
+                           abs(_angle_delta(other_yaw, yaw)) >= 0.65)
+        return nearest
+
+    def _traffic_follow_throttle(self, source, command, neighbours,
+                                 physics_params, step):
+        """Return ``(throttle, waiting)`` behind a slower teammate.
+
+        The limit holds while the teammate occupies the corridor. ``waiting``
+        suppresses stuck recovery only while the follower is stalled behind it.
+        After ``TRAFFIC_WAIT_LEASE_SECONDS`` of that, the follower is released
+        to a crawl so a dead column cannot hold it in place.
+        """
+        throttle = max(-1.0, min(1.0, _number(command.get('throttle'))))
+        bot_id = int(_number(source.get('id')))
+        blocker = None
+        if (throttle > 0.01 and physics_params is not None and
+                int(_number(source.get('team'))) in (1, 2)):
+            blocker = self._traffic_blocker(source, neighbours)
+        if blocker is None:
+            self._traffic_leases.pop(bot_id, None)
             return throttle, False
-        clearance, leader_speed, same_direction = nearest
-        if not same_direction:
-            # A crossing or head-on merge is a discrete right-of-way event,
-            # not longitudinal following.  Preserve the established yield
-            # gate; the continuous controller below applies only to vehicles
-            # travelling along the same corridor.
-            safe_clearance = max(
-                stopping_clearance,
-                TRAFFIC_STANDSTILL_CLEARANCE +
-                own_speed * TRAFFIC_HEADWAY_SECONDS)
-            if clearance <= safe_clearance:
-                return (0.0,
-                        own_speed > TRAFFIC_DIRECTION_SPEED_EPSILON)
-            if own_speed > leader_speed + 0.5:
-                limited = min(throttle, max(0.0, min(
-                    1.0, (clearance - safe_clearance) / 4.0)))
-                return (limited, bool(
-                    limited <= 0.01 and
-                    own_speed > TRAFFIC_DIRECTION_SPEED_EPSILON))
+        own_speed = abs(_number(source.get('speed')))
+        reserve = (TRAFFIC_STANDSTILL_CLEARANCE +
+                   self._cached_traffic_stopping_distance(
+                       source, command, physics_params))
+        # A crossing hull is a right-of-way event: the lower bot id keeps the
+        # lane and every bot yields to a human, but only while the copied coast
+        # distance still fits in front of that hull.
+        if (blocker[2] and blocker[1] > reserve and
+                bot_id < blocker[0] < HUMAN_TARGET_ID_BASE):
+            self._traffic_leases.pop(bot_id, None)
             return throttle, False
-        if clearance <= TRAFFIC_STANDSTILL_CLEARANCE:
-            return (0.0,
-                    own_speed > TRAFFIC_DIRECTION_SPEED_EPSILON)
-        try:
-            mass = max(1.0, float(physics_params['mass']))
-            drive_accel = vehicle_physics.engine_force(
-                physics_params, own_speed, 1.0, slope_pitch) / mass
-            rolling_accel = vehicle_physics.rolling_resist_force(
-                physics_params, 0, steering) / mass
-            gravity_accel = vehicle_physics.GRAVITY * math.sin(slope_pitch)
-        except (KeyError, TypeError, ValueError, OverflowError):
+        band = max(1.0, own_speed * TRAFFIC_HEADWAY_SECONDS)
+        limited = min(throttle, max(0.0, min(
+            1.0, (blocker[1] - reserve) / band)))
+        lease = self._traffic_leases.get(bot_id)
+        if lease is None or lease[0] != blocker[0]:
+            lease = [blocker[0], 0.0, False]
+            self._traffic_leases[bot_id] = lease
+        if limited >= throttle - 0.000001:
+            lease[1] = 0.0
+            lease[2] = False
             return throttle, False
-        if drive_accel <= 0.000001:
-            return throttle, False
-        desired_clearance = max(
-            stopping_clearance,
-            TRAFFIC_STANDSTILL_CLEARANCE +
-            own_speed * TRAFFIC_HEADWAY_SECONDS)
-        # Standard constant-time-headway feedback: close the spacing error in
-        # one headway while also matching the leader's forward velocity.  The
-        # result is an acceleration, not a hand-tuned throttle blend.
-        desired_accel = (
-            (clearance - desired_clearance) /
-            (TRAFFIC_HEADWAY_SECONDS * TRAFFIC_HEADWAY_SECONDS) +
-            (leader_speed - own_speed) / TRAFFIC_HEADWAY_SECONDS)
-        required = ((desired_accel - gravity_accel + rolling_accel) /
-                    drive_accel)
-        limited = min(throttle, max(0.0, min(1.0, required)))
-        # ``waiting`` suppresses route-stuck recovery only while a moving hull
-        # is actually coasting to a traffic stop.  A partial drive command is
-        # still progress, and a parked crossing must enter the existing
-        # recovery path so two stopped neighbours cannot reset one another's
-        # stuck clock forever.
-        return (limited, bool(
-            limited <= 0.01 and
-            own_speed > TRAFFIC_DIRECTION_SPEED_EPSILON))
+        progressing = own_speed >= TRAFFIC_PROGRESS_SPEED
+        if not lease[2]:
+            lease[1] = 0.0 if progressing else lease[1] + max(
+                0.0, _number(step))
+            lease[2] = lease[1] >= ai_driver.TRAFFIC_WAIT_LEASE_SECONDS
+        # A released column stays released against the same hull, so the
+        # follower crawls steadily instead of cycling through the lease.
+        if lease[2]:
+            return max(limited, min(throttle, TRAFFIC_RELEASE_THROTTLE)), False
+        return limited, not progressing
 
     def _player_vehicle_profile(self, raw):
         vehicle_name = raw.get('vehicle')
@@ -7741,10 +7680,9 @@ class BotRuntime(object):
         shot_lane_budget = [MAX_SHOT_LANE_PAIRS_PER_FRAME]
         shot_lanes_ready = True
         neighbours = list(neighbours or []) + self._player_neighbours(players)
-        # Native terrain and visibility probes run on BigWorld's render thread.
-        # Build the local-overlap view lazily, only when a staggered decision is
-        # due. It steers apart hulls which already touch; it never predicts
-        # traffic or changes their strategic terrain path.
+        # One local-overlap view per authority tick. It steers apart hulls which
+        # already touch and feeds the friendly following limit; it never changes
+        # a strategic terrain path.
         traffic_bodies = None
         traffic_index = None
         observation_entries = {}
@@ -7801,6 +7739,11 @@ class BotRuntime(object):
             tick_poses[state['id']] = position
             tick_safe[state['id']] = prebaked_navigation.pose_is_safe(
                 self.baked_graph, position, shoulder_cells=0)
+            if traffic_bodies is None:
+                traffic_bodies, traffic_index = self._traffic_snapshot(
+                    neighbours)
+            bot_neighbours = self._neighbours_for(
+                state, neighbours, traffic_index, traffic_bodies)
             server_order = self._server_orders.get(state['id'])
             decide_with_order = getattr(self.adapter, 'decide_with_order', None)
             cache_key = (('server', self._server_order_tokens.get(
@@ -7867,9 +7810,6 @@ class BotRuntime(object):
             else:
                 contacts, targets = self._contacts_for(
                     state, players, now, team_visibility, visibility_tick)
-                if traffic_bodies is None:
-                    traffic_bodies, traffic_index = self._traffic_snapshot(
-                        neighbours)
                 decision_step = step
                 if decision_cache is not None:
                     decision_step = max(
@@ -7897,13 +7837,7 @@ class BotRuntime(object):
                     'health': state['health'],
                     'max_health': state['max_health'],
                     'contacts': contacts,
-                    'neighbours': self._neighbours_for(
-                        state, neighbours, traffic_index, traffic_bodies),
-                    'velocity': (
-                        math.sin(_number(state.get('yaw'))) *
-                        _number(state.get('speed')), 0.0,
-                        math.cos(_number(state.get('yaw'))) *
-                        _number(state.get('speed'))),
+                    'neighbours': bot_neighbours,
                     'half_length': _number(state.get('half_length'), 3.5),
                     'half_width': _number(state.get('half_width'), 1.7),
                     'stopping_distance': stopping_distance,
@@ -7945,13 +7879,18 @@ class BotRuntime(object):
                     DECISION_TIER_FACTOR[self._detail_tier(state)],
                     3, decision_cache is None)
                 raw_command = dict(command)
-            # Hull contact is already solved simultaneously after every Bot's
-            # copied step. Friendly ramming no longer deals damage, so a second
-            # predictive headway controller only makes slow vehicles coast and
-            # accelerate in visible pulses. Preserve the planner's last valid
-            # command until terrain/world collision gives a completed veto.
-            command['throttle'] = max(
-                -1.0, min(1.0, _number(command.get('throttle'))))
+            # Hull contact stays owned by the simultaneous tank solver. This is
+            # only a following speed limit, so a queued Bot settles behind a
+            # slower teammate instead of pushing it and reversing away again.
+            command['throttle'], traffic_waiting = (
+                self._traffic_follow_throttle(
+                    state, command, bot_neighbours,
+                    self._physics_params.get(state['id']), step))
+            if traffic_waiting and decision_due:
+                driver = getattr(self.adapter, 'driver', None)
+                wait = getattr(driver, 'wait_for_traffic', None)
+                if callable(wait):
+                    wait(state['id'])
             if decision_due:
                 self._decision_cache[state['id']] = (
                     cache_key, decision_deadline, _number(now), raw_command,
