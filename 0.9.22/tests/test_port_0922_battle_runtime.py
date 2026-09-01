@@ -14114,6 +14114,52 @@ class BattleRuntimeContractTests(unittest.TestCase):
         world_probe.assert_not_called()
         battle._destructibles._catalog_motion_blocked.assert_not_called()
 
+    def test_bot_pending_generic_corridor_recasts_before_hull_leaves_proof(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        bots = bot_runtime.BotRuntime(1)
+        bots.states = {11: {
+            'movement_dir': 1, 'rotation_dir': 0,
+            'airborne': False,
+        }}
+        bots._motion_probe_cache[11] = {
+            'result': {
+                'clear': True, 'collision': False, 'slope': 0.0,
+                '_world_receipt_pending': True,
+            },
+            'position': (0.0, 0.0, 0.0),
+            'yaw': 0.0,
+            'probe_distance': 15.0,
+            'probe_leading': 3.5,
+            'deadline': 0.0,
+        }
+        battle._bots = bots
+        battle._destructibles = mock.Mock()
+        battle._destructibles._catalog_hull_contact.return_value = False
+        battle._destructibles._catalog_motion_blocked.return_value = {
+            'status': 'clear', 'token': None,
+            'accepted_now': False, 'used_kinetic_speed': False,
+        }
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'world_collision.check_horizontal_collision',
+                return_value='clear') as world_probe:
+            inside = battle._resolve_bot_motion(
+                11, (0.0, 0.0, 11.0), 0.0, 4.0,
+                _Descriptor(), 0.04, 10.0)
+            self.assertEqual('clear', inside)
+            world_probe.assert_not_called()
+
+            outside = battle._resolve_bot_motion(
+                11, (0.0, 0.0, 11.2), 0.0, 4.0,
+                _Descriptor(), 0.04, 10.0)
+
+        self.assertEqual('clear', outside)
+        world_probe.assert_called_once()
+        battle._destructibles._catalog_motion_blocked.assert_called_once()
+
     def test_bot_reverse_receipt_uses_travel_yaw_and_actual_dt(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

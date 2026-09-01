@@ -4531,13 +4531,15 @@ class BotRuntime(object):
             # the actual probed distance instead of paying the ordinary 3.5 m
             # re-planning budget repeatedly in one render callback.
             probed_distance = cached.get('probe_distance')
-            if probed_distance is not None:
+            probe_leading = cached.get('probe_leading')
+            if probed_distance is not None and probe_leading is not None:
                 current_reach = max(
                     0.4, abs(_number(speed)) * max(
                         0.0, min(MAX_CONTROL_ELAPSED_SECONDS, _number(dt))) +
                     0.2)
                 forward_budget = max(
-                    0.0, _number(probed_distance) - current_reach)
+                    0.0, _number(probed_distance) -
+                    max(0.5, _number(probe_leading)) - current_reach)
         heading_drift = lookahead * abs(math.sin(angle))
         reusable = bool(
             -0.1 <= forward <= forward_budget and
@@ -8536,6 +8538,11 @@ class BotRuntime(object):
                             20.0 if abs(_number(
                                 state.get('speed'))) > 5.0 else 15.0,
                             _number(maximum_probe_distance, float('inf'))),
+                        # The generic rays begin at the hull origin. Reserve
+                        # its admitted collision half-length before catch-up
+                        # slices consume the remainder of that clear corridor.
+                        'probe_leading': max(
+                            0.5, _number(state.get('half_length'), 3.5)),
                         'deadline': (
                             _number(now)
                             if receipt_pending

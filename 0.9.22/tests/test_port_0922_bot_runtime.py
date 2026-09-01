@@ -4952,6 +4952,9 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertGreater(state['speed'], 0.0)
         self.assertEqual(2000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
+        self.assertEqual(
+            state['half_length'],
+            runtime._motion_probe_cache[11]['probe_leading'])
 
     def test_authority_publication_and_server_ack_remain_live_for_two_minutes(self):
         command = {
@@ -5575,6 +5578,43 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertTrue(covers({'maximum_distance': 6.0}, 4.0))
         self.assertTrue(covers({}, 6.0))
         self.assertFalse(covers({'maximum_distance': 4.0}, None))
+
+    def test_pending_generic_corridor_reserves_the_hull_leading_edge(self):
+        runtime = self.module.BotRuntime(1)
+
+        def install(yaw):
+            runtime._motion_probe_cache[11] = {
+                'result': {
+                    'clear': True, 'collision': False, 'slope': 0.0,
+                    '_world_receipt_pending': True,
+                },
+                'position': (0.0, 0.0, 0.0),
+                'yaw': yaw,
+                'probe_distance': 15.0,
+                'probe_leading': 3.5,
+                'deadline': 0.0,
+            }
+
+        install(0.0)
+        self.assertTrue(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, 11.0), 0.0, 4.0,
+            now=10.0, dt=0.04))
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, 11.2), 0.0, 4.0,
+            now=10.0, dt=0.04))
+
+        install(math.pi)
+        self.assertTrue(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -11.0), math.pi, -4.0,
+            now=10.0, dt=0.04))
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -11.2), math.pi, -4.0,
+            now=10.0, dt=0.04))
+
+        runtime._motion_probe_cache[11].pop('probe_leading')
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -3.6), math.pi, -4.0,
+            now=10.0, dt=0.04))
 
     def test_typed_world_receipt_contains_only_the_actual_motion_step(self):
         runtime = self.module.BotRuntime(1)
