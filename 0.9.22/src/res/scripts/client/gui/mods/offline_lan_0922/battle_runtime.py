@@ -77,6 +77,19 @@ RPM_PRESENTATION_SECONDS = 0.10
 SPOTTING_UPDATE_SECONDS = 0.10
 SPOTTING_PROBE_SECONDS = 0.50
 SPOTTING_PHASE_BUCKETS = 5
+# The official layout can produce fourteen unique sight lines.  Sample three
+# new lines at a time and remember a clear one, so ordinary open sight remains
+# one native query while fully occluded teams cannot multiply every pair by
+# fourteen in a single hidden-worker slice.
+SPOTTING_RAYS_PER_SAMPLE = 3
+SPOTTING_RAY_STATE_LIMIT = 2048
+SPOTTING_LAYOUT_CACHE_LIMIT = 128
+# The existing 29-Bot blocked-visibility benchmark issues about 1,735 one-ray
+# checks per second.  Permit roughly twice that measured baseline, but cap one
+# render callback separately so a low-FPS worker cannot receive a catch-up
+# spike large enough to reinforce the stall.
+SPOTTING_WORKER_RAYS_PER_SECOND = 3840.0
+SPOTTING_WORKER_RAYS_PER_FRAME = 128
 FALLEN_TREE_FOLIAGE_REFRESH_SECONDS = 0.10
 FALLEN_TREE_FOLIAGE_STABLE_READS = 3
 # Stock client code can republish the server half of a space visibility mask
@@ -1358,6 +1371,17 @@ class BattleRuntime(object):
         self._local_spotting_cache = None
         self._local_factors_cache = None
         self._remote_spotting_cache = {}
+        self._spotting_ray_states = {}
+        self._spotting_layout_cache = collections.OrderedDict()
+        self._spotting_worker_ray_budget = 0
+        self._spotting_worker_call_index = 0
+        self._spotting_worker_next_start = 0
+        self._spotting_worker_budget_exhausted_at = None
+        self._spotting_worker_budget_active = False
+        self._spotting_worker_ray_tokens = \
+            float(SPOTTING_WORKER_RAYS_PER_FRAME)
+        self._spotting_worker_ray_time = None
+        self._spotting_worker_ray_start_budget = 0
         self._local_still_since = None
         self._published_vision_radius = None
         self._published_still_devices = {}
@@ -1619,6 +1643,17 @@ class BattleRuntime(object):
         self._local_spotting_cache = None
         self._local_factors_cache = None
         self._remote_spotting_cache = {}
+        self._spotting_ray_states = {}
+        self._spotting_layout_cache = collections.OrderedDict()
+        self._spotting_worker_ray_budget = 0
+        self._spotting_worker_call_index = 0
+        self._spotting_worker_next_start = 0
+        self._spotting_worker_budget_exhausted_at = None
+        self._spotting_worker_budget_active = False
+        self._spotting_worker_ray_tokens = \
+            float(SPOTTING_WORKER_RAYS_PER_FRAME)
+        self._spotting_worker_ray_time = None
+        self._spotting_worker_ray_start_budget = 0
         self._local_ram_profile_cache = None
         self._remote_ram_profile_cache = {}
         self._local_still_since = None
@@ -11946,8 +11981,14 @@ class BattleRuntime(object):
                     # and make worker authority behave unlike player authority.
                     set_camera(
                         None if self._worker_mode else self._local_position)
-                outgoing_messages = self._bots.update(
-                    rule_dt, now, players=players)
+                if self._worker_mode:
+                    self._begin_worker_spotting_budget(now)
+                try:
+                    outgoing_messages = self._bots.update(
+                        rule_dt, now, players=players)
+                finally:
+                    if self._worker_mode:
+                        self._finish_worker_spotting_budget()
                 after_probes = None
                 after_probe_durations = None
                 if profiling and callable(probe_totals):
@@ -15139,18 +15180,235 @@ class BattleRuntime(object):
                 self._remote_factory.track_animation_error))
         return True
 
+    @staticmethod
+    def _spotting_pose(actor, position=None):
+        """Freeze one actor pose for the descriptor checkpoint transform."""
+        actor = actor if isinstance(actor, dict) else {}
+        if position is None:
+            position = actor.get('position') or _xyz(actor)
+        position = _xyz(position)
+        yaw = _number(actor.get('yaw'))
+        turret_yaw = (_number(actor.get('turret_yaw'))
+                      if 'turret_yaw' in actor else
+                      _angle_delta(yaw, _number(
+                          actor.get('aim_yaw'), yaw)))
+        return (
+            position, yaw, _number(actor.get('pitch')),
+            _number(actor.get('roll')), turret_yaw,
+            _number(actor.get('gun_pitch')))
+
+    def _visibility_descriptor(self, actor):
+        """Resolve the exact mounted descriptor for a worker LOS actor."""
+        if not isinstance(actor, dict):
+            return None
+        try:
+            kind = actor.get('kind', 'bot')
+            identity = actor.get('network_id', actor.get('id', 0))
+            if kind == 'bot':
+                descriptors = getattr(self._bots, '_descriptors', {})
+                return descriptors.get(int(identity))
+            return self._resolve_player_descriptor(actor)
+        except Exception:
+            # Descriptor donation and native resource teardown can straddle a
+            # worker sample.  Contain that sample to the established fallback
+            # instead of failing the whole Bot visibility callback.
+            return None
+
+    @staticmethod
+    def _fallback_visibility_rays(observer_pose, target_pose):
+        """Retain the previous two-height contract for malformed descriptors."""
+        observer_position = observer_pose[0]
+        target_position = target_pose[0]
+        result = []
+        for target_height in (1.5, 2.2):
+            segment = bot_planner.trimmed_sight_segment(
+                observer_position, target_position, 2.5, target_height)
+            if segment:
+                result.append(segment)
+        return tuple(result)
+
+    def _begin_worker_spotting_budget(self, now=None):
+        now = self._clock() if now is None else float(now)
+        previous = self._spotting_worker_ray_time
+        if previous is not None:
+            elapsed = max(0.0, now - float(previous))
+            self._spotting_worker_ray_tokens = min(
+                float(SPOTTING_WORKER_RAYS_PER_FRAME),
+                self._spotting_worker_ray_tokens +
+                elapsed * SPOTTING_WORKER_RAYS_PER_SECOND)
+        self._spotting_worker_ray_time = now
+        self._spotting_worker_ray_budget = min(
+            SPOTTING_WORKER_RAYS_PER_FRAME,
+            int(self._spotting_worker_ray_tokens))
+        self._spotting_worker_ray_start_budget = \
+            self._spotting_worker_ray_budget
+        self._spotting_worker_call_index = 0
+        self._spotting_worker_budget_exhausted_at = None
+        self._spotting_worker_budget_active = True
+
+    def _finish_worker_spotting_budget(self):
+        seen = int(self._spotting_worker_call_index)
+        start = int(self._spotting_worker_next_start)
+        exhausted = self._spotting_worker_budget_exhausted_at
+        if exhausted is not None:
+            self._spotting_worker_next_start = int(exhausted)
+        elif seen <= start:
+            self._spotting_worker_next_start = max(0, start - seen)
+        else:
+            self._spotting_worker_next_start = 0
+        used = max(
+            0, int(self._spotting_worker_ray_start_budget) -
+            int(self._spotting_worker_ray_budget))
+        self._spotting_worker_ray_tokens = max(
+            0.0, self._spotting_worker_ray_tokens - used)
+        self._spotting_worker_ray_budget = 0
+        self._spotting_worker_ray_start_budget = 0
+        self._spotting_worker_budget_active = False
+
+    def _remember_spotting_ray_state(
+            self, probe_key, next_index, preferred, ray_count):
+        if probe_key is None:
+            return
+        if (probe_key not in self._spotting_ray_states and
+                len(self._spotting_ray_states) >=
+                SPOTTING_RAY_STATE_LIMIT):
+            self._spotting_ray_states.clear()
+        self._spotting_ray_states[probe_key] = {
+            'next': int(next_index), 'preferred': preferred,
+            'ray_count': int(ray_count)}
+
+    def _cached_visibility_layout(self, descriptor, pose):
+        """Reuse one actor layout while its exact frozen pose is unchanged."""
+        if descriptor is None:
+            raise ValueError('visibility descriptor is unavailable')
+        key = (id(descriptor), pose)
+        cached = self._spotting_layout_cache.pop(key, None)
+        if cached is not None and cached[0] is descriptor:
+            self._spotting_layout_cache[key] = cached
+            return cached[1]
+        layout = spotting.vehicle_visibility_layout(descriptor, pose)
+        if len(self._spotting_layout_cache) >= SPOTTING_LAYOUT_CACHE_LIMIT:
+            self._spotting_layout_cache.popitem(last=False)
+        self._spotting_layout_cache[key] = (descriptor, layout)
+        return layout
+
+    def _checkpoint_line_of_sight(
+            self, observer_descriptor, observer_pose,
+            target_descriptor, target_pose, probe_key=None):
+        """Probe official checkpoint structure under a bounded native budget."""
+        state = (self._spotting_ray_states.get(probe_key) or {}
+                 if probe_key is not None else {})
+        worker_probe = bool(
+            isinstance(probe_key, tuple) and probe_key and
+            probe_key[0] == 'worker')
+        worker_budgeted = bool(
+            worker_probe and self._spotting_worker_budget_active)
+        worker_ordinal = None
+        if worker_budgeted:
+            worker_ordinal = self._spotting_worker_call_index
+            self._spotting_worker_call_index += 1
+            if worker_ordinal < self._spotting_worker_next_start:
+                return False
+            if self._spotting_worker_ray_budget <= 0:
+                if self._spotting_worker_budget_exhausted_at is None:
+                    self._spotting_worker_budget_exhausted_at = \
+                        worker_ordinal
+                return False
+        try:
+            observer_layout = self._cached_visibility_layout(
+                observer_descriptor, observer_pose)
+            target_layout = self._cached_visibility_layout(
+                target_descriptor, target_pose)
+            ray_count = spotting.visibility_ray_count(
+                observer_layout, target_layout)
+
+            def ray_at(index):
+                return spotting.visibility_ray_at(
+                    observer_layout, target_layout, index)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                OverflowError):
+            rays = self._fallback_visibility_rays(
+                observer_pose, target_pose)
+
+            def ray_at(index):
+                return rays[index]
+
+            ray_count = len(rays)
+        if ray_count <= 0:
+            return False
+        if state.get('ray_count') != ray_count:
+            state = {}
+        if probe_key is None:
+            ray_entries = tuple(
+                (index, ray_at(index)) for index in range(ray_count))
+            ray_entries = tuple(
+                entry for entry in ray_entries if entry[1] is not None)
+            next_index = 0
+        else:
+            preferred = state.get('preferred')
+            next_index = int(state.get('next', 0) or 0) % ray_count
+            ray_entries = []
+            selected = set()
+            if isinstance(preferred, int) and 0 <= preferred < ray_count:
+                ray = ray_at(preferred)
+                selected.add(preferred)
+                if ray is not None:
+                    ray_entries.append((preferred, ray))
+            sample_limit = min(SPOTTING_RAYS_PER_SAMPLE, ray_count)
+            if worker_budgeted:
+                sample_limit = min(
+                    sample_limit, self._spotting_worker_ray_budget)
+            scanned = 0
+            while len(ray_entries) < sample_limit and scanned < ray_count:
+                candidate = next_index
+                next_index = (next_index + 1) % ray_count
+                scanned += 1
+                if candidate in selected:
+                    continue
+                selected.add(candidate)
+                ray = ray_at(candidate)
+                if ray is None:
+                    continue
+                ray_entries.append((candidate, ray))
+        for index, ray in ray_entries:
+            if ray is None:
+                continue
+            start, end = ray
+            if worker_budgeted:
+                self._spotting_worker_ray_budget -= 1
+            hit = self._runtime.bigworld.wg_collideSegment(
+                self._avatar.spaceID,
+                self._vector(start), self._vector(end), 128)
+            if hit is not None:
+                continue
+            self._remember_spotting_ray_state(
+                probe_key, next_index, index, ray_count)
+            return True
+        self._remember_spotting_ray_state(
+            probe_key, next_index, None, ray_count)
+        if (worker_budgeted and
+                self._spotting_worker_ray_budget <= 0 and
+                len(ray_entries) <
+                min(SPOTTING_RAYS_PER_SAMPLE, ray_count) and
+                self._spotting_worker_budget_exhausted_at is None):
+            self._spotting_worker_budget_exhausted_at = worker_ordinal
+        return False
+
     def _bot_visibility(self, source, target, fired_recently=False):
         source_position = _xyz(source)
         target_position = target.get('position') or _xyz(target)
-        start = self._vector((source_position[0], source_position[1] + 2.0,
-                              source_position[2]))
-        end = self._vector((target_position[0], target_position[1] + 1.5,
-                            target_position[2]))
-        hit = self._runtime.bigworld.wg_collideSegment(
-            self._avatar.spaceID, start, end, 128)
-        line_of_sight = bool(
-            hit is None or
-            (hit[0] - start).length + 1.5 >= (end - start).length)
+        source_id = int(source.get(
+            'network_id', source.get('id', 0)) or 0)
+        target_id = int(target.get(
+            'network_id', target.get('id', 0)) or 0)
+        probe_key = (
+            'worker', source.get('kind', 'bot'), source_id,
+            target.get('kind', 'bot'), target_id)
+        line_of_sight = self._checkpoint_line_of_sight(
+            self._visibility_descriptor(source),
+            self._spotting_pose(source, source_position),
+            self._visibility_descriptor(target),
+            self._spotting_pose(target, target_position), probe_key)
         foliage_bonus = 0.0
         if line_of_sight and self._foliage is not None:
             foliage_bonus = self._foliage_camouflage_bonus(
@@ -17293,10 +17551,30 @@ class BattleRuntime(object):
                 self._fallen_tree_foliage_stable.pop(identity, None)
         return changed
 
+    def _observer_spotting_pose(self, position, entity, is_local):
+        if is_local:
+            rotator = getattr(self._avatar, 'gunRotator', None)
+            return (
+                _xyz(position), float(self._local_yaw),
+                float(self._local_pitch), float(self._local_roll),
+                _number(getattr(rotator, 'turretYaw', 0.0)),
+                _number(getattr(rotator, 'gunPitch', 0.0)))
+        rotation = tuple(getattr(entity, 'rotation', (0.0, 0.0, 0.0)))
+        yaw = _number(getattr(entity, 'yaw',
+                              rotation[2] if len(rotation) > 2 else 0.0))
+        pitch = _number(rotation[1] if len(rotation) > 1 else 0.0)
+        roll = _number(rotation[0] if rotation else 0.0)
+        aim = getattr(entity, 'getAimParams', None)
+        turret_yaw, gun_pitch = (
+            aim() if callable(aim) else (0.0, 0.0))
+        return (_xyz(position), yaw, pitch, roll,
+                _number(turret_yaw), _number(gun_pitch))
+
     def _spot_line_of_sight(self, observer, target, target_descriptor,
                             target_moving=False, fired_recently=False,
                             target_still_seconds=0.0,
-                            target_effective=None):
+                            target_effective=None, target_pose=None,
+                            probe_key=None):
         (observer_position, observer_descriptor, observer_entity,
          observer_still_seconds, observer_is_local) = _spotting_observer(
             observer)
@@ -17305,23 +17583,13 @@ class BattleRuntime(object):
             return True
         if distance > spotting.MAX_SPOT_DISTANCE:
             return False
-        for target_height in (1.5, 2.2):
-            segment = bot_planner.trimmed_sight_segment(
-                observer_position, target, 2.5, target_height)
-            if segment is None:
-                has_line_of_sight = True
-                break
-            if not segment:
-                continue
-            start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
-                self._avatar.spaceID,
-                self._vector(start), self._vector(end), 128)
-            if hit is None:
-                has_line_of_sight = True
-                break
-        else:
-            has_line_of_sight = False
+        observer_pose = self._observer_spotting_pose(
+            observer_position, observer_entity, observer_is_local)
+        if target_pose is None:
+            target_pose = self._spotting_pose({}, target)
+        has_line_of_sight = self._checkpoint_line_of_sight(
+            observer_descriptor, observer_pose,
+            target_descriptor, target_pose, probe_key)
         if not has_line_of_sight:
             return False
         foliage_bonus = self._foliage_camouflage_bonus(
@@ -17549,19 +17817,38 @@ class BattleRuntime(object):
                 fired_recently = now < float(
                     record.get('shot_penalty_until', 0.0))
                 target_still = self._record_still_seconds(record)
+                target_pose = self._spotting_pose(state, target)
+                target_identity = int(record.get(
+                    'network_id', record.get('engine_id', 0)) or 0)
+                observer_identity = int(getattr(
+                    self.client, 'player_id', 0) or 0)
+                direct_key = (
+                    'visible', observer_identity, record.get('kind'),
+                    target_identity, 0)
                 direct_seen = (
                     observers[0] is not None and
                     self._spot_line_of_sight(
                         observers[0], target, entity.typeDescriptor,
                         target_moving, fired_recently,
                         target_still_seconds=target_still,
-                        target_effective=target_effective))
-                seen = direct_seen or any(self._spot_line_of_sight(
-                    observer, target, entity.typeDescriptor,
-                    target_moving, fired_recently,
-                    target_still_seconds=target_still,
-                    target_effective=target_effective)
-                    for observer in observers[1:])
+                        target_effective=target_effective,
+                        target_pose=target_pose,
+                        probe_key=direct_key))
+                seen = bool(direct_seen)
+                if not seen:
+                    for observer_index, observer in enumerate(observers[1:]):
+                        if self._spot_line_of_sight(
+                                observer, target, entity.typeDescriptor,
+                                target_moving, fired_recently,
+                                target_still_seconds=target_still,
+                                target_effective=target_effective,
+                                target_pose=target_pose,
+                                probe_key=(
+                                    'visible', observer_identity,
+                                    record.get('kind'), target_identity,
+                                    observer_index + 1)):
+                            seen = True
+                            break
                 # A direct LOS sample owns the answer until this record's next
                 # staggered sample.  Publishing only on the one 0.10-second
                 # update that happened to execute the 0.50-second probe made
@@ -18911,6 +19198,17 @@ class BattleRuntime(object):
         self._local_spotting_cache = None
         self._local_factors_cache = None
         self._remote_spotting_cache = {}
+        self._spotting_ray_states = {}
+        self._spotting_layout_cache = collections.OrderedDict()
+        self._spotting_worker_ray_budget = 0
+        self._spotting_worker_call_index = 0
+        self._spotting_worker_next_start = 0
+        self._spotting_worker_budget_exhausted_at = None
+        self._spotting_worker_budget_active = False
+        self._spotting_worker_ray_tokens = \
+            float(SPOTTING_WORKER_RAYS_PER_FRAME)
+        self._spotting_worker_ray_time = None
+        self._spotting_worker_ray_start_budget = 0
         self._local_still_since = None
         self._published_vision_radius = None
         self._published_still_devices = {}

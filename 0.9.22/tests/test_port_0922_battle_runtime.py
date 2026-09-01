@@ -17589,11 +17589,191 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle._update_spotting(now)
             per_update.append(len(rays) - before)
 
-        # Each client proves only its local human's direct sight. Bot and
-        # remote-human sightings arrive through the server-merged team relay,
-        # so three phased enemies cost two static rays apiece instead of the
-        # old 3 enemies x 15 duplicated observers x 2 rays.
-        self.assertEqual([6] * 10, per_update)
+        # Each client still proves only its local human's direct sight.  The
+        # official layout is sampled three rays at a time, so three phased
+        # enemies have a strict nine-query ceiling even when every ray is
+        # blocked; a clear preferred ray drops later samples back to one.
+        self.assertEqual([9] * 10, per_update)
+
+    def test_spotting_ray_budget_rotates_then_reuses_the_clear_ray(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        rays = tuple(
+            ((float(index), 2.0, 0.0),
+             (100.0 + float(index), 2.0, 0.0))
+            for index in range(6))
+        calls = []
+
+        def collide(unused_space, start, unused_end, unused_mask):
+            calls.append(start.x)
+            return None if start.x == 4.0 else (_Vector(),)
+
+        runtime.bigworld.wg_collideSegment = collide
+        with mock.patch.object(
+                battle, '_cached_visibility_layout', return_value=object()), \
+                mock.patch.object(
+                    battle_runtime_module.spotting,
+                    'visibility_ray_count', return_value=len(rays)), \
+                mock.patch.object(
+                    battle_runtime_module.spotting, 'visibility_ray_at',
+                    side_effect=lambda unused_observer, unused_target,
+                    index: rays[index]):
+            self.assertFalse(battle._checkpoint_line_of_sight(
+                object(), (), object(), (), ('worker', 1, 2)))
+            self.assertTrue(battle._checkpoint_line_of_sight(
+                object(), (), object(), (), ('worker', 1, 2)))
+            before = len(calls)
+            self.assertTrue(battle._checkpoint_line_of_sight(
+                object(), (), object(), (), ('worker', 1, 2)))
+
+        self.assertEqual([0.0, 1.0, 2.0, 3.0, 4.0], calls[:5])
+        self.assertEqual([4.0], calls[before:])
+
+    def test_worker_global_ray_budget_resumes_at_the_first_deferred_pair(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        calls = []
+
+        def ray_at(observer, unused_target, index):
+            base = float(observer) * 10.0
+            return ((base + index, 2.0, 0.0),
+                    (base + 100.0 + index, 2.0, 0.0))
+
+        def blocked(unused_space, start, unused_end, unused_mask):
+            calls.append(start.x)
+            return (_Vector(),)
+
+        runtime.bigworld.wg_collideSegment = blocked
+        with mock.patch.object(
+                battle, '_cached_visibility_layout',
+                side_effect=lambda descriptor, unused_pose: descriptor), \
+                mock.patch.object(
+                    battle_runtime_module.spotting,
+                    'visibility_ray_count', return_value=6), \
+                mock.patch.object(
+                    battle_runtime_module.spotting, 'visibility_ray_at',
+                    side_effect=ray_at), mock.patch.object(
+                    battle_runtime_module,
+                    'SPOTTING_WORKER_RAYS_PER_FRAME', 4):
+            battle._begin_worker_spotting_budget()
+            for identity in range(4):
+                battle._checkpoint_line_of_sight(
+                    identity, (), object(), (),
+                    ('worker', identity, 99))
+            battle._finish_worker_spotting_budget()
+            first_frame = list(calls)
+
+            battle._begin_worker_spotting_budget()
+            for identity in range(4):
+                battle._checkpoint_line_of_sight(
+                    identity, (), object(), (),
+                    ('worker', identity, 99))
+            battle._finish_worker_spotting_budget()
+            second_frame = calls[len(first_frame):]
+
+        self.assertEqual([0.0, 1.0, 2.0, 10.0], first_frame)
+        self.assertEqual([11.0, 12.0, 13.0, 20.0], second_frame)
+        self.assertEqual(2, battle._spotting_worker_next_start)
+
+    def test_worker_spotting_token_bucket_limits_rate_and_frame_burst(self):
+        battle = BattleRuntime(_runtime())
+        battle._spotting_worker_ray_tokens = 0.0
+        battle._spotting_worker_ray_time = 10.0
+
+        with mock.patch.object(
+                battle_runtime_module,
+                'SPOTTING_WORKER_RAYS_PER_SECOND', 8.0), \
+                mock.patch.object(
+                    battle_runtime_module,
+                    'SPOTTING_WORKER_RAYS_PER_FRAME', 3):
+            battle._begin_worker_spotting_budget(10.25)
+            self.assertEqual(2, battle._spotting_worker_ray_budget)
+            battle._spotting_worker_ray_budget = 0
+            battle._finish_worker_spotting_budget()
+            self.assertEqual(0.0, battle._spotting_worker_ray_tokens)
+
+            battle._begin_worker_spotting_budget(10.375)
+            self.assertEqual(1, battle._spotting_worker_ray_budget)
+            battle._finish_worker_spotting_budget()
+
+            battle._begin_worker_spotting_budget(20.0)
+            self.assertEqual(3, battle._spotting_worker_ray_budget)
+
+    def test_spotting_layout_cache_reuses_only_the_same_descriptor_pose(self):
+        battle = BattleRuntime(_runtime())
+        descriptor = object()
+        first_pose = ((1.0, 2.0, 3.0), 0.1, 0.0, 0.0, 0.2, -0.1)
+        second_pose = ((1.1, 2.0, 3.0), 0.1, 0.0, 0.0, 0.2, -0.1)
+        layouts = [object(), object()]
+
+        with mock.patch.object(
+                battle_runtime_module.spotting,
+                'vehicle_visibility_layout', side_effect=layouts) as build:
+            first = battle._cached_visibility_layout(
+                descriptor, first_pose)
+            cached = battle._cached_visibility_layout(
+                descriptor, first_pose)
+            second = battle._cached_visibility_layout(
+                descriptor, second_pose)
+
+        self.assertIs(first, cached)
+        self.assertIs(layouts[0], first)
+        self.assertIs(layouts[1], second)
+        self.assertEqual(2, build.call_count)
+
+    def test_hidden_worker_visibility_uses_shared_descriptor_checkpoints(self):
+        battle = BattleRuntime(_runtime())
+        battle._avatar = battle._runtime.bigworld.avatar
+        observer_descriptor = _Descriptor('ussr:R11_MS-1')
+        target_descriptor = _Descriptor('ussr:R04_T-34')
+        battle._bots = types.SimpleNamespace(
+            _descriptors={11: observer_descriptor, 12: target_descriptor})
+        battle._checkpoint_line_of_sight = mock.Mock(return_value=True)
+        source = {
+            'kind': 'bot', 'id': 11, 'network_id': 11,
+            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.25,
+            'aim_yaw': 0.75, 'gun_pitch': -0.1}
+        target = {
+            'kind': 'bot', 'id': 12, 'network_id': 12,
+            'position': (101.0, 2.0, 3.0), 'yaw': -0.25,
+            'turret_yaw': 0.2, 'gun_pitch': 0.1}
+
+        result = battle._bot_visibility(source, target)
+
+        self.assertTrue(result['line_of_sight'])
+        args = battle._checkpoint_line_of_sight.call_args.args
+        self.assertIs(observer_descriptor, args[0])
+        self.assertEqual(((1.0, 2.0, 3.0), 0.25, 0.0, 0.0, 0.5, -0.1),
+                         args[1])
+        self.assertIs(target_descriptor, args[2])
+        self.assertEqual(
+            ((101.0, 2.0, 3.0), -0.25, 0.0, 0.0, 0.2, 0.1),
+            args[3])
+        self.assertEqual(
+            ('worker', 'bot', 11, 'bot', 12), args[4])
+
+    def test_hidden_worker_descriptor_failure_uses_visibility_fallback(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._bots = types.SimpleNamespace(_descriptors={})
+        runtime.bigworld.wg_collideSegment = mock.Mock(return_value=None)
+        source = {
+            'kind': 'player', 'network_id': 7,
+            'position': (0.0, 0.0, 0.0)}
+        target = {
+            'kind': 'bot', 'id': 12,
+            'position': (100.0, 0.0, 0.0)}
+
+        with mock.patch.object(
+                battle, '_resolve_player_descriptor',
+                side_effect=RuntimeError('descriptor not loaded')):
+            result = battle._bot_visibility(source, target)
+
+        self.assertTrue(result['line_of_sight'])
+        self.assertEqual(1, runtime.bigworld.wg_collideSegment.call_count)
 
     def test_spotting_uses_descriptor_camouflage_and_shot_factor(self):
         runtime = _runtime()
