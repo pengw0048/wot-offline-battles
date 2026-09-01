@@ -11,6 +11,7 @@ probes so it can be tested outside the legacy client.
 import heapq
 import math
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 from gui.mods.offline_lan_0922.ai.driver import (
 	FIRST_CANDIDATE_OFFSET, WAYPOINT_ARRIVAL_RADIUS)
 
@@ -1167,6 +1168,11 @@ class TerrainNavigator(object):
 		self._accrue_search_credit(elapsed)
 
 	def _advance_searches(self, now):
+		"""Profile one complete fair A* service boundary."""
+		return hidden_worker_profiler.python_call(
+			'bot_astar_inclusive', self._advance_searches_impl, now)
+
+	def _advance_searches_impl(self, now):
 		"""Give every pending A* task a deterministic fair frame share.
 
 		The old on-demand scheduler handed the whole frame budget to whichever bots
@@ -1212,6 +1218,7 @@ class TerrainNavigator(object):
 		self.search_credit = max(0.0, self.search_credit - processed)
 		self.search_frame_budget = max(
 			0, int(self.search_frame_budget) - processed)
+		hidden_worker_profiler.work_add('bot_astar_expansions', processed)
 		self.search_next_key = queue[0] if queue else None
 		self._trim_cache(now)
 

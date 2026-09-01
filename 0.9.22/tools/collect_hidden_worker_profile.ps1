@@ -3,7 +3,7 @@ param(
     [string]$GameRoot = $env:WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT,
 
     [ValidateRange(5, 3600)]
-    [int]$Seconds = 60,
+    [int]$Seconds = 90,
 
     [ValidateRange(1, 30)]
     [int]$IntervalSeconds = 2,
@@ -414,8 +414,8 @@ try {
         included = @($included)
         missing = @($missing)
         runtimeEvidence = @(
-            "authority_worker_status.json runtime.frame_performance",
-            "hidden-worker.log PERF and slow-frame lines"
+            "authority_worker_status.json runtime.frame_performance with detailed phase timings and work counters",
+            "hidden-worker.log PERF and slow-frame lines with native-query and Python phase summaries"
         )
         gpuRule = "PID-scoped Windows GPU Engine counters only; unavailable is not estimated"
     }

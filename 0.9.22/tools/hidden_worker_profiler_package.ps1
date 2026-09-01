@@ -67,16 +67,145 @@ function Read-DiagnosticMarker([string]$Path) {
     return $marker
 }
 
+function Update-Profiler(
+        [string]$ModDirectory,
+        [string]$MarkerPath,
+        [string]$BackupRoot,
+        [string]$SourceMarkerPath,
+        [string]$SourcePackage,
+        $Marker) {
+    $backupManifestPath = Join-Path $BackupRoot $BackupManifestName
+    if (-not [System.IO.File]::Exists($backupManifestPath)) {
+        throw "The existing profiler backup is incomplete: $BackupRoot"
+    }
+    $backup = Read-JsonFile $backupManifestPath
+    if ($backup.schema -ne 1 -or
+            [string]$backup.packageFile -ne
+                "org.peng.offline_lan_0922_0.6.2.wotmod" -or
+            [string]$backup.packageSha256 -notmatch "^[0-9a-f]{64}$" -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$backup.diagnosticBuildIdentity)) {
+        throw "The existing profiler backup manifest is invalid."
+    }
+
+    $installedPackage = Join-Path $ModDirectory ([string]$backup.packageFile)
+    if (-not [System.IO.File]::Exists($installedPackage) -or
+            (Get-Sha256 $installedPackage) -ne
+                [string]$backup.packageSha256) {
+        throw "The installed profiler changed after its backup was created. Recovery files were preserved."
+    }
+    if (-not [System.IO.File]::Exists($MarkerPath)) {
+        throw "The installed profiler marker is missing. Recovery files were preserved."
+    }
+    $installedMarker = Read-DiagnosticMarker $MarkerPath
+    if ([string]$installedMarker.diagnosticBuildIdentity -ne
+            [string]$backup.diagnosticBuildIdentity -or
+            [string]$installedMarker.packageSha256 -ne
+            [string]$backup.packageSha256) {
+        throw "The installed profiler does not match its backup. Recovery files were preserved."
+    }
+    foreach ($name in @($backup.previousPackages)) {
+        $leaf = [System.IO.Path]::GetFileName([string]$name)
+        if ($leaf -ne [string]$name -or $leaf -notlike $ModPattern -or
+                -not [System.IO.File]::Exists((Join-Path (
+                    Join-Path $BackupRoot "packages") $leaf))) {
+            throw "The original launcher WOTMOD backup is incomplete. Recovery files were preserved."
+        }
+    }
+    if ([bool]$backup.previousDiagnosticMarker -and
+            -not [System.IO.File]::Exists((Join-Path $BackupRoot (
+                "previous_diagnostic_marker.json")))) {
+        throw "The original diagnostic marker backup is incomplete. Recovery files were preserved."
+    }
+
+    if ([string]$installedMarker.diagnosticBuildIdentity -eq
+            [string]$Marker.diagnosticBuildIdentity -and
+            [string]$installedMarker.packageSha256 -eq
+            [string]$Marker.packageSha256) {
+        Write-Host "Hidden-worker profiler build $($Marker.diagnosticBuildIdentity) is already installed."
+        return
+    }
+
+    $suffix = [Guid]::NewGuid().ToString("N")
+    $markerDirectory = Split-Path -Parent $MarkerPath
+    $newPackageTemporary = Join-Path $ModDirectory (
+        ".hidden-worker-profiler-new-$suffix.tmp")
+    $newMarkerTemporary = Join-Path $markerDirectory (
+        ".hidden-worker-profiler-marker-new-$suffix.tmp")
+    $newManifestTemporary = Join-Path $BackupRoot (
+        ".backup-manifest-new-$suffix.tmp")
+    $oldPackageTemporary = Join-Path $BackupRoot (
+        ".installed-profiler-old-$suffix.wotmod")
+    $oldMarkerTemporary = Join-Path $BackupRoot (
+        ".installed-profiler-marker-old-$suffix.json")
+    $oldManifestTemporary = Join-Path $BackupRoot (
+        ".backup-manifest-old-$suffix.json")
+
+    Copy-Item -LiteralPath $SourcePackage -Destination $newPackageTemporary
+    Copy-Item -LiteralPath $SourceMarkerPath -Destination $newMarkerTemporary
+    @{
+        schema = 1
+        diagnosticBuildIdentity = [string]$Marker.diagnosticBuildIdentity
+        packageFile = [string]$Marker.packageFile
+        packageSha256 = [string]$Marker.packageSha256
+        previousPackages = @($backup.previousPackages)
+        previousDiagnosticMarker = [bool]$backup.previousDiagnosticMarker
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (
+        $newManifestTemporary) -Encoding UTF8
+
+    try {
+        Move-Item -LiteralPath $installedPackage -Destination (
+            $oldPackageTemporary)
+        Move-Item -LiteralPath $MarkerPath -Destination $oldMarkerTemporary
+        Move-Item -LiteralPath $backupManifestPath -Destination (
+            $oldManifestTemporary)
+        Move-Item -LiteralPath $newPackageTemporary -Destination (
+            $installedPackage)
+        Move-Item -LiteralPath $newMarkerTemporary -Destination $MarkerPath
+        Move-Item -LiteralPath $newManifestTemporary -Destination (
+            $backupManifestPath)
+    }
+    catch {
+        if ([System.IO.File]::Exists($oldPackageTemporary)) {
+            Remove-Item -LiteralPath $installedPackage -Force `
+                -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $oldPackageTemporary -Destination (
+                $installedPackage)
+        }
+        if ([System.IO.File]::Exists($oldMarkerTemporary)) {
+            Remove-Item -LiteralPath $MarkerPath -Force `
+                -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $oldMarkerTemporary -Destination $MarkerPath
+        }
+        if ([System.IO.File]::Exists($oldManifestTemporary)) {
+            Remove-Item -LiteralPath $backupManifestPath -Force `
+                -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $oldManifestTemporary -Destination (
+                $backupManifestPath)
+        }
+        Remove-Item -LiteralPath $newPackageTemporary -Force `
+            -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $newMarkerTemporary -Force `
+            -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $newManifestTemporary -Force `
+            -ErrorAction SilentlyContinue
+        throw
+    }
+    Remove-Item -LiteralPath $oldPackageTemporary -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $oldMarkerTemporary -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $oldManifestTemporary -Force `
+        -ErrorAction SilentlyContinue
+    Write-Host "Updated hidden-worker profiler to build $($Marker.diagnosticBuildIdentity)."
+    Write-Host "Original launcher WOTMOD backup remains at: $BackupRoot"
+}
+
 function Install-Profiler(
         [string]$Root,
         [string]$ModDirectory,
         [string]$MarkerPath,
         [string]$BackupRoot) {
-    if ([System.IO.Directory]::Exists($BackupRoot) -or
-            [System.IO.File]::Exists($BackupRoot)) {
-        throw "A profiler backup already exists. Uninstall it before installing another build: $BackupRoot"
-    }
-
     $sourceMarkerPath = Join-Path $PSScriptRoot $DiagnosticMarkerName
     $marker = Read-DiagnosticMarker $sourceMarkerPath
     $sourcePackage = Join-Path (
@@ -96,6 +225,15 @@ function Install-Profiler(
     if ($packages.Count -ne 1 -or $packages[0].Name -ne
             "org.peng.offline_lan_0922_0.6.2.wotmod") {
         throw "Expected exactly one v0.6.2 org.peng.offline_lan_0922 WOTMOD. Install or repair v0.6.2 with the launcher first."
+    }
+
+    if ([System.IO.Directory]::Exists($BackupRoot)) {
+        Update-Profiler $ModDirectory $MarkerPath $BackupRoot `
+            $sourceMarkerPath $sourcePackage $marker
+        return
+    }
+    if ([System.IO.File]::Exists($BackupRoot)) {
+        throw "The profiler backup path is occupied by a file: $BackupRoot"
     }
 
     $backupPackages = Join-Path $BackupRoot "packages"

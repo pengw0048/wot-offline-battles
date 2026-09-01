@@ -216,9 +216,10 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
                 'Get-Process -Name "WorldOfTanks"',
                 'Get-Process -Name "WoT-Offline-Battles-Launcher"',
                 '.offline-hidden-worker-profiler-backup',
-                'A profiler backup already exists', 'Get-Sha256',
+                'Updated hidden-worker profiler to build', 'Get-Sha256',
                 'Expected exactly one v0.6.2',
-                'previousPackages', 'diagnosticBuildIdentity'):
+                'previousPackages', 'diagnosticBuildIdentity',
+                'Original launcher WOTMOD backup remains at'):
             self.assertIn(required, source)
         self.assertNotIn('build_identity.json', source)
         self.assertNotIn('server_endpoint.json', source)
@@ -231,6 +232,8 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
 
     def test_collector_uses_only_fixed_paths_and_pid_scoped_counters(self):
         source = (TOOLS_ROOT / 'collect_hidden_worker_profile.ps1').read_text(
+            encoding='utf-8')
+        batch = (TOOLS_ROOT / 'COLLECT_HIDDEN_WORKER_PROFILE.bat').read_text(
             encoding='utf-8')
         for required in (
                 'authority_worker_status.json', 'process_id',
@@ -247,19 +250,22 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
             self.assertIn(required, source)
         self.assertNotIn('Get-ChildItem -Path $env:', source)
         self.assertNotIn('-Recurse', source)
+        self.assertIn('[int]$Seconds = 90', source)
+        self.assertIn('set "CAPTURE_SECONDS=90"', batch)
 
-    def test_install_text_explains_separate_worker_copy_and_restoration(self):
+    def test_install_text_explains_launcher_workflow_and_restoration(self):
         text = self.builder.install_text('profiler-test-a')
-        self.assertIn('let it finish its normal installation', text)
-        self.assertIn('exact same launcher build', text)
+        self.assertIn('let it finish its normal v0.6.2 installation', text)
+        self.assertIn('still start the game, LAN server, visible client and hidden', text)
+        self.assertIn('through that same launcher', text)
+        self.assertIn('avoids rebuilding or replacing', text)
+        self.assertIn('exact same launcher to start the battle', text)
         self.assertIn('do not switch to another launcher build', text)
-        self.assertIn('System baseline first', text)
-        self.assertIn('missing diagnostic', text)
-        self.assertIn('is expected for this first report', text)
-        self.assertIn('whole-product system baseline', text)
-        self.assertIn('after the launcher package', text)
-        self.assertIn('wrapper-only observational baseline', text)
-        self.assertIn('not an unmodified-client or causal comparison', text)
+        self.assertIn('start the battle normally', text)
+        self.assertIn('updates it in place', text)
+        self.assertIn('preserves the original launcher WOTMOD backup', text)
+        self.assertIn('one comprehensive profile', text)
+        self.assertIn('default capture is 90 seconds', text)
         self.assertIn('another physical #1513 client copy', text)
         self.assertIn('installer again', text)
         self.assertIn('restores the exact WOTMOD files', text)

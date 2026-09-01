@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +13,7 @@ sys.path.insert(0, str(
     ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'))
 
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.lan_client import LANClient
@@ -209,6 +211,75 @@ class LanClientQueueTests(unittest.TestCase):
              'bot_observation'],
             [item[1]['type'] for item in queued])
         self.assertEqual((1, 2), queued[0][1]['nested']['values'])
+
+    def test_visible_outbound_does_not_enter_worker_profile_boundaries(self):
+        client = self.activate()
+        with mock.patch.object(
+                hidden_worker_profiler, 'python_started') as started, \
+                mock.patch.object(
+                    hidden_worker_profiler, 'work_add') as work_add:
+            self.assertTrue(client._send({
+                'type': 'projectile_progress', 'projectiles': []}))
+
+        started.assert_not_called()
+        work_add.assert_not_called()
+        self.assertIs(type(client._outbound_queue[0][1]), dict)
+
+    def test_worker_generic_outbound_profiles_main_and_sender_boundaries(self):
+        client = self.activate(worker=True)
+        sock = client.sock
+        profiler = hidden_worker_profiler.HiddenWorkerProfiler(
+            clock=time.perf_counter, alternate_modes=False)
+        original = hidden_worker_profiler._PROFILER
+        hidden_worker_profiler._PROFILER = profiler
+        try:
+            hidden_worker_profiler.begin_frame(True)
+            message = {
+                'type': 'projectile_progress', 'projectiles': [{'id': 7}]}
+            self.assertTrue(client._send(message))
+            queued = client._dequeue_outbound(
+                client._transport_generation)
+            self.assertIsInstance(
+                queued[1], lan_client_module._ProfiledWorkerOutbound)
+            thread = threading.Thread(
+                target=client._send_wire,
+                args=(queued[1], sock, client._transport_generation))
+            thread.start()
+            thread.join(1.0)
+            self.assertFalse(thread.is_alive())
+            frame = hidden_worker_profiler.end_frame()
+            interval = hidden_worker_profiler.begin_frame(True)
+        finally:
+            hidden_worker_profiler.reset()
+            hidden_worker_profiler._PROFILER = original
+
+        self.assertIn('worker_message_freeze', frame['python'])
+        self.assertIn('worker_message_enqueue', frame['python'])
+        self.assertEqual(1, frame['work']['worker_messages'])
+        self.assertEqual(1, frame['work']['worker_queue_depth'])
+        self.assertIn('worker_message_send', interval['offframe_python'])
+        expected = (json.dumps(
+            message, separators=(',', ':')) + '\n').encode('utf-8')
+        self.assertEqual([expected], sock.sent)
+        self.assertEqual(
+            len(expected), interval['offframe_work']['worker_wire_bytes'])
+
+    def test_worker_preencoded_tag_preserves_wire_and_coalescing(self):
+        client = self.activate(worker=True)
+        first = {'type': 'projectile_progress', 'revision': 1}
+        second = {'type': 'projectile_progress', 'revision': 2}
+
+        self.assertTrue(client._send_preencoded_trusted(
+            first, coalesce_key=('projectile_progress',)))
+        self.assertTrue(client._send_preencoded_trusted(
+            second, coalesce_key=('projectile_progress',)))
+
+        self.assertEqual(1, len(client._outbound_queue))
+        queued = client._outbound_queue[0][1]
+        self.assertIsInstance(queued, lan_client_module._PreencodedOutbound)
+        self.assertTrue(queued.profiled_worker_message)
+        self.assertEqual(
+            second, json.loads(queued.payload.decode('utf-8')))
 
     def test_battle_ready_canonicalizes_spawn_planner_team_keys(self):
         client = self.activate()

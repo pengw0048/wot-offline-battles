@@ -8,6 +8,8 @@ steering, so it is safe to exercise outside the BigWorld client.
 
 import math
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 
 WAYPOINT_ARRIVAL_RADIUS = 1.5
 TRAFFIC_WAIT_LEASE_SECONDS = 1.5
@@ -435,6 +437,18 @@ class LocalDriver(object):
 		return None
 
 	def drive(self, bot_id, position, yaw, speed, dt, target, neighbours,
+			direction_clear, velocity=None, half_length=3.5, half_width=1.7,
+			movement_intent=True, stopping_distance=None,
+			stop_at_target=True, decision_horizon=0.0):
+		"""Profile the complete local-driver boundary without changing its law."""
+		return hidden_worker_profiler.python_call(
+			'bot_driver_inclusive', self._drive_impl,
+			bot_id, position, yaw, speed, dt, target, neighbours,
+			direction_clear, velocity, half_length, half_width,
+			movement_intent, stopping_distance, stop_at_target,
+			decision_horizon)
+
+	def _drive_impl(self, bot_id, position, yaw, speed, dt, target, neighbours,
 			direction_clear, velocity=None, half_length=3.5, half_width=1.7,
 			movement_intent=True, stopping_distance=None,
 			stop_at_target=True, decision_horizon=0.0):

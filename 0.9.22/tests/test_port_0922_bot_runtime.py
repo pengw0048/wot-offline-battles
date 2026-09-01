@@ -14550,6 +14550,115 @@ class BotRuntimeTests(unittest.TestCase):
         # Reading the report clears the window's counters.
         self.assertEqual((), runtime.load_report()['busiest'])
 
+    def test_profiler_partitions_one_bot_step_and_counts_its_work(self):
+        profiler = self.module.hidden_worker_profiler
+        runtime = self.runtime
+        runtime.battle_start(self.start)
+        profiler.reset()
+        try:
+            profiler.begin_frame(True)
+            outgoing = runtime.update(.04, 1.0)
+            profile = profiler.end_frame()
+        finally:
+            profiler.reset()
+
+        self.assertTrue(profile['measured'])
+        self.assertTrue(outgoing)
+        main_categories = (
+            'bot_setup', 'bot_control_observation',
+            'bot_selected_motion', 'bot_motion_commit_integration',
+            'bot_aim_fire', 'bot_supplemental', 'bot_tank_contacts',
+            'bot_vertical_ground', 'bot_publication')
+        for category in main_categories:
+            self.assertIn(category, profile['python'])
+            self.assertGreaterEqual(profile['python'][category][0], 1)
+            self.assertEqual(0, profile['python'][category][2])
+        scheduler_seconds = profile['python'][
+            'bot_scheduler_control_refresh'][1]
+        main_seconds = sum(
+            profile['python'][category][1]
+            for category in main_categories)
+        self.assertGreaterEqual(scheduler_seconds + 1.0e-9, main_seconds)
+        for category in (
+                'bot_visibility_prepare_inclusive',
+                'bot_contacts_inclusive',
+                'bot_planner_navigation_inclusive'):
+            self.assertIn(category, profile['python'])
+        self.assertEqual(1, profile['work']['bot_control_refresh_slices'])
+        self.assertEqual(1, profile['work']['bot_live_rows'])
+        self.assertEqual(1, profile['work']['bot_integrated_rows'])
+        self.assertEqual(1, profile['work']['bot_decision_due'])
+        self.assertEqual(1, profile['work']['bot_projected_rows'])
+        self.assertEqual(1, profile['work']['bot_publications'])
+        self.assertGreaterEqual(profile['work']['bot_ground_probes'], 1)
+        self.assertGreaterEqual(
+            profile['work']['bot_motion_direction_probes'], 1)
+
+    def test_profiler_separates_refresh_and_catchup_slices(self):
+        command = self._stationary_command()
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        profiler = self.module.hidden_worker_profiler
+        profiler.reset()
+        try:
+            profiler.begin_frame(True)
+            runtime.update(.45, 1.0)
+            profile = profiler.end_frame()
+        finally:
+            profiler.reset()
+
+        self.assertEqual(1, profile['work']['bot_control_refresh_slices'])
+        self.assertEqual(2, profile['work']['bot_catchup_slices'])
+        self.assertEqual(
+            1, profile['python']['bot_scheduler_control_refresh'][0])
+        self.assertEqual(2, profile['python']['bot_scheduler_catchup'][0])
+        self.assertEqual(3, profile['python']['bot_setup'][0])
+
+    def test_profiler_wraps_driver_and_astar_boundaries(self):
+        class PendingSearch(object):
+            def __init__(self):
+                self.done = False
+                self.last_frame = None
+                self.calls = 0
+
+            def step(self, budget):
+                self.calls += int(budget)
+                return False
+
+        profiler = self.module.hidden_worker_profiler
+        driver = self.module.ai_driver.LocalDriver()
+        navigator = self.module.TerrainNavigator(
+            lambda unused_x, unused_z, unused_y: 0.0)
+        pending = PendingSearch()
+        navigator.searches = {('pending',): pending}
+        navigator.begin_frame(.1)
+        navigator.search_credit = 3.0
+        navigator.search_frame_budget = 3
+        profiler.reset()
+        try:
+            profiler.begin_frame(True)
+            driver.drive(
+                11, (0.0, 0.0, 0.0), 0.0, 0.0, .1,
+                (0.0, 0.0, 20.0), (), lambda unused_yaw: True)
+            navigator._advance_searches(1.0)
+            profile = profiler.end_frame()
+        finally:
+            profiler.reset()
+
+        self.assertEqual(1, profile['python']['bot_driver_inclusive'][0])
+        self.assertEqual(1, profile['python']['bot_astar_inclusive'][0])
+        self.assertEqual(3, pending.calls)
+        self.assertEqual(3, profile['work']['bot_astar_expansions'])
+
 
 class BotOwnStationaryVisionTests(unittest.TestCase):
     """A bot's own stereoscope was evaluated once at registration with zero
