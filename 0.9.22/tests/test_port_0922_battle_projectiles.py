@@ -473,26 +473,212 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(10.0, battle._projectile_server_local_time)
         self.assertEqual(11000, battle._projectile_estimated_server_time(11.0))
 
-    def test_delayed_tracer_starts_at_server_confirmed_cursor(self):
-        battle, bigworld = _battle(now=1.0)
+    def test_canonical_tracer_waits_for_confirmed_safe_cursor(self):
+        battle, bigworld = _battle(now=0.0)
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
         battle._remote_factory = types.SimpleNamespace(
             play_projectile_tracer=mock.Mock(return_value=1000000))
+        source_shot = dict(_event()['source_shot'])
+        source_shot.update({
+            'speed': math.sqrt(10400.0),
+            'gravity': 10.0,
+            'maxDistance': 1000.0,
+        })
         event = dict(
             _event(), maxDistance=1000.0, max_time_ms=20000,
+            source_shot=source_shot,
             velocity=[100.0, 20.0, 0.0], gravity=10.0,
-            launch_server_time_ms=0)
-        battle._projectile_server_time_ms = 1000
-        battle._projectile_server_local_time = 1.0
+            segment_velocity=[100.0, 20.0, 0.0],
+            launch_server_time_ms=0, _launch_server_tick=10,
+            _segment_launch_server_tick=10)
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = 0.0
 
         self.assertTrue(battle._show_shot(event))
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+        source.showShooting.assert_called_once_with(1, False)
+
+        progressed = dict(
+            event, checked_through_ms=40, checked_distance=4.0,
+            piercing_loss=0.0)
+        normalized = battle._projectile_wire_meta(progressed)
+        self.assertIsNotNone(normalized)
+        normalized['source_descriptor'] = source.typeDescriptor
+        normalized['_snapshot_server_tick'] = 13
+        bigworld.now = 1.0
+        self.assertFalse(
+            battle._ensure_projectile_visual(normalized, bigworld.now))
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+
+        normalized['_snapshot_server_tick'] = 14
+        self.assertTrue(
+            battle._ensure_projectile_visual(normalized, bigworld.now))
 
         arguments = battle._remote_factory.play_projectile_tracer.call_args[0]
         self.assertEqual('player:7:1', arguments[7])
         self.assertEqual((0.0, 1.0, 0.0), arguments[8])
         self.assertEqual((100.0, 20.0, 0.0), arguments[9])
-        source.showShooting.assert_called_once_with(1, False)
+
+    def test_he_tracer_keeps_the_second_query_pipeline_behind_cursor(self):
+        battle, bigworld = _battle(now=0.0)
+        battle._remote_factory = types.SimpleNamespace(
+            play_projectile_tracer=mock.Mock(return_value=1000000))
+        event = _event()
+        event['source_shot'] = dict(event['source_shot'])
+        event['source_shot']['shell'] = dict(
+            event['source_shot']['shell'])
+        event['source_shot']['shell'].update({
+            'kind': 'HIGH_EXPLOSIVE', 'explosionRadius': 4.0,
+        })
+        event.update({
+            'is_he': True, 'splash_radius': 4.0,
+            'checked_through_ms': 200, 'checked_distance': 2.0,
+            'piercing_loss': 0.0, '_launch_server_tick': 10,
+            '_segment_launch_server_tick': 10,
+        })
+        normalized = battle._projectile_wire_meta(event)
+        self.assertIsNotNone(normalized)
+        normalized['source_descriptor'] = battle._server_entity(
+            41).typeDescriptor
+
+        normalized['_snapshot_server_tick'] = 16
+        bigworld.now = 1.0
+        self.assertFalse(
+            battle._ensure_projectile_visual(normalized, bigworld.now))
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+
+        normalized['_snapshot_server_tick'] = 19
+        self.assertTrue(
+            battle._ensure_projectile_visual(normalized, bigworld.now))
+        reference = battle._remote_factory.play_projectile_tracer.call_args[0][8]
+        self.assertAlmostEqual(2.0 / 3.0, reference[0], places=5)
+
+    def test_ricochet_visual_delay_is_relative_to_the_new_segment(self):
+        battle, unused_bigworld = _battle(now=1.0)
+        raw = {
+            'projectile_id': 'p1', 'is_he': False,
+            'ricochet_count': 1, 'segment_start_time_ms': 10,
+            'base_checked_ms': 40, 'max_time_ms': 20000,
+            'launch_server_time_ms': 0, '_launch_server_tick': 10,
+            '_segment_launch_server_tick': 14,
+            '_snapshot_server_tick': 17,
+        }
+
+        self.assertIsNone(battle._projectile_safe_visual_age(raw, 1.0))
+        raw['_snapshot_server_tick'] = 18
+        self.assertAlmostEqual(
+            0.0, battle._projectile_safe_visual_age(raw, 1.0))
+        raw.pop('_segment_launch_server_tick')
+        raw['_snapshot_server_tick'] = 100
+        self.assertIsNone(battle._projectile_safe_visual_age(raw, 10.0))
+
+    def test_ricochet_install_keeps_its_exact_visual_delay_boundary(self):
+        battle, unused_bigworld = _battle(now=1.0)
+        launch = dict(
+            _event(), _launch_server_tick=10,
+            _segment_launch_server_tick=10)
+        battle._install_projectile_meta(
+            battle._projectile_wire_meta(launch))
+        ricochet = dict(
+            _event(), segment_origin=[0.1, 1.0, 0.0],
+            segment_velocity=[-10.0, 0.0, 0.0],
+            segment_start_time_ms=10, ricochet_count=1,
+            base_penetration_multiplier=(
+                combat_rules.first_ricochet_penetration_multiplier(
+                    'ARMOR_PIERCING')),
+            checked_through_ms=40, checked_distance=0.4,
+            piercing_loss=0.0, _segment_launch_server_tick=14)
+        normalized = battle._projectile_wire_meta(ricochet)
+        meta = battle._install_projectile_meta(normalized)
+
+        snapshot = dict(normalized)
+        snapshot.pop('_segment_launch_server_tick')
+        snapshot['_snapshot_server_tick'] = 17
+        battle._install_projectile_meta(snapshot)
+        self.assertEqual(14, meta['_segment_launch_server_tick'])
+        self.assertIsNone(
+            battle._projectile_safe_visual_age(snapshot, 1.0))
+        snapshot['_snapshot_server_tick'] = 18
+        self.assertAlmostEqual(
+            0.0, battle._projectile_safe_visual_age(snapshot, 1.0))
+
+    def test_ricochet_without_segment_tick_drops_the_old_visual_boundary(self):
+        battle, unused_bigworld = _battle(now=1.0)
+        launch = dict(
+            _event(), _launch_server_tick=10,
+            _segment_launch_server_tick=10)
+        battle._install_projectile_meta(
+            battle._projectile_wire_meta(launch))
+        ricochet = dict(
+            _event(), segment_origin=[0.1, 1.0, 0.0],
+            segment_velocity=[-10.0, 0.0, 0.0],
+            segment_start_time_ms=10, ricochet_count=1,
+            base_penetration_multiplier=(
+                combat_rules.first_ricochet_penetration_multiplier(
+                    'ARMOR_PIERCING')),
+            checked_through_ms=40, checked_distance=0.4,
+            piercing_loss=0.0)
+
+        normalized = battle._projectile_wire_meta(ricochet)
+        meta = battle._install_projectile_meta(normalized)
+        normalized['_snapshot_server_tick'] = 100
+
+        self.assertNotIn('_segment_launch_server_tick', meta)
+        self.assertIsNone(
+            battle._projectile_safe_visual_age(normalized, 10.0))
+
+    def test_terminal_cancels_a_tracer_before_its_safe_release(self):
+        battle, bigworld = _battle(now=0.0)
+        source = battle._server_entity(41)
+        source.showShooting = mock.Mock(return_value=True)
+        battle._remote_factory = types.SimpleNamespace(
+            play_projectile_tracer=mock.Mock(return_value=1000000),
+            stop_projectile_tracer=mock.Mock(return_value=False))
+
+        self.assertTrue(battle._show_shot(_event()))
+        self.assertTrue(battle._apply_projectile_terminal_event({
+            'kind': 'projectile_impact',
+            'projectile_id': 'player:7:1',
+            'outcome': 'impact', 'resolved_time_ms': 10,
+            'impact': [0.1, 1.0, 0.0], 'hit_vehicle': True,
+        }))
+
+        bigworld.now = 1.0
+        self.assertNotIn('player:7:1', battle._projectile_visual_meta)
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+
+    def test_pending_world_terminal_keeps_its_impact_without_a_tracer(self):
+        battle, unused_bigworld = _battle(now=0.0)
+        source = battle._server_entity(41)
+        source.showShooting = mock.Mock(return_value=True)
+        add_effect = mock.Mock()
+        battle._avatar.terrainEffects = types.SimpleNamespace(
+            addNew=add_effect)
+        effects_descr = {
+            'groundHit': ('groundStages', 'groundEffects', None)}
+        battle._runtime.vehicles = types.SimpleNamespace(
+            g_cache=types.SimpleNamespace(shotEffects=[effects_descr]))
+        battle._surface_effect_material = lambda unused_impact: 'ground'
+        battle._remote_factory = types.SimpleNamespace(
+            play_projectile_tracer=mock.Mock(return_value=1000000),
+            stop_projectile_tracer=mock.Mock(return_value=False))
+
+        self.assertTrue(battle._show_shot(_event()))
+        self.assertTrue(battle._apply_projectile_terminal_event({
+            'kind': 'projectile_impact',
+            'projectile_id': 'player:7:1',
+            'outcome': 'impact', 'resolved_time_ms': 10,
+            'impact': [0.1, 1.0, 0.0], 'hit_vehicle': False,
+        }))
+
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+        battle._remote_factory.stop_projectile_tracer.assert_called_once()
+        add_effect.assert_called_once()
+        arguments = add_effect.call_args[0]
+        self.assertEqual('groundEffects', arguments[1])
+        self.assertEqual('groundStages', arguments[2])
+        self.assertNotIn('player:7:1', battle._projectile_visual_meta)
 
     def test_snapshot_tracer_catches_up_only_to_confirmed_cursor(self):
         battle, unused_bigworld = _battle(now=1.0)
@@ -550,10 +736,21 @@ class BattleProjectileTests(unittest.TestCase):
             play_projectile_tracer=mock.Mock(return_value=1000000))
 
         self.assertTrue(battle._show_shot(_event()))
-        second = dict(_event(), projectile_id='player:7:2', shot_seq=2)
+        second = dict(
+            _event(), projectile_id='player:7:2', shot_seq=2,
+            burst_group_seq=2, fire_intent_seq=2, fire_input_seq=2)
         self.assertTrue(battle._show_shot(second))
 
         self.assertEqual(1, source.showShooting.call_count)
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+        for event in (_event(), second):
+            progressed = dict(
+                event, checked_through_ms=100, checked_distance=1.0,
+                piercing_loss=0.0)
+            normalized = battle._projectile_wire_meta(progressed)
+            normalized['source_descriptor'] = source.typeDescriptor
+            self.assertTrue(battle._ensure_projectile_visual(
+                normalized, 2.0))
         self.assertEqual(
             2, battle._remote_factory.play_projectile_tracer.call_count)
         self.assertIn(
@@ -595,6 +792,38 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertNotIn('player:7:1', battle._projectile_meta)
         self.assertNotIn('player:7:1', battle._projectile_visual_meta)
         self.assertFalse(battle._projectiles.contains('player:7:1'))
+
+    def test_failed_native_terminal_is_retried_from_the_next_snapshot(self):
+        battle, unused_bigworld = _battle()
+        battle._remote_factory = types.SimpleNamespace(
+            stop_projectile_tracer=mock.Mock(
+                side_effect=(False, True)),
+            owns_projectile_tracer=mock.Mock(return_value=True))
+        battle._projectile_meta['p1'] = {
+            'manager_key': 'p1', 'hit_vehicle': True,
+        }
+        battle._projectile_visual_meta['p1'] = {
+            'origin': (0.0, 1.0, 0.0),
+            'velocity': (10.0, 0.0, 0.0),
+            'gravity': 0.000001, 'segment_start_time_ms': 0,
+            'admitted': True, 'launched': True, 'pending': False,
+        }
+
+        self.assertTrue(battle._apply_projectile_terminal_event({
+            'kind': 'projectile_impact', 'projectile_id': 'p1',
+            'outcome': 'impact', 'resolved_time_ms': 500,
+            'impact': [5.0, 1.0, 0.0], 'hit_vehicle': True,
+        }))
+
+        self.assertNotIn('p1', battle._projectile_meta)
+        self.assertTrue(
+            battle._projectile_visual_meta['p1']['retire_pending'])
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [],
+        }))
+        self.assertNotIn('p1', battle._projectile_visual_meta)
+        self.assertEqual(
+            2, battle._remote_factory.stop_projectile_tracer.call_count)
 
     def test_non_authority_snapshot_keeps_metadata_for_ground_terminal(self):
         battle, unused_bigworld = _battle(now=1.0)
@@ -746,8 +975,8 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertIsNone(battle._projectile_explosion('p1', (1.0, 2.0, 3.0)))
 
-    def test_snapshot_ensures_tracer_even_when_client_is_not_authority(self):
-        battle, unused_bigworld = _battle(now=1.0)
+    def test_snapshot_releases_safe_tracer_when_client_is_not_authority(self):
+        battle, bigworld = _battle(now=1.0)
         battle.client.is_bot_authority = lambda: False
         battle._resolve_descriptor = lambda unused_name: (
             battle._server_entity(41).typeDescriptor)
@@ -765,6 +994,20 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertTrue(battle._reconcile_projectile_snapshot({
             'projectiles': [row]}))
 
+        battle._remote_factory.play_projectile_tracer.assert_not_called()
+        self.assertTrue(
+            battle._projectile_visual_meta['player:7:1']['pending'])
+
+        bigworld.now = 1.2
+        row.update({
+            'checked_through_ms': 40, 'checked_distance': 0.4,
+        })
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [row]}))
+        self.assertEqual(1, battle._remote_factory.
+                         play_projectile_tracer.call_count)
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [row]}))
         self.assertEqual(1, battle._remote_factory.
                          play_projectile_tracer.call_count)
         self.assertFalse(battle._projectiles.contains('player:7:1'))

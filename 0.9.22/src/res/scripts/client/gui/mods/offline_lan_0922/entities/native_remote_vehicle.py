@@ -877,6 +877,10 @@ class NativeRemoteVehicleFactory(object):
         return self._shot_presenter.stop_canonical(
             projectile_id, end_position, explosion)
 
+    def owns_projectile_tracer(self, projectile_id):
+        """Expose pending native ownership for terminal retry."""
+        return self._shot_presenter.owns_canonical(projectile_id)
+
     def engine_owns(self, entity_id):
         entities = getattr(self._bigworld, 'entities', None)
         lookup = getattr(entities, 'get', None)

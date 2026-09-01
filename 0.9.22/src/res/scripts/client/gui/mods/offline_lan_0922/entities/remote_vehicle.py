@@ -678,6 +678,16 @@ class _RemoteShotPresenter(object):
         self._visual_admissions.pop(projectile_id, None)
         return True
 
+    def owns_canonical(self, projectile_id):
+        """Whether a terminal retry still has a native visual to retire."""
+        if self._closed or projectile_id is None:
+            return False
+        try:
+            projectile_id = str(projectile_id)
+        except Exception:
+            return False
+        return projectile_id in self._projectile_shots
+
     def _explode_canonical(self, mover, shot_id, end, explosion):
         """Play the retail ground explosion for one world terminal.
 
@@ -1675,6 +1685,8 @@ class RemoteVehicle(object):
         self.last_shot = (int(burst_count), bool(is_predicted))
         native_started = self._start_shooting_effect(max(1, int(burst_count)))
         tracer_started = bool(
+            not bool(getattr(
+                self, '_offlineLANSuppressProjectileTracer', False)) and
             self._shot_presenter is not None and
             self._shot_presenter.play_tracer(self))
         self.last_shot_effect = (native_started, tracer_started)
@@ -2437,6 +2449,10 @@ class RemoteVehicleFactory(object):
         """Retire one canonical tracer after a server terminal event."""
         return self._shot_presenter.stop_canonical(
             projectile_id, end_position, explosion)
+
+    def owns_projectile_tracer(self, projectile_id):
+        """Expose pending native ownership for terminal retry."""
+        return self._shot_presenter.owns_canonical(projectile_id)
 
     def engine_owns(self, entity_id):
         """Whether BigWorld still knows this client-only entity.

@@ -2922,6 +2922,29 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
                 RuntimeError, 'shot sound contract failed'):
             vehicle.showShooting(1, False)
 
+    def test_remote_canonical_muzzle_can_defer_its_tracer(self):
+        vehicle = RemoteVehicle(
+            1000, _Descriptor(), {
+                'publicInfo': {'team': 2, 'name': 'Bot'},
+                'health': 500, 'isCrewActive': True,
+                'gunAnglesPacked': 0},
+            _Vector(), (0.0, 0.0, 0.0),
+            types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix))
+        vehicle.model = _Model()
+        vehicle.isStarted = True
+        vehicle.inWorld = True
+        vehicle._start_shooting_effect = mock.Mock(return_value=True)
+        play_tracer = mock.Mock(return_value=True)
+        vehicle._shot_presenter = types.SimpleNamespace(
+            play_tracer=play_tracer)
+        vehicle._offlineLANSuppressProjectileTracer = True
+
+        self.assertTrue(vehicle.showShooting(1, False))
+
+        vehicle._start_shooting_effect.assert_called_once_with(1)
+        play_tracer.assert_not_called()
+        self.assertEqual((True, False), vehicle.last_shot_effect)
+
     def test_remote_siege_callback_swaps_descriptor_and_blocks_transition_shot(self):
         descriptor = _Descriptor()
         descriptor.hasSiegeMode = True
@@ -9854,7 +9877,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'bot:11': {'state': {'health': 500, 'alive': True}}}
         battle._pending_bot_create_order = ['bot:11']
         battle._show_shot = mock.Mock(return_value=True)
-        message = {'events': [{
+        message = {'server_tick': 7, 'events': [{
             'event_id': '1:7:0', 'kind': 'bot_shot',
             'attacker_bot': 11, 'shell_index': 0}]}
 
@@ -9874,8 +9897,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._drain_event_journal())
         self.assertIn('1:7:0', battle._applied_event_ids)
         self.assertEqual([], battle._event_journal)
+        expected = dict(
+            message['events'][0], _launch_server_tick=7,
+            _segment_launch_server_tick=7)
         battle._show_shot.assert_called_once_with(
-            message['events'][0], update_state=False)
+            expected, update_state=False)
 
     def test_pending_combat_merges_state_before_native_presentation(self):
         battle = BattleRuntime(_runtime())

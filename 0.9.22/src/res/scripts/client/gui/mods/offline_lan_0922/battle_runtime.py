@@ -130,6 +130,15 @@ PROJECTILE_MAX_TIME_MS = 20000
 PROJECTILE_MAX_ACTIVE = 128
 PROJECTILE_CHORDS_PER_FRAME = 32
 PROJECTILE_MAX_CHORDS_PER_FRAME = 256
+# The matching Rust server runs projectile queries at 30 Hz and applies every
+# hidden-worker answer exactly three ticks after it was planned. The first
+# flight query starts one tick after launch. HE direct hits add one more
+# three-tick evidence query, and a ricochet adds one pipeline for its
+# replacement segment. Keep ProjectileMover behind those exact boundaries;
+# after add() the native visual otherwise advances freely on render time.
+PROJECTILE_SERVER_TICK_SECONDS = 1.0 / 30.0
+PROJECTILE_QUERY_PIPELINE_TICKS = 3
+PROJECTILE_VISUAL_GUARD_TICKS = 1
 # A rotating target traces a curve in component-local space. Subdivide until
 # every frozen component query spans at most one degree; reject pathological
 # motion rather than silently treating one midpoint matrix as exact.
@@ -7030,6 +7039,13 @@ class BattleRuntime(object):
         except Exception as error:
             self._ignore_live_payload('events', error, message)
             return False
+        try:
+            frame_tick = int((message or {}).get('server_tick'))
+            if isinstance((message or {}).get('server_tick'), bool) or \
+                    frame_tick < 0:
+                frame_tick = None
+        except (TypeError, ValueError, OverflowError):
+            frame_tick = None
         for raw_event in (message or {}).get('events') or ():
             event_id = None
             try:
@@ -7042,6 +7058,18 @@ class BattleRuntime(object):
                 event_id = str(event_id)
                 if event_id in self._accepted_event_ids:
                     continue
+                if frame_tick is not None:
+                    if event.get('kind') in _SHOT_EVENT_KINDS:
+                        # Keep the reliable launch boundary locally. Active
+                        # snapshots carry their current server tick but do not
+                        # repeat the original one.
+                        event['_launch_server_tick'] = frame_tick
+                        event['_segment_launch_server_tick'] = frame_tick
+                    elif event.get('kind') == 'projectile_ricochet':
+                        # The replacement segment is installed on this exact
+                        # server tick. Its fractional physical impact time is
+                        # not an integer-tick substitute for this boundary.
+                        event['_segment_launch_server_tick'] = frame_tick
                 self._prepare_ordered_event(event)
                 self._accepted_event_ids.add(event_id)
                 self._event_journal.append(event)
@@ -9032,13 +9060,11 @@ class BattleRuntime(object):
                 gravity = _number(event.get('gravity'))
                 visual_admitted = self._admit_projectile_visual(
                     entity.id, projectile_id, self._clock())
-                # Present from the last server-committed collision cursor,
-                # not from an extrapolated wall-clock age.  The hidden
-                # worker can still be resolving later chords when this launch
-                # reaches the visible client.  Fast-forwarding the native
-                # mover beyond that cursor lets its cosmetic simulator pass a
-                # tank (or strike the world) before the canonical terminal
-                # arrives a few frames later.
+                # The launch event has no confirmed-clear chord yet. Do not
+                # start ProjectileMover here: the native visual would advance
+                # while the server is still waiting for its fixed query
+                # pipeline. A later authoritative snapshot releases it from a
+                # collision-confirmed, pipeline-delayed cursor.
                 elapsed = self._projectile_visual_age(normalized)
                 reference_origin = trajectory_position(
                     origin, velocity, (0.0, -gravity, 0.0), elapsed)
@@ -9046,12 +9072,17 @@ class BattleRuntime(object):
                     float(velocity[0]),
                     float(velocity[1]) - gravity * elapsed,
                     float(velocity[2]))
-                if projectile_id is not None:
+                if projectile_id is not None and normalized is not None:
                     self._projectile_visual_meta[str(projectile_id)] = {
-                        'origin': tuple(float(value) for value in origin),
-                        'velocity': tuple(float(value) for value in velocity),
+                        'origin': tuple(normalized['segment_origin']),
+                        'velocity': tuple(normalized['segment_velocity']),
                         'gravity': gravity,
+                        'segment_start_time_ms': normalized[
+                            'segment_start_time_ms'],
+                        'ricochet_count': normalized['ricochet_count'],
                         'admitted': visual_admitted,
+                        'launched': False,
+                        'pending': bool(visual_admitted),
                     }
                 for name, value in (
                         ('_offlineLANShotOrigin', origin),
@@ -9062,35 +9093,14 @@ class BattleRuntime(object):
                         ('_offlineLANProjectileID', projectile_id),
                         ('_offlineLANShotReferenceOrigin', reference_origin),
                         ('_offlineLANShotReferenceVelocity',
-                         reference_velocity)):
+                         reference_velocity),
+                        ('_offlineLANSuppressProjectileTracer', True)):
                     setattr(entity, name, value)
                     transient_names.append(name)
-                # RemoteVehicle.showShooting delegates to the same factory
-                # presenter and consumes the transient canonical values.  The
-                # stock local Vehicle has no such delegate, so launch its
-                # authoritative tracer explicitly from the event instead of
-                # reconstructing it from a later muzzle pose.
-                if (visual_admitted and
-                        (not bool(getattr(
-                            entity, '_offlineLANPresentation', False)) or
-                         burst_index > 0 or
-                         not self._optional_feature_enabled(
-                             'shot muzzle presentation')) and
-                        self._remote_factory is not None):
-                    self._run_optional_feature(
-                        'projectile visual launch',
-                        self._remote_factory.play_projectile_tracer,
-                        args=(
-                            entity.typeDescriptor,
-                            entity._offlineLANShotIndex,
-                            origin, velocity, gravity,
-                            event.get('maxDistance'), entity.id,
-                            projectile_id, reference_origin,
-                            reference_velocity))
             if burst_index == 0:
                 # One native call owns the grouped muzzle effect and local
-                # waiting-for-shot handshake.  Later physical rounds already
-                # received their explicit canonical tracer above.
+                # waiting-for-shot handshake. Canonical tracers are admitted
+                # separately after their first confirmed-clear chord.
                 burst = _field(entity.typeDescriptor.gun, 'burst', (1,))
                 try:
                     descriptor_count = int(burst[0])
@@ -9282,6 +9292,75 @@ class BattleRuntime(object):
                 float(checked_through - segment_start) / 1000.0))
 
     @staticmethod
+    def _projectile_visual_delay_ticks(raw):
+        """Return the fixed server pipeline lag in simulation ticks."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            ricochet_count = int(raw.get('ricochet_count', 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if ricochet_count not in (0, 1):
+            return None
+        pipeline_count = 1
+        if bool(raw.get('is_he', False)):
+            pipeline_count += 1
+        return (pipeline_count * PROJECTILE_QUERY_PIPELINE_TICKS +
+                PROJECTILE_VISUAL_GUARD_TICKS)
+
+    def _projectile_safe_visual_age(self, raw, now):
+        """Return a collision-confirmed, pipeline-delayed segment age.
+
+        None means the visual must remain pending. Requiring both a clear
+        collision cursor and the fixed server delay means a first-chord hit is
+        retired before ProjectileMover is ever created.
+        """
+        confirmed = self._projectile_visual_age(raw)
+        if confirmed <= 0.0:
+            return None
+        delay_ticks = self._projectile_visual_delay_ticks(raw)
+        if delay_ticks is None:
+            return None
+        segment_launch_tick = raw.get('_segment_launch_server_tick')
+        stored = None
+        if segment_launch_tick is None:
+            projectile_id = raw.get('projectile_id')
+            stored = self._projectile_meta.get(str(projectile_id)) \
+                if projectile_id is not None else None
+            if stored is not None:
+                segment_launch_tick = stored.get(
+                    '_segment_launch_server_tick')
+        snapshot_tick = raw.get('_snapshot_server_tick')
+        try:
+            if (segment_launch_tick is not None and
+                    snapshot_tick is not None):
+                elapsed_ticks = (
+                    int(snapshot_tick) - int(segment_launch_tick))
+                delayed = float(
+                    elapsed_ticks - delay_ticks) * \
+                    PROJECTILE_SERVER_TICK_SECONDS
+            else:
+                # A late joiner cannot reconstruct a ricochet segment's exact
+                # integer launch tick from its fractional impact time. Omitting
+                # that cosmetic tracer is safer than guessing it past a tank.
+                if int(raw.get('ricochet_count', 0)) > 0:
+                    return None
+                estimated = self._projectile_estimated_server_time(now)
+                if estimated is None:
+                    return None
+                segment_age = max(
+                    0.0,
+                    float(estimated - int(raw['launch_server_time_ms']) -
+                          int(raw['segment_start_time_ms'])) / 1000.0)
+                delayed = segment_age - (
+                    float(delay_ticks) * PROJECTILE_SERVER_TICK_SECONDS)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if delayed < 0.0:
+            return None
+        return min(confirmed, delayed)
+
+    @staticmethod
     def _projectile_wire_meta(raw):
         """Normalize the canonical-event and snapshot launch spellings."""
         if not isinstance(raw, dict):
@@ -9415,6 +9494,17 @@ class BattleRuntime(object):
             'piercing_loss': max(
                 0.0, _number(raw.get('piercing_loss'), 0.0)),
         }
+        for private_tick in (
+                '_launch_server_tick', '_segment_launch_server_tick'):
+            if private_tick not in raw:
+                continue
+            try:
+                tick = int(raw[private_tick])
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if isinstance(raw[private_tick], bool) or tick < 0:
+                return None
+            result[private_tick] = tick
         if shooter_kind == 'player':
             try:
                 fire_intent_seq = int(raw['fire_intent_seq'])
@@ -9475,6 +9565,11 @@ class BattleRuntime(object):
                     self._projectiles.remove(old_manager_key)
                 for name in segment_fields:
                     meta[name] = normalized[name]
+                if '_segment_launch_server_tick' in normalized:
+                    meta['_segment_launch_server_tick'] = normalized[
+                        '_segment_launch_server_tick']
+                else:
+                    meta.pop('_segment_launch_server_tick', None)
                 meta['ricochet_count'] = incoming_count
                 meta['manager_key'] = (projectile_id, incoming_count)
                 meta['awaiting_ricochet'] = False
@@ -9579,15 +9674,25 @@ class BattleRuntime(object):
         """Restore the authoritative cursor without rescanning elapsed time."""
         if self._projectiles is None or not isinstance(message, dict):
             return False
+        self._retry_projectile_visual_retirements()
         rows = message.get('projectiles')
         if not isinstance(rows, (list, tuple)):
             return False
         now = self._clock()
+        try:
+            snapshot_tick = int(message.get('server_tick'))
+            if isinstance(message.get('server_tick'), bool) or \
+                    snapshot_tick < 0:
+                snapshot_tick = None
+        except (TypeError, ValueError, OverflowError):
+            snapshot_tick = None
         active_ids = set()
         for raw in rows:
             normalized = self._projectile_wire_meta(raw)
             if normalized is None:
                 raise RuntimeError('active projectile snapshot is malformed')
+            if snapshot_tick is not None:
+                normalized['_snapshot_server_tick'] = snapshot_tick
             projectile_id = normalized['projectile_id']
             active_ids.add(projectile_id)
             self._install_projectile_meta(normalized)
@@ -9596,6 +9701,8 @@ class BattleRuntime(object):
             return True
         for raw in rows:
             normalized = self._projectile_wire_meta(raw)
+            if snapshot_tick is not None:
+                normalized['_snapshot_server_tick'] = snapshot_tick
             projectile_id = normalized['projectile_id']
             meta = self._install_projectile_meta(normalized)
             if self._projectiles.contains(meta['manager_key']):
@@ -9815,43 +9922,37 @@ class BattleRuntime(object):
         return True
 
     def _ensure_projectile_visual(self, normalized, now):
-        """Ensure late joiners and delayed snapshots see the live tracer."""
+        """Start a live tracer only after its collision-safe visual delay."""
         if self._worker_mode:
             return False
         if self._remote_factory is None or not isinstance(normalized, dict):
             return False
-        descriptor = self._projectile_source_descriptor(normalized)
-        if descriptor is None:
-            return False
+        projectile_id = normalized['projectile_id']
         existing_visual = self._projectile_visual_meta.get(
-            normalized['projectile_id'])
+            projectile_id)
         if (existing_visual is not None and
                 int(existing_visual.get('ricochet_count', 0)) !=
                 normalized['ricochet_count']):
-            meta = self._projectile_meta.get(normalized['projectile_id'])
+            meta = self._projectile_meta.get(projectile_id)
             if meta is not None:
                 meta['hit_vehicle'] = True
             self._stop_projectile_visual(
-                normalized['projectile_id'], {
+                projectile_id, {
                     'impact': list(normalized['segment_origin']),
                     'resolved_time_ms': normalized[
                         'segment_start_time_ms'],
                 })
-        elapsed = self._projectile_visual_age(normalized)
+            existing_visual = None
         gravity = normalized['gravity']
-        reference_origin = trajectory_position(
-            normalized['segment_origin'], normalized['segment_velocity'],
-            (0.0, -gravity, 0.0), elapsed)
-        reference_velocity = (
-            normalized['segment_velocity'][0],
-            normalized['segment_velocity'][1] - gravity * elapsed,
-            normalized['segment_velocity'][2])
-        self._projectile_visual_meta[normalized['projectile_id']] = {
+        launched = bool(existing_visual is not None and
+                        existing_visual.get('launched', False))
+        visual = {
             'origin': tuple(normalized['segment_origin']),
             'velocity': tuple(normalized['segment_velocity']),
             'gravity': gravity,
             'segment_start_time_ms': normalized['segment_start_time_ms'],
             'ricochet_count': normalized['ricochet_count'],
+            'launched': launched,
         }
         record = self._records.get('%s:%s' % (
             normalized['shooter_kind'], normalized['shooter_id']))
@@ -9865,14 +9966,33 @@ class BattleRuntime(object):
         admitted = (bool(existing_visual.get('admitted', True))
                     if existing_visual is not None else
                     self._admit_projectile_visual(
-                        attacker_id, normalized['projectile_id'], now))
-        self._projectile_visual_meta[normalized['projectile_id']][
-            'admitted'] = admitted
+                        attacker_id, projectile_id, now))
+        visual['admitted'] = admitted
+        visual['pending'] = bool(admitted and not launched)
+        self._projectile_visual_meta[projectile_id] = visual
+        if launched:
+            # A live native visual owns its original delayed cursor. Replaying
+            # active snapshots must not fast-forward or recreate it.
+            return True
         if not admitted or not self._optional_feature_enabled(
                 'projectile visual launch'):
+            visual['pending'] = False
             return False
+        elapsed = self._projectile_safe_visual_age(normalized, now)
+        if elapsed is None:
+            return False
+        descriptor = self._projectile_source_descriptor(normalized)
+        if descriptor is None:
+            return False
+        reference_origin = trajectory_position(
+            normalized['segment_origin'], normalized['segment_velocity'],
+            (0.0, -gravity, 0.0), elapsed)
+        reference_velocity = (
+            normalized['segment_velocity'][0],
+            normalized['segment_velocity'][1] - gravity * elapsed,
+            normalized['segment_velocity'][2])
         try:
-            return bool(self._remote_factory.play_projectile_tracer(
+            launched = bool(self._remote_factory.play_projectile_tracer(
                 descriptor, normalized['shell_index'],
                 normalized['segment_origin'],
                 normalized['segment_velocity'], gravity, max(
@@ -9884,7 +10004,10 @@ class BattleRuntime(object):
         except Exception as error:
             self._warn_optional_failure(
                 'projectile visual launch', error)
-            return False
+            launched = False
+        visual['launched'] = launched
+        visual['pending'] = not launched
+        return launched
 
     def _projectile_explosion(self, projectile_id, impact):
         """Return ``(effectsDescr, effectMaterial, velocity)`` for a world hit.
@@ -9950,6 +10073,44 @@ class BattleRuntime(object):
         except Exception:
             return None
 
+    def _present_pending_projectile_explosion(self, impact, explosion):
+        """Play a world terminal when no native tracer was started.
+
+        A first-query world hit can arrive before the collision-safe tracer
+        window.  Creating ProjectileMover only to explode it would briefly
+        reintroduce an unverified flight path, so use the same terrain-effects
+        boundary as the stock armour-hit presentation for that terminal only.
+        """
+        if (not explosion or
+                not self._optional_feature_enabled(
+                    'projectile impact presentation')):
+            return False
+        try:
+            effects_descr, material, direction_value = explosion
+            stages, effects, unused = effects_descr[str(material) + 'Hit']
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        terrain_effects = getattr(self._avatar, 'terrainEffects', None)
+        add_effect = getattr(terrain_effects, 'addNew', None)
+        if not callable(add_effect):
+            return False
+        position = self._vector(_xyz(impact))
+        direction = self._vector(_xyz(direction_value))
+        if direction.length <= 0.0:
+            return False
+        direction.normalise()
+        try:
+            add_effect(
+                position, effects, stages, None, dir=direction,
+                start=position - direction.scale(1.0),
+                end=position + direction.scale(1.0),
+                showShockWave=False, showFlashBang=False)
+        except Exception as error:
+            self._warn_optional_failure(
+                'projectile impact presentation', error)
+            return False
+        return True
+
     def _stop_projectile_visual(self, projectile_id, event):
         if self._worker_mode:
             self._projectile_visual_meta.pop(projectile_id, None)
@@ -9979,19 +10140,76 @@ class BattleRuntime(object):
                     (0.0, -visual['gravity'], 0.0), elapsed)
         if impact is None:
             return False
+        explosion = self._projectile_explosion(projectile_id, impact)
+        visual = self._projectile_visual_meta.get(projectile_id)
+        pending_without_tracer = bool(
+            visual is not None and visual.get('pending', False) and
+            not visual.get('launched', False))
         try:
             stopped = bool(self._remote_factory.stop_projectile_tracer(
-                projectile_id, impact,
-                explosion=self._projectile_explosion(
-                    projectile_id, impact)))
+                projectile_id, impact, explosion=explosion))
         except Exception as error:
             # Terminal authority has already been applied.  A native cosmetic
             # retirement failure must not poison the ordered event journal.
             self._warn_optional_failure(
                 'projectile visual retirement', error, disable=False)
             stopped = False
-        self._projectile_visual_meta.pop(projectile_id, None)
+        if (not stopped and pending_without_tracer and
+                explosion is not None):
+            stopped = self._present_pending_projectile_explosion(
+                impact, explosion)
+        owns = getattr(
+            self._remote_factory, 'owns_projectile_tracer', None)
+        retry = False
+        if (not stopped and visual is not None and
+                bool(visual.get('launched', False)) and callable(owns)):
+            try:
+                retry = bool(owns(projectile_id))
+            except Exception as error:
+                self._warn_optional_failure(
+                    'projectile visual retirement ownership', error,
+                    disable=False)
+                retry = True
+        if retry:
+            visual['pending'] = False
+            visual['retire_pending'] = True
+            visual['retire_impact'] = impact
+            visual['retire_explosion'] = explosion
+        else:
+            self._projectile_visual_meta.pop(projectile_id, None)
         return stopped
+
+    def _retry_projectile_visual_retirements(self):
+        """Retry a native hide that failed after terminal authority won."""
+        if self._worker_mode or self._remote_factory is None:
+            return False
+        changed = False
+        owns = getattr(
+            self._remote_factory, 'owns_projectile_tracer', None)
+        for projectile_id, visual in tuple(
+                self._projectile_visual_meta.items()):
+            if not bool(visual.get('retire_pending', False)):
+                continue
+            try:
+                stopped = bool(self._remote_factory.stop_projectile_tracer(
+                    projectile_id, visual.get('retire_impact'),
+                    explosion=visual.get('retire_explosion')))
+            except Exception as error:
+                self._warn_optional_failure(
+                    'projectile visual retirement', error, disable=False)
+                stopped = False
+            still_owned = True
+            if not stopped and callable(owns):
+                try:
+                    still_owned = bool(owns(projectile_id))
+                except Exception as error:
+                    self._warn_optional_failure(
+                        'projectile visual retirement ownership', error,
+                        disable=False)
+            if stopped or not still_owned:
+                self._projectile_visual_meta.pop(projectile_id, None)
+                changed = True
+        return changed
 
     def _projectile_record_positions(self):
         result = {}
