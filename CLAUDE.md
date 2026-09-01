@@ -12,9 +12,6 @@ or editing that implementation: `0.8.2/CLAUDE.md` or `0.9.22/CLAUDE.md`.
 - Discuss plans, evidence, tradeoffs, progress, and results with Peng in
   Chinese. Keep code, comments, commit messages, logs, and shared repository
   documentation in English.
-- Use direct, ordinary Chinese terminology with Peng. Refer to the hidden
-  worker as the `hidden worker`, and describe its exact native-query or
-  rendering role directly; do not use metaphorical aliases in conversation.
 - Lead with the observed outcome and supporting evidence. Separate a confirmed
   fact from an inference, and say exactly which boundary still needs a real
   Windows client.
