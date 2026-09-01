@@ -719,7 +719,7 @@ class SnapshotSyncTests(unittest.TestCase):
         self.assertGreaterEqual(presented['pose']['x'], 0.12)
         self.assertLessEqual(presented['pose']['x'], 0.32)
 
-    def test_first_live_reset_waits_for_an_advanced_bot_revision(self):
+    def test_battle_phase_anchors_unchanged_pose_before_first_live_revision(self):
         clock = [0.0]
         sync = self.module.SnapshotSync(1, clock=lambda: clock[0])
 
@@ -738,8 +738,9 @@ class SnapshotSyncTests(unittest.TestCase):
             'bots': [bot(0.0)],
         })
         # The server can enter battle before the worker publishes its first
-        # live revision. This repeated pose must not consume the timeline
-        # reset intended for the following advanced sample.
+        # live revision. This repeated pose is a confirmed live-time anchor,
+        # so a slow first revision forms an interpolation segment rather than
+        # snapping after the countdown-sized gap.
         clock[0] = 15.0
         sync.snapshot({
             'round_id': 1, 'server_tick': 450,
@@ -748,7 +749,11 @@ class SnapshotSyncTests(unittest.TestCase):
             'timing': {'phase': 'battle'},
             'bots': [bot(0.0)],
         })
-        self.assertTrue(sync._live_timeline_reset_pending)
+        self.assertFalse(sync._live_timeline_reset_pending)
+        record = sync._entities['bot:7']
+        self.assertEqual([15000000], [
+            sample['time_us'] for sample in record['timed_samples']])
+        self.assertEqual(15000000, record['presentation_time_us'])
 
         clock[0] = 15.04
         events = sync.snapshot({
@@ -761,11 +766,12 @@ class SnapshotSyncTests(unittest.TestCase):
 
         update = [event for event in events
                   if event.get('entity') == 'bot:7'][-1]
-        self.assertTrue(update['snap'])
-        self.assertAlmostEqual(0.12, update['pose']['x'])
+        self.assertFalse(update['snap'])
+        self.assertIsNone(update['pose'])
         record = sync._entities['bot:7']
-        self.assertEqual(1, len(record['timed_samples']))
-        self.assertEqual(15040000, record['presentation_time_us'])
+        self.assertEqual([15000000, 15040000], [
+            sample['time_us'] for sample in record['timed_samples']])
+        self.assertEqual(15000000, record['presentation_time_us'])
         self.assertFalse(sync._live_timeline_reset_pending)
 
     def test_first_live_reset_discards_all_prebattle_pose_history(self):

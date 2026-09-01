@@ -1628,6 +1628,15 @@ class RemoteVehicle(object):
         self.filter.update(self.position, velocity)
         self.appearance.gear = 1 if self.filter.speed > 0.01 else 0
 
+    def settle_motion(self, now=None):
+        """Clear pose-derived motion without re-keying the hull animation."""
+        if now is not None:
+            self._last_pose_time = float(now)
+        velocity = self._math.Vector3(0.0, 0.0, 0.0)
+        self.filter.update(self.position, velocity)
+        self.appearance.gear = 0
+        return True
+
     def set_aim(self, hull_yaw, aim_yaw, gun_pitch):
         relative = ((float(aim_yaw) - float(hull_yaw) + math.pi) %
                     (2.0 * math.pi) - math.pi)

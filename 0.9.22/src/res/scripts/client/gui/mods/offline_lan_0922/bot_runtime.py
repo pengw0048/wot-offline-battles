@@ -39,11 +39,11 @@ OBSERVATION_SECONDS = 0.40
 # while burst edges below retain their exact due timestamps.
 PUBLICATION_SECONDS = 1.0 / 30.0
 WORKER_CONTROL_SECONDS = 0.10
-# Run at most one full-roster step in a render callback. A late callback
-# consumes its actual elapsed interval in that one step instead of queuing
-# another complete planner/probe pass or leaking permanent simulation debt.
-# The mature variable-step seam already bounds copied physics at 200 ms; keep
-# the worker inside that reviewed limit and carry only larger one-off stalls.
+# Keep copied physics inside the mature 200 ms variable-step bound. A slow
+# render callback may need several such slices, but only its first slice may
+# refresh planner control work. Later slices keep applying the last valid
+# command and acquire a new physical corridor only after ongoing motion has
+# consumed or rotated beyond the previous proof.
 MAX_CONTROL_ELAPSED_SECONDS = 0.20
 LOCAL_ACTION_SECONDS = 0.10
 TACTICAL_REFRESH_SECONDS = 1.0
@@ -64,6 +64,14 @@ HUMAN_TARGET_ID_BASE = 1000000
 # planner reads reuse the last pair result. A target fire-sequence edge still
 # invalidates the pair immediately below.
 VISIBILITY_SAMPLE_SECONDS = 1.0 / 6.0
+# Production runs a full Bot control step at 10 Hz. Without a per-render-frame
+# fence, one stale 15-vs-15 visibility cohort performs all 420 ordered static
+# rays in the same callback. Forty-eight jobs cover the complete roster in at
+# most nine eligible control frames while selected, new and firing targets are
+# promoted ahead of ordinary refreshes. Deferred pairs fail closed as direct
+# observations, leaving only the existing team-memory pose; the independent
+# final firing-lane check below remains unchanged.
+MAX_VISIBILITY_PROBES_PER_FRAME = 48
 SHOT_LANE_SECONDS = 0.20
 # Spread full-roster tactical refreshes across one second independently from
 # the 0.40-second spotting publication. A selected target still goes through
@@ -76,6 +84,12 @@ SHOT_LANE_PHASES = 29
 # render-thread spike. Spotting publication never waits for this advisory
 # shooter list; missing or expired pairs publish as not shootable.
 MAX_SHOT_LANE_PAIRS_PER_FRAME = 64
+# The final selected-target check keeps the full budget above. Production's
+# all-roster advisory scan is supplemental planner input and uses a smaller
+# independent budget. Per-pair refresh deadlines remain pending until sampled,
+# so a slow hidden worker carries the fair scan across one-second boundaries
+# instead of catching up in one render callback.
+MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME = 16
 # The server never assigns a visible target beyond 560 metres. Keep a
 # conservative 25-metre broad-phase margin for the advisory roster scan; the
 # selected target's independent 0.20-second final-fire check does not use this
@@ -1824,6 +1838,13 @@ class BotRuntime(object):
         self._fixed_control = control_seconds is not None
         self._control_seconds = max(
             0.001, _number(control_seconds, PUBLICATION_SECONDS))
+        # Direct _update_once callers retain the mature full-control behavior.
+        # update() temporarily clears this flag only for physical catch-up
+        # slices inside the same render callback.
+        self._refresh_control_this_step = True
+        self._publish_control_this_step = True
+        self._last_update_control_steps = 0
+        self._last_update_max_control_step = 0.0
         self._water_depth_probe = (
             water_depth_probe if callable(water_depth_probe) else
             (lambda unused_position: -1.0))
@@ -1876,6 +1897,7 @@ class BotRuntime(object):
         self._friendly_repositions = {}
         self._shot_los_cache = {}
         self._shot_los_deadlines = {}
+        self._reset_shot_lane_diagnostics()
         self._physics_params = {}
         self._repair_factors = {}
         self._vision_ranges = {}
@@ -1895,6 +1917,9 @@ class BotRuntime(object):
         self._human_ram_report_cache = {}
         self.finished = False
         self._visibility_cache = {}
+        self._visibility_waiting = []
+        self._visibility_frame = None
+        self._reset_visibility_diagnostics()
         self._team_visibility_cache = {}
         self._visible_target_poses = {}
         self._spot_until = {}
@@ -1968,7 +1993,52 @@ class BotRuntime(object):
 
     def diagnostic_totals(self):
         """Return counters which never participate in simulation decisions."""
-        return {'alive_bot_ticks': int(self._alive_bot_ticks)}
+        oldest_age_ms = 0
+        if self._visibility_deferred_since:
+            oldest_age_ms = max(0, int(round(1000.0 * (
+                self._visibility_diagnostic_now - min(
+                    self._visibility_deferred_since.values())))))
+        shot_lane_oldest_due_age_ms = 0
+        if (self._shot_lane_pending_pairs > 0 and
+                self._shot_lane_due_since is not None):
+            shot_lane_oldest_due_age_ms = max(0, int(round(1000.0 * (
+                self._shot_lane_diagnostic_now -
+                self._shot_lane_due_since))))
+        return {
+            'alive_bot_ticks': int(self._alive_bot_ticks),
+            'visibility_queue_depth': len(self._visibility_waiting),
+            'visibility_queue_max_depth': int(
+                self._visibility_queue_max_depth),
+            'visibility_oldest_stale_age_ms': oldest_age_ms,
+            'visibility_oldest_stale_max_age_ms': int(
+                self._visibility_oldest_stale_max_age_ms),
+            'visibility_admitted': int(
+                self._visibility_scheduler_totals['admitted']),
+            'visibility_completed': int(
+                self._visibility_scheduler_totals['completed']),
+            'visibility_deferred': int(
+                self._visibility_scheduler_totals['deferred']),
+            'visibility_selected_services': int(
+                self._visibility_service_totals['selected']),
+            'visibility_fire_services': int(
+                self._visibility_service_totals['fire']),
+            'visibility_new_services': int(
+                self._visibility_service_totals['new']),
+            'visibility_ordinary_services': int(
+                self._visibility_service_totals['ordinary']),
+            'shot_lane_pending_pairs': int(
+                self._shot_lane_pending_pairs),
+            'shot_lane_pending_max_pairs': int(
+                self._shot_lane_pending_max_pairs),
+            'shot_lane_oldest_due_age_ms': int(
+                shot_lane_oldest_due_age_ms),
+            'shot_lane_oldest_due_max_age_ms': int(
+                self._shot_lane_oldest_due_max_age_ms),
+            'shot_lane_completed_pairs': int(
+                self._shot_lane_completed_pairs),
+            'shot_lane_budget_deferred_attempts': int(
+                self._shot_lane_budget_deferred_attempts),
+        }
 
     def _probe_started(self):
         if self._probe_clock is None:
@@ -2583,6 +2653,7 @@ class BotRuntime(object):
             self._friendly_repositions = {}
             self._shot_los_cache = {}
             self._shot_los_deadlines = {}
+            self._reset_shot_lane_diagnostics()
             self._physics_params = {}
             self._repair_factors = {}
             self._vision_ranges = {}
@@ -2603,6 +2674,9 @@ class BotRuntime(object):
             self.adapter = None
             self.finished = False
             self._visibility_cache = {}
+            self._visibility_waiting = []
+            self._visibility_frame = None
+            self._reset_visibility_diagnostics()
             self._team_visibility_cache = {}
             self._visible_target_poses = {}
             self._spot_until = {}
@@ -2656,6 +2730,9 @@ class BotRuntime(object):
             self._ballistic_solution_cache = {}
             self._friendly_repositions = {}
             self._visibility_cache = {}
+            self._visibility_waiting = []
+            self._visibility_frame = None
+            self._reset_visibility_diagnostics()
             self._team_visibility_cache = {}
             self._visible_target_poses = {}
             self._spot_until = {}
@@ -2667,6 +2744,7 @@ class BotRuntime(object):
             self._visibility_still = {}
             self._shot_los_cache = {}
             self._shot_los_deadlines = {}
+            self._reset_shot_lane_diagnostics()
             self._decision_cache = {}
             self._motion_probe_cache = {}
             self._traffic_stopping_cache = {}
@@ -3969,6 +4047,341 @@ class BotRuntime(object):
             cache[identity] = (token, result)
         return result
 
+    @staticmethod
+    def _visibility_fire_sequence(target):
+        if target.get('fire_seq') is None:
+            return None
+        try:
+            return max(0, int(target.get('fire_seq')))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _reset_shot_lane_diagnostics(self):
+        """Reset pull-only supplemental lane debt at authority boundaries."""
+        self._shot_lane_pending_pairs = 0
+        self._shot_lane_pending_max_pairs = 0
+        self._shot_lane_cycle_time = None
+        self._shot_lane_due_since = None
+        self._shot_lane_diagnostic_now = 0.0
+        self._shot_lane_oldest_due_max_age_ms = 0
+        self._shot_lane_completed_pairs = 0
+        self._shot_lane_budget_deferred_attempts = 0
+
+    def _update_shot_lane_debt_diagnostics(
+            self, now, cycle_time, pending_pairs, cycle_due):
+        """Observe the existing supplemental pass without scanning it again."""
+        now = _number(now)
+        cycle_time = _number(cycle_time)
+        pending_pairs = max(0, int(pending_pairs))
+        if self._shot_lane_cycle_time != cycle_time:
+            self._shot_lane_cycle_time = cycle_time
+            self._shot_lane_due_since = None
+        self._shot_lane_diagnostic_now = now
+        self._shot_lane_pending_pairs = pending_pairs
+        self._shot_lane_pending_max_pairs = max(
+            self._shot_lane_pending_max_pairs, pending_pairs)
+        if pending_pairs <= 0:
+            self._shot_lane_due_since = None
+            return
+        if cycle_due and self._shot_lane_due_since is None:
+            # The first cycle uses a zero sentinel rather than an authority
+            # timestamp. Start its age on the first actual attempt instead of
+            # reporting the entire process clock as pre-existing debt.
+            self._shot_lane_due_since = (
+                cycle_time if cycle_time > 0.0 else now)
+        if self._shot_lane_due_since is not None:
+            age_ms = max(0, int(round(1000.0 * (
+                now - self._shot_lane_due_since))))
+            self._shot_lane_oldest_due_max_age_ms = max(
+                self._shot_lane_oldest_due_max_age_ms, age_ms)
+
+    def _reset_visibility_diagnostics(self):
+        """Reset pull-only visibility debt counters at authority boundaries."""
+        self._visibility_deferred_since = {}
+        self._visibility_diagnostic_now = 0.0
+        self._visibility_queue_max_depth = 0
+        self._visibility_oldest_stale_max_age_ms = 0
+        self._visibility_scheduler_totals = {
+            'admitted': 0, 'completed': 0, 'deferred': 0,
+        }
+        self._visibility_service_totals = {
+            'selected': 0, 'fire': 0, 'new': 0, 'ordinary': 0,
+        }
+
+    def _update_visibility_debt_diagnostics(self, now):
+        """Observe current queue debt without feeding any scheduling choice."""
+        self._visibility_diagnostic_now = _number(now)
+        depth = len(self._visibility_waiting)
+        self._visibility_queue_max_depth = max(
+            self._visibility_queue_max_depth, depth)
+        if self._visibility_deferred_since:
+            oldest_age_ms = max(0, int(round(1000.0 * (
+                self._visibility_diagnostic_now - min(
+                    self._visibility_deferred_since.values())))))
+            self._visibility_oldest_stale_max_age_ms = max(
+                self._visibility_oldest_stale_max_age_ms, oldest_age_ms)
+
+    def _begin_visibility_frame(self):
+        """Open one production render-frame budget for static LOS work."""
+        self._visibility_frame = {
+            'budget': MAX_VISIBILITY_PROBES_PER_FRAME,
+            'order': [],
+            'allowed': set(),
+            'next': 0,
+            'completed': set(),
+            'requested': set(),
+            'admitted': set(),
+            'deferred': set(),
+            'prepared': False,
+        }
+
+    def _selected_visibility_target(self, state):
+        """Return the current selected target's wire identity, if known."""
+        bot_id = int(state['id'])
+        order = self._server_orders.get(bot_id)
+        if isinstance(order, dict):
+            kind = order.get('target_kind')
+            target_id = order.get('target_id')
+            if kind in ('bot', 'human') and target_id is not None:
+                try:
+                    return kind, int(target_id)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+        cached = self._decision_cache.get(bot_id)
+        if not isinstance(cached, tuple) or len(cached) < 6:
+            return None
+        command = cached[3]
+        targets = cached[5]
+        if not isinstance(command, dict) or not isinstance(targets, dict):
+            return None
+        target = targets.get(command.get('target_id'))
+        if not isinstance(target, dict):
+            return None
+        kind = target.get('kind')
+        target_id = target.get('network_id', target.get('id'))
+        if kind not in ('bot', 'human') or target_id is None:
+            return None
+        try:
+            return kind, int(target_id)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _visibility_decision_due(self, state, now):
+        server_order = self._server_orders.get(state['id'])
+        cache_key = (('server', self._server_order_tokens.get(
+                          state['id'], 0))
+                     if server_order is not None else ('local',))
+        cached = self._decision_cache.get(state['id'])
+        return not (
+            cached is not None and cached[0] == cache_key and
+            _number(now) < cached[1])
+
+    def _prepare_visibility_frame(self, players, now, include_humans):
+        """Select a bounded, fair stale-pair cohort before native calls."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict) or frame.get('prepared'):
+            return False
+        frame['prepared'] = True
+        now = _number(now)
+        frame['now'] = now
+        live_bots = [state for state in self._ordered_states()
+                     if state.get('alive', True)]
+        live_humans = [raw for raw in (players or ())
+                       if (isinstance(raw, dict) and
+                           raw.get('id') is not None and
+                           raw.get('alive', True))]
+        targets = []
+        for state in live_bots:
+            targets.append(('bot', int(state['id']),
+                            int(state.get('team', 0)), state))
+        for raw in live_humans:
+            targets.append(('human', int(raw['id']),
+                            int(raw.get('team', 0)), raw))
+        sources = []
+        for state in live_bots:
+            sources.append((
+                'bot', int(state['id']), int(state.get('team', 0)),
+                self._selected_visibility_target(state),
+                self._visibility_decision_due(state, now)))
+        for raw in live_humans:
+            sources.append((
+                'human', int(raw['id']), int(raw.get('team', 0)), None,
+                bool(include_humans)))
+
+        candidates = {}
+        valid = {}
+        for (source_kind, source_id, source_team, selected,
+             source_eligible) in sources:
+            if source_team not in (1, 2):
+                continue
+            for target_kind, target_id, target_team, target in targets:
+                if target_team == source_team or target_team not in (1, 2):
+                    continue
+                key = (source_kind, source_id, target_kind, target_id)
+                cached = self._visibility_cache.get(key)
+                fire_seq = self._visibility_fire_sequence(target)
+                new_pair = cached is None
+                fire_edge = bool(
+                    cached is not None and cached[2] != fire_seq)
+                stale = bool(
+                    new_pair or fire_edge or
+                    now - _number(cached[0]) >=
+                    VISIBILITY_SAMPLE_SECONDS)
+                valid[key] = stale
+                if not stale or not source_eligible:
+                    continue
+                candidates[key] = (
+                    source_kind == 'human',
+                    selected == (target_kind, target_id),
+                    fire_edge, new_pair)
+
+        for key in tuple(self._visibility_deferred_since):
+            if not valid.get(key, False):
+                self._visibility_deferred_since.pop(key, None)
+
+        candidate_keys = set(candidates)
+        prior_waiting = [key for key in self._visibility_waiting
+                         if valid.get(key, False)]
+        waiting = [key for key in prior_waiting if key in candidate_keys]
+        parked = [key for key in prior_waiting if key not in candidate_keys]
+        waiting_set = set(waiting)
+        # Human observers own the player-facing team view. Keep inherited
+        # human debt ahead of newly stale Bot pairs so tuple ordering cannot
+        # hide a visible client's direct observations behind the full roster.
+        human_waiting = [
+            key for key in waiting if candidates[key][0]]
+        human_new = sorted(
+            key for key, flags in candidates.items()
+            if flags[0] and key not in waiting_set)
+        selected = sorted(
+            key for key, flags in candidates.items()
+            if flags[1] and not flags[0])
+        fire_edges = sorted(
+            key for key, flags in candidates.items()
+            if flags[2] and not flags[0] and not flags[1])
+        new_pairs = sorted(
+            key for key, flags in candidates.items()
+            if flags[3] and not flags[0] and not flags[1] and not flags[2])
+        ordinary_waiting = [
+            key for key in waiting
+            if not any(candidates[key])]
+        ordinary_new = sorted(
+            key for key in candidate_keys
+            if (key not in waiting_set and not candidates[key][0] and
+                not candidates[key][1] and not candidates[key][2] and
+                not candidates[key][3]))
+        order = []
+        seen = set()
+        for cohort in (human_waiting, human_new, selected, fire_edges,
+                       new_pairs,
+                       ordinary_waiting, ordinary_new):
+            for key in cohort:
+                if key not in seen:
+                    order.append(key)
+                    seen.add(key)
+        # A formerly ordinary deferred pair may have become selected or seen a
+        # fire edge; the priority cohorts above move it without duplicating it.
+        for key in waiting:
+            if key not in seen:
+                order.append(key)
+                seen.add(key)
+        frame['prior_waiting'] = prior_waiting
+        frame['parked'] = parked
+        frame['order'] = order
+        frame['classification'] = dict(
+            (key, ('selected' if candidates[key][1] else
+                   ('fire' if candidates[key][2] else
+                    ('new' if candidates[key][3] else 'ordinary'))))
+            for key in order)
+        frame['next'] = min(len(order), frame['budget'])
+        frame['allowed'] = set(order[:frame['next']])
+        return True
+
+    def _visibility_probe_completed(self, key):
+        """Retire one pair and backfill slots unused by pure-data rejects."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return False
+        first_completion = key not in frame['completed']
+        frame['completed'].add(key)
+        self._visibility_deferred_since.pop(key, None)
+        if first_completion:
+            self._visibility_scheduler_totals['completed'] += 1
+        frame['allowed'].discard(key)
+        order = frame['order']
+        while (len(frame['allowed']) < frame['budget'] and
+               frame['next'] < len(order)):
+            candidate = order[frame['next']]
+            frame['next'] += 1
+            if candidate not in frame['completed']:
+                frame['allowed'].add(candidate)
+        return True
+
+    def _visibility_probe_allowed(self, key):
+        """Peek at the fair cohort without spending its native-query slot."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return True
+        return bool(key in frame['allowed'] and frame['budget'] > 0)
+
+    def _visibility_probe_deferred(self, key):
+        """Record one per-callback denial without influencing fair order."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return False
+        frame['requested'].add(key)
+        if key not in frame['deferred']:
+            frame['deferred'].add(key)
+            self._visibility_scheduler_totals['deferred'] += 1
+        self._visibility_deferred_since.setdefault(
+            key, _number(frame.get('now')))
+        return True
+
+    def _visibility_probe_admitted(self, key):
+        """Admit only the selected fair cohort in a production callback."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return True
+        frame['requested'].add(key)
+        if key not in frame['allowed'] or frame['budget'] <= 0:
+            self._visibility_probe_deferred(key)
+            return False
+        frame['budget'] -= 1
+        if key not in frame['admitted']:
+            frame['admitted'].add(key)
+            self._visibility_scheduler_totals['admitted'] += 1
+            classification = frame.get('classification', {}).get(
+                key, 'ordinary')
+            self._visibility_service_totals[classification] += 1
+        return True
+
+    def _finish_visibility_frame(self):
+        """Carry only unfinished stale pairs into the next active callback."""
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return False
+        completed = frame['completed']
+        unfinished = set(frame.get('parked', ()))
+        unfinished.update(
+            key for key in frame['order'] if key not in completed)
+        waiting = []
+        seen = set()
+        for key in frame.get('prior_waiting', ()):
+            if key in unfinished and key not in seen:
+                waiting.append(key)
+                seen.add(key)
+        for key in frame['order']:
+            if key in unfinished and key not in seen:
+                waiting.append(key)
+                seen.add(key)
+        self._visibility_waiting = waiting
+        for key in waiting:
+            self._visibility_deferred_since.setdefault(
+                key, _number(frame.get('now')))
+        self._update_visibility_debt_diagnostics(frame.get('now'))
+        self._visibility_frame = None
+        return True
+
     def _visible(self, source, target, now, tick_cache=None,
                  source_position=None, view_range_resolver=None):
         target_id = target.get('network_id', target.get('id', 0))
@@ -3987,14 +4400,20 @@ class BotRuntime(object):
                            _position(source))
         distance = _distance(source_position, target.get('position') or
                              _position(target))
-        view_range = (view_range_resolver()
-                      if callable(view_range_resolver) else
-                      self._source_view_range(source, now))
         if distance <= spotting.PROXIMITY_SPOT_DISTANCE:
             value = True
         elif distance > spotting.MAX_SPOT_DISTANCE:
             value = False
         else:
+            if not self._visibility_probe_allowed(key):
+                # Budgeted-out pairs must stop before the per-target profile,
+                # camouflage and source-view calculations. They remain queued
+                # and fail closed as direct observations until serviced.
+                self._visibility_probe_deferred(key)
+                return False
+            view_range = (view_range_resolver()
+                          if callable(view_range_resolver) else
+                          self._source_view_range(source, now))
             (base_pair, shot_factor, profile, moving,
              additive, multiplier) = self._target_detection_projection(
                  target, target_id, now, tick_cache)
@@ -4003,6 +4422,10 @@ class BotRuntime(object):
                     fired_recently):
                 value = False
             else:
+                if not self._visibility_probe_admitted(key):
+                    # A fair-slot change inside one synchronous calculation is
+                    # not expected, but preserve the same fail-closed boundary.
+                    return False
                 try:
                     self._probe_totals[0] += 1
                     probe_started = self._probe_started()
@@ -4033,6 +4456,7 @@ class BotRuntime(object):
                 value = spotting.is_detected(
                     distance, view_range, camouflage, has_line_of_sight)
         self._visibility_cache[key] = (_number(now), value, fire_seq)
+        self._visibility_probe_completed(key)
         if len(self._visibility_cache) > 1024:
             oldest = sorted(self._visibility_cache.items(),
                             key=lambda item: item[1][0])[:256]
@@ -4519,9 +4943,25 @@ class BotRuntime(object):
                 now >= cached.get('deadline', 0.0)):
             return False
         lookahead = 20.0 if abs(_number(speed)) > 5.0 else 15.0
+        forward_budget = MOTION_PROBE_FORWARD_BUDGET
+        if ignore_deadline:
+            # A catch-up slice keeps exactly the sampled heading. Its complete
+            # dual-height, three-lane corridor may therefore be consumed up to
+            # the actual probed distance instead of paying the ordinary 3.5 m
+            # re-planning budget repeatedly in one render callback.
+            probed_distance = cached.get('probe_distance')
+            probe_leading = cached.get('probe_leading')
+            if probed_distance is not None and probe_leading is not None:
+                current_reach = max(
+                    0.4, abs(_number(speed)) * max(
+                        0.0, min(MAX_CONTROL_ELAPSED_SECONDS, _number(dt))) +
+                    0.2)
+                forward_budget = max(
+                    0.0, _number(probed_distance) -
+                    max(0.5, _number(probe_leading)) - current_reach)
         heading_drift = lookahead * abs(math.sin(angle))
         reusable = bool(
-            -0.1 <= forward <= MOTION_PROBE_FORWARD_BUDGET and
+            -0.1 <= forward <= forward_budget and
             lateral + heading_drift <= MOTION_PROBE_LATERAL_BUDGET)
         if not reusable:
             return False
@@ -6852,7 +7292,8 @@ class BotRuntime(object):
         cached = self._ballistic_solution_cache.get(bot_id)
         fresh = bool(
             force or cached is None or cached[0] != signature or
-            _number(now) + 1.0e-9 >= cached[1])
+            (self._refresh_control_this_step and
+             _number(now) + 1.0e-9 >= cached[1]))
         if fresh:
             solution = self._ballistic_solution(
                 state, target, descriptor, shell_index, now)
@@ -7046,6 +7487,7 @@ class BotRuntime(object):
         cached = self._shot_los_cache.get(key)
         if cached is not None and cached[0] > window_start + 1e-9:
             self._shot_los_deadlines[key] = observation_time
+            self._shot_lane_completed_pairs += 1
             return False
         if now + 1e-9 < deadline:
             return False
@@ -7053,8 +7495,13 @@ class BotRuntime(object):
             source, target, now, force=True, probe_budget=probe_budget,
             lane_key=key, distance_cache=distance_cache)
         if value is None:
+            # This helper is used only by the supplemental roster pass. Count
+            # each pair/callback denial explicitly; it is not a unique-pair
+            # counter and never includes the independent final-fire gate.
+            self._shot_lane_budget_deferred_attempts += 1
             return False
         self._shot_los_deadlines[key] = observation_time
+        self._shot_lane_completed_pairs += 1
         return True
 
     def _pack_observations(self, aggregate, now):
@@ -7792,15 +8239,17 @@ class BotRuntime(object):
         return result
 
     def update(self, dt, now, players=None, neighbours=None):
-        """Advance Bot control without multiplying full-roster slow work.
+        """Advance Bot motion in real time with one control refresh per frame.
 
-        Fixed-control workers run at most once per render callback. That step
-        consumes the accumulated elapsed interval up to the reviewed 200 ms
-        physics bound, so a sustained 5-10 FPS worker keeps moving in real
-        time instead of adding 100 ms of permanent debt every frame. An armed
-        burst may shorten the step at its next physical round; the remainder
-        stays queued so no one-shot edge or frozen launch pose is skipped.
+        Fixed-control workers consume every elapsed second in bounded physical
+        slices. The first slice may think and observe; later slices keep its
+        command until the next render callback. Physical corridor proofs may
+        still follow an ongoing turn, without re-entering the planner. Burst
+        edges can shorten any slice, so accepted rounds and their frozen launch
+        poses are never skipped when a callback is late.
         """
+        self._last_update_control_steps = 0
+        self._last_update_max_control_step = 0.0
         if (not self.is_authority() or self.adapter is None or
                 self.finished):
             return []
@@ -7813,6 +8262,7 @@ class BotRuntime(object):
             navigator_begin(elapsed_input)
         outgoing = []
         receipt_frame_open = False
+        visibility_frame_open = False
         try:
             if not self._fixed_control:
                 # Preserve the mature engine-free seam for focused law tests
@@ -7829,6 +8279,9 @@ class BotRuntime(object):
             # retire valid deferred requests as no longer eligible.
             self._begin_world_receipt_frame()
             receipt_frame_open = True
+            if self._fixed_control:
+                self._begin_visibility_frame()
+                visibility_frame_open = True
             try:
                 if not self._fixed_control:
                     elapsed = self._accumulator
@@ -7838,18 +8291,33 @@ class BotRuntime(object):
                             min(elapsed, 0.2))
                         elapsed = max(0.0, elapsed - frame_step)
                         step_now = now - elapsed
-                        outgoing.extend(self._update_once(
-                            frame_step, step_now, players, neighbours))
+                        self._last_update_control_steps += 1
+                        self._last_update_max_control_step = max(
+                            self._last_update_max_control_step, frame_step)
+                        outgoing.extend(self._run_update_once(
+                            frame_step, step_now, players, neighbours, True,
+                            True))
                 else:
-                    frame_step = min(
-                        self._accumulator, MAX_CONTROL_ELAPSED_SECONDS)
-                    frame_step = self._bounded_burst_step(frame_step)
-                    self._accumulator = max(
-                        0.0, self._accumulator - frame_step)
-                    step_now = now - self._accumulator
-                    outgoing.extend(self._update_once(
-                        frame_step, step_now, players, neighbours))
+                    elapsed = self._accumulator
+                    self._accumulator = 0.0
+                    refresh_control = True
+                    while elapsed > 1e-12:
+                        frame_step = self._bounded_burst_step(
+                            min(elapsed, MAX_CONTROL_ELAPSED_SECONDS))
+                        elapsed = max(0.0, elapsed - frame_step)
+                        step_now = now - elapsed
+                        publish_step = bool(
+                            refresh_control or elapsed <= 1e-12)
+                        self._last_update_control_steps += 1
+                        self._last_update_max_control_step = max(
+                            self._last_update_max_control_step, frame_step)
+                        outgoing.extend(self._run_update_once(
+                            frame_step, step_now, players, neighbours,
+                            refresh_control, publish_step))
+                        refresh_control = False
             finally:
+                if visibility_frame_open:
+                    self._finish_visibility_frame()
                 if receipt_frame_open:
                     self._finish_world_receipt_frame()
         finally:
@@ -7865,9 +8333,25 @@ class BotRuntime(object):
             message['source_batch_horizon_us'] = source_batch_horizon_us
         return outgoing
 
+    def _run_update_once(self, frame_step, now, players, neighbours,
+                         refresh_control, publish_step=True):
+        """Expose one per-callback control-refresh flag without changing seams."""
+        previous = (
+            self._refresh_control_this_step,
+            self._publish_control_this_step)
+        self._refresh_control_this_step = bool(refresh_control)
+        self._publish_control_this_step = bool(publish_step)
+        try:
+            return self._update_once(
+                frame_step, now, players, neighbours)
+        finally:
+            (self._refresh_control_this_step,
+             self._publish_control_this_step) = previous
+
     def _update_once(self, frame_step, now, players=None, neighbours=None):
         """Advance one stable authority substep and preserve its events."""
-        publish = True
+        publish = bool(self._publish_control_this_step)
+        refresh_control = bool(self._refresh_control_this_step)
         step_duration_us = max(
             1, int(round(float(frame_step) * 1000000.0)))
         step_start_time_us = self._sample_time_us
@@ -7888,21 +8372,26 @@ class BotRuntime(object):
         # Spotting is latency-sensitive presentation state. Full-roster firing
         # lanes and cover fans only guide the one-hertz server planner, so they
         # run on independent clocks and can never delay this observation.
-        observation_due = now >= self._next_observation
+        observation_due = refresh_control and now >= self._next_observation
         collect_observation = publish and observation_due
         shot_lane_refresh_time = self._next_shot_lane_refresh
         shot_lane_refresh_due = now >= shot_lane_refresh_time
         refresh_shot_lanes = (
+            refresh_control and
             not self._cover_queue and
             (shot_lane_refresh_due or
              (shot_lane_refresh_time > 0.0 and
               now + SHOT_LANE_REFRESH_SECONDS + 1e-9 >=
               shot_lane_refresh_time)))
         collect_cover_jobs = bool(
-            publish and not self._cover_queue and
+            refresh_control and publish and not self._cover_queue and
             now >= self._next_cover_refresh)
-        shot_lane_budget = [MAX_SHOT_LANE_PAIRS_PER_FRAME]
+        final_shot_lane_budget = [MAX_SHOT_LANE_PAIRS_PER_FRAME]
+        supplemental_shot_lane_budget = [
+            (MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME
+             if self._fixed_control else MAX_SHOT_LANE_PAIRS_PER_FRAME)]
         shot_lanes_ready = True
+        shot_lane_pending_pairs = 0
         neighbours = list(neighbours or []) + self._player_neighbours(players)
         # Native terrain and visibility probes run on BigWorld's render thread.
         # Build the local-overlap view lazily, only when a staggered decision is
@@ -7917,6 +8406,8 @@ class BotRuntime(object):
         # simulation slice. Share them across all observers, but never across
         # slices where motion or equipment state may change.
         visibility_tick = {}
+        self._prepare_visibility_frame(
+            players, now, collect_observation or refresh_shot_lanes)
         if collect_observation or refresh_shot_lanes:
             self._append_human_observations(
                 players, now, observation_entries, team_visibility,
@@ -7970,10 +8461,13 @@ class BotRuntime(object):
                               state['id'], 0))
                          if server_order is not None else ('local',))
             decision_cache = self._decision_cache.get(state['id'])
-            decision_due = not (
-                decision_cache is not None and
-                decision_cache[0] == cache_key and
-                _number(now) < decision_cache[1])
+            decision_cache_valid = bool(
+                decision_cache is not None and len(decision_cache) >= 6 and
+                decision_cache[0] == cache_key)
+            decision_due = bool(
+                refresh_control and
+                (not decision_cache_valid or
+                 _number(now) >= decision_cache[1]))
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -8020,13 +8514,30 @@ class BotRuntime(object):
                     return True
                 return self._probe_is_clear(sample)
 
-            if not decision_due:
-                if len(decision_cache) < 6:
-                    raise RuntimeError(
-                        'cached bot perception is unavailable')
+            if decision_cache_valid and not decision_due:
                 command = dict(decision_cache[3])
                 contacts = decision_cache[4]
                 targets = decision_cache[5]
+            elif not refresh_control:
+                # A completed physical veto may invalidate the command chosen
+                # by the first slice. Do not run the planner again in the same
+                # render callback and do not keep driving into proved danger.
+                position_hold = _position(state)
+                command = {
+                    'bot_id': int(state['id']), 'target_id': None,
+                    'aim_position': position_hold,
+                    'face_position': position_hold,
+                    'move_position': position_hold,
+                    'fire_range': 0.0, 'combat_mode': 'physical_hold',
+                    'fire_allowed': False,
+                    'shell_index': int(state.get('shell_index', 0)),
+                    'throttle': 0.0, 'turn': 0.0,
+                    'target_yaw': _number(state.get('yaw')),
+                    'recovery_mode': 'physical_hold',
+                    'movement_intent': False,
+                }
+                contacts = ()
+                targets = {}
             else:
                 contacts, targets = self._contacts_for(
                     state, players, now, team_visibility, visibility_tick)
@@ -8175,8 +8686,14 @@ class BotRuntime(object):
                     entry[2] = observed_target
                     if direct_visible:
                         entry[4].add(int(state['id']))
+                selected_lane = (
+                    cached_target.get('id') == command.get('target_id'))
+                lane_priority = (
+                    0 if selected_lane and command.get('fire_allowed') else
+                    (1 if selected_lane else 2))
                 observation_pairs.append((
-                    lane_source, observed_target, lane_key, key, [None]))
+                    lane_priority, lane_source, observed_target, lane_key,
+                    key, [None]))
             target_id = command.get('target_id')
             if target_id in (targets or {}):
                 # Aim/fire gating retains the observer-specific spotting flag.
@@ -8346,11 +8863,38 @@ class BotRuntime(object):
                 abs(_number(state.get('speed'))) <= 0.02 and
                 state.get('grounded_once', False) and
                 not state.get('airborne', False))
-            if not ((not decision_due or self._motion_probe_covers_distance(
+            motion_probe_reusable = bool(
+                (not decision_due or self._motion_probe_covers_distance(
                     cached_motion_probe, maximum_probe_distance)) and
-                    self._motion_probe_reusable(
-                        cached_motion_probe, position, travel_yaw,
-                        state.get('speed', 0.0), now, settled_motion, step)):
+                self._motion_probe_reusable(
+                    cached_motion_probe, position, travel_yaw,
+                    state.get('speed', 0.0), now, settled_motion, step,
+                    ignore_deadline=not refresh_control))
+            cached_motion_result = (
+                (cached_motion_probe or {}).get('result') or {})
+            catchup_motion_reprobe = bool(
+                not refresh_control and not motion_probe_reusable and
+                isinstance(cached_motion_probe, dict) and
+                isinstance(cached_motion_result, dict) and
+                self._probe_is_clear(cached_motion_result) and
+                (abs(throttle) > 0.01 or
+                 abs(_number(state.get('speed'))) > 0.0001 or
+                 abs(turn) > 0.01 or
+                 abs(_number(self._turn_speeds.get(
+                     state['id'], 0.0))) > 0.01))
+            catchup_motion_hold = bool(
+                not refresh_control and not motion_probe_reusable and
+                not catchup_motion_reprobe)
+            if catchup_motion_hold:
+                # With no prior clear physical proof, this callback may not
+                # turn a missing/deferred/blocked sample into motion. A valid
+                # command which merely consumed or turned beyond its old clear
+                # corridor re-probes below without re-entering the planner.
+                motion_probe = None
+                throttle = 0.0
+                turn = 0.0
+                state['speed'] = 0.0
+            elif not motion_probe_reusable:
                 # Planner ranking is intentionally unable to satisfy this
                 # gate.  Every newly selected travel corridor receives its own
                 # complete native generic probe before an exact receipt can be
@@ -8441,6 +8985,15 @@ class BotRuntime(object):
                         'position': position,
                         'yaw': travel_yaw,
                         'maximum_distance': maximum_probe_distance,
+                        'probe_distance': min(
+                            20.0 if abs(_number(
+                                state.get('speed'))) > 5.0 else 15.0,
+                            _number(maximum_probe_distance, float('inf'))),
+                        # The generic rays begin at the hull origin. Reserve
+                        # its admitted collision half-length before catch-up
+                        # slices consume the remainder of that clear corridor.
+                        'probe_leading': max(
+                            0.5, _number(state.get('half_length'), 3.5)),
                         'deadline': (
                             _number(now)
                             if receipt_pending
@@ -8469,7 +9022,8 @@ class BotRuntime(object):
                 motion_probe.get('collision', False) and
                 not motion_probe.get('water', False) and
                 abs(_number(motion_probe.get('slope', 0.0))) <= 0.55)
-            path_clear = (True if (probe_deferred or motion_probe is None or
+            path_clear = (True if (catchup_motion_hold or probe_deferred or
+                                   motion_probe is None or
                                    exact_motion_owns_collision or
                                    (abs(throttle) <= 0.01 and
                                     abs(_number(state.get('speed'))) <=
@@ -8713,7 +9267,7 @@ class BotRuntime(object):
                      pending_reproof is not None or
                      self._shot_clear(
                         state, target, now,
-                        probe_budget=shot_lane_budget))):
+                        probe_budget=final_shot_lane_budget))):
                 launch_receipt = None
                 launch_preview = None
                 lane_clear = False
@@ -8798,8 +9352,9 @@ class BotRuntime(object):
         # without changing a decision.  Aggregate radio spotting first, then
         # prove every shooter lane for only those team-visible targets.  The
         # selected target's independent final-fire gate below remains live.
-        for (lane_source, observed_target, lane_key, key,
-             lane_distance) in observation_pairs:
+        observation_pairs.sort(key=lambda value: value[0])
+        for (unused_lane_priority, lane_source, observed_target, lane_key,
+             key, lane_distance) in observation_pairs:
             if not team_visibility.get(key, False):
                 continue
             if refresh_shot_lanes:
@@ -8807,12 +9362,14 @@ class BotRuntime(object):
                         shot_lane_refresh_time):
                     self._refresh_shot_clear(
                         lane_source, observed_target, now,
-                        shot_lane_refresh_time, shot_lane_budget,
+                        shot_lane_refresh_time,
+                        supplemental_shot_lane_budget,
                         lane_key=lane_key,
                         distance_cache=lane_distance)
                 if (self._shot_los_deadlines.get(lane_key) !=
                         shot_lane_refresh_time):
                     shot_lanes_ready = False
+                    shot_lane_pending_pairs += 1
             if collect_observation:
                 # Report the latest bounded tactical sample without waiting
                 # for the current one-second roster refresh. Missing or old
@@ -8825,6 +9382,17 @@ class BotRuntime(object):
                         self._control_seconds + 1e-9 and lane_sample[1]):
                     observation_entries[key][1].add(
                         int(lane_source['id']))
+        if refresh_shot_lanes:
+            self._update_shot_lane_debt_diagnostics(
+                now, shot_lane_refresh_time, shot_lane_pending_pairs,
+                shot_lane_refresh_due)
+        else:
+            # Cover work can temporarily own the supplemental window. Retain
+            # the last observed pair depth and let its due age advance without
+            # rebuilding the roster solely for diagnostics.
+            self._update_shot_lane_debt_diagnostics(
+                now, shot_lane_refresh_time,
+                self._shot_lane_pending_pairs, shot_lane_refresh_due)
         if (shot_lane_refresh_due and refresh_shot_lanes and
                 shot_lanes_ready):
             self._next_shot_lane_refresh = (
@@ -8854,7 +9422,7 @@ class BotRuntime(object):
                 self._cover_queue.append((
                     ready_at, bot_id, source, target, route,
                     tuple(ally_positions.get(source.get('team'), ()))))
-        if self._cover_queue:
+        if refresh_control and self._cover_queue:
             ready_at, bot_id, source, target, route, allies = \
                 self._cover_queue[0]
             if now + 1e-9 >= ready_at:
@@ -8878,8 +9446,16 @@ class BotRuntime(object):
                         'target_kind': target.get('kind', 'human'),
                         'candidates': list(candidates),
                     })
+        pending_ram_count = len(self._pending_ram_reports)
         self._pending_ram_reports.extend(
             self._resolve_tank_contacts(players, now, frame_step))
+        if (not publish and
+                len(self._pending_ram_reports) > pending_ram_count):
+            # A ram report is a one-shot state barrier. Publish the contact
+            # pose from this exact physical slice before the event; waiting for
+            # the callback's final pose can move both hulls beyond the server's
+            # bounded proximity validation and silently discard a real hit.
+            publish = True
         for bot_id, locked_pose in siege_locked_poses.items():
             state = self.states.get(bot_id)
             if state is None:
@@ -8906,7 +9482,7 @@ class BotRuntime(object):
                         attempted_yaw)
                 slope_candidates.append(state)
         self._alive_bot_ticks += len(slope_candidates)
-        if slope_candidates:
+        if refresh_control and slope_candidates:
             start = self._slope_pose_cursor % len(slope_candidates)
             visited = 0
             sampled = 0
@@ -8922,6 +9498,7 @@ class BotRuntime(object):
             if publish:
                 self._mark_combat_publication(state)
         if not publish:
+            self._sample_time_us = step_end_time_us
             return []
         wire_states = []
         launches = [dict(launch) for launch in self._pending_launches]
