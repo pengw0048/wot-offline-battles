@@ -3426,6 +3426,13 @@ class LANClient(object):
                         # A different canonical Bot checkpoint is a state
                         # edge.  Never move a later state back across it.
                         break
+                    if (isinstance(queued, dict) and
+                            queued.get('type') == 'bot_ram_report'):
+                        # The server validates this one-shot contact against
+                        # the immediately preceding authority pose. A newer
+                        # checkpoint may not replace that state from across
+                        # the event even when its continuous key is equal.
+                        break
             previous = (self._outbound_queue[replacement_index]
                         if replacement_index is not None else None)
             replacement_bytes = (

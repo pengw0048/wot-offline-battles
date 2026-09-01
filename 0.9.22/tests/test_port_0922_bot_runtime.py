@@ -4656,10 +4656,11 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual([{'type': 'ram_damage', 'event': 'once'}], events)
         self.assertEqual(0.0, self.runtime._accumulator)
 
-    def test_worker_stall_runs_one_roster_step_per_callback(self):
+    def test_worker_stall_refreshes_control_once_and_consumes_all_elapsed(self):
+        adapter = _Adapter()
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
-            adapter_factory=lambda *args: _Adapter(*args),
+            adapter_factory=lambda *unused: adapter,
             direction_probe=lambda *unused: {'clear': True, 'slope': .2},
             ground_probe=lambda *unused: 0.0,
             physics_ground_probe=lambda *unused: 0.0,
@@ -4669,32 +4670,80 @@ class BotRuntimeTests(unittest.TestCase):
         runtime._pending_ram_reports = [{
             'type': 'ram_damage', 'event': 'once'}]
         runtime._world_receipt_waiting = [(11, True)]
+        steps = []
+        original_update_once = runtime._update_once
+
+        def counted_update_once(*args):
+            steps.append((
+                args[0],
+                getattr(runtime, '_refresh_control_this_step', True)))
+            return original_update_once(*args)
+
+        runtime._update_once = counted_update_once
 
         self.assertEqual([], runtime.update(0.01, 9.01))
         self.assertEqual([(11, True)], runtime._world_receipt_waiting)
 
-        first = runtime.update(0.99, 10.0)
-        states = [message for message in first
+        outgoing = runtime.update(0.99, 10.0)
+        states = [message for message in outgoing
                   if message.get('type') == 'bot_state']
-        events = [message for message in first
+        events = [message for message in outgoing
                   if message.get('type') == 'ram_damage']
 
-        self.assertEqual([200000], [
-            message['sample_time_us'] for message in states])
-        self.assertEqual([{'type': 'ram_damage', 'event': 'once'}], events)
-        self.assertAlmostEqual(0.8, runtime._accumulator)
-
-        drained = []
-        for unused in range(4):
-            drained.extend(runtime.update(0.0, 10.0))
-        all_messages = first + drained
+        self.assertEqual(1000000, states[-1]['sample_time_us'])
         self.assertEqual(
-            [index * 200000 for index in range(1, 6)],
-            [message['sample_time_us'] for message in all_messages
-             if message.get('type') == 'bot_state'])
-        self.assertEqual(1, sum(
-            message.get('type') == 'ram_damage'
-            for message in all_messages))
+            [1000000] * len(states),
+            [message['source_batch_horizon_us'] for message in states])
+        self.assertEqual([{'type': 'ram_damage', 'event': 'once'}], events)
+        self.assertAlmostEqual(1.0, sum(step for step, unused in steps))
+        self.assertTrue(all(
+            step <= self.module.MAX_CONTROL_ELAPSED_SECONDS + 1.0e-9
+            for step, unused in steps))
+        self.assertEqual(
+            [True] + [False] * (len(steps) - 1),
+            [refresh for unused, refresh in steps])
+        self.assertEqual(1, len(adapter.calls))
+        self.assertEqual(1000000, runtime._sample_time_us)
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+
+    def test_worker_intermediate_ram_report_forces_state_barrier(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused: _FixedAdapter(
+                self._stationary_command()),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        contact_slices = []
+
+        def contact(unused_players, unused_now, step):
+            contact_slices.append(step)
+            if len(contact_slices) == 3:
+                return [{
+                    'type': 'bot_ram', 'bot_id': 11,
+                    'target_kind': 'bot', 'target_id': 12,
+                    'ram_seq': 1, 'damage_to_bot': 1,
+                    'damage_to_target': 1,
+                }]
+            return []
+
+        runtime._resolve_tank_contacts = contact
+        outgoing = runtime.update(1.0, 1.0)
+        event_index = next(
+            index for index, message in enumerate(outgoing)
+            if message.get('type') == 'bot_ram')
+
+        self.assertEqual(5, len(contact_slices))
+        self.assertEqual('bot_state', outgoing[event_index - 1]['type'])
+        self.assertEqual(
+            600000, outgoing[event_index - 1]['sample_time_us'])
+        self.assertEqual([200000, 600000, 1000000], [
+            message['sample_time_us'] for message in outgoing
+            if message.get('type') == 'bot_state'])
+        self.assertEqual(1000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
 
     def test_worker_sustained_five_fps_consumes_elapsed_without_debt(self):
@@ -4729,42 +4778,71 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual([0.12, 0.10], steps)
         self.assertAlmostEqual(0.0, runtime._accumulator)
 
-    def test_worker_gap_debt_is_stable_at_five_fps_and_then_recovers(self):
-        runtime = self.module.BotRuntime(
-            1, control_seconds=self.module.WORKER_CONTROL_SECONDS)
-        runtime.authority_id = 1
-        runtime.adapter = object()
-        steps = []
-        runtime._update_once = lambda step, *unused: steps.append(step) or []
+    def test_worker_fixed_control_tracks_wall_time_from_five_to_one_fps(self):
+        wall_seconds = 2
+        for fps in (5, 4, 2, 1):
+            with self.subTest(fps=fps):
+                runtime = self.module.BotRuntime(
+                    1, control_seconds=self.module.WORKER_CONTROL_SECONDS)
+                runtime.authority_id = 1
+                runtime.adapter = object()
+                callback_calls = []
+                current_callback = [None]
 
-        runtime.update(0.3, 1.0)
+                def simulate(step, unused_now, unused_players,
+                             unused_neighbours):
+                    callback_calls[current_callback[0]].append((
+                        step,
+                        getattr(runtime, '_refresh_control_this_step', True)))
+                    duration_us = max(
+                        1, int(round(float(step) * 1000000.0)))
+                    runtime._sample_time_us += duration_us
+                    return []
 
-        self.assertEqual([self.module.MAX_CONTROL_ELAPSED_SECONDS], steps)
-        self.assertAlmostEqual(0.1, runtime._accumulator)
+                runtime._update_once = simulate
+                frame_seconds = 1.0 / float(fps)
+                frame_count = wall_seconds * fps
+                accumulator_us = []
+                for frame in range(frame_count):
+                    current_callback[0] = frame
+                    callback_calls.append([])
+                    runtime.update(
+                        frame_seconds, (frame + 1) * frame_seconds)
+                    accumulator_us.append(int(round(
+                        runtime._accumulator * 1000000.0)))
 
-        # At the exact 200 ms physics bound, one callback cannot consume old
-        # debt without either exceeding that bound or running the full roster
-        # twice. The lag stays constant instead of growing.
-        for frame in range(3):
-            before = len(steps)
-            runtime.update(0.2, 1.2 + frame * 0.2)
-            self.assertEqual(before + 1, len(steps))
-            self.assertAlmostEqual(0.1, runtime._accumulator)
-
-        # The measured bad session still delivered 8.85 callbacks per second.
-        # That leaves enough room under the 200 ms step bound to retire the
-        # carried interval without a second roster pass in either callback.
-        observed_slow_frame = 1.0 / 8.85
-        runtime.update(observed_slow_frame, 1.8)
-        self.assertAlmostEqual(
-            0.1 + observed_slow_frame -
-            self.module.MAX_CONTROL_ELAPSED_SECONDS,
-            runtime._accumulator)
-        runtime.update(observed_slow_frame, 1.8 + observed_slow_frame)
-        self.assertAlmostEqual(0.0, runtime._accumulator)
-        self.assertTrue(all(
-            step <= self.module.MAX_CONTROL_ELAPSED_SECONDS + 1.0e-9
-            for step in steps))
+                callback_elapsed_us = [
+                    int(round(sum(step for step, unused in calls) *
+                              1000000.0))
+                    for calls in callback_calls]
+                refresh_counts = [sum(
+                    1 for unused, refresh in calls if refresh)
+                    for calls in callback_calls]
+                max_step_us = max(
+                    int(round(step * 1000000.0))
+                    for calls in callback_calls for step, unused in calls)
+                self.assertEqual({
+                    'accumulator_us': [0] * frame_count,
+                    'sample_time_us': wall_seconds * 1000000,
+                    'callback_elapsed_us': [
+                        int(round(frame_seconds * 1000000.0))
+                    ] * frame_count,
+                    'refresh_counts': [1] * frame_count,
+                    'refresh_ordered': True,
+                    'step_bound_held': True,
+                }, {
+                    'accumulator_us': accumulator_us,
+                    'sample_time_us': runtime._sample_time_us,
+                    'callback_elapsed_us': callback_elapsed_us,
+                    'refresh_counts': refresh_counts,
+                    'refresh_ordered': all(
+                        calls and calls[0][1] and
+                        not any(refresh for unused, refresh in calls[1:])
+                        for calls in callback_calls),
+                    'step_bound_held': max_step_us <= int(round(
+                        self.module.MAX_CONTROL_ELAPSED_SECONDS *
+                        1000000.0)),
+                })
 
     def test_worker_low_fps_reuses_valid_drive_and_moves_continuously(self):
         command = self._stationary_command()
@@ -4809,6 +4887,190 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(1000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
         self.assertEqual(1, len(adapter.calls))
+
+    def test_worker_one_hz_holds_one_drive_plan_through_bounded_slices(self):
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'move_position': (0.0, 0.0, 100.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        adapter = _FixedAdapter(command)
+        direction_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: adapter,
+            direction_probe=lambda *unused: direction_calls.append(1) or {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        runtime.navigator = None
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True)
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda *unused, **unused_kwargs: True)
+        try:
+            outgoing = runtime.update(1.0, 1.0)
+        finally:
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        states = [message for message in outgoing
+                  if message.get('type') == 'bot_state']
+        self.assertGreater(state['z'], 4.0)
+        self.assertEqual(1, state['movement_dir'])
+        self.assertEqual(1, len(adapter.calls))
+        self.assertEqual(2, len(direction_calls))
+        self.assertEqual(1000000, runtime._sample_time_us)
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+        self.assertEqual([200000, 1000000], [
+            message['sample_time_us'] for message in states])
+        self.assertEqual([1000000, 1000000], [
+            message['source_batch_horizon_us'] for message in states])
+
+    def test_worker_one_hz_full_roster_refreshes_planning_once(self):
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'move_position': (0.0, 0.0, 200.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Slow-worker-%02d' % index}
+            for index in range(29)
+        ]
+        adapter = _FixedAdapter(command)
+        direction_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: adapter,
+            direction_probe=lambda *unused: direction_calls.append(1) or {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        runtime.navigator = None
+        for index, state in enumerate(runtime._ordered_states()):
+            state.update(
+                x=float(index * 20), y=0.0, z=0.0, yaw=0.0,
+                speed=4.0, grounded_once=True)
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda *unused, **unused_kwargs: True)
+        try:
+            outgoing = runtime.update(1.0, 1.0)
+        finally:
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        states = [message for message in outgoing
+                  if message.get('type') == 'bot_state']
+        self.assertEqual(29, len(adapter.calls))
+        self.assertEqual(58, len(direction_calls))
+        self.assertTrue(all(
+            state['z'] > 4.0 and state['movement_dir'] == 1
+            for state in runtime.states.values()))
+        self.assertEqual([200000, 1000000], [
+            message['sample_time_us'] for message in states])
+        self.assertEqual(1000000, runtime._sample_time_us)
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+
+    def test_worker_four_fps_keeps_turning_drive_active_between_plans(self):
+        command = self._stationary_command()
+        command.update({
+            'target_yaw': math.pi / 2.0,
+            'throttle': 1.0, 'turn': 1.0, 'combat_mode': 'route',
+            'move_position': (100.0, 0.0, 100.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        adapter = _FixedAdapter(command)
+        direction_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: adapter,
+            direction_probe=lambda *unused: direction_calls.append(1) or {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        runtime.navigator = None
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True)
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda *unused, **unused_kwargs: True)
+        try:
+            samples = []
+            for frame in range(4):
+                runtime.update(0.25, (frame + 1) * 0.25)
+                samples.append((
+                    state['x'], state['z'], state['yaw'], state['speed'],
+                    state['movement_dir']))
+        finally:
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        self.assertEqual(4, len(adapter.calls))
+        self.assertTrue(all(
+            speed > 0.0 and movement_dir == 1
+            for unused_x, unused_z, unused_yaw, speed, movement_dir in samples))
+        self.assertTrue(all(
+            later[0] > earlier[0] and later[1] > earlier[1] and
+            later[2] > earlier[2]
+            for earlier, later in zip(samples, samples[1:])))
+        self.assertEqual(12, len(direction_calls))
+        self.assertEqual(1000000, runtime._sample_time_us)
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+
+    def test_worker_catchup_reprobes_exhausted_corridor_without_replanning(self):
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'move_position': (0.0, 0.0, 100.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        direction_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: direction_calls.append(1) or {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        runtime.navigator = None
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=35.0,
+                     grounded_once=True)
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda *unused, **unused_kwargs: True)
+        try:
+            runtime.update(2.0, 2.0)
+        finally:
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        self.assertEqual(3, len(direction_calls))
+        self.assertGreater(state['z'], 20.0)
+        self.assertEqual(1, state['movement_dir'])
+        self.assertGreater(state['speed'], 0.0)
+        self.assertEqual(2000000, runtime._sample_time_us)
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+        self.assertEqual(
+            state['half_length'],
+            runtime._motion_probe_cache[11]['probe_leading'])
 
     def test_authority_publication_and_server_ack_remain_live_for_two_minutes(self):
         command = {
@@ -5687,6 +5949,43 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertTrue(covers({'maximum_distance': 6.0}, 4.0))
         self.assertTrue(covers({}, 6.0))
         self.assertFalse(covers({'maximum_distance': 4.0}, None))
+
+    def test_pending_generic_corridor_reserves_the_hull_leading_edge(self):
+        runtime = self.module.BotRuntime(1)
+
+        def install(yaw):
+            runtime._motion_probe_cache[11] = {
+                'result': {
+                    'clear': True, 'collision': False, 'slope': 0.0,
+                    '_world_receipt_pending': True,
+                },
+                'position': (0.0, 0.0, 0.0),
+                'yaw': yaw,
+                'probe_distance': 15.0,
+                'probe_leading': 3.5,
+                'deadline': 0.0,
+            }
+
+        install(0.0)
+        self.assertTrue(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, 11.0), 0.0, 4.0,
+            now=10.0, dt=0.04))
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, 11.2), 0.0, 4.0,
+            now=10.0, dt=0.04))
+
+        install(math.pi)
+        self.assertTrue(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -11.0), math.pi, -4.0,
+            now=10.0, dt=0.04))
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -11.2), math.pi, -4.0,
+            now=10.0, dt=0.04))
+
+        runtime._motion_probe_cache[11].pop('probe_leading')
+        self.assertFalse(runtime.motion_world_corridor_reusable(
+            11, (0.0, 0.0, -3.6), math.pi, -4.0,
+            now=10.0, dt=0.04))
 
     def test_typed_world_receipt_contains_only_the_actual_motion_step(self):
         runtime = self.module.BotRuntime(1)
@@ -7680,91 +7979,133 @@ class BotRuntimeTests(unittest.TestCase):
                 self.assertTrue(all(
                     step <= 0.100000001 for step in substeps))
 
-    def test_worker_burst_edges_stay_exact_and_debt_recovers_at_slow_fps(self):
+    def test_worker_slow_fps_catchup_preserves_every_burst_edge(self):
         count = 11
-        descriptor = _combat_descriptor(
-            reload_time=4.0, clip=(count + 1, 2.0),
-            dispersion=0.01, max_ammo=count + 2)
-        descriptor.gun.burst = (count, 0.1)
-        descriptor.gun.shotDispersionFactors = {
-            'afterShot': 4.0, 'afterShotInBurst': 1.0,
-            'turretRotation': 0.0,
-        }
-        runtime = self.module.BotRuntime(
-            1, friendly_lane_probe=lambda *unused: True,
-            direct_launch_origin_probe=lambda source, *unused: (
-                source['x'], source['y'] + 1.0, source['z']),
-            control_seconds=self.module.WORKER_CONTROL_SECONDS)
-        runtime.round_id = 5
-        runtime.authority_id = 1
-        runtime.adapter = object()
-        runtime._descriptors[11] = descriptor
-        state = {
-            'id': 11, 'alive': True, 'health': 1000,
-            'fire_seq': 0, 'x': 0.0, 'y': 0.0, 'z': 0.0,
-            'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
-            'aim_yaw': 0.0, 'turret_yaw': 0.0,
-            'gun_pitch': -0.01, 'critical': {}, 'profile': {},
-        }
-        target = {
-            'id': 2, 'network_id': 2, 'kind': 'human',
-            'alive': True, 'position': (0.0, 1.0, 100.0),
-        }
-        solution = {'flight_time': 0.5}
-        gun_state = self.module._BotGunState(descriptor)
-        gun_state.elapsed = 10.0
-        ammo_state = self.module._BotAmmoState(descriptor, {}, state)
-        runtime._gun_states[11] = gun_state
-        runtime._ammo_states[11] = ammo_state
-        preview = runtime._direct_launch_preview(
-            state, descriptor, ammo_state.loaded, gun_state, solution)
-        self.assertTrue(runtime._fire(
-            state, gun_state, 1.0, descriptor,
-            ammo_state=ammo_state, launch_preview=preview,
-            launch_time_us=0))
+        for fps in (5, 4, 2, 1):
+            with self.subTest(fps=fps):
+                descriptor = _combat_descriptor(
+                    reload_time=4.0, clip=(count + 1, 2.0),
+                    dispersion=0.01, max_ammo=count + 2)
+                descriptor.gun.burst = (count, 0.1)
+                descriptor.gun.shotDispersionFactors = {
+                    'afterShot': 4.0, 'afterShotInBurst': 1.0,
+                    'turretRotation': 0.0,
+                }
+                runtime = self.module.BotRuntime(
+                    1, friendly_lane_probe=lambda *unused: True,
+                    direct_launch_origin_probe=lambda source, *unused: (
+                        source['x'], source['y'] + 1.0, source['z']),
+                    control_seconds=self.module.WORKER_CONTROL_SECONDS)
+                runtime.round_id = 5
+                runtime.authority_id = 1
+                runtime.adapter = object()
+                runtime._descriptors[11] = descriptor
+                state = {
+                    'id': 11, 'alive': True, 'health': 1000,
+                    'fire_seq': 0, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                    'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
+                    'aim_yaw': 0.0, 'turret_yaw': 0.0,
+                    'gun_pitch': -0.01, 'critical': {}, 'profile': {},
+                }
+                target = {
+                    'id': 2, 'network_id': 2, 'kind': 'human',
+                    'alive': True, 'position': (0.0, 1.0, 100.0),
+                }
+                solution = {'flight_time': 0.5}
+                gun_state = self.module._BotGunState(descriptor)
+                gun_state.elapsed = 10.0
+                ammo_state = self.module._BotAmmoState(
+                    descriptor, {}, state)
+                runtime._gun_states[11] = gun_state
+                runtime._ammo_states[11] = ammo_state
+                preview = runtime._direct_launch_preview(
+                    state, descriptor, ammo_state.loaded, gun_state,
+                    solution)
+                self.assertTrue(runtime._fire(
+                    state, gun_state, 1.0, descriptor,
+                    ammo_state=ammo_state, launch_preview=preview,
+                    launch_time_us=0))
 
-        substeps = []
+                callback_calls = []
+                current_callback = [None]
 
-        def simulate(step, unused_now, unused_players, unused_neighbours):
-            start_us = runtime._sample_time_us
-            duration_us = max(1, int(round(step * 1000000.0)))
-            end_us = start_us + duration_us
-            state['z'] += 10.0 * step
-            substeps.append(step)
-            runtime._advance_active_burst(
-                state, gun_state, ammo_state, 1.0, descriptor,
-                target, solution, step, set(), start_us, end_us)
-            runtime._sample_time_us = end_us
-            return []
+                def simulate(step, unused_now, unused_players,
+                             unused_neighbours):
+                    start_us = runtime._sample_time_us
+                    duration_us = max(
+                        1, int(round(step * 1000000.0)))
+                    end_us = start_us + duration_us
+                    state['z'] += 10.0 * step
+                    callback_calls[current_callback[0]].append((
+                        step,
+                        getattr(runtime, '_refresh_control_this_step', True)))
+                    runtime._advance_active_burst(
+                        state, gun_state, ammo_state, 1.0, descriptor,
+                        target, solution, step, set(), start_us, end_us)
+                    runtime._sample_time_us = end_us
+                    return []
 
-        runtime._update_once = simulate
-        runtime.update(1.0, 1.0)
-        self.assertEqual(2, len(runtime._pending_launches))
-        self.assertAlmostEqual(0.9, runtime._accumulator)
+                runtime._update_once = simulate
+                frame_seconds = 1.0 / float(fps)
+                accumulator_us = []
+                for frame in range(fps):
+                    current_callback[0] = frame
+                    callback_calls.append([])
+                    runtime.update(
+                        frame_seconds, (frame + 1) * frame_seconds)
+                    accumulator_us.append(int(round(
+                        runtime._accumulator * 1000000.0)))
 
-        observed_slow_frame = 1.0 / 8.85
-        callbacks = 0
-        while ((runtime._burst_states[11].active or
-                runtime._accumulator > 1.0e-9) and callbacks < 64):
-            before = len(substeps)
-            callbacks += 1
-            runtime.update(
-                observed_slow_frame,
-                1.0 + callbacks * observed_slow_frame)
-            self.assertLessEqual(len(substeps) - before, 1)
-
-        self.assertEqual(count, len(runtime._pending_launches))
-        self.assertEqual(
-            [index * 100000 for index in range(count)],
-            [launch['launch_time_us']
-             for launch in runtime._pending_launches])
-        self.assertEqual(
-            [round(float(index), 6) for index in range(count)],
-            [round(launch['shot_origin'][2], 6)
-             for launch in runtime._pending_launches])
-        self.assertEqual([0.1] * 10, substeps[:10])
-        self.assertLess(callbacks, 64)
-        self.assertAlmostEqual(0.0, runtime._accumulator)
+                launches = runtime._pending_launches
+                callback_elapsed_us = [
+                    int(round(sum(step for step, unused in calls) *
+                              1000000.0))
+                    for calls in callback_calls]
+                refresh_counts = [sum(
+                    1 for unused, refresh in calls if refresh)
+                    for calls in callback_calls]
+                all_steps = [
+                    step for calls in callback_calls
+                    for step, unused in calls]
+                self.assertEqual({
+                    'accumulator_us': [0] * fps,
+                    'sample_time_us': 1000000,
+                    'callback_elapsed_us': [
+                        int(round(frame_seconds * 1000000.0))
+                    ] * fps,
+                    'refresh_counts': [1] * fps,
+                    'refresh_ordered': True,
+                    'step_bound_held': True,
+                    'burst_active': False,
+                    'launch_time_us': [
+                        index * 100000 for index in range(count)],
+                    'shot_origin_z': [
+                        float(index) for index in range(count)],
+                    'launch_pose_z': [
+                        float(index) for index in range(count)],
+                }, {
+                    'accumulator_us': accumulator_us,
+                    'sample_time_us': runtime._sample_time_us,
+                    'callback_elapsed_us': callback_elapsed_us,
+                    'refresh_counts': refresh_counts,
+                    'refresh_ordered': all(
+                        calls and calls[0][1] and
+                        not any(refresh for unused, refresh in calls[1:])
+                        for calls in callback_calls),
+                    'step_bound_held': bool(all_steps) and all(
+                        step <= (self.module.MAX_CONTROL_ELAPSED_SECONDS +
+                                 1.0e-9)
+                        for step in all_steps),
+                    'burst_active': runtime._burst_states[11].active,
+                    'launch_time_us': [
+                        launch['launch_time_us'] for launch in launches],
+                    'shot_origin_z': [
+                        round(launch['shot_origin'][2], 6)
+                        for launch in launches],
+                    'launch_pose_z': [
+                        round(launch['launch_pose'][2], 6)
+                        for launch in launches],
+                })
 
     def test_siege_transition_edge_locks_pose_in_its_starting_tick(self):
         self.runtime.battle_start(self.start)
