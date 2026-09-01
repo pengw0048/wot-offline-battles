@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$GameRoot,
+    [string]$GameRoot = $env:WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT,
 
     [ValidateRange(5, 3600)]
     [int]$Seconds = 60,
@@ -9,7 +8,7 @@ param(
     [ValidateRange(1, 30)]
     [int]$IntervalSeconds = 2,
 
-    [string]$OutputRoot = $PSScriptRoot
+    [string]$OutputRoot = $env:WOT_HIDDEN_WORKER_PROFILER_OUTPUT_ROOT
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,9 +141,21 @@ function New-ReportZip([string]$CaptureRoot, [string]$ZipPath) {
         [System.IO.Compression.CompressionLevel]::Optimal, $false)
 }
 
+function Resolve-FullPath([string]$Value, [string]$Label) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$Label path is empty."
+    }
+    $candidate = $Value.Trim().Trim([char]34)
+    try {
+        return [System.IO.Path]::GetFullPath($candidate)
+    }
+    catch {
+        throw "$Label path is invalid: $candidate"
+    }
+}
+
 try {
-    $resolvedRoot = [System.IO.Path]::GetFullPath(
-        $GameRoot.Trim().Trim([char]34))
+    $resolvedRoot = Resolve-FullPath $GameRoot "Game folder"
     if (-not [System.IO.File]::Exists((Join-Path $resolvedRoot "WorldOfTanks.exe"))) {
         throw "WorldOfTanks.exe is missing from: $resolvedRoot"
     }
@@ -185,8 +196,7 @@ try {
         }
     }
 
-    $resolvedOutput = [System.IO.Path]::GetFullPath(
-        $OutputRoot.Trim().Trim([char]34))
+    $resolvedOutput = Resolve-FullPath $OutputRoot "Report folder"
     if (-not [System.IO.Directory]::Exists($resolvedOutput)) {
         New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
     }
