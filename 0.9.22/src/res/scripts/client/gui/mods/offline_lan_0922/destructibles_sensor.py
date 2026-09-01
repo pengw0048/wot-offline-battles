@@ -994,10 +994,15 @@ def _boxes_intersect(left, right):
 	right_center, right_half_axes = right[:2]
 	delta = tuple(right_center[index] - left_center[index]
 		for index in range(3))
-	axes = list(_box_face_axes(left_half_axes))
-	axes.extend(_box_face_axes(right_half_axes))
-	axes.extend(_vector_cross(left_axis, right_axis)
-		for left_axis in left_half_axes for right_axis in right_half_axes)
+	# A translated OBB is a four-generator zonotope: its three original
+	# half-axes plus half of the translation.  The separating axes for two
+	# zonotopes are the cross products of every generator pair.  Ordinary
+	# three-axis OBBs therefore retain the same 15 SAT axes, while a swept hull
+	# can preserve its real orientation without collapsing into a lossy box.
+	generators = tuple(left_half_axes) + tuple(right_half_axes)
+	axes = (_vector_cross(generators[left_index], generators[right_index])
+		for left_index in range(len(generators))
+		for right_index in range(left_index + 1, len(generators)))
 	for axis in axes:
 		length_squared = _vector_dot(axis, axis)
 		if length_squared <= 1.0e-16:
@@ -1391,7 +1396,8 @@ def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
 			_stream_baked_shot_instance_1513(spaceID, identity)
 
 
-def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None):
+def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None,
+		motion_yaw=None):
 	import math
 	minimum, maximum = bbox[:2]
 	half_width = max(abs(minimum[0]), abs(maximum[0])) + 0.5
@@ -1403,6 +1409,32 @@ def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None):
 		reach = 0.8 + min(abs(vel) * 0.25, 1.2)
 	else:
 		reach = max(0.0, float(travel_reach))
+	if motion_yaw is not None:
+		# Ram separation, slope slip and wall deflection translate the chassis
+		# independently of its orientation.  Preserve the real hull OBB and add
+		# half of the translation as a fourth zonotope generator.  This is the
+		# exact swept volume for a fixed-orientation OBB; rotating the hull to the
+		# travel direction would lose the long front/rear corners.
+		cos_y = math.cos(yaw)
+		sin_y = math.sin(yaw)
+		center_forward = (front - back) * 0.5
+		half_forward = (front + back) * 0.5
+		motion_sin = math.sin(float(motion_yaw))
+		motion_cos = math.cos(float(motion_yaw))
+		travel_x = motion_sin * reach
+		travel_z = motion_cos * reach
+		center_y = pos.y + (minimum[1] + maximum[1]) * 0.5
+		half_y = (maximum[1] - minimum[1]) * 0.5
+		center = (
+			pos.x + sin_y * center_forward + travel_x * 0.5,
+			center_y,
+			pos.z + cos_y * center_forward + travel_z * 0.5)
+		half_axes = (
+			(cos_y * half_width, 0.0, -sin_y * half_width),
+			(0.0, half_y, 0.0),
+			(sin_y * half_forward, 0.0, cos_y * half_forward),
+			(travel_x * 0.5, 0.0, travel_z * 0.5))
+		return center, half_axes
 	if vel < 0.0:
 		minimum_forward = -(back + reach)
 		maximum_forward = front
@@ -1933,7 +1965,8 @@ def take_ground_skip_count():
 	return int(count)
 
 
-def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04):
+def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04,
+		motion_yaw=None):
 	"""Return whether a fragile/module hide window still covers the hull.
 
 	This is classification only.  Callers keep the pose blocked while the native
@@ -1945,7 +1978,8 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04):
 	if _destructible_catalog is None or bbox is None:
 		return False
 	vehicle_box = _vehicle_swept_box(
-		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt))
+		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
+		motion_yaw=motion_yaw)
 	pending = globals().get('g_offh_destr_pending', {})
 	for candidate in _catalog_contact_candidates(vehicle_box):
 		deadline = pending.get((candidate[0], candidate[1], candidate[2]))
@@ -1954,14 +1988,16 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04):
 	return False
 
 
-def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04):
+def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04,
+		motion_yaw=None):
 	"""Cheap contact-bin guard for the copied player/Bot pose integrators."""
 	bbox = _vehicle_hull_bbox(td)
 	if _destructible_catalog is None or bbox is None:
 		return False
 	return bool(_catalog_contact_candidates(
 		_vehicle_swept_box(
-			pos, yaw, vel, bbox, _motion_travel_reach(vel, dt))))
+			pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
+			motion_yaw=motion_yaw)))
 
 
 def _catalog_motion_result(status, token=None, accepted_now=False,
@@ -1988,7 +2024,7 @@ def _catalog_motion_result(status, token=None, accepted_now=False,
 def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		return_status=False, dt=0.04, kinetic_speed=None,
 		return_detail=False, kinetic_commit=False, commit_enabled=True,
-		proposal_only=False):
+		proposal_only=False, motion_yaw=None):
 	"""Resolve exact streamed OBB contact before committing local movement."""
 	if proposal_only and (not return_detail or not kinetic_commit):
 		raise ValueError(
@@ -2007,7 +2043,8 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	auth = _get_destr_authority()
 	_refresh_destroyed_falling_instances_1513(spaceID, auth, now)
 	vehicle_box = _vehicle_swept_box(
-		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt))
+		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
+		motion_yaw=motion_yaw)
 	# The visible player does not run the authority Bot scan that normally
 	# populates the live item registry.  Admit only checksum-pinned wires in the
 	# current hull bins through the same read-only native validation as shells.
@@ -2024,7 +2061,7 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_box = (_vehicle_contact_box(
 		pos, yaw, bbox, travel=float(vel) * max(0.0, float(dt)))
-		if kinetic_speed is not None else None)
+		if kinetic_speed is not None and motion_yaw is None else None)
 	blocked = False
 	crushed = False
 	kinetic = False
@@ -2178,12 +2215,13 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 
 
 def _catalog_motion_proposal(spaceID, pos, yaw, vel, td, now,
-		dt=0.04, kinetic_speed=None):
+		dt=0.04, kinetic_speed=None, motion_yaw=None):
 	"""Return a mutation-free exact hull-sweep proposal for worker review."""
 	return _catalog_motion_blocked(
 		spaceID, pos, yaw, vel, td, now, dt=dt,
 		kinetic_speed=kinetic_speed, return_detail=True,
-		kinetic_commit=True, commit_enabled=True, proposal_only=True)
+		kinetic_commit=True, commit_enabled=True, proposal_only=True,
+		motion_yaw=motion_yaw)
 
 
 def _catalog_instance_boxes(chunkID, itemIndex, filename, kind,

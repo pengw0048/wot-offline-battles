@@ -7302,6 +7302,34 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 0.25 + math.pi,
                 world_probe.call_args.kwargs['motion_yaw'])
 
+            catalog = types.SimpleNamespace(
+                _catalog_motion_blocked=mock.Mock(
+                    return_value={'status': 'clear'}),
+                _catalog_pending_at_hull=mock.Mock(return_value=False),
+                _catalog_hull_contact=mock.Mock(return_value=False))
+            battle._destructibles = catalog
+            world_probe.reset_mock()
+            self.assertTrue(battle._motion_is_clear(
+                entity, (0.0, 7.0, 0.0), 0.55, 1.0, 0.1,
+                hull_yaw=0.0))
+            blocked_call = catalog._catalog_motion_blocked.call_args
+            self.assertEqual(0.0, blocked_call.args[2])
+            self.assertEqual(0.55, blocked_call.kwargs['motion_yaw'])
+
+            world_probe.return_value = 'hard'
+            self.assertFalse(battle._motion_is_clear(
+                entity, (0.0, 7.0, 0.0), 1.0, -1.0, 0.1,
+                hull_yaw=0.25))
+            pending_call = catalog._catalog_pending_at_hull.call_args
+            hull_call = catalog._catalog_hull_contact.call_args
+            self.assertEqual(0.25, pending_call.args[1])
+            self.assertEqual(0.25, hull_call.args[1])
+            self.assertAlmostEqual(
+                1.0 + math.pi,
+                pending_call.kwargs['motion_yaw'])
+            self.assertAlmostEqual(
+                1.0 + math.pi, hull_call.kwargs['motion_yaw'])
+
     def test_supported_map_installs_catalog_before_native_destructible_reset(self):
         runtime = _runtime()
         runtime.area_destructibles = object()

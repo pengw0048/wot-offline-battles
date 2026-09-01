@@ -242,57 +242,89 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			# 1.2 m cap was shorter than a 20 m/s tank's 2 m slow-frame step and
 			# could miss a hard wall immediately behind a crushed light prop.
 			_ahead = max(0.4, abs(vel) * dt + 0.2)
-		# Hull yaw owns the OBB.  Lateral impulses may supply a different
-		# direction for the swept corridor without rotating that footprint.
 		cos_y = math.cos(yaw)
 		sin_y = math.sin(yaw)
-		right_x, right_z = cos_y, -sin_y
-		forward_x, forward_z = sin_y, cos_y
-		explicit_motion_yaw = motion_yaw is not None
+		lane_segments = []
 		if motion_yaw is None:
-			motion_yaw = (float(yaw) if vel > 0.0 else
-				float(yaw) + math.pi)
-		motion_sin = math.sin(float(motion_yaw))
-		motion_cos = math.cos(float(motion_yaw))
-		perp_x, perp_z = motion_cos, -motion_sin
-		forward_dot = (
-			motion_sin * forward_x + motion_cos * forward_z)
-		right_dot = motion_sin * right_x + motion_cos * right_z
-		leading_extent = (abs(right_dot) * hw + max(
-			forward_dot * -hl_back, forward_dot * hl_front))
-		perp_forward_dot = (
-			perp_x * forward_x + perp_z * forward_z)
-		perp_right_dot = perp_x * right_x + perp_z * right_z
-		lateral_right_extent = abs(perp_right_dot) * hw
-		lateral_min = lateral_right_extent * -1.0 + min(
-			perp_forward_dot * -hl_back,
-			perp_forward_dot * hl_front)
-		lateral_max = lateral_right_extent + max(
-			perp_forward_dot * -hl_back,
-			perp_forward_dot * hl_front)
-		lane_offsets = (lateral_min, 0.0, lateral_max)
-		if not explicit_motion_yaw and vel <= 0.0:
-			# The reverse motion basis points its perpendicular to the old
-			# right-to-left lane order.  Retain the legacy left/centre/right
-			# evaluation order because a lane may own one native prop commit.
-			lane_offsets = (lateral_max, 0.0, lateral_min)
+			# Keep the shipped longitudinal probe byte-for-byte in geometry and
+			# lane order.  The explicit path below is only for cross-heading
+			# translation introduced by ram, slip and wall deflection.
+			back_margin = -0.5 if vel > 0.0 else 0.5
+			front_margin = ((hl_front + _ahead) if vel > 0.0 else
+				-(hl_back + _ahead))
+			direction = 1.0 if vel >= 0.0 else -1.0
+			look = (hl_front if vel > 0.0 else hl_back) + _ahead
+			target_len = abs(back_margin) + look
+			for offset_x in (-hw, 0.0, hw):
+				sx = pos.x + cos_y * offset_x
+				sz = pos.z - sin_y * offset_x
+				x1 = sx + sin_y * back_margin
+				z1 = sz + cos_y * back_margin
+				x2 = sx + sin_y * front_margin
+				z2 = sz + cos_y * front_margin
+				lane_segments.append((
+					x1, z1, x2, z2, target_len,
+					sx, sz, sin_y, cos_y, direction, look))
+		else:
+			# The supplied yaw is already the true signed travel direction.
+			# Sweep each real hull corner plus the centre line.  A diagonal
+			# projection can leave a corner metres behind the old shared u=-0.5
+			# start, while strict lateral/longitudinal motion merges back to three
+			# lanes.
+			motion_sin = math.sin(float(motion_yaw))
+			motion_cos = math.cos(float(motion_yaw))
+			perp_x, perp_z = motion_cos, -motion_sin
+			right_u = motion_sin * cos_y - motion_cos * sin_y
+			forward_u = motion_sin * sin_y + motion_cos * cos_y
+			right_v = perp_x * cos_y - perp_z * sin_y
+			forward_v = perp_x * sin_y + perp_z * cos_y
+			projected = []
+			for hull_right, hull_forward in (
+					(-hw, -hl_back), (hw, -hl_back),
+					(hw, hl_front), (-hw, hl_front)):
+				corner_u = right_u * hull_right + forward_u * hull_forward
+				corner_v = right_v * hull_right + forward_v * hull_forward
+				projected.append((corner_v, corner_u, corner_u + _ahead))
+			limits = []
+			if right_u > 1.0e-9:
+				limits.append(hw / right_u)
+			elif right_u < -1.0e-9:
+				limits.append(-hw / right_u)
+			if forward_u > 1.0e-9:
+				limits.append(hl_front / forward_u)
+			elif forward_u < -1.0e-9:
+				limits.append(-hl_back / forward_u)
+			center_front = min(limits) if limits else 0.0
+			projected.append((0.0, -0.5, center_front + _ahead))
+			merged = []
+			for lane_v, start_u, end_u in sorted(projected):
+				if merged and abs(lane_v - merged[-1][0]) <= 1.0e-7:
+					previous_v, previous_start, previous_end = merged[-1]
+					merged[-1] = (
+						previous_v, min(previous_start, start_u),
+						max(previous_end, end_u))
+				else:
+					merged.append((lane_v, start_u, end_u))
+			for lane_v, start_u, end_u in merged:
+				x1 = pos.x + perp_x * lane_v + motion_sin * start_u
+				z1 = pos.z + perp_z * lane_v + motion_cos * start_u
+				x2 = pos.x + perp_x * lane_v + motion_sin * end_u
+				z2 = pos.z + perp_z * lane_v + motion_cos * end_u
+				target_len = end_u - start_u
+				lane_segments.append((
+					x1, z1, x2, z2, target_len,
+					x1, z1, motion_sin, motion_cos, 1.0, target_len))
 		_crush_state = [False]
 		_kinetic_contact = False
 
-		for offset_x in lane_offsets:
-			sx = pos.x + perp_x * offset_x
-			sz = pos.z + perp_z * offset_x
-
-			x1 = sx - motion_sin * 0.5
-			z1 = sz - motion_cos * 0.5
-			x2 = sx + motion_sin * (leading_extent + _ahead)
-			z2 = sz + motion_cos * (leading_extent + _ahead)
+		for (x1, z1, x2, z2, target_len,
+				profile_x, profile_z, profile_sin, profile_cos,
+				profile_direction, profile_look) in lane_segments:
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
 			start_bot = Math.Vector3(x1, pos.y + 0.6, z1)
 			end_bot = Math.Vector3(x2, pos.y + 0.6, z2)
 			col_bot = _collide_horizontal(spaceID, start_bot, end_bot)
-			target_len = 0.5 + leading_extent + _ahead
 			
 			if col_bot is not None:
 				d_bot = (col_bot[0] - start_bot).length
@@ -301,7 +333,6 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					# exact lane has a continuous non-flat ground profile and the
 					# native contact normal is also a drivable surface. This handles
 					# downhill terrain without hiding a wall merely located on a hill.
-					_look = leading_extent + _ahead
 					_heights = ()
 					_segment = 0.0
 					_gradient_limit = _MAX_DESCENDING_GRADIENT
@@ -310,8 +341,9 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					# Only a surface that could be a slope earns the exact lane profile.
 					if _drivable_surface(col_bot, _gradient_limit):
 						_heights, _segment = _ground_profile(
-							spaceID, Math, pos, sx, sz,
-							motion_sin, motion_cos, 1.0, _look)
+							spaceID, Math, pos, profile_x, profile_z,
+							profile_sin, profile_cos, profile_direction,
+							profile_look)
 						_gradient_limit = _profile_gradient_limit(_heights)
 						if (_heights and
 								abs(float(_heights[-1]) -

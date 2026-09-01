@@ -595,13 +595,177 @@ class WorldCollisionTests(unittest.TestCase):
             if abs(start.y - 0.6) < 0.001]
         self.assertEqual(3, len(lower_rays))
         for start, end in lower_rays:
-            self.assertAlmostEqual(-0.5, start.x)
             self.assertAlmostEqual(1.9, end.x)
             self.assertGreater(end.x, start.x)
             self.assertAlmostEqual(start.z, end.z)
-        lane_positions = sorted(start.z for start, unused_end in lower_rays)
-        for actual, expected in zip(lane_positions, (-4.0, 0.0, 6.0)):
-            self.assertAlmostEqual(expected, actual)
+        lanes = sorted((start.z, start.x)
+                       for start, unused_end in lower_rays)
+        for (actual_z, actual_x), (expected_z, expected_x) in zip(
+                lanes, ((-4.0, -1.5), (0.0, -0.5), (6.0, -1.5))):
+            self.assertAlmostEqual(expected_z, actual_z)
+            self.assertAlmostEqual(expected_x, actual_x)
+
+    def test_diagonal_motion_sweeps_each_projected_extreme_corner(self):
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.6, -1.0, -4.0),
+                    (1.6, 1.0, 6.0), None))))
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+
+        for motion_yaw, velocity in (
+                (0.55, 5.0), (-0.55, 5.0),
+                (1.0, 5.0), (-1.0, 5.0),
+                (0.55 + math.pi, -5.0)):
+            motion_x = math.sin(motion_yaw)
+            motion_z = math.cos(motion_yaw)
+            perp_x = motion_z
+            perp_z = -motion_x
+            corners = []
+            for corner_x, corner_z in (
+                    (-1.5, -4.0), (1.5, -4.0),
+                    (1.5, 6.0), (-1.5, 6.0)):
+                corners.append((
+                    corner_x * motion_x + corner_z * motion_z,
+                    corner_x * perp_x + corner_z * perp_z,
+                    corner_x, corner_z))
+            extremes = (
+                min(corners, key=lambda value: value[1]),
+                max(corners, key=lambda value: value[1]))
+            candidates = [value for value in extremes if value[0] < -0.5]
+            self.assertTrue(candidates)
+            unused_u, unused_v, corner_x, corner_z = min(candidates)
+            obstacle_x = corner_x + motion_x * 0.1
+            obstacle_z = corner_z + motion_z * 0.1
+
+            def collide(unused_space, start, end, unused_mask):
+                delta_x = end.x - start.x
+                delta_z = end.z - start.z
+                length_squared = delta_x * delta_x + delta_z * delta_z
+                if length_squared <= 1.0e-12:
+                    return None
+                progress = ((obstacle_x - start.x) * delta_x +
+                            (obstacle_z - start.z) * delta_z) / length_squared
+                if progress < 0.0 or progress > 1.0:
+                    return None
+                nearest_x = start.x + delta_x * progress
+                nearest_z = start.z + delta_z * progress
+                distance_squared = ((nearest_x - obstacle_x) ** 2 +
+                                    (nearest_z - obstacle_z) ** 2)
+                if distance_squared > 1.0e-10:
+                    return None
+                return (_Vector(nearest_x, start.y, nearest_z),
+                        _Vector(0.0, 0.0, -1.0), 0)
+
+            bigworld = types.ModuleType('BigWorld')
+            bigworld.wg_collideSegment = collide
+            bigworld.wg_getMatInfoNearPoint = _miss_mat_info_1513
+
+            self.assertEqual(
+                'hard', world_collision.check_horizontal_collision(
+                    bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                    descriptor, False, 0.04, True,
+                    commit_enabled=False, motion_yaw=motion_yaw))
+
+    def test_diagonal_motion_lower_rays_cover_all_four_corner_paths(self):
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.6, -1.0, -4.0),
+                    (1.6, 1.0, 6.0), None))))
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+
+        for velocity in (5.0, -5.0):
+            for candidate_yaw in (0.55, -0.55, 1.0, -1.0):
+                motion_yaw = (candidate_yaw if velocity > 0.0 else
+                              candidate_yaw + math.pi)
+                horizontal_calls = []
+
+                def collide(unused_space, start, end, unused_mask):
+                    horizontal_calls.append((start, end))
+                    return None
+
+                bigworld = types.ModuleType('BigWorld')
+                bigworld.wg_collideSegment = collide
+                bigworld.wg_getMatInfoNearPoint = _miss_mat_info_1513
+                self.assertFalse(
+                    world_collision.check_horizontal_collision(
+                        bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                        descriptor, False, 0.04,
+                        motion_yaw=motion_yaw))
+                lower_rays = [
+                    (start, end) for start, end in horizontal_calls
+                    if abs(start.y - 0.6) < 0.001]
+                self.assertEqual(5, len(lower_rays))
+                motion_x = math.sin(motion_yaw)
+                motion_z = math.cos(motion_yaw)
+                for corner_x, corner_z in (
+                        (-1.5, -4.0), (1.5, -4.0),
+                        (1.5, 6.0), (-1.5, 6.0)):
+                    target_x = corner_x + motion_x * 0.1
+                    target_z = corner_z + motion_z * 0.1
+                    distances = []
+                    for start, end in lower_rays:
+                        delta_x = end.x - start.x
+                        delta_z = end.z - start.z
+                        length_squared = (
+                            delta_x * delta_x + delta_z * delta_z)
+                        progress = ((target_x - start.x) * delta_x +
+                                    (target_z - start.z) * delta_z)
+                        progress = max(
+                            0.0, min(1.0, progress / length_squared))
+                        nearest_x = start.x + delta_x * progress
+                        nearest_z = start.z + delta_z * progress
+                        distances.append(
+                            (nearest_x - target_x) ** 2 +
+                            (nearest_z - target_z) ** 2)
+                    self.assertLess(min(distances), 1.0e-10)
+
+    def test_diagonal_drivable_profile_samples_the_hit_corner_segment(self):
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.6, -1.0, -4.0),
+                    (1.6, 1.0, 6.0), None))))
+        hit_segment = []
+
+        def collide(unused_space, start, end, unused_mask):
+            if abs(start.y - 0.6) < 0.001 and not hit_segment:
+                hit_segment.append((start, end))
+                return (_Vector(
+                    (start.x + end.x) * 0.5, start.y,
+                    (start.z + end.z) * 0.5),
+                    _Vector(0.0, 1.0, 0.0), 0)
+            return None
+
+        def ground_profile(unused_space, unused_math, unused_pos,
+                           unused_x, unused_z, unused_sin, unused_cos,
+                           unused_direction, look, segment_count=6):
+            segment = float(look) / float(segment_count)
+            return ([index * segment * 0.5
+                     for index in range(segment_count + 1)], segment)
+
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = collide
+        bigworld.wg_getMatInfoNearPoint = _miss_mat_info_1513
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        with mock.patch.object(
+                world_collision, '_ground_profile',
+                side_effect=ground_profile) as profile:
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+                descriptor, False, 0.04, motion_yaw=0.55))
+
+        start, end = hit_segment[0]
+        call = profile.call_args.args
+        self.assertAlmostEqual(start.x, call[3])
+        self.assertAlmostEqual(start.z, call[4])
+        self.assertAlmostEqual(
+            ((end.x - start.x) ** 2 + (end.z - start.z) ** 2) ** 0.5,
+            call[8])
 
     def test_omitted_motion_yaw_preserves_forward_and_reverse_sweeps(self):
         descriptor = _Strict1513Component(

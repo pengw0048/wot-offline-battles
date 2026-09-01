@@ -5820,6 +5820,110 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(1, counts['receipt_contact_invalidated'])
         self.assertEqual(0, counts['receipt_contact_entries'])
 
+    def test_lateral_catalog_sweep_keeps_long_hull_corner_in_both_directions(
+            self):
+        self._empty_catalog_scan_fixture()
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.6, -1.0, -4.0), (1.6, 1.0, 6.0), None))))
+
+        for item_index, motion_yaw, contact_x in (
+                (7, math.pi * 0.5, 2.5),
+                (8, -math.pi * 0.5, -2.5)):
+            instance = {
+                'filename': 'known.model',
+                'descriptor_filename': 'known.model',
+                'kind': 'fragile',
+                'item_scale': 1.0,
+                'boxes': (((contact_x, 0.0, 5.5),
+                           ((0.25, 0.0, 0.0), (0.0, 0.5, 0.0),
+                            (0.0, 0.0, 0.25)), None),),
+            }
+            destructibles_sensor.g_offh_destr_instances = {
+                (22, item_index): instance}
+            destructibles_sensor.g_offh_destr_contact_bins = {}
+            destructibles_sensor._index_catalog_instance_1513(
+                destructibles_sensor.g_offh_destr_contact_bins,
+                (22, item_index), instance)
+
+            self.assertTrue(destructibles_sensor._catalog_hull_contact(
+                _Vector(), 0.0, 5.0, descriptor, 0.2,
+                motion_yaw=motion_yaw))
+
+    def test_lateral_catalog_sweep_excludes_rotated_hull_false_region(self):
+        self._empty_catalog_scan_fixture()
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.6, -1.0, -4.0), (1.6, 1.0, 6.0), None))))
+        instance = {
+            'filename': 'known.model',
+            'descriptor_filename': 'known.model',
+            'kind': 'fragile',
+            'item_scale': 1.0,
+            'boxes': (((5.5, 0.0, 0.0),
+                       ((0.25, 0.0, 0.0), (0.0, 0.5, 0.0),
+                        (0.0, 0.0, 0.25)), None),),
+        }
+        destructibles_sensor.g_offh_destr_instances = {(22, 7): instance}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+        destructibles_sensor._index_catalog_instance_1513(
+            destructibles_sensor.g_offh_destr_contact_bins,
+            (22, 7), instance)
+
+        self.assertFalse(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 5.0, descriptor, 0.2,
+            motion_yaw=math.pi * 0.5))
+
+    def test_diagonal_swept_zonotope_excludes_its_empty_aabb_corner(self):
+        bbox = ((-1.6, -1.0, -4.0), (1.6, 1.0, 6.0), None)
+        swept = destructibles_sensor._vehicle_swept_box(
+            _Vector(), 0.0, 5.0, bbox, 1.0, motion_yaw=0.55)
+        bounds = destructibles_sensor._box_xz_bounds(swept)
+        outside = (
+            (-2.0, 0.0, 6.7),
+            ((0.05, 0.0, 0.0), (0.0, 0.5, 0.0),
+             (0.0, 0.0, 0.05)), None)
+
+        self.assertLess(bounds[0], outside[0][0])
+        self.assertGreater(bounds[1], outside[0][0])
+        self.assertLess(bounds[2], outside[0][2])
+        self.assertGreater(bounds[3], outside[0][2])
+        self.assertFalse(destructibles_sensor._boxes_intersect(
+            swept, outside))
+
+    def test_lateral_catalog_contact_invalidates_warm_empty_receipt(self):
+        self._empty_catalog_scan_fixture()
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.6, -1.0, -4.0), (1.6, 1.0, 6.0), None))))
+        destructibles_sensor.g_offh_destr_instances = {}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+        self.assertFalse(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 5.0, descriptor, 0.2,
+            motion_yaw=math.pi * 0.5))
+        instance = {
+            'filename': 'known.model',
+            'descriptor_filename': 'known.model',
+            'kind': 'fragile',
+            'item_scale': 1.0,
+            'boxes': (((2.5, 0.0, 5.5),
+                       ((0.25, 0.0, 0.0), (0.0, 0.5, 0.0),
+                        (0.0, 0.0, 0.25)), None),),
+        }
+        destructibles_sensor.g_offh_destr_instances[(22, 7)] = instance
+        destructibles_sensor._index_catalog_instance_1513(
+            destructibles_sensor.g_offh_destr_contact_bins,
+            (22, 7), instance)
+
+        self.assertTrue(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 5.0, descriptor, 0.2,
+            motion_yaw=math.pi * 0.5))
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_contact_invalidated'])
+
     def test_chunk_registry_limits_each_frame_to_nearby_contact_bins(self):
         registry = {'bins': {}, 'extended_bins': {}, 'count': 0,
                     'max_radius': 4.5}

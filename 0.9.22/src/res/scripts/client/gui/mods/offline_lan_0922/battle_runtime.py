@@ -13357,6 +13357,9 @@ class BattleRuntime(object):
         world_hull_yaw = yaw if hull_yaw is None else hull_yaw
         world_motion_yaw = (None if hull_yaw is None else
                             yaw if speed >= 0.0 else yaw + math.pi)
+        destructible_motion = ({}
+                               if world_motion_yaw is None else
+                               {'motion_yaw': world_motion_yaw})
         kinetic_speed = None
         if allow_crush_drive:
             params = self._local_physics
@@ -13370,9 +13373,10 @@ class BattleRuntime(object):
             proposer = getattr(
                 self._destructibles, '_catalog_motion_proposal', None)
             proposal = (proposer(
-                self._avatar.spaceID, self._vector(position), yaw,
+                self._avatar.spaceID, self._vector(position), world_hull_yaw,
                 speed, entity.typeDescriptor, self._clock(),
-                dt=dt, kinetic_speed=kinetic_speed)
+                dt=dt, kinetic_speed=kinetic_speed,
+                **destructible_motion)
                 if callable(proposer) else None)
             # Lightweight injected adapters predating the proposal seam keep
             # using the read-only catalog path below. Production's pinned
@@ -13451,24 +13455,26 @@ class BattleRuntime(object):
         if world_status == 'hard':
             if self._destructibles is not None:
                 if self._destructibles._catalog_pending_at_hull(
-                        self._vector(position), yaw, speed,
-                        entity.typeDescriptor, self._clock(), dt):
+                        self._vector(position), world_hull_yaw, speed,
+                        entity.typeDescriptor, self._clock(), dt,
+                        **destructible_motion):
                     self._local_motion_soft_block = True
                     self._local_motion_kinds = 'broken'
                 elif self._destructibles._catalog_hull_contact(
-                        self._vector(position), yaw, speed,
-                        entity.typeDescriptor, dt):
+                        self._vector(position), world_hull_yaw, speed,
+                        entity.typeDescriptor, dt, **destructible_motion):
                     self._local_motion_kinds = 'world'
             self._local_motion_status = 'hard'
             return False
         if self._destructibles is None:
             return world_status == 'clear'
         detail = self._destructibles._catalog_motion_blocked(
-            self._avatar.spaceID, self._vector(position), yaw,
+            self._avatar.spaceID, self._vector(position), world_hull_yaw,
             speed, entity.typeDescriptor, self._clock(),
             dt=dt, kinetic_speed=kinetic_speed,
             return_detail=True,
-            kinetic_commit=False, commit_enabled=False)
+            kinetic_commit=False, commit_enabled=False,
+            **destructible_motion)
         # Keep injected legacy test/adaptor seams fail-closed.  Production's
         # exact #1513 sensor always returns the typed receipt above.
         if isinstance(detail, bool):
