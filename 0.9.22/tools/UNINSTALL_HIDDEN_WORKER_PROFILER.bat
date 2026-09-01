@@ -2,7 +2,7 @@
 setlocal
 
 set "GAME_ROOT=%~1"
-if not defined GAME_ROOT if exist "%~dp0WorldOfTanks.exe" set "GAME_ROOT=%~dp0"
+if not defined GAME_ROOT if exist "%~dp0WorldOfTanks.exe" set "GAME_ROOT=%~dp0."
 if not defined GAME_ROOT set /p "GAME_ROOT=Folder containing WorldOfTanks.exe: "
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ^
