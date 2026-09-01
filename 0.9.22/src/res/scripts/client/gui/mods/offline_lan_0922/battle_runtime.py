@@ -60,9 +60,8 @@ from gui.mods.offline_lan_0922 import (
 # and makes copied local physics, authority bots and remote interpolation step
 # even while the renderer itself reports a healthy frame rate.
 FRAME_SECONDS = 0.0
-# Runtime profiling is observational. The same process-time clock separately
-# gates whether a hidden-worker callback may run its second fixed catch-up
-# step; it never becomes simulation time or changes retained elapsed debt.
+# Runtime profiling is observational. Its process-time clock never becomes
+# simulation time and never feeds the fixed-control or A* schedulers.
 PERFORMANCE_DIAGNOSTICS = True
 WORKER_NATIVE_PROBE_SECONDS = 5.0
 # Keep enough timing evidence for user-submitted logs without displacing
@@ -71,6 +70,21 @@ WORKER_NATIVE_PROBE_SECONDS = 5.0
 DIAGNOSTIC_INITIAL_WINDOW_SECONDS = 5.0
 DIAGNOSTIC_WINDOW_SECONDS = 30.0
 DIAGNOSTIC_TOP_FRAMES = 3
+# A normal 30-second window at 60-120 FPS fits entirely. Pathological high
+# frame rates retain only the latest bounded sample set while exact maxima and
+# threshold counts still cover the complete window.
+DIAGNOSTIC_PERCENTILE_SAMPLES = 4096
+_WORKER_DIAGNOSTIC_FIELDS = (
+    'alive_bot_ticks', 'visibility_queue_depth',
+    'visibility_queue_max_depth', 'visibility_oldest_stale_age_ms',
+    'visibility_oldest_stale_max_age_ms', 'visibility_admitted',
+    'visibility_completed', 'visibility_deferred',
+    'visibility_selected_services', 'visibility_fire_services',
+    'visibility_new_services', 'visibility_ordinary_services',
+    'shot_lane_pending_pairs', 'shot_lane_pending_max_pairs',
+    'shot_lane_oldest_due_age_ms', 'shot_lane_oldest_due_max_age_ms',
+    'shot_lane_completed_pairs',
+    'shot_lane_budget_deferred_attempts')
 AMMO_SECONDS = 0.10
 NETWORK_INPUT_SECONDS = 1.0 / 30.0
 RPM_PRESENTATION_SECONDS = 0.10
@@ -375,7 +389,7 @@ def _is_port_object(value):
 
 
 _FRAME_STAGE_NAMES = (
-    'house', 'sync', 'critical', 'drown', 'transition', 'local',
+    'house', 'sync', 'critical', 'drown', 'prewarm', 'transition', 'local',
     'outline', 'bots_update', 'bot_present', 'bot_events', 'spot', 'lock',
     'schedule', 'diag_emit')
 _PROJECTILE_METRIC_NAMES = (
@@ -403,6 +417,7 @@ class _FrameDiagnostics(object):
         self._frame_id = 0
         self._window_id = 0
         self._window_seconds = self._initial_window_seconds
+        self._last_snapshot = {}
         self._reset_window()
 
     def _reset_window(self):
@@ -416,10 +431,18 @@ class _FrameDiagnostics(object):
         self._exec_max = 0.0
         self._outside_sum = 0.0
         self._outside_max = 0.0
+        self._gap_samples = collections.deque(
+            maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES)
+        self._exec_samples = collections.deque(
+            maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES)
+        self._outside_samples = collections.deque(
+            maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES)
+        self._distribution_samples = 0
         self._offframe_sum = 0.0
         self._offframe_max = 0.0
         self._load_busiest = ()
         self._collections = {}
+        self._worker_runtime = {}
         self._stage_sums = dict((name, 0.0)
                                 for name in _FRAME_STAGE_NAMES)
         self._stage_maxima = dict((name, 0.0)
@@ -500,6 +523,10 @@ class _FrameDiagnostics(object):
         self._exec_max = max(self._exec_max, execution)
         self._outside_sum += outside
         self._outside_max = max(self._outside_max, outside)
+        self._gap_samples.append(gap)
+        self._exec_samples.append(execution)
+        self._outside_samples.append(outside)
+        self._distribution_samples += 1
         offframe = row.get('offframe', 0.0)
         self._offframe_sum += offframe
         self._offframe_max = max(self._offframe_max, offframe)
@@ -568,24 +595,122 @@ class _FrameDiagnostics(object):
         self._load_busiest = tuple(report.get('busiest') or ())
         return True
 
+    def note_worker_runtime(self, report):
+        """Record one low-frequency fixed-control/presentation snapshot."""
+        if not self.enabled or not isinstance(report, dict):
+            return False
+        self._worker_runtime = dict(report)
+        return True
+
     @staticmethod
     def _milliseconds(value):
         return max(0.0, float(value)) * 1000.0
+
+    @staticmethod
+    def _percentile(sorted_values, fraction):
+        if not sorted_values:
+            return 0.0
+        if len(sorted_values) == 1:
+            return float(sorted_values[0])
+        rank = max(0.0, min(1.0, float(fraction))) * (
+            len(sorted_values) - 1)
+        lower = int(math.floor(rank))
+        upper = int(math.ceil(rank))
+        if lower == upper:
+            return float(sorted_values[lower])
+        weight = rank - lower
+        return (float(sorted_values[lower]) * (1.0 - weight) +
+                float(sorted_values[upper]) * weight)
+
+    def _distribution(self, samples, exact_maximum):
+        values = sorted(samples)
+        return {
+            'p50': self._milliseconds(self._percentile(values, 0.50)),
+            'p95': self._milliseconds(self._percentile(values, 0.95)),
+            'p99': self._milliseconds(self._percentile(values, 0.99)),
+            'max': self._milliseconds(exact_maximum),
+        }
+
+    def snapshot(self):
+        """Return the most recently completed bounded performance window."""
+        return dict(self._last_snapshot)
 
     def _format(self):
         samples = max(1, self._samples)
         elapsed = max(1e-9, self._window_elapsed)
         context = self._last_context
         self._window_id += 1
+        gap_distribution = self._distribution(
+            self._gap_samples, self._gap_max)
+        exec_distribution = self._distribution(
+            self._exec_samples, self._exec_max)
+        outside_distribution = self._distribution(
+            self._outside_samples, self._outside_max)
+        stage_snapshot = {}
+        for name in _FRAME_STAGE_NAMES:
+            stage_snapshot[name] = {
+                'avg_ms': self._milliseconds(
+                    self._stage_sums[name] / samples),
+                'max_ms': self._milliseconds(self._stage_maxima[name]),
+            }
+        probe_snapshot = {}
+        for name in PROBE_KINDS:
+            probe_snapshot[name] = {
+                'logical_count': self._probe_sums[name],
+                'logical_hz': self._probe_sums[name] / elapsed,
+                'logical_per_frame_avg': (
+                    float(self._probe_sums[name]) / samples),
+                'logical_per_frame_max': self._probe_maxima[name],
+                'timed_ms_total': self._milliseconds(
+                    self._probe_duration_sums[name]),
+                'timed_ms_per_second': self._milliseconds(
+                    self._probe_duration_sums[name] / elapsed),
+                'timed_ms_per_frame_avg': self._milliseconds(
+                    self._probe_duration_sums[name] / samples),
+                'timed_ms_per_frame_max': self._milliseconds(
+                    self._probe_duration_maxima[name]),
+            }
+        self._last_snapshot = {
+            'schema': 1,
+            'window': self._window_id,
+            'round': context.get('round', '-'),
+            'map': context.get('map', '-'),
+            'phase': context.get('phase', '-'),
+            'role': context.get('role', '-'),
+            'probe_timing': context.get('probe_timing', 'off'),
+            'samples': self._samples,
+            'seconds': self._window_elapsed,
+            'render_callback_fps': self._samples / elapsed,
+            'distribution_samples': len(self._gap_samples),
+            'distribution_dropped': max(
+                0, self._distribution_samples - len(self._gap_samples)),
+            'frame_interval_ms': gap_distribution,
+            'python_callback_ms': exec_distribution,
+            'outside_callback_ms': outside_distribution,
+            'python_stages_ms': stage_snapshot,
+            # One logical probe can contain several native calls. The current
+            # Python boundary cannot truthfully derive raw call/primitives.
+            'raw_native_calls_measured': False,
+            'logical_native_probes': probe_snapshot,
+            'worker_runtime': dict(self._worker_runtime),
+            'over_50_67_100': (
+                self._over_50, self._over_67, self._over_100),
+            'simulation_caps': self._sim_caps,
+            'clock_regressions': self._clock_regressions,
+        }
         prefix = '[Offline LAN 0.9.22] PERF '
         lines = [
             (prefix +
-             'summary v=2 window=%d round=%s map=%s phase=%s role=%s '
+             'summary v=3 window=%d round=%s map=%s phase=%s role=%s '
              'probe_timing=%s '
              'samples=%d seconds=%.3f fps=%.2f authority_frames=%d '
              'gap_ms_avg_max=%.3f/%.3f raw_dt_ms_avg_max=%.3f/%.3f '
              'exec_ms_avg_max=%.3f/%.3f offframe_ms_avg_max=%.3f/%.3f '
              'outside_ms_avg_max=%.3f/%.3f '
+             'gap_ms_p50_p95_p99_max=%.3f/%.3f/%.3f/%.3f '
+             'python_ms_p50_p95_p99_max=%.3f/%.3f/%.3f/%.3f '
+             'outside_ms_p50_p95_p99_max=%.3f/%.3f/%.3f/%.3f '
+             'distribution_kept_dropped=%d/%d '
              'over_50_67_100=%d/%d/%d sim_caps=%d clock_regress=%d\n') % (
                  self._window_id, context.get('round', '-'),
                  context.get('map', '-'), context.get('phase', '-'),
@@ -602,6 +727,17 @@ class _FrameDiagnostics(object):
                  self._milliseconds(self._offframe_max),
                  self._milliseconds(self._outside_sum / samples),
                  self._milliseconds(self._outside_max),
+                 gap_distribution['p50'], gap_distribution['p95'],
+                 gap_distribution['p99'], gap_distribution['max'],
+                 exec_distribution['p50'], exec_distribution['p95'],
+                 exec_distribution['p99'], exec_distribution['max'],
+                 outside_distribution['p50'],
+                 outside_distribution['p95'],
+                 outside_distribution['p99'],
+                 outside_distribution['max'],
+                 len(self._gap_samples), max(
+                     0, self._distribution_samples -
+                     len(self._gap_samples)),
                  self._over_50, self._over_67, self._over_100,
                  self._sim_caps, self._clock_regressions),
         ]
@@ -613,6 +749,49 @@ class _FrameDiagnostics(object):
             ' '.join('%s=%d' % (name, self._collections[name])
                      for name in sorted(self._collections)) or 'none') +
             '\n')
+        control = self._worker_runtime.get('control') or {}
+        presentation = self._worker_runtime.get('presentation') or {}
+        bot_diagnostics = self._worker_runtime.get('bot_diagnostics') or {}
+        lines.append(
+            (prefix +
+             'worker control_steps=%s catchup=%s debt_callbacks=%s '
+             'control_debt_ms=%s max_control_step_ms=%s '
+             'astar_pending=%s astar_credit=%s astar_budget_remaining=%s '
+             'astar_budget_exhausted=%s astar_completed=%s astar_failed=%s '
+             'visibility_queue_depth_max=%s/%s '
+             'visibility_oldest_ms_max=%s/%s '
+             'shot_lane_pending_max=%s/%s '
+             'shot_lane_oldest_due_ms_max=%s/%s '
+             'shot_lane_completed_deferred=%s/%s '
+             'pose_writes_skips=%s/%s aim_writes_skips=%s/%s\n') % (
+                 control.get('control_steps'),
+                 control.get('catchup_callbacks'),
+                 control.get('debt_callbacks'),
+                 control.get('control_debt_ms'),
+                 control.get('max_control_step_ms'),
+                 control.get('astar_pending'),
+                 control.get('astar_credit'),
+                 control.get('astar_budget_remaining'),
+                 control.get('astar_budget_exhausted_callbacks'),
+                 control.get('astar_completed'),
+                 control.get('astar_failed'),
+                 bot_diagnostics.get('visibility_queue_depth'),
+                 bot_diagnostics.get('visibility_queue_max_depth'),
+                 bot_diagnostics.get('visibility_oldest_stale_age_ms'),
+                 bot_diagnostics.get(
+                     'visibility_oldest_stale_max_age_ms'),
+                 bot_diagnostics.get('shot_lane_pending_pairs'),
+                 bot_diagnostics.get('shot_lane_pending_max_pairs'),
+                 bot_diagnostics.get('shot_lane_oldest_due_age_ms'),
+                 bot_diagnostics.get(
+                     'shot_lane_oldest_due_max_age_ms'),
+                 bot_diagnostics.get('shot_lane_completed_pairs'),
+                 bot_diagnostics.get(
+                     'shot_lane_budget_deferred_attempts'),
+                 presentation.get('pose_writes'),
+                 presentation.get('pose_skips'),
+                 presentation.get('aim_writes'),
+                 presentation.get('aim_skips')))
         stage_values = []
         for name in _FRAME_STAGE_NAMES:
             stage_values.append('%s=%.3f/%.3f' % (
@@ -626,8 +805,15 @@ class _FrameDiagnostics(object):
             probe_values.append('%s=%.2f/%d' % (
                 name, float(self._probe_sums[name]) / samples,
                 self._probe_maxima[name]))
-        lines.append(prefix + 'probes_avg_max ' +
+        lines.append(prefix + 'logical_probes_avg_max ' +
                      ' '.join(probe_values) + '\n')
+        probe_rate_values = []
+        for name in PROBE_KINDS:
+            probe_rate_values.append('%s=%.2f/%d' % (
+                name, self._probe_sums[name] / elapsed,
+                self._probe_sums[name]))
+        lines.append(prefix + 'logical_probes_hz_total ' +
+                     ' '.join(probe_rate_values) + '\n')
         probe_duration_values = []
         for name in PROBE_KINDS:
             probe_duration_values.append('%s=%.3f/%.3f' % (
@@ -635,8 +821,17 @@ class _FrameDiagnostics(object):
                 self._milliseconds(
                     self._probe_duration_sums[name] / samples),
                 self._milliseconds(self._probe_duration_maxima[name])))
-        lines.append(prefix + 'probe_ms_avg_max ' +
+        lines.append(prefix + 'logical_probe_ms_avg_max ' +
                      ' '.join(probe_duration_values) + '\n')
+        probe_duration_rate_values = []
+        for name in PROBE_KINDS:
+            probe_duration_rate_values.append('%s=%.3f/%.3f' % (
+                name,
+                self._milliseconds(
+                    self._probe_duration_sums[name] / elapsed),
+                self._milliseconds(self._probe_duration_sums[name])))
+        lines.append(prefix + 'logical_probe_ms_per_s_total ' +
+                     ' '.join(probe_duration_rate_values) + '\n')
         lines.append(
             (prefix +
              'projectile_avg_max active=%.2f/%.0f chords=%.2f/%.0f '
@@ -674,7 +869,8 @@ class _FrameDiagnostics(object):
                  'pose_step_m=%.4f speed_mps=%.3f camera_mps=%.3f '
                  'airborne=%d grind=%d bots=%d outgoing=%d '
                  'transition=%d prev_emit=%d '
-                 'projectile=%s stages_ms=%s probes=%s probe_ms=%s\n') % (
+                 'projectile=%s stages_ms=%s logical_probes=%s '
+                 'logical_probe_ms=%s\n') % (
                      rank, row['cause'], row['next'],
                      self._milliseconds(row['wall_gap']),
                      row['raw_dt'] * 1000.0,
@@ -1240,6 +1436,18 @@ class BattleRuntime(object):
         self._worker_probe_bot_send_failed = 0
         self._worker_probe_bot_count = 0
         self._worker_probe_simulation_caps = 0
+        self._worker_probe_control_steps = 0
+        self._worker_probe_catchup_callbacks = 0
+        self._worker_probe_control_debt_callbacks = 0
+        self._worker_probe_max_control_step = 0.0
+        self._worker_probe_control_debt = 0.0
+        self._worker_probe_max_control_debt = 0.0
+        self._worker_probe_astar_budget_exhausted = 0
+        self._worker_probe_astar_max_pending = 0
+        self._authority_pose_writes = 0
+        self._authority_pose_skips = 0
+        self._authority_aim_writes = 0
+        self._authority_aim_skips = 0
         self._frame_diagnostics = (
             _FrameDiagnostics(
                 initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS)
@@ -1493,6 +1701,18 @@ class BattleRuntime(object):
         self._worker_probe_bot_send_failed = 0
         self._worker_probe_bot_count = 0
         self._worker_probe_simulation_caps = 0
+        self._worker_probe_control_steps = 0
+        self._worker_probe_catchup_callbacks = 0
+        self._worker_probe_control_debt_callbacks = 0
+        self._worker_probe_max_control_step = 0.0
+        self._worker_probe_control_debt = 0.0
+        self._worker_probe_max_control_debt = 0.0
+        self._worker_probe_astar_budget_exhausted = 0
+        self._worker_probe_astar_max_pending = 0
+        self._authority_pose_writes = 0
+        self._authority_pose_skips = 0
+        self._authority_aim_writes = 0
+        self._authority_aim_skips = 0
         self._next_bot_manifest_retry = 0.0
         self._bot_manifest_retry_deadline = 0.0
         self._bot_manifest_retry_identity = None
@@ -11841,6 +12061,113 @@ class BattleRuntime(object):
             result['camouflage_id'] = camouflage_id
         return result
 
+    def _record_worker_control_diagnostics(self, sample_time_before):
+        """Observe fixed-control and A* debt without feeding either scheduler."""
+        if not self._worker_mode or self._bots is None:
+            return False
+        try:
+            sample_time_after = int(getattr(
+                self._bots, '_sample_time_us'))
+            sample_time_before = int(sample_time_before)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            sample_time_after = sample_time_before = 0
+        advanced = max(0, sample_time_after - sample_time_before)
+        try:
+            control_steps = max(0, int(getattr(
+                self._bots, '_last_update_control_steps')))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            control_steps = 1 if advanced > 0 else 0
+        try:
+            max_control_step = max(0.0, float(getattr(
+                self._bots, '_last_update_max_control_step')))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            max_control_step = advanced / 1000000.0
+        if math.isnan(max_control_step) or math.isinf(max_control_step):
+            max_control_step = advanced / 1000000.0
+        debt = max(0.0, _number(getattr(
+            self._bots, '_accumulator', 0.0)))
+        self._worker_probe_control_debt = debt
+        self._worker_probe_max_control_debt = max(
+            self._worker_probe_max_control_debt, debt)
+        if advanced > 0:
+            if control_steps <= 0:
+                control_steps = 1
+            self._worker_probe_control_steps += control_steps
+            self._worker_probe_max_control_step = max(
+                self._worker_probe_max_control_step, max_control_step)
+            control_seconds = max(0.0, _number(getattr(
+                self._bots, '_control_seconds', 0.0)))
+            if (control_steps > 1 or
+                    advanced / 1000000.0 > control_seconds + 1.0e-9):
+                self._worker_probe_catchup_callbacks += 1
+            if debt + 1.0e-9 >= control_seconds > 0.0:
+                self._worker_probe_control_debt_callbacks += 1
+        navigator = getattr(self._bots, 'navigator', None)
+        searches = getattr(navigator, 'searches', None)
+        pending = len(searches) if isinstance(searches, dict) else 0
+        self._worker_probe_astar_max_pending = max(
+            self._worker_probe_astar_max_pending, pending)
+        if advanced > 0 and pending > 0:
+            try:
+                remaining = int(getattr(
+                    navigator, 'search_frame_budget'))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                remaining = None
+            if remaining is not None and remaining <= 0:
+                self._worker_probe_astar_budget_exhausted += 1
+        return advanced > 0
+
+    def _worker_diagnostic_totals(self):
+        """Project only bounded non-negative Bot diagnostic integers."""
+        provider = getattr(self._bots, 'diagnostic_totals', None)
+        try:
+            raw = provider() if callable(provider) else {}
+        except Exception:
+            raw = {}
+        result = {}
+        if isinstance(raw, dict):
+            for name in _WORKER_DIAGNOSTIC_FIELDS:
+                value = raw.get(name)
+                if (isinstance(value, bool) or
+                        not isinstance(value, _INTEGER_TYPES) or value < 0):
+                    continue
+                result[name] = int(value)
+        return result
+
+    def _worker_control_snapshot(self):
+        bots = self._bots
+        navigator = getattr(bots, 'navigator', None)
+        searches = getattr(navigator, 'searches', None)
+        pending = len(searches) if isinstance(searches, dict) else None
+
+        def finite_attribute(owner, name):
+            if owner is None or not hasattr(owner, name):
+                return None
+            value = _number(getattr(owner, name), float('nan'))
+            return value if not math.isnan(value) and not math.isinf(
+                value) else None
+
+        return {
+            'control_steps': self._worker_probe_control_steps,
+            'catchup_callbacks': self._worker_probe_catchup_callbacks,
+            'debt_callbacks': self._worker_probe_control_debt_callbacks,
+            'max_control_step_ms': (
+                self._worker_probe_max_control_step * 1000.0),
+            'control_debt_ms': self._worker_probe_control_debt * 1000.0,
+            'max_control_debt_ms': (
+                self._worker_probe_max_control_debt * 1000.0),
+            'astar_pending': pending,
+            'astar_credit': finite_attribute(navigator, 'search_credit'),
+            'astar_budget_remaining': finite_attribute(
+                navigator, 'search_frame_budget'),
+            'astar_completed': finite_attribute(
+                navigator, 'search_completed'),
+            'astar_failed': finite_attribute(navigator, 'search_failed'),
+            'astar_budget_exhausted_callbacks': (
+                self._worker_probe_astar_budget_exhausted),
+            'astar_max_pending': self._worker_probe_astar_max_pending,
+        }
+
     def _authority_worker_probe_sample(self):
         totals = None
         provider = getattr(self._bots, 'probe_totals', None)
@@ -11858,15 +12185,42 @@ class BattleRuntime(object):
                     probes[name] = int(totals[index])
                 except (TypeError, ValueError, OverflowError):
                     continue
-        diagnostic_totals = {}
-        diagnostic_provider = getattr(
-            self._bots, 'diagnostic_totals', None)
-        if callable(diagnostic_provider):
+        duration_totals = None
+        duration_provider = getattr(
+            self._bots, 'probe_duration_totals', None)
+        if callable(duration_provider):
             try:
-                diagnostic_totals = diagnostic_provider()
+                duration_totals = duration_provider()
             except Exception:
-                diagnostic_totals = {}
+                duration_totals = None
+        probe_seconds = {}
+        if isinstance(duration_totals, (list, tuple)):
+            for index, name in enumerate(PROBE_KINDS):
+                if index >= len(duration_totals):
+                    break
+                try:
+                    value = float(duration_totals[index])
+                    if value >= 0.0 and not math.isnan(value) and not math.isinf(
+                            value):
+                        probe_seconds[name] = value
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        probe_timing = 'off'
+        timing_provider = getattr(self._bots, 'probe_timing_state', None)
+        if callable(timing_provider):
+            try:
+                probe_timing = str(timing_provider())
+            except Exception:
+                probe_timing = 'failed'
+        diagnostic_totals = self._worker_diagnostic_totals()
         snapshot = self._last_snapshot or {}
+        frame_performance = {}
+        frame_provider = getattr(self._frame_diagnostics, 'snapshot', None)
+        if callable(frame_provider):
+            try:
+                frame_performance = frame_provider()
+            except Exception:
+                frame_performance = {}
         return {
             'round_finished': self._battle_result is not None,
             'frame_callbacks': self._worker_frame_callbacks,
@@ -11876,9 +12230,20 @@ class BattleRuntime(object):
             'bot_state_send_failed': self._worker_probe_bot_send_failed,
             'bot_state_revision': snapshot.get('bot_state_revision'),
             'bot_probes': probes,
+            'bot_probe_seconds': probe_seconds,
+            'probe_timing': probe_timing,
             'bot_count': self._worker_probe_bot_count,
             'simulation_caps': self._worker_probe_simulation_caps,
             'alive_bot_ticks': diagnostic_totals.get('alive_bot_ticks'),
+            'bot_diagnostics': diagnostic_totals,
+            'control': self._worker_control_snapshot(),
+            'presentation': {
+                'pose_writes': self._authority_pose_writes,
+                'pose_skips': self._authority_pose_skips,
+                'aim_writes': self._authority_aim_writes,
+                'aim_skips': self._authority_aim_skips,
+            },
+            'frame_performance': frame_performance,
         }
 
     def authority_worker_ready_for_draw_off(self):
@@ -12205,8 +12570,13 @@ class BattleRuntime(object):
                     # and make worker authority behave unlike player authority.
                     set_camera(
                         None if self._worker_mode else self._local_position)
+                control_sample_before = getattr(
+                    self._bots, '_sample_time_us', None)
                 outgoing_messages = self._bots.update(
                     rule_dt, now, players=players)
+                if self._worker_mode:
+                    self._record_worker_control_diagnostics(
+                        control_sample_before)
                 after_probes = None
                 after_probe_durations = None
                 if profiling and callable(probe_totals):
@@ -12253,10 +12623,10 @@ class BattleRuntime(object):
                     raise RuntimeError(
                         'authority bot presentation boundary is unavailable')
                 # Pull the accepted authority pose on every render callback,
-                # while the complete simulation and LAN bot_state cadence are
-                # capped together at 30 Hz.  RemoteVehicle's MatrixAnimation
-                # interpolates between changed poses; unchanged pulls are a
-                # cheap no-op and do not require render-frame bot physics.
+                # while BotRuntime advances only when its production fixed-
+                # control scheduler consumes elapsed time. RemoteVehicle's
+                # MatrixAnimation interpolates between changed poses; exact
+                # duplicate render pulls do not require native rewrites.
                 states = presentation_states(now)
                 bot_count = len(states)
                 self._apply_authority_bot_poses(states)
@@ -12351,6 +12721,23 @@ class BattleRuntime(object):
                     diagnostics.note_collections(self._collection_counts())
                 except Exception:
                     pass
+                note_worker_runtime = getattr(
+                    diagnostics, 'note_worker_runtime', None)
+                if self._worker_mode and callable(note_worker_runtime):
+                    try:
+                        note_worker_runtime({
+                            'control': self._worker_control_snapshot(),
+                            'bot_diagnostics': (
+                                self._worker_diagnostic_totals()),
+                            'presentation': {
+                                'pose_writes': self._authority_pose_writes,
+                                'pose_skips': self._authority_pose_skips,
+                                'aim_writes': self._authority_aim_writes,
+                                'aim_skips': self._authority_aim_skips,
+                            },
+                        })
+                    except Exception:
+                        pass
             diagnostics.finish(
                 frame_id, entry_wall, tick_dt, dt, stages, probes, {
                     'round': (self._start_message or {}).get('round_id', '-'),
@@ -15247,16 +15634,48 @@ class BattleRuntime(object):
         self._bot_yaw_rates[key] = turned / elapsed
         return elapsed * POSE_RELAX_STRETCH
 
+    def _authority_presentation_lifecycle(self, record, bot_id):
+        """Fence unchanged-pose caches to one live actor/entity generation."""
+        lifecycle = (
+            int(self._generation), int(bot_id),
+            int(record.get('engine_id', 0)), id(record))
+        if record.get('_authority_presentation_lifecycle') != lifecycle:
+            record['_authority_presentation_lifecycle'] = lifecycle
+            record.pop('_authority_pose_signature', None)
+            record.pop('_authority_aim_signature', None)
+            self._bot_pose_times.pop(bot_id, None)
+            self._bot_yaw_rates.pop(bot_id, None)
+        return lifecycle
+
+    @staticmethod
+    def _clear_authority_presentation_signatures(record):
+        if isinstance(record, dict):
+            record.pop('_authority_presentation_lifecycle', None)
+            record.pop('_authority_pose_signature', None)
+            record.pop('_authority_aim_signature', None)
+
     def _apply_authority_bot_poses(self, states):
         """Present copied 0.8.2 bot poses through the remote filter."""
         applied = False
         now = self._clock()
+        try:
+            control_pose_epoch = int(getattr(
+                self._bots, '_sample_time_us'))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            control_pose_epoch = None
         for state in states:
             if not isinstance(state, dict) or state.get('id') is None:
                 continue
             record = self._records.get('bot:%s' % state['id'])
-            if record is None or not record.get('ready'):
+            if record is None:
                 continue
+            if not record.get('ready'):
+                self._clear_authority_presentation_signatures(record)
+                continue
+            bot_id = int(state['id'])
+            engine_id = int(record['engine_id'])
+            lifecycle = self._authority_presentation_lifecycle(
+                record, bot_id)
             x = _number(state.get('x'))
             y = _number(state.get('y'))
             z = _number(state.get('z'))
@@ -15265,7 +15684,10 @@ class BattleRuntime(object):
             yaw = _number(state.get('yaw'))
             if (self._worker_mode and self._destructibles is not None and
                     self._bot_destructible_scan_due(state, now)):
-                entity = self._server_entity(record['engine_id'])
+                entity = self._server_entity(engine_id)
+                if entity is None:
+                    raise RuntimeError(
+                        'authority bot presentation entity is unavailable')
                 descriptor = getattr(entity, 'typeDescriptor', None)
                 if descriptor is None:
                     raise RuntimeError(
@@ -15275,14 +15697,61 @@ class BattleRuntime(object):
                     _number(state.get('speed')), descriptor)
             rotation = _engine_rotation(
                 yaw, _number(state.get('pitch')), _number(state.get('roll')))
-            self._binding.set_vehicle_pose(
-                record['engine_id'], position, rotation,
-                relax_time=self._bot_pose_relax(
-                    state, (tuple(position), rotation), now), now=now)
-            self._binding.update_vehicle_aim(
-                record['engine_id'], yaw,
-                _number(state.get('aim_yaw', yaw)),
-                _number(state.get('gun_pitch')))
+            relax_time = self._bot_pose_relax(
+                state, (tuple(position), rotation), now)
+            speed = _number(state.get('speed'))
+            motion_alive = (
+                bool(state.get('alive', True)) and
+                _number(state.get('health', 1), 1.0) > 0.0)
+            motion_active = motion_alive and (
+                speed != 0.0 or
+                any(_number(state.get(name)) != 0.0 for name in (
+                    'movement_dir', 'rotation_dir', 'vertical_speed',
+                    'slide_speed', 'push_x', 'push_z', 'air_lateral_x',
+                    'air_lateral_z')) or
+                bool(state.get('airborne', False)))
+            pose_signature = (
+                lifecycle, x, y, z, rotation,
+                # NativeRemoteVehicle derives its motion overlay from pose
+                # deltas. An exact speed edge with an unchanged final pose
+                # must still settle or resume that overlay once. While any
+                # canonical motion remains active, replay one identical pose
+                # per control epoch so a physically blocked Bot publishes
+                # zero native velocity instead of retaining its prior delta.
+                speed,
+                control_pose_epoch if motion_active else None,
+                motion_alive,
+                int(state.get('siege_state', 0) or 0))
+            if record.get('_authority_pose_signature') == pose_signature:
+                self._authority_pose_skips += 1
+            else:
+                self._binding.set_vehicle_pose(
+                    engine_id, position, rotation,
+                    relax_time=relax_time, now=now)
+                if not motion_active:
+                    # Remote presentation derives velocity from successive pose
+                    # writes.  A stop sample can also advance to its final pose,
+                    # so clear that derived delta now without re-keying the hull
+                    # animation or waiting for a duplicate render callback.
+                    self._binding.settle_vehicle_motion(engine_id, now=now)
+                record['_authority_pose_signature'] = pose_signature
+                self._authority_pose_writes += 1
+            aim_yaw = _number(state.get('aim_yaw', yaw))
+            gun_pitch = _number(state.get('gun_pitch'))
+            # Hydraulic body matrices are live providers. Replaying an
+            # identical setHullAimingAnglesDelta input every render callback
+            # does not advance them; current hull pitch and Siege state below
+            # fence every input that can change that value.
+            aim_signature = (
+                lifecycle, yaw, aim_yaw, gun_pitch,
+                rotation[1], int(state.get('siege_state', 0) or 0))
+            if record.get('_authority_aim_signature') == aim_signature:
+                self._authority_aim_skips += 1
+            else:
+                self._binding.update_vehicle_aim(
+                    engine_id, yaw, aim_yaw, gun_pitch)
+                record['_authority_aim_signature'] = aim_signature
+                self._authority_aim_writes += 1
             record['projectile_collision_pose'] = \
                 self._projectile_plain_pose((x, y, z), state)
             self._run_optional_feature(
@@ -19097,6 +19566,18 @@ class BattleRuntime(object):
         self._worker_probe_bot_send_failed = 0
         self._worker_probe_bot_count = 0
         self._worker_probe_simulation_caps = 0
+        self._worker_probe_control_steps = 0
+        self._worker_probe_catchup_callbacks = 0
+        self._worker_probe_control_debt_callbacks = 0
+        self._worker_probe_max_control_step = 0.0
+        self._worker_probe_control_debt = 0.0
+        self._worker_probe_max_control_debt = 0.0
+        self._worker_probe_astar_budget_exhausted = 0
+        self._worker_probe_astar_max_pending = 0
+        self._authority_pose_writes = 0
+        self._authority_pose_skips = 0
+        self._authority_aim_writes = 0
+        self._authority_aim_skips = 0
         if self._frame_diagnostics is not None:
             self._frame_diagnostics.reset()
         self._has_sixth_sense = False

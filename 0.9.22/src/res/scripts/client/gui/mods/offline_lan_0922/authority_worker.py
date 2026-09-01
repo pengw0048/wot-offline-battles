@@ -51,6 +51,78 @@ _COALESCIBLE_BOT_STATE_FIELDS = frozenset((
     'combat_fire_elapsed', 'combat_fire_timer'))
 _COALESCIBLE_EQUIPMENT_FIELDS = frozenset((
     'cooldownTimeLeft', 'autoPendingElapsed', 'aiPendingElapsed'))
+_VISIBILITY_DIAGNOSTIC_COUNTERS = (
+    'visibility_admitted', 'visibility_completed', 'visibility_deferred',
+    'visibility_selected_services', 'visibility_fire_services',
+    'visibility_new_services', 'visibility_ordinary_services')
+_SHOT_LANE_DIAGNOSTIC_COUNTERS = (
+    'shot_lane_completed_pairs',
+    'shot_lane_budget_deferred_attempts')
+
+
+def _windows_process_counters():
+    """Read cheap process counters on the exact Windows worker, fail-soft."""
+    if not sys.platform.startswith('win'):
+        return None
+    try:
+        import ctypes
+
+        class _FileTime(ctypes.Structure):
+            _fields_ = [
+                ('low', ctypes.c_ulong),
+                ('high', ctypes.c_ulong),
+            ]
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ('cb', ctypes.c_ulong),
+                ('page_fault_count', ctypes.c_ulong),
+                ('peak_working_set_size', ctypes.c_size_t),
+                ('working_set_size', ctypes.c_size_t),
+                ('quota_peak_paged_pool_usage', ctypes.c_size_t),
+                ('quota_paged_pool_usage', ctypes.c_size_t),
+                ('quota_peak_non_paged_pool_usage', ctypes.c_size_t),
+                ('quota_non_paged_pool_usage', ctypes.c_size_t),
+                ('pagefile_usage', ctypes.c_size_t),
+                ('peak_pagefile_usage', ctypes.c_size_t),
+            ]
+
+        kernel = ctypes.windll.kernel32
+        process = kernel.GetCurrentProcess()
+        creation = _FileTime()
+        exit_time = _FileTime()
+        kernel_time = _FileTime()
+        user_time = _FileTime()
+        if not kernel.GetProcessTimes(
+                process, ctypes.byref(creation), ctypes.byref(exit_time),
+                ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            return None
+        memory = _ProcessMemoryCounters()
+        memory.cb = ctypes.sizeof(memory)
+        if not ctypes.windll.psapi.GetProcessMemoryInfo(
+                process, ctypes.byref(memory), memory.cb):
+            return None
+
+        def filetime_seconds(value):
+            ticks = (int(value.high) << 32) | int(value.low)
+            return ticks / 10000000.0
+
+        processors = None
+        try:
+            processors = max(
+                1, int(os.environ.get('NUMBER_OF_PROCESSORS')))
+        except (TypeError, ValueError, OverflowError):
+            processors = None
+        return {
+            'cpu_seconds': (
+                filetime_seconds(kernel_time) +
+                filetime_seconds(user_time)),
+            'working_set_bytes': int(memory.working_set_size),
+            'logical_processors': processors,
+        }
+    except Exception:
+        # Performance evidence can be absent; it cannot alter worker life.
+        return None
 
 
 def _immutable_outbound_key(value):
@@ -671,6 +743,8 @@ class WorkerSession(object):
         self._probe_round_id = None
         self._probe_time = None
         self._probe_sample = None
+        self._process_sample_time = None
+        self._process_cpu_seconds = None
 
     def _ensure_runtime_boundaries(self):
         if self._bigworld is None:
@@ -1132,6 +1206,7 @@ class WorkerSession(object):
                 None if self.client is None else
                 self.client.bot_authority_id),
             'world_draw_enabled': draw_enabled,
+            'process_performance': self._process_performance(now),
             'runtime': self._runtime_status(now),
         }
         try:
@@ -1143,12 +1218,94 @@ class WorkerSession(object):
             return False
         return True
 
+    def _process_performance(self, now):
+        """Sample Windows CPU/working set only at the two-second status rate."""
+        counters = _windows_process_counters()
+        if not isinstance(counters, dict):
+            return {
+                'available': False,
+                'source': 'windows_process_api',
+                'cpu_core_percent': None,
+                'cpu_machine_percent': None,
+                'working_set_bytes': None,
+                'logical_processors': None,
+                'gpu_measured': False,
+            }
+        try:
+            cpu_seconds = float(counters['cpu_seconds'])
+            working_set = max(0, int(counters['working_set_bytes']))
+            processors = counters.get('logical_processors')
+            processors = (None if processors is None else
+                          max(1, int(processors)))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                'available': False,
+                'source': 'windows_process_api',
+                'cpu_core_percent': None,
+                'cpu_machine_percent': None,
+                'working_set_bytes': None,
+                'logical_processors': None,
+                'gpu_measured': False,
+            }
+        core_percent = None
+        if (self._process_sample_time is not None and
+                self._process_cpu_seconds is not None and
+                float(now) > self._process_sample_time and
+                cpu_seconds >= self._process_cpu_seconds):
+            core_percent = (100.0 *
+                            (cpu_seconds - self._process_cpu_seconds) /
+                            (float(now) - self._process_sample_time))
+        self._process_sample_time = float(now)
+        self._process_cpu_seconds = cpu_seconds
+        return {
+            'available': True,
+            'source': 'windows_process_api',
+            # This may exceed 100% when several worker threads are busy.
+            'cpu_core_percent': core_percent,
+            'cpu_machine_percent': (
+                None if core_percent is None or processors is None else
+                core_percent / processors),
+            'working_set_bytes': working_set,
+            'logical_processors': processors,
+            # #1513 exposes no reliable per-process GPU counter to Python.
+            'gpu_measured': False,
+        }
+
     @staticmethod
     def _counter_delta(current, previous, name):
         try:
             return max(0, int(current.get(name)) - int(previous.get(name)))
         except (AttributeError, TypeError, ValueError, OverflowError):
             return None
+
+    @staticmethod
+    def _mapping_delta(current, previous, name, integer=False):
+        try:
+            current_values = current.get(name) or {}
+            previous_values = previous.get(name) or {}
+        except AttributeError:
+            return None
+        if (not isinstance(current_values, dict) or
+                not isinstance(previous_values, dict)):
+            return None
+        result = {}
+        for key in set(current_values).union(previous_values):
+            try:
+                value = (float(current_values.get(key, 0.0)) -
+                         float(previous_values.get(key, 0.0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if value < 0.0 or math.isnan(value) or math.isinf(value):
+                continue
+            result[str(key)] = int(value) if integer else value
+        return result
+
+    @staticmethod
+    def _mapping_rates(values, seconds, scale=1.0):
+        if not isinstance(values, dict) or not seconds:
+            return None
+        return dict((name, float(value) * float(scale) / float(seconds))
+                    for name, value in values.items())
 
     def _reset_probe_window(self):
         self._probe_runtime = None
@@ -1174,20 +1331,76 @@ class WorkerSession(object):
             previous is not None and previous_time is not None and
             now > previous_time)
         window_seconds = None
-        callback_delta = publication_delta = None
+        callback_delta = render_delta = publication_delta = None
         revision_delta = send_failed_delta = None
+        probe_deltas = probe_rates = None
+        timed_probe_seconds = timed_probe_ms = None
+        presentation_delta = presentation_rates = None
+        catchup_delta = debt_callback_delta = None
+        astar_exhausted_delta = astar_completed_delta = None
+        astar_failed_delta = None
+        visibility_delta = visibility_hz = None
+        shot_lane_delta = shot_lane_hz = None
         if same_window:
             window_seconds = float(now - previous_time)
             callback_delta = self._counter_delta(
                 sample, previous, 'authority_callbacks')
+            render_delta = self._counter_delta(
+                sample, previous, 'frame_callbacks')
             publication_delta = self._counter_delta(
                 sample, previous, 'bot_state_enqueued')
             revision_delta = self._counter_delta(
                 sample, previous, 'bot_state_revision')
             send_failed_delta = self._counter_delta(
                 sample, previous, 'bot_state_send_failed')
+            probe_deltas = self._mapping_delta(
+                sample, previous, 'bot_probes', integer=True)
+            probe_rates = self._mapping_rates(
+                probe_deltas, window_seconds)
+            timed_probe_seconds = self._mapping_delta(
+                sample, previous, 'bot_probe_seconds')
+            timed_probe_ms = self._mapping_rates(
+                timed_probe_seconds, 1.0, scale=1000.0)
+            presentation_delta = self._mapping_delta(
+                sample, previous, 'presentation', integer=True)
+            presentation_rates = self._mapping_rates(
+                presentation_delta, window_seconds)
+            current_control = sample.get('control') or {}
+            previous_control = previous.get('control') or {}
+            catchup_delta = self._counter_delta(
+                current_control, previous_control, 'catchup_callbacks')
+            debt_callback_delta = self._counter_delta(
+                current_control, previous_control, 'debt_callbacks')
+            astar_exhausted_delta = self._counter_delta(
+                current_control, previous_control,
+                'astar_budget_exhausted_callbacks')
+            astar_completed_delta = self._counter_delta(
+                current_control, previous_control, 'astar_completed')
+            astar_failed_delta = self._counter_delta(
+                current_control, previous_control, 'astar_failed')
+            current_diagnostics = sample.get('bot_diagnostics') or {}
+            previous_diagnostics = previous.get('bot_diagnostics') or {}
+            visibility_delta = {}
+            for name in _VISIBILITY_DIAGNOSTIC_COUNTERS:
+                delta = self._counter_delta(
+                    current_diagnostics, previous_diagnostics, name)
+                if delta is not None:
+                    visibility_delta[name] = delta
+            visibility_hz = self._mapping_rates(
+                visibility_delta, window_seconds)
+            shot_lane_delta = {}
+            for name in _SHOT_LANE_DIAGNOSTIC_COUNTERS:
+                delta = self._counter_delta(
+                    current_diagnostics, previous_diagnostics, name)
+                if delta is not None:
+                    shot_lane_delta[name] = delta
+            shot_lane_hz = self._mapping_rates(
+                shot_lane_delta, window_seconds)
         sample.update({
             'window_seconds': window_seconds,
+            'render_callback_hz': (
+                None if render_delta is None else
+                render_delta / window_seconds),
             'callback_hz': (
                 None if callback_delta is None else
                 callback_delta / window_seconds),
@@ -1196,6 +1409,20 @@ class WorkerSession(object):
                 publication_delta / window_seconds),
             'revision_delta': revision_delta,
             'send_failed_delta': send_failed_delta,
+            'logical_probe_delta': probe_deltas,
+            'logical_probe_hz': probe_rates,
+            'timed_probe_ms_delta': timed_probe_ms,
+            'presentation_delta': presentation_delta,
+            'presentation_hz': presentation_rates,
+            'catchup_delta': catchup_delta,
+            'debt_callback_delta': debt_callback_delta,
+            'astar_budget_exhausted_delta': astar_exhausted_delta,
+            'astar_completed_delta': astar_completed_delta,
+            'astar_failed_delta': astar_failed_delta,
+            'visibility_counter_delta': visibility_delta,
+            'visibility_counter_hz': visibility_hz,
+            'shot_lane_counter_delta': shot_lane_delta,
+            'shot_lane_counter_hz': shot_lane_hz,
         })
         self._probe_runtime = runtime
         self._probe_round_id = self._active_round_id

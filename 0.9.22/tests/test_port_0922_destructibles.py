@@ -5580,6 +5580,246 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertIs(installed, destructibles_sensor._destructible_catalog)
         self.assertNotIn('g_offh_destr_instances', destructibles_sensor.__dict__)
 
+    def _empty_catalog_scan_fixture(self, streamed=True):
+        destructibles_sensor.set_catalog(_catalog({
+            'known.model': {
+                'kind': 'fragile',
+                'boxes': [[-1, -1, -1, 1, 1, 1, None]],
+            },
+        }))
+        manager = _Manager()
+        manager.space_id = 1
+        if streamed:
+            manager.set_chunk_count(22, 0)
+        mapper = mock.Mock(return_value=22)
+        area = types.ModuleType('AreaDestructibles')
+        area.g_destructiblesManager = manager
+        area.DESTR_TYPE_TREE = 1
+        area.DESTR_TYPE_FALLING_ATOM = 2
+        area.DESTR_TYPE_FRAGILE = 3
+        area.DESTR_TYPE_STRUCTURE = 4
+        area.chunkIDFromPosition = mapper
+        area.g_cache = types.SimpleNamespace(
+            getDescByFilename=lambda unused: None)
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_getChunkDestrFilenames = mock.Mock(return_value=())
+        bigworld.wg_getChunkMatrix = mock.Mock(return_value=
+            types.SimpleNamespace(translation=_Vector()))
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        math_module.Matrix = lambda value: value
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None))))
+        destructibles_sensor.xrange = range
+        return (manager, mapper, area, bigworld, math_module, descriptor)
+
+    def test_empty_swept_cells_avoid_repeating_full_chunk_scan_for_30_tanks(self):
+        (unused_manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            for index in range(30):
+                destructibles_sensor._fell_trees_near(
+                    1, _Vector(float(index) * 0.01, 0.0, 0.0),
+                    0.0, 6.0, descriptor)
+
+        # The first exact sweep maps current/forward and the surrounding 3x3
+        # chunks. Later tanks only validate the native current chunk while the
+        # complete streamed registry and the same empty swept cells are valid.
+        self.assertEqual(40, mapper.call_count)
+        bigworld.wg_getChunkDestrFilenames.assert_called_once_with(1, 22)
+        bigworld.wg_getChunkMatrix.assert_called_once_with(1, 22)
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(29, counts['receipt_proximity_hits'])
+        self.assertEqual(1, counts['receipt_proximity_misses'])
+        self.assertEqual(1, counts['receipt_proximity_stores'])
+        self.assertEqual(1, counts['receipt_proximity_entries'])
+
+    def test_empty_swept_cell_receipt_waits_for_streaming_completion(self):
+        (manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture(streamed=False)
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            manager.set_chunk_count(22, 0)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        # Pending scans must retry the full native mapping. Only the fourth
+        # call may reuse the empty receipt created after streaming completed.
+        self.assertEqual(34, mapper.call_count)
+        bigworld.wg_getChunkDestrFilenames.assert_called_once_with(1, 22)
+
+    def test_empty_swept_cell_receipt_drops_on_chunk_unload(self):
+        (manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            del manager._DestructiblesManager__loadedChunkIDs[22]
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        self.assertEqual(23, mapper.call_count)
+        self.assertNotIn(
+            22, destructibles_sensor.g_offh_tree_state['chunks'])
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_proximity_hits'])
+        self.assertEqual(2, counts['receipt_proximity_misses'])
+        self.assertEqual(1, counts['receipt_proximity_invalidated'])
+        self.assertEqual(0, counts['receipt_proximity_entries'])
+
+    def test_empty_swept_cell_receipt_counts_native_count_change_as_miss(self):
+        (manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+        bigworld.wg_getDestructibleMatrix = mock.Mock(
+            return_value=_ItemMatrix())
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            manager.set_chunk_count(22, 1)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_proximity_hits'])
+        self.assertEqual(2, counts['receipt_proximity_misses'])
+        self.assertEqual(2, counts['receipt_proximity_stores'])
+        self.assertEqual(1, counts['receipt_proximity_invalidated'])
+        self.assertEqual(1, counts['receipt_proximity_entries'])
+
+    def test_empty_swept_cell_receipt_invalidates_on_spatial_index_change(self):
+        (unused_manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            instance = {
+                'boxes': (((100.0, 0.0, 100.0),
+                           ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                            (0.0, 0.0, 1.0)), None),),
+            }
+            destructibles_sensor._index_catalog_instance_1513(
+                destructibles_sensor.g_offh_destr_contact_bins,
+                (22, 7), instance)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        # The second call uses one current-chunk validation. Adding any exact
+        # footprint invalidates all older negative spatial receipts.
+        self.assertEqual(23, mapper.call_count)
+
+    def test_empty_swept_cell_receipt_is_not_used_while_a_column_moves(self):
+        (unused_manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor.g_offh_destr_falling_active = {
+                (22, 7): {'last_refresh': None},
+            }
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        # A moving column can enter a previously empty cell. It therefore
+        # keeps the complete scan live until its final indexed pose settles.
+        self.assertEqual(22, mapper.call_count)
+
+    def test_empty_catalog_hull_cells_are_scanned_once_per_spatial_generation(self):
+        (unused_manager, unused_mapper, unused_area, unused_bigworld,
+         unused_math, descriptor) = self._empty_catalog_scan_fixture()
+        destructibles_sensor.g_offh_destr_instances = {}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+
+        with mock.patch.object(
+                destructibles_sensor, '_bin_keys_for_bounds',
+                wraps=destructibles_sensor._bin_keys_for_bounds) as bins:
+            for index in range(30):
+                self.assertFalse(destructibles_sensor._catalog_hull_contact(
+                    _Vector(float(index) * 0.01, 0.0, 0.0),
+                    0.0, 6.0, descriptor, 0.04))
+
+        self.assertEqual(1, bins.call_count)
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(29, counts['receipt_contact_hits'])
+        self.assertEqual(1, counts['receipt_contact_misses'])
+        self.assertEqual(1, counts['receipt_contact_stores'])
+        self.assertEqual(1, counts['receipt_contact_entries'])
+
+    def test_empty_catalog_hull_receipt_expires_outside_swept_cell_envelope(self):
+        (unused_manager, unused_mapper, unused_area, unused_bigworld,
+         unused_math, descriptor) = self._empty_catalog_scan_fixture()
+        destructibles_sensor.g_offh_destr_instances = {}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+
+        with mock.patch.object(
+                destructibles_sensor, '_bin_keys_for_bounds',
+                wraps=destructibles_sensor._bin_keys_for_bounds) as bins:
+            self.assertFalse(destructibles_sensor._catalog_hull_contact(
+                _Vector(), 0.0, 6.0, descriptor, 0.04))
+            self.assertFalse(destructibles_sensor._catalog_hull_contact(
+                _Vector(6.0, 0.0, 0.0), 0.0, 6.0, descriptor, 0.04))
+
+        self.assertEqual(2, bins.call_count)
+
+    def test_new_exact_contact_invalidates_empty_catalog_hull_receipt(self):
+        (unused_manager, unused_mapper, unused_area, unused_bigworld,
+         unused_math, descriptor) = self._empty_catalog_scan_fixture()
+        destructibles_sensor.g_offh_destr_instances = {}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+        self.assertFalse(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 6.0, descriptor, 0.04))
+        instance = {
+            'filename': 'known.model',
+            'descriptor_filename': 'known.model',
+            'kind': 'fragile',
+            'item_scale': 1.0,
+            'boxes': (((0.0, 0.0, 3.8),
+                       ((0.25, 0.0, 0.0), (0.0, 0.5, 0.0),
+                        (0.0, 0.0, 0.25)), None),),
+        }
+        destructibles_sensor.g_offh_destr_instances[(22, 7)] = instance
+        destructibles_sensor._index_catalog_instance_1513(
+            destructibles_sensor.g_offh_destr_contact_bins,
+            (22, 7), instance)
+
+        self.assertTrue(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 6.0, descriptor, 0.04))
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(2, counts['receipt_contact_misses'])
+        self.assertEqual(1, counts['receipt_contact_stores'])
+        self.assertEqual(1, counts['receipt_contact_invalidated'])
+        self.assertEqual(0, counts['receipt_contact_entries'])
+
     def test_chunk_registry_limits_each_frame_to_nearby_contact_bins(self):
         registry = {'bins': {}, 'extended_bins': {}, 'count': 0,
                     'max_radius': 4.5}

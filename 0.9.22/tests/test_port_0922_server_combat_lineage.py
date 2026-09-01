@@ -205,6 +205,83 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             'round_id': server.round_id, 'bots': manifest['bots']}))
         return runtime, server, roster
 
+    def test_same_source_batch_horizon_preserves_slow_callback_burst_edges(
+            self):
+        unused_runtime, server, unused_roster = self._runtime_and_server()
+        shooter = server.bot_states[11]
+        shooter.update({
+            'clip': 3, 'clip_size': 3,
+            'reload_time': 0.0, 'reload_duration': 0.5,
+            'ammo_remaining': [45], 'ammo_reload_pending': False,
+        })
+
+        def publication(fire_seq, ammo, clip, burst_active, next_index,
+                        time_left):
+            rows = []
+            for bot_id in sorted(server.bot_states):
+                row = dict(server.bot_states[bot_id])
+                row['ammo_remaining'] = list(
+                    row.get('ammo_remaining') or [])
+                row['equipment_states'] = list(
+                    row.get('equipment_states') or [])
+                row['combat_seq'] = int(row.get('combat_ack_seq', 0))
+                rows.append(row)
+            shot = next(row for row in rows if row['id'] == 11)
+            shot.update({
+                'fire_seq': fire_seq,
+                'ammo_remaining': [ammo],
+                'ammo_reload_pending': True,
+                'clip': clip, 'clip_size': 3,
+                'reload_time': 0.5, 'reload_duration': 0.5,
+                'burst_active': burst_active,
+                'burst_group_seq': 1, 'burst_count': 3,
+                'burst_next_index': next_index,
+                'burst_interval': 0.1,
+                'burst_time_left': time_left,
+                'burst_shell_index': 0,
+            })
+            return rows
+
+        # One slow worker callback can expose its first physical edge before
+        # the callback's final source horizon. The later publication belongs
+        # to the same callback even though almost no server wall time elapsed.
+        self.assertTrue(server.update_bot_states(1, {
+            'round_id': server.round_id,
+            'bots': publication(1, 44, 2, True, 1, 0.1),
+            'sample_time_us': 200000,
+            'source_batch_horizon_us': 1000000,
+        }), server.last_bot_state_reject)
+        first_mapped_time_us = server.bot_state_time_us
+
+        self.assertTrue(server.update_bot_states(1, {
+            'round_id': server.round_id,
+            'bots': publication(3, 42, 0, False, 3, 0.0),
+            'sample_time_us': 1000000,
+            'source_batch_horizon_us': 1000000,
+        }), server.last_bot_state_reject)
+
+        launches = sorted(server.bot_pending_projectile_launches)
+        metadata = server.bot_pending_projectile_metadata
+        self.assertEqual({
+            'launches': [(11, 1), (11, 2), (11, 3)],
+            'burst_indexes': [0, 1, 2],
+            'sample_windows': [
+                (0, 200000),
+                (200000, 1000000),
+                (200000, 1000000),
+            ],
+            'mapped_time_delta_us': 800000,
+        }, {
+            'launches': launches,
+            'burst_indexes': [
+                metadata[key]['burst_index'] for key in launches],
+            'sample_windows': [(
+                metadata[key]['sample_start_us'],
+                metadata[key]['sample_end_us']) for key in launches],
+            'mapped_time_delta_us': (
+                server.bot_state_time_us - first_mapped_time_us),
+        })
+
     def test_29_bot_fire_hits_survive_external_combat_rebases(self):
         runtime, server, roster = self._runtime_and_server()
         # This historical stress test invokes legacy reports directly.  Keep

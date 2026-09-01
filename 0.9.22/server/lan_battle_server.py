@@ -5134,6 +5134,7 @@ class BattleState:
             source_time_us = None
             source_batch_horizon_us = None
             source_clock_rebase = False
+            same_source_batch = False
             if "sample_time_us" in message:
                 try:
                     source_time_us = _exact_int(
@@ -5161,6 +5162,10 @@ class BattleState:
                         "horizon_us=%s previous=%s" % (
                             source_batch_horizon_us,
                             self.bot_source_batch_horizon_us))
+                same_source_batch = bool(
+                    self.bot_source_batch_horizon_us is not None and
+                    source_batch_horizon_us ==
+                    self.bot_source_batch_horizon_us)
                 if (self.bot_source_time_us is not None and
                         source_time_us <= self.bot_source_time_us):
                     return self._set_protocol_reject(
@@ -5181,9 +5186,10 @@ class BattleState:
                     receipt_elapsed_us = max(
                         0, received_raw_motion_time_us -
                         self.bot_source_receipt_time_us)
-                    if source_delta_us > (
-                            receipt_elapsed_us +
-                            MAX_BOT_SAMPLE_LEAD_US):
+                    if (not same_source_batch and
+                            source_delta_us > (
+                                receipt_elapsed_us +
+                                MAX_BOT_SAMPLE_LEAD_US)):
                         # A complete, valid publication may re-anchor the
                         # trusted source clock after a render stall or a
                         # coalesced outbound backlog.  Defer that rebase until
@@ -5195,6 +5201,11 @@ class BattleState:
                             received_motion_time_us,
                             self.bot_state_time_us + 1)
                     else:
+                        # One slow worker callback can publish ordered physical
+                        # checkpoints which share its final source horizon.
+                        # Their near-identical receipt times do not make the
+                        # later checkpoint a source-clock jump; preserving the
+                        # source delta also preserves every admitted shot edge.
                         next_bot_state_time_us = (
                             self.bot_state_time_us + source_delta_us)
             elif "source_batch_horizon_us" in message:

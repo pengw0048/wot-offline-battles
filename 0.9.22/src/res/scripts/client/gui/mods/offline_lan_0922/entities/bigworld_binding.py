@@ -450,6 +450,17 @@ class BigWorldVehicleBinding(object):
                 'remote vehicle has no authoritative presentation')
         setter(position, rotation, relax_time, now)
 
+    def settle_vehicle_motion(self, entity_id, now=None):
+        """Clear one stationary remote's pose-derived motion in place."""
+        entity = self._authority_entity_or_fail(entity_id)
+        settle = getattr(entity, 'settle_motion', None)
+        if not (bool(getattr(entity, '_offlineLANPresentation', False) or
+                     getattr(entity, '_offlineNativeRemote', False)) and
+                callable(settle)):
+            raise CapabilityError(
+                'remote vehicle has no authoritative motion settlement')
+        return bool(settle(now))
+
     def update_vehicle_aim(self, entity_id, hull_yaw, aim_yaw, gun_pitch):
         """Apply a network world aim to the exact packed Vehicle property."""
         entity = self._authority_entity_or_fail(entity_id)
