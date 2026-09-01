@@ -4,8 +4,7 @@ param(
     [ValidateSet("Install", "Uninstall")]
     [string]$Action,
 
-    [Parameter(Mandatory = $true)]
-    [string]$GameRoot
+    [string]$GameRoot = $env:WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT
 )
 
 $ErrorActionPreference = "Stop"
