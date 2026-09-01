@@ -6,7 +6,7 @@ import math
 
 
 PREDICTION_SECONDS = 0.05
-# BotRuntime admits at most one 0.2-second authority integration step after a
+# BotRuntime keeps every copied-physics slice at or below 0.2 seconds after a
 # delayed callback. Keep the derived diagnostic velocity on that same span;
 # timed presentation below interpolates confirmed samples and does not use it.
 MAX_TIMED_PREDICTION_SECONDS = 0.2
@@ -332,6 +332,31 @@ class SnapshotSync(object):
             return True
         return False
 
+    @staticmethod
+    def _start_live_timeline(record, time_us, local_time):
+        """Re-anchor one confirmed countdown pose at the live phase edge."""
+        pose = record.get('target') or record.get('current')
+        if pose is None:
+            return False
+        pose = dict(pose)
+        record['target'] = pose
+        record['target_time'] = float(local_time)
+        record['target_sample_time_us'] = int(time_us)
+        record['motion_anchor_time_us'] = int(time_us)
+        record['motion_anchor_local_time'] = float(local_time)
+        record['snapshot_interval_us'] = None
+        record['interpolation_delay_us'] = None
+        record['presentation_delay_us'] = None
+        record['timed_warmup_intervals'] = 0
+        record['timed_warmup_active'] = True
+        record['timed_samples'] = [{
+            'time_us': int(time_us), 'pose': dict(pose)}]
+        record['presentation_time_us'] = int(time_us)
+        record['timed_teleport'] = False
+        record['target_age'] = 0.0
+        record['timed_prediction'] = True
+        return True
+
     def _upsert(self, kind, state, now, output, update_remote_pose=True,
                 sample_time_us=None, sample_age=0.0, motion_time_us=None,
                 motion_anchor_local_time=None,
@@ -494,11 +519,14 @@ class SnapshotSync(object):
         timing = message.get('timing')
         timing_phase = (timing.get('phase')
                         if isinstance(timing, dict) else None)
-        if (timing_phase == 'battle' and
-                self._last_timing_phase in ('loading', 'prebattle')):
+        entered_battle = bool(
+            timing_phase == 'battle' and
+            self._last_timing_phase in ('loading', 'prebattle'))
+        if entered_battle:
             # The phase transition and the first live bot revision need not be
-            # published by the same server snapshot. Keep the reset armed
-            # until an advanced timed bot sample can actually consume it.
+            # published by the same server snapshot. The unchanged phase-edge
+            # pose below can establish the live anchor; otherwise keep the
+            # reset armed until an advanced timed sample can consume it.
             self._live_timeline_reset_pending = True
         live_timeline_started = bool(
             self._live_timeline_reset_pending and timed_bot_poses and
@@ -514,6 +542,22 @@ class SnapshotSync(object):
         dispatch_delay = max(
             0.0, _number(message.get('_client_dispatch_delay'), 0.0))
         motion_anchor_local_time = now - dispatch_delay
+        if (entered_battle and timed_bot_poses and not update_bot_poses):
+            # The server may publish the phase edge before the first live Bot
+            # revision. The unchanged canonical pose proves that the hull held
+            # through this motion time, so make it the confirmed live anchor.
+            # The next slow-worker sample can then form a real interpolation
+            # segment instead of being mistaken for a countdown-spanning stale
+            # anchor and snapping directly to its final pose.
+            anchored = False
+            for key, record in self._entities.items():
+                if record.get('kind') != 'bot' or record.get('dead'):
+                    continue
+                anchored = self._start_live_timeline(
+                    record, motion_time_us, motion_anchor_local_time) or anchored
+            if anchored:
+                self._live_timeline_reset_pending = False
+                live_timeline_started = False
         output = []
         seen = set()
         for kind, field in (('player', 'players'), ('bot', 'bots')):

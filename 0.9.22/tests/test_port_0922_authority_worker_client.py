@@ -451,6 +451,40 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             if isinstance(item[1], lan_client_module._PreencodedOutbound)]
         self.assertEqual(9.0, wires[-1]['bots'][0]['x'])
 
+    def test_worker_ram_event_preserves_its_preceding_pose_barrier(self):
+        client = self._active_client()
+        contact = _projected_bot_state()
+        contact['x'] = 5.0
+        later = json.loads(json.dumps(contact))
+        later['x'] = 20.0
+
+        self.assertTrue(client.send_projected_bot_state(
+            [contact], sample_time_us=400000,
+            source_batch_horizon_us=1000000))
+        self.assertTrue(client._send({
+            'type': 'bot_ram', 'bot_id': 11,
+            'target_kind': 'bot', 'target_id': 12,
+            'ram_seq': 1, 'damage_to_bot': 1,
+            'damage_to_target': 1,
+        }))
+        self.assertTrue(client.send_projected_bot_state(
+            [later], sample_time_us=1000000,
+            source_batch_horizon_us=1000000))
+
+        self.assertEqual([
+            'bot_state', 'bot_ram', 'bot_state',
+        ], [
+            (json.loads(item[1].payload.decode('utf-8'))['type']
+             if isinstance(item[1], lan_client_module._PreencodedOutbound)
+             else item[1]['type'])
+            for item in client._outbound_queue])
+        states = [
+            json.loads(item[1].payload.decode('utf-8'))
+            for item in client._outbound_queue
+            if isinstance(item[1], lan_client_module._PreencodedOutbound)]
+        self.assertEqual([5.0, 20.0], [
+            state['bots'][0]['x'] for state in states])
+
     def test_worker_never_coalesces_damage_or_combat_sequence_edges(self):
         client = self._active_client()
         first = _projected_bot_state()

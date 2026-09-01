@@ -39,11 +39,11 @@ OBSERVATION_SECONDS = 0.40
 # while burst edges below retain their exact due timestamps.
 PUBLICATION_SECONDS = 1.0 / 30.0
 WORKER_CONTROL_SECONDS = 0.10
-# Run at most one full-roster step in a render callback. A late callback
-# consumes its actual elapsed interval in that one step instead of queuing
-# another complete planner/probe pass or leaking permanent simulation debt.
-# The mature variable-step seam already bounds copied physics at 200 ms; keep
-# the worker inside that reviewed limit and carry only larger one-off stalls.
+# Keep copied physics inside the mature 200 ms variable-step bound. A slow
+# render callback may need several such slices, but only its first slice may
+# refresh planner control work. Later slices keep applying the last valid
+# command and acquire a new physical corridor only after ongoing motion has
+# consumed or rotated beyond the previous proof.
 MAX_CONTROL_ELAPSED_SECONDS = 0.20
 LOCAL_ACTION_SECONDS = 0.10
 TACTICAL_REFRESH_SECONDS = 1.0
@@ -1824,6 +1824,11 @@ class BotRuntime(object):
         self._fixed_control = control_seconds is not None
         self._control_seconds = max(
             0.001, _number(control_seconds, PUBLICATION_SECONDS))
+        # Direct _update_once callers retain the mature full-control behavior.
+        # update() temporarily clears this flag only for physical catch-up
+        # slices inside the same render callback.
+        self._refresh_control_this_step = True
+        self._publish_control_this_step = True
         self._water_depth_probe = (
             water_depth_probe if callable(water_depth_probe) else
             (lambda unused_position: -1.0))
@@ -4519,9 +4524,23 @@ class BotRuntime(object):
                 now >= cached.get('deadline', 0.0)):
             return False
         lookahead = 20.0 if abs(_number(speed)) > 5.0 else 15.0
+        forward_budget = MOTION_PROBE_FORWARD_BUDGET
+        if ignore_deadline:
+            # A catch-up slice keeps exactly the sampled heading. Its complete
+            # dual-height, three-lane corridor may therefore be consumed up to
+            # the actual probed distance instead of paying the ordinary 3.5 m
+            # re-planning budget repeatedly in one render callback.
+            probed_distance = cached.get('probe_distance')
+            if probed_distance is not None:
+                current_reach = max(
+                    0.4, abs(_number(speed)) * max(
+                        0.0, min(MAX_CONTROL_ELAPSED_SECONDS, _number(dt))) +
+                    0.2)
+                forward_budget = max(
+                    0.0, _number(probed_distance) - current_reach)
         heading_drift = lookahead * abs(math.sin(angle))
         reusable = bool(
-            -0.1 <= forward <= MOTION_PROBE_FORWARD_BUDGET and
+            -0.1 <= forward <= forward_budget and
             lateral + heading_drift <= MOTION_PROBE_LATERAL_BUDGET)
         if not reusable:
             return False
@@ -6852,7 +6871,8 @@ class BotRuntime(object):
         cached = self._ballistic_solution_cache.get(bot_id)
         fresh = bool(
             force or cached is None or cached[0] != signature or
-            _number(now) + 1.0e-9 >= cached[1])
+            (self._refresh_control_this_step and
+             _number(now) + 1.0e-9 >= cached[1]))
         if fresh:
             solution = self._ballistic_solution(
                 state, target, descriptor, shell_index, now)
@@ -7792,14 +7812,14 @@ class BotRuntime(object):
         return result
 
     def update(self, dt, now, players=None, neighbours=None):
-        """Advance Bot control without multiplying full-roster slow work.
+        """Advance Bot motion in real time with one control refresh per frame.
 
-        Fixed-control workers run at most once per render callback. That step
-        consumes the accumulated elapsed interval up to the reviewed 200 ms
-        physics bound, so a sustained 5-10 FPS worker keeps moving in real
-        time instead of adding 100 ms of permanent debt every frame. An armed
-        burst may shorten the step at its next physical round; the remainder
-        stays queued so no one-shot edge or frozen launch pose is skipped.
+        Fixed-control workers consume every elapsed second in bounded physical
+        slices. The first slice may think and observe; later slices keep its
+        command until the next render callback. Physical corridor proofs may
+        still follow an ongoing turn, without re-entering the planner. Burst
+        edges can shorten any slice, so accepted rounds and their frozen launch
+        poses are never skipped when a callback is late.
         """
         if (not self.is_authority() or self.adapter is None or
                 self.finished):
@@ -7838,17 +7858,24 @@ class BotRuntime(object):
                             min(elapsed, 0.2))
                         elapsed = max(0.0, elapsed - frame_step)
                         step_now = now - elapsed
-                        outgoing.extend(self._update_once(
-                            frame_step, step_now, players, neighbours))
+                        outgoing.extend(self._run_update_once(
+                            frame_step, step_now, players, neighbours, True,
+                            True))
                 else:
-                    frame_step = min(
-                        self._accumulator, MAX_CONTROL_ELAPSED_SECONDS)
-                    frame_step = self._bounded_burst_step(frame_step)
-                    self._accumulator = max(
-                        0.0, self._accumulator - frame_step)
-                    step_now = now - self._accumulator
-                    outgoing.extend(self._update_once(
-                        frame_step, step_now, players, neighbours))
+                    elapsed = self._accumulator
+                    self._accumulator = 0.0
+                    refresh_control = True
+                    while elapsed > 1e-12:
+                        frame_step = self._bounded_burst_step(
+                            min(elapsed, MAX_CONTROL_ELAPSED_SECONDS))
+                        elapsed = max(0.0, elapsed - frame_step)
+                        step_now = now - elapsed
+                        publish_step = bool(
+                            refresh_control or elapsed <= 1e-12)
+                        outgoing.extend(self._run_update_once(
+                            frame_step, step_now, players, neighbours,
+                            refresh_control, publish_step))
+                        refresh_control = False
             finally:
                 if receipt_frame_open:
                     self._finish_world_receipt_frame()
@@ -7865,9 +7892,25 @@ class BotRuntime(object):
             message['source_batch_horizon_us'] = source_batch_horizon_us
         return outgoing
 
+    def _run_update_once(self, frame_step, now, players, neighbours,
+                         refresh_control, publish_step=True):
+        """Expose one per-callback control-refresh flag without changing seams."""
+        previous = (
+            self._refresh_control_this_step,
+            self._publish_control_this_step)
+        self._refresh_control_this_step = bool(refresh_control)
+        self._publish_control_this_step = bool(publish_step)
+        try:
+            return self._update_once(
+                frame_step, now, players, neighbours)
+        finally:
+            (self._refresh_control_this_step,
+             self._publish_control_this_step) = previous
+
     def _update_once(self, frame_step, now, players=None, neighbours=None):
         """Advance one stable authority substep and preserve its events."""
-        publish = True
+        publish = bool(self._publish_control_this_step)
+        refresh_control = bool(self._refresh_control_this_step)
         step_duration_us = max(
             1, int(round(float(frame_step) * 1000000.0)))
         step_start_time_us = self._sample_time_us
@@ -7888,18 +7931,19 @@ class BotRuntime(object):
         # Spotting is latency-sensitive presentation state. Full-roster firing
         # lanes and cover fans only guide the one-hertz server planner, so they
         # run on independent clocks and can never delay this observation.
-        observation_due = now >= self._next_observation
+        observation_due = refresh_control and now >= self._next_observation
         collect_observation = publish and observation_due
         shot_lane_refresh_time = self._next_shot_lane_refresh
         shot_lane_refresh_due = now >= shot_lane_refresh_time
         refresh_shot_lanes = (
+            refresh_control and
             not self._cover_queue and
             (shot_lane_refresh_due or
              (shot_lane_refresh_time > 0.0 and
               now + SHOT_LANE_REFRESH_SECONDS + 1e-9 >=
               shot_lane_refresh_time)))
         collect_cover_jobs = bool(
-            publish and not self._cover_queue and
+            refresh_control and publish and not self._cover_queue and
             now >= self._next_cover_refresh)
         shot_lane_budget = [MAX_SHOT_LANE_PAIRS_PER_FRAME]
         shot_lanes_ready = True
@@ -7970,10 +8014,13 @@ class BotRuntime(object):
                               state['id'], 0))
                          if server_order is not None else ('local',))
             decision_cache = self._decision_cache.get(state['id'])
-            decision_due = not (
-                decision_cache is not None and
-                decision_cache[0] == cache_key and
-                _number(now) < decision_cache[1])
+            decision_cache_valid = bool(
+                decision_cache is not None and len(decision_cache) >= 6 and
+                decision_cache[0] == cache_key)
+            decision_due = bool(
+                refresh_control and
+                (not decision_cache_valid or
+                 _number(now) >= decision_cache[1]))
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -8020,13 +8067,30 @@ class BotRuntime(object):
                     return True
                 return self._probe_is_clear(sample)
 
-            if not decision_due:
-                if len(decision_cache) < 6:
-                    raise RuntimeError(
-                        'cached bot perception is unavailable')
+            if decision_cache_valid and not decision_due:
                 command = dict(decision_cache[3])
                 contacts = decision_cache[4]
                 targets = decision_cache[5]
+            elif not refresh_control:
+                # A completed physical veto may invalidate the command chosen
+                # by the first slice. Do not run the planner again in the same
+                # render callback and do not keep driving into proved danger.
+                position_hold = _position(state)
+                command = {
+                    'bot_id': int(state['id']), 'target_id': None,
+                    'aim_position': position_hold,
+                    'face_position': position_hold,
+                    'move_position': position_hold,
+                    'fire_range': 0.0, 'combat_mode': 'physical_hold',
+                    'fire_allowed': False,
+                    'shell_index': int(state.get('shell_index', 0)),
+                    'throttle': 0.0, 'turn': 0.0,
+                    'target_yaw': _number(state.get('yaw')),
+                    'recovery_mode': 'physical_hold',
+                    'movement_intent': False,
+                }
+                contacts = ()
+                targets = {}
             else:
                 contacts, targets = self._contacts_for(
                     state, players, now, team_visibility, visibility_tick)
@@ -8346,11 +8410,38 @@ class BotRuntime(object):
                 abs(_number(state.get('speed'))) <= 0.02 and
                 state.get('grounded_once', False) and
                 not state.get('airborne', False))
-            if not ((not decision_due or self._motion_probe_covers_distance(
+            motion_probe_reusable = bool(
+                (not decision_due or self._motion_probe_covers_distance(
                     cached_motion_probe, maximum_probe_distance)) and
-                    self._motion_probe_reusable(
-                        cached_motion_probe, position, travel_yaw,
-                        state.get('speed', 0.0), now, settled_motion, step)):
+                self._motion_probe_reusable(
+                    cached_motion_probe, position, travel_yaw,
+                    state.get('speed', 0.0), now, settled_motion, step,
+                    ignore_deadline=not refresh_control))
+            cached_motion_result = (
+                (cached_motion_probe or {}).get('result') or {})
+            catchup_motion_reprobe = bool(
+                not refresh_control and not motion_probe_reusable and
+                isinstance(cached_motion_probe, dict) and
+                isinstance(cached_motion_result, dict) and
+                self._probe_is_clear(cached_motion_result) and
+                (abs(throttle) > 0.01 or
+                 abs(_number(state.get('speed'))) > 0.0001 or
+                 abs(turn) > 0.01 or
+                 abs(_number(self._turn_speeds.get(
+                     state['id'], 0.0))) > 0.01))
+            catchup_motion_hold = bool(
+                not refresh_control and not motion_probe_reusable and
+                not catchup_motion_reprobe)
+            if catchup_motion_hold:
+                # With no prior clear physical proof, this callback may not
+                # turn a missing/deferred/blocked sample into motion. A valid
+                # command which merely consumed or turned beyond its old clear
+                # corridor re-probes below without re-entering the planner.
+                motion_probe = None
+                throttle = 0.0
+                turn = 0.0
+                state['speed'] = 0.0
+            elif not motion_probe_reusable:
                 # Planner ranking is intentionally unable to satisfy this
                 # gate.  Every newly selected travel corridor receives its own
                 # complete native generic probe before an exact receipt can be
@@ -8441,6 +8532,10 @@ class BotRuntime(object):
                         'position': position,
                         'yaw': travel_yaw,
                         'maximum_distance': maximum_probe_distance,
+                        'probe_distance': min(
+                            20.0 if abs(_number(
+                                state.get('speed'))) > 5.0 else 15.0,
+                            _number(maximum_probe_distance, float('inf'))),
                         'deadline': (
                             _number(now)
                             if receipt_pending
@@ -8469,7 +8564,8 @@ class BotRuntime(object):
                 motion_probe.get('collision', False) and
                 not motion_probe.get('water', False) and
                 abs(_number(motion_probe.get('slope', 0.0))) <= 0.55)
-            path_clear = (True if (probe_deferred or motion_probe is None or
+            path_clear = (True if (catchup_motion_hold or probe_deferred or
+                                   motion_probe is None or
                                    exact_motion_owns_collision or
                                    (abs(throttle) <= 0.01 and
                                     abs(_number(state.get('speed'))) <=
@@ -8854,7 +8950,7 @@ class BotRuntime(object):
                 self._cover_queue.append((
                     ready_at, bot_id, source, target, route,
                     tuple(ally_positions.get(source.get('team'), ()))))
-        if self._cover_queue:
+        if refresh_control and self._cover_queue:
             ready_at, bot_id, source, target, route, allies = \
                 self._cover_queue[0]
             if now + 1e-9 >= ready_at:
@@ -8878,8 +8974,16 @@ class BotRuntime(object):
                         'target_kind': target.get('kind', 'human'),
                         'candidates': list(candidates),
                     })
+        pending_ram_count = len(self._pending_ram_reports)
         self._pending_ram_reports.extend(
             self._resolve_tank_contacts(players, now, frame_step))
+        if (not publish and
+                len(self._pending_ram_reports) > pending_ram_count):
+            # A ram report is a one-shot state barrier. Publish the contact
+            # pose from this exact physical slice before the event; waiting for
+            # the callback's final pose can move both hulls beyond the server's
+            # bounded proximity validation and silently discard a real hit.
+            publish = True
         for bot_id, locked_pose in siege_locked_poses.items():
             state = self.states.get(bot_id)
             if state is None:
@@ -8906,7 +9010,7 @@ class BotRuntime(object):
                         attempted_yaw)
                 slope_candidates.append(state)
         self._alive_bot_ticks += len(slope_candidates)
-        if slope_candidates:
+        if refresh_control and slope_candidates:
             start = self._slope_pose_cursor % len(slope_candidates)
             visited = 0
             sampled = 0
@@ -8922,6 +9026,7 @@ class BotRuntime(object):
             if publish:
                 self._mark_combat_publication(state)
         if not publish:
+            self._sample_time_us = step_end_time_us
             return []
         wire_states = []
         launches = [dict(launch) for launch in self._pending_launches]
