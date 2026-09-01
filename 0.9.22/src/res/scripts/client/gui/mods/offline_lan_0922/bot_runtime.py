@@ -1843,6 +1843,8 @@ class BotRuntime(object):
         # slices inside the same render callback.
         self._refresh_control_this_step = True
         self._publish_control_this_step = True
+        self._last_update_control_steps = 0
+        self._last_update_max_control_step = 0.0
         self._water_depth_probe = (
             water_depth_probe if callable(water_depth_probe) else
             (lambda unused_position: -1.0))
@@ -4229,6 +4231,7 @@ class BotRuntime(object):
                 if not stale or not source_eligible:
                     continue
                 candidates[key] = (
+                    source_kind == 'human',
                     selected == (target_kind, target_id),
                     fire_edge, new_pair)
 
@@ -4242,24 +4245,35 @@ class BotRuntime(object):
         waiting = [key for key in prior_waiting if key in candidate_keys]
         parked = [key for key in prior_waiting if key not in candidate_keys]
         waiting_set = set(waiting)
+        # Human observers own the player-facing team view. Keep inherited
+        # human debt ahead of newly stale Bot pairs so tuple ordering cannot
+        # hide a visible client's direct observations behind the full roster.
+        human_waiting = [
+            key for key in waiting if candidates[key][0]]
+        human_new = sorted(
+            key for key, flags in candidates.items()
+            if flags[0] and key not in waiting_set)
         selected = sorted(
-            key for key, flags in candidates.items() if flags[0])
-        fire_edges = sorted(
             key for key, flags in candidates.items()
             if flags[1] and not flags[0])
-        new_pairs = sorted(
+        fire_edges = sorted(
             key for key, flags in candidates.items()
             if flags[2] and not flags[0] and not flags[1])
+        new_pairs = sorted(
+            key for key, flags in candidates.items()
+            if flags[3] and not flags[0] and not flags[1] and not flags[2])
         ordinary_waiting = [
             key for key in waiting
             if not any(candidates[key])]
         ordinary_new = sorted(
             key for key in candidate_keys
             if (key not in waiting_set and not candidates[key][0] and
-                not candidates[key][1] and not candidates[key][2]))
+                not candidates[key][1] and not candidates[key][2] and
+                not candidates[key][3]))
         order = []
         seen = set()
-        for cohort in (selected, fire_edges, new_pairs,
+        for cohort in (human_waiting, human_new, selected, fire_edges,
+                       new_pairs,
                        ordinary_waiting, ordinary_new):
             for key in cohort:
                 if key not in seen:
@@ -4275,9 +4289,9 @@ class BotRuntime(object):
         frame['parked'] = parked
         frame['order'] = order
         frame['classification'] = dict(
-            (key, ('selected' if candidates[key][0] else
-                   ('fire' if candidates[key][1] else
-                    ('new' if candidates[key][2] else 'ordinary'))))
+            (key, ('selected' if candidates[key][1] else
+                   ('fire' if candidates[key][2] else
+                    ('new' if candidates[key][3] else 'ordinary'))))
             for key in order)
         frame['next'] = min(len(order), frame['budget'])
         frame['allowed'] = set(order[:frame['next']])
@@ -8234,6 +8248,8 @@ class BotRuntime(object):
         edges can shorten any slice, so accepted rounds and their frozen launch
         poses are never skipped when a callback is late.
         """
+        self._last_update_control_steps = 0
+        self._last_update_max_control_step = 0.0
         if (not self.is_authority() or self.adapter is None or
                 self.finished):
             return []
@@ -8275,6 +8291,9 @@ class BotRuntime(object):
                             min(elapsed, 0.2))
                         elapsed = max(0.0, elapsed - frame_step)
                         step_now = now - elapsed
+                        self._last_update_control_steps += 1
+                        self._last_update_max_control_step = max(
+                            self._last_update_max_control_step, frame_step)
                         outgoing.extend(self._run_update_once(
                             frame_step, step_now, players, neighbours, True,
                             True))
@@ -8289,6 +8308,9 @@ class BotRuntime(object):
                         step_now = now - elapsed
                         publish_step = bool(
                             refresh_control or elapsed <= 1e-12)
+                        self._last_update_control_steps += 1
+                        self._last_update_max_control_step = max(
+                            self._last_update_max_control_step, frame_step)
                         outgoing.extend(self._run_update_once(
                             frame_step, step_now, players, neighbours,
                             refresh_control, publish_step))

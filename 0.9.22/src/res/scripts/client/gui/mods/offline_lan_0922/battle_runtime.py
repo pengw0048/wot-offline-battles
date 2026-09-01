@@ -11813,19 +11813,33 @@ class BattleRuntime(object):
         except (AttributeError, TypeError, ValueError, OverflowError):
             sample_time_after = sample_time_before = 0
         advanced = max(0, sample_time_after - sample_time_before)
+        try:
+            control_steps = max(0, int(getattr(
+                self._bots, '_last_update_control_steps')))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            control_steps = 1 if advanced > 0 else 0
+        try:
+            max_control_step = max(0.0, float(getattr(
+                self._bots, '_last_update_max_control_step')))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            max_control_step = advanced / 1000000.0
+        if math.isnan(max_control_step) or math.isinf(max_control_step):
+            max_control_step = advanced / 1000000.0
         debt = max(0.0, _number(getattr(
             self._bots, '_accumulator', 0.0)))
         self._worker_probe_control_debt = debt
         self._worker_probe_max_control_debt = max(
             self._worker_probe_max_control_debt, debt)
         if advanced > 0:
-            step = advanced / 1000000.0
-            self._worker_probe_control_steps += 1
+            if control_steps <= 0:
+                control_steps = 1
+            self._worker_probe_control_steps += control_steps
             self._worker_probe_max_control_step = max(
-                self._worker_probe_max_control_step, step)
+                self._worker_probe_max_control_step, max_control_step)
             control_seconds = max(0.0, _number(getattr(
                 self._bots, '_control_seconds', 0.0)))
-            if step > control_seconds + 1.0e-9:
+            if (control_steps > 1 or
+                    advanced / 1000000.0 > control_seconds + 1.0e-9):
                 self._worker_probe_catchup_callbacks += 1
             if debt + 1.0e-9 >= control_seconds > 0.0:
                 self._worker_probe_control_debt_callbacks += 1

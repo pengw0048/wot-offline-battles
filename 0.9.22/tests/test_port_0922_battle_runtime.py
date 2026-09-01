@@ -12964,8 +12964,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
             search_credit=0.0, search_frame_budget=0,
             search_completed=7, search_failed=2)
         battle._bots = types.SimpleNamespace(
-            _sample_time_us=1100000, _accumulator=0.05,
-            _control_seconds=1.0 / 30.0, navigator=navigator,
+            _sample_time_us=2000000, _accumulator=0.1,
+            _last_update_control_steps=5,
+            _last_update_max_control_step=0.2,
+            _control_seconds=0.1, navigator=navigator,
             probe_totals=lambda: (2, 3, 4, 5, 6),
             probe_duration_totals=lambda: (0.01, 0.02, 0.03, 0.04, 0.05),
             probe_timing_state=lambda: 'active',
@@ -12992,15 +12994,15 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._record_worker_control_diagnostics(1000000))
         sample = battle._authority_worker_probe_sample()
 
-        self.assertEqual(1, sample['control']['control_steps'])
+        self.assertEqual(5, sample['control']['control_steps'])
         self.assertEqual(1, sample['control']['catchup_callbacks'])
         self.assertEqual(1, sample['control']['debt_callbacks'])
         self.assertEqual(2, sample['control']['astar_pending'])
         self.assertEqual(
             1, sample['control']['astar_budget_exhausted_callbacks'])
-        self.assertAlmostEqual(100.0,
+        self.assertAlmostEqual(200.0,
                                sample['control']['max_control_step_ms'])
-        self.assertAlmostEqual(50.0,
+        self.assertAlmostEqual(100.0,
                                sample['control']['control_debt_ms'])
         self.assertEqual(2, sample['bot_probes']['visibility'])
         self.assertAlmostEqual(

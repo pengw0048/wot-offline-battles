@@ -4705,6 +4705,10 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(adapter.calls))
         self.assertEqual(1000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
+        self.assertEqual(5, runtime._last_update_control_steps)
+        self.assertAlmostEqual(
+            self.module.MAX_CONTROL_ELAPSED_SECONDS,
+            runtime._last_update_max_control_step)
 
     def test_worker_intermediate_ram_report_forces_state_barrier(self):
         runtime = self.module.BotRuntime(
@@ -5577,6 +5581,71 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(14, diagnostics['visibility_fire_services'])
         self.assertEqual(14, diagnostics['visibility_new_services'])
         self.assertEqual(19, diagnostics['visibility_ordinary_services'])
+
+    def test_worker_visibility_services_human_observers_before_bot_roster(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Human-priority-%d' % index}
+            for index in range(29)
+        ]
+        calls = []
+
+        class HoldAdapter(_FixedAdapter):
+            def decide(self, state, unused_clear):
+                self.calls.append(state['id'])
+                return dict(self.command)
+
+        def visibility(source, target, unused_fired=False):
+            calls.append((
+                source.get('kind', 'bot'), int(source['id']),
+                target.get('kind', 'bot'), int(target['network_id'])))
+            return True
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                HoldAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            visibility_probe=visibility,
+            firing_lane_probe=lambda *unused: True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        for state in runtime.states.values():
+            state.update(
+                x=0.0, y=0.0,
+                z=0.0 if state['team'] == 1 else 100.0)
+        players = _admit_players(
+            {'id': 1, 'team': 1, 'alive': True,
+             'vehicle': 'ussr:R11_MS-1',
+             'x': 0.0, 'y': 0.0, 'z': 0.0},
+            {'id': 2, 'team': 2, 'alive': True,
+             'vehicle': 'ussr:R11_MS-1',
+             'x': 0.0, 'y': 0.0, 'z': 100.0})
+
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 1.0,
+                       players=players)
+
+        expected_human_pairs = set()
+        for source in players:
+            for target in roster:
+                if source['team'] != target['team']:
+                    expected_human_pairs.add((
+                        'human', source['id'], 'bot', target['id']))
+            other = players[1] if source is players[0] else players[0]
+            expected_human_pairs.add((
+                'human', source['id'], 'human', other['id']))
+        observed_human_pairs = set(
+            call for call in calls if call[0] == 'human')
+        self.assertEqual(expected_human_pairs, observed_human_pairs)
+        self.assertLessEqual(
+            len(calls), self.module.MAX_VISIBILITY_PROBES_PER_FRAME)
 
     def test_worker_denied_stale_visibility_uses_only_remembered_pose(self):
         roster = [
