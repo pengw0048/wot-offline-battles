@@ -1629,6 +1629,84 @@ class OfflineCompatibilityTests(unittest.TestCase):
         compatibility.fini()
         self.assertIs(original, runtime.bigworld.__class__.serverTime)
 
+    def test_offline_current_shell_change_defers_stock_optimistic_update(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        settings = types.SimpleNamespace(CURRENT_SHELLS=0, NEXT_SHELLS=1)
+        runtime.constants.VEHICLE_SETTING = settings
+        calls = []
+        state = {'alive': True, 'on_arena': True}
+
+        getter = types.SimpleNamespace(
+            isVehicleAlive=lambda unused_avatar: state['alive'],
+            isPlayerOnArena=lambda unused_avatar: state['on_arena'],
+            updateVehicleSetting=lambda code, value, unused_avatar: \
+                calls.append(('update', code, value)),
+            changeVehicleSetting=lambda code, value, unused_avatar: \
+                calls.append(('change', code, value)))
+        runtime.avatar_getter = getter
+
+        class AmmoController(object):
+            def __init__(self, code):
+                self.code = code
+
+            def getNextSettingCode(self, unused_int_cd):
+                return self.code
+
+            def changeSetting(self, int_cd, avatar=None):
+                if not getter.isVehicleAlive(avatar):
+                    return False
+                code = self.getNextSettingCode(int_cd)
+                if code is None:
+                    return False
+                getter.updateVehicleSetting(code, int_cd, avatar)
+                if getter.isPlayerOnArena(avatar):
+                    getter.changeVehicleSetting(code, int_cd, avatar)
+                return True
+
+        runtime.ammo_controller_type = AmmoController
+        original = AmmoController.__dict__['changeSetting']
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+
+        controller = AmmoController(settings.CURRENT_SHELLS)
+        self.assertTrue(controller.changeSetting(102, avatar='outside'))
+        self.assertEqual([
+            ('update', settings.CURRENT_SHELLS, 102),
+            ('change', settings.CURRENT_SHELLS, 102),
+        ], calls)
+
+        compatibility.configure_battle()
+        calls[:] = []
+        self.assertTrue(controller.changeSetting(102, avatar='battle'))
+        self.assertEqual([
+            ('change', settings.CURRENT_SHELLS, 102),
+        ], calls)
+
+        calls[:] = []
+        controller.code = settings.NEXT_SHELLS
+        self.assertTrue(controller.changeSetting(102, avatar='battle'))
+        self.assertEqual([
+            ('update', settings.NEXT_SHELLS, 102),
+            ('change', settings.NEXT_SHELLS, 102),
+        ], calls)
+
+        calls[:] = []
+        controller.code = settings.CURRENT_SHELLS
+        state['on_arena'] = False
+        self.assertTrue(controller.changeSetting(102, avatar='loading'))
+        self.assertEqual([
+            ('update', settings.CURRENT_SHELLS, 102),
+        ], calls)
+
+        calls[:] = []
+        state['alive'] = False
+        self.assertFalse(controller.changeSetting(102, avatar='dead'))
+        self.assertEqual([], calls)
+
+        compatibility.fini()
+        self.assertIs(original, AmmoController.__dict__['changeSetting'])
+
     def test_offline_battle_debug_panel_uses_lan_transport_health(self):
         compatibility_module = _load_port_source('compat')
         runtime, operations = self._runtime()

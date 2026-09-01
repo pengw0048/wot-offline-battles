@@ -3190,6 +3190,11 @@ class BattleRuntime(object):
     def _begin_battle(self):
         if self._battle_live:
             return False
+        # Close the final prebattle interval while reload progression is still
+        # frozen.  Otherwise the first live ammo callback charges that old gap
+        # to the opening reload cycle.
+        if self._gun_state is not None:
+            self._advance_local_gun_edge(self._gun_state)
         duration = self._battle_seconds()
         deadline = getattr(self.client, 'combat_end_deadline', None)
         if deadline is not None:
@@ -6383,6 +6388,42 @@ class BattleRuntime(object):
         state.reload_time = next_duration * remaining_fraction
         return True
 
+    def _advance_local_gun_edge(self, state, now=None):
+        """Close the old gun timeline before one synchronous state mutation.
+
+        ``send_current`` advances again when it freezes the outgoing
+        checkpoint.  That remains necessary for ordinary movement and aiming
+        inputs, but it is too late for a caller which has already started a
+        new reload cycle: the complete gap since ``_gun_last_tick`` would then
+        be charged to the new cycle.  Mutating paths use this helper first so
+        the later sender advance contains only time elapsed after the edge.
+
+        Lightweight contract tests construct a GunState without starting the
+        battle clock.  There is no elapsed timeline to close in that case.
+        """
+        if (state is None or self._worker_mode or
+                self._gun_last_tick is None):
+            return None
+        if state is not self._gun_state:
+            raise RuntimeError('local gun edge does not own the active state')
+        if self._server is None:
+            raise RuntimeError('player gun edge has no server identity')
+        entity = self._server_entity(self._server.vehicle_id)
+        if entity is None or entity.typeDescriptor is None:
+            raise RuntimeError('player gun edge has no vehicle descriptor')
+        now = self._clock() if now is None else float(now)
+        advanced = self._advance_local_gun_to(entity, now)
+        if advanced is not state:
+            raise RuntimeError('player gun edge replaced the active state')
+        return entity, now
+
+    def _apply_current_reload_factor(self, state, entity):
+        """Apply the live critical factor before publishing a new cycle."""
+        if state is None or entity is None:
+            return False
+        return self._rescale_current_reload(
+            state, critical_damage.stat_factor(entity, 'reload'))
+
     def _advance_local_gun_to(self, entity, now=None):
         """Advance the presented gun to one exact wall-clock edge.
 
@@ -6404,8 +6445,6 @@ class BattleRuntime(object):
             self._gun_last_tick = now
         dt = max(0.0, now - self._gun_last_tick)
         self._gun_last_tick = now
-        reload_rescaled = self._rescale_current_reload(
-            state, critical_damage.stat_factor(entity, 'reload'))
         previous_reload = state.reload_time
         state.tick(
             dt, self._battle_live, self._local_speed,
@@ -6414,6 +6453,12 @@ class BattleRuntime(object):
                 entity, 'dispersion'),
             aim_time_factor=critical_damage.stat_factor(
                 entity, 'aim_time'))
+        # A critical or descriptor factor observed at this edge applies after
+        # the elapsed interval owned by the preceding state.  Rescaling first
+        # would apply a newly damaged or repaired reload factor retroactively
+        # to the whole callback gap.
+        reload_rescaled = self._rescale_current_reload(
+            state, critical_damage.stat_factor(entity, 'reload'))
         self._report_crew_penalty(entity)
         self._publish_ammo_state(state)
         self._tick_equipment_cooldowns(now)
@@ -6503,16 +6548,21 @@ class BattleRuntime(object):
         return True
 
     def _reload_partial_clip_now(self, state):
+        edge = self._advance_local_gun_edge(state)
+        entity = edge[0] if edge is not None else None
         previous_reload = state.reload_time
         previous_duration = state.reload_duration
         if not state.reload_partial_clip():
             return False
+        self._apply_current_reload_factor(state, entity)
         if previous_reload > 0.0:
             self._publish_reload_event(
                 0.0, previous_duration, force=True)
         self._publish_ammo_state(state, force=True)
         self._publish_reload_event(
             state.reload_time, state.reload_duration, force=True)
+        if self._sender is not None:
+            self._sender.send_current()
         return True
 
     def _publish_loaded_shell_change(
@@ -6532,12 +6582,20 @@ class BattleRuntime(object):
         self._sender.send_current()
 
     def _switch_current_shell(self, state, index):
+        edge = self._advance_local_gun_edge(state)
+        entity = edge[0] if edge is not None else None
         previous_reload = state.reload_time
         previous_duration = state.reload_duration
-        instant = self._roll_loader_intuition()
+        # The pre-1.13 loader_intuition perk does not work with cassette
+        # guns.  Retail's server owned this eligibility decision even though
+        # #1513 keeps a generic client-side notification consumer.
+        instant = (
+            state.clip_size <= 1 and state.burst_count <= 1 and
+            self._roll_loader_intuition())
         changed = state.sync_shell_index(index, instant=instant)
         if not changed:
             return False
+        self._apply_current_reload_factor(state, entity)
         self._publish_loaded_shell_change(
             state, previous_reload, previous_duration)
         if instant:
@@ -6591,26 +6649,39 @@ class BattleRuntime(object):
             shell = _field(shot, 'shell', {})
             if int(_field(shell, 'compactDescr', 0)) != int(value):
                 continue
-            previous_reload = state.reload_time
-            previous_duration = state.reload_duration
-            previous_selection = (
-                int(state.shot_index), state.pending_index)
             if code == current_shells:
                 pending_fire = self._local_fire_intent
                 if isinstance(pending_fire, dict):
                     # The physical round was frozen at the trigger edge. Keep
                     # it loaded until that shot is accepted or rejected; the
                     # requested shell can still be queued for the shot boundary.
-                    state.request_shell_index(index)
+                    edge = self._advance_local_gun_edge(state)
+                    entity = edge[0] if edge is not None else None
+                    previous_reload = state.reload_time
+                    previous_duration = state.reload_duration
+                    previous_selection = (
+                        int(state.shot_index), state.pending_index)
+                    changed = state.request_shell_index(index)
                     pending_fire['deferred_current_shell_index'] = int(index)
-                    if previous_selection != (
+                    if changed:
+                        self._apply_current_reload_factor(state, entity)
+                        self._publish_loaded_shell_change(
+                            state, previous_reload, previous_duration)
+                    elif previous_selection != (
                             int(state.shot_index), state.pending_index):
                         self._sender.send_current()
                     return True
                 self._switch_current_shell(state, index)
                 return True
+            edge = self._advance_local_gun_edge(state)
+            entity = edge[0] if edge is not None else None
+            previous_reload = state.reload_time
+            previous_duration = state.reload_duration
+            previous_selection = (
+                int(state.shot_index), state.pending_index)
             changed = state.request_shell_index(index)
             if changed:
+                self._apply_current_reload_factor(state, entity)
                 self._publish_loaded_shell_change(
                     state, previous_reload, previous_duration)
             elif previous_selection != (
@@ -8613,7 +8684,14 @@ class BattleRuntime(object):
                 record, event, canonical)
             if (entity is not None and should_apply and
                     canonical != record.get('critical_state')):
+                gun_edge = None
+                if record.get('local') and self._gun_state is not None:
+                    gun_edge = self._advance_local_gun_edge(self._gun_state)
                 events = critical_damage.apply_payload(entity, critical)
+                if gun_edge is not None:
+                    # Apply loader/ammo-rack factors at their canonical event
+                    # edge instead of retroactively over the callback gap.
+                    self._advance_local_gun_to(entity, gun_edge[1])
                 state['critical'] = canonical
                 record['critical_state'] = canonical
                 self._present_critical(record, events, attacker_id)
@@ -8740,7 +8818,12 @@ class BattleRuntime(object):
         entity = self._server_entity(record['engine_id'])
         if entity is None:
             return False
+        gun_edge = None
+        if record.get('local') and self._gun_state is not None:
+            gun_edge = self._advance_local_gun_edge(self._gun_state)
         events = critical_damage.apply_payload(entity, canonical)
+        if gun_edge is not None:
+            self._advance_local_gun_to(entity, gun_edge[1])
         record['critical_state'] = canonical
         state = dict(record.get('state') or {})
         state['critical'] = canonical
@@ -9205,13 +9288,21 @@ class BattleRuntime(object):
                 'canonical local shot does not acknowledge its trigger')
         gun = self._gun_state
         if gun is not None:
-            if shell_index != gun.shot_index or not gun.commit_fire(
-                    critical_damage.stat_factor(
-                        self._server_entity(record['engine_id']), 'reload')):
+            edge = self._advance_local_gun_edge(gun)
+            entity = (edge[0] if edge is not None else
+                      self._server_entity(record['engine_id']))
+            reload_factor = critical_damage.stat_factor(entity, 'reload')
+            if (shell_index != gun.shot_index or
+                    not gun.commit_fire(reload_factor)):
                 raise RuntimeError(
                     'canonical local shot violates presented gun state')
             if pending.get('deferred_partial_clip_reload'):
                 gun.reload_partial_clip()
+            # commit_fire applies the factor to a normal empty-magazine cycle.
+            # A queued shell promotion or deferred partial reload replaces that
+            # duration with the base reload, so normalize the final transaction
+            # state before its first native publication and checkpoint.
+            self._rescale_current_reload(gun, reload_factor)
             self._publish_ammo_state(gun, force=True)
             self._publish_reload_event(
                 gun.reload_time, gun.reload_duration, force=True)
@@ -17361,6 +17452,11 @@ class BattleRuntime(object):
         if not bool(getattr(descriptor, 'hasSiegeMode', False)):
             record['presented_siege_state'] = disabled
             return False
+        gun_edge = None
+        if record.get('local') and self._gun_state is not None:
+            # The native Siege callback may synchronously swap the composite
+            # descriptor.  Settle the old gun law before crossing that edge.
+            gun_edge = self._advance_local_gun_edge(self._gun_state)
         self._binding.update_vehicle_siege_state(
             record['engine_id'], siege_state,
             float(time_left_ms) / 1000.0)
@@ -17376,8 +17472,19 @@ class BattleRuntime(object):
                 entity, siege_state in (
                     siege_states.ENABLED, siege_states.SWITCHING_OFF))
         if record.get('local') and self._gun_state is not None:
-            self._gun_state.adopt_descriptor(entity.typeDescriptor)
+            gun_changed = self._gun_state.adopt_descriptor(
+                entity.typeDescriptor)
             self._targeting_signature = None
+            if gun_edge is not None:
+                # Re-evaluate the new reload duration at the exact same edge;
+                # no pre-Siege elapsed time can enter the new descriptor law.
+                self._advance_local_gun_to(entity, gun_edge[1])
+            # Only a visible clock-owning transaction donates this descriptor
+            # edge.  Worker records have no local sender/gun timeline, while
+            # lightweight harnesses may intentionally omit that timeline.
+            if (gun_changed and gun_edge is not None and
+                    self._sender is not None):
+                self._sender.send_current()
         if record.get('local') and self._local_physics is not None:
             self._local_physics = vehicle_physics.derive_params(
                 entity.typeDescriptor,

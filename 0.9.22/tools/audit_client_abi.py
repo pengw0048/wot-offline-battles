@@ -403,6 +403,7 @@ EXPECTED_ABI = {
         'AmmoController.getNextSettingCode': ('self', 'intCD'),
         'AmmoController.setNextShellCD': ('self', 'intCD'),
         'AmmoController.setCurrentShellCD': ('self', 'intCD'),
+        'AmmoController.useLoaderIntuition': ('self',),
     },
     'scripts/client/account_helpers/AccountSettings.pyc': {
         'AccountSettings.__readSection': ('ds', 'name'),
@@ -1117,7 +1118,8 @@ EXPECTED_CODE_NAMES = {
             'updateVehicleDestroyTimer', 'SIEGE_MODE_STATE_CHANGED',
             'VEHICLE_SIEGE_STATE', 'SWITCHING_ON', 'SWITCHING_OFF',
             'moveVehicleByCurrentKeys', 'SIEGE_MODE',
-            '_PlayerAvatar__onSiegeStateUpdated'),
+            '_PlayerAvatar__onSiegeStateUpdated',
+            'LOADER_INTUITION_WAS_USED', 'useLoaderIntuition'),
         'PlayerAvatar.__onSiegeStateUpdated': (
             'BigWorld', 'entity', 'typeDescriptor', 'hasSiegeMode',
             'onSiegeStateUpdated', 'isPlayerVehicle'),
@@ -1133,6 +1135,16 @@ EXPECTED_CODE_NAMES = {
             '_endTime', 'BigWorld', 'serverTime'),
         'ArenaPeriodController.__tick': (
             '_calculate', '_updateCountdown'),
+    },
+    'scripts/client/gui/battle_control/controllers/consumables/'
+    'ammo_ctrl.pyc': {
+        'AmmoController.changeSetting': (
+            'avatar_getter', 'isVehicleAlive', 'getNextSettingCode',
+            'updateVehicleSetting', 'isPlayerOnArena',
+            'changeVehicleSetting'),
+        'AmmoController.useLoaderIntuition': (
+            '_AmmoController__gunSettings', 'clip', 'size',
+            'isGunReloading', 'setShells'),
     },
     'scripts/client/gui/battle_control/controllers/vehicle_state_ctrl.pyc': {
         '_SpeedStateHandler._invalidate': (

@@ -244,6 +244,9 @@ def _load_runtime():
     from OfflineMapCreator import g_offlineMapCreator
     from PlayerEvents import g_playerEvents
     from connection_mgr import LOGIN_STATUS
+    from gui.battle_control import avatar_getter
+    from gui.battle_control.controllers.consumables.ammo_ctrl import \
+        AmmoController
     from gui.Scaleform.daapi.view.battle.shared.debug_panel import DebugPanel
     from gui.Scaleform.daapi.view.battle.shared.markers2d.plugins import \
         VehicleMarkerPlugin
@@ -263,6 +266,8 @@ def _load_runtime():
     runtime.account_module = Account
     runtime.avatar_module = Avatar
     runtime.avatar_input_handler = AvatarInputHandler
+    runtime.avatar_getter = avatar_getter
+    runtime.ammo_controller_type = AmmoController
     runtime.control_modes = ControlModes
     runtime.avatar_position_control = AvatarPositionControl
     runtime.acceleration_smoother_type = AccelerationSmoother
@@ -514,6 +519,7 @@ class OfflineCompatibility(object):
         self._original_avatar_aux_physics = None
         self._original_avatar_get_speeds = None
         self._original_avatar_auto_aim = None
+        self._original_ammo_change_setting = None
         self._original_arcade_handle_key_event = None
         self._original_strategic_camera_update = None
         self._strategic_camera_update_wrapper = None
@@ -572,6 +578,7 @@ class OfflineCompatibility(object):
         self._avatar_aux_physics_wrapper = None
         self._avatar_get_speeds_wrapper = None
         self._avatar_auto_aim_wrapper = None
+        self._ammo_change_setting_wrapper = None
         self._arcade_handle_key_event_wrapper = None
         self._sniper_handle_key_event_wrapper = None
         self._control_mode_changed_wrapper = None
@@ -623,6 +630,8 @@ class OfflineCompatibility(object):
         runtime = self._runtime
         account_type = runtime.account_module.PlayerAccount
         avatar_type = runtime.avatar_module.PlayerAvatar
+        ammo_controller_type = getattr(
+            runtime, 'ammo_controller_type', None)
         vehicle_type = getattr(
             getattr(runtime, 'vehicle_module', None), 'Vehicle', None)
         vehicle_marker_type = getattr(
@@ -706,6 +715,16 @@ class OfflineCompatibility(object):
             'autoAim', getattr(avatar_type, 'autoAim', None))
         if self._original_avatar_auto_aim is None:
             raise RuntimeError('#1513 Avatar.autoAim is unavailable')
+        if ammo_controller_type is not None:
+            self._original_ammo_change_setting = (
+                ammo_controller_type.__dict__.get(
+                    'changeSetting', getattr(
+                        ammo_controller_type, 'changeSetting', None)))
+            if (self._original_ammo_change_setting is None or
+                    getattr(runtime, 'avatar_getter', None) is None):
+                raise RuntimeError(
+                    '#1513 AmmoController shell-setting boundary is '
+                    'unavailable')
         if arcade_control_type is None or sniper_control_type is None:
             raise RuntimeError('#1513 target-lock control modes are unavailable')
         self._original_arcade_handle_key_event = (
@@ -1812,6 +1831,36 @@ class OfflineCompatibility(object):
                 vehicleId=vehicle_id)
             return None
 
+        def ammo_change_setting(controller, int_cd, avatar=None):
+            """Let one offline CURRENT transaction own its native edge order.
+
+            Stock #1513 optimistically applies CURRENT_SHELLS before invoking
+            the cell mailbox.  The LAN runtime must close the old positive
+            reload before it publishes the new current shell, otherwise the
+            old completion edge is attributed to the new ammo slot.  NEXT and
+            every non-offline call retain the unmodified stock behavior.
+            """
+            if not compatibility._battle_active:
+                return compatibility._original_ammo_change_setting(
+                    controller, int_cd, avatar)
+            getter = runtime.avatar_getter
+            if not getter.isVehicleAlive(avatar):
+                return False
+            code = controller.getNextSettingCode(int_cd)
+            settings = getattr(runtime.constants, 'VEHICLE_SETTING', None)
+            current_shells = getattr(settings, 'CURRENT_SHELLS', None)
+            if current_shells is None or code != current_shells:
+                return compatibility._original_ammo_change_setting(
+                    controller, int_cd, avatar)
+            if not getter.isPlayerOnArena(avatar):
+                return compatibility._original_ammo_change_setting(
+                    controller, int_cd, avatar)
+            # AvatarServerBridge invokes BattleRuntime synchronously.  That
+            # transaction publishes old reload 0, CURRENT_SHELLS and the new
+            # positive duration before this stock input call returns.
+            getter.changeVehicleSetting(code, int_cd, avatar)
+            return True
+
         def handle_target_lock_input(original, control, is_down, key, mods,
                                      event):
             if not compatibility._battle_active:
@@ -2228,6 +2277,7 @@ class OfflineCompatibility(object):
         self._avatar_aux_physics_wrapper = avatar_aux_physics
         self._avatar_get_speeds_wrapper = avatar_get_speeds
         self._avatar_auto_aim_wrapper = avatar_auto_aim
+        self._ammo_change_setting_wrapper = ammo_change_setting
         self._arcade_handle_key_event_wrapper = arcade_handle_key_event
         self._sniper_handle_key_event_wrapper = sniper_handle_key_event
         self._strategic_camera_update_wrapper = strategic_camera_update
@@ -2282,6 +2332,8 @@ class OfflineCompatibility(object):
             if self._original_avatar_get_speeds is not None:
                 avatar_type.getOwnVehicleSpeeds = avatar_get_speeds
             avatar_type.autoAim = avatar_auto_aim
+            if ammo_controller_type is not None:
+                ammo_controller_type.changeSetting = ammo_change_setting
             arcade_control_type.handleKeyEvent = arcade_handle_key_event
             sniper_control_type.handleKeyEvent = sniper_handle_key_event
             strategic_camera_type._StrategicCamera__cameraUpdate = (
@@ -2345,6 +2397,8 @@ class OfflineCompatibility(object):
         runtime = self._runtime
         account_type = runtime.account_module.PlayerAccount
         avatar_type = runtime.avatar_module.PlayerAvatar
+        ammo_controller_type = getattr(
+            runtime, 'ammo_controller_type', None)
         vehicle_type = getattr(
             getattr(runtime, 'vehicle_module', None), 'Vehicle', None)
         vehicle_marker_type = getattr(
@@ -2431,6 +2485,12 @@ class OfflineCompatibility(object):
                 avatar_type.__dict__.get('autoAim') is
                 self._avatar_auto_aim_wrapper):
             avatar_type.autoAim = self._original_avatar_auto_aim
+        if (ammo_controller_type is not None and
+                self._original_ammo_change_setting is not None and
+                ammo_controller_type.__dict__.get('changeSetting') is
+                self._ammo_change_setting_wrapper):
+            ammo_controller_type.changeSetting = (
+                self._original_ammo_change_setting)
         if (arcade_control_type is not None and
                 self._original_arcade_handle_key_event is not None and
                 arcade_control_type.__dict__.get('handleKeyEvent') is

@@ -6591,6 +6591,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle, battle._gun_state,
             runtime.constants.VEHICLE_SETTING, client, record)
 
+    def _last_input_gun_checkpoint(self, client):
+        messages = [message for message in client.sent
+                    if message[0] == 'input']
+        self.assertTrue(messages)
+        return messages[-1][2]['gun_checkpoint']
+
     def test_next_shell_setting_waits_for_the_loaded_round(self):
         battle, state, settings = self._shell_change_battle()
 
@@ -6868,6 +6874,339 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(0.0, state.reload_time)
         self.assertEqual(1, state.clip)
         self.assertTrue(state.can_fire(True))
+
+    def test_shell_switch_consumes_old_elapsed_before_new_reload_cycle(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle()
+        state.reload = 6.0
+        state.clip = 0
+        state.reload_time = 4.0
+        state.reload_duration = 6.0
+        clock = [100.0]
+        battle._clock = lambda: clock[0]
+        battle._gun_last_tick = 99.7
+        battle._reload_event = (4.0, 6.0)
+
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.NEXT_SHELLS, 102))
+        self.assertAlmostEqual(3.7, state.reload_time)
+
+        clock[0] = 100.4
+        battle._avatar.reload_updates[:] = []
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.CURRENT_SHELLS, 102))
+
+        positive = [event for event in battle._avatar.reload_updates
+                    if event[1] > 0.0]
+        checkpoint = self._last_input_gun_checkpoint(client)
+        self.assertEqual([(10, 6.0, 6.0)], positive)
+        self.assertEqual(6.0, state.reload_time)
+        self.assertEqual(6.0, state.reload_duration)
+        self.assertEqual(6.0, checkpoint['reload_time'])
+        self.assertEqual(6.0, checkpoint['reload_duration'])
+        self.assertEqual(100.4, battle._gun_last_tick)
+
+    def test_deferred_stock_current_closes_old_shell_before_new_reload(self):
+        battle, state, settings, unused_client, unused_record = \
+            self._pending_fire_shell_change_battle()
+        state.reload = 6.0
+        state.clip = 0
+        state.reload_time = 3.0
+        state.reload_duration = 6.0
+        stock = {'current': 101, 'next': 101}
+        events = []
+
+        def update_setting(unused_vehicle_id, code, value):
+            value = int(value)
+            if code == settings.NEXT_SHELLS:
+                if stock['next'] != value:
+                    stock['next'] = value
+                    events.append(('next', value))
+            elif code == settings.CURRENT_SHELLS:
+                if stock['current'] != value:
+                    stock['current'] = value
+                    events.append(('current', value))
+
+        def update_reload(unused_vehicle_id, time_left, base_time):
+            events.append((
+                'reload', stock['current'], float(time_left),
+                float(base_time)))
+
+        battle._avatar.updateVehicleSetting = update_setting
+        battle._avatar.updateVehicleGunReloadTime = update_reload
+
+        def stock_change_setting(value):
+            if value == stock['current'] and value == stock['next']:
+                return False
+            code = (settings.CURRENT_SHELLS
+                    if value == stock['next'] else settings.NEXT_SHELLS)
+            # OfflineCompatibility preserves the stock optimistic NEXT edge,
+            # but defers CURRENT to the synchronous local bridge so the old
+            # reload can be closed while the old shell still owns it.
+            if code != settings.CURRENT_SHELLS:
+                battle._avatar.updateVehicleSetting(10, code, value)
+            return battle._sender.change_vehicle_setting(10, code, value)
+
+        self.assertTrue(stock_change_setting(102))
+        self.assertTrue(stock_change_setting(102))
+
+        reload_events = [event for event in events
+                         if event[0] == 'reload']
+        self.assertEqual([
+            ('reload', 101, 0.0, 6.0),
+            ('reload', 102, 6.0, 6.0),
+        ], reload_events)
+        self.assertEqual(1, len([
+            event for event in reload_events
+            if event[1] == 102 and event[2] > 0.0]))
+
+    def test_partial_clip_reload_starts_at_setting_edge_and_sends_checkpoint(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle(clip_size=3, clip=2)
+        state.reload = 6.0
+        state.reload_time = 0.0
+        state.reload_duration = 6.0
+        clock = [200.0]
+        battle._clock = lambda: clock[0]
+        battle._gun_last_tick = 199.8
+
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.NEXT_SHELLS, 102))
+        input_count = len([
+            message for message in client.sent if message[0] == 'input'])
+
+        clock[0] = 200.5
+        battle._avatar.reload_updates[:] = []
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.RELOAD_PARTIAL_CLIP, 0))
+
+        messages = [message for message in client.sent
+                    if message[0] == 'input']
+        checkpoint = self._last_input_gun_checkpoint(client)
+        self.assertEqual(input_count + 1, len(messages))
+        self.assertEqual([(10, 6.0, 6.0)], [
+            event for event in battle._avatar.reload_updates
+            if event[1] > 0.0])
+        self.assertEqual(1, state.shot_index)
+        self.assertIsNone(state.pending_index)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(6.0, state.reload_time)
+        self.assertEqual(6.0, checkpoint['reload_time'])
+        self.assertEqual(1, messages[-1][2]['shell_index'])
+        self.assertFalse(messages[-1][2]['shell_change_pending'])
+        self.assertEqual(200.5, battle._gun_last_tick)
+
+    def test_rejected_fire_starts_deferred_shell_reload_at_rejection_edge(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle()
+        state.reload = 6.0
+        clock = [300.0]
+        battle._clock = lambda: clock[0]
+        battle._gun_last_tick = 299.5
+
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        pending = dict(battle._local_fire_intent)
+        clock[0] = 300.1
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.NEXT_SHELLS, 102))
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.CURRENT_SHELLS, 102))
+
+        clock[0] = 301.0
+        battle._avatar.reload_updates[:] = []
+        self.assertTrue(battle.on_fire_intent_result({
+            'type': 'fire_intent_result', 'round_id': 7,
+            'player_id': 1, 'intent_seq': pending['intent_seq'],
+            'accepted': False, 'reason': 'projectile_launch_rejected',
+        }))
+
+        checkpoint = self._last_input_gun_checkpoint(client)
+        messages = [message for message in client.sent
+                    if message[0] == 'input']
+        self.assertEqual([(10, 6.0, 6.0)], [
+            event for event in battle._avatar.reload_updates
+            if event[1] > 0.0])
+        self.assertEqual(6.0, state.reload_time)
+        self.assertEqual(6.0, checkpoint['reload_time'])
+        self.assertEqual(1, messages[-1][2]['shell_index'])
+        self.assertEqual(301.0, battle._gun_last_tick)
+
+    def test_damaged_ammo_rack_shell_switch_publishes_one_scaled_cycle(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle()
+        state.reload = 6.0
+        state.clip = 0
+        state.reload_time = 6.0
+        state.reload_duration = 12.0
+        clock = [400.0]
+        battle._clock = lambda: clock[0]
+        battle._gun_last_tick = 400.0
+        battle._reload_event = (6.0, 12.0)
+
+        def damaged_factor(unused_entity, stat):
+            return 2.0 if stat == 'reload' else 1.0
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'critical_damage.stat_factor', side_effect=damaged_factor):
+            self.assertTrue(battle.change_vehicle_setting(
+                settings.NEXT_SHELLS, 102))
+            clock[0] = 400.5
+            battle._avatar.reload_updates[:] = []
+            self.assertTrue(battle.change_vehicle_setting(
+                settings.CURRENT_SHELLS, 102))
+
+        checkpoint = self._last_input_gun_checkpoint(client)
+        self.assertEqual([
+            (10, 0.0, 12.0),
+            (10, 12.0, 12.0),
+        ], battle._avatar.reload_updates)
+        self.assertEqual(12.0, state.reload_time)
+        self.assertEqual(12.0, state.reload_duration)
+        self.assertEqual(12.0, checkpoint['reload_time'])
+        self.assertEqual(12.0, checkpoint['reload_duration'])
+        self.assertEqual(400.5, battle._gun_last_tick)
+
+    def test_loader_intuition_switch_closes_old_reload_and_stays_loaded(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle(clip_size=1, clip=0)
+        state.reload = 6.0
+        state.reload_time = 3.0
+        state.reload_duration = 6.0
+        initial_ammo = tuple(state.ammo)
+        battle._roll_loader_intuition = lambda: True
+        clock = [500.0]
+        battle._clock = lambda: clock[0]
+        battle._gun_last_tick = 499.6
+
+        stock = {
+            'current': 101, 'next': 101, 'reload': 3.0,
+            'base': 6.0, 'ammo': {101: (20, 0), 102: (10, 0)},
+        }
+        events = []
+
+        def update_setting(unused_vehicle_id, code, value):
+            value = int(value)
+            if code == settings.NEXT_SHELLS:
+                if stock['next'] != value:
+                    stock['next'] = value
+                    events.append(('next', value))
+            elif code == settings.CURRENT_SHELLS:
+                if stock['current'] != value:
+                    stock['current'] = value
+                    events.append(('current', value))
+
+        def update_ammo(unused_vehicle_id, compact_descr, quantity,
+                        quantity_in_clip, unused_time_remaining):
+            compact_descr = int(compact_descr)
+            stock['ammo'][compact_descr] = (
+                int(quantity), int(quantity_in_clip))
+            events.append(('ammo', compact_descr, int(quantity_in_clip)))
+
+        def update_reload(unused_vehicle_id, time_left, base_time):
+            stock['reload'] = float(time_left)
+            stock['base'] = float(base_time)
+            events.append((
+                'reload', stock['current'], stock['reload'], stock['base']))
+
+        def update_misc(unused_vehicle_id, code, unused_int_arg,
+                        unused_float_args):
+            status = battle._runtime.constants.VEHICLE_MISC_STATUS
+            self.assertEqual(status.LOADER_INTUITION_WAS_USED, code)
+            # This mirrors #1513 AmmoController.useLoaderIntuition: it only
+            # refills the selected cassette after native reload state is 0.
+            self.assertEqual(0.0, stock['reload'])
+            self.assertEqual(102, stock['current'])
+            for compact_descr, (quantity, unused_clip) in list(
+                    stock['ammo'].items()):
+                stock['ammo'][compact_descr] = (quantity, 0)
+            quantity = stock['ammo'][stock['current']][0]
+            stock['ammo'][stock['current']] = (
+                quantity, min(state.clip_size, quantity))
+            events.append(('intuition', stock['current']))
+
+        battle._avatar.updateVehicleSetting = update_setting
+        battle._avatar.updateVehicleAmmo = update_ammo
+        battle._avatar.updateVehicleGunReloadTime = update_reload
+        battle._avatar.updateVehicleMiscStatus = update_misc
+
+        def stock_change_setting(value):
+            if value == stock['current'] and value == stock['next']:
+                return False
+            code = (settings.CURRENT_SHELLS
+                    if value == stock['next'] else settings.NEXT_SHELLS)
+            if code != settings.CURRENT_SHELLS:
+                battle._avatar.updateVehicleSetting(10, code, value)
+            return battle._sender.change_vehicle_setting(10, code, value)
+
+        self.assertTrue(stock_change_setting(102))
+        input_count = len([
+            message for message in client.sent if message[0] == 'input'])
+        events[:] = []
+        clock[0] = 500.3
+        self.assertTrue(stock_change_setting(102))
+
+        messages = [message for message in client.sent
+                    if message[0] == 'input']
+        payload = messages[-1][2]
+        checkpoint = payload['gun_checkpoint']
+        self.assertEqual([
+            ('reload', 101, 0.0, 6.0),
+            ('ammo', 101, 0),
+            ('ammo', 102, 1),
+            ('current', 102),
+            ('reload', 102, 0.0, 6.0),
+            ('intuition', 102),
+        ], events)
+        self.assertEqual(input_count + 1, len(messages))
+        self.assertEqual(1, state.shot_index)
+        self.assertIsNone(state.pending_index)
+        self.assertEqual(1, state.clip)
+        self.assertEqual(0.0, state.reload_time)
+        self.assertEqual(initial_ammo, tuple(state.ammo))
+        self.assertTrue(state.can_fire(True))
+        self.assertEqual((10, 1), stock['ammo'][102])
+        self.assertEqual(1, payload['shell_index'])
+        self.assertEqual(1, payload['next_shell_index'])
+        self.assertFalse(payload['shell_change_pending'])
+        self.assertEqual(1, checkpoint['clip'])
+        self.assertEqual(1, checkpoint['clip_size'])
+        self.assertEqual(0.0, checkpoint['reload_time'])
+        self.assertEqual(6.0, checkpoint['reload_duration'])
+
+        events[:] = []
+        clock[0] = 501.3
+        battle._advance_local_gun_to(battle._server_entity(10))
+        self.assertEqual([], [event for event in events
+                             if event[0] == 'reload' and event[2] > 0.0])
+        self.assertEqual(1, state.clip)
+        self.assertEqual(0.0, state.reload_time)
+
+    def test_loader_intuition_is_not_rolled_for_an_autoloader(self):
+        battle, state, settings, client, unused_record = \
+            self._pending_fire_shell_change_battle(clip_size=3, clip=3)
+        state.reload = 6.0
+        state.reload_time = 0.0
+        state.reload_duration = 6.0
+        battle._roll_loader_intuition = mock.Mock(return_value=True)
+
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.NEXT_SHELLS, 102))
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.CURRENT_SHELLS, 102))
+
+        checkpoint = self._last_input_gun_checkpoint(client)
+        battle._roll_loader_intuition.assert_not_called()
+        self.assertEqual(1, state.shot_index)
+        self.assertIsNone(state.pending_index)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(6.0, state.reload_time)
+        self.assertEqual(6.0, state.reload_duration)
+        self.assertFalse(state.can_fire(True))
+        self.assertEqual(0, checkpoint['clip'])
+        self.assertEqual(3, checkpoint['clip_size'])
+        self.assertEqual(6.0, checkpoint['reload_time'])
+        self.assertEqual([], battle._avatar.misc_statuses)
 
     def test_loader_intuition_swaps_at_once_and_notifies_the_hud(self):
         battle, state, settings = self._shell_change_battle()
