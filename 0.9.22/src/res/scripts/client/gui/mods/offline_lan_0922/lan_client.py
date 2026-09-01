@@ -67,6 +67,7 @@ MAX_DESTRUCTIBLE_MAP_PARTS = 64
 MAX_DESTRUCTIBLE_INSTANCES_PER_PART = 2000
 MAX_DESTRUCTIBLE_RESOURCES_PER_PART = 512
 MAX_PROJECTILE_ID = 2147483647
+MAX_PROJECTILE_DAMAGE_STICKER = (1 << 64) - 1
 PLAYER_LANDING_MAX_IMPACT_SPEED = 200.0
 MAX_LANDING_OBSERVATION_QUEUE = 32
 # A process-relative microsecond clock fits comfortably in this bound for
@@ -1048,9 +1049,11 @@ def _strict_projectile_effect(value):
         'critical_target_ack_seq', 'hull_damage', 'critical_delta'))
     stun_fields = frozenset(('stun_end_server_time_ms',))
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
+    damage_sticker_fields = frozenset(('damage_sticker',))
     keys = set(value)
     if not required.issubset(keys) or not keys.issubset(
-            required | critical_fields | stun_fields | target_pose_fields):
+            required | critical_fields | stun_fields | target_pose_fields |
+            damage_sticker_fields):
         return None
     kind = value.get('target_kind')
     target_id = _projectile_int_range(
@@ -1066,13 +1069,17 @@ def _strict_projectile_effect(value):
     has_critical = 'critical' in value
     has_stun = 'stun_end_server_time_ms' in value
     has_target_pose = bool(keys & target_pose_fields)
+    has_damage_sticker = 'damage_sticker' in value
     expected = (required |
                 (critical_fields if has_critical else frozenset()) |
                 (stun_fields if has_stun else frozenset()) |
-                (target_pose_fields if has_target_pose else frozenset()))
+                (target_pose_fields if has_target_pose else frozenset()) |
+                (damage_sticker_fields if has_damage_sticker else
+                 frozenset()))
     if (kind not in ('player', 'bot') or target_id is None or
             damage is None or shot_result is None or
             any(component is None for component in position) or
+            (has_target_pose and has_damage_sticker) or
             keys != expected):
         return None
     result = {
@@ -1110,6 +1117,13 @@ def _strict_projectile_effect(value):
         if stun_end is None:
             return None
         result['stun_end_server_time_ms'] = stun_end
+    if has_damage_sticker:
+        damage_sticker = _projectile_int_range(
+            value.get('damage_sticker'), 0,
+            MAX_PROJECTILE_DAMAGE_STICKER)
+        if damage_sticker is None:
+            return None
+        result['damage_sticker'] = damage_sticker
     if has_target_pose:
         target_position = []
         for axis in ('x', 'y', 'z'):
@@ -2986,6 +3000,7 @@ class LANClient(object):
         for effect in splash:
             parsed = _strict_projectile_effect(effect)
             if (parsed is None or
+                    'damage_sticker' in parsed or
                     not all(name in parsed for name in
                             ('target_x', 'target_y', 'target_z'))):
                 return False
@@ -3065,6 +3080,9 @@ class LANClient(object):
             if parsed is None:
                 return False
             parsed_destructibles.append(parsed)
+        direct_fields = {
+            'target_kind', 'target_id', 'damage', 'shot_result',
+            'x', 'y', 'z'}
         if (parsed_epoch is None or parsed_epoch != _exact_int(
                 self.authority_epoch) or parsed_projectile_id is None or
                 parsed_base is None or parsed_time is None or
@@ -3075,9 +3093,8 @@ class LANClient(object):
                 parsed_factor is None or parsed_direct is None or
                 parsed_direct['damage'] != 0 or
                 parsed_direct['shot_result'] != 0 or
-                set(parsed_direct) != {
-                    'target_kind', 'target_id', 'damage', 'shot_result',
-                    'x', 'y', 'z'}):
+                set(parsed_direct) not in (
+                    direct_fields, direct_fields | {'damage_sticker'})):
             return False
         if math.sqrt(sum(
                 (parsed_origin[index] - parsed_impact[index]) ** 2
@@ -4086,7 +4103,8 @@ class LANClient(object):
         a user-visible failure boundary.  Callers must also avoid mutating any
         state before reaching this boundary.
         """
-        if not self._runtime_recovery_enabled():
+        if (kind != 'battle_receipt' and
+                not self._runtime_recovery_enabled()):
             return False
         key = _safe_text(kind, 'unknown', 32)
         now = _monotonic_time()
@@ -4111,6 +4129,22 @@ class LANClient(object):
         self._runtime_drop_diagnostics[key] = (now, 0)
         return True
 
+    def _discard_battle_receipt(self, message, reason):
+        """Acknowledge one poison receipt without ending the session.
+
+        The server verifies receipt ownership before removing it.  A bounded
+        identifier is therefore safe to acknowledge even when the rest of the
+        durable row cannot be consumed by this client build.
+        """
+        receipt_id = (_safe_text(message.get('receipt_id'), '', 97)
+                      if isinstance(message, dict) else '')
+        if receipt_id and len(receipt_id) <= 96:
+            try:
+                self.acknowledge_battle_receipt(receipt_id)
+            except Exception:
+                pass
+        self._ignore_runtime_payload('battle_receipt', reason, message)
+
     def _runtime_round_disposition(self, kind, message, error):
         """Classify a live payload round without hiding identity conflicts."""
         round_id = _exact_int(message.get('round_id'))
@@ -4134,6 +4168,11 @@ class LANClient(object):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
+        if kind == 'battle_receipt':
+            if (not _valid_battle_receipt(message) or
+                    message.get('account_key') != self.account_key):
+                self._discard_battle_receipt(message, 'invalid_receipt')
+                return
         message_round = _exact_int(message.get('round_id'))
         if (kind in RECOVERABLE_RUNTIME_TYPES and
                 self.round_id is not None and
@@ -4143,7 +4182,12 @@ class LANClient(object):
         protocol = message.get('protocol')
         if protocol is not None or kind in SERVER_STATE_TYPES:
             parsed_protocol = _exact_int(protocol)
-            if kind == 'welcome' or self._schema_negotiated:
+            if kind == 'battle_receipt':
+                # The complete receipt schema above is the compatibility
+                # boundary.  A stale informational protocol label must not
+                # make one durable result lock this account out forever.
+                matches_protocol = True
+            elif kind == 'welcome' or self._schema_negotiated:
                 # Welcome carries the full capability contract below.  A
                 # positive version marker is enough to negotiate that known
                 # JSON schema; the exact build/version label is informational.
@@ -4322,11 +4366,7 @@ class LANClient(object):
             self._schema_negotiated = True
             self.server_time_ms = welcome_server_time
         elif kind == 'battle_receipt':
-            if (not _valid_battle_receipt(message) or
-                    message.get('account_key') != self.account_key):
-                self.last_error = 'invalid battle receipt'
-                self.stop()
-                return
+            pass
         elif kind == 'roster':
             round_id = _exact_int(message.get('round_id'))
             if round_id is None:

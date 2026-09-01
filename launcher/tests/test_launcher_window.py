@@ -266,6 +266,16 @@ class WindowTest(unittest.TestCase):
             "Collect full-memory crash dumps (very large files)",
             self.window.full_crash_dump_check.cget("text"))
 
+    def test_launcher_session_identity_is_visible_and_persisted(self):
+        self.assertIn(
+            "Launcher session: version=0.6.1 build=unknown role=launcher",
+            self._log_text())
+        with open(core.launcher_log_path(), encoding="utf-8") as stream:
+            persisted = stream.read()
+        self.assertIn(
+            "Launcher session: version=0.6.1 build=unknown role=launcher",
+            persisted)
+
     def test_first_run_prompts_once_when_the_launcher_starts(self):
         with mock.patch.object(
                 self.window, "_request_crash_collection",

@@ -12,6 +12,10 @@ except NameError:
 
 CONFIG_PATH = os.path.join(
     '.', 'mods', 'configs', 'offline_lan_0922', 'config.json')
+BUILD_IDENTITY_PATH = os.path.join(
+    '.', 'mods', 'configs', 'offline_lan_0922', 'build_identity.json')
+BUILD_SEMANTIC_VERSION_ENV = 'WOT_OFFLINE_SEMANTIC_VERSION'
+BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 ENDPOINT_FILE_NAME = 'server_endpoint.json'
 WAITING_ROOM_STATE_FILE_NAME = 'waiting_room_state.json'
 LEGACY_USER_DATA_DIR = os.path.dirname(CONFIG_PATH)
@@ -86,6 +90,52 @@ DEFAULT_CONFIG = {
     # always published; these are the noisy per-event lines.
     'debug_logging': False,
 }
+
+
+def _identity_text(value):
+    if not isinstance(value, string_types):
+        return None
+    try:
+        value = value.strip()
+    except Exception:
+        return None
+    if (not value or len(value) > 96 or
+            any(character not in
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+                '0123456789._-+' for character in value)):
+        return None
+    return value
+
+
+def session_identity(path=BUILD_IDENTITY_PATH, environ=None):
+    """Return installed and launcher identities for diagnostic logging only."""
+    environ = os.environ if environ is None else environ
+    installed = None
+    try:
+        with open(path, 'rb') as stream:
+            value = json.load(stream)
+        if isinstance(value, dict) and value.get('schema') == 1:
+            semantic_version = _identity_text(value.get('semanticVersion'))
+            build_identity = _identity_text(value.get('buildIdentity'))
+            if semantic_version is not None and build_identity is not None:
+                installed = (semantic_version, build_identity)
+    except Exception:
+        pass
+    launched = (
+        _identity_text(environ.get(BUILD_SEMANTIC_VERSION_ENV)),
+        _identity_text(environ.get(BUILD_IDENTITY_ENV)),
+    )
+    if None in launched:
+        launched = None
+    effective = installed or ('unknown', 'unknown')
+    return {
+        'semanticVersion': effective[0],
+        'buildIdentity': effective[1],
+        'launcherSemanticVersion': (
+            launched[0] if launched is not None else 'unknown'),
+        'launcherBuildIdentity': (
+            launched[1] if launched is not None else 'unknown'),
+    }
 
 
 def _copy_defaults():

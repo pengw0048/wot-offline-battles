@@ -1146,6 +1146,13 @@ class SnapshotSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'disappeared'):
             self.sync.snapshot({
                 'round_id': 1, 'server_tick': 3, 'bots': [bot]})
+        self.assertEqual(3, self.sync._last_bot_state_revision)
+        self.assertEqual(1, self.sync._last_sequence)
+        self.sync.snapshot({
+            'round_id': 1, 'server_tick': 2,
+            'bot_state_revision': 4, 'bots': [bot]})
+        self.assertEqual(4, self.sync._last_bot_state_revision)
+        self.assertEqual(2, self.sync._last_sequence)
 
         self.sync.manifest({'round_id': 2, 'bots': [bot]})
         self.sync.snapshot({

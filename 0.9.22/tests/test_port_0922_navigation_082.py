@@ -100,6 +100,20 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
         self.assertEqual(path[2], selected)
 
+    def test_speed_horizon_advances_farther_along_a_proved_flat_corridor(self):
+        navigator = TerrainNavigator(
+            lambda x, z, hint: 0.0, cell_size=4.0)
+        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_penalty = lambda start, end, now: 0.0
+        path = tuple((0.0, 0.0, float(index * 4)) for index in range(8))
+        navigator._path = lambda key, start, goal, now, avoid: (key, path)
+
+        selected = navigator.next_target(
+            81, (0.0, 0.0, -1.0), path[-1], ('flat-speed',), 1.0,
+            lookahead_distance=18.0)
+
+        self.assertEqual(path[4], selected)
+
     def test_near_waypoint_advance_still_keeps_climb_setup_point(self):
         navigator = TerrainNavigator(lambda x, z, hint: 0.0)
         navigator.grid.segment_clear = lambda start, end: True

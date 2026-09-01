@@ -32,6 +32,7 @@ SESSION_DUMPS_DIRECTORY_NAME = "session-dumps"
 SERVER_SESSION_ENV = "WOT_OFFLINE_REPORT_SESSION"
 
 ROLE_SERVER = "server"
+ROLE_LAUNCHER = "launcher"
 ROLE_VISIBLE_CLIENT = "visible-client"
 ROLE_HIDDEN_WORKER = "hidden-worker"
 ROLE_HIDDEN_WORKER_STARTER = "hidden-worker-starter"
@@ -46,6 +47,7 @@ DUMP_ROLES = (
     ROLE_HIDDEN_WORKER,
 )
 _SOURCE_ORDER = (
+    ROLE_LAUNCHER,
     ROLE_SERVER,
     ROLE_VISIBLE_CLIENT,
     ROLE_HIDDEN_WORKER,
@@ -57,6 +59,7 @@ _GAME_LOG_FILENAMES = {
     ROLE_HIDDEN_WORKER_STARTER: core.WORKER_FAILURE_LOG_FILENAME_0922,
 }
 _ARCHIVE_FILENAMES = {
+    ROLE_LAUNCHER: "launcher.log",
     ROLE_SERVER: "server.log",
     ROLE_VISIBLE_CLIENT: "visible-client.log",
     ROLE_HIDDEN_WORKER: "hidden-worker.log",
@@ -400,6 +403,7 @@ def begin_session(game_root, needs_worker=False, local_server=False,
     if needs_worker:
         expected.append(ROLE_HIDDEN_WORKER)
     sources = {
+        ROLE_LAUNCHER: _checkpoint(core.launcher_log_path(), "launcher"),
         ROLE_VISIBLE_CLIENT: _checkpoint(
             os.path.join(game_root, _GAME_LOG_FILENAMES[ROLE_VISIBLE_CLIENT]),
             "game"),
@@ -459,6 +463,8 @@ def expect_worker_starter_reset(session):
 
 def _source_path(session, role, source):
     kind = source.get("kind")
+    if kind == "launcher" and role == ROLE_LAUNCHER:
+        return core.launcher_log_path()
     if kind == "game" and role in _GAME_LOG_FILENAMES:
         return os.path.join(
             session["gameRoot"], _GAME_LOG_FILENAMES[role])

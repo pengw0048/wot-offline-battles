@@ -205,6 +205,16 @@ class _RemoteAppearance(object):
         """Mirror the CompoundAppearance hook used by stock Vehicle."""
         self.siegeState = int(state)
 
+    def addDamageSticker(self, code, component_name, sticker_id,
+                         segment_start, segment_end):
+        """Delegate the stock CompoundAppearance damage-sticker contract."""
+        stickers = self._owner._vehicle_stickers
+        add_sticker = getattr(stickers, 'addDamageSticker', None)
+        if not callable(add_sticker):
+            raise RuntimeError('remote damage-sticker owner is unavailable')
+        return add_sticker(
+            code, component_name, sticker_id, segment_start, segment_end)
+
     def attach(self, model):
         self.compoundModel = model
         self.models = [model]
@@ -973,6 +983,112 @@ def _pose_components(vehicle, math_module):
     gun.preMultiply(turret)
     result.append((descriptor.gun, gun))
     return result
+
+
+def _damage_sticker_coordinate(value, lower, upper):
+    """Quantize one #1513 damage-sticker coordinate to its wire byte."""
+    value = float(value)
+    lower = float(lower)
+    upper = float(upper)
+    if (math.isnan(value) or math.isinf(value) or
+            math.isnan(lower) or math.isinf(lower) or
+            math.isnan(upper) or math.isinf(upper) or upper <= lower):
+        raise ValueError('damage-sticker bounds are invalid')
+    ratio = max(0.0, min(1.0, (value - lower) / (upper - lower)))
+    return int(round(ratio * 255.0))
+
+
+def _clip_damage_sticker_segment(start_point, end_point, bbox):
+    """Clip a component-local ray to its bbox before byte quantization."""
+    start = tuple(float(start_point[axis]) for axis in range(3))
+    end = tuple(float(end_point[axis]) for axis in range(3))
+    delta = tuple(end[axis] - start[axis] for axis in range(3))
+    minimum = tuple(float(bbox[0][axis]) for axis in range(3))
+    maximum = tuple(float(bbox[1][axis]) for axis in range(3))
+    entry = 0.0
+    exit = 1.0
+    for axis in range(3):
+        if maximum[axis] <= minimum[axis]:
+            return None
+        if abs(delta[axis]) <= 1.0e-12:
+            if start[axis] < minimum[axis] or start[axis] > maximum[axis]:
+                return None
+            continue
+        first = (minimum[axis] - start[axis]) / delta[axis]
+        second = (maximum[axis] - start[axis]) / delta[axis]
+        if first > second:
+            first, second = second, first
+        entry = max(entry, first)
+        exit = min(exit, second)
+        if exit < entry:
+            return None
+    return (
+        tuple(start[axis] + delta[axis] * entry for axis in range(3)),
+        tuple(start[axis] + delta[axis] * exit for axis in range(3)),
+    )
+
+
+def encode_damage_sticker(vehicle, vehicle_matrix, start_point, end_point,
+                          component_name, sticker_id, math_module,
+                          chassis_matrix=None):
+    """Encode the exact uint64 consumed by #1513 DamageFromShotDecoder.
+
+    The authoritative projectile query is already expressed at the sampled
+    target pose. Preserve that pose here instead of reconstructing the mark
+    later from a replica's current model matrices.
+    """
+    if (vehicle is None or vehicle_matrix is None or
+            not isinstance(component_name, _STRING_TYPES) or
+            isinstance(sticker_id, bool)):
+        return None
+    try:
+        sticker_id = int(sticker_id)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not 0 <= sticker_id <= 255:
+        return None
+    try:
+        components = _pose_components(vehicle, math_module)
+        for component_index, pair in enumerate(components):
+            component, component_matrix = pair
+            if _component_value(component, 'itemTypeName') != component_name:
+                continue
+            tester = _component_value(component, 'hitTester')
+            bbox = _component_value(tester, 'bbox')
+            if bbox is None:
+                return None
+            root_matrix = (chassis_matrix if component_index == 0 and
+                           chassis_matrix is not None else vehicle_matrix)
+            world_to_root = math_module.Matrix(root_matrix)
+            world_to_root.invert()
+            local_points = (
+                component_matrix.applyPoint(
+                    world_to_root.applyPoint(start_point)),
+                component_matrix.applyPoint(
+                    world_to_root.applyPoint(end_point)),
+            )
+            local_points = _clip_damage_sticker_segment(
+                local_points[0], local_points[1], bbox)
+            if local_points is None:
+                return None
+            coordinate_shifts = ((16, 24, 32), (40, 48, 56))
+            encoded = sticker_id | (component_index << 8)
+            quantized = []
+            for point, shifts in zip(local_points, coordinate_shifts):
+                point_bytes = []
+                for axis, shift in enumerate(shifts):
+                    coordinate = _damage_sticker_coordinate(
+                        point[axis], bbox[0][axis], bbox[1][axis])
+                    point_bytes.append(coordinate)
+                    encoded |= coordinate << shift
+                quantized.append(tuple(point_bytes))
+            if quantized[0] == quantized[1]:
+                return None
+            return encoded
+    except (AttributeError, IndexError, TypeError, ValueError,
+            OverflowError):
+        return None
+    return None
 
 
 def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,

@@ -565,6 +565,13 @@ class ProcDumpDownloadTest(unittest.TestCase):
 
 class ServerPayloadTest(unittest.TestCase):
 
+    def test_launcher_log_lives_beside_settings(self):
+        settings = os.path.join(tempfile.gettempdir(), "state", "launcher.json")
+        with mock.patch.object(core, "settings_path", return_value=settings):
+            self.assertEqual(
+                os.path.join(os.path.dirname(settings), "launcher.log"),
+                core.launcher_log_path())
+
     def test_server_log_lives_beside_the_frozen_launcher(self):
         executable = os.path.join(
             tempfile.gettempdir(), "portable-launcher", "Launcher.exe")
@@ -631,6 +638,28 @@ class ServerPayloadTest(unittest.TestCase):
             environment[core.SERVER_TEAM_SIZE_ENV_0922])
         self.assertEqual("[]", environment[core.SERVER_BOT_LINEUP_ENV_0922])
         self.assertNotIn(core.NAVGRAPH_DIR_ENV, environment)
+
+    def test_server_and_clients_receive_the_bundled_diagnostic_identity(self):
+        identity = {
+            "schema": 1,
+            "semanticVersion": "0.6.1",
+            "buildIdentity": "test-build-a",
+        }
+        with mock.patch.object(
+                core, "bundled_payload_identity", return_value=identity):
+            environments = (
+                core.server_environment(
+                    core.PORT_0_9_22, "/game", {}),
+                core.worker_environment("/game", environment={}),
+                core.visible_client_environment(
+                    core.PORT_0_9_22, environment={}),
+            )
+
+        for environment in environments:
+            self.assertEqual(
+                "0.6.1", environment[core.BUILD_SEMANTIC_VERSION_ENV])
+            self.assertEqual(
+                "test-build-a", environment[core.BUILD_IDENTITY_ENV])
 
     def test_0_9_22_server_receives_the_selected_team_size(self):
         environment = core.server_environment(
@@ -801,11 +830,16 @@ class ClientInstallTest(unittest.TestCase):
         members["%s/manifest.json" % data_root] = json.dumps({"maps": records})
         return self._archive("0.8.2", members)
 
-    def _stage_0_9_22(self, content="new"):
+    def _stage_0_9_22(self, content="new", build_identity="test-build-a"):
         members = {
             "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod": content,
             "mods/0.9.22.0.1/offline_instance_guard_native.pyd": content,
             "mods/configs/offline_lan_0922/config.json": content,
+            core.BUILD_IDENTITY_RELATIVE_PATH_0922: json.dumps({
+                "schema": 1,
+                "semanticVersion": "0.6.1",
+                "buildIdentity": build_identity,
+            }),
             "offline_worker_starter.exe": content,
             "res_mods/0.9.22.0.1/engine_config.offline-player.xml": content,
             "res_mods/0.9.22.0.1/engine_config.offline-worker.xml": content,
@@ -1186,6 +1220,36 @@ class ClientInstallTest(unittest.TestCase):
         self.assertEqual(["The 0.8.2 mod is already up to date."], actions)
         self.assertEqual("kept", self._read("res_mods/0.8.2/leftover.txt"))
 
+    def test_same_semantic_version_with_a_new_build_identity_reinstalls(self):
+        package = (
+            "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod")
+        self._stage_0_9_22(content="first", build_identity="test-build-a")
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+        self._stage_0_9_22(content="second", build_identity="test-build-b")
+
+        actions = core.install_client_mod(
+            self.game, core.PORT_0_9_22, self.payload)
+
+        self.assertEqual("second", self._read(package))
+        self.assertIn("build=test-build-a", " ".join(actions))
+        self.assertIn("build=test-build-b", " ".join(actions))
+        self.assertIn("Install decision: reinstall", " ".join(actions))
+
+    def test_same_build_identity_keeps_the_complete_0_9_22_install(self):
+        self._stage_0_9_22(build_identity="test-build-a")
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+
+        actions = core.install_client_mod(
+            self.game, core.PORT_0_9_22, self.payload)
+
+        self.assertIn("Install decision: keep", " ".join(actions))
+        self.assertEqual({
+            "schema": 1,
+            "semanticVersion": "0.6.1",
+            "buildIdentity": "test-build-a",
+        }, core.installed_payload_identity(
+            self.game, core.PORT_0_9_22))
+
     def test_a_missing_required_file_forces_a_reinstall(self):
         self._stage_0_9_22()
         core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
@@ -1260,6 +1324,53 @@ class ClientInstallTest(unittest.TestCase):
 
         self.assertRaises(core.LauncherError, core.install_client_mod,
                           self.game, core.PORT_0_9_22, self.payload)
+
+    def test_a_malformed_build_identity_is_soft_and_forces_reinstall(self):
+        package = (
+            "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod")
+        self._stage_0_9_22(content="first", build_identity="test-build-a")
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+        archive_path = self._stage_0_9_22()
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = {name: archive.read(name)
+                       for name in archive.namelist()}
+        members[package] = "second"
+        members[core.BUILD_IDENTITY_RELATIVE_PATH_0922] = json.dumps({
+            "schema": 1,
+            "semanticVersion": "0.6.1",
+            "buildIdentity": "not a valid identity",
+        })
+        self._archive(core.PORT_0_9_22, members)
+
+        actions = core.install_client_mod(
+            self.game, core.PORT_0_9_22, self.payload)
+
+        self.assertEqual("second", self._read(package))
+        self.assertIsNone(core.installed_payload_identity(
+            self.game, core.PORT_0_9_22))
+        self.assertIn("build identity is unavailable", " ".join(actions))
+        self.assertIn("Install decision: reinstall", " ".join(actions))
+
+    def test_a_missing_build_identity_is_soft_and_removes_the_stale_one(self):
+        self._stage_0_9_22(content="first", build_identity="test-build-a")
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+        archive_path = self._stage_0_9_22(content="second")
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = {
+                name: archive.read(name) for name in archive.namelist()
+                if name != core.BUILD_IDENTITY_RELATIVE_PATH_0922
+            }
+        self._archive(core.PORT_0_9_22, members)
+
+        actions = core.install_client_mod(
+            self.game, core.PORT_0_9_22, self.payload)
+
+        self.assertFalse(os.path.exists(os.path.join(
+            self.game, *core.BUILD_IDENTITY_RELATIVE_PATH_0922.split("/"))))
+        self.assertIsNone(core.installed_payload_identity(
+            self.game, core.PORT_0_9_22))
+        self.assertIn("build identity is unavailable", " ".join(actions))
+        self.assertIn("Install decision: reinstall", " ".join(actions))
 
     def test_an_0_8_2_archive_missing_a_navgraph_is_rejected(self):
         archive_path = self._stage_0_8_2()
@@ -1491,6 +1602,8 @@ class PayloadStagingTest(unittest.TestCase):
                          "org.peng.offline_lan_0922_0.6.1.wotmod"),
             os.path.join(overlay, "mods", "configs", "offline_lan_0922",
                          "config.json"),
+            os.path.join(overlay, "mods", "configs", "offline_lan_0922",
+                         core.BUILD_IDENTITY_FILENAME_0922),
             os.path.join(overlay, "map_studio", "editor.py"),
         ]
         for relative in relative_paths:
@@ -1499,6 +1612,14 @@ class PayloadStagingTest(unittest.TestCase):
                 os.makedirs(os.path.dirname(path))
             with open(path, "w") as stream:
                 stream.write("x")
+        identity_path = os.path.join(
+            overlay, *core.BUILD_IDENTITY_RELATIVE_PATH_0922.split("/"))
+        with open(identity_path, "w") as stream:
+            json.dump({
+                "schema": 1,
+                "semanticVersion": "0.6.1",
+                "buildIdentity": "test-staging",
+            }, stream)
         self._write_0_8_2_navgraphs(source)
         self._write_0_9_22_data(overlay)
         target = os.path.join(source, "staged")
@@ -1507,6 +1628,7 @@ class PayloadStagingTest(unittest.TestCase):
             "0.9.22": ("mods/0.9.22.0.1/"
                        "org.peng.offline_lan_0922_0.6.1.wotmod",
                        "mods/configs/offline_lan_0922/config.json",
+                       core.BUILD_IDENTITY_RELATIVE_PATH_0922,
                        "offline_worker_starter.exe",
                        "mods/0.9.22.0.1/offline_instance_guard_native.pyd",
                        "res_mods/0.9.22.0.1/"
@@ -1568,6 +1690,13 @@ class PayloadStagingTest(unittest.TestCase):
             "org.peng.offline_lan_0922_0.6.1.wotmod.sha256")] = "secret"
         paths[os.path.join(
             overlay, "mods/configs/offline_lan_0922/config.json")] = "x"
+        paths[os.path.join(
+            overlay,
+            core.BUILD_IDENTITY_RELATIVE_PATH_0922)] = json.dumps({
+                "schema": 1,
+                "semanticVersion": "0.6.1",
+                "buildIdentity": "test-staging",
+            })
         paths[os.path.join(
             overlay, "mods/configs/offline_lan_0922/debug.log")] = "secret"
         for relative, content in paths.items():

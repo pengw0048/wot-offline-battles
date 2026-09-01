@@ -135,6 +135,22 @@ class ErrorReportTest(unittest.TestCase):
                 core.LauncherError, "No earlier session was included"):
             error_reports.create_report()
 
+    def test_report_includes_only_the_current_launcher_session_slice(self):
+        launcher_log = core.launcher_log_path()
+        self._write(launcher_log, b"old launcher session\n")
+        session = error_reports.begin_session(
+            self.game, session_id=self.SESSION_1, started_at="start")
+        self._write(launcher_log, b"version=0.6.1 build=test-build-a\n", "ab")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT), b"visible\n")
+        error_reports.finalize_session(session, ended_at="end")
+
+        payloads = self._archive(error_reports.create_report())
+
+        self.assertEqual(
+            b"version=0.6.1 build=test-build-a\n",
+            payloads["launcher.log"])
+
     def test_clean_visible_exit_marker_must_end_this_session_log(self):
         visible = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
         marker = (

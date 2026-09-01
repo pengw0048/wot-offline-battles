@@ -653,6 +653,10 @@ EXPECTED_ABI = {
         'encodeFragile': ('destrID', 'isShotDamage'),
         'decodeFragile': ('data',),
     },
+    'scripts/client/VehicleEffects.pyc': {
+        'DamageFromShotDecoder.decodeSegment': (
+            'segment', 'vehicleDescr'),
+    },
     'scripts/client/vehicle_systems/CompoundAppearance.pyc': {
         'CompoundAppearance.start': ('self', 'prereqs'),
         'CompoundAppearance.__linkCompound': ('self',),
@@ -663,6 +667,14 @@ EXPECTED_ABI = {
         'CompoundAppearance.deactivate': ('self', 'stopEffects'),
         'CompoundAppearance.addCrashedTrack': ('self', 'isLeft'),
         'CompoundAppearance.delCrashedTrack': ('self', 'isLeft'),
+        'CompoundAppearance.addDamageSticker': (
+            'self', 'code', 'componentName', 'stickerID',
+            'segStart', 'segEnd'),
+    },
+    'scripts/client/VehicleStickers.pyc': {
+        'VehicleStickers.addDamageSticker': (
+            'self', 'code', 'componentName', 'stickerID',
+            'segStart', 'segEnd'),
     },
     'scripts/client/vehicle_systems/components/CrashedTracks.pyc': {
         'CrashedTrackController.__setupTrackAssembler': ('self', 'entity'),
@@ -1741,6 +1753,12 @@ EXPECTED_PACKED_XML_PATH_VALUES = {
             (1, 'FLOAT32'),),
     },
     'scripts/entity_defs/Vehicle.def': {
+        ('Properties', 'damageStickers', 'Type'): (
+            (1, 'ARRAY'),),
+        ('Properties', 'damageStickers', 'Type', 'of'): (
+            (1, 'UINT64'),),
+        ('Properties', 'damageStickers', 'Flags'): (
+            (1, 'ALL_CLIENTS'),),
         ('Properties', 'siegeState', 'Type'): (
             (1, 'UINT8'),),
         ('Properties', 'siegeState', 'Flags'): (

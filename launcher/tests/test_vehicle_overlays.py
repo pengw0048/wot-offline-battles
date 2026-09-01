@@ -23,6 +23,13 @@ def element(children):
         packed.TYPE_ELEMENT, packed.PackedElement(children=children))
 
 
+def valued_element(value_type, value, children):
+    return packed.PackedValue(
+        packed.TYPE_ELEMENT,
+        packed.PackedElement(value=scalar(value_type, value),
+                             children=children))
+
+
 def child(parent, name):
     encoded = name.encode("utf-8")
     return next(value for current, value in parent.children
@@ -608,6 +615,36 @@ class VehicleOverlayTest(unittest.TestCase):
             self._root(self.VEHICLE), "hull/armor/armor_1")
         self.assertEqual(packed.TYPE_STRING, armor.value_type)
         self.assertEqual(b"22.25", armor.value)
+
+    def test_armor_element_self_value_is_editable_without_losing_children(self):
+        vehicle_root = packed.read_packed_xml(self.members[self.VEHICLE])
+        turret = child(child(vehicle_root, "turrets0").value, "T-18_mod")
+        armor = child(turret.value, "armor")
+        armor.value.children[1] = (
+            b"armor_2",
+            valued_element(
+                packed.TYPE_INTEGER, 45,
+                [(b"vehicleDamageFactor",
+                  scalar(packed.TYPE_STRING, b"0.0"))]))
+        self.members[self.VEHICLE] = packed.write_packed_xml(vehicle_root)
+        self._write_package()
+
+        fields = vehicle_overlays.list_vehicle_field_choices(
+            self.game, self.VEHICLE)
+        paths = {record["fieldPath"]: record for record in fields}
+        field_path = "turrets0/T-18_mod/armor/armor_2"
+        self.assertEqual("45", paths[field_path]["originalValue"])
+
+        vehicle_overlays.apply_vehicle_edit(
+            self.game, self.VEHICLE, field_path, "52.5",
+            is_running=lambda: False)
+        rebuilt = self._root(self.VEHICLE)
+        value = vehicle_overlays._find_value(rebuilt, field_path)
+        self.assertEqual(packed.TYPE_STRING, value.value_type)
+        self.assertEqual(b"52.5", value.value)
+        factor = vehicle_overlays._find_value(
+            rebuilt, field_path + "/vehicleDamageFactor")
+        self.assertEqual(b"0.0", factor.value)
 
     def test_angle_relations_and_ranges_are_rejected_atomically(self):
         refused = (
@@ -1365,6 +1402,20 @@ class VehicleOverlayTest(unittest.TestCase):
             vehicle_overlays.manifest_path(self.game)))
         self.assertTrue(os.path.isfile(
             vehicle_overlays.profile_store_path(self.game)))
+
+    def test_profile_field_choices_include_all_current_values_in_one_snapshot(self):
+        vehicle_overlays.create_vehicle_profile(self.game, "Fast MS-1")
+        vehicle_overlays.apply_profile_edit(
+            self.game, "Fast MS-1", self.VEHICLE,
+            "speedLimits/forward", "40", is_running=lambda: False)
+
+        fields = vehicle_overlays.list_vehicle_profile_field_choices(
+            self.game, "Fast MS-1", self.VEHICLE)
+        values = dict((record["fieldPath"], record["currentValue"])
+                      for record in fields if record["member"] == self.VEHICLE)
+
+        self.assertEqual("40", values["speedLimits/forward"])
+        self.assertEqual("8", values["speedLimits/backward"])
 
     def test_profiles_use_appdata_without_creating_a_game_recovery_journal(self):
         appdata = tempfile.mkdtemp()

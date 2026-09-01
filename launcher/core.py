@@ -52,6 +52,9 @@ SERVE_FLAG = "--serve"
 
 _VERSION_PATTERN = re.compile(r"v\.(\d+(?:\.\d+)+)(?:\s+#(\d+))?")
 _SUPPORTED_0_9_22_PREFIX = (0, 9, 22)
+_SEMANTIC_VERSION_PATTERN = re.compile(
+    r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$")
+_BUILD_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 _MOD_MARKERS = {
     PORT_0_8_2: os.path.join(
@@ -83,6 +86,12 @@ WORKER_STARTER_FILENAME_0922 = "offline_worker_starter.exe"
 WORKER_READY_MARKER_FILENAME_0922 = "offline-worker.ready"
 WORKER_FAILURE_LOG_FILENAME_0922 = "offline-worker-starter.log"
 SERVER_LOG_FILENAME = "server.log"
+LAUNCHER_LOG_FILENAME = "launcher.log"
+BUILD_IDENTITY_FILENAME_0922 = "build_identity.json"
+BUILD_IDENTITY_RELATIVE_PATH_0922 = (
+    "mods/configs/offline_lan_0922/" + BUILD_IDENTITY_FILENAME_0922)
+BUILD_SEMANTIC_VERSION_ENV = "WOT_OFFLINE_SEMANTIC_VERSION"
+BUILD_IDENTITY_ENV = "WOT_OFFLINE_BUILD_IDENTITY"
 PLAYER_ENGINE_CONFIG_0922 = "engine_config.offline-player.xml"
 PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
@@ -211,6 +220,13 @@ def server_log_path(executable=None, frozen=None):
         SERVER_LOG_FILENAME)
 
 
+def launcher_log_path():
+    """Return the persistent activity log beside launcher settings."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(settings_path())),
+        LAUNCHER_LOG_FILENAME)
+
+
 def visible_client_command(game_root, port_version, paired_worker=False):
     """Build the visible client command for one supported port."""
     if port_version == PORT_0_9_22:
@@ -229,6 +245,8 @@ def visible_client_environment(port_version, host=LOCAL_HOST,
     environment = dict(os.environ if environment is None else environment)
     if port_version != PORT_0_9_22:
         return environment
+    _apply_payload_identity_environment(
+        environment, bundled_payload_identity(port_version))
     for name in (HIDDEN_DESKTOP_ENV_0922, WORKER_READY_MARKER_ENV_0922):
         environment.pop(name, None)
     environment[CLIENT_MODE_ENV_0922] = PLAYER_MODE_0922
@@ -586,7 +604,11 @@ _CLIENT_INSTALL = {
         "replace": tuple(
             "mods/configs/offline_lan_0922/%s" % name
             for name in _DATASETS_0_9_22),
-        "prune": (("mods/0.9.22.0.1", "org.peng.offline_lan_0922*"),),
+        "prune": (
+            ("mods/0.9.22.0.1", "org.peng.offline_lan_0922*"),
+            ("mods/configs/offline_lan_0922",
+             BUILD_IDENTITY_FILENAME_0922),
+        ),
         "keep": ("mods/configs/offline_lan_0922/config.json",),
         "allowed": (
             "mods/0.9.22.0.1/",
@@ -600,7 +622,9 @@ _CLIENT_INSTALL = {
             for name in _DATASETS_0_9_22) + (
             "mods/configs/offline_lan_0922/config.json",
         ) + _CLIENT_RUNTIME_FILES_0_9_22,
-        "owned_files": _CLIENT_RUNTIME_FILES_0_9_22,
+        "owned_files": (
+            (BUILD_IDENTITY_RELATIVE_PATH_0922,) +
+            _CLIENT_RUNTIME_FILES_0_9_22),
         "package_pattern": (
             "mods/0.9.22.0.1/org.peng.offline_lan_0922*.wotmod"),
     },
@@ -862,9 +886,90 @@ def client_archive(port_version, base_dir=None):
     return path if os.path.isfile(path) else None
 
 
+def _normalize_payload_identity(value):
+    """Return one diagnostic build identity, never a compatibility gate."""
+    if not isinstance(value, dict) or value.get("schema") != 1:
+        return None
+    semantic_version = value.get("semanticVersion")
+    build_identity = value.get("buildIdentity")
+    if (not isinstance(semantic_version, str) or
+            _SEMANTIC_VERSION_PATTERN.fullmatch(semantic_version) is None or
+            not isinstance(build_identity, str) or
+            _BUILD_IDENTITY_PATTERN.fullmatch(build_identity) is None):
+        return None
+    return {
+        "schema": 1,
+        "semanticVersion": semantic_version,
+        "buildIdentity": build_identity,
+    }
+
+
+def _decode_payload_identity(payload):
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
+        return None
+    return _normalize_payload_identity(value)
+
+
+def _archive_payload_identity(path, port_version):
+    if port_version != PORT_0_9_22 or path is None:
+        return None
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            payload = archive.read(BUILD_IDENTITY_RELATIVE_PATH_0922)
+    except (IOError, KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return None
+    return _decode_payload_identity(payload)
+
+
+def bundled_payload_identity(port_version, base_dir=None):
+    """Read the identity generated into this launcher's trusted payload."""
+    return _archive_payload_identity(
+        client_archive(port_version, base_dir), port_version)
+
+
+def installed_payload_identity(game_root, port_version):
+    """Read the loose identity installed beside the package-owned data."""
+    if port_version != PORT_0_9_22:
+        return None
+    try:
+        with open(_relative_path(
+                game_root, BUILD_IDENTITY_RELATIVE_PATH_0922), "rb") as stream:
+            return _decode_payload_identity(stream.read())
+    except (IOError, OSError):
+        return None
+
+
+def payload_identity_text(identity):
+    if identity is None:
+        return "version=unknown build=unknown"
+    return "version=%s build=%s" % (
+        identity["semanticVersion"], identity["buildIdentity"])
+
+
+def _apply_payload_identity_environment(environment, identity):
+    if identity is None:
+        environment.pop(BUILD_SEMANTIC_VERSION_ENV, None)
+        environment.pop(BUILD_IDENTITY_ENV, None)
+        return environment
+    environment[BUILD_SEMANTIC_VERSION_ENV] = identity["semanticVersion"]
+    environment[BUILD_IDENTITY_ENV] = identity["buildIdentity"]
+    return environment
+
+
 def _payload_release(path, port_version):
     """Return a stable package label without hashing the trusted payload."""
     import zipfile
+
+    if port_version == PORT_0_9_22:
+        identity = _archive_payload_identity(path, port_version)
+        if identity is not None:
+            return "%s:%s:%s" % (
+                port_version, identity["semanticVersion"],
+                identity["buildIdentity"])
 
     with zipfile.ZipFile(path, "r") as archive:
         packages = sorted(
@@ -991,8 +1096,11 @@ def _validate_archive(archive, game_root, port_version, layout):
         raise LauncherError(
             "The bundled %s baked data is incomplete." % port_version)
     if port_version == PORT_0_9_22:
+        owned_files = set(layout["owned_files"])
+        if BUILD_IDENTITY_RELATIVE_PATH_0922 not in names:
+            owned_files.discard(BUILD_IDENTITY_RELATIVE_PATH_0922)
         expected = (inventory | set(layout["keep"]) | set(packages) |
-                    set(layout["owned_files"]))
+                    owned_files)
         if names != expected:
             raise LauncherError(
                 "The bundled 0.9.22 mod contains unexpected files.")
@@ -1157,9 +1265,43 @@ def install_client_mod(game_root, port_version, base_dir=None, force=False):
         raise LauncherError(
             "The bundled %s mod cannot be read: %s" %
             (port_version, error))
+    payload_identity = bundled_payload_identity(port_version, base_dir)
+    installed_identity = installed_payload_identity(game_root, port_version)
+    identity_actions = []
+    if port_version == PORT_0_9_22:
+        identity_actions.extend((
+            "Bundled 0.9.22 payload: %s." %
+            payload_identity_text(payload_identity),
+            "Installed 0.9.22 payload before installation: %s." %
+            payload_identity_text(installed_identity),
+        ))
+        if payload_identity is None:
+            identity_actions.append(
+                "The bundled diagnostic build identity is unavailable; "
+                "installation will continue and will not be treated as "
+                "current on the next launch.")
+    identity_current = (
+        port_version != PORT_0_9_22 or
+        (payload_identity is not None and
+         installed_identity == payload_identity))
     if (not force and installed_release(game_root, port_version) == release
+            and identity_current
             and _installation_complete(game_root, port_version, layout)):
+        if port_version == PORT_0_9_22:
+            identity_actions.append(
+                "Install decision: keep the installed 0.9.22 payload; "
+                "the build identity and package-owned files are current.")
+            return identity_actions
         return ["The %s mod is already up to date." % port_version]
+    if port_version == PORT_0_9_22:
+        if force:
+            decision = "forced reinstall"
+        elif installed_port(game_root) == port_version:
+            decision = "reinstall"
+        else:
+            decision = "install"
+        identity_actions.append(
+            "Install decision: %s the bundled 0.9.22 payload." % decision)
     transaction_root = None
     preserve_transaction = False
     try:
@@ -1186,13 +1328,24 @@ def install_client_mod(game_root, port_version, base_dir=None, force=False):
             archive.close()
         actions, written = _transactional_install(
             game_root, staged_root, members, layout)
+        actions[0:0] = identity_actions
         actions.append("Installed %d %s mod paths" % (written, port_version))
         try:
-            _write_json(install_marker_path(game_root, port_version),
-                        {"release": release})
+            marker = {"release": release}
+            if payload_identity is not None:
+                marker.update({
+                    "semanticVersion": payload_identity["semanticVersion"],
+                    "buildIdentity": payload_identity["buildIdentity"],
+                })
+            _write_json(install_marker_path(game_root, port_version), marker)
         except (IOError, OSError):
             actions.append(
                 "The mod was installed, but its update marker could not be saved.")
+        if port_version == PORT_0_9_22:
+            actions.append(
+                "Installed 0.9.22 payload after installation: %s." %
+                payload_identity_text(installed_payload_identity(
+                    game_root, port_version)))
         return actions
     except LauncherError as error:
         preserve_transaction = bool(getattr(
@@ -1465,6 +1618,8 @@ def server_environment(port_version, game_root, environment=None,
         environment[NAVGRAPH_DIR_ENV] = os.path.join(
             game_root, _NAVGRAPH_RELATIVE_DIR)
     elif port_version == PORT_0_9_22:
+        _apply_payload_identity_environment(
+            environment, bundled_payload_identity(port_version))
         team1_size = parse_team_size(
             team_size if team1_size is None else team1_size)
         team2_size = parse_team_size(

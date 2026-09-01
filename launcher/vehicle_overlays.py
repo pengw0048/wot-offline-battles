@@ -561,8 +561,10 @@ def _find_value(root, field_path):
         unused_index, value = matches[0]
         if offset == len(parts) - 1:
             if value.value_type == packed_xml.TYPE_ELEMENT:
-                raise VehicleOverlayError(
-                    "Only an existing scalar leaf can be edited.")
+                # Packed XML elements may carry their own scalar in addition
+                # to named children. Armor records use this shape for a plate
+                # thickness plus attributes such as vehicleDamageFactor.
+                return value.value.value
             return value
         if value.value_type != packed_xml.TYPE_ELEMENT:
             raise VehicleOverlayError(
@@ -898,6 +900,23 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
 def _editable_fields_from_root(member, root):
     records = []
 
+    def append_field(field_path, value):
+        try:
+            rule = _field_rule(member, field_path)
+            # Duplicate child names are not addressable without changing
+            # topology, even when one of them happens to be allowlisted.
+            if _find_value(root, field_path) is not value:
+                return
+            _validate_original(value, rule)
+        except VehicleOverlayError:
+            return
+        records.append({
+            "fieldPath": field_path,
+            "originalValue": _scalar_text(value),
+            "packedType": _TYPE_NAMES.get(value.value_type, "unknown"),
+            "constraint": rule["description"],
+        })
+
     def visit(element, prefix=()):
         for raw_name, value in element.children:
             try:
@@ -906,24 +925,11 @@ def _editable_fields_from_root(member, root):
                 continue
             path_parts = prefix + (name,)
             if value.value_type == packed_xml.TYPE_ELEMENT:
+                append_field("/".join(path_parts), value.value.value)
                 visit(value.value, path_parts)
                 continue
             field_path = "/".join(path_parts)
-            try:
-                rule = _field_rule(member, field_path)
-                # Duplicate child names are not addressable without changing
-                # topology, even when one of them happens to be allowlisted.
-                if _find_value(root, field_path) is not value:
-                    continue
-                _validate_original(value, rule)
-            except VehicleOverlayError:
-                continue
-            records.append({
-                "fieldPath": field_path,
-                "originalValue": _scalar_text(value),
-                "packedType": _TYPE_NAMES.get(value.value_type, "unknown"),
-                "constraint": rule["description"],
-            })
+            append_field(field_path, value)
 
     visit(root)
     return sorted(records, key=lambda record: record["fieldPath"])
@@ -968,6 +974,11 @@ def _element_leaf_paths(element, prefix=()):
             continue
         path = prefix + (name,)
         if value.value_type == packed_xml.TYPE_ELEMENT:
+            try:
+                if _scalar_text(value.value.value):
+                    paths.add("/".join(path))
+            except VehicleOverlayError:
+                pass
             paths.update(_element_leaf_paths(value.value, path))
         else:
             paths.add("/".join(path))
@@ -1675,7 +1686,8 @@ def _same_recorded_value(recorded, current, value_type):
 
 
 def _compare_trees(original, rebuilt, edited_paths, prefix=()):
-    if original.value.value_type != rebuilt.value.value_type:
+    if (prefix not in edited_paths and
+            original.value.value_type != rebuilt.value.value_type):
         raise VehicleOverlayError("Packed XML root type changed during rebuild.")
     if prefix not in edited_paths and original.value.value != rebuilt.value.value:
         raise VehicleOverlayError("An unedited Packed XML value changed.")
@@ -2844,6 +2856,34 @@ def inspect_profile_field(game_root, profile_name, member, field_path):
         "overlayPath": profile_store_path(status["path"]),
         "conflict": "",
     }
+
+
+def list_vehicle_profile_field_choices(game_root, profile_name,
+                                       vehicle_member):
+    """Return safe fields with the current values from one named profile.
+
+    This is the batch counterpart to :func:`inspect_profile_field`.  It keeps
+    the editor and armor viewer on one profile snapshot without rebuilding a
+    complete Packed XML member once per displayed armor plate.
+    """
+    status, unused_package = _require_target(game_root)
+    fields = list_vehicle_field_choices(status["path"], vehicle_member)
+    store, unused_exists = _load_profile_store(status["path"])
+    profile = store["profiles"][_profile_index(store, profile_name)]
+    entries = _entry_map(_profile_manifest(profile))
+    replacements = {}
+    for member, entry in entries.items():
+        for edit in entry["edits"]:
+            replacements[(member, edit["fieldPath"])] = edit[
+                "replacementValue"]
+    result = []
+    for field in fields:
+        current = dict(field)
+        current["currentValue"] = str(replacements.get(
+            (field["member"], field["fieldPath"]),
+            field["originalValue"]))
+        result.append(current)
+    return result
 
 
 def apply_profile_edit(game_root, profile_name, member, field_path,

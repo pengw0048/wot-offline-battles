@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 try:
-    from . import i18n, vehicle_overlays
+    from . import i18n, vehicle_armor_viewer, vehicle_overlays
 except ImportError:
     import i18n
+    import vehicle_armor_viewer
     import vehicle_overlays
 
 
@@ -157,7 +158,7 @@ class VehicleEditorWindow(object):
 
     def __init__(self, parent, game_root, profile_name, tk_module, ttk_module,
                  messagebox_module, log=None, service=vehicle_overlays,
-                 language=i18n.LANGUAGE_ENGLISH):
+                 language=i18n.LANGUAGE_ENGLISH, armor_viewer_factory=None):
         self._tk = tk_module
         self._ttk = ttk_module
         self._messagebox = messagebox_module
@@ -166,11 +167,13 @@ class VehicleEditorWindow(object):
         self._profile_name = profile_name
         self._language = i18n.resolve_language(language)
         self._log = log or (lambda unused_message: None)
+        self._armor_viewer_factory = armor_viewer_factory
         self._vehicle_choices = []
         self._selected_vehicle_choice = None
         self._filtered_vehicle_choices = []
         self._fields = []
         self._field_by_label = {}
+        self._field_by_key = {}
         self._build(parent)
         self.refresh_catalog()
 
@@ -274,7 +277,22 @@ class VehicleEditorWindow(object):
                      row=row, column=0, columnspan=3, sticky="we",
                      pady=(10, 0))
 
+        viewer_factory = self._armor_viewer_factory
+        if viewer_factory is None:
+            viewer_factory = (vehicle_armor_viewer.ArmorViewerPanel
+                              if hasattr(tk, "Canvas")
+                              else vehicle_armor_viewer.NullArmorViewerPanel)
+        self.armor_viewer = viewer_factory(
+            frame, tk, self.select_field_from_viewer, self._language,
+            self._game_root)
+        self.armor_viewer.grid(
+            row=1, column=3, rowspan=max(1, row), sticky="nsew",
+            padx=(14, 0))
+
         frame.grid_columnconfigure(1, weight=1)
+        frame.grid_columnconfigure(3, weight=1)
+        if hasattr(self.root, "minsize"):
+            self.root.minsize(1180, 650)
 
     def _t(self, text):
         if self._language == i18n.LANGUAGE_CHINESE:
@@ -585,8 +603,14 @@ class VehicleEditorWindow(object):
         self._selected_vehicle_choice = choice
         self.vehicle.set(self._choice_label(choice))
         try:
-            fields = self._service.list_vehicle_field_choices(
-                self._game_root, choice["member"])
+            batch = getattr(
+                self._service, "list_vehicle_profile_field_choices", None)
+            if batch is None:
+                fields = self._service.list_vehicle_field_choices(
+                    self._game_root, choice["member"])
+            else:
+                fields = batch(
+                    self._game_root, self._profile_name, choice["member"])
         except self._service.VehicleOverlayError as error:
             return self._show_error(error, clear_contract=True)
         if not fields:
@@ -595,6 +619,10 @@ class VehicleEditorWindow(object):
                     "This vehicle has no existing fields in the safe allowlist."),
                 clear_contract=True)
         self._fields = list(fields)
+        self._field_by_key = dict(
+            ((record["member"], record["fieldPath"]), record)
+            for record in self._fields)
+        self.armor_viewer.load_vehicle(choice["member"], self._fields)
         categories = []
         for record in self._fields:
             label = self._category_label(record["categoryLabel"])
@@ -604,6 +632,28 @@ class VehicleEditorWindow(object):
         if self.category.get().strip() not in categories:
             self.category.set(categories[0])
         return self.refresh_fields()
+
+    def select_field_from_viewer(self, field_key):
+        """Select one exact editor field after a model-surface click."""
+        record = self._field_by_key.get(tuple(field_key))
+        if record is None:
+            return False
+        category = self._category_label(record["categoryLabel"])
+        fields = [candidate for candidate in self._fields
+                  if self._category_label(
+                      candidate["categoryLabel"]) == category]
+        labels = [self._field_label(candidate["fieldLabel"])
+                  for candidate in fields]
+        target = self._field_label(record["fieldLabel"])
+        if target not in labels or len(labels) != len(set(labels)):
+            return False
+        self.category.set(category)
+        self._field_by_label = dict(
+            (self._field_label(candidate["fieldLabel"]), candidate)
+            for candidate in fields)
+        self.field_box.config(values=tuple(labels))
+        self.field.set(target)
+        return self.inspect()
 
     def refresh_fields(self, unused_event=None):
         category = self.category.get().strip()
@@ -644,6 +694,8 @@ class VehicleEditorWindow(object):
         self.source.set("%s :: %s" % (member, field_path))
         self.replacement.set(result["currentValue"])
         self._show_result(result)
+        record["currentValue"] = result["currentValue"]
+        self.armor_viewer.focus_field(record)
         return True
 
     def apply(self):
@@ -656,6 +708,11 @@ class VehicleEditorWindow(object):
             return self._show_error(error)
         message = "Profile edit saved and reparsed successfully."
         self._show_result(result, self._t(message))
+        record = self._field_by_key.get((member, field_path))
+        if record is not None:
+            record["currentValue"] = result["currentValue"]
+        self.armor_viewer.update_field(
+            member, field_path, result["currentValue"])
         self._log("Vehicle data editor: %s" % message)
         return True
 
@@ -677,6 +734,9 @@ class VehicleEditorWindow(object):
             "Cleared edits from %d package member%s in profile '%s'." %
             (count, "" if count == 1 else "s", self._profile_name))
         self._log("Vehicle data editor: %s" % message)
+        for record in self._fields:
+            record["currentValue"] = record.get("originalValue", "0")
+        self.armor_viewer.reset_values()
         if self.inspect():
             if self._language == i18n.LANGUAGE_CHINESE:
                 self.status.set(

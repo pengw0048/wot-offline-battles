@@ -286,6 +286,68 @@ class LanClientQueueTests(unittest.TestCase):
             'type': 'battle_receipt_ack', 'receipt_id': 'server:7:1'},
             client._outbound_queue[0][1])
 
+    def test_invalid_battle_receipt_is_acked_without_stopping_waiting_client(self):
+        client = self.activate()
+        client.ready = True
+        client.phase = 'waiting'
+        client.account_key = 'a' * 32
+
+        client._handle_message({
+            'type': 'battle_receipt',
+            'receipt_id': 'server:7:1',
+            'account_key': client.account_key,
+            'protocol': 'obsolete',
+        })
+
+        self.assertTrue(client.running)
+        self.assertTrue(client.connected)
+        self.assertIsNone(client.last_error)
+        self.assertEqual({
+            'type': 'battle_receipt_ack', 'receipt_id': 'server:7:1'},
+            client._outbound_queue[0][1])
+
+    def test_valid_receipt_schema_ignores_stale_protocol_label(self):
+        client = self.activate()
+        client.ready = True
+        client.phase = 'waiting'
+        client.account_key = 'a' * 32
+        notifications = []
+        client.on_event = lambda kind, message: notifications.append(
+            (kind, message))
+        stats = dict((name, 0) for name in (
+            'shots', 'direct_hits', 'piercings', 'damage',
+            'damage_received', 'damage_blocked', 'assist_track',
+            'assist_radio', 'assist_stun', 'kills', 'spotted',
+            'capture_points', 'dropped_capture_points'))
+        receipt = {
+            'type': 'battle_receipt', 'protocol': 'obsolete',
+            'receipt_id': 'server:7:1',
+            'account_key': client.account_key,
+            'player_name': 'P', 'vehicle': 'ussr:R11_MS-1',
+            'map': '01_karelia', 'arena_unique_id': 7001,
+            'round_id': 7, 'player_id': 1, 'team': 1, 'winner': 1,
+            'duration': 60, 'premature_leave': False, 'death_reason': -1,
+            'stats': stats,
+            'rewards': {
+                'credits': 0, 'xp': 0, 'free_xp': 0,
+                'repair_cost': 0, 'ammo_cost': 0,
+            },
+            'public_results': [{
+                'actor_kind': 'player', 'actor_id': 1, 'team': 1,
+                'name': 'P', 'vehicle': 'ussr:R11_MS-1',
+                'health': 1, 'death_reason': -1, 'xp': 0,
+                'is_team_killer': False, 'killer_kind': '', 'killer_id': 0,
+                'stats': stats,
+            }],
+            'interactions': [],
+        }
+
+        client._handle_message(receipt)
+
+        self.assertTrue(client.running)
+        self.assertIsNone(client.last_error)
+        self.assertEqual([('battle_receipt', receipt)], notifications)
+
     def test_bot_state_queue_projects_full_local_state_to_wire_contract(self):
         client = self.activate(worker=True)
         client.ready = True

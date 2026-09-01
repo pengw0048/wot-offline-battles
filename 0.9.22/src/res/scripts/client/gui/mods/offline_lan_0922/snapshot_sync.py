@@ -421,8 +421,6 @@ class SnapshotSync(object):
         sequence = self._sequence(message)
         if sequence is not None and self._last_sequence is not None and sequence <= self._last_sequence:
             return []
-        if sequence is not None:
-            self._last_sequence = sequence
         update_bot_poses = True
         previous_revision = self._last_bot_state_revision
         revision = None
@@ -441,7 +439,6 @@ class SnapshotSync(object):
             update_bot_poses = (
                 previous_revision is None or
                 revision > previous_revision)
-            self._last_bot_state_revision = revision
         elif self._last_bot_state_revision is not None:
             raise ValueError('bot_state_revision disappeared')
         has_motion_time = 'motion_time_us' in message
@@ -476,11 +473,20 @@ class SnapshotSync(object):
                     bot_state_time_us <= self._last_bot_state_time_us):
                 raise ValueError(
                     'advanced bot revision did not advance sample time')
+        elif self._timed_bot_poses:
+            raise ValueError('bot pose timing disappeared')
+
+        # Commit the validated header atomically. A stale or malformed
+        # snapshot must not advance one frontier and make the following good
+        # snapshot look old.
+        if sequence is not None:
+            self._last_sequence = sequence
+        if revision is not None:
+            self._last_bot_state_revision = revision
+        if timed_bot_poses:
             self._last_motion_time_us = motion_time_us
             self._last_bot_state_time_us = bot_state_time_us
             self._timed_bot_poses = True
-        elif self._timed_bot_poses:
-            raise ValueError('bot pose timing disappeared')
         elif self._timed_bot_poses is None:
             # Old v5 servers remain readable.  A later timed snapshot may
             # upgrade this round, but timing may not disappear after that.

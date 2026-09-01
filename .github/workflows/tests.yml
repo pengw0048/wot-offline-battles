@@ -60,6 +60,7 @@ jobs:
       - name: Build Python 2.7 0.9.22 LAN client
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
+          -e WOT_OFFLINE_BUILD_IDENTITY="github-${{ github.run_id }}-${{ github.run_attempt }}"
           -w /work/0.9.22 python:2.7.18
           python build_wotmod.py
       - name: Validate 0.9.22 wotmod package

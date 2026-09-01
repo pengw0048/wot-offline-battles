@@ -5,9 +5,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
+import time
+import uuid
 import zipfile
 
 
@@ -21,6 +24,9 @@ import navigation_graph_schema as _navigation_schema
 
 MOD_ID = 'org.peng.offline_lan_0922'
 MOD_VERSION = '0.6.1'
+BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
+BUILD_IDENTITY_FILENAME = 'build_identity.json'
+BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
 NATIVE_BRIDGE_FILENAME = 'offline_instance_guard_native.pyd'
 WORKER_STARTER_FILENAME = 'offline_worker_starter.exe'
 SERVER_FILENAME = 'WoT-0.9.22-LAN-Server.exe'
@@ -128,6 +134,28 @@ def _release_config():
     }
 
 
+def _generated_build_identity(environ=None, now=None, random_hex=None):
+    """Create one opaque diagnostic identity without inspecting payload bytes."""
+    environ = os.environ if environ is None else environ
+    explicit = str(environ.get(BUILD_IDENTITY_ENV, '') or '').strip()
+    if explicit:
+        if BUILD_IDENTITY_PATTERN.match(explicit) is None:
+            raise SystemExit('%s is invalid' % BUILD_IDENTITY_ENV)
+        return explicit
+    now = time.time() if now is None else float(now)
+    random_hex = uuid.uuid4().hex if random_hex is None else str(random_hex)
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))
+    return 'local-%s-%s' % (stamp, random_hex[:12])
+
+
+def _build_identity_payload(build_identity):
+    return {
+        'schema': 1,
+        'semanticVersion': MOD_VERSION,
+        'buildIdentity': str(build_identity),
+    }
+
+
 def _preferences_config_payloads(source_root):
     stock_leaf = b'preferences.xml'
     baseline = None
@@ -161,8 +189,12 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
                           destructible_source=None,
                           native_bridge_source=None,
                           worker_starter_source=None,
-                          server_executable_source=None):
+                          server_executable_source=None,
+                          build_identity=None):
     release_config = _release_config()
+    build_identity = (
+        _generated_build_identity() if build_identity is None
+        else str(build_identity))
     native_bridge_source = native_bridge_source or os.path.join(
         os.path.dirname(__file__), 'native', NATIVE_BRIDGE_FILENAME)
     worker_starter_source = worker_starter_source or os.path.join(
@@ -210,6 +242,12 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
     with open(os.path.join(config_root, 'config.json'), 'wb') as stream:
         payload = json.dumps(
             release_config, indent=2, sort_keys=True) + '\n'
+        stream.write(payload.encode('utf-8'))
+    with open(os.path.join(
+            config_root, BUILD_IDENTITY_FILENAME), 'wb') as stream:
+        payload = json.dumps(
+            _build_identity_payload(build_identity),
+            indent=2, sort_keys=True) + '\n'
         stream.write(payload.encode('utf-8'))
     graph_source = graph_source or os.path.join(
         os.path.dirname(__file__), 'navgraphs')
@@ -630,6 +668,7 @@ def build():
     if not os.path.isdir(dist_root):
         os.makedirs(dist_root)
     _remove_stale_outputs(dist_root)
+    build_identity = _generated_build_identity()
     staging_parent = tempfile.mkdtemp(prefix='offline-lan-0922-')
     try:
         staging_root = os.path.join(staging_parent, 'package')
@@ -664,7 +703,10 @@ def build():
         shutil.copy2(native_bridge_source, native_bridge_path)
         overlay_root, overlay_zip = _write_client_overlay(
             dist_root, destination, checksum_path, digest,
-            native_bridge_source=native_bridge_path)
+            native_bridge_source=native_bridge_path,
+            build_identity=build_identity)
+        print('build identity=%s version=%s' %
+              (build_identity, MOD_VERSION))
         print(destination)
         print('sha256=%s' % digest)
         print(overlay_root)

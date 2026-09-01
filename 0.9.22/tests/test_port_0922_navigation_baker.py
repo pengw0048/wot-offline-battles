@@ -230,7 +230,7 @@ class CompiledSpace0922Test(unittest.TestCase):
         self.assertFalse(baker.spawn_obbs_overlap(
             first, (14.0, 0.0, 0.0, 0.0), 2.24, 5.46))
 
-    def test_runtime_loader_only_validates_selected_navigation_record(self):
+    def test_runtime_loader_ignores_manifest_identity_and_validates_graph(self):
         graph = ROOT / '0.9.22' / 'navgraphs' / '06_ensk.json'
         self.assertTrue(graph.is_file(), 'baked Ensk graph is missing')
         loader_path = (ROOT / '0.9.22' / 'src' / 'res' / 'scripts' /
@@ -281,8 +281,13 @@ class CompiledSpace0922Test(unittest.TestCase):
                     if record['map'] == '06_ensk')
                 selected['file'] = 'missing.json'
                 manifest_path.write_text(json.dumps(manifest))
-                with self.assertRaisesRegex(
-                        ValueError, 'manifest record is invalid'):
+                loaded_without_manifest_identity = loader.load_graph(
+                    '06_ensk')
+
+                graph_value = json.loads(graph_path.read_text())
+                graph_value['format'] = 'invalid-navigation-graph'
+                graph_path.write_text(json.dumps(graph_value))
+                with self.assertRaises(ValueError):
                     loader.load_graph('06_ensk')
             finally:
                 for name, previous in saved.items():
@@ -291,6 +296,9 @@ class CompiledSpace0922Test(unittest.TestCase):
                     else:
                         sys.modules[name] = previous
         self.assertEqual('offline-lan-0922-navgraph', loaded['format'])
+        self.assertEqual(
+            'offline-lan-0922-navgraph',
+            loaded_without_manifest_identity['format'])
         self.assertGreater(len(loaded['routes']['1']), 0)
         self.assertGreater(loaded['validation']['route_segments'], 0)
 

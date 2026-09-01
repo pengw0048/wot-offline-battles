@@ -330,6 +330,38 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 port_config.DEFAULT_CONFIG,
                 environ={port_config.CLIENT_MODE_ENV: 'unexpected'})
 
+    def test_session_identity_reports_installed_and_launcher_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'build_identity.json'
+            path.write_text(json.dumps({
+                'schema': 1,
+                'semanticVersion': '0.6.1',
+                'buildIdentity': 'installed-build',
+            }), encoding='utf-8')
+
+            identity = port_config.session_identity(
+                str(path), environ={
+                    port_config.BUILD_SEMANTIC_VERSION_ENV: '0.6.1',
+                    port_config.BUILD_IDENTITY_ENV: 'launcher-build',
+                })
+
+        self.assertEqual('0.6.1', identity['semanticVersion'])
+        self.assertEqual('installed-build', identity['buildIdentity'])
+        self.assertEqual('0.6.1', identity['launcherSemanticVersion'])
+        self.assertEqual('launcher-build', identity['launcherBuildIdentity'])
+
+    def test_missing_session_identity_never_blocks_startup(self):
+        identity = port_config.session_identity(
+            'does-not-exist.json', environ={
+                port_config.BUILD_SEMANTIC_VERSION_ENV: '0.6.1',
+                port_config.BUILD_IDENTITY_ENV: 'launcher-build',
+            })
+
+        self.assertEqual('unknown', identity['semanticVersion'])
+        self.assertEqual('unknown', identity['buildIdentity'])
+        self.assertEqual('0.6.1', identity['launcherSemanticVersion'])
+        self.assertEqual('launcher-build', identity['launcherBuildIdentity'])
+
     def test_player_hello_wire_shape_advertises_required_capabilities(self):
         loadout = {
             'repair': {'available': False},

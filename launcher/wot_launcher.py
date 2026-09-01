@@ -181,10 +181,28 @@ PROCDUMP_CONSENT_SETTING = "procdump_download_consent"
 PROCDUMP_PATH_ENV = "WOT_OFFLINE_PROCDUMP_PATH"
 CRASH_DUMP_PATH_ENV = "WOT_OFFLINE_CRASH_DUMP_PATH"
 CRASH_DUMP_MODE_ENV = "WOT_OFFLINE_CRASH_DUMP_MODE"
+_LAUNCHER_LOG_LOCK = threading.Lock()
 
 
 def _no_console_flags():
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _append_launcher_log(message, path=None, timestamp=None):
+    """Persist one launcher-owned activity line for the current app run."""
+    path = path or core.launcher_log_path()
+    timestamp = timestamp or time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        directory = os.path.dirname(path)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory)
+        with _LAUNCHER_LOG_LOCK:
+            with open(path, "a", encoding="utf-8", newline="\n") as stream:
+                stream.write("[%s] %s\n" %
+                             (timestamp, str(message).rstrip()))
+        return True
+    except (IOError, OSError):
+        return False
 
 
 SERVER_LOG_MAX_BYTES = 1024 * 1024
@@ -648,6 +666,14 @@ class LauncherWindow(object):
         self._refresh_client()
         self._refresh_mode()
         self._recover_stale_vehicle_profile()
+        identity = core.bundled_payload_identity(core.PORT_0_9_22)
+        if identity is None:
+            identity = {
+                "semanticVersion": LAUNCHER_VERSION,
+                "buildIdentity": "unknown",
+            }
+        self._log("Launcher session: %s role=launcher." %
+                  core.payload_identity_text(identity))
 
     def _t(self, text):
         if self.language == i18n.LANGUAGE_CHINESE:
@@ -996,6 +1022,8 @@ class LauncherWindow(object):
         return True
 
     def _log(self, message):
+        _append_launcher_log(message)
+
         def append():
             self.log_view.config(state="normal")
             self.log_view.insert("end", message.rstrip() + "\n")
@@ -2530,6 +2558,9 @@ def _serve(argv):
         print("Unsupported client version: %s" % port_version)
         return 2
     _open_server_log(error_reports.server_log_for_environment())
+    print("Server session: version=%s build=%s role=server" % (
+        os.environ.get(core.BUILD_SEMANTIC_VERSION_ENV, "unknown"),
+        os.environ.get(core.BUILD_IDENTITY_ENV, "unknown")))
     print("Starting the %s LAN server from %s" %
           (port_version, core.server_root()))
     try:

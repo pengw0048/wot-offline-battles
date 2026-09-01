@@ -79,6 +79,36 @@ class _MessageBox(object):
         return self.answer
 
 
+class _ArmorViewer(object):
+    instances = []
+
+    def __init__(self, parent, tk_module, on_select, language, game_root):
+        self.parent = parent
+        self.on_select = on_select
+        self.language = language
+        self.game_root = game_root
+        self.loaded = []
+        self.focused = []
+        self.updated = []
+        self.reset_count = 0
+        self.__class__.instances.append(self)
+
+    def grid(self, *args, **options):
+        self.grid_call = (args, options)
+
+    def load_vehicle(self, member, records, focus_record=None):
+        self.loaded.append((member, list(records), focus_record))
+
+    def focus_field(self, record):
+        self.focused.append(record)
+
+    def update_field(self, member, field_path, value):
+        self.updated.append((member, field_path, value))
+
+    def reset_values(self):
+        self.reset_count += 1
+
+
 class _Service(object):
     class VehicleOverlayError(Exception):
         pass
@@ -94,6 +124,7 @@ class _Service(object):
         self.restore_error = None
         self.conflict = ""
         self.current = "32"
+        self.extra_fields = []
         self.choices = [
             {"nation": "ussr", "vehicle": "R11_MS-1",
              "label": "MS-1",
@@ -116,7 +147,8 @@ class _Service(object):
         if member.endswith("R12_Test.xml"):
             return [self._field(
                 member, "speedLimits/forward", "Vehicle",
-                "Speed limits / Forward speed", False, ("R12_Test",))]
+                "Speed limits / Forward speed", False, ("R12_Test",))] + list(
+                    self.extra_fields)
         return [
             self._field(
                 member, vehicle_editor_ui.DEFAULT_FIELD, "Vehicle",
@@ -126,7 +158,7 @@ class _Service(object):
                 "shared/Gun-A/reloadTime", "Gun",
                 "Gun-A / Reload time", True,
                 ("R11_MS-1", "R12_Test"), original="2.5"),
-        ]
+        ] + list(self.extra_fields)
 
     @staticmethod
     def _field(member, field_path, category, field_label, shared, affected,
@@ -145,6 +177,10 @@ class _Service(object):
                 "member": member,
                 "fieldPath": field_path,
                 "categoryLabel": category,
+                "category": {
+                    "Vehicle": "vehicle", "Chassis": "chassis",
+                    "Turret": "turret", "Gun": "guns",
+                }.get(category, category.lower()),
                 "fieldLabel": field_label,
                 "scope": scope,
                 "shared": shared,
@@ -252,6 +288,45 @@ class VehicleEditorWindowTest(unittest.TestCase):
             self.window.member.get())
         self.assertEqual("shared/Gun-A/reloadTime",
                          self.window.field_path.get())
+
+    def test_armor_viewer_click_selects_exact_field_and_saved_value_recolors(self):
+        service = _Service()
+        turret_path = "turrets0/T-18_mod/armor/armor_1"
+        service.extra_fields = [
+            service._field(
+                vehicle_editor_ui.DEFAULT_MEMBER,
+                "hull/armor/armor_1", "Vehicle",
+                "Hull / Armor thickness (armor_1)", False,
+                ("R11_MS-1",), original="16"),
+            service._field(
+                vehicle_editor_ui.DEFAULT_MEMBER,
+                turret_path, "Turret",
+                "T-18_mod / Armor thickness (armor_1)", False,
+                ("R11_MS-1",), original="35"),
+        ]
+        window = vehicle_editor_ui.VehicleEditorWindow(
+            self.parent, "C:/WoT", "Fast MS-1", _FakeTk, _FakeTtk,
+            self.messagebox, service=service,
+            armor_viewer_factory=_ArmorViewer)
+        armor_viewer = _ArmorViewer.instances[-1]
+
+        self.assertEqual(vehicle_editor_ui.DEFAULT_MEMBER,
+                         armor_viewer.loaded[-1][0])
+        self.assertTrue(window.select_field_from_viewer(
+            (vehicle_editor_ui.DEFAULT_MEMBER, turret_path)))
+        self.assertEqual("Turret", window.category.get())
+        self.assertEqual(
+            "T-18_mod / Armor thickness (armor_1)", window.field.get())
+        self.assertEqual(turret_path, window.field_path.get())
+
+        window.replacement.set("75")
+        self.assertTrue(window.apply())
+        self.assertEqual(
+            (vehicle_editor_ui.DEFAULT_MEMBER, turret_path, "75"),
+            armor_viewer.updated[-1])
+
+        self.assertTrue(window.restore_defaults())
+        self.assertEqual(1, armor_viewer.reset_count)
 
     def test_selecting_a_nation_filters_the_vehicle_list(self):
         self.window.nation.set("usa")

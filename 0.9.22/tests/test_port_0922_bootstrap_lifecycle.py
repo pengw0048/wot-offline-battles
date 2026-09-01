@@ -462,6 +462,27 @@ class BootstrapLifecycleTests(unittest.TestCase):
                      'driver_virtuoso', 'driver_smoothDriving',
                      'gunner_smoothTurret', 'loader_intuition')
 
+    def test_session_log_distinguishes_visible_and_worker_builds(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+        bootstrap.port_config.session_identity = lambda: {
+            'semanticVersion': '0.6.1',
+            'buildIdentity': 'installed-build',
+            'launcherSemanticVersion': '0.6.1',
+            'launcherBuildIdentity': 'launcher-build',
+        }
+        writer = mock.Mock()
+
+        with mock.patch.object(bootstrap.sys.stdout, 'write', writer):
+            bootstrap._log_session_identity('simulation_worker')
+
+        payload = ''.join(call.args[0] for call in writer.call_args_list)
+        self.assertIn('version=0.6.1', payload)
+        self.assertIn('build=installed-build', payload)
+        self.assertIn('role=hidden-worker', payload)
+        self.assertIn('launcher_build=launcher-build', payload)
+
     def test_a_fresh_garage_vehicle_starts_with_the_refill_switches_on(self):
         (bootstrap, unused_callbacks, unused_compatibility,
          unused_app_loader, unused_spaces, unused_events, modules) = self._load()

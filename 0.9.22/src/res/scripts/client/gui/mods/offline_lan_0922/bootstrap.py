@@ -1207,11 +1207,43 @@ def _run_once():
         _fail_startup(error)
 
 
+def _log_session_identity(requested_mode):
+    role = ('hidden-worker' if
+            requested_mode == port_config.SIMULATION_WORKER_MODE else
+            'visible-client')
+    identity = {
+        'semanticVersion': 'unknown',
+        'buildIdentity': 'unknown',
+        'launcherSemanticVersion': 'unknown',
+        'launcherBuildIdentity': 'unknown',
+    }
+    try:
+        provider = getattr(port_config, 'session_identity', None)
+        if callable(provider):
+            loaded = provider()
+            if isinstance(loaded, dict):
+                identity.update(loaded)
+    except Exception:
+        pass
+    sys.stdout.write(
+        '[Offline LAN 0.9.22] session version=%s build=%s role=%s '
+        'launcher_version=%s launcher_build=%s\n' % (
+            identity['semanticVersion'], identity['buildIdentity'], role,
+            identity['launcherSemanticVersion'],
+            identity['launcherBuildIdentity']))
+
+
 def init():
     global _callback_id, _client_guard_released, _started
     if _started:
         return
     _started = True
+    requested_mode = os.environ.get(port_config.CLIENT_MODE_ENV, '')
+    try:
+        requested_mode = requested_mode.strip()
+    except AttributeError:
+        requested_mode = ''
+    _log_session_identity(requested_mode)
     guard_error = None
     try:
         # Complete #1513's native WGC teardown before scheduling callbacks;
@@ -1230,11 +1262,6 @@ def init():
             '[Offline LAN 0.9.22] client guard release failed: %s\n' %
             guard_error)
 
-    requested_mode = os.environ.get(port_config.CLIENT_MODE_ENV, '')
-    try:
-        requested_mode = requested_mode.strip()
-    except AttributeError:
-        requested_mode = ''
     try:
         # Install this before every worker refusal path. A fresh preferences
         # leaf otherwise selects #1513's compulsory, unskippable intro movie.

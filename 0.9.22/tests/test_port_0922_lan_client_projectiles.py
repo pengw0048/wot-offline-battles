@@ -760,6 +760,7 @@ class ProjectileWireTests(unittest.TestCase):
     def test_resolve_is_atomic_and_rejects_duplicate_targets(self):
         client = self.active_worker_client()
         direct = self.effect('player', 8)
+        direct['damage_sticker'] = module.MAX_PROJECTILE_DAMAGE_STICKER
         splash = [self.effect(
             'bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))]
 
@@ -777,6 +778,9 @@ class ProjectileWireTests(unittest.TestCase):
             set(message))
         self.assertEqual('player:7:1', message['projectile_id'])
         self.assertTrue(message['hit_vehicle'])
+        self.assertEqual(
+            module.MAX_PROJECTILE_DAMAGE_STICKER,
+            message['direct']['damage_sticker'])
 
         duplicate = self.effect('player', 8)
         self.assertFalse(client.send_projectile_resolve(
@@ -790,6 +794,19 @@ class ProjectileWireTests(unittest.TestCase):
             4, 'player:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], direct,
             [self.effect('bot', 17, 12.0)]))
+        splash_with_sticker = self.effect(
+            'bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))
+        splash_with_sticker['damage_sticker'] = 1
+        self.assertFalse(client.send_projectile_resolve(
+            4, 'player:7:2', 0, 'impact', 10,
+            [0.0, 0.0, 0.0], direct, [splash_with_sticker]))
+        for invalid in (True, 1.0, -1,
+                        module.MAX_PROJECTILE_DAMAGE_STICKER + 1):
+            with self.subTest(damage_sticker=invalid):
+                self.assertFalse(client.send_projectile_resolve(
+                    4, 'player:7:2', 0, 'impact', 10,
+                    [0.0, 0.0, 0.0],
+                    dict(direct, damage_sticker=invalid), []))
         self.assertFalse(client.send_projectile_resolve(
             4, 'player:7:2', 0, 'miss', 10,
             [0.0, 0.0, 0.0], direct, []))
@@ -799,6 +816,7 @@ class ProjectileWireTests(unittest.TestCase):
         direct = self.effect('bot', 17, 11.0)
         direct['damage'] = 0
         direct['shot_result'] = 0
+        direct['damage_sticker'] = 12345678901234567890
 
         self.assertTrue(client.send_projectile_ricochet(
             4, 'player:7:1', 150, 180,
@@ -814,6 +832,8 @@ class ProjectileWireTests(unittest.TestCase):
             'segment_origin', 'segment_velocity',
             'base_penetration_multiplier', 'direct', 'destructibles'},
             set(message))
+        self.assertEqual(
+            12345678901234567890, message['direct']['damage_sticker'])
 
         damaging = dict(direct, damage=1)
         self.assertFalse(client.send_projectile_ricochet(
@@ -833,6 +853,10 @@ class ProjectileWireTests(unittest.TestCase):
             critical,
             dict(direct, stun_end_server_time_ms=500),
             dict(direct, target_x=11.0, target_y=2.0, target_z=3.0),
+            dict(direct, damage_sticker=True),
+            dict(direct, damage_sticker=-1),
+            dict(direct, damage_sticker=
+                 module.MAX_PROJECTILE_DAMAGE_STICKER + 1),
         )
         for proposal in forbidden:
             with self.subTest(proposal=proposal):

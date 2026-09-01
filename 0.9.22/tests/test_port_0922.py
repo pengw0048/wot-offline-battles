@@ -466,6 +466,14 @@ class PortSourceTests(unittest.TestCase):
             config = json.loads(config_path.read_text(encoding='utf-8'))
             self.assertEqual('127.0.0.1', config['host'])
             self.assertEqual(28782, config['port'])
+            identity = json.loads((
+                config_path.parent / packager.BUILD_IDENTITY_FILENAME
+            ).read_text(encoding='utf-8'))
+            self.assertEqual(1, identity['schema'])
+            self.assertEqual('0.6.1', identity['semanticVersion'])
+            self.assertRegex(
+                identity['buildIdentity'],
+                r'^local-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
             self.assertFalse(
                 (config_path.parent / 'server_endpoint.json').exists())
             self.assertTrue((config_path.parent / 'navgraphs' /
@@ -551,6 +559,22 @@ class PortSourceTests(unittest.TestCase):
                 (Path(overlay) / 'tools' /
                  'windows_migration_acceptance.ps1').is_file())
             self.assertTrue(Path(archive).is_file())
+
+    def test_build_identity_is_automatic_and_can_be_pinned_by_ci(self):
+        packager_path = PORT_ROOT / 'build_wotmod.py'
+        spec = importlib.util.spec_from_file_location(
+            'build_wotmod_identity_test', packager_path)
+        packager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(packager)
+
+        self.assertEqual(
+            'github-12345-2',
+            packager._generated_build_identity({
+                packager.BUILD_IDENTITY_ENV: 'github-12345-2'}))
+        self.assertEqual(
+            'local-19700101T000000Z-abcdef012345',
+            packager._generated_build_identity(
+                {}, now=0, random_hex='abcdef0123456789'))
 
     def test_navigation_release_gate_rejects_wrong_41_map_names(self):
         packager_path = PORT_ROOT / 'build_wotmod.py'

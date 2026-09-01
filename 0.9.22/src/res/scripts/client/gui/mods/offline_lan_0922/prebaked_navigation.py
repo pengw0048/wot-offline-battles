@@ -6,7 +6,6 @@ import os
 
 from gui.mods.offline_lan_0922.config import CONFIG_PATH
 from gui.mods.offline_lan_0922.navigation_graph_schema import (
-	FORMAT_NAME, FORMAT_VERSION, MANIFEST_FORMAT,
 	SUPPORTED_MAPS, short_map_name, validate_graph,
 )
 
@@ -30,55 +29,18 @@ def _validate(graph, map_name):
 	return validate_graph(graph, map_name)
 
 
-def _manifest_entry(directory, map_name):
-	"""Validate and return only this map's manifest record.
-
-	A missing manifest remains valid for one-file developer builds. Once a batch
-	manifest is present, the selected map must still have a compatible record and
-	file. Build and install validation own whole-batch completeness.
-	"""
-	path = os.path.join(directory, 'manifest.json')
-	if not os.path.isfile(path):
-		return None
-	handle = open(path, 'r')
-	try:
-		manifest = json.load(handle)
-	finally:
-		handle.close()
-	if (not isinstance(manifest, dict) or
-			manifest.get('format') != MANIFEST_FORMAT or
-			int(manifest.get('version', -1)) != FORMAT_VERSION):
-		raise ValueError('navigation manifest is incompatible')
-	records = manifest.get('maps')
-	if not isinstance(records, list):
-		raise ValueError('navigation manifest record list is invalid')
-	selected = None
-	for record in records:
-		if (not isinstance(record, dict) or
-				_short_map_name(record.get('map')) != map_name):
-			continue
-		if selected is not None:
-			raise ValueError('navigation manifest record is duplicated')
-		selected = record
-	if selected is None:
-		raise ValueError('navigation manifest has no record for this map')
-	name = _short_map_name(selected.get('map'))
-	filename = str(selected.get('file') or '')
-	if name not in SUPPORTED_MAPS or filename != name + '.json':
-		raise ValueError('navigation manifest record is invalid')
-	if not os.path.isfile(os.path.join(directory, filename)):
-		raise ValueError('navigation graph is unavailable')
-	return selected
-
-
 def load_graph(map_name, base_dir=None):
-	"""Return a validated graph, or None when this map has not been baked."""
+	"""Return a validated graph, or None when this map has not been baked.
+
+	The batch manifest is a build/install audit artifact. Runtime safety comes
+	from validating the selected graph itself, so stale optional metadata cannot
+	turn a structurally valid deployed map into a worker-fatal loading error.
+	"""
 	short_name = _short_map_name(map_name)
 	if not short_name:
 		return None
 	directory = os.path.join(
 		base_dir if base_dir is not None else mod_dir(), 'navgraphs')
-	entry = _manifest_entry(directory, short_name)
 	path = os.path.join(directory, short_name + '.json')
 	if not os.path.isfile(path):
 		return None
