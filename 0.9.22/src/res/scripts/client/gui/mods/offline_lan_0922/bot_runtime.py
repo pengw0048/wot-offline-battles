@@ -20,6 +20,7 @@ from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import effective_params
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import gun_pitch_limits
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 from gui.mods.offline_lan_0922 import hull_aiming
 from gui.mods.offline_lan_0922 import prebaked_navigation
 from gui.mods.offline_lan_0922 import shot_geometry
@@ -2187,6 +2188,7 @@ class BotRuntime(object):
     def _probe_direction(self, position, yaw, speed=0.0, descriptor=None,
                          maximum_distance=None):
         """Return one canonical direction sample for planning and physics."""
+        hidden_worker_profiler.work_add('bot_motion_direction_probes')
         self._probe_totals[4] += 1
         probe_started = self._probe_started()
         try:
@@ -2272,8 +2274,10 @@ class BotRuntime(object):
         if not callable(self.world_receipt_probe):
             return None
         bot_id = int(bot_id)
+        hidden_worker_profiler.work_add('bot_receipt_requests')
         frame = self._world_receipt_frame
         if not isinstance(frame, dict):
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
             return 'deferred'
         if bot_id not in frame['requested_set']:
             frame['requested'].append(bot_id)
@@ -2288,16 +2292,21 @@ class BotRuntime(object):
             # callback. Preserve a proved hard result; every other result can
             # safely use the already-complete generic corridor until the next
             # render callback refreshes the exact optimisation.
-            return (False if frame['attempt_results'].get(bot_id) is False
-                    else 'deferred')
+            if frame['attempt_results'].get(bot_id) is False:
+                return False
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
+            return 'deferred'
         priority = frame['priority']
         if (frame['initial_first'] and
                 not frame['request_uncached'][bot_id]):
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
             return 'deferred'
         if priority and bot_id not in priority:
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
             return 'deferred'
         priority.discard(bot_id)
         if self._world_receipt_budget <= 0:
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
             return 'deferred'
         self._world_receipt_budget -= 1
         frame['attempted'].add(bot_id)
@@ -2305,6 +2314,7 @@ class BotRuntime(object):
             position, yaw, speed, descriptor, maximum_distance)
         frame['attempt_results'][bot_id] = result
         if result == 'deferred':
+            hidden_worker_profiler.work_add('bot_receipt_deferred')
             frame['attempt_deferred'].append(bot_id)
         return result
 
@@ -2313,6 +2323,8 @@ class BotRuntime(object):
         """Run one measured exact receipt without changing queue ownership."""
         if not callable(self.world_receipt_probe):
             return None
+        hidden_worker_profiler.work_add('bot_receipt_attempts')
+        hidden_worker_profiler.work_add('bot_motion_receipt_probes')
         self._probe_totals[4] += 1
         probe_started = self._probe_started()
         try:
@@ -4412,6 +4424,7 @@ class BotRuntime(object):
 
     def _visible(self, source, target, now, tick_cache=None,
                  source_position=None, view_range_resolver=None):
+        hidden_worker_profiler.work_add('bot_visibility_pairs')
         target_id = target.get('network_id', target.get('id', 0))
         source_kind = source.get('kind', 'bot')
         key = (source_kind, int(source.get('id', 0)),
@@ -5161,6 +5174,7 @@ class BotRuntime(object):
         yaw = _number(state.get('yaw'))
         half_length = max(1.5, _number(state.get('half_length'), 3.5))
         sine, cosine = math.sin(yaw), math.cos(yaw)
+        hidden_worker_profiler.work_add('bot_ground_probes')
         self._probe_totals[3] += 1
         probe_started = self._probe_started()
         try:
@@ -5177,6 +5191,7 @@ class BotRuntime(object):
         for distance in (half_length, -half_length):
             x = position[0] + sine * distance
             z = position[2] + cosine * distance
+            hidden_worker_profiler.work_add('bot_ground_probes')
             self._probe_totals[3] += 1
             probe_started = self._probe_started()
             try:
@@ -5326,6 +5341,7 @@ class BotRuntime(object):
             return False
 
         def probe(sample_x, sample_z, hint):
+            hidden_worker_profiler.work_add('bot_ground_probes')
             self._probe_totals[3] += 1
             probe_started = self._probe_started()
             try:
@@ -5358,6 +5374,7 @@ class BotRuntime(object):
         # BattleRuntime's resolver infers active crush intent from this field.
         state['movement_dir'] = 0
         try:
+            hidden_worker_profiler.work_add('bot_motion_commit_sweeps')
             if self._probe_clock is None:
                 status = self.motion_resolver(
                     state['id'], position, yaw, speed,
@@ -6696,6 +6713,8 @@ class BotRuntime(object):
         previous_ram_contacts = self._ram_contacts
         current_ram_contacts = set()
         frame_ram_armors = {}
+        candidate_pair_count = 0
+        resolved_pair_count = 0
 
         def contact_armor_probe(first, second, contact):
             first_id = int(first['id'])
@@ -6734,6 +6753,7 @@ class BotRuntime(object):
                     continue
                 other = by_id[tank_id]
                 others.append(other)
+            candidate_pair_count += len(others)
             resolve_kwargs = {
                 'now': now,
                 'ram_cooldowns': self._ram_cooldowns,
@@ -6747,10 +6767,15 @@ class BotRuntime(object):
                 own, others, **resolve_kwargs)
             self._ram_cooldowns = result['cooldowns']
             current_ram_contacts.update(result['contacts'])
+            resolved_pair_count += len(result['contacts'])
             self._apply_tank_contact_response(state, result, step)
             reports.extend(self._ram_reports(
                 state, result['ram_events']))
         self._ram_contacts = frozenset(current_ram_contacts)
+        hidden_worker_profiler.work_add(
+            'bot_contact_candidate_pairs', candidate_pair_count)
+        hidden_worker_profiler.work_add(
+            'bot_contact_resolved_pairs', resolved_pair_count)
         return reports
 
     @staticmethod
@@ -7740,6 +7765,7 @@ class BotRuntime(object):
     def _shot_clear(self, source, target, now, force=False,
                     probe_budget=None, lane_key=None, distance_cache=None):
         """Probe a current static firing lane independently from team spotting."""
+        hidden_worker_profiler.work_add('bot_shot_lane_pairs')
         key = (lane_key if lane_key is not None else
                self._shot_los_key(source, target))
         if distance_cache is not None and distance_cache[0] is not None:
@@ -8603,7 +8629,11 @@ class BotRuntime(object):
                         self._last_update_control_steps += 1
                         self._last_update_max_control_step = max(
                             self._last_update_max_control_step, frame_step)
-                        outgoing.extend(self._run_update_once(
+                        hidden_worker_profiler.work_add(
+                            'bot_control_refresh_slices')
+                        outgoing.extend(hidden_worker_profiler.python_call(
+                            'bot_scheduler_control_refresh',
+                            self._run_update_once,
                             frame_step, step_now, players, neighbours, True,
                             True))
                 else:
@@ -8620,7 +8650,15 @@ class BotRuntime(object):
                         self._last_update_control_steps += 1
                         self._last_update_max_control_step = max(
                             self._last_update_max_control_step, frame_step)
-                        outgoing.extend(self._run_update_once(
+                        scheduler_category = (
+                            'bot_scheduler_control_refresh'
+                            if refresh_control else
+                            'bot_scheduler_catchup')
+                        hidden_worker_profiler.work_add(
+                            ('bot_control_refresh_slices'
+                             if refresh_control else 'bot_catchup_slices'))
+                        outgoing.extend(hidden_worker_profiler.python_call(
+                            scheduler_category, self._run_update_once,
                             frame_step, step_now, players, neighbours,
                             refresh_control, publish_step))
                         refresh_control = False
@@ -8658,7 +8696,34 @@ class BotRuntime(object):
              self._publish_control_this_step) = previous
 
     def _update_once(self, frame_step, now, players=None, neighbours=None):
+        """Time one Bot step as mutually exclusive, continuously owned phases."""
+        current_stage = [None, None]
+        work = {}
+
+        def enter_stage(category):
+            if current_stage[1] == category:
+                return
+            hidden_worker_profiler.python_finished(current_stage[0])
+            current_stage[0] = hidden_worker_profiler.python_started(category)
+            current_stage[1] = category
+
+        failed = False
+        try:
+            return self._update_once_impl(
+                frame_step, now, players, neighbours, enter_stage, work)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                current_stage[0], failed)
+            for name, amount in sorted(work.items()):
+                hidden_worker_profiler.work_add(name, amount)
+
+    def _update_once_impl(self, frame_step, now, players, neighbours,
+                          enter_stage, profile_work):
         """Advance one stable authority substep and preserve its events."""
+        enter_stage('bot_setup')
         publish = bool(self._publish_control_this_step)
         refresh_control = bool(self._refresh_control_this_step)
         step_duration_us = max(
@@ -8715,7 +8780,10 @@ class BotRuntime(object):
         # simulation slice. Share them across all observers, but never across
         # slices where motion or equipment state may change.
         visibility_tick = {}
-        self._prepare_visibility_frame(
+        enter_stage('bot_control_observation')
+        hidden_worker_profiler.python_call(
+            'bot_visibility_prepare_inclusive',
+            self._prepare_visibility_frame,
             players, now, collect_observation or refresh_shot_lanes)
         if collect_observation or refresh_shot_lanes:
             self._append_human_observations(
@@ -8728,9 +8796,12 @@ class BotRuntime(object):
         siege_locked_poses = {}
         integrated = set()
         for state in self.states.values():
+            enter_stage('bot_control_observation')
             if not state['alive']:
                 self._cancel_active_burst(state)
                 continue
+            profile_work['bot_live_rows'] = (
+                profile_work.get('bot_live_rows', 0) + 1)
             self._note_source_stillness(state, now)
             # Every live bot consumes the same banked authority step. Planner
             # and slope detail may still vary by distance, but skipping one
@@ -8738,6 +8809,8 @@ class BotRuntime(object):
             # contact/reload/vertical clock into the same canonical tick.
             step = frame_step
             integrated.add(state['id'])
+            profile_work['bot_integrated_rows'] = (
+                profile_work.get('bot_integrated_rows', 0) + 1)
             self._advance_bot_critical(state, step, now)
             if not state['alive']:
                 self._cancel_active_burst(state)
@@ -8777,6 +8850,9 @@ class BotRuntime(object):
                 refresh_control and
                 (not decision_cache_valid or
                  _number(now) >= decision_cache[1]))
+            if decision_due:
+                profile_work['bot_decision_due'] = (
+                    profile_work.get('bot_decision_due', 0) + 1)
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -8803,6 +8879,8 @@ class BotRuntime(object):
                 self.navigator, 'controlled_shallow_step', None)
 
             def sample_clear(sample_yaw):
+                profile_work['bot_candidate_attempts'] = (
+                    profile_work.get('bot_candidate_attempts', 0) + 1)
                 advisory = self._planner_corridor_clear(
                     position, sample_yaw, state.get('speed', 0.0),
                     wet_escape=(baked_shallow_escape or
@@ -8813,6 +8891,9 @@ class BotRuntime(object):
                                        state['id'], position, sample_yaw)))
                 if advisory is not None:
                     return bool(advisory)
+                profile_work['bot_candidate_native_fallbacks'] = (
+                    profile_work.get(
+                        'bot_candidate_native_fallbacks', 0) + 1)
                 sample = planner_sample_direction(sample_yaw)
                 # Exhausting the soft-static recast budget is not a wall. Keep
                 # the previous drive intent; commit-side world collision still
@@ -8848,7 +8929,8 @@ class BotRuntime(object):
                 contacts = ()
                 targets = {}
             else:
-                contacts, targets = self._contacts_for(
+                contacts, targets = hidden_worker_profiler.python_call(
+                    'bot_contacts_inclusive', self._contacts_for,
                     state, players, now, team_visibility, visibility_tick,
                     processed_bot_ids)
                 if traffic_bodies is None:
@@ -8897,7 +8979,9 @@ class BotRuntime(object):
                     self._friendly_reposition_order(state, targets, now)
                 if (reposition_order is not None and
                         callable(decide_with_order)):
-                    command = decide_with_order(
+                    command = hidden_worker_profiler.python_call(
+                        'bot_planner_navigation_inclusive',
+                        decide_with_order,
                         decision_state, reposition_order, sample_clear)
                 elif server_order is not None and callable(decide_with_order):
                     server_order = dict(server_order)
@@ -8909,11 +8993,14 @@ class BotRuntime(object):
                         server_order,
                         targets.get(server_order.get('target_id')),
                         position)
-                    command = decide_with_order(
-                        decision_state, server_order,
-                        sample_clear)
+                    command = hidden_worker_profiler.python_call(
+                        'bot_planner_navigation_inclusive',
+                        decide_with_order,
+                        decision_state, server_order, sample_clear)
                 else:
-                    command = self.adapter.decide(
+                    command = hidden_worker_profiler.python_call(
+                        'bot_planner_navigation_inclusive',
+                        self.adapter.decide,
                         decision_state, sample_clear)
                 if reposition_expired:
                     # Resume the ordinary strategic movement on this frame,
@@ -9077,6 +9164,7 @@ class BotRuntime(object):
                     command['throttle'] = 0.0
                     command['turn'] = 0.0
                     command['movement_intent'] = False
+            enter_stage('bot_selected_motion')
             throttle = max(-1.0, min(1.0, _number(command['throttle'])))
             turn = max(-1.0, min(1.0, _number(command.get('turn'))))
             aim_fallback = (target.get('position') if target is not None
@@ -9181,6 +9269,11 @@ class BotRuntime(object):
                     cached_motion_probe, position, travel_yaw,
                     state.get('speed', 0.0), now, settled_motion, step,
                     ignore_deadline=not refresh_control))
+            cache_work_name = (
+                'bot_motion_cache_hits' if motion_probe_reusable else
+                'bot_motion_cache_misses')
+            profile_work[cache_work_name] = (
+                profile_work.get(cache_work_name, 0) + 1)
             cached_motion_result = (
                 (cached_motion_probe or {}).get('result') or {})
             catchup_motion_reprobe = bool(
@@ -9366,6 +9459,7 @@ class BotRuntime(object):
                 1 if throttle > 0.01 else (-1 if throttle < -0.01 else 0))
             state['rotation_dir'] = steer_dir
             self._log_direction_flip(state, path_clear, motion_probe, now)
+            enter_stage('bot_motion_commit_integration')
             if not self.native_motion:
                 params = self._physics_params.get(state['id'])
                 if params is None:
@@ -9456,6 +9550,8 @@ class BotRuntime(object):
                 if (path_clear and abs(speed) > 0.0001 and
                         callable(self.motion_resolver)):
                     resolved_motion = True
+                    hidden_worker_profiler.work_add(
+                        'bot_motion_commit_sweeps')
                     if self._probe_clock is None:
                         motion_status = self.motion_resolver(
                             state['id'], position, state['yaw'], speed,
@@ -9531,6 +9627,7 @@ class BotRuntime(object):
                         self._hard_contact_grinds[bot_id] = max(
                             0, self._hard_contact_grinds.get(bot_id, 0) - 1)
             ammo_state.publish(state)
+            enter_stage('bot_aim_fire')
             ballistic_solution, local_action_fresh = \
                 self._cadenced_ballistic_solution(
                     state, target, descriptor, state['shell_index'], now,
@@ -9641,6 +9738,7 @@ class BotRuntime(object):
                         # moving SPG must discard it and prove the next shot
                         # again after its normal safe-driver motion completes.
                         self._cancel_artillery_intent(state['id'])
+            enter_stage('bot_supplemental')
             mode = command.get('combat_mode')
             if (collect_cover_jobs and
                     target is not None and target.get('visible') and
@@ -9656,6 +9754,7 @@ class BotRuntime(object):
                                    command.get('move_position', position)))
             _clear_critical_parts_tick_cache(state)
             processed_bot_ids.add(int(state['id']))
+        enter_stage('bot_supplemental')
         # A static firing lane is useful only while the team has a current
         # direct spot. Keep one queue of compact identities across callbacks;
         # resolve at most the bounded service cohort against current poses.
@@ -9690,6 +9789,8 @@ class BotRuntime(object):
             completed_affordances = tuple(self._cover_results)
             self._cover_results = []
         cover_jobs.sort(key=lambda value: value[0])
+        profile_work['bot_cover_jobs'] = (
+            profile_work.get('bot_cover_jobs', 0) + len(cover_jobs))
         if collect_cover_jobs:
             self._next_cover_refresh = _number(now) + COVER_REFRESH_SECONDS
         if collect_cover_jobs and cover_jobs:
@@ -9734,6 +9835,7 @@ class BotRuntime(object):
                         'target_kind': target.get('kind', 'human'),
                         'candidates': list(candidates),
                     })
+        enter_stage('bot_tank_contacts')
         pending_ram_count = len(self._pending_ram_reports)
         self._pending_ram_reports.extend(
             self._resolve_tank_contacts(players, now, frame_step))
@@ -9755,6 +9857,7 @@ class BotRuntime(object):
             state['push_x'] = 0.0
             state['push_z'] = 0.0
             self._turn_speeds[bot_id] = 0.0
+        enter_stage('bot_vertical_ground')
         ordered_states = self._ordered_states()
         slope_candidates = []
         for state in ordered_states:
@@ -9782,6 +9885,9 @@ class BotRuntime(object):
                 visited += 1
             self._slope_pose_cursor = (
                 start + max(1, visited)) % len(slope_candidates)
+            profile_work['bot_slope_samples'] = (
+                profile_work.get('bot_slope_samples', 0) + sampled)
+        enter_stage('bot_publication')
         for state in ordered_states:
             if publish:
                 self._mark_combat_publication(state)
@@ -9799,11 +9905,15 @@ class BotRuntime(object):
             if projected is None:
                 raise RuntimeError('bot publication projection failed')
             wire_states.append(projected)
+        profile_work['bot_projected_rows'] = (
+            profile_work.get('bot_projected_rows', 0) + len(wire_states))
         self._sample_time_us = step_end_time_us
         publication = {
             'type': 'bot_state', 'bots': wire_states,
             'sample_time_us': self._sample_time_us,
         }
+        profile_work['bot_publications'] = (
+            profile_work.get('bot_publications', 0) + 1)
         if launches:
             # Never put these local-only SPG proof receipts on the LAN wire.
             # BattleRuntime retries an unaccepted launch from this compact list.

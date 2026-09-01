@@ -11,6 +11,7 @@ import uuid
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import spotting
 
@@ -180,11 +181,23 @@ class _OutboundPayloadError(Exception):
 class _PreencodedOutbound(object):
     """Immutable wire bytes owned by the reliable outbound queue."""
 
-    __slots__ = ('payload', 'coalesce_key')
+    __slots__ = ('payload', 'coalesce_key', 'profiled_worker_message')
 
-    def __init__(self, payload, coalesce_key=None):
+    def __init__(self, payload, coalesce_key=None,
+                 profiled_worker_message=False):
         self.payload = payload
         self.coalesce_key = coalesce_key
+        self.profiled_worker_message = bool(profiled_worker_message)
+
+
+class _ProfiledWorkerOutbound(dict):
+    """Plain JSON mapping tagged only inside the reliable worker queue."""
+
+
+def _is_profiled_worker_message(message):
+    if isinstance(message, _PreencodedOutbound):
+        return bool(message.profiled_worker_message)
+    return isinstance(message, _ProfiledWorkerOutbound)
 
 
 def _json_text_size(value):
@@ -3333,6 +3346,13 @@ class LANClient(object):
             return item
 
     def _send_wire(self, message, sock, generation):
+        if not _is_profiled_worker_message(message):
+            return self._send_wire_impl(message, sock, generation)
+        return hidden_worker_profiler.python_call(
+            'worker_message_send', self._send_wire_impl,
+            message, sock, generation)
+
+    def _send_wire_impl(self, message, sock, generation):
         """Write one queued message, encoding generic payloads on demand."""
         try:
             if isinstance(message, _PreencodedOutbound):
@@ -3355,6 +3375,9 @@ class LANClient(object):
                 sent = self._send_payload(payload, sock, generation)
                 if sent is not True:
                     return sent
+            if _is_profiled_worker_message(message):
+                hidden_worker_profiler.work_add(
+                    'worker_wire_bytes', len(payload))
             return True
         except Exception as error:
             if self._record_transport_error(error, generation, sock):
@@ -3424,6 +3447,8 @@ class LANClient(object):
     def _enqueue_outbound(self, message, encoded_size, generation):
         """Apply the common generation, FIFO and queue-size boundaries."""
         overflow = False
+        admitted_depth = None
+        profiled_worker_message = _is_profiled_worker_message(message)
         with self._outbound_lock:
             if (generation != self._transport_generation or
                     not self._outbound_accepting or self._stopping or
@@ -3483,11 +3508,17 @@ class LANClient(object):
                     self._outbound_queue.append((
                         self._outbound_seq, message, encoded_size))
                     self._outbound_bytes += encoded_size
+            if not overflow and profiled_worker_message:
+                admitted_depth = len(self._outbound_queue)
         if overflow:
             # Queue pressure is backpressure, not transport corruption.  Keep
             # every already accepted FIFO event and let the caller retry or
             # supersede this checkpoint after the sender drains capacity.
             return False
+        if admitted_depth is not None:
+            hidden_worker_profiler.work_add('worker_messages')
+            hidden_worker_profiler.work_add(
+                'worker_queue_depth', admitted_depth)
         self._outbound_event.set()
         return True
 
@@ -3510,18 +3541,39 @@ class LANClient(object):
                     not self._outbound_accepting):
                 return False
             generation = self._transport_generation
+        profiled_worker_message = (
+            self.player_id == WORKER_AUTHORITY_ID)
+        freeze_marker = (hidden_worker_profiler.python_started(
+            'worker_message_freeze') if profiled_worker_message else None)
+        freeze_failed = False
         try:
             payload = (json.dumps(
                 message, separators=(',', ':'), allow_nan=False) +
                 '\n').encode('utf-8')
         except Exception:
+            freeze_failed = True
             return False
+        finally:
+            hidden_worker_profiler.python_finished(
+                freeze_marker, freeze_failed)
         encoded_size = len(payload)
         if encoded_size > MAX_MESSAGE_BYTES:
             return False
-        return self._enqueue_outbound(
-            _PreencodedOutbound(payload, coalesce_key), encoded_size,
-            generation)
+        frozen = _PreencodedOutbound(
+            payload, coalesce_key,
+            profiled_worker_message=profiled_worker_message)
+        enqueue_marker = (hidden_worker_profiler.python_started(
+            'worker_message_enqueue') if profiled_worker_message else None)
+        enqueue_failed = False
+        try:
+            return self._enqueue_outbound(
+                frozen, encoded_size, generation)
+        except Exception:
+            enqueue_failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                enqueue_marker, enqueue_failed)
 
     def _send(self, message):
         """Freeze and enqueue one reliable message without wire I/O."""
@@ -3531,14 +3583,36 @@ class LANClient(object):
                     not self._outbound_accepting):
                 return False
             generation = self._transport_generation
+        profiled_worker_message = (
+            self.player_id == WORKER_AUTHORITY_ID)
+        freeze_marker = (hidden_worker_profiler.python_started(
+            'worker_message_freeze') if profiled_worker_message else None)
+        freeze_failed = False
         try:
             frozen, estimated_size = _freeze_outbound(message, [0])
         except Exception:
+            freeze_failed = True
             return False
+        finally:
+            hidden_worker_profiler.python_finished(
+                freeze_marker, freeze_failed)
         estimated_size += 1
         if estimated_size > MAX_MESSAGE_BYTES:
             return False
-        return self._enqueue_outbound(frozen, estimated_size, generation)
+        if profiled_worker_message:
+            frozen = _ProfiledWorkerOutbound(frozen)
+        enqueue_marker = (hidden_worker_profiler.python_started(
+            'worker_message_enqueue') if profiled_worker_message else None)
+        enqueue_failed = False
+        try:
+            return self._enqueue_outbound(
+                frozen, estimated_size, generation)
+        except Exception:
+            enqueue_failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                enqueue_marker, enqueue_failed)
 
     def _schedule_poll(self):
         if self._poll_callback is not None:

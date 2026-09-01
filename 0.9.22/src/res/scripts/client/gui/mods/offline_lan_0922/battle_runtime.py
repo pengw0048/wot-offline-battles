@@ -384,11 +384,23 @@ def _is_port_object(value):
 
 _FRAME_STAGE_NAMES = (
     'house', 'sync', 'critical', 'drown', 'prewarm', 'transition', 'local',
-    'outline', 'bots_update', 'bot_present', 'bot_events', 'spot', 'lock',
-    'schedule', 'diag_emit')
+    'outline', 'bot_prework', 'bot_runtime_update', 'bot_postdiag',
+    'bot_present', 'bot_messages', 'projectiles', 'spot', 'lock', 'schedule',
+    'diag_emit')
 _PROJECTILE_METRIC_NAMES = (
     'active', 'chords', 'debt', 'advance', 'terminals', 'scans',
     'candidates')
+_WORK_METRIC_NAMES = tuple(hidden_worker_profiler.WORK_COUNTERS)
+_WORK_METRIC_AGGREGATIONS = dict(
+    hidden_worker_profiler.WORK_COUNTER_AGGREGATIONS)
+_BOT_MAIN_PHASE_NAMES = (
+    'bot_setup', 'bot_control_observation', 'bot_selected_motion',
+    'bot_motion_commit_integration', 'bot_aim_fire', 'bot_supplemental',
+    'bot_tank_contacts', 'bot_vertical_ground', 'bot_publication')
+_LEGACY_STAGE_GROUPS = {
+    'bots_update': ('bot_prework', 'bot_runtime_update', 'bot_postdiag'),
+    'bot_events': ('bot_messages', 'projectiles'),
+}
 
 
 class _FrameDiagnostics(object):
@@ -441,6 +453,10 @@ class _FrameDiagnostics(object):
                                 for name in _FRAME_STAGE_NAMES)
         self._stage_maxima = dict((name, 0.0)
                                   for name in _FRAME_STAGE_NAMES)
+        self._legacy_stage_sums = dict(
+            (name, 0.0) for name in _LEGACY_STAGE_GROUPS)
+        self._legacy_stage_maxima = dict(
+            (name, 0.0) for name in _LEGACY_STAGE_GROUPS)
         self._probe_sums = dict((name, 0) for name in PROBE_KINDS)
         self._probe_maxima = dict((name, 0) for name in PROBE_KINDS)
         self._probe_duration_sums = dict(
@@ -451,6 +467,28 @@ class _FrameDiagnostics(object):
             (name, 0.0) for name in _PROJECTILE_METRIC_NAMES)
         self._projectile_maxima = dict(
             (name, 0.0) for name in _PROJECTILE_METRIC_NAMES)
+        self._work_sums = dict((name, 0.0) for name in _WORK_METRIC_NAMES)
+        self._work_maxima = dict((name, 0.0) for name in _WORK_METRIC_NAMES)
+        self._frame_work_sums = dict(
+            (name, 0.0) for name in _WORK_METRIC_NAMES)
+        self._offframe_work_sums = dict(
+            (name, 0.0) for name in _WORK_METRIC_NAMES)
+        self._work_samples = 0
+        self._work_counters_recorded = False
+        self._callback_residual_sum = 0.0
+        self._callback_residual_max = 0.0
+        self._bot_attribution_samples = 0
+        self._bot_outer_sum = 0.0
+        self._bot_outer_max = 0.0
+        self._bot_main_sum = 0.0
+        self._bot_main_max = 0.0
+        self._bot_residual_sum = 0.0
+        self._bot_residual_max = 0.0
+        self._bot_scheduler_attribution_samples = 0
+        self._bot_scheduler_sum = 0.0
+        self._bot_scheduler_max = 0.0
+        self._bot_scheduler_residual_sum = 0.0
+        self._bot_scheduler_residual_max = 0.0
         self._native_profile_measured = False
         self._native_profile_samples = 0
         self._native_profile_elapsed = 0.0
@@ -475,6 +513,8 @@ class _FrameDiagnostics(object):
         self._profiler_clock_reads = 0
         self._profiler_clock_read_estimate_ns = None
         self._profiler_mode_frames = {}
+        self._python_category_scopes = {}
+        self._python_scope_sum_rule = None
         self._slow = []
         self._over_50 = 0
         self._over_67 = 0
@@ -552,6 +592,26 @@ class _FrameDiagnostics(object):
                 except (IndexError, TypeError, ValueError, OverflowError):
                     continue
             profile[bucket_name] = target
+        for bucket_name in ('work', 'offframe_work'):
+            source = interval.get(bucket_name)
+            if not isinstance(source, dict):
+                continue
+            target = dict(profile.get(bucket_name) or {})
+            for name in _WORK_METRIC_NAMES:
+                if name not in source:
+                    continue
+                try:
+                    value = float(source[name])
+                    if math.isnan(value) or math.isinf(value) or value < 0.0:
+                        continue
+                    old = max(0.0, float(target.get(name, 0.0)))
+                    target[name] = (
+                        max(old, value)
+                        if _WORK_METRIC_AGGREGATIONS.get(name) == 'sampled_max'
+                        else old + value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            profile[bucket_name] = target
         for trace_name in ('trace', 'representative_trace'):
             source = interval.get(trace_name)
             if isinstance(source, (list, tuple)):
@@ -566,7 +626,13 @@ class _FrameDiagnostics(object):
         if bool(interval.get('measured', False)):
             profile['measured'] = True
         for name in ('clock_read_estimate_ns', 'coverage',
-                     'filtered_segment_timing'):
+                     'filtered_segment_timing', 'work_counter_scope',
+                     'work_counter_semantics', 'python_timing_semantics',
+                     'work_counter_aggregations', 'work_counter_notes',
+                     'python_category_scopes', 'python_scope_sum_rule',
+                     'bot_update_residual_semantics',
+                     'python_thread_attribution',
+                     'offframe_python_timing_semantics'):
             if profile.get(name) is None and interval.get(name) is not None:
                 profile[name] = interval.get(name)
         if profile.get('frame_ordinal') is None:
@@ -605,11 +671,24 @@ class _FrameDiagnostics(object):
             self._sim_caps += 1
         if row.get('context', {}).get('role') == 'authority':
             self._authority_frames += 1
+        stage_total = 0.0
         for name in _FRAME_STAGE_NAMES:
             value = max(0.0, float(row['stages'].get(name, 0.0)))
             self._stage_sums[name] += value
             self._stage_maxima[name] = max(
                 self._stage_maxima[name], value)
+            stage_total += value
+        callback_residual = max(0.0, execution - stage_total)
+        self._callback_residual_sum += callback_residual
+        self._callback_residual_max = max(
+            self._callback_residual_max, callback_residual)
+        for legacy_name, components in _LEGACY_STAGE_GROUPS.items():
+            value = sum(max(
+                0.0, float(row['stages'].get(name, 0.0)))
+                for name in components)
+            self._legacy_stage_sums[legacy_name] += value
+            self._legacy_stage_maxima[legacy_name] = max(
+                self._legacy_stage_maxima[legacy_name], value)
         for name in PROBE_KINDS:
             value = max(0, int(row['probes'].get(name, 0)))
             self._probe_sums[name] += value
@@ -627,6 +706,38 @@ class _FrameDiagnostics(object):
             self._projectile_maxima[name] = max(
                 self._projectile_maxima[name], value)
         detailed = row.get('detailed_profile') or {}
+        work = detailed.get('work') or {}
+        offframe_work = detailed.get('offframe_work') or {}
+        if bool(detailed.get('work_counters_recorded', False)):
+            self._work_counters_recorded = True
+            self._work_samples += 1
+        for name in _WORK_METRIC_NAMES:
+            try:
+                frame_value = max(0.0, float(work.get(name, 0.0)))
+                offframe_value = max(
+                    0.0, float(offframe_work.get(name, 0.0)))
+                if (math.isnan(frame_value) or math.isinf(frame_value) or
+                        math.isnan(offframe_value) or
+                        math.isinf(offframe_value)):
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if _WORK_METRIC_AGGREGATIONS.get(name) == 'sampled_max':
+                combined = max(frame_value, offframe_value)
+                self._frame_work_sums[name] = max(
+                    self._frame_work_sums[name], frame_value)
+                self._offframe_work_sums[name] = max(
+                    self._offframe_work_sums[name], offframe_value)
+                self._work_sums[name] = max(
+                    self._work_sums[name], combined)
+                self._work_maxima[name] = self._work_sums[name]
+            else:
+                combined = frame_value + offframe_value
+                self._frame_work_sums[name] += frame_value
+                self._offframe_work_sums[name] += offframe_value
+                self._work_sums[name] += combined
+                self._work_maxima[name] = max(
+                    self._work_maxima[name], combined)
         self._add_profiler_mode_frame(detailed.get('mode'), row)
         if bool(detailed.get('measured', False)):
             self._native_profile_measured = True
@@ -659,6 +770,72 @@ class _FrameDiagnostics(object):
             detailed.get('offframe_python'),
             self._offframe_python_detail_sums,
             self._offframe_python_detail_maxima)
+        scopes = detailed.get('python_category_scopes')
+        if isinstance(scopes, dict):
+            for name in hidden_worker_profiler.PYTHON_CATEGORIES:
+                scope = scopes.get(name)
+                if scope is not None:
+                    self._python_category_scopes[name] = str(scope)[:48]
+        sum_rule = detailed.get('python_scope_sum_rule')
+        if sum_rule is not None:
+            self._python_scope_sum_rule = str(sum_rule)[:256]
+        python_detail = detailed.get('python') or {}
+        main_seconds = None
+        try:
+            main_seconds = sum(max(
+                0.0, float((python_detail.get(name) or (0, 0.0))[1]))
+                for name in _BOT_MAIN_PHASE_NAMES)
+            if math.isnan(main_seconds) or math.isinf(main_seconds):
+                main_seconds = None
+        except (IndexError, TypeError, ValueError, OverflowError):
+            main_seconds = None
+        outer = python_detail.get('bot_runtime_update')
+        if (main_seconds is not None and
+                isinstance(outer, (list, tuple)) and len(outer) >= 2):
+            try:
+                outer_seconds = max(0.0, float(outer[1]))
+                if (not math.isnan(outer_seconds) and
+                        not math.isinf(outer_seconds) and
+                        not math.isnan(main_seconds) and
+                        not math.isinf(main_seconds)):
+                    residual = max(0.0, outer_seconds - main_seconds)
+                    self._bot_attribution_samples += 1
+                    self._bot_outer_sum += outer_seconds
+                    self._bot_outer_max = max(
+                        self._bot_outer_max, outer_seconds)
+                    self._bot_main_sum += main_seconds
+                    self._bot_main_max = max(
+                        self._bot_main_max, main_seconds)
+                    self._bot_residual_sum += residual
+                    self._bot_residual_max = max(
+                        self._bot_residual_max, residual)
+            except (IndexError, TypeError, ValueError, OverflowError):
+                pass
+        scheduler_rows = [
+            python_detail.get('bot_scheduler_control_refresh'),
+            python_detail.get('bot_scheduler_catchup'),
+        ]
+        if (main_seconds is not None and
+                any(isinstance(value, (list, tuple)) and len(value) >= 2
+                    for value in scheduler_rows)):
+            try:
+                scheduler_seconds = sum(max(
+                    0.0, float((value or (0, 0.0))[1]))
+                    for value in scheduler_rows)
+                if (not math.isnan(scheduler_seconds) and
+                        not math.isinf(scheduler_seconds)):
+                    scheduler_residual = max(
+                        0.0, scheduler_seconds - main_seconds)
+                    self._bot_scheduler_attribution_samples += 1
+                    self._bot_scheduler_sum += scheduler_seconds
+                    self._bot_scheduler_max = max(
+                        self._bot_scheduler_max, scheduler_seconds)
+                    self._bot_scheduler_residual_sum += scheduler_residual
+                    self._bot_scheduler_residual_max = max(
+                        self._bot_scheduler_residual_max,
+                        scheduler_residual)
+            except (IndexError, TypeError, ValueError, OverflowError):
+                pass
         if bool(detailed.get('measured', False)):
             self._add_frame_totals(
                 self._native_frame_totals, native_frame)
@@ -886,6 +1063,30 @@ class _FrameDiagnostics(object):
                 stats['seconds_max']),
         }
 
+    def _work_snapshot(self, samples, elapsed):
+        result = {}
+        for name in _WORK_METRIC_NAMES:
+            total = self._work_sums[name]
+            aggregation = _WORK_METRIC_AGGREGATIONS.get(name, 'sum')
+            if aggregation == 'sampled_max':
+                result[name] = {
+                    'aggregation': aggregation,
+                    'max': total,
+                    'render_frame_max': self._frame_work_sums[name],
+                    'offframe_max': self._offframe_work_sums[name],
+                }
+                continue
+            result[name] = {
+                'aggregation': aggregation,
+                'total': total,
+                'per_second': total / elapsed,
+                'per_frame_avg': total / samples,
+                'per_frame_max': self._work_maxima[name],
+                'render_frame_total': self._frame_work_sums[name],
+                'offframe_total': self._offframe_work_sums[name],
+            }
+        return result
+
     def _profiler_ab_snapshot(self):
         result = {}
         for mode, stats in sorted(self._profiler_mode_frames.items()):
@@ -933,6 +1134,9 @@ class _FrameDiagnostics(object):
             self._exec_samples, self._exec_max)
         outside_distribution = self._distribution(
             self._outside_samples, self._outside_max)
+        bot_samples = max(1, self._bot_attribution_samples)
+        scheduler_samples = max(
+            1, self._bot_scheduler_attribution_samples)
         stage_snapshot = {}
         for name in _FRAME_STAGE_NAMES:
             stage_snapshot[name] = {
@@ -940,6 +1144,18 @@ class _FrameDiagnostics(object):
                     self._stage_sums[name] / samples),
                 'max_ms': self._milliseconds(self._stage_maxima[name]),
             }
+        legacy_stage_snapshot = {}
+        for name, components in sorted(_LEGACY_STAGE_GROUPS.items()):
+            legacy_stage_snapshot[name] = {
+                'avg_ms': self._milliseconds(
+                    self._legacy_stage_sums[name] / samples),
+                'max_ms': self._milliseconds(
+                    self._legacy_stage_maxima[name]),
+                'derived_from': components,
+                'excluded_from_residual_sum': True,
+            }
+            # Preserve the old lookup key while identifying it as derived.
+            stage_snapshot[name] = dict(legacy_stage_snapshot[name])
         probe_snapshot = {}
         for name in PROBE_KINDS:
             probe_snapshot[name] = {
@@ -958,7 +1174,7 @@ class _FrameDiagnostics(object):
                     self._probe_duration_maxima[name]),
             }
         self._last_snapshot = {
-            'schema': 2,
+            'schema': 3,
             'window': self._window_id,
             'round': context.get('round', '-'),
             'map': context.get('map', '-'),
@@ -974,7 +1190,15 @@ class _FrameDiagnostics(object):
             'frame_interval_ms': gap_distribution,
             'python_callback_ms': exec_distribution,
             'outside_callback_ms': outside_distribution,
+            'callback_residual_ms': {
+                'avg': self._milliseconds(
+                    self._callback_residual_sum / samples),
+                'max': self._milliseconds(self._callback_residual_max),
+                'semantics': (
+                    'python_callback_minus_mutually_exclusive_frame_stages'),
+            },
             'python_stages_ms': stage_snapshot,
+            'legacy_derived_python_stages_ms': legacy_stage_snapshot,
             'raw_native_calls_measured': self._native_profile_measured,
             'native_timing_frames': self._native_profile_samples,
             'native_timing_seconds': self._native_profile_elapsed,
@@ -1000,6 +1224,46 @@ class _FrameDiagnostics(object):
                 timing_samples, timing_elapsed),
             'python_detail_semantics': (
                 'inclusive_of_nested_native_do_not_sum'),
+            'python_category_scopes': dict(self._python_category_scopes),
+            'python_scope_sum_rule': self._python_scope_sum_rule,
+            'bot_timing_attribution': {
+                'battle_outer_timing_frames': self._bot_attribution_samples,
+                'battle_outer_avg_ms': self._milliseconds(
+                    self._bot_outer_sum / bot_samples),
+                'battle_outer_max_ms': self._milliseconds(
+                    self._bot_outer_max),
+                'main_exclusive_avg_ms': self._milliseconds(
+                    self._bot_main_sum / bot_samples),
+                'main_exclusive_max_ms': self._milliseconds(
+                    self._bot_main_max),
+                'battle_outer_residual_avg_ms': self._milliseconds(
+                    self._bot_residual_sum / bot_samples),
+                'battle_outer_residual_max_ms': self._milliseconds(
+                    self._bot_residual_max),
+                'battle_outer_category': 'bot_runtime_update',
+                'scheduler_timing_frames': (
+                    self._bot_scheduler_attribution_samples),
+                'scheduler_inclusive_avg_ms': self._milliseconds(
+                    self._bot_scheduler_sum / scheduler_samples),
+                'scheduler_inclusive_max_ms': self._milliseconds(
+                    self._bot_scheduler_max),
+                'scheduler_residual_avg_ms': self._milliseconds(
+                    self._bot_scheduler_residual_sum / scheduler_samples),
+                'scheduler_residual_max_ms': self._milliseconds(
+                    self._bot_scheduler_residual_max),
+                'additive_main_categories': _BOT_MAIN_PHASE_NAMES,
+                'semantics': (
+                    hidden_worker_profiler.BOT_UPDATE_RESIDUAL_SEMANTICS),
+            },
+            'work_counters_recorded': self._work_counters_recorded,
+            'work_counter_samples': self._work_samples,
+            'work': self._work_snapshot(samples, elapsed),
+            'work_counter_aggregations': dict(_WORK_METRIC_AGGREGATIONS),
+            'work_counter_notes': dict(
+                hidden_worker_profiler.WORK_COUNTER_NOTES),
+            'work_counter_semantics': (
+                'sum counters combine frame+offframe;sampled_max gauges do not '
+                'have total/rate/average'),
             'native_trace': tuple(self._native_trace),
             'representative_segment_trace': dict(
                 (category, tuple(rows))
@@ -1030,6 +1294,10 @@ class _FrameDiagnostics(object):
                     'instrumentation and wrapper branch; not a causal or '
                     'unmodified-client baseline'),
                 'ab_frames': self._profiler_ab_snapshot(),
+                'python_thread_attribution': (
+                    hidden_worker_profiler.PYTHON_THREAD_ATTRIBUTION),
+                'offframe_python_timing_semantics': (
+                    hidden_worker_profiler.OFFFRAME_PYTHON_TIMING_SEMANTICS),
             },
             'logical_native_probes': probe_snapshot,
             'worker_runtime': dict(self._worker_runtime),
@@ -1041,7 +1309,7 @@ class _FrameDiagnostics(object):
         prefix = '[Offline LAN 0.9.22] PERF '
         lines = [
             (prefix +
-             'summary v=4 window=%d round=%s map=%s phase=%s role=%s '
+             'summary v=5 window=%d round=%s map=%s phase=%s role=%s '
              'probe_timing=%s '
              'samples=%d seconds=%.3f fps=%.2f authority_frames=%d '
              'gap_ms_avg_max=%.3f/%.3f raw_dt_ms_avg_max=%.3f/%.3f '
@@ -1140,6 +1408,40 @@ class _FrameDiagnostics(object):
                 self._milliseconds(self._stage_maxima[name])))
         lines.append(prefix + 'stages_ms_avg_max ' +
                      ' '.join(stage_values) + '\n')
+        lines.append(prefix + 'legacy_stages_ms_avg_max_derived ' +
+                     ' '.join('%s=%.3f/%.3f(%s)' % (
+                         name,
+                         self._milliseconds(
+                             self._legacy_stage_sums[name] / samples),
+                         self._milliseconds(
+                             self._legacy_stage_maxima[name]),
+                         '+'.join(_LEGACY_STAGE_GROUPS[name]))
+                         for name in sorted(_LEGACY_STAGE_GROUPS)) + '\n')
+        lines.append(
+            (prefix +
+             'attribution_ms callback_residual_avg_max=%.3f/%.3f '
+             'bot_battle_outer_frames=%d bot_battle_outer_avg_max=%.3f/%.3f '
+             'bot_main_exclusive_avg_max=%.3f/%.3f '
+             'bot_battle_outer_residual_avg_max=%.3f/%.3f '
+             'bot_scheduler_frames=%d bot_scheduler_avg_max=%.3f/%.3f '
+             'bot_scheduler_residual_avg_max=%.3f/%.3f '
+             'bot_rule=scheduler_minus_main_exclusive_nested_excluded\n') % (
+                 self._milliseconds(self._callback_residual_sum / samples),
+                 self._milliseconds(self._callback_residual_max),
+                 self._bot_attribution_samples,
+                 self._milliseconds(self._bot_outer_sum / bot_samples),
+                 self._milliseconds(self._bot_outer_max),
+                 self._milliseconds(self._bot_main_sum / bot_samples),
+                 self._milliseconds(self._bot_main_max),
+                 self._milliseconds(self._bot_residual_sum / bot_samples),
+                 self._milliseconds(self._bot_residual_max),
+                 self._bot_scheduler_attribution_samples,
+                 self._milliseconds(
+                     self._bot_scheduler_sum / scheduler_samples),
+                 self._milliseconds(self._bot_scheduler_max),
+                 self._milliseconds(
+                     self._bot_scheduler_residual_sum / scheduler_samples),
+                 self._milliseconds(self._bot_scheduler_residual_max)))
         probe_values = []
         for name in PROBE_KINDS:
             probe_values.append('%s=%.2f/%d' % (
@@ -1264,6 +1566,29 @@ class _FrameDiagnostics(object):
             lines.append(prefix + label +
                          '_inclusive_ms_avg_per_s_max_fail ' +
                          (' '.join(values) or 'none') + '\n')
+        work_avg_values = []
+        work_rate_values = []
+        work_gauge_values = []
+        for name in _WORK_METRIC_NAMES:
+            total = self._work_sums[name]
+            if total <= 0.0:
+                continue
+            if _WORK_METRIC_AGGREGATIONS.get(name) == 'sampled_max':
+                work_gauge_values.append('%s=%.0f/%.0f/%.0f' % (
+                    name, total, self._frame_work_sums[name],
+                    self._offframe_work_sums[name]))
+                continue
+            work_avg_values.append('%s=%.2f/%.0f' % (
+                name, total / samples, self._work_maxima[name]))
+            work_rate_values.append('%s=%.2f/%.0f/%.0f' % (
+                name, total / elapsed, self._frame_work_sums[name],
+                self._offframe_work_sums[name]))
+        lines.append(prefix + 'work_avg_max ' +
+                     (' '.join(work_avg_values) or 'none') + '\n')
+        lines.append(prefix + 'work_hz_frame_offframe_total ' +
+                     (' '.join(work_rate_values) or 'none') + '\n')
+        lines.append(prefix + 'work_sampled_max_window_frame_offframe ' +
+                     (' '.join(work_gauge_values) or 'none') + '\n')
         lines.append(
             (prefix +
              'projectile_avg_max active=%.2f/%.0f chords=%.2f/%.0f '
@@ -1351,7 +1676,8 @@ class _FrameDiagnostics(object):
                  'projectile=%s stages_ms=%s logical_probes=%s '
                  'logical_probe_ms=%s raw_native=%s '
                  'raw_native_offframe=%s python_detail_inclusive=%s '
-                 'python_detail_offframe_inclusive=%s\n') % (
+                 'python_detail_offframe_inclusive=%s work=%s '
+                 'work_offframe=%s callback_residual_ms=%.3f\n') % (
                      rank, row['cause'], row['next'],
                      detailed.get('frame_ordinal', '-'),
                      detailed.get('mode', 'off'),
@@ -1413,7 +1739,19 @@ class _FrameDiagnostics(object):
                               for name, value in sorted(
                                   (detailed.get(
                                       'offframe_python') or {}).items())) or
-                     'none'))
+                     'none',
+                     ','.join('%s:%.3f' % (name, float(value))
+                              for name, value in sorted(
+                                  (detailed.get('work') or {}).items())
+                              if name in _WORK_METRIC_NAMES) or 'none',
+                     ','.join('%s:%.3f' % (name, float(value))
+                              for name, value in sorted(
+                                  (detailed.get('offframe_work') or {}).items())
+                              if name in _WORK_METRIC_NAMES) or 'none',
+                     self._milliseconds(max(
+                         0.0, row['exec'] - sum(max(
+                             0.0, float(stages.get(name, 0.0)))
+                             for name in _FRAME_STAGE_NAMES)))))
         return ''.join(lines)
 
     def finish(self, frame_id, entry_wall, tick_dt, motion_dt, stages,
@@ -10733,6 +11071,11 @@ class BattleRuntime(object):
         return True
 
     def _ensure_projectile_visual(self, normalized, now):
+        return hidden_worker_profiler.python_call(
+            'projectile_visual', self._ensure_projectile_visual_impl,
+            normalized, now)
+
+    def _ensure_projectile_visual_impl(self, normalized, now):
         """Ensure late joiners and delayed snapshots see the live tracer."""
         if self._worker_mode:
             return False
@@ -10869,6 +11212,11 @@ class BattleRuntime(object):
             return None
 
     def _stop_projectile_visual(self, projectile_id, event):
+        return hidden_worker_profiler.python_call(
+            'projectile_visual', self._stop_projectile_visual_impl,
+            projectile_id, event)
+
+    def _stop_projectile_visual_impl(self, projectile_id, event):
         if self._worker_mode:
             self._projectile_visual_meta.pop(projectile_id, None)
             return False
@@ -11361,16 +11709,37 @@ class BattleRuntime(object):
         self._projectile_candidate_count = 0
         if self._projectiles is None:
             return False
-        self._flush_pending_projectile_resolutions()
-        previous = self._projectile_target_positions
-        states = self._projectiles.snapshot()
-        current_poses = self._projectile_record_poses()
-        current = dict(
-            (key, _xyz(pose)) for key, pose in current_poses.items())
-        if (len(self._projectiles) or self._projectile_visual_meta or
-                self._projectile_is_authority()):
-            self._sample_projectile_positions(now, current_poses)
-            self._prune_projectile_position_history(states)
+        terminal_marker = hidden_worker_profiler.python_started(
+            'projectile_terminal')
+        terminal_failed = False
+        try:
+            self._flush_pending_projectile_resolutions()
+        except Exception:
+            terminal_failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                terminal_marker, terminal_failed)
+        history_marker = hidden_worker_profiler.python_started(
+            'projectile_history')
+        history_failed = False
+        try:
+            previous = self._projectile_target_positions
+            states = self._projectiles.snapshot()
+            current_poses = self._projectile_record_poses()
+            current = dict(
+                (key, _xyz(pose)) for key, pose in current_poses.items())
+            if (len(self._projectiles) or self._projectile_visual_meta or
+                    self._projectile_is_authority()):
+                self._sample_projectile_positions(now, current_poses)
+                self._prune_projectile_position_history(states)
+        except Exception:
+            history_failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                history_marker, history_failed)
+        hidden_worker_profiler.work_add('projectiles_active', len(states))
         if not self._projectile_is_authority():
             self._projectile_target_positions = current
             return False
@@ -11388,11 +11757,31 @@ class BattleRuntime(object):
         advance_start = _PROFILE_CLOCK()
         self._projectile_historic_pose_cache = {}
         try:
-            self._build_projectile_spatial_bins(
-                states, now, maximum_chords=chord_budget)
-            advanced = self._projectiles.advance(
-                now, self._projectile_chord, self._projectile_terminal,
-                maximum_chords=chord_budget)
+            history_marker = hidden_worker_profiler.python_started(
+                'projectile_history')
+            history_failed = False
+            try:
+                self._build_projectile_spatial_bins(
+                    states, now, maximum_chords=chord_budget)
+            except Exception:
+                history_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    history_marker, history_failed)
+            step_marker = hidden_worker_profiler.python_started(
+                'projectile_step')
+            step_failed = False
+            try:
+                advanced = self._projectiles.advance(
+                    now, self._projectile_chord, self._projectile_terminal,
+                    maximum_chords=chord_budget)
+            except Exception:
+                step_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    step_marker, step_failed)
         finally:
             self._clear_projectile_spatial_index()
             self._projectile_historic_pose_cache = None
@@ -11407,8 +11796,24 @@ class BattleRuntime(object):
             'scans': self._projectile_scan_count,
             'candidates': self._projectile_candidate_count,
         }
-        self._prune_projectile_position_history()
-        self._projectile_target_positions = current
+        hidden_worker_profiler.work_add(
+            'projectile_segments', metrics.get('chords', 0))
+        hidden_worker_profiler.work_add(
+            'projectile_candidates', self._projectile_candidate_count)
+        hidden_worker_profiler.work_add(
+            'projectile_terminals', metrics.get('terminals', 0))
+        history_marker = hidden_worker_profiler.python_started(
+            'projectile_history')
+        history_failed = False
+        try:
+            self._prune_projectile_position_history()
+            self._projectile_target_positions = current
+        except Exception:
+            history_failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(
+                history_marker, history_failed)
         if now >= self._next_projectile_progress_time:
             self._next_projectile_progress_time = (
                 now + PROJECTILE_PROGRESS_SECONDS)
@@ -11544,6 +11949,13 @@ class BattleRuntime(object):
 
     def _projectile_vehicle_collisions(self, record, target, start, end,
                                        pose=None):
+        return hidden_worker_profiler.python_call(
+            'projectile_vehicle',
+            self._projectile_vehicle_collisions_impl,
+            record, target, start, end, pose)
+
+    def _projectile_vehicle_collisions_impl(self, record, target, start, end,
+                                            pose=None):
         """Return retail ABI collisions plus private world-normal evidence."""
         if pose is not None:
             descriptor = self._projectile_descriptor_at_pose(target, pose)
@@ -11827,7 +12239,8 @@ class BattleRuntime(object):
             raise RuntimeError('nested projectile destructible context')
         self._projectile_destructible_context = projectile_id
         try:
-            scene = self._resolve_shot_scene(
+            scene = hidden_worker_profiler.python_call(
+                'projectile_world', self._resolve_shot_scene,
                 self._vector(start), self._vector(scene_end_tuple), direction,
                 self._projectile_shot(meta),
                 penetration_factor=meta.get('penetration_factor'),
@@ -12219,6 +12632,11 @@ class BattleRuntime(object):
         return effects
 
     def _projectile_terminal(self, state, terminal):
+        return hidden_worker_profiler.python_call(
+            'projectile_terminal', self._projectile_terminal_impl,
+            state, terminal)
+
+    def _projectile_terminal_impl(self, state, terminal):
         manager_key = state.get('key')
         projectile_id = (manager_key[0]
                          if isinstance(manager_key, tuple) else manager_key)
@@ -13058,28 +13476,55 @@ class BattleRuntime(object):
         detailed_profile = {}
         boundary = entry_wall
         try:
-            self._run_optional_feature(
-                'map visibility filtering',
-                self._maintain_standard_space_visibility, (now,),
-                self._disable_standard_space_visibility)
-            self._flush_pending_bot_create(now)
-            self._flush_pending_entities(now)
-            self._drain_event_journal()
+            sync_marker = hidden_worker_profiler.python_started('render_sync')
+            sync_failed = False
+            try:
+                self._run_optional_feature(
+                    'map visibility filtering',
+                    self._maintain_standard_space_visibility, (now,),
+                    self._disable_standard_space_visibility)
+                self._flush_pending_bot_create(now)
+                self._flush_pending_entities(now)
+                self._drain_event_journal()
+            except Exception:
+                sync_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    sync_marker, sync_failed)
             hidden_worker_profiler.python_call(
                 'foliage_dynamic', self._run_optional_feature,
                 'foliage camouflage',
                 self._refresh_fallen_tree_foliage, (now,))
-            self._retry_bot_manifest(now)
-            self._maybe_send_battle_ready()
+            sync_marker = hidden_worker_profiler.python_started('render_sync')
+            sync_failed = False
+            try:
+                self._retry_bot_manifest(now)
+                self._maybe_send_battle_ready()
+            except Exception:
+                sync_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    sync_marker, sync_failed)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['house'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if self._sync is not None:
-                self._sync.advance(now)
-            if self._battle_live and self._worker_mode:
-                self._advance_player_fire_authority(rule_dt, now)
-                self._publish_player_environment(rule_dt, now)
+            sync_marker = hidden_worker_profiler.python_started('render_sync')
+            sync_failed = False
+            try:
+                if self._sync is not None:
+                    self._sync.advance(now)
+                if self._battle_live and self._worker_mode:
+                    self._advance_player_fire_authority(rule_dt, now)
+                    self._publish_player_environment(rule_dt, now)
+            except Exception:
+                sync_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    sync_marker, sync_failed)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['sync'] = max(0.0, next_boundary - boundary)
@@ -13199,87 +13644,125 @@ class BattleRuntime(object):
                 next_boundary = _PROFILE_CLOCK()
                 stages['outline'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if self._battle_live and self._bots is not None:
-                if self._worker_mode:
-                    self._worker_probe_authority_callbacks += 1
-                self._advance_artillery_arcs(now)
-                players = self._authority_players()
-                if self._worker_mode:
-                    hidden_worker_profiler.python_call(
-                        'destructible_scan',
-                        self._scan_authority_player_trees, players, now)
-                    hidden_worker_profiler.python_call(
-                        'destructible_contact',
-                        self._resolve_player_destructible_contacts,
-                        players, now)
-                probe_totals = getattr(self._bots, 'probe_totals', None)
-                probe_duration_totals = getattr(
-                    self._bots, 'probe_duration_totals', None)
-                before_probes = None
-                before_probe_durations = None
-                if profiling and callable(probe_totals):
-                    try:
-                        before_probes = probe_totals()
-                    except Exception:
-                        before_probes = None
-                if profiling and callable(probe_duration_totals):
-                    try:
-                        before_probe_durations = probe_duration_totals()
-                    except Exception:
-                        before_probe_durations = None
-                set_camera = getattr(
-                    self._bots, 'set_camera_position', None)
-                if callable(set_camera):
-                    # A worker has no presentation camera. Using its off-map
-                    # dummy as one would lower update detail for distant bots
-                    # and make worker authority behave unlike player authority.
-                    set_camera(
-                        None if self._worker_mode else self._local_position)
-                control_sample_before = getattr(
-                    self._bots, '_sample_time_us', None)
-                outgoing_messages = self._bots.update(
-                    rule_dt, now, players=players)
-                if self._worker_mode:
-                    self._record_worker_control_diagnostics(
-                        control_sample_before)
-                after_probes = None
-                after_probe_durations = None
-                if profiling and callable(probe_totals):
-                    try:
-                        after_probes = probe_totals()
-                    except Exception:
-                        after_probes = None
-                if profiling and callable(probe_duration_totals):
-                    try:
-                        after_probe_durations = probe_duration_totals()
-                    except Exception:
-                        after_probe_durations = None
-                if (isinstance(before_probes, (list, tuple)) and
-                        isinstance(after_probes, (list, tuple)) and
-                        len(before_probes) == len(PROBE_KINDS) and
-                        len(after_probes) == len(PROBE_KINDS)):
-                    try:
-                        for index, name in enumerate(PROBE_KINDS):
-                            probes[name] += max(
-                                0, int(after_probes[index]) -
-                                int(before_probes[index]))
-                    except (TypeError, ValueError, OverflowError):
-                        probes = dict((name, 0) for name in PROBE_KINDS)
-                if (isinstance(before_probe_durations, (list, tuple)) and
-                        isinstance(after_probe_durations, (list, tuple)) and
-                        len(before_probe_durations) == len(PROBE_KINDS) and
-                        len(after_probe_durations) == len(PROBE_KINDS)):
-                    try:
-                        for index, name in enumerate(PROBE_KINDS):
-                            probe_durations[name] += max(
-                                0.0, float(after_probe_durations[index]) -
-                                float(before_probe_durations[index]))
-                    except (TypeError, ValueError, OverflowError):
-                        probe_durations = dict(
-                            (name, 0.0) for name in PROBE_KINDS)
+            bots_active = self._battle_live and self._bots is not None
+            players = ()
+            probe_totals = None
+            probe_duration_totals = None
+            before_probes = None
+            before_probe_durations = None
+            control_sample_before = None
+            if bots_active:
+                bot_marker = hidden_worker_profiler.python_started(
+                    'bot_prework')
+                bot_failed = False
+                try:
+                    if self._worker_mode:
+                        self._worker_probe_authority_callbacks += 1
+                    self._advance_artillery_arcs(now)
+                    players = self._authority_players()
+                    if self._worker_mode:
+                        hidden_worker_profiler.python_call(
+                            'destructible_scan',
+                            self._scan_authority_player_trees, players, now)
+                        hidden_worker_profiler.python_call(
+                            'destructible_contact',
+                            self._resolve_player_destructible_contacts,
+                            players, now)
+                    probe_totals = getattr(self._bots, 'probe_totals', None)
+                    probe_duration_totals = getattr(
+                        self._bots, 'probe_duration_totals', None)
+                    if profiling and callable(probe_totals):
+                        try:
+                            before_probes = probe_totals()
+                        except Exception:
+                            before_probes = None
+                    if profiling and callable(probe_duration_totals):
+                        try:
+                            before_probe_durations = probe_duration_totals()
+                        except Exception:
+                            before_probe_durations = None
+                    set_camera = getattr(
+                        self._bots, 'set_camera_position', None)
+                    if callable(set_camera):
+                        # A worker has no presentation camera. Using its off-map
+                        # dummy as one would lower update detail for distant bots
+                        # and make worker authority behave unlike player authority.
+                        set_camera(
+                            None if self._worker_mode else self._local_position)
+                    control_sample_before = getattr(
+                        self._bots, '_sample_time_us', None)
+                except Exception:
+                    bot_failed = True
+                    raise
+                finally:
+                    hidden_worker_profiler.python_finished(
+                        bot_marker, bot_failed)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
-                stages['bots_update'] = max(0.0, next_boundary - boundary)
+                stages['bot_prework'] = max(0.0, next_boundary - boundary)
+                boundary = next_boundary
+            if bots_active:
+                outgoing_messages = hidden_worker_profiler.python_call(
+                    'bot_runtime_update', self._bots.update,
+                    rule_dt, now, players=players)
+            if profiling:
+                next_boundary = _PROFILE_CLOCK()
+                stages['bot_runtime_update'] = max(
+                    0.0, next_boundary - boundary)
+                boundary = next_boundary
+            if bots_active:
+                bot_marker = hidden_worker_profiler.python_started(
+                    'bot_postdiag')
+                bot_failed = False
+                try:
+                    if self._worker_mode:
+                        self._record_worker_control_diagnostics(
+                            control_sample_before)
+                    after_probes = None
+                    after_probe_durations = None
+                    if profiling and callable(probe_totals):
+                        try:
+                            after_probes = probe_totals()
+                        except Exception:
+                            after_probes = None
+                    if profiling and callable(probe_duration_totals):
+                        try:
+                            after_probe_durations = probe_duration_totals()
+                        except Exception:
+                            after_probe_durations = None
+                    if (isinstance(before_probes, (list, tuple)) and
+                            isinstance(after_probes, (list, tuple)) and
+                            len(before_probes) == len(PROBE_KINDS) and
+                            len(after_probes) == len(PROBE_KINDS)):
+                        try:
+                            for index, name in enumerate(PROBE_KINDS):
+                                probes[name] += max(
+                                    0, int(after_probes[index]) -
+                                    int(before_probes[index]))
+                        except (TypeError, ValueError, OverflowError):
+                            probes = dict((name, 0) for name in PROBE_KINDS)
+                    if (isinstance(before_probe_durations, (list, tuple)) and
+                            isinstance(after_probe_durations, (list, tuple)) and
+                            len(before_probe_durations) == len(PROBE_KINDS) and
+                            len(after_probe_durations) == len(PROBE_KINDS)):
+                        try:
+                            for index, name in enumerate(PROBE_KINDS):
+                                probe_durations[name] += max(
+                                    0.0,
+                                    float(after_probe_durations[index]) -
+                                    float(before_probe_durations[index]))
+                        except (TypeError, ValueError, OverflowError):
+                            probe_durations = dict(
+                                (name, 0.0) for name in PROBE_KINDS)
+                except Exception:
+                    bot_failed = True
+                    raise
+                finally:
+                    hidden_worker_profiler.python_finished(
+                        bot_marker, bot_failed)
+            if profiling:
+                next_boundary = _PROFILE_CLOCK()
+                stages['bot_postdiag'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
             if self._battle_live and self._bots is not None:
                 presentation_states = getattr(
@@ -13300,8 +13783,12 @@ class BattleRuntime(object):
                 stages['bot_present'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
             if self._battle_live and self._bots is not None:
+                hidden_worker_profiler.work_add(
+                    'bot_messages', len(outgoing_messages))
                 for outgoing in outgoing_messages:
                     is_bot_state = outgoing.get('type') == 'bot_state'
+                    hidden_worker_profiler.work_add(
+                        'bot_rows', self._bot_message_row_count(outgoing))
                     if is_bot_state:
                         self._worker_probe_bot_generated += 1
                     accepted = self._enqueue_bot_message(outgoing)
@@ -13310,6 +13797,10 @@ class BattleRuntime(object):
                             self._worker_probe_bot_enqueued += 1
                         else:
                             self._worker_probe_bot_send_failed += 1
+            if profiling:
+                next_boundary = _PROFILE_CLOCK()
+                stages['bot_messages'] = max(0.0, next_boundary - boundary)
+                boundary = next_boundary
             if (self._battle_live and
                     (self._projectile_is_authority() or
                      self._projectile_visual_meta)):
@@ -13317,7 +13808,7 @@ class BattleRuntime(object):
                 projectile_perf = dict(self._projectile_perf)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
-                stages['bot_events'] = max(0.0, next_boundary - boundary)
+                stages['projectiles'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
             if not self._worker_mode:
                 if self._battle_live:
@@ -17031,6 +17522,32 @@ class BattleRuntime(object):
             now, ARTILLERY_ARC_RAYS_PER_FRAME,
             self._artillery_arc_probe)
 
+    @staticmethod
+    def _bot_message_row_count(message):
+        """Return bounded logical rows without walking arbitrary payload data."""
+        if not isinstance(message, dict):
+            return 0
+        kind = message.get('type')
+        if kind == 'rules_state':
+            rules = message.get('rules')
+            bases = rules.get('bases') if isinstance(rules, dict) else None
+            return min(128, len(bases)) if isinstance(
+                bases, (list, tuple, dict)) else 0
+        fields = {
+            'bot_manifest': ('bots', 'player_collision_profiles'),
+            'bot_state': ('bots', 'launches'),
+            'bot_observation': ('contacts', 'affordances'),
+        }.get(kind)
+        if fields is None:
+            return 1 if kind in (
+                'bot_human_hit', 'bot_ram', 'battle_result') else 0
+        total = 0
+        for name in fields:
+            rows = message.get(name)
+            if isinstance(rows, (list, tuple)):
+                total += min(128, len(rows))
+        return min(256, total)
+
     def _send_bot_message(self, message):
         kind = message.get('type')
         if kind == 'bot_manifest':
@@ -19774,11 +20291,21 @@ class BattleRuntime(object):
         piercing_loss = initial_piercing_loss
         for unused_index in range(64):
             cursor = start + direction.scale(travelled)
-            result = hidden_worker_profiler.python_call(
-                'destructible_projectile',
-                self._destructibles.shot_world_distance,
-                self._runtime.bigworld, self._avatar.spaceID,
-                cursor, end, direction, shot)
+            destructible_marker = hidden_worker_profiler.python_started(
+                'projectile_destructible')
+            destructible_failed = False
+            try:
+                result = hidden_worker_profiler.python_call(
+                    'destructible_projectile',
+                    self._destructibles.shot_world_distance,
+                    self._runtime.bigworld, self._avatar.spaceID,
+                    cursor, end, direction, shot)
+            except Exception:
+                destructible_failed = True
+                raise
+            finally:
+                hidden_worker_profiler.python_finished(
+                    destructible_marker, destructible_failed)
             if not isinstance(result, dict):
                 raise RuntimeError(
                     '#1513 destructible shot result must be a dictionary')

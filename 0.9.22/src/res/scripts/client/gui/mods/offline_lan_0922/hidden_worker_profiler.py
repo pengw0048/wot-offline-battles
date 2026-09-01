@@ -14,7 +14,13 @@ separate off-frame bucket and attributed to the following render interval.
 """
 
 import math
+import threading
 import time
+
+try:
+    import thread as _thread_module
+except ImportError:
+    import _thread as _thread_module
 
 
 _CLOCK = getattr(time, 'perf_counter', None)
@@ -30,24 +36,120 @@ NATIVE_CATEGORIES = (
     'destructible_setup', 'destructible_motion',
     'destructible_projectile', 'destructible_state',
     'destructible_tree_scan', 'foliage_dynamic', 'presentation', 'other')
+PYTHON_PHASE_CATEGORIES = (
+    'bot_prework', 'bot_runtime_update', 'bot_postdiag',
+    'bot_message_freeze', 'bot_message_enqueue', 'bot_message_send',
+    'worker_message_freeze', 'worker_message_enqueue',
+    'worker_message_send',
+    'bot_scheduler_control_refresh', 'bot_scheduler_catchup',
+    'bot_setup', 'bot_control_observation', 'bot_selected_motion',
+    'bot_motion_commit_integration', 'bot_aim_fire', 'bot_supplemental',
+    'bot_tank_contacts', 'bot_vertical_ground', 'bot_publication',
+    'bot_contacts_inclusive', 'bot_visibility_prepare_inclusive',
+    'bot_planner_navigation_inclusive', 'bot_astar_inclusive',
+    'bot_driver_inclusive',
+    'projectile_history', 'projectile_step', 'projectile_world',
+    'projectile_vehicle', 'projectile_destructible',
+    'projectile_terminal', 'projectile_visual', 'render_sync')
 PYTHON_CATEGORIES = (
     'foliage_spotting', 'foliage_dynamic', 'destructible_scan',
     'destructible_contact', 'destructible_projectile',
     'destructible_mutation', 'vehicle_collision_projectile',
     'vehicle_collision_firing_lane', 'vehicle_collision_presentation',
-    'vehicle_collision_other', 'muzzle_transform', 'other')
+    'vehicle_collision_other', 'muzzle_transform') + \
+    PYTHON_PHASE_CATEGORIES + ('other',)
+WORK_COUNTERS = (
+    'bot_control_refresh_slices', 'bot_catchup_slices',
+    'bot_live_rows', 'bot_integrated_rows', 'bot_decision_due',
+    'bot_candidate_attempts', 'bot_candidate_native_fallbacks',
+    'bot_motion_cache_hits', 'bot_motion_cache_misses',
+    'bot_receipt_requests', 'bot_receipt_attempts',
+    'bot_receipt_deferred', 'bot_astar_expansions',
+    'bot_contact_candidate_pairs', 'bot_contact_resolved_pairs',
+    'bot_slope_samples', 'bot_observation_pairs', 'bot_cover_jobs',
+    'bot_projected_rows', 'bot_publications',
+    'bot_visibility_pairs', 'bot_shot_lane_pairs', 'bot_ground_probes',
+    'bot_motion_direction_probes', 'bot_motion_receipt_probes',
+    'bot_motion_commit_sweeps',
+    'projectiles_active', 'projectile_segments', 'projectile_candidates',
+    'projectile_terminals', 'bot_messages', 'bot_rows')
+WORK_COUNTERS += (
+    'worker_messages', 'worker_wire_bytes', 'worker_queue_depth')
 _NATIVE_CATEGORY_LOOKUP = dict((name, True) for name in NATIVE_CATEGORIES)
 _PYTHON_CATEGORY_LOOKUP = dict((name, True) for name in PYTHON_CATEGORIES)
+_WORK_COUNTER_LOOKUP = dict((name, True) for name in WORK_COUNTERS)
+
+# A timing row is inclusive unless it belongs to one of the two explicitly
+# additive groups.  ``frame_exclusive`` categories partition the reviewed
+# outer Bot callback section. ``bot_step_exclusive`` categories partition one
+# BotRuntime physical slice.  Every other scope can overlap one of those
+# groups and must be displayed separately rather than added to it.
+PYTHON_CATEGORY_SCOPES = dict(
+    (name, 'inclusive_boundary') for name in PYTHON_CATEGORIES)
+for _name in ('bot_prework', 'bot_runtime_update', 'bot_postdiag'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'frame_exclusive'
+for _name in (
+        'bot_setup', 'bot_control_observation', 'bot_selected_motion',
+        'bot_motion_commit_integration', 'bot_aim_fire', 'bot_supplemental',
+        'bot_tank_contacts', 'bot_vertical_ground', 'bot_publication'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'bot_step_exclusive'
+for _name in ('bot_scheduler_control_refresh', 'bot_scheduler_catchup'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'scheduler_inclusive'
+for _name in (
+        'bot_contacts_inclusive', 'bot_visibility_prepare_inclusive',
+        'bot_planner_navigation_inclusive', 'bot_astar_inclusive',
+        'bot_driver_inclusive'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'nested_inclusive'
+for _name in ('worker_message_freeze', 'worker_message_enqueue',
+              'worker_message_send'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'message_nested_inclusive'
+for _name in ('bot_message_freeze', 'bot_message_enqueue',
+              'bot_message_send'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'legacy_bot_message_nested_inclusive'
+PYTHON_CATEGORY_SCOPES['projectile_step'] = 'projectile_outer_inclusive'
+for _name in (
+        'projectile_history', 'projectile_world', 'projectile_vehicle',
+        'projectile_destructible', 'projectile_terminal',
+        'projectile_visual'):
+    PYTHON_CATEGORY_SCOPES[_name] = 'projectile_nested_inclusive'
+PYTHON_CATEGORY_SCOPES['render_sync'] = 'frame_inclusive_boundary'
 TRACE_SAMPLES_PER_FRAME = 24
 SLOW_TRACE_MIN_SECONDS = 0.001
 REPRESENTATIVE_SEGMENT_PERIOD = 256
 REPRESENTATIVE_SEGMENTS_PER_CATEGORY_PER_FRAME = 2
 FULL_TIMING_SECONDS = 30.0
 DORMANT_BASELINE_SECONDS = 5.0
+MAX_WORK_COUNTER_VALUE = 1000000000000
+WORK_COUNTER_SCOPE = 'active_hidden_worker_session_all_modes'
+WORK_COUNTER_SEMANTICS = (
+    'nonnegative_finite_bounded_per_interval;see_work_counter_aggregations')
+WORK_COUNTER_AGGREGATIONS = dict((name, 'sum') for name in WORK_COUNTERS)
+WORK_COUNTER_AGGREGATIONS['worker_queue_depth'] = 'sampled_max'
+WORK_COUNTER_NOTES = {
+    'bot_motion_commit_sweeps': (
+        'logical_motion_resolver_requests_including_cache_fast_path;'
+        'not_native_ray_count'),
+    'worker_queue_depth': 'maximum_of_instrumented_queue_depth_samples',
+}
+PYTHON_SCOPE_SUM_RULE = (
+    'sum_only_within_frame_exclusive_or_bot_step_exclusive;'
+    'all_other_scopes_are_inclusive')
+BOT_UPDATE_RESIDUAL_SEMANTICS = (
+    'max(0,sum(scheduler_inclusive)-sum(bot_step_exclusive));'
+    'nested_inclusive_is_excluded')
+PYTHON_THREAD_ATTRIBUTION = (
+    'begin_frame_thread_is_render;other_threads_are_offframe')
+OFFFRAME_PYTHON_TIMING_SEMANTICS = (
+    'timing_at_marker_start;reported_in_completion_interval')
 _CATEGORY_PHASE = dict(
     (name, (index * 13) % REPRESENTATIVE_SEGMENT_PERIOD)
     for index, name in enumerate(NATIVE_CATEGORIES))
 _MISSING = object()
+
+try:
+    _INTEGER_TYPES = (int, long)
+except NameError:
+    _INTEGER_TYPES = (int,)
 
 
 def _empty_profile(measured=False):
@@ -55,13 +157,28 @@ def _empty_profile(measured=False):
         'measured': bool(measured),
         'native': {},
         'python': {},
+        'work': {},
         'offframe_native': {},
         'offframe_python': {},
+        'offframe_work': {},
         'trace': (),
         'representative_trace': (),
         'mode': 'off',
         'clock_reads': 0,
         'clock_read_estimate_ns': None,
+        'work_counters_recorded': False,
+        'work_counter_scope': WORK_COUNTER_SCOPE,
+        'work_counter_semantics': WORK_COUNTER_SEMANTICS,
+        'work_counter_aggregations': WORK_COUNTER_AGGREGATIONS,
+        'work_counter_notes': WORK_COUNTER_NOTES,
+        'python_timing_semantics': 'inclusive_timing_windows_only',
+        'python_category_scopes': PYTHON_CATEGORY_SCOPES,
+        'python_scope_sum_rule': PYTHON_SCOPE_SUM_RULE,
+        'bot_update_residual_semantics': BOT_UPDATE_RESIDUAL_SEMANTICS,
+        'python_thread_attribution': PYTHON_THREAD_ATTRIBUTION,
+        'offframe_python_timing_semantics': (
+            OFFFRAME_PYTHON_TIMING_SEMANTICS),
+        'offframe_python_measured': False,
         'coverage': 'reviewed_hidden_worker_call_sites_only',
         'filtered_segment_timing': (
             'native_boundary_including_python_filter'),
@@ -95,6 +212,7 @@ class HiddenWorkerProfiler(object):
                  full_timing_seconds=FULL_TIMING_SECONDS,
                  baseline_seconds=DORMANT_BASELINE_SECONDS):
         self._clock = clock or _CLOCK
+        self._state_lock = threading.RLock()
         self._calibrate_clock_reads = clock is None
         if alternate_modes is None:
             alternate_modes = clock is None
@@ -102,9 +220,21 @@ class HiddenWorkerProfiler(object):
         self._full_timing_seconds = max(
             0.001, float(full_timing_seconds))
         self._baseline_seconds = max(0.001, float(baseline_seconds))
-        self.reset()
+        self._reset_state()
 
     def reset(self):
+        try:
+            self._state_lock.acquire()
+            try:
+                self._reset_state()
+            finally:
+                self._state_lock.release()
+        except Exception:
+            # Reset is called from battle lifecycle cleanup.  A diagnostic
+            # failure must not replace that cleanup's gameplay semantics.
+            pass
+
+    def _reset_state(self):
         self.enabled = False
         self._session_active = False
         self._mode = 'off'
@@ -113,8 +243,10 @@ class HiddenWorkerProfiler(object):
         self._frame_ordinal = 0
         self._frame_native = {}
         self._frame_python = {}
+        self._frame_work = {}
         self._offframe_native = {}
         self._offframe_python = {}
+        self._offframe_work = {}
         self._trace = []
         self._trace_floor_seconds = SLOW_TRACE_MIN_SECONDS
         self._representative_trace = []
@@ -125,6 +257,17 @@ class HiddenWorkerProfiler(object):
         self._frame_clock_reads = 0
         self._offframe_clock_reads = 0
         self._clock_read_estimate_ns = None
+        self._render_thread_id = None
+        # Background timing markers from a prior battle are ignored if they
+        # complete after reset instead of contaminating the next room.
+        self._session_token = object()
+
+    @staticmethod
+    def _thread_ident():
+        try:
+            return _thread_module.get_ident()
+        except Exception:
+            return None
 
     @staticmethod
     def _note(bucket, key, elapsed, failed):
@@ -141,6 +284,41 @@ class HiddenWorkerProfiler(object):
     def _copy_bucket(bucket):
         return dict((key, (int(value[0]), float(value[1]), int(value[2])))
                     for key, value in bucket.items())
+
+    @staticmethod
+    def _work_value(value):
+        """Return one bounded work increment without coercing arbitrary data."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, _INTEGER_TYPES):
+            if value < 0:
+                return None
+            return min(value, MAX_WORK_COUNTER_VALUE)
+        if not isinstance(value, float):
+            return None
+        if math.isnan(value) or math.isinf(value) or value < 0.0:
+            return None
+        return min(value, float(MAX_WORK_COUNTER_VALUE))
+
+    @staticmethod
+    def _work_merge(name, current, value):
+        if WORK_COUNTER_AGGREGATIONS.get(name) == 'sampled_max':
+            return max(current, value)
+        if (isinstance(current, _INTEGER_TYPES) and
+                isinstance(value, _INTEGER_TYPES)):
+            return min(current + value, MAX_WORK_COUNTER_VALUE)
+        return min(
+            float(current) + float(value), float(MAX_WORK_COUNTER_VALUE))
+
+    @staticmethod
+    def _copy_work_bucket(bucket):
+        result = {}
+        for key, value in bucket.items():
+            if isinstance(value, _INTEGER_TYPES):
+                result[key] = int(value)
+            else:
+                result[key] = float(value)
+        return result
 
     def begin_frame(self, active, context=None):
         """Open one render callback and retain prior off-frame work."""
@@ -161,6 +339,13 @@ class HiddenWorkerProfiler(object):
             if self._session_active or self._frame_open or self.enabled:
                 self.reset()
             return False
+        self._state_lock.acquire()
+        try:
+            return self._begin_active_frame(context)
+        finally:
+            self._state_lock.release()
+
+    def _begin_active_frame(self, context):
         # If a callback escaped before end_frame(), preserve its observations
         # with the interval that is about to be sealed.  Diagnostics must not
         # retain mutable frame buckets across callbacks.
@@ -175,9 +360,14 @@ class HiddenWorkerProfiler(object):
                 row[0] += value[0]
                 row[1] += value[1]
                 row[2] += value[2]
+            for key, value in self._frame_work.items():
+                self._offframe_work[key] = self._work_merge(
+                    key,
+                    self._offframe_work.get(key, 0), value)
             self._offframe_clock_reads += self._frame_clock_reads
         interval_profile = self._detach_interval_profile()
         self._session_active = True
+        self._render_thread_id = self._thread_ident()
         self._frame_ordinal += 1
         if self._phase_started is None:
             self._phase_started = self._clock() if self._alternate_modes else 0.0
@@ -199,6 +389,7 @@ class HiddenWorkerProfiler(object):
             self._calibrate_clock()
         self._frame_native = {}
         self._frame_python = {}
+        self._frame_work = {}
         self._trace = []
         self._trace_floor_seconds = SLOW_TRACE_MIN_SECONDS
         self._representative_trace = []
@@ -211,6 +402,7 @@ class HiddenWorkerProfiler(object):
 
     def _detach_interval_profile(self):
         if (not self._offframe_native and not self._offframe_python and
+                not self._offframe_work and
                 not self._trace and not self._representative_trace and
                 not self._offframe_clock_reads):
             return False
@@ -218,18 +410,35 @@ class HiddenWorkerProfiler(object):
             'measured': bool(self.enabled),
             'offframe_native': self._copy_bucket(self._offframe_native),
             'offframe_python': self._copy_bucket(self._offframe_python),
+            'work': {},
+            'offframe_work': self._copy_work_bucket(self._offframe_work),
             'trace': tuple(self._trace),
             'representative_trace': tuple(self._representative_trace),
             'mode': self._mode,
             'clock_reads': int(self._offframe_clock_reads),
             'clock_read_estimate_ns': self._clock_read_estimate_ns,
             'frame_ordinal': self._frame_ordinal,
+            'work_counters_recorded': True,
+            'work_counter_scope': WORK_COUNTER_SCOPE,
+            'work_counter_semantics': WORK_COUNTER_SEMANTICS,
+            'work_counter_aggregations': WORK_COUNTER_AGGREGATIONS,
+            'work_counter_notes': WORK_COUNTER_NOTES,
+            'python_timing_semantics': 'inclusive_timing_windows_only',
+            'python_category_scopes': PYTHON_CATEGORY_SCOPES,
+            'python_scope_sum_rule': PYTHON_SCOPE_SUM_RULE,
+            'bot_update_residual_semantics': (
+                BOT_UPDATE_RESIDUAL_SEMANTICS),
+            'python_thread_attribution': PYTHON_THREAD_ATTRIBUTION,
+            'offframe_python_timing_semantics': (
+                OFFFRAME_PYTHON_TIMING_SEMANTICS),
+            'offframe_python_measured': bool(self._offframe_python),
             'coverage': 'reviewed_hidden_worker_call_sites_only',
             'filtered_segment_timing': (
                 'native_boundary_including_python_filter'),
         }
         self._offframe_native = {}
         self._offframe_python = {}
+        self._offframe_work = {}
         self._trace = []
         self._trace_floor_seconds = SLOW_TRACE_MIN_SECONDS
         self._representative_trace = []
@@ -239,17 +448,34 @@ class HiddenWorkerProfiler(object):
 
     def end_frame(self):
         """Close the current callback and detach its immutable sample."""
-        try:
-            return self._end_frame()
-        except Exception:
-            self._frame_open = False
-            self._frame_native = {}
-            self._frame_python = {}
-            self._trace = []
-            self._representative_trace = []
-            self._representative_frame_counts = {}
-            self._frame_clock_reads = 0
+        if not self._session_active:
             return _empty_profile(False)
+        profile = _empty_profile(False)
+        locked = False
+        try:
+            self._state_lock.acquire()
+            locked = True
+            profile = self._end_frame()
+        except Exception:
+            try:
+                self._frame_open = False
+                self._frame_native = {}
+                self._frame_python = {}
+                self._frame_work = {}
+                self._trace = []
+                self._representative_trace = []
+                self._representative_frame_counts = {}
+                self._frame_clock_reads = 0
+            except Exception:
+                pass
+            profile = _empty_profile(False)
+        finally:
+            if locked:
+                try:
+                    self._state_lock.release()
+                except Exception:
+                    pass
+        return profile
 
     def _end_frame(self):
         if not self._session_active:
@@ -259,17 +485,22 @@ class HiddenWorkerProfiler(object):
             profile['mode'] = 'wrapper_only_baseline'
             profile['frame_ordinal'] = self._frame_ordinal
             profile['clock_read_estimate_ns'] = self._clock_read_estimate_ns
+            profile['work'] = self._copy_work_bucket(self._frame_work)
+            profile['work_counters_recorded'] = True
             self._frame_open = False
             self._frame_native = {}
             self._frame_python = {}
+            self._frame_work = {}
             self._frame_clock_reads = 0
             return profile
         profile = {
             'measured': True,
             'native': self._copy_bucket(self._frame_native),
             'python': self._copy_bucket(self._frame_python),
+            'work': self._copy_work_bucket(self._frame_work),
             'offframe_native': {},
             'offframe_python': {},
+            'offframe_work': {},
             'trace': tuple(sorted(
                 self._trace, key=lambda row: row.get('elapsed_ms', 0.0),
                 reverse=True)),
@@ -278,12 +509,27 @@ class HiddenWorkerProfiler(object):
             'clock_reads': int(self._frame_clock_reads),
             'clock_read_estimate_ns': self._clock_read_estimate_ns,
             'frame_ordinal': self._frame_ordinal,
+            'work_counters_recorded': True,
+            'work_counter_scope': WORK_COUNTER_SCOPE,
+            'work_counter_semantics': WORK_COUNTER_SEMANTICS,
+            'work_counter_aggregations': WORK_COUNTER_AGGREGATIONS,
+            'work_counter_notes': WORK_COUNTER_NOTES,
+            'python_timing_semantics': 'inclusive_timing_windows_only',
+            'python_category_scopes': PYTHON_CATEGORY_SCOPES,
+            'python_scope_sum_rule': PYTHON_SCOPE_SUM_RULE,
+            'bot_update_residual_semantics': (
+                BOT_UPDATE_RESIDUAL_SEMANTICS),
+            'python_thread_attribution': PYTHON_THREAD_ATTRIBUTION,
+            'offframe_python_timing_semantics': (
+                OFFFRAME_PYTHON_TIMING_SEMANTICS),
+            'offframe_python_measured': False,
             'coverage': 'reviewed_hidden_worker_call_sites_only',
             'filtered_segment_timing': (
                 'native_boundary_including_python_filter'),
         }
         self._frame_native = {}
         self._frame_python = {}
+        self._frame_work = {}
         self._trace = []
         self._trace_floor_seconds = SLOW_TRACE_MIN_SECONDS
         self._representative_trace = []
@@ -304,12 +550,50 @@ class HiddenWorkerProfiler(object):
         except Exception:
             self._clock_read_estimate_ns = None
 
-    def _read_clock(self):
-        if self._frame_open:
+    def _read_clock(self, owner=None):
+        if owner is None:
+            owner = 'frame' if self._frame_open else 'offframe'
+        if owner == 'frame':
             self._frame_clock_reads += 1
         else:
             self._offframe_clock_reads += 1
         return self._clock()
+
+    def _bucket_owner(self):
+        thread_id = self._thread_ident()
+        if (self._frame_open and self._render_thread_id is not None and
+                thread_id == self._render_thread_id):
+            return 'frame'
+        return 'offframe'
+
+    def work_add(self, name, value=1):
+        """Add one bounded work-unit observation without reading the clock."""
+        try:
+            if not self._session_active:
+                return False
+            name = str(name)
+            if name not in _WORK_COUNTER_LOOKUP:
+                return False
+            value = self._work_value(value)
+            if value is None:
+                return False
+            if self._bucket_owner() == 'frame':
+                self._frame_work[name] = self._work_merge(
+                    name,
+                    self._frame_work.get(name, 0), value)
+                return True
+            self._state_lock.acquire()
+            try:
+                if not self._session_active:
+                    return False
+                self._offframe_work[name] = self._work_merge(
+                    name,
+                    self._offframe_work.get(name, 0), value)
+                return True
+            finally:
+                self._state_lock.release()
+        except Exception:
+            return False
 
     def update_context(self, context):
         try:
@@ -506,22 +790,51 @@ class HiddenWorkerProfiler(object):
         if not self.enabled:
             return None
         try:
-            return (_safe_name(category, _PYTHON_CATEGORY_LOOKUP),
-                    self._read_clock())
+            category = _safe_name(category, _PYTHON_CATEGORY_LOOKUP)
+            owner = self._bucket_owner()
+            if owner == 'frame':
+                return (category, self._read_clock('frame'), owner,
+                        self._session_token)
+            self._state_lock.acquire()
+            try:
+                # The render callback may have changed A/B mode while this
+                # background thread waited for the interval swap.
+                if not self.enabled or not self._session_active:
+                    return None
+                return (category, self._read_clock('offframe'), owner,
+                        self._session_token)
+            finally:
+                self._state_lock.release()
         except Exception:
             return None
 
     def python_finished(self, marker, failed=False):
-        if marker is None or not self.enabled:
+        if marker is None:
             return False
         try:
-            category, started = marker
-            elapsed = float(self._read_clock()) - float(started)
-            if math.isnan(elapsed) or math.isinf(elapsed):
-                elapsed = 0.0
-            self._note(
-                self._python_bucket(), category, elapsed, bool(failed))
-            return True
+            category, started, owner, session_token = marker
+            if owner == 'frame':
+                if session_token is not self._session_token:
+                    return False
+                elapsed = float(self._read_clock('frame')) - float(started)
+                if math.isnan(elapsed) or math.isinf(elapsed):
+                    elapsed = 0.0
+                self._note(
+                    self._frame_python, category, elapsed, bool(failed))
+                return True
+            self._state_lock.acquire()
+            try:
+                if session_token is not self._session_token:
+                    return False
+                elapsed = (float(self._read_clock('offframe')) -
+                           float(started))
+                if math.isnan(elapsed) or math.isinf(elapsed):
+                    elapsed = 0.0
+                self._note(
+                    self._offframe_python, category, elapsed, bool(failed))
+                return True
+            finally:
+                self._state_lock.release()
         except Exception:
             return False
 
@@ -556,6 +869,10 @@ def update_context(context):
 
 def reset():
     return _PROFILER.reset()
+
+
+def work_add(name, value=1):
+    return _PROFILER.work_add(name, value)
 
 
 def native_call(category, api, function, *args, **kwargs):

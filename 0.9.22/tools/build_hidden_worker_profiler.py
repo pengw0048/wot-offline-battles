@@ -92,42 +92,36 @@ def install_text(build_identity):
 
 Diagnostic build: {identity}
 
-This is a reversible delta for an existing v0.6.2 launcher installation. Run
-that same v0.6.2 launcher once and let it finish its normal installation before
+This is a reversible diagnostic WOTMOD for an existing v0.6.2 launcher
+installation. You still start the game, LAN server, visible client and hidden
+worker through that same launcher. This ZIP only avoids rebuilding or replacing
+the launcher itself.
+
+Run the launcher once and let it finish its normal v0.6.2 installation before
 using this ZIP. The ZIP does not contain the LAN server, baked map data, native
-bridge, launcher, or any player-owned configuration. It replaces the one existing
-org.peng.offline_lan_0922 WOTMOD and keeps a private backup for uninstall.
+bridge, launcher, or any player-owned configuration. It replaces the one
+existing org.peng.offline_lan_0922 WOTMOD and keeps a private backup for
+uninstall.
 
-System baseline first
----------------------
-
-Extract this ZIP before installing its payload. Start one ordinary 15-vs-15
-battle with the currently installed v0.6.2 product and run
-COLLECT_HIDDEN_WORKER_PROFILE.bat for 60 seconds. A missing diagnostic marker
-is expected for this first report. Stop the room and every client, then install
-the profiler and repeat the same map, lineup, visible-client count and
-60-second collection.
-
-The build marker records the diagnostic package's exact source revision. That
-revision can include main-branch changes made after the launcher package you
-currently have, even though both packages retain semantic version 0.6.2.
-Therefore this before/after pair is a whole-product system baseline, not an
-isolated estimate of profiler overhead. Within the diagnostic build, the light
-phase is only a wrapper-only observational baseline: it measures the extra
-clocks, aggregation and bounded trace work, but still includes wrapper dispatch
-and is not an unmodified-client or causal comparison.
+This build records one comprehensive profile: hidden-worker render frames,
+Bot scheduler/control/planning/motion/aim/publication phases, projectile phases,
+message freezing/enqueue/sending, native-query categories, unit counts, queue
+health, process CPU/GPU use and working set. Timing and counters are aggregated;
+it does not emit one log line per Bot operation.
 
 Install
 -------
 
-1. Close every visible client and hidden worker.
+1. Close the launcher, every visible client and hidden worker.
 2. Extract this ZIP. Do not copy payload files by hand.
 3. Run INSTALL_HIDDEN_WORKER_PROFILER.bat. If the ZIP is not extracted in the
    game folder, enter the exact folder that contains WorldOfTanks.exe, or pass
-   it as the first argument.
-4. Continue using the exact same launcher build. Do not request a forced
-   repair/reinstall and do not switch to another launcher build while collecting
-   evidence, because either action intentionally restores its bundled mod.
+   it as the first argument. If an earlier profiler build is still installed,
+   this updates it in place and preserves the original launcher WOTMOD backup.
+4. Reopen and use the exact same launcher to start the battle normally. Do not
+   request a forced repair/reinstall and do not switch to another launcher build
+   while collecting evidence, because either action intentionally restores its
+   bundled mod.
 
 Normally the launcher starts the visible client and hidden worker from the
 same selected client folder, so one install covers both. If a diagnostic setup
@@ -138,7 +132,8 @@ Collect
 -------
 
 While a 15-vs-15 battle is running, run COLLECT_HIDDEN_WORKER_PROFILE.bat.
-The default capture is 60 seconds. Its optional arguments are the game folder
+The default capture is 90 seconds, so one report spans multiple detailed and
+lightweight profiler windows. Its optional arguments are the game folder
 and capture seconds. The collector reads the PID from
 authority_worker_status.json, samples CPU and working set, attempts Windows'
 PID-scoped GPU Engine counter, and creates a ZIP beside these scripts. If the

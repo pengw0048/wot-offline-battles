@@ -4936,7 +4936,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         second = diagnostics.begin(0.12, 0.12)
         wall[0] = 0.125
         diagnostics.finish(
-            second, 0.12, 0.10, 0.10, {'bots_update': 0.002},
+            second, 0.12, 0.10, 0.10, {
+                'bot_prework': 0.0005,
+                'bot_runtime_update': 0.001,
+                'bot_postdiag': 0.0005,
+            },
             {'visibility': 3}, {
                 'role': 'authority', 'probe_timing': 'active'})
         third = diagnostics.begin(0.30, 0.18)
@@ -4983,7 +4987,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('probe_ms=', first_row)
         self.assertIn('lane:5.000', first_row)
         self.assertIn('active:29,chords:58,debt_ms:50.000', first_row)
-        self.assertIn('summary v=4', payloads[0])
+        self.assertIn('summary v=5', payloads[0])
+        self.assertIn(
+            'bots_update=1.000/2.000('
+            'bot_prework+bot_runtime_update+bot_postdiag)', payloads[0])
         self.assertIn('role=authority probe_timing=active', payloads[0])
         self.assertIn('gap_ms_p50_p95_p99_max=', payloads[0])
         self.assertIn('python_ms_p50_p95_p99_max=', payloads[0])
@@ -5095,7 +5102,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
             first, 0.0, 0.0, 0.0, {}, {}, {}, detailed_profile={
                 'measured': True, 'mode': 'timing+bounded_trace',
                 'frame_ordinal': 1, 'native': {}, 'python': {},
+                'work': {'bot_messages': 1, 'bot_rows': 29,
+                         'worker_queue_depth': 3},
                 'offframe_native': {}, 'offframe_python': {},
+                'offframe_work': {}, 'work_counters_recorded': True,
             })
         interval = {
             'measured': True, 'mode': 'timing+bounded_trace',
@@ -5103,7 +5113,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'offframe_native': {
                 'destructible_state.wg_getDestructibleMatrix': (
                     1, 0.004, 0)},
-            'offframe_python': {}, 'trace': (),
+            'offframe_python': {},
+            'offframe_work': {
+                'bot_messages': 2, 'bot_rows': 58,
+                'worker_queue_depth': 7},
+            'work_counters_recorded': True, 'trace': (),
             'representative_trace': (),
         }
 
@@ -5115,6 +5129,87 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             1, diagnostics._slow[0]['detailed_profile'][
                 'offframe_native'][key][0])
+        self.assertEqual(3, diagnostics._work_sums['bot_messages'])
+        self.assertEqual(87, diagnostics._work_sums['bot_rows'])
+        self.assertEqual(7, diagnostics._work_sums['worker_queue_depth'])
+        self.assertEqual(
+            7, diagnostics._slow[0]['detailed_profile'][
+                'offframe_work']['worker_queue_depth'])
+
+    def test_frame_diagnostics_report_callback_and_bot_residuals(self):
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: 0.0, writer=lambda unused: None)
+        main = {
+            'bot_setup': (1, 0.002, 0),
+            'bot_control_observation': (1, 0.006, 0),
+            'bot_selected_motion': (1, 0.004, 0),
+            'bot_motion_commit_integration': (1, 0.005, 0),
+            'bot_aim_fire': (1, 0.003, 0),
+            'bot_supplemental': (1, 0.001, 0),
+            'bot_tank_contacts': (1, 0.001, 0),
+            'bot_vertical_ground': (1, 0.002, 0),
+            'bot_publication': (1, 0.001, 0),
+        }
+        detailed_python = dict(main)
+        detailed_python['bot_runtime_update'] = (1, 0.034, 0)
+        detailed_python['bot_scheduler_control_refresh'] = (1, 0.020, 0)
+        detailed_python['bot_scheduler_catchup'] = (1, 0.010, 0)
+        # This overlaps the exclusive phases and must not enter the residual.
+        detailed_python['bot_astar_inclusive'] = (1, 0.020, 0)
+        diagnostics._add({
+            'cause': 1, 'next': 2,
+            'wall_gap': 0.1, 'raw_dt': 0.1, 'exec': 0.050,
+            'outside': 0.05, 'offframe': 0.0,
+            'bw_minus_wall': 0.0, 'tick_dt': 0.1, 'motion_dt': 0.1,
+            'stages': {
+                'bot_prework': 0.003, 'bot_runtime_update': 0.034,
+                'bot_postdiag': 0.002,
+            },
+            'probes': {}, 'probe_durations': {}, 'projectile': {},
+            'detailed_profile': {
+                'measured': True, 'python': detailed_python,
+                'offframe_python': {}, 'native': {},
+                'offframe_native': {}, 'work': {
+                    'worker_messages': 2, 'worker_wire_bytes': 4096,
+                    'worker_queue_depth': 5,
+                }, 'offframe_work': {'worker_queue_depth': 9},
+                'work_counters_recorded': True,
+                'python_category_scopes': {
+                    'bot_runtime_update': 'frame_exclusive',
+                    'bot_setup': 'bot_step_exclusive',
+                },
+                'python_scope_sum_rule': 'sum exclusive groups only',
+            },
+            'context': {'role': 'worker'}, 'emitted': False,
+        })
+
+        payload = diagnostics._format()
+        snapshot = diagnostics.snapshot()
+
+        self.assertAlmostEqual(
+            11.0, snapshot['callback_residual_ms']['avg'])
+        attribution = snapshot['bot_timing_attribution']
+        self.assertAlmostEqual(34.0, attribution['battle_outer_avg_ms'])
+        self.assertAlmostEqual(25.0, attribution['main_exclusive_avg_ms'])
+        self.assertAlmostEqual(
+            9.0, attribution['battle_outer_residual_avg_ms'])
+        self.assertAlmostEqual(
+            5.0, attribution['scheduler_residual_avg_ms'])
+        self.assertAlmostEqual(
+            39.0, snapshot['python_stages_ms']['bots_update']['avg_ms'])
+        self.assertEqual(
+            4096, snapshot['work']['worker_wire_bytes']['total'])
+        queue = snapshot['work']['worker_queue_depth']
+        self.assertEqual('sampled_max', queue['aggregation'])
+        self.assertEqual(9, queue['max'])
+        self.assertNotIn('total', queue)
+        self.assertIn(
+            'bot_battle_outer_residual_avg_max=9.000/9.000', payload)
+        self.assertIn(
+            'bot_scheduler_residual_avg_max=5.000/5.000', payload)
+        self.assertIn(
+            'work_sampled_max_window_frame_offframe '
+            'worker_queue_depth=9/5/9', payload)
 
     def test_frame_diagnostics_emit_window_with_segment_sample(self):
         wall = [0.0]
@@ -5145,7 +5240,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertTrue(diagnostics.enabled)
         self.assertEqual(1, len(payloads))
-        self.assertIn('summary v=4', payloads[0])
+        self.assertIn('summary v=5', payloads[0])
         self.assertIn(
             'segment_samples category=spotting', payloads[0])
 

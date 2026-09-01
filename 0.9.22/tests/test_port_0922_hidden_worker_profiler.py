@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import threading
 import unittest
 
 
@@ -7,11 +8,28 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT_ROOT = ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_ROOT))
 
-from gui.mods.offline_lan_0922.hidden_worker_profiler import \
-    HiddenWorkerProfiler
+from gui.mods.offline_lan_0922.hidden_worker_profiler import (
+    BOT_UPDATE_RESIDUAL_SEMANTICS,
+    MAX_WORK_COUNTER_VALUE,
+    PYTHON_CATEGORY_SCOPES,
+    HiddenWorkerProfiler,
+)
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 
 
 class HiddenWorkerProfilerTests(unittest.TestCase):
+    @staticmethod
+    def _incrementing_clock():
+        state = {'value': 0.0}
+        lock = threading.Lock()
+
+        def clock():
+            with lock:
+                state['value'] += 0.001
+                return state['value']
+
+        return clock
+
     def test_inactive_profiler_invokes_original_once_without_reading_clock(self):
         clock_calls = []
         calls = []
@@ -220,6 +238,189 @@ class HiddenWorkerProfilerTests(unittest.TestCase):
         now[0] = 1.7
         profiler.begin_frame(True)
         self.assertEqual('timing+bounded_trace', profiler.end_frame()['mode'])
+
+    def test_phase_categories_publish_non_additive_scope_metadata(self):
+        clock = iter((1.0, 1.002, 2.0, 2.003, 3.0, 3.004,
+                      4.0, 4.005, 5.0, 5.006))
+        profiler = HiddenWorkerProfiler(clock=lambda: next(clock))
+        profiler.begin_frame(True)
+
+        for category in (
+                'bot_setup', 'bot_astar_inclusive',
+                'bot_scheduler_catchup', 'projectile_step',
+                'worker_message_send'):
+            profiler.python_call(category, lambda: None)
+        profile = profiler.end_frame()
+
+        self.assertNotIn('other', profile['python'])
+        self.assertEqual(
+            'bot_step_exclusive',
+            profile['python_category_scopes']['bot_setup'])
+        self.assertEqual(
+            'nested_inclusive',
+            profile['python_category_scopes']['bot_astar_inclusive'])
+        self.assertEqual(
+            'scheduler_inclusive',
+            profile['python_category_scopes']['bot_scheduler_catchup'])
+        self.assertEqual(
+            'projectile_outer_inclusive',
+            profile['python_category_scopes']['projectile_step'])
+        self.assertEqual(
+            'message_nested_inclusive',
+            profile['python_category_scopes']['worker_message_send'])
+        self.assertEqual(
+            BOT_UPDATE_RESIDUAL_SEMANTICS,
+            profile['bot_update_residual_semantics'])
+        self.assertIn('all_other_scopes_are_inclusive',
+                      profile['python_scope_sum_rule'])
+        self.assertEqual(PYTHON_CATEGORY_SCOPES,
+                         profile['python_category_scopes'])
+
+    def test_work_counters_are_bounded_validated_and_clock_free(self):
+        clock_calls = []
+        profiler = HiddenWorkerProfiler(
+            clock=lambda: clock_calls.append(True) or 0.0)
+        profiler.begin_frame(True)
+
+        self.assertTrue(profiler.work_add('bot_live_rows', 2))
+        self.assertTrue(profiler.work_add('bot_live_rows', 0.5))
+        self.assertTrue(profiler.work_add(
+            'bot_motion_commit_sweeps', MAX_WORK_COUNTER_VALUE))
+        self.assertTrue(profiler.work_add('bot_motion_commit_sweeps', 1))
+        self.assertTrue(profiler.work_add('worker_queue_depth', 4))
+        self.assertTrue(profiler.work_add('worker_queue_depth', 2))
+        self.assertTrue(profiler.work_add('worker_queue_depth', 7))
+        self.assertFalse(profiler.work_add('unbounded-key', 1))
+        self.assertFalse(profiler.work_add('bot_rows', True))
+        self.assertFalse(profiler.work_add('bot_rows', -1))
+        self.assertFalse(profiler.work_add('bot_rows', float('nan')))
+        self.assertFalse(profiler.work_add('bot_rows', float('inf')))
+        self.assertFalse(profiler.work_add('bot_rows', '3'))
+        profile = profiler.end_frame()
+
+        self.assertEqual([], clock_calls)
+        self.assertEqual(2.5, profile['work']['bot_live_rows'])
+        self.assertEqual(
+            MAX_WORK_COUNTER_VALUE,
+            profile['work']['bot_motion_commit_sweeps'])
+        self.assertEqual(7, profile['work']['worker_queue_depth'])
+        self.assertNotIn('unbounded-key', profile['work'])
+        self.assertNotIn('bot_rows', profile['work'])
+        self.assertTrue(profile['work_counters_recorded'])
+        self.assertEqual(
+            'sampled_max',
+            profile['work_counter_aggregations']['worker_queue_depth'])
+        self.assertIn(
+            'not_native_ray_count',
+            profile['work_counter_notes']['bot_motion_commit_sweeps'])
+        self.assertTrue(callable(hidden_worker_profiler.work_add))
+
+    def test_wrapper_only_baseline_keeps_work_without_timing(self):
+        now = [0.0]
+        profiler = HiddenWorkerProfiler(
+            clock=lambda: now[0], alternate_modes=True,
+            full_timing_seconds=1.0, baseline_seconds=5.0)
+        profiler.begin_frame(True)
+        profiler.end_frame()
+        now[0] = 1.1
+        profiler.begin_frame(True)
+
+        self.assertTrue(profiler.work_add('projectile_segments', 11))
+        marker = profiler.python_started('projectile_step')
+        profile = profiler.end_frame()
+
+        self.assertIsNone(marker)
+        self.assertFalse(profile['measured'])
+        self.assertEqual('wrapper_only_baseline', profile['mode'])
+        self.assertEqual(11, profile['work']['projectile_segments'])
+        self.assertEqual({}, profile['python'])
+        self.assertEqual(0, profile['clock_reads'])
+        self.assertTrue(profile['work_counters_recorded'])
+
+    def test_inactive_and_visible_sessions_reject_work(self):
+        clock_calls = []
+        profiler = HiddenWorkerProfiler(
+            clock=lambda: clock_calls.append(True) or 0.0)
+
+        self.assertFalse(profiler.work_add('bot_rows'))
+        self.assertFalse(profiler.begin_frame(False))
+        self.assertFalse(profiler.work_add('bot_rows'))
+        self.assertEqual([], clock_calls)
+        self.assertFalse(profiler.end_frame()['work_counters_recorded'])
+
+    def test_render_thread_offframe_work_is_detached_next_interval(self):
+        profiler = HiddenWorkerProfiler(clock=lambda: 0.0)
+        profiler.begin_frame(True)
+        profiler.end_frame()
+
+        self.assertTrue(profiler.work_add('worker_wire_bytes', 128))
+        interval = profiler.begin_frame(True)
+
+        self.assertEqual(128, interval['offframe_work']['worker_wire_bytes'])
+        self.assertEqual({}, interval['work'])
+        self.assertEqual(
+            'active_hidden_worker_session_all_modes',
+            interval['work_counter_scope'])
+
+    def test_background_python_marker_is_never_charged_to_render_frame(self):
+        profiler = HiddenWorkerProfiler(clock=self._incrementing_clock())
+        profiler.begin_frame(True)
+        completed = []
+
+        def run_background_send():
+            marker = profiler.python_started('worker_message_send')
+            profiler.work_add('worker_wire_bytes', 64)
+            completed.append(profiler.python_finished(marker))
+
+        thread = threading.Thread(target=run_background_send)
+        thread.start()
+        thread.join()
+        frame = profiler.end_frame()
+        interval = profiler.begin_frame(True)
+
+        self.assertEqual([True], completed)
+        self.assertEqual({}, frame['python'])
+        self.assertEqual({}, frame['work'])
+        self.assertEqual(
+            1, interval['offframe_python']['worker_message_send'][0])
+        self.assertEqual(64, interval['offframe_work']['worker_wire_bytes'])
+        self.assertTrue(interval['offframe_python_measured'])
+        self.assertEqual(
+            'begin_frame_thread_is_render;other_threads_are_offframe',
+            interval['python_thread_attribution'])
+
+    def test_background_marker_crossing_interval_swap_is_not_lost(self):
+        profiler = HiddenWorkerProfiler(clock=self._incrementing_clock())
+        profiler.begin_frame(True)
+        marker_started = threading.Event()
+        allow_finish = threading.Event()
+        completed = []
+
+        def run_background_send():
+            marker = profiler.python_started('worker_message_send')
+            marker_started.set()
+            allow_finish.wait(2.0)
+            completed.append(profiler.python_finished(marker))
+
+        thread = threading.Thread(target=run_background_send)
+        thread.start()
+        self.assertTrue(marker_started.wait(2.0))
+        profiler.end_frame()
+        first_interval = profiler.begin_frame(True)
+        allow_finish.set()
+        thread.join(2.0)
+        self.assertFalse(thread.is_alive())
+        profiler.end_frame()
+        second_interval = profiler.begin_frame(True)
+
+        self.assertEqual([True], completed)
+        self.assertNotIn(
+            'worker_message_send', first_interval.get('offframe_python', {}))
+        self.assertEqual(
+            1, second_interval['offframe_python']['worker_message_send'][0])
+        self.assertEqual(
+            'timing_at_marker_start;reported_in_completion_interval',
+            second_interval['offframe_python_timing_semantics'])
 
 
 if __name__ == '__main__':
