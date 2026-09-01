@@ -898,6 +898,98 @@ class WorldCollisionTests(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertTrue(horizontal_calls)
 
+    def test_hull_pitch_keeps_lower_rays_above_rising_terrain_seam(self):
+        gradient = 0.20
+        seam_normal = _Vector(0.0, 0.0, -1.0)
+
+        def collide(unused_space, start, end, unused_mask):
+            if abs(start.y - end.y) > 10.0:
+                return (_Vector(start.x, gradient * start.z, start.z),)
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            denominator = delta_y - gradient * delta_z
+            if abs(denominator) <= 1.0e-9:
+                return None
+            progress = (gradient * start.z - start.y) / denominator
+            if not 0.0 <= progress <= 1.0:
+                return None
+            return (_Vector(
+                start.x, start.y + delta_y * progress,
+                start.z + delta_z * progress), seam_normal, 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertTrue(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04))
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04, pitch=-math.atan(gradient)))
+
+    def test_hull_roll_poses_lanes_without_adding_native_rays(self):
+        calls = []
+
+        def collide(unused_space, start, end, unused_mask):
+            calls.append((start, end))
+            return None
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04))
+        level_ray_count = len(calls)
+        calls[:] = []
+
+        roll = 0.20
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04, roll=roll))
+        self.assertEqual(level_ray_count, len(calls))
+        lower_rays = calls[::3]
+        self.assertEqual(3, len(lower_rays))
+        for (start, end), local_right in zip(
+                lower_rays, (-1.5, 0.0, 1.5)):
+            expected_y = (0.6 * math.cos(roll) +
+                          local_right * math.sin(roll))
+            self.assertAlmostEqual(expected_y, start.y)
+            self.assertAlmostEqual(expected_y, end.y)
+            self.assertAlmostEqual(local_right, start.x)
+            self.assertAlmostEqual(local_right, end.x)
+            self.assertAlmostEqual(-0.5, start.z)
+            self.assertAlmostEqual(3.9, end.z)
+
+    def test_posed_ray_composes_roll_before_pitch(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        pos = _Vector(4.0, 7.0, 9.0)
+        local_start = (1.4, -2.3)
+        local_end = (-0.8, 3.1)
+        pitch = 0.31
+        roll = -0.22
+        height = 0.85
+
+        pose_y = world_collision._hull_pose_y(pitch, roll)
+        start, end = world_collision._posed_ray(
+            math_module, pos, 2.0, 3.0, 5.0, 6.0,
+            local_start, local_end, height, pose_y)
+
+        def expected_y(local):
+            return (pos.y + math.cos(pitch) * (
+                local[0] * math.sin(roll) +
+                height * math.cos(roll)) -
+                local[1] * math.sin(pitch))
+
+        self.assertAlmostEqual(expected_y(local_start), start.y)
+        self.assertAlmostEqual(expected_y(local_end), end.y)
+        self.assertEqual((2.0, 3.0), (start.x, start.z))
+        self.assertEqual((5.0, 6.0), (end.x, end.z))
+
     def test_gradually_descending_ground_remains_drivable(self):
         horizontal_calls = []
 

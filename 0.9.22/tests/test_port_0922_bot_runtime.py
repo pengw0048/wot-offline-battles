@@ -3091,7 +3091,7 @@ class BotRuntimeTests(unittest.TestCase):
 
         hard_calls = []
 
-        def hard_resolver(*args):
+        def hard_resolver(*args, **unused_kwargs):
             hard_calls.append(args)
             return 'hard'
 
@@ -3175,14 +3175,14 @@ class BotRuntimeTests(unittest.TestCase):
         calls = []
         destroyed = []
 
-        def resolver(*args):
+        def resolver(*args, **kwargs):
             commit_enabled = args[7] if len(args) > 7 else True
-            calls.append((args, commit_enabled))
+            calls.append((args, kwargs, commit_enabled))
             if len(calls) == 1:
                 return 'hard'
             if commit_enabled:
-                destroyed.append(args[2])
-            if args[2] == -0.55:
+                destroyed.append(kwargs['motion_yaw'])
+            if kwargs['motion_yaw'] == -0.55:
                 return 'crushed' if commit_enabled else 'clear'
             return 'hard'
 
@@ -3207,10 +3207,12 @@ class BotRuntimeTests(unittest.TestCase):
             self.module.vehicle_physics.hard_contact_step(
                 contact_speed, .04, grinding=False, slide_yaw=-0.55)
         self.assertEqual(4, len(calls))
-        self.assertEqual([0.55, -0.55, -0.55],
+        self.assertEqual([0.0, 0.0, 0.0],
                          [call[0][2] for call in calls[1:]])
+        self.assertEqual([0.55, -0.55, -0.55],
+                         [call[1]['motion_yaw'] for call in calls[1:]])
         self.assertEqual([False, False, True],
-                         [call[1] for call in calls[1:]])
+                         [call[2] for call in calls[1:]])
         self.assertEqual([-0.55], destroyed)
         self.assertAlmostEqual(expected_speed, state['speed'])
         self.assertAlmostEqual(delta_x, state['x'])
@@ -3218,6 +3220,28 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             self.module.vehicle_physics.HARD_CONTACT_GRIND_TICKS,
             runtime._hard_contact_grinds[11])
+
+    def test_reverse_passive_probe_uses_signed_motion_not_hull_yaw(self):
+        calls = []
+
+        def resolver(*args, **kwargs):
+            calls.append((args, kwargs))
+            return 'clear'
+
+        runtime = self.module.BotRuntime(1, motion_resolver=resolver)
+        state = {'id': 11, 'yaw': 0.4, 'movement_dir': -1}
+
+        status = runtime._passive_motion_status(
+            state, (1.0, 2.0, 3.0), -0.15, -4.0, {}, 0.04, 1.0,
+            commit_enabled=False)
+
+        self.assertEqual('clear', status)
+        self.assertEqual(-1, state['movement_dir'])
+        self.assertEqual(1, len(calls))
+        self.assertAlmostEqual(0.4, calls[0][0][2])
+        self.assertAlmostEqual(math.pi - 0.15,
+                               calls[0][1]['motion_yaw'])
+        self.assertFalse(calls[0][0][7])
 
     def test_realised_hard_contact_invalidates_cached_command_and_probe(self):
         attempted_yaw = 0.25
@@ -3248,7 +3272,7 @@ class BotRuntimeTests(unittest.TestCase):
             direction_probe=lambda *unused: {
                 'clear': False, 'collision': True, 'water': False,
                 'slope': 0.0},
-            motion_resolver=lambda *unused: status[0],
+            motion_resolver=lambda *unused, **unused_kwargs: status[0],
             ground_probe=lambda *unused: 0.0,
             physics_ground_probe=lambda *unused: 0.0,
             spawn_resolver=_spawn_resolver, baked_graph=_graph())
@@ -3542,6 +3566,118 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(2.0, state['y'])
         self.assertFalse(state['airborne'])
         self.assertFalse(support_blocked)
+
+    def test_low_fps_bot_follows_a_continuous_rising_support_profile(self):
+        calls = []
+
+        def ground(unused_x, z, unused_y):
+            calls.append(z)
+            return z * 0.22
+
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=ground)
+        state = {
+            'id': 11, 'x': 0.0, 'y': 0.0, 'z': 4.0, 'yaw': 0.0,
+            'speed': 20.0, 'half_length': 3.0,
+            'vertical_speed': 0.0, 'airborne': False,
+            'grounded_once': True,
+            'last_drive_pitch': -math.atan(0.22),
+        }
+
+        support_blocked = runtime._update_vertical_motion(
+            state, 0.2, (0.0, 0.0, 0.0), 0.0)
+
+        self.assertFalse(support_blocked)
+        self.assertAlmostEqual(0.88, state['y'])
+        self.assertEqual(20.0, state['speed'])
+        self.assertEqual(3, len(calls))
+        self.assertAlmostEqual(4.0, calls[0])
+        self.assertAlmostEqual(4.0 / 3.0, calls[1])
+        self.assertAlmostEqual(8.0 / 3.0, calls[2])
+
+    def test_low_fps_bot_still_rejects_a_vertical_support_step(self):
+        calls = []
+
+        def ground(unused_x, z, unused_y):
+            calls.append(z)
+            return 0.88 if z >= 2.0 else 0.0
+
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=ground)
+        state = {
+            'id': 11, 'x': 0.0, 'y': 0.0, 'z': 4.0, 'yaw': 0.0,
+            'speed': 20.0, 'half_length': 3.0,
+            'movement_dir': 1, 'rotation_dir': 0,
+            'push_x': 0.0, 'push_z': 0.0,
+            'vertical_speed': 0.0, 'airborne': False,
+            'grounded_once': True,
+            'last_drive_pitch': -math.atan(0.22),
+        }
+
+        support_blocked = runtime._update_vertical_motion(
+            state, 0.2, (0.0, 0.0, 0.0), 0.0)
+
+        self.assertTrue(support_blocked)
+        self.assertEqual((0.0, 0.0, 0.0),
+                         (state['x'], state['y'], state['z']))
+        self.assertEqual(0.0, state['speed'])
+        self.assertEqual(3, len(calls))
+
+    def test_suspicious_support_profile_rejects_an_interior_drop(self):
+        calls = []
+
+        def ground(unused_x, z, unused_y):
+            calls.append(z)
+            if z >= 6.9:
+                return 0.91
+            if z < 1.5:
+                return -2.0
+            return -2.0 + (z - 1.4) / 1.4 * 0.79
+
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=ground)
+        state = {
+            'id': 11, 'x': 0.0, 'y': 0.0, 'z': 7.0, 'yaw': 0.0,
+            'speed': 35.0, 'half_length': 3.0,
+            'movement_dir': 1, 'rotation_dir': 0,
+            'push_x': 0.0, 'push_z': 0.0,
+            'vertical_speed': 0.0, 'airborne': False,
+            'grounded_once': True,
+            'last_drive_pitch': -math.atan(0.13),
+        }
+
+        support_blocked = runtime._update_vertical_motion(
+            state, 0.2, (0.0, 0.0, 0.0), 0.0)
+
+        self.assertTrue(support_blocked)
+        self.assertEqual((0.0, 0.0, 0.0),
+                         (state['x'], state['y'], state['z']))
+        self.assertEqual(2, len(calls))
+
+    def test_suspicious_support_profile_uses_at_most_four_extra_rays(self):
+        calls = []
+
+        def ground(unused_x, z, unused_y):
+            calls.append(z)
+            return z * 0.13
+
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=ground)
+        state = {
+            'id': 11, 'x': 0.0, 'y': 0.0, 'z': 7.0, 'yaw': 0.0,
+            'speed': 35.0, 'half_length': 3.0,
+            'vertical_speed': 0.0, 'airborne': False,
+            'grounded_once': True,
+            'last_drive_pitch': -math.atan(0.13),
+        }
+
+        support_blocked = runtime._update_vertical_motion(
+            state, 0.2, (0.0, 0.0, 0.0), 0.0)
+
+        self.assertFalse(support_blocked)
+        self.assertEqual(5, len(calls))
+        self.assertEqual(5, dict(zip(
+            self.module.PROBE_KINDS, runtime.probe_totals()))['ground'])
 
     def test_grounded_bot_rejects_raised_centre_support_and_recovers(self):
         failures = []

@@ -652,6 +652,24 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(2, player.input_seq)
         self.assertEqual(1.0, player.forward)
 
+    def test_destructible_contact_freezes_bound_pose_attitude(self):
+        state = _state(players=1)
+        relayed = []
+        state.simulation_worker.offer_reliable = (
+            lambda message: relayed.append(message) or True)
+
+        self.assertTrue(_update_player_input(
+            state, 1, forward=1.0, speed=5.0,
+            pitch=0.2, roll=-0.15,
+            destructible_contacts=[_player_destructible_contact()]))
+
+        contact = state.players[1].destructible_contacts[1]
+        self.assertEqual((0.2, -0.15), (
+            contact['pitch'], contact['roll']))
+        self.assertEqual((0.2, -0.15), (
+            relayed[0]['player']['destructible_contacts'][0]['pitch'],
+            relayed[0]['player']['destructible_contacts'][0]['roll']))
+
     def test_player_environment_skips_overtaken_rows_and_keeps_live_rows(self):
         state = _state(players=2)
         dead = state.players[1]

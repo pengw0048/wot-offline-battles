@@ -9275,6 +9275,8 @@ class BattleState:
                             "y": round(float(sample["y"]), 4),
                             "z": round(float(sample["z"]), 4),
                             "yaw": round(float(sample["yaw"]), 5),
+                            "pitch": round(float(sample["pitch"]), 5),
+                            "roll": round(float(sample["roll"]), 5),
                             "forward": round(float(sample["forward"]), 4),
                         })
                         player.destructible_contacts[seq] = contact
