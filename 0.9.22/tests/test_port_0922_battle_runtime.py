@@ -7355,6 +7355,19 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 entity, (296.49, 7.0, 0.0), 0.0, 1.0, 0.1,
                 hull_yaw=math.pi * 0.5))
             world_probe.assert_called_once()
+            self.assertAlmostEqual(
+                math.pi * 0.5, world_probe.call_args.args[4])
+            self.assertEqual(
+                0.0, world_probe.call_args.kwargs['motion_yaw'])
+
+            world_probe.reset_mock()
+            self.assertTrue(battle._motion_is_clear(
+                entity, (0.0, 7.0, 0.0), 0.25, -1.0, 0.1,
+                hull_yaw=1.0))
+            self.assertAlmostEqual(1.0, world_probe.call_args.args[4])
+            self.assertAlmostEqual(
+                0.25 + math.pi,
+                world_probe.call_args.kwargs['motion_yaw'])
 
     def test_supported_map_installs_catalog_before_native_destructible_reset(self):
         runtime = _runtime()

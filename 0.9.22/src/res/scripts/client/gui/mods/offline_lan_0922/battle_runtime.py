@@ -13098,6 +13098,12 @@ class BattleRuntime(object):
             self._local_motion_kinds = 'arena'
             self._local_motion_status = 'hard'
             return False
+        # Ram separation, airborne carry and wall deflection can translate the
+        # tank across its heading.  Keep the native corridor aligned with that
+        # travel while retaining the real chassis orientation and footprint.
+        world_hull_yaw = yaw if hull_yaw is None else hull_yaw
+        world_motion_yaw = (None if hull_yaw is None else
+                            yaw if speed >= 0.0 else yaw + math.pi)
         kinetic_speed = None
         if allow_crush_drive:
             params = self._local_physics
@@ -13149,9 +13155,11 @@ class BattleRuntime(object):
                         predictor(token))
                 world_status = world_collision.check_horizontal_collision(
                     self._runtime.bigworld, self._runtime.math,
-                    self._avatar.spaceID, self._vector(position), yaw, speed,
+                    self._avatar.spaceID, self._vector(position),
+                    world_hull_yaw, speed,
                     entity.typeDescriptor, self._local_airborne, dt, True,
-                    True, kinetic_speed, commit_enabled=False)
+                    True, kinetic_speed, commit_enabled=False,
+                    motion_yaw=world_motion_yaw)
                 if isinstance(world_status, bool):
                     world_status = 'hard' if world_status else 'clear'
                 if world_status not in ('clear', 'kinetic'):
@@ -13192,10 +13200,11 @@ class BattleRuntime(object):
                 return True
         world_status = world_collision.check_horizontal_collision(
             self._runtime.bigworld, self._runtime.math,
-            self._avatar.spaceID, self._vector(position), yaw, speed,
+            self._avatar.spaceID, self._vector(position),
+            world_hull_yaw, speed,
             entity.typeDescriptor, self._local_airborne, dt, True,
             bool(kinetic_speed is not None), kinetic_speed,
-            commit_enabled=False)
+            commit_enabled=False, motion_yaw=world_motion_yaw)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         if world_status == 'hard':
