@@ -3427,7 +3427,7 @@ class LANClient(object):
                         # edge.  Never move a later state back across it.
                         break
                     if (isinstance(queued, dict) and
-                            queued.get('type') == 'bot_ram'):
+                            queued.get('type') == 'bot_ram_report'):
                         # The server validates this one-shot contact against
                         # the immediately preceding authority pose. A newer
                         # checkpoint may not replace that state from across

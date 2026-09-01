@@ -461,18 +461,14 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertTrue(client.send_projected_bot_state(
             [contact], sample_time_us=400000,
             source_batch_horizon_us=1000000))
-        self.assertTrue(client._send({
-            'type': 'bot_ram', 'bot_id': 11,
-            'target_kind': 'bot', 'target_id': 12,
-            'ram_seq': 1, 'damage_to_bot': 1,
-            'damage_to_target': 1,
-        }))
+        self.assertTrue(client.send_bot_ram(
+            11, 'bot', 12, 1, 1, 1))
         self.assertTrue(client.send_projected_bot_state(
             [later], sample_time_us=1000000,
             source_batch_horizon_us=1000000))
 
         self.assertEqual([
-            'bot_state', 'bot_ram', 'bot_state',
+            'bot_state', 'bot_ram_report', 'bot_state',
         ], [
             (json.loads(item[1].payload.decode('utf-8'))['type']
              if isinstance(item[1], lan_client_module._PreencodedOutbound)
