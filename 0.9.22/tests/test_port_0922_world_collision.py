@@ -567,6 +567,89 @@ class WorldCollisionTests(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertTrue(horizontal_calls)
 
+    def test_sideways_motion_sweeps_hull_width_across_front_back_lanes(self):
+        horizontal_calls = []
+
+        def collide(unused_space, start, end, unused_mask):
+            horizontal_calls.append((start, end))
+            return None
+
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = collide
+        bigworld.wg_getMatInfoNearPoint = _miss_mat_info_1513
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.6, -1.0, -4.0),
+                    (1.6, 1.0, 6.0), None))))
+
+        blocked = world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            descriptor, False, 0.04, motion_yaw=math.pi / 2.0)
+
+        self.assertFalse(blocked)
+        lower_rays = [
+            (start, end) for start, end in horizontal_calls
+            if abs(start.y - 0.6) < 0.001]
+        self.assertEqual(3, len(lower_rays))
+        for start, end in lower_rays:
+            self.assertAlmostEqual(-0.5, start.x)
+            self.assertAlmostEqual(1.9, end.x)
+            self.assertGreater(end.x, start.x)
+            self.assertAlmostEqual(start.z, end.z)
+        lane_positions = sorted(start.z for start, unused_end in lower_rays)
+        for actual, expected in zip(lane_positions, (-4.0, 0.0, 6.0)):
+            self.assertAlmostEqual(expected, actual)
+
+    def test_omitted_motion_yaw_preserves_forward_and_reverse_sweeps(self):
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.6, -1.0, -4.0),
+                    (1.6, 1.0, 6.0), None))))
+
+        def lower_rays_for(velocity):
+            horizontal_calls = []
+
+            def collide(unused_space, start, end, unused_mask):
+                horizontal_calls.append((start, end))
+                return None
+
+            bigworld = types.ModuleType('BigWorld')
+            bigworld.wg_collideSegment = collide
+            bigworld.wg_getMatInfoNearPoint = _miss_mat_info_1513
+            math_module = types.ModuleType('Math')
+            math_module.Vector3 = _Vector
+            blocked = world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                descriptor, False, 0.04)
+            self.assertFalse(blocked)
+            lower_rays = [
+                (start, end) for start, end in horizontal_calls
+                if abs(start.y - 0.6) < 0.001]
+            self.assertEqual(3, len(lower_rays))
+            return lower_rays
+
+        forward_rays = lower_rays_for(5.0)
+        reverse_rays = lower_rays_for(-5.0)
+
+        for start, end in forward_rays:
+            self.assertAlmostEqual(-0.5, start.z)
+            self.assertAlmostEqual(6.4, end.z)
+            self.assertGreater(end.z, start.z)
+            self.assertAlmostEqual(start.x, end.x)
+        for start, end in reverse_rays:
+            self.assertAlmostEqual(0.5, start.z)
+            self.assertAlmostEqual(-4.4, end.z)
+            self.assertLess(end.z, start.z)
+            self.assertAlmostEqual(start.x, end.x)
+        for rays in (forward_rays, reverse_rays):
+            lane_positions = [start.x for start, unused_end in rays]
+            for actual, expected in zip(lane_positions, (-1.5, 0.0, 1.5)):
+                self.assertAlmostEqual(expected, actual)
+
     def test_slow_frame_sweep_reaches_wall_beyond_old_lookahead_cap(self):
         wall_z = [5.0]
         horizontal_ends = []

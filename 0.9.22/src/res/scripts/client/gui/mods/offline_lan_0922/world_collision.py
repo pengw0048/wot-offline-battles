@@ -212,7 +212,8 @@ def check_horizontal_collision(bigworld, math_module, *args, **kwargs):
 
 def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		airborne=False, dt=0.04, return_status=False,
-		allow_kinetic=False, kinetic_speed=None, commit_enabled=True):
+		allow_kinetic=False, kinetic_speed=None, commit_enabled=True,
+		motion_yaw=None):
 	import math, BigWorld, Math
 	try:
 		hw = 1.5
@@ -241,29 +242,57 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			# 1.2 m cap was shorter than a 20 m/s tank's 2 m slow-frame step and
 			# could miss a hard wall immediately behind a crushed light prop.
 			_ahead = max(0.4, abs(vel) * dt + 0.2)
-		back_margin = -0.5 if vel > 0 else 0.5
-		front_margin = (hl_front + _ahead) if vel > 0 else -(hl_back + _ahead)
-		
+		# Hull yaw owns the OBB.  Lateral impulses may supply a different
+		# direction for the swept corridor without rotating that footprint.
 		cos_y = math.cos(yaw)
 		sin_y = math.sin(yaw)
+		right_x, right_z = cos_y, -sin_y
+		forward_x, forward_z = sin_y, cos_y
+		explicit_motion_yaw = motion_yaw is not None
+		if motion_yaw is None:
+			motion_yaw = (float(yaw) if vel > 0.0 else
+				float(yaw) + math.pi)
+		motion_sin = math.sin(float(motion_yaw))
+		motion_cos = math.cos(float(motion_yaw))
+		perp_x, perp_z = motion_cos, -motion_sin
+		forward_dot = (
+			motion_sin * forward_x + motion_cos * forward_z)
+		right_dot = motion_sin * right_x + motion_cos * right_z
+		leading_extent = (abs(right_dot) * hw + max(
+			forward_dot * -hl_back, forward_dot * hl_front))
+		perp_forward_dot = (
+			perp_x * forward_x + perp_z * forward_z)
+		perp_right_dot = perp_x * right_x + perp_z * right_z
+		lateral_right_extent = abs(perp_right_dot) * hw
+		lateral_min = lateral_right_extent * -1.0 + min(
+			perp_forward_dot * -hl_back,
+			perp_forward_dot * hl_front)
+		lateral_max = lateral_right_extent + max(
+			perp_forward_dot * -hl_back,
+			perp_forward_dot * hl_front)
+		lane_offsets = (lateral_min, 0.0, lateral_max)
+		if not explicit_motion_yaw and vel <= 0.0:
+			# The reverse motion basis points its perpendicular to the old
+			# right-to-left lane order.  Retain the legacy left/centre/right
+			# evaluation order because a lane may own one native prop commit.
+			lane_offsets = (lateral_max, 0.0, lateral_min)
 		_crush_state = [False]
 		_kinetic_contact = False
 
-		for offset_x in (-hw, 0, hw):
-			sx = pos.x + cos_y * offset_x
-			sz = pos.z - sin_y * offset_x
-			
-			x1 = sx + sin_y * back_margin
-			z1 = sz + cos_y * back_margin
-			x2 = sx + sin_y * front_margin
-			z2 = sz + cos_y * front_margin
+		for offset_x in lane_offsets:
+			sx = pos.x + perp_x * offset_x
+			sz = pos.z + perp_z * offset_x
+
+			x1 = sx - motion_sin * 0.5
+			z1 = sz - motion_cos * 0.5
+			x2 = sx + motion_sin * (leading_extent + _ahead)
+			z2 = sz + motion_cos * (leading_extent + _ahead)
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
 			start_bot = Math.Vector3(x1, pos.y + 0.6, z1)
 			end_bot = Math.Vector3(x2, pos.y + 0.6, z2)
 			col_bot = _collide_horizontal(spaceID, start_bot, end_bot)
-			target_len = (abs(back_margin) +
-				(hl_front if vel > 0 else hl_back) + _ahead)
+			target_len = 0.5 + leading_extent + _ahead
 			
 			if col_bot is not None:
 				d_bot = (col_bot[0] - start_bot).length
@@ -272,8 +301,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					# exact lane has a continuous non-flat ground profile and the
 					# native contact normal is also a drivable surface. This handles
 					# downhill terrain without hiding a wall merely located on a hill.
-					_direction = 1.0 if vel >= 0 else -1.0
-					_look = (hl_front if vel > 0 else hl_back) + _ahead
+					_look = leading_extent + _ahead
 					_heights = ()
 					_segment = 0.0
 					_gradient_limit = _MAX_DESCENDING_GRADIENT
@@ -282,8 +310,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					# Only a surface that could be a slope earns the exact lane profile.
 					if _drivable_surface(col_bot, _gradient_limit):
 						_heights, _segment = _ground_profile(
-							spaceID, Math, pos, sx, sz, sin_y, cos_y,
-							_direction, _look)
+							spaceID, Math, pos, sx, sz,
+							motion_sin, motion_cos, 1.0, _look)
 						_gradient_limit = _profile_gradient_limit(_heights)
 						if (_heights and
 								abs(float(_heights[-1]) -
