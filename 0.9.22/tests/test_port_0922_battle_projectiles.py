@@ -1,5 +1,6 @@
 import math
 from pathlib import Path
+import random
 import sys
 import types
 import unittest
@@ -987,6 +988,201 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertTrue(queried)
         self.assertFalse(set(target_ids).intersection(queried))
 
+    def test_spatial_index_keeps_old_debt_target_after_it_moves_away(self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        for sample_time, target_x in ((0.0, 5.0), (0.5, 100.0),
+                                      (1.0, 200.0)):
+            battle._sample_projectile_positions(sample_time, {
+                'player:7': source,
+                'bot:8': battle._projectile_plain_pose(
+                    (target_x, 0.0, 0.0)),
+            })
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 1.0))
+        candidates = dict(battle._projectile_chord_records(
+            (0.0, 0.0, 0.0), (10.0, 0.0, 0.0), 0.0, 0.05))
+
+        self.assertIn('bot:8', candidates)
+
+    def test_spatial_index_keeps_target_near_only_at_middle_sample(self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        for sample_time, target_x in ((0.0, 200.0), (0.5, 5.0),
+                                      (1.0, 200.0)):
+            battle._sample_projectile_positions(sample_time, {
+                'player:7': source,
+                'bot:8': battle._projectile_plain_pose(
+                    (target_x, 0.0, 0.0)),
+            })
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 1.0))
+        candidates = dict(battle._projectile_chord_records(
+            (0.0, 0.0, 0.0), (10.0, 0.0, 0.0), 0.45, 0.55))
+
+        self.assertNotIn('bot:8', battle._projectile_spatial_fallback_keys)
+        self.assertIn('bot:8', candidates)
+
+    def test_spatial_index_keeps_incomplete_history_as_full_scan_candidate(
+            self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        battle._sample_projectile_positions(0.0, {'player:7': source})
+        battle._sample_projectile_positions(1.0, {
+            'player:7': source,
+            'bot:8': battle._projectile_plain_pose(
+                (1000.0, 0.0, 1000.0)),
+        })
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 1.0))
+        candidates = dict(battle._projectile_chord_records(
+            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.0, 0.05))
+
+        self.assertIn('bot:8', battle._projectile_spatial_fallback_keys)
+        self.assertIn('bot:8', candidates)
+
+    def test_spatial_index_falls_back_when_history_or_records_change(self):
+        battle, unused_bigworld = _battle()
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        battle._sample_projectile_positions(1.0, {'player:7': source})
+        battle._sample_projectile_positions(2.0, {'player:7': source})
+
+        self.assertFalse(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.5},), 2.0))
+        self.assertEqual(
+            set(battle._records),
+            set(dict(battle._projectile_chord_records(
+                (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.5, 0.55))))
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 1.0},), 2.0))
+        battle._records['bot:9'] = {
+            'engine_id': 43, 'network_id': 9, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._records_revision += 1
+        candidates = dict(battle._projectile_chord_records(
+            (1000.0, 0.0, 1000.0), (1001.0, 0.0, 1000.0),
+            1.0, 1.05))
+        self.assertEqual(set(battle._records), set(candidates))
+
+    def test_spatial_index_candidates_cover_relative_motion_broadphase(self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        generator = random.Random(1513)
+        for unused_index in range(300):
+            projectile_start = (
+                generator.uniform(-100.0, 100.0), 0.0,
+                generator.uniform(-100.0, 100.0))
+            projectile_end = (
+                generator.uniform(-100.0, 100.0), 0.0,
+                generator.uniform(-100.0, 100.0))
+            relative_x = generator.uniform(20.0, 80.0)
+            relative_z = generator.uniform(20.0, 80.0)
+            target_start = (
+                projectile_start[0] + relative_x, 0.0,
+                projectile_start[2] + relative_z)
+            target_end = (
+                projectile_end[0] - relative_x, 0.0,
+                projectile_end[2] - relative_z)
+            battle._projectile_position_history = []
+            battle._sample_projectile_positions(0.0, {
+                'player:7': source,
+                'bot:8': battle._projectile_plain_pose(target_start),
+            })
+            battle._sample_projectile_positions(1.0, {
+                'player:7': source,
+                'bot:8': battle._projectile_plain_pose(target_end),
+            })
+
+            self.assertTrue(battle._build_projectile_spatial_bins(
+                ({'cursor_time': 0.0},), 1.0))
+            self.assertNotIn(
+                'bot:8', battle._projectile_spatial_fallback_keys)
+            candidates = dict(battle._projectile_chord_records(
+                projectile_start, projectile_end, 0.0, 1.0))
+            self.assertIn('bot:8', candidates)
+
+    def test_spatial_index_excessive_target_span_uses_fallback(self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        battle._sample_projectile_positions(0.0, {
+            'player:7': source,
+            'bot:8': battle._projectile_plain_pose((-64.0, 0.0, -64.0)),
+        })
+        battle._sample_projectile_positions(1.0, {
+            'player:7': source,
+            'bot:8': battle._projectile_plain_pose((64.0, 0.0, 64.0)),
+        })
+        module = sys.modules[BattleRuntime.__module__]
+
+        with mock.patch.object(
+                module, 'PROJECTILE_SPATIAL_MAX_TARGET_CELLS', 1):
+            self.assertTrue(battle._build_projectile_spatial_bins(
+                ({'cursor_time': 0.0},), 1.0))
+            candidates = dict(battle._projectile_chord_records(
+                (1000.0, 0.0, 1000.0),
+                (1001.0, 0.0, 1000.0), 0.0, 0.05))
+
+        self.assertIn('bot:8', battle._projectile_spatial_fallback_keys)
+        self.assertIn('bot:8', candidates)
+
+    def test_spatial_index_skips_more_expensive_history_build(self):
+        battle, unused_bigworld = _battle()
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        for index in range(101):
+            battle._sample_projectile_positions(
+                float(index) / 100.0, {'player:7': source})
+
+        self.assertFalse(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 1.0, maximum_chords=1))
+        self.assertIsNone(battle._projectile_spatial_bins)
+
+    def test_spatial_index_cell_budgets_fall_back_to_all_records(self):
+        battle, unused_bigworld = _battle()
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        battle._sample_projectile_positions(0.0, {'player:7': source})
+        battle._sample_projectile_positions(1.0, {'player:7': source})
+        module = sys.modules[BattleRuntime.__module__]
+
+        with mock.patch.object(
+                module, 'PROJECTILE_SPATIAL_MAX_TOTAL_CELLS', 1):
+            self.assertFalse(battle._build_projectile_spatial_bins(
+                ({'cursor_time': 0.0},), 1.0))
+        self.assertIsNone(battle._projectile_spatial_bins)
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 1.0))
+        with mock.patch.object(
+                module, 'PROJECTILE_SPATIAL_MAX_QUERY_CELLS', 1):
+            candidates = dict(battle._projectile_chord_records(
+                (1000.0, 0.0, 1000.0),
+                (1200.0, 0.0, 1000.0), 0.0, 0.05))
+        self.assertEqual(set(battle._records), set(candidates))
+
     def test_worker_player_projectile_uses_hydraulic_body_and_chassis(self):
         battle, unused_bigworld = _battle()
         battle._worker_mode = True
@@ -1070,6 +1266,8 @@ class BattleProjectileTests(unittest.TestCase):
         for sample_time in (0.0, 0.1):
             battle._sample_projectile_positions(sample_time, {
                 'player:7': source_pose, 'bot:8': wreck_pose})
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            ({'cursor_time': 0.0},), 0.1))
         battle._resolve_shot_scene = mock.Mock(return_value={
             'piercing_loss': 0.0, 'penetration_factor': 1.0,
             'world_distance': 99999.0,
@@ -1144,10 +1342,14 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(11, invocations)
         self.assertEqual(638, totals['chords'])
-        self.assertEqual(19140, totals['scans'])
+        # The advance-scoped spatial index keeps the source record as the only
+        # nearby broad-phase entry instead of rescanning all 30 records for
+        # every chord.
+        self.assertEqual(638, totals['scans'])
         self.assertEqual(58, battle._projectile_perf['chords'])
-        self.assertEqual(1740, battle._projectile_perf['scans'])
+        self.assertEqual(58, battle._projectile_perf['scans'])
         self.assertEqual(0, battle._projectile_perf['candidates'])
+        self.assertIsNone(battle._projectile_spatial_bins)
         for entity_id, entity in entities.items():
             if entity_id != 41:
                 entity.collideSegmentExt.assert_not_called()
@@ -1184,6 +1386,9 @@ class BattleProjectileTests(unittest.TestCase):
         uncached = mock.Mock(
             wraps=battle._projectile_historic_pose_uncached)
         battle._projectile_historic_pose_uncached = uncached
+        # Isolate the historic-pose memoization contract from the independent
+        # spatial broad phase exercised by the preceding stress case.
+        battle._build_projectile_spatial_bins = mock.Mock(return_value=False)
 
         bigworld.now = 1.0
         self.assertTrue(battle._advance_projectiles(1.0))
