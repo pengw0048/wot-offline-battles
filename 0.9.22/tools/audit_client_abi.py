@@ -950,6 +950,21 @@ EXPECTED_CODE_LITERALS = {
         'Vehicle.set_gunAnglesPacked': ('syncGunAngles',),
     },
     'scripts/client/ProjectileMover.pyc': {
+        'ProjectileMover.add': (
+            'artilleryID', 'projectile', 'model', 'motor', 'effectsDescr',
+            'showExplosion', 'fireMissedTrigger', 'autoScaleProjectile',
+            'attackerID', 'effectsData', 'flying', 'isPlayerVehicle',
+            'isArtillery'),
+        'ProjectileMover.explode': (
+            'artilleryID', 'effectsDescr', 'effectMaterial', 'attackerID',
+            'fireMissedTrigger', 'showExplosion'),
+        'ProjectileMover.__notifyProjectileHit': (
+            'effectsDescr', 'caliber', 'autoScaleProjectile'),
+        'ProjectileMover.__killProjectile': (
+            'effectsDescr', 'projectile', 'effectsData', 'stopFlying',
+            'showExplosion'),
+        'ProjectileMover.__delProjectile': (
+            'effectsDescr', 'projectile', 'effectsData', 'model', 'motor'),
         'segmentMayHitEntity': ('segmentMayHitEntity',),
     },
     'scripts/client/gui/battle_control/controllers/feedback_events.pyc': {
@@ -1327,29 +1342,23 @@ EXPECTED_CODE_NAMES = {
     },
     'scripts/client/ProjectileMover.pyc': {
         'ProjectileMover.add': (
-            'artilleryID', 'salvo', 'addProjectile',
-            '_ProjectileMover__ballistics', 'projectile', 'BigWorld',
+            'salvo', 'addProjectile', '_ProjectileMover__ballistics', 'BigWorld',
             'Model', 'player', 'addModel', 'addMotor', 'visible',
             'visibleAttachments', 'attachTo', 'FlockManager',
             'getManager', 'onProjectile'),
         'ProjectileMover.explode': (
-            'fireMissedTrigger', 'TriggersManager', 'g_manager',
-            'fireTrigger', 'TRIGGER_TYPE', 'PLAYER_SHOT_MISSED',
+            'TriggersManager', 'g_manager', 'fireTrigger', 'TRIGGER_TYPE',
+            'PLAYER_SHOT_MISSED',
             '_ProjectileMover__notifyProjectileHit'),
         'ProjectileMover.__notifyProjectileHit': (
-            'effectsDescr', 'caliber', 'autoScaleProjectile', 'BigWorld',
-            'player', 'inputHandler', 'onProjectileHit', 'FlockManager',
-            'getManager', 'onProjectile'),
+            'BigWorld', 'player', 'inputHandler', 'onProjectileHit',
+            'FlockManager', 'getManager', 'onProjectile'),
         'ProjectileMover.__killProjectile': (
-            '_ProjectileMover__projectiles', 'get', 'effectsDescr',
-            'projectile', 'detachFrom', 'showExplosion',
+            '_ProjectileMover__projectiles', 'get', 'detachFrom',
             '_ProjectileMover__addExplosionEffect'),
         'ProjectileMover.__delProjectile': (
-            '_ProjectileMover__projectiles', 'pop', 'effectsDescr',
-            'projectile', 'detachAllFrom', 'model', 'delMotor', 'motor',
-            'BigWorld', 'player', 'delModel', 'fireMissedTrigger',
-            'TriggersManager', 'g_manager', 'fireTrigger', 'TRIGGER_TYPE',
-            'PLAYER_SHOT_MISSED'),
+            '_ProjectileMover__projectiles', 'pop', 'detachAllFrom',
+            'delMotor', 'BigWorld', 'player', 'delModel'),
         # The native method name is a dynamic getattr string literal, while
         # ``filter`` and ``getattr`` are the actual CPython name-table entries.
         'segmentMayHitEntity': ('getattr', 'filter'),

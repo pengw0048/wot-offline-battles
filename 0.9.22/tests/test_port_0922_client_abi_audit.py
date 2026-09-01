@@ -106,26 +106,57 @@ class ClientAbiProjectileAuditTests(unittest.TestCase):
             '_CombatSelectedArea__matrix', 'setRotateYPR', 'translation',
         }.issubset(selected_area['CombatSelectedArea.relocate']))
 
-        mover = AUDIT.EXPECTED_CODE_NAMES[
+        mover_names = AUDIT.EXPECTED_CODE_NAMES[
             'scripts/client/ProjectileMover.pyc']
         self.assertTrue({
-            'projectile', 'BigWorld', 'Model', 'addModel', 'addMotor',
-            'visible', 'visibleAttachments', 'attachTo', 'FlockManager',
-            'onProjectile',
-        }.issubset(mover['ProjectileMover.add']))
+            'BigWorld', 'Model', 'addModel', 'addMotor', 'visible',
+            'visibleAttachments', 'attachTo', 'FlockManager', 'onProjectile',
+        }.issubset(mover_names['ProjectileMover.add']))
         self.assertTrue({
-            'fireMissedTrigger', 'TriggersManager', 'fireTrigger',
-            'PLAYER_SHOT_MISSED',
-        }.issubset(mover['ProjectileMover.explode']))
+            'TriggersManager', 'fireTrigger', 'PLAYER_SHOT_MISSED',
+        }.issubset(mover_names['ProjectileMover.explode']))
         self.assertTrue({
             'onProjectileHit', 'FlockManager', 'getManager', 'onProjectile',
-        }.issubset(mover['ProjectileMover.__notifyProjectileHit']))
+        }.issubset(mover_names['ProjectileMover.__notifyProjectileHit']))
         self.assertTrue({
-            'projectile', 'detachFrom', 'showExplosion',
-        }.issubset(mover['ProjectileMover.__killProjectile']))
+            'detachFrom', '_ProjectileMover__addExplosionEffect',
+        }.issubset(mover_names['ProjectileMover.__killProjectile']))
         self.assertTrue({
-            'projectile', 'detachAllFrom', 'delMotor', 'delModel',
-        }.issubset(mover['ProjectileMover.__delProjectile']))
+            'detachAllFrom', 'delMotor', 'delModel',
+        }.issubset(mover_names['ProjectileMover.__delProjectile']))
+
+        mover_literals = AUDIT.EXPECTED_CODE_LITERALS[
+            'scripts/client/ProjectileMover.pyc']
+        self.assertTrue({
+            'artilleryID', 'projectile', 'flying', 'isPlayerVehicle',
+            'isArtillery',
+        }.issubset(mover_literals['ProjectileMover.add']))
+        self.assertTrue({
+            'effectsDescr', 'effectMaterial', 'attackerID',
+            'fireMissedTrigger', 'showExplosion',
+        }.issubset(mover_literals['ProjectileMover.explode']))
+        self.assertTrue({
+            'effectsDescr', 'caliber', 'autoScaleProjectile',
+        }.issubset(
+            mover_literals['ProjectileMover.__notifyProjectileHit']))
+        self.assertTrue({
+            'effectsDescr', 'projectile', 'effectsData', 'stopFlying',
+            'showExplosion',
+        }.issubset(mover_literals['ProjectileMover.__killProjectile']))
+        self.assertTrue({
+            'effectsDescr', 'projectile', 'effectsData', 'model', 'motor',
+        }.issubset(mover_literals['ProjectileMover.__delProjectile']))
+        for method in (
+                'ProjectileMover.add', 'ProjectileMover.explode',
+                'ProjectileMover.__notifyProjectileHit',
+                'ProjectileMover.__killProjectile',
+                'ProjectileMover.__delProjectile'):
+            self.assertTrue(
+                set(mover_names[method]).isdisjoint(mover_literals[method]))
+        self.assertTrue({
+            'fireMissedTrigger', 'TriggersManager', 'g_manager',
+            'fireTrigger', 'TRIGGER_TYPE', 'PLAYER_SHOT_MISSED',
+        }.isdisjoint(mover_names['ProjectileMover.__delProjectile']))
         self.assertEqual(
             2.0,
             AUDIT.EXPECTED_CLASS_CONSTANTS[

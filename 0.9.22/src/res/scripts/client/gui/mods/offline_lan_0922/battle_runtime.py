@@ -10359,13 +10359,15 @@ class BattleRuntime(object):
                             'presenter retained old-epoch visual owners'),
                         disable=False)
 
-    def _projectile_explosion(self, projectile_id, impact):
+    def _projectile_explosion(self, projectile_id, impact, outcome):
         """Return ``(effectsDescr, effectMaterial, velocity)`` for a world hit.
 
         Returns None for a vehicle terminal and whenever the verdict is not
         ours to make, because an explosion added on top of the armour-hit
         effect would be a visible regression while a missing one is not.
         """
+        if outcome != 'impact':
+            return None
         meta = self._projectile_meta.get(projectile_id)
         if meta is None or meta.get('hit_vehicle') is not False:
             return None
@@ -10457,7 +10459,8 @@ class BattleRuntime(object):
             stopped = bool(self._remote_factory.stop_projectile_tracer(
                 projectile_id, impact,
                 explosion=self._projectile_explosion(
-                    projectile_id, impact),
+                    projectile_id, impact,
+                    event.get('outcome') if isinstance(event, dict) else None),
                 missed=bool(
                     isinstance(event, dict) and
                     event.get('hit_vehicle') is False)))

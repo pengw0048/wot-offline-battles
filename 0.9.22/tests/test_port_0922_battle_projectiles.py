@@ -786,6 +786,28 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertNotIn('player:7:1', factory.active)
         self.assertNotIn('player:7:1', battle._projectile_visual_meta)
 
+    def test_non_impact_terminal_stops_tracer_without_world_explosion(self):
+        for outcome in ('miss', 'expired'):
+            with self.subTest(outcome=outcome):
+                battle, unused_bigworld = _battle()
+                source = battle._server_entity(41)
+                source.showShooting = mock.Mock(return_value=True)
+                factory = _ControlledTracerFactory()
+                battle._remote_factory = factory
+                self.assertTrue(battle._show_shot(_event()))
+
+                self.assertTrue(battle._apply_projectile_terminal_event({
+                    'kind': 'projectile_impact',
+                    'projectile_id': 'player:7:1',
+                    'outcome': outcome, 'resolved_time_ms': 500,
+                    'hit_vehicle': False,
+                }))
+
+                self.assertEqual(1, len(factory.stop_calls))
+                self.assertIsNone(factory.stop_calls[0][2])
+                self.assertTrue(factory.stop_calls[0][3])
+                self.assertNotIn('player:7:1', factory.active)
+
     def test_terminal_pins_and_stops_tracer_before_following_combat_event(self):
         order = []
         battle, unused_bigworld = _battle()
@@ -963,7 +985,7 @@ class BattleProjectileTests(unittest.TestCase):
         }))
 
         battle._projectile_explosion.assert_called_once_with(
-            'player:7:1', [5.0, 0.875, 0.0])
+            'player:7:1', [5.0, 0.875, 0.0], 'impact')
         battle._remote_factory.stop_projectile_tracer.assert_called_once_with(
             'player:7:1', [5.0, 0.875, 0.0],
             explosion='ground-fx', missed=True)
@@ -982,7 +1004,8 @@ class BattleProjectileTests(unittest.TestCase):
             g_cache=types.SimpleNamespace(shotEffects=[
                 {}, {}, {}, {'groundHit': ('kp', 'fx', set())}]))
 
-        bundle = battle._projectile_explosion('p1', (1.0, 2.0, 3.0))
+        bundle = battle._projectile_explosion(
+            'p1', (1.0, 2.0, 3.0), 'impact')
 
         self.assertIsNotNone(bundle)
         effects_descr, material, velocity = bundle
@@ -1002,13 +1025,30 @@ class BattleProjectileTests(unittest.TestCase):
         battle._projectile_visual_meta['p1'] = {'admitted': False}
 
         self.assertIsNone(
-            battle._projectile_explosion('p1', (1.0, 2.0, 3.0)))
+            battle._projectile_explosion(
+                'p1', (1.0, 2.0, 3.0), 'impact'))
 
     def test_a_vehicle_terminal_carries_no_ground_explosion(self):
         battle, unused_bigworld = _battle(now=1.0)
         battle._projectile_meta['p1'] = {'hit_vehicle': True}
 
-        self.assertIsNone(battle._projectile_explosion('p1', (1.0, 2.0, 3.0)))
+        self.assertIsNone(battle._projectile_explosion(
+            'p1', (1.0, 2.0, 3.0), 'impact'))
+
+    def test_a_non_impact_terminal_carries_no_ground_explosion(self):
+        battle, unused_bigworld = _battle(now=1.0)
+        battle._projectile_meta['p1'] = {
+            'hit_vehicle': False, 'terminal_velocity': (0.0, -100.0, 10.0),
+            'shooter_kind': 'player', 'shooter_id': 7, 'shell_index': 0}
+        battle._projectile_shot = mock.Mock()
+        battle._surface_effect_material = mock.Mock()
+
+        for outcome in ('miss', 'expired'):
+            self.assertIsNone(battle._projectile_explosion(
+                'p1', (1.0, 2.0, 3.0), outcome))
+
+        battle._projectile_shot.assert_not_called()
+        battle._surface_effect_material.assert_not_called()
 
     def test_a_visible_wreck_terminal_plays_only_the_armour_hit(self):
         battle, unused_bigworld = _battle(now=1.0)
@@ -1078,7 +1118,8 @@ class BattleProjectileTests(unittest.TestCase):
         battle, unused_bigworld = _battle(now=1.0)
         battle._projectile_meta['p1'] = {}
 
-        self.assertIsNone(battle._projectile_explosion('p1', (1.0, 2.0, 3.0)))
+        self.assertIsNone(battle._projectile_explosion(
+            'p1', (1.0, 2.0, 3.0), 'impact'))
 
     def test_an_unresolvable_surface_carries_no_explosion(self):
         battle, unused_bigworld = _battle(now=1.0)
@@ -1089,7 +1130,8 @@ class BattleProjectileTests(unittest.TestCase):
             g_cache=types.SimpleNamespace(shotEffects=[{'groundHit': ()}]))
         battle._surface_effect_material = lambda impact: None
 
-        self.assertIsNone(battle._projectile_explosion('p1', (1.0, 2.0, 3.0)))
+        self.assertIsNone(battle._projectile_explosion(
+            'p1', (1.0, 2.0, 3.0), 'impact'))
 
     def test_snapshot_ensures_tracer_even_when_client_is_not_authority(self):
         battle, unused_bigworld = _battle(now=1.0)
