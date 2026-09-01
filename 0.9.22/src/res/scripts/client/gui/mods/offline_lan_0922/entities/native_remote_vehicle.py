@@ -620,6 +620,37 @@ class _NativeRemoteState(object):
             entity._gun_pitch = raw_gun_pitch
         return True
 
+    def present_hit_impulse(self, direction, impulse):
+        """Call the stock reaction only while every native owner is live."""
+        if (not self._engine_owns_entity() or
+                self.presentation_capabilities.get('body_swinging') is not
+                True):
+            return False
+        entity = self.entity
+        appearance = getattr(entity, 'appearance', None)
+        vehicle_filter = getattr(entity, 'filter', None)
+        if (appearance is None or
+                getattr(appearance, 'filter', None) is not vehicle_filter or
+                getattr(appearance, 'swingingAnimator', None) is None):
+            return False
+        receive_impulse = getattr(appearance, 'receiveShotImpulse', None)
+        if not callable(receive_impulse):
+            return False
+        try:
+            impulse = float(impulse)
+            values = tuple(float(direction[index]) for index in range(3))
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return False
+        if (impulse <= 0.0 or math.isnan(impulse) or math.isinf(impulse) or
+                any(math.isnan(value) or math.isinf(value)
+                    for value in values)):
+            return False
+        length = math.sqrt(sum(value * value for value in values))
+        if length <= 0.0 or abs(length - 1.0) > 0.01:
+            return False
+        receive_impulse(direction, impulse)
+        return True
+
     def update_tracks(self, left, right, mode):
         entity = self.entity
         if entity is None:
@@ -852,6 +883,12 @@ class NativeRemoteVehicleFactory(object):
         if state is None or state.entity is None:
             return False
         return state.update_siege_pose()
+
+    def present_hit_impulse(self, entity_id, direction, impulse):
+        state = self._states.get(int(entity_id))
+        if state is None or state.entity is None:
+            return False
+        return state.present_hit_impulse(direction, impulse)
 
     def request_wreck(self, unused_entity_id):
         # Vehicle.onHealthChanged owns stock damaged-model replacement.

@@ -2053,6 +2053,35 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         self.assertIsNone(state.entity)
         self.assertIsNone(state.model_changed)
 
+    def test_native_hit_impulse_requires_live_bound_swinging_owner(self):
+        runtime = _runtime()
+        vehicle_filter = object()
+        receive_impulse = mock.Mock()
+        appearance = types.SimpleNamespace(
+            filter=vehicle_filter, swingingAnimator=object(),
+            receiveShotImpulse=receive_impulse)
+        entity = types.SimpleNamespace(
+            id=44, inWorld=True, isStarted=True,
+            filter=vehicle_filter, appearance=appearance)
+        bigworld = types.SimpleNamespace(entities={44: entity})
+        state = _NativeRemoteState(
+            bigworld, runtime.math, mock.Mock(), None,
+            _Vector(), (0.0, 0.0, 0.0))
+        state.entity = entity
+        state.presentation_capabilities['body_swinging'] = True
+        direction = _Vector(1.0, 0.0, 0.0)
+
+        self.assertTrue(state.present_hit_impulse(direction, 0.75))
+        self.assertFalse(state.present_hit_impulse(
+            direction, float('nan')))
+        appearance.filter = object()
+        self.assertFalse(state.present_hit_impulse(direction, 0.75))
+        appearance.filter = vehicle_filter
+        bigworld.entities[44] = object()
+        self.assertFalse(state.present_hit_impulse(direction, 0.75))
+
+        receive_impulse.assert_called_once_with(direction, 0.75)
+
     def test_native_siege_authority_uses_hydraulic_body_and_ground_chassis(self):
         runtime = _runtime()
         native_body = _Matrix()
@@ -10382,6 +10411,106 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([10, 9], [
             value['eventType']
             for value in battle._avatar.battle_events[0]])
+
+    def test_direct_remote_hits_use_the_stock_target_impulse(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = mock.Mock()
+        battle._remote_factory.get.side_effect = runtime.bigworld.entity
+        battle._remote_factory.present_hit_impulse.return_value = True
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 0.75
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'state': {'health': 500, 'alive': True},
+            'spot_visible': True, 'native_remote': True,
+            'kind': 'bot', 'network_id': 1, 'local': False}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        for shot_result in (0, 1, 2):
+            event = {
+                'kind': 'bot_bot_hit', 'world_pose': True,
+                'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                'shot_result': shot_result, 'damage': 40,
+                'source': 'shot'}
+
+            self.assertTrue(battle._present_combat_hit(
+                event, target_record, attacker_record, 11))
+
+        self.assertEqual(
+            3, battle._remote_factory.present_hit_impulse.call_count)
+        for call in battle._remote_factory.present_hit_impulse.call_args_list:
+            engine_id, direction, impulse = call.args
+            self.assertEqual(10, engine_id)
+            self.assertEqual(0.75, impulse)
+            self.assertAlmostEqual(-1.0, direction.x)
+            self.assertAlmostEqual(0.0, direction.y)
+            self.assertAlmostEqual(0.0, direction.z)
+
+    def test_remote_hit_reaction_skips_splash_local_and_dead_targets(self):
+        battle = BattleRuntime(_runtime())
+        battle._remote_factory = mock.Mock()
+        record = {
+            'engine_id': 10, 'state': {'health': 500, 'alive': True},
+            'native_remote': True, 'local': False}
+        direction = _Vector(1.0, 0.0, 0.0)
+        effects_descr = {'targetImpulse': 0.75}
+
+        self.assertFalse(battle._present_remote_hit_reaction(
+            {'splash': True}, record, direction, effects_descr))
+        local_record = dict(record, local=True)
+        self.assertFalse(battle._present_remote_hit_reaction(
+            {}, local_record, direction, effects_descr))
+        dead_record = dict(record, state={'health': 0, 'alive': False})
+        self.assertFalse(battle._present_remote_hit_reaction(
+            {'dead': True}, dead_record, direction, effects_descr))
+
+        battle._remote_factory.present_hit_impulse.assert_not_called()
+
+    def test_remote_hit_reaction_failure_does_not_disable_impact_effects(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = mock.Mock()
+        battle._remote_factory.get.side_effect = runtime.bigworld.entity
+        battle._remote_factory.present_hit_impulse.side_effect = \
+            RuntimeError('native reaction failed')
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 0.75
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'state': {'health': 500, 'alive': True},
+            'spot_visible': True, 'native_remote': True,
+            'kind': 'bot', 'network_id': 1, 'local': False}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        event = {
+            'kind': 'bot_bot_hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 40, 'source': 'shot'}
+
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+
+        self.assertEqual(
+            1, battle._remote_factory.present_hit_impulse.call_count)
+        self.assertEqual(2, battle._avatar.terrainEffects.addNew.call_count)
+        self.assertIn(
+            'projectile vehicle hit impulse',
+            battle._disabled_optional_features)
 
     def test_native_impact_effect_exception_keeps_nonvisual_feedback(self):
         runtime = _runtime()

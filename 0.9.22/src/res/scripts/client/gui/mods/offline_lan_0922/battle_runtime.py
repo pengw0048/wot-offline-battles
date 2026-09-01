@@ -8096,6 +8096,24 @@ class BattleRuntime(object):
             return False
         return True
 
+    def _present_remote_hit_reaction(self, event, target_record, direction,
+                                     effects_descr):
+        """Pass one direct-hit impulse through the native entity owner."""
+        state = target_record.get('state') or {}
+        if (event.get('splash', False) or event.get('dead', False) or
+                target_record.get('local') or
+                not target_record.get('native_remote') or
+                not bool(state.get('alive', True)) or
+                int(state.get('health', 1) or 0) <= 0):
+            return False
+        present = getattr(
+            self._remote_factory, 'present_hit_impulse', None)
+        if not callable(present):
+            return False
+        return present(
+            int(target_record['engine_id']), direction,
+            _field(effects_descr, 'targetImpulse', 0.0))
+
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
         """Port the mature 0.8.2 hit feedback through exact #1513 APIs."""
@@ -8191,6 +8209,10 @@ class BattleRuntime(object):
             self._warn_optional_failure(
                 'projectile impact presentation', error)
             return False
+        self._run_optional_feature(
+            'projectile vehicle hit impulse',
+            self._present_remote_hit_reaction,
+            (event, target_record, direction, effects_descr))
         return True
 
     _DECAL_REPORT_LIMIT = 32
