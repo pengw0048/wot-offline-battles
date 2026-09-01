@@ -47,7 +47,7 @@ from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
 from gui.mods.offline_lan_0922 import (
     ballistics, combat_rules, critical_damage, descriptor_donation,
     destructibles_compat, effective_params, equipment_mechanics, gun_mechanics,
-    hull_aiming, lan_client as lan_protocol,
+    hidden_worker_profiler, hull_aiming, lan_client as lan_protocol,
     loadout as loadout_law, prebaked_destructibles, prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision,
@@ -70,6 +70,9 @@ WORKER_NATIVE_PROBE_SECONDS = 5.0
 DIAGNOSTIC_INITIAL_WINDOW_SECONDS = 5.0
 DIAGNOSTIC_WINDOW_SECONDS = 30.0
 DIAGNOSTIC_TOP_FRAMES = 3
+DIAGNOSTIC_NATIVE_TRACE_SAMPLES = 32
+DIAGNOSTIC_NATIVE_TRACE_LOG_SAMPLES = 8
+DIAGNOSTIC_SEGMENT_SAMPLES_PER_CATEGORY = 8
 # A normal 30-second window at 60-120 FPS fits entirely. Pathological high
 # frame rates retain only the latest bounded sample set while exact maxima and
 # threshold counts still cover the complete window.
@@ -288,15 +291,6 @@ def _underlying_function(value):
     return getattr(value, 'im_func', getattr(value, '__func__', value))
 
 
-def _format_xyz(value):
-    """Render a Vector3 or a 3-sequence compactly for a diagnostic line."""
-    try:
-        x, y, z = _xyz(value)
-        return '(%.1f, %.1f, %.1f)' % (x, y, z)
-    except Exception:
-        return repr(value)
-
-
 _PORT_PACKAGE = 'gui.mods.offline_lan_0922'
 # Sizing these adds nothing and walking a string character by character is slow.
 _ATOMIC_TYPES = (bool, float, complex, bytes, bytearray)
@@ -457,6 +451,30 @@ class _FrameDiagnostics(object):
             (name, 0.0) for name in _PROJECTILE_METRIC_NAMES)
         self._projectile_maxima = dict(
             (name, 0.0) for name in _PROJECTILE_METRIC_NAMES)
+        self._native_profile_measured = False
+        self._native_profile_samples = 0
+        self._native_profile_elapsed = 0.0
+        self._native_query_sums = {}
+        self._native_query_maxima = {}
+        self._offframe_native_query_sums = {}
+        self._offframe_native_query_maxima = {}
+        self._python_detail_sums = {}
+        self._python_detail_maxima = {}
+        self._offframe_python_detail_sums = {}
+        self._offframe_python_detail_maxima = {}
+        self._native_frame_totals = {
+            'calls': 0, 'calls_max': 0, 'seconds': 0.0,
+            'seconds_max': 0.0, 'failures': 0}
+        self._offframe_native_frame_totals = {
+            'calls': 0, 'calls_max': 0, 'seconds': 0.0,
+            'seconds_max': 0.0, 'failures': 0}
+        self._native_trace = []
+        self._segment_samples = {}
+        self._segment_samples_seen = {}
+        self._profiler_mode = 'off'
+        self._profiler_clock_reads = 0
+        self._profiler_clock_read_estimate_ns = None
+        self._profiler_mode_frames = {}
         self._slow = []
         self._over_50 = 0
         self._over_67 = 0
@@ -472,7 +490,8 @@ class _FrameDiagnostics(object):
         self._pending = None
         self._slow = []
 
-    def begin(self, entry_wall, raw_dt, offframe=0.0):
+    def begin(self, entry_wall, raw_dt, offframe=0.0,
+              detailed_offframe=None):
         """Seal the previous callback using this callback's entry interval.
 
         ``offframe`` is the time this port's other scheduled callbacks spent
@@ -494,6 +513,8 @@ class _FrameDiagnostics(object):
                     self._clock_regressions += 1
                 off = max(0.0, float(offframe))
                 row = dict(pending)
+                row['detailed_profile'] = self._merge_interval_profile(
+                    row.get('detailed_profile'), detailed_offframe)
                 row.update({
                     'next': frame_id,
                     'wall_gap': wall_gap,
@@ -507,6 +528,50 @@ class _FrameDiagnostics(object):
         except Exception:
             self._disable()
             return frame_id
+
+    @staticmethod
+    def _merge_interval_profile(profile, interval):
+        profile = dict(profile or {})
+        if not isinstance(interval, dict):
+            return profile
+        for bucket_name in ('offframe_native', 'offframe_python'):
+            source = interval.get(bucket_name)
+            if not isinstance(source, dict):
+                continue
+            target = dict(profile.get(bucket_name) or {})
+            for key, value in source.items():
+                try:
+                    calls = int(value[0])
+                    seconds = float(value[1])
+                    failures = int(value[2])
+                    old = target.get(key, (0, 0.0, 0))
+                    target[key] = (
+                        int(old[0]) + calls,
+                        float(old[1]) + seconds,
+                        int(old[2]) + failures)
+                except (IndexError, TypeError, ValueError, OverflowError):
+                    continue
+            profile[bucket_name] = target
+        for trace_name in ('trace', 'representative_trace'):
+            source = interval.get(trace_name)
+            if isinstance(source, (list, tuple)):
+                profile[trace_name] = tuple(
+                    profile.get(trace_name) or ()) + tuple(source)
+        try:
+            profile['clock_reads'] = (
+                int(profile.get('clock_reads', 0)) +
+                int(interval.get('clock_reads', 0)))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        if bool(interval.get('measured', False)):
+            profile['measured'] = True
+        for name in ('clock_read_estimate_ns', 'coverage',
+                     'filtered_segment_timing'):
+            if profile.get(name) is None and interval.get(name) is not None:
+                profile[name] = interval.get(name)
+        if profile.get('frame_ordinal') is None:
+            profile['frame_ordinal'] = interval.get('frame_ordinal')
+        return profile
 
     def _add(self, row):
         self._samples += 1
@@ -561,6 +626,47 @@ class _FrameDiagnostics(object):
             self._projectile_sums[name] += value
             self._projectile_maxima[name] = max(
                 self._projectile_maxima[name], value)
+        detailed = row.get('detailed_profile') or {}
+        self._add_profiler_mode_frame(detailed.get('mode'), row)
+        if bool(detailed.get('measured', False)):
+            self._native_profile_measured = True
+            self._native_profile_samples += 1
+            self._native_profile_elapsed += gap
+            self._profiler_mode = str(
+                detailed.get('mode') or self._profiler_mode)[:64]
+        try:
+            self._profiler_clock_reads += max(
+                0, int(detailed.get('clock_reads', 0)))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        try:
+            estimate = float(detailed.get('clock_read_estimate_ns'))
+            if not math.isnan(estimate) and not math.isinf(estimate):
+                self._profiler_clock_read_estimate_ns = max(0.0, estimate)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        native_frame = self._add_detailed_bucket(
+            detailed.get('native'), self._native_query_sums,
+            self._native_query_maxima)
+        offframe_native_frame = self._add_detailed_bucket(
+            detailed.get('offframe_native'),
+            self._offframe_native_query_sums,
+            self._offframe_native_query_maxima)
+        self._add_detailed_bucket(
+            detailed.get('python'), self._python_detail_sums,
+            self._python_detail_maxima)
+        self._add_detailed_bucket(
+            detailed.get('offframe_python'),
+            self._offframe_python_detail_sums,
+            self._offframe_python_detail_maxima)
+        if bool(detailed.get('measured', False)):
+            self._add_frame_totals(
+                self._native_frame_totals, native_frame)
+            self._add_frame_totals(
+                self._offframe_native_frame_totals,
+                offframe_native_frame)
+        self._add_native_trace(detailed.get('trace'))
+        self._add_segment_samples(detailed.get('representative_trace'))
         self._last_context = dict(row.get('context') or {})
         score = (gap, execution)
         inserted = False
@@ -575,6 +681,117 @@ class _FrameDiagnostics(object):
             del self._slow[DIAGNOSTIC_TOP_FRAMES:]
         if self._window_elapsed >= self._window_seconds:
             self._emit_due = True
+
+    @staticmethod
+    def _add_detailed_bucket(source, sums, maxima):
+        frame = [0, 0.0, 0]
+        if not isinstance(source, dict):
+            return tuple(frame)
+        for key, value in source.items():
+            try:
+                calls = max(0, int(value[0]))
+                seconds = max(0.0, float(value[1]))
+                failures = max(0, int(value[2]))
+            except (IndexError, TypeError, ValueError, OverflowError):
+                continue
+            if (math.isnan(seconds) or math.isinf(seconds) or
+                    len(str(key)) > 96):
+                continue
+            key = str(key)
+            total = sums.get(key)
+            if total is None:
+                total = [0, 0.0, 0]
+                sums[key] = total
+            total[0] += calls
+            total[1] += seconds
+            total[2] += failures
+            maximum = maxima.get(key)
+            if maximum is None:
+                maximum = [0, 0.0]
+                maxima[key] = maximum
+            maximum[0] = max(maximum[0], calls)
+            maximum[1] = max(maximum[1], seconds)
+            frame[0] += calls
+            frame[1] += seconds
+            frame[2] += failures
+        return tuple(frame)
+
+    @staticmethod
+    def _add_frame_totals(stats, frame):
+        calls, seconds, failures = frame
+        stats['calls'] += calls
+        stats['calls_max'] = max(stats['calls_max'], calls)
+        stats['seconds'] += seconds
+        stats['seconds_max'] = max(stats['seconds_max'], seconds)
+        stats['failures'] += failures
+
+    def _add_profiler_mode_frame(self, mode, row):
+        mode = str(mode or 'off')[:64]
+        if mode == 'off':
+            return
+        stats = self._profiler_mode_frames.get(mode)
+        if stats is None:
+            stats = {
+                'samples': 0,
+                'gap_sum': 0.0,
+                'gap_max': 0.0,
+                'exec_sum': 0.0,
+                'exec_max': 0.0,
+                'gap_samples': collections.deque(
+                    maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES),
+                'exec_samples': collections.deque(
+                    maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES),
+            }
+            self._profiler_mode_frames[mode] = stats
+        gap = max(0.0, float(row.get('wall_gap', 0.0)))
+        execution = max(0.0, float(row.get('exec', 0.0)))
+        stats['samples'] += 1
+        stats['gap_sum'] += gap
+        stats['gap_max'] = max(stats['gap_max'], gap)
+        stats['exec_sum'] += execution
+        stats['exec_max'] = max(stats['exec_max'], execution)
+        stats['gap_samples'].append(gap)
+        stats['exec_samples'].append(execution)
+
+    def _add_native_trace(self, rows):
+        if not isinstance(rows, (list, tuple)):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                elapsed = max(0.0, float(row.get('elapsed_ms', 0.0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isnan(elapsed) or math.isinf(elapsed):
+                continue
+            copied = dict(row)
+            copied['elapsed_ms'] = elapsed
+            self._native_trace.append(copied)
+        self._native_trace.sort(
+            key=lambda value: value.get('elapsed_ms', 0.0), reverse=True)
+        del self._native_trace[DIAGNOSTIC_NATIVE_TRACE_SAMPLES:]
+
+    def _add_segment_samples(self, rows):
+        if not isinstance(rows, (list, tuple)):
+            return
+        for row in rows:
+            if (not isinstance(row, dict) or
+                    row.get('api') != 'wg_collideSegment'):
+                continue
+            category = str(row.get('category', 'other'))[:48]
+            seen = self._segment_samples_seen.get(category, 0) + 1
+            self._segment_samples_seen[category] = seen
+            bucket = self._segment_samples.setdefault(category, [])
+            copied = dict(row)
+            if len(bucket) < DIAGNOSTIC_SEGMENT_SAMPLES_PER_CATEGORY:
+                bucket.append(copied)
+                continue
+            # Deterministic reservoir sampling avoids depending on gameplay's
+            # random stream and rotates beyond the first vehicles in a cohort.
+            replacement = ((seen * 1103515245 + 12345) & 0x7fffffff) % seen
+            if replacement < DIAGNOSTIC_SEGMENT_SAMPLES_PER_CATEGORY:
+                bucket[replacement] = copied
 
     def emit_due(self):
         """Whether the next end() closes the window."""
@@ -631,13 +848,83 @@ class _FrameDiagnostics(object):
             'max': self._milliseconds(exact_maximum),
         }
 
+    def _detailed_snapshot(self, sums, maxima, samples, elapsed):
+        result = {}
+        for key in sorted(sums):
+            total = sums[key]
+            maximum = maxima.get(key, (0, 0.0))
+            result[key] = {
+                'calls': int(total[0]),
+                'calls_per_second': float(total[0]) / elapsed,
+                'calls_per_frame_avg': float(total[0]) / samples,
+                'calls_per_frame_max': int(maximum[0]),
+                'failures': int(total[2]),
+                'timed_ms_total': self._milliseconds(total[1]),
+                'timed_ms_per_second': self._milliseconds(
+                    total[1] / elapsed),
+                'timed_ms_per_frame_avg': self._milliseconds(
+                    total[1] / samples),
+                'timed_ms_per_frame_max': self._milliseconds(maximum[1]),
+            }
+        return result
+
+    def _native_frame_total_snapshot(self, stats, samples, elapsed):
+        return {
+            'timing_frames': self._native_profile_samples,
+            'timing_seconds': self._native_profile_elapsed,
+            'calls': int(stats['calls']),
+            'calls_per_second': float(stats['calls']) / elapsed,
+            'calls_per_timed_frame_avg': float(stats['calls']) / samples,
+            'calls_per_timed_frame_max': int(stats['calls_max']),
+            'failures': int(stats['failures']),
+            'timed_ms_total': self._milliseconds(stats['seconds']),
+            'timed_ms_per_second': self._milliseconds(
+                stats['seconds'] / elapsed),
+            'timed_ms_per_timed_frame_avg': self._milliseconds(
+                stats['seconds'] / samples),
+            'timed_ms_per_timed_frame_max': self._milliseconds(
+                stats['seconds_max']),
+        }
+
+    def _profiler_ab_snapshot(self):
+        result = {}
+        for mode, stats in sorted(self._profiler_mode_frames.items()):
+            samples = max(1, stats['samples'])
+            result[mode] = {
+                'samples': stats['samples'],
+                'frame_interval_ms': self._distribution(
+                    stats['gap_samples'], stats['gap_max']),
+                'python_callback_ms': self._distribution(
+                    stats['exec_samples'], stats['exec_max']),
+                'frame_interval_avg_ms': self._milliseconds(
+                    stats['gap_sum'] / samples),
+                'python_callback_avg_ms': self._milliseconds(
+                    stats['exec_sum'] / samples),
+            }
+        return result
+
     def snapshot(self):
         """Return the most recently completed bounded performance window."""
         return dict(self._last_snapshot)
 
+    def compact_snapshot(self):
+        """Return status-safe window metrics without replay endpoints."""
+        result = self.snapshot()
+        if not result:
+            return {}
+        native_trace = result.pop('native_trace', ())
+        representative = result.pop('representative_segment_trace', {})
+        result['native_trace_omitted_from_status'] = len(native_trace)
+        result['representative_trace_omitted_from_status'] = dict(
+            (str(category), len(rows))
+            for category, rows in representative.items())
+        return result
+
     def _format(self):
         samples = max(1, self._samples)
         elapsed = max(1e-9, self._window_elapsed)
+        timing_samples = max(1, self._native_profile_samples)
+        timing_elapsed = max(1e-9, self._native_profile_elapsed)
         context = self._last_context
         self._window_id += 1
         gap_distribution = self._distribution(
@@ -671,7 +958,7 @@ class _FrameDiagnostics(object):
                     self._probe_duration_maxima[name]),
             }
         self._last_snapshot = {
-            'schema': 1,
+            'schema': 2,
             'window': self._window_id,
             'round': context.get('round', '-'),
             'map': context.get('map', '-'),
@@ -688,9 +975,62 @@ class _FrameDiagnostics(object):
             'python_callback_ms': exec_distribution,
             'outside_callback_ms': outside_distribution,
             'python_stages_ms': stage_snapshot,
-            # One logical probe can contain several native calls. The current
-            # Python boundary cannot truthfully derive raw call/primitives.
-            'raw_native_calls_measured': False,
+            'raw_native_calls_measured': self._native_profile_measured,
+            'native_timing_frames': self._native_profile_samples,
+            'native_timing_seconds': self._native_profile_elapsed,
+            'native_queries': self._detailed_snapshot(
+                self._native_query_sums, self._native_query_maxima,
+                timing_samples, timing_elapsed),
+            'offframe_native_queries': self._detailed_snapshot(
+                self._offframe_native_query_sums,
+                self._offframe_native_query_maxima,
+                timing_samples, timing_elapsed),
+            'native_frame_totals': self._native_frame_total_snapshot(
+                self._native_frame_totals, timing_samples, timing_elapsed),
+            'offframe_native_frame_totals': (
+                self._native_frame_total_snapshot(
+                    self._offframe_native_frame_totals,
+                    timing_samples, timing_elapsed)),
+            'python_detail': self._detailed_snapshot(
+                self._python_detail_sums, self._python_detail_maxima,
+                timing_samples, timing_elapsed),
+            'offframe_python_detail': self._detailed_snapshot(
+                self._offframe_python_detail_sums,
+                self._offframe_python_detail_maxima,
+                timing_samples, timing_elapsed),
+            'python_detail_semantics': (
+                'inclusive_of_nested_native_do_not_sum'),
+            'native_trace': tuple(self._native_trace),
+            'representative_segment_trace': dict(
+                (category, tuple(rows))
+                for category, rows in sorted(self._segment_samples.items())),
+            'profiler': {
+                'mode': self._profiler_mode,
+                'clock_reads': self._profiler_clock_reads,
+                'clock_reads_per_second': (
+                    self._profiler_clock_reads / timing_elapsed),
+                'timing_frames': self._native_profile_samples,
+                'timing_seconds': self._native_profile_elapsed,
+                'clock_read_estimate_ns': (
+                    self._profiler_clock_read_estimate_ns),
+                'clock_read_estimate_kind': (
+                    'upper_bound_including_python_loop'),
+                'estimated_clock_overhead_ms': (
+                    None if self._profiler_clock_read_estimate_ns is None else
+                    self._profiler_clock_reads *
+                    self._profiler_clock_read_estimate_ns / 1000000.0),
+                'trace_sampling': 'first+periodic/256 then reservoir/8',
+                'coverage': 'reviewed_hidden_worker_call_sites_only',
+                'filtered_segment_timing': (
+                    'native_boundary_including_python_filter'),
+                'ab_cycle': (
+                    '30s full timing / 5s wrapper-only baseline'),
+                'ab_interpretation': (
+                    'observational timing comparison of full '
+                    'instrumentation and wrapper branch; not a causal or '
+                    'unmodified-client baseline'),
+                'ab_frames': self._profiler_ab_snapshot(),
+            },
             'logical_native_probes': probe_snapshot,
             'worker_runtime': dict(self._worker_runtime),
             'over_50_67_100': (
@@ -701,7 +1041,7 @@ class _FrameDiagnostics(object):
         prefix = '[Offline LAN 0.9.22] PERF '
         lines = [
             (prefix +
-             'summary v=3 window=%d round=%s map=%s phase=%s role=%s '
+             'summary v=4 window=%d round=%s map=%s phase=%s role=%s '
              'probe_timing=%s '
              'samples=%d seconds=%.3f fps=%.2f authority_frames=%d '
              'gap_ms_avg_max=%.3f/%.3f raw_dt_ms_avg_max=%.3f/%.3f '
@@ -832,6 +1172,98 @@ class _FrameDiagnostics(object):
                 self._milliseconds(self._probe_duration_sums[name])))
         lines.append(prefix + 'logical_probe_ms_per_s_total ' +
                      ' '.join(probe_duration_rate_values) + '\n')
+        estimated_clock_ms = (
+            '-' if self._profiler_clock_read_estimate_ns is None else
+            '%.3f' % (self._profiler_clock_reads *
+                       self._profiler_clock_read_estimate_ns / 1000000.0))
+        lines.append(
+            (prefix +
+             'profiler mode=%s clock_reads=%d clock_reads_hz=%.2f '
+             'clock_read_upper_bound_ns=%s '
+             'estimated_clock_overhead_upper_bound_ms=%s '
+             'trace_sampling=first+periodic/256_then_reservoir/8 '
+             'coverage=reviewed_hidden_worker_call_sites_only '
+             'filtered_segment_timing=includes_python_filter '
+             'ab_cycle=30s_full_timing/5s_wrapper_only_baseline '
+             'ab_scope=observational_not_causal_or_unmodified\n') % (
+                 self._profiler_mode, self._profiler_clock_reads,
+                 self._profiler_clock_reads / timing_elapsed,
+                 ('-' if self._profiler_clock_read_estimate_ns is None else
+                  '%.1f' % self._profiler_clock_read_estimate_ns),
+                 estimated_clock_ms))
+        for mode, stats in sorted(self._profiler_mode_frames.items()):
+            mode_samples = max(1, stats['samples'])
+            gap = self._distribution(
+                stats['gap_samples'], stats['gap_max'])
+            execution = self._distribution(
+                stats['exec_samples'], stats['exec_max'])
+            lines.append(
+                (prefix +
+                 'profiler_ab mode=%s samples=%d gap_ms_avg_p50_p95_max='
+                 '%.3f/%.3f/%.3f/%.3f python_ms_avg_p50_p95_max='
+                 '%.3f/%.3f/%.3f/%.3f\n') % (
+                     mode, stats['samples'],
+                     self._milliseconds(stats['gap_sum'] / mode_samples),
+                     gap['p50'], gap['p95'], gap['max'],
+                     self._milliseconds(stats['exec_sum'] / mode_samples),
+                     execution['p50'], execution['p95'], execution['max']))
+        for label, sums, maxima in (
+                ('native', self._native_query_sums,
+                 self._native_query_maxima),
+                ('native_offframe', self._offframe_native_query_sums,
+                 self._offframe_native_query_maxima)):
+            call_values = []
+            timing_values = []
+            for name in sorted(sums):
+                total = sums[name]
+                maximum = maxima.get(name, (0, 0.0))
+                call_values.append('%s=%.2f/%d/%d/%d' % (
+                    name, total[0] / timing_elapsed,
+                    total[0], maximum[0],
+                    total[2]))
+                timing_values.append('%s=%.3f/%.3f/%.3f' % (
+                    name, self._milliseconds(total[1] / timing_elapsed),
+                    self._milliseconds(total[1]),
+                    self._milliseconds(maximum[1])))
+            lines.append(prefix + label + '_calls_hz_total_max_fail ' +
+                         (' '.join(call_values) or 'none') + '\n')
+            lines.append(prefix + label + '_ms_per_s_total_max_frame ' +
+                         (' '.join(timing_values) or 'none') + '\n')
+        for label, stats in (
+                ('native_frame_total', self._native_frame_totals),
+                ('native_offframe_frame_total',
+                 self._offframe_native_frame_totals)):
+            lines.append(
+                (prefix +
+                 '%s timing_frames_seconds=%d/%.3f '
+                 'calls_hz_total_avg_max_fail=%.2f/%d/%.2f/%d/%d '
+                 'ms_per_s_total_avg_max=%.3f/%.3f/%.3f/%.3f\n') % (
+                     label, self._native_profile_samples,
+                     self._native_profile_elapsed,
+                     stats['calls'] / timing_elapsed, stats['calls'],
+                     float(stats['calls']) / timing_samples,
+                     stats['calls_max'], stats['failures'],
+                     self._milliseconds(stats['seconds'] / timing_elapsed),
+                     self._milliseconds(stats['seconds']),
+                     self._milliseconds(stats['seconds'] / timing_samples),
+                     self._milliseconds(stats['seconds_max'])))
+        for label, sums, maxima in (
+                ('python_detail', self._python_detail_sums,
+                 self._python_detail_maxima),
+                ('python_detail_offframe',
+                 self._offframe_python_detail_sums,
+                 self._offframe_python_detail_maxima)):
+            values = []
+            for name in sorted(sums):
+                total = sums[name]
+                maximum = maxima.get(name, (0, 0.0))
+                values.append('%s=%.3f/%.3f/%.3f/%d' % (
+                    name, self._milliseconds(total[1] / timing_samples),
+                    self._milliseconds(total[1] / timing_elapsed),
+                    self._milliseconds(maximum[1]), total[2]))
+            lines.append(prefix + label +
+                         '_inclusive_ms_avg_per_s_max_fail ' +
+                         (' '.join(values) or 'none') + '\n')
         lines.append(
             (prefix +
              'projectile_avg_max active=%.2f/%.0f chords=%.2f/%.0f '
@@ -854,15 +1286,62 @@ class _FrameDiagnostics(object):
                  self._projectile_maxima['scans'],
                  self._projectile_sums['candidates'] / samples,
                  self._projectile_maxima['candidates']))
+        for rank, trace in enumerate(
+                self._native_trace[:DIAGNOSTIC_NATIVE_TRACE_LOG_SAMPLES], 1):
+            result = trace.get('result') or {}
+            lines.append(
+                (prefix +
+                 'native_trace rank=%d category=%s api=%s ms=%.3f '
+                 'profiler_frame=%s '
+                 'map=%s round=%s destr_rev=%s foliage_rev=%s '
+                 'replay_candidate=%d replayable=%d filter_free=%d '
+                 'filtered=%d space=%s mask=%s '
+                 'start=%s end=%s hit=%s point=%s normal=%s material=%s '
+                 'failed=%d\n') % (
+                     rank, trace.get('category', '-'),
+                     trace.get('api', '-'),
+                     float(trace.get('elapsed_ms', 0.0)),
+                     trace.get('profiler_frame', '-'),
+                     trace.get('map', '-'), trace.get('round', '-'),
+                     trace.get('destructible_revision', '-'),
+                     trace.get('foliage_revision', '-'),
+                     int(bool(trace.get('replay_candidate', False))),
+                     int(bool(trace.get('replayable', False))),
+                     int(bool(trace.get('filter_free', False))),
+                     int(bool(trace.get('filtered', False))),
+                     trace.get('space_id', '-'), trace.get('mask', '-'),
+                     trace.get('start', '-'), trace.get('end', '-'),
+                     result.get('hit', '-'), result.get('point', '-'),
+                     result.get('normal', '-'), result.get('material', '-'),
+                     int(bool(trace.get('failed', False)))))
+        for category in sorted(self._segment_samples):
+            samples_for_category = self._segment_samples[category]
+            encoded = []
+            for trace in samples_for_category[:2]:
+                result = trace.get('result') or {}
+                encoded.append('%s|%.3f|%s/%s|%s>%s|%s|%s' % (
+                    trace.get('sample_ordinal', '-'),
+                    float(trace.get('elapsed_ms', 0.0)),
+                    trace.get('destructible_revision', '-'),
+                    trace.get('foliage_revision', '-'),
+                    trace.get('start', '-'), trace.get('end', '-'),
+                    result.get('hit', '-'), result.get('material', '-')))
+            lines.append(
+                prefix + 'segment_samples category=%s seen=%d rows=%s\n' % (
+                    category,
+                    self._segment_samples_seen.get(category, 0),
+                    ';'.join(encoded) or 'none'))
         for rank, row in enumerate(self._slow, 1):
             stages = row['stages']
             probes = row['probes']
             probe_durations = row.get('probe_durations', {})
             projectile = row.get('projectile') or {}
+            detailed = row.get('detailed_profile') or {}
             context = row.get('context') or {}
             lines.append(
                 (prefix +
-                 'slow rank=%d cause=%d next=%d gap_ms=%.3f '
+                 'slow rank=%d cause=%d next=%d profiler_frame=%s '
+                 'profiler_mode=%s gap_ms=%.3f '
                  'raw_dt_ms=%.3f bw_minus_wall_ms=%.3f '
                  'prev_exec_ms=%.3f outside_ms=%.3f '
                  'cause_tick_ms=%.3f cause_motion_ms=%.3f '
@@ -870,8 +1349,12 @@ class _FrameDiagnostics(object):
                  'airborne=%d grind=%d bots=%d outgoing=%d '
                  'transition=%d prev_emit=%d '
                  'projectile=%s stages_ms=%s logical_probes=%s '
-                 'logical_probe_ms=%s\n') % (
+                 'logical_probe_ms=%s raw_native=%s '
+                 'raw_native_offframe=%s python_detail_inclusive=%s '
+                 'python_detail_offframe_inclusive=%s\n') % (
                      rank, row['cause'], row['next'],
+                     detailed.get('frame_ordinal', '-'),
+                     detailed.get('mode', 'off'),
                      self._milliseconds(row['wall_gap']),
                      row['raw_dt'] * 1000.0,
                      row['bw_minus_wall'] * 1000.0,
@@ -908,11 +1391,34 @@ class _FrameDiagnostics(object):
                      ','.join('%s:%.3f' % (
                          name, self._milliseconds(
                              probe_durations.get(name, 0.0)))
-                              for name in PROBE_KINDS)))
+                              for name in PROBE_KINDS),
+                     ','.join('%s:%d/%.3f' % (
+                         name, int(value[0]), self._milliseconds(value[1]))
+                              for name, value in sorted(
+                                  (detailed.get('native') or {}).items())) or
+                     'none',
+                     ','.join('%s:%d/%.3f' % (
+                         name, int(value[0]), self._milliseconds(value[1]))
+                              for name, value in sorted(
+                                  (detailed.get(
+                                      'offframe_native') or {}).items())) or
+                     'none',
+                     ','.join('%s:%d/%.3f' % (
+                         name, int(value[0]), self._milliseconds(value[1]))
+                              for name, value in sorted(
+                                  (detailed.get('python') or {}).items())) or
+                     'none',
+                     ','.join('%s:%d/%.3f' % (
+                         name, int(value[0]), self._milliseconds(value[1]))
+                              for name, value in sorted(
+                                  (detailed.get(
+                                      'offframe_python') or {}).items())) or
+                     'none'))
         return ''.join(lines)
 
     def finish(self, frame_id, entry_wall, tick_dt, motion_dt, stages,
-               probes, context, probe_durations=None, projectile=None):
+               probes, context, probe_durations=None, projectile=None,
+               detailed_profile=None):
         if not self.enabled:
             return
         try:
@@ -938,6 +1444,7 @@ class _FrameDiagnostics(object):
                 'stages': stages, 'probes': probes,
                 'probe_durations': dict(probe_durations or {}),
                 'projectile': dict(projectile or {}),
+                'detailed_profile': dict(detailed_profile or {}),
                 'context': dict(context or {}), 'emitted': emitted,
             }
         except Exception:
@@ -1647,6 +2154,8 @@ class BattleRuntime(object):
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}
+        self._profiler_destructible_revision = 0
+        self._profiler_foliage_revision = 0
         self._projectiles = None
         self._projectile_meta = {}
         self._projectile_visual_meta = {}
@@ -1689,6 +2198,9 @@ class BattleRuntime(object):
         self._runtime = self._runtime or _load_runtime()
         self._config = dict(config or {})
         self._worker_mode = bool(self._config.get('worker_mode', False))
+        hidden_worker_profiler.reset()
+        self._profiler_destructible_revision = 0
+        self._profiler_foliage_revision = 0
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False
             self._config['bot_track_animation'] = False
@@ -4286,9 +4798,13 @@ class BattleRuntime(object):
     def _collide_down(self, start, end, ground_filter):
         """Vertical probe that skips the skin of an already broken item."""
         if ground_filter is None:
-            return self._runtime.bigworld.wg_collideSegment(
+            return hidden_worker_profiler.native_call(
+                'ground', 'wg_collideSegment',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID, start, end, 128)
-        return self._runtime.bigworld.wg_collideSegment(
+        return hidden_worker_profiler.native_call(
+            'ground', 'wg_collideSegment',
+            self._runtime.bigworld.wg_collideSegment,
             self._avatar.spaceID, start, end, 128, ground_filter)
 
     def _ground_y(self, x, z, hint=0.0, allow_wide=False):
@@ -4461,7 +4977,9 @@ class BattleRuntime(object):
             probe_up = max(4.5, run * 0.52)
             probe_down = max(5.0, run * 0.45)
             try:
-                ground = self._runtime.bigworld.wg_collideSegment(
+                ground = hidden_worker_profiler.native_call(
+                    'motion_direction', 'wg_collideSegment',
+                    self._runtime.bigworld.wg_collideSegment,
                     self._avatar.spaceID,
                     self._vector((nx, previous_y + probe_up, nz)),
                     self._vector((nx, previous_y - probe_down, nz)), 128)
@@ -4496,7 +5014,9 @@ class BattleRuntime(object):
                     nx + lateral_x * offset, next_y + height,
                     nz + lateral_z * offset))
                 try:
-                    collision = self._runtime.bigworld.wg_collideSegment(
+                    collision = hidden_worker_profiler.native_call(
+                        'motion_direction', 'wg_collideSegment',
+                        self._runtime.bigworld.wg_collideSegment,
                         self._avatar.spaceID, ray_start, ray_end, 128)
                 except Exception:
                     collision = True
@@ -4623,7 +5143,9 @@ class BattleRuntime(object):
                 ray_start = self._vector((sx, y + height, sz))
                 ray_end = self._vector((ex, y + height, ez))
                 try:
-                    collision = self._runtime.bigworld.wg_collideSegment(
+                    collision = hidden_worker_profiler.native_call(
+                        'motion_receipt', 'wg_collideSegment',
+                        self._runtime.bigworld.wg_collideSegment,
                         self._avatar.spaceID, ray_start, ray_end, 128)
                 except Exception:
                     return False
@@ -4665,7 +5187,9 @@ class BattleRuntime(object):
                 float(end[0]) + lateral_x * offset,
                 float(end[1]) + 0.9,
                 float(end[2]) + lateral_z * offset))
-            if self._runtime.bigworld.wg_collideSegment(
+            if hidden_worker_profiler.native_call(
+                    'navigation', 'wg_collideSegment',
+                    self._runtime.bigworld.wg_collideSegment,
                     self._avatar.spaceID, ray_start, ray_end, 128) is not None:
                 return True
         return False
@@ -4675,7 +5199,8 @@ class BattleRuntime(object):
         if not callable(collide):
             return -1.0
         try:
-            value = collide(
+            value = hidden_worker_profiler.native_call(
+                'water', 'wg_collideWater', collide,
                 self._vector((point[0], point[1] + 20.0, point[2])),
                 self._vector((point[0], point[1] - 5.0, point[2])), False)
         except Exception:
@@ -4711,7 +5236,8 @@ class BattleRuntime(object):
             end = self._vector((
                 float(point[0]), float(point[1]) + 0.1,
                 float(point[2])))
-            value = collide(start, end, False)
+            value = hidden_worker_profiler.native_call(
+                'water', 'wg_collideWater', collide, start, end, False)
             return value is not None and float(value) > 0.0
         except Exception:
             return True
@@ -4983,7 +5509,9 @@ class BattleRuntime(object):
                               observer[2]))
         for height in (1.5, 2.2):
             end = self._vector((target[0], target[1] + height, target[2]))
-            if self._runtime.bigworld.wg_collideSegment(
+            if hidden_worker_profiler.native_call(
+                    'cover', 'wg_collideSegment',
+                    self._runtime.bigworld.wg_collideSegment,
                     self._avatar.spaceID, start, end, 128) is None:
                 return True
         return False
@@ -7977,6 +8505,12 @@ class BattleRuntime(object):
         if kind == 'tree':
             foliage_changed = self._activate_fallen_tree_foliage(
                 chunk_id, item_index)
+        if not already_destroyed:
+            self._profiler_destructible_revision += 1
+        if foliage_changed:
+            self._profiler_foliage_revision += 1
+        hidden_worker_profiler.update_context(
+            self._hidden_worker_profile_context())
         if already_destroyed:
             return foliage_changed
         note_destroyed = getattr(
@@ -10966,7 +11500,9 @@ class BattleRuntime(object):
                 target, body_matrix, start, end, self._runtime.math,
                 chassis_matrix=chassis_matrix) or ())
             return (tuple(item.collision for item in evidence), evidence)
-        return (tuple(target.collideSegmentExt(start, end) or ()), ())
+        return (tuple(hidden_worker_profiler.category_call(
+            'projectile_vehicle',
+            target.collideSegmentExt, start, end) or ()), ())
 
     def _projectile_chord(self, state, start, end,
                           absolute_start, absolute_end):
@@ -11368,8 +11904,12 @@ class BattleRuntime(object):
             if (decoded_sticker != sticker_id or
                     decoded_start is None or decoded_end is None or
                     decoded_start == decoded_end or
-                    not callable(local_hit_test) or
-                    not local_hit_test(decoded_start, decoded_end)):
+                    not callable(local_hit_test)):
+                return None
+            sticker_hits = hidden_worker_profiler.native_call(
+                'projectile_vehicle', 'hitTester.localHitTest',
+                local_hit_test, decoded_start, decoded_end)
+            if not sticker_hits:
                 return None
             return encoded
         except Exception:
@@ -11557,8 +12097,9 @@ class BattleRuntime(object):
                         self._runtime.math,
                         chassis_matrix=chassis_matrix) or ())
                 else:
-                    collisions = tuple(
-                        target.collideSegmentExt(burst, aim) or ())
+                    collisions = tuple(hidden_worker_profiler.category_call(
+                        'projectile_vehicle',
+                        target.collideSegmentExt, burst, aim) or ())
                 nominal = combat_rules.he_nominal_armor(
                     collisions, target.typeDescriptor)
             except Exception:
@@ -11991,7 +12532,9 @@ class BattleRuntime(object):
             requested = set(token)
             unresolved = set(row for row in requested
                 if not destructibles_authority.is_destroyed(*row))
-            world_status = world_collision.check_horizontal_collision(
+            world_status = hidden_worker_profiler.python_call(
+                'destructible_contact',
+                world_collision.check_horizontal_collision,
                 self._runtime.bigworld, self._runtime.math,
                 self._avatar.spaceID, self._vector(position), yaw, speed,
                 descriptor, False, dt, True, True, kinetic_speed,
@@ -12215,7 +12758,8 @@ class BattleRuntime(object):
         diagnostic_totals = self._worker_diagnostic_totals()
         snapshot = self._last_snapshot or {}
         frame_performance = {}
-        frame_provider = getattr(self._frame_diagnostics, 'snapshot', None)
+        frame_provider = getattr(
+            self._frame_diagnostics, 'compact_snapshot', None)
         if callable(frame_provider):
             try:
                 frame_performance = frame_provider()
@@ -12245,6 +12789,22 @@ class BattleRuntime(object):
             },
             'frame_performance': frame_performance,
         }
+
+    def _hidden_worker_profile_context(self):
+        try:
+            destructible_revision = self._profiler_destructible_revision
+            revision_reader = getattr(
+                self._destructibles, '_spatial_revision_1513', None)
+            if callable(revision_reader):
+                destructible_revision = int(revision_reader())
+            return {
+                'round': (self._start_message or {}).get('round_id', '-'),
+                'map': (self._config or {}).get('map', '-'),
+                'destructible_revision': destructible_revision,
+                'foliage_revision': self._profiler_foliage_revision,
+            }
+        except Exception:
+            return {}
 
     def authority_worker_ready_for_draw_off(self):
         """Return true only after every native simulation model is ready.
@@ -12364,6 +12924,11 @@ class BattleRuntime(object):
         diagnostics = self._frame_diagnostics
         profiling = diagnostics is not None and diagnostics.enabled
         entry_wall = _PROFILE_CLOCK() if profiling else 0.0
+        profile_active = self._worker_mode and profiling
+        detailed_offframe = hidden_worker_profiler.begin_frame(
+            profile_active,
+            context=(self._hidden_worker_profile_context()
+                     if profile_active else None))
         now = self._clock()
         frame_start = self._last_frame_time
         raw_dt = (0.0 if frame_start is None else
@@ -12387,7 +12952,9 @@ class BattleRuntime(object):
         self._offframe_seconds = 0.0
         self._effect_reports = 0
         self._spotted_signature = None
-        frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe)
+        frame_id = (diagnostics.begin(
+            entry_wall, raw_dt, offframe,
+            detailed_offframe=detailed_offframe)
                     if profiling else 0)
         stages = {}
         probes = dict((name, 0) for name in PROBE_KINDS)
@@ -12397,6 +12964,7 @@ class BattleRuntime(object):
         outgoing_messages = ()
         bot_count = 0
         projectile_perf = {}
+        detailed_profile = {}
         boundary = entry_wall
         try:
             self._run_optional_feature(
@@ -12406,7 +12974,8 @@ class BattleRuntime(object):
             self._flush_pending_bot_create(now)
             self._flush_pending_entities(now)
             self._drain_event_journal()
-            self._run_optional_feature(
+            hidden_worker_profiler.python_call(
+                'foliage_dynamic', self._run_optional_feature,
                 'foliage camouflage',
                 self._refresh_fallen_tree_foliage, (now,))
             self._retry_bot_manifest(now)
@@ -12545,8 +13114,13 @@ class BattleRuntime(object):
                 self._advance_artillery_arcs(now)
                 players = self._authority_players()
                 if self._worker_mode:
-                    self._scan_authority_player_trees(players, now)
-                    self._resolve_player_destructible_contacts(players, now)
+                    hidden_worker_profiler.python_call(
+                        'destructible_scan',
+                        self._scan_authority_player_trees, players, now)
+                    hidden_worker_profiler.python_call(
+                        'destructible_contact',
+                        self._resolve_player_destructible_contacts,
+                        players, now)
                 probe_totals = getattr(self._bots, 'probe_totals', None)
                 probe_duration_totals = getattr(
                     self._bots, 'probe_duration_totals', None)
@@ -12681,6 +13255,7 @@ class BattleRuntime(object):
                 stages['lock'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
         except Exception as error:
+            detailed_profile = hidden_worker_profiler.end_frame()
             self._fail(error)
             return
         schedule_start = _PROFILE_CLOCK() if profiling else 0.0
@@ -12738,6 +13313,7 @@ class BattleRuntime(object):
                         })
                     except Exception:
                         pass
+            detailed_profile = hidden_worker_profiler.end_frame()
             diagnostics.finish(
                 frame_id, entry_wall, tick_dt, dt, stages, probes, {
                     'round': (self._start_message or {}).get('round_id', '-'),
@@ -12755,7 +13331,8 @@ class BattleRuntime(object):
                     'grind': int(self._local_grind),
                     'transitioned': transitioned,
                 }, probe_durations=probe_durations,
-                projectile=projectile_perf)
+                projectile=projectile_perf,
+                detailed_profile=detailed_profile)
 
     def _mutable_shot_ray(self):
         """Copy #1513's native gun ray before normalising or scattering it."""
@@ -12862,10 +13439,13 @@ class BattleRuntime(object):
             if record.get('native_remote'):
                 collisions = collide_vehicle_at_matrix(
                     vehicle, vehicle.matrix, start, end,
-                    self._runtime.math)
+                    self._runtime.math,
+                    profiler_category='presentation')
             else:
                 collide = getattr(vehicle, 'collideSegmentExt', None)
-                collisions = collide(start, end) if callable(collide) else ()
+                collisions = (hidden_worker_profiler.category_call(
+                    'presentation',
+                    collide, start, end) if callable(collide) else ())
             if (collisions and min(float(item.dist) for item in collisions) +
                     _SHOT_OCCLUSION_EPSILON < target_depth):
                 return True
@@ -12946,13 +13526,16 @@ class BattleRuntime(object):
                 if record.get('native_remote'):
                     collisions = collide_vehicle_at_matrix(
                         vehicle, vehicle.matrix, start, end,
-                        self._runtime.math)
+                        self._runtime.math,
+                        profiler_category='presentation')
                     if collisions:
                         depth = min(float(item.dist) for item in collisions)
                 else:
                     collide = getattr(vehicle, 'collideSegmentExt', None)
                     if callable(collide):
-                        collisions = collide(start, end)
+                        collisions = hidden_worker_profiler.category_call(
+                            'presentation',
+                            collide, start, end)
                         if collisions:
                             depth = min(
                                 float(item.dist) for item in collisions)
@@ -12970,7 +13553,9 @@ class BattleRuntime(object):
                 chosen = engine_id
         if chosen is not None and chosen_depth is not None:
             target_end = start + direction.scale(chosen_depth)
-            world_hit = self._runtime.bigworld.wg_collideSegment(
+            world_hit = hidden_worker_profiler.native_call(
+                'presentation', 'wg_collideSegment',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID, start, target_end, 128)
             if (world_hit is not None and
                     (world_hit[0] - start).length +
@@ -13659,7 +14244,9 @@ class BattleRuntime(object):
                     predicted = bool(
                         token is not None and callable(predictor) and
                         predictor(token))
-                world_status = world_collision.check_horizontal_collision(
+                world_status = hidden_worker_profiler.python_call(
+                    'destructible_contact',
+                    world_collision.check_horizontal_collision,
                     self._runtime.bigworld, self._runtime.math,
                     self._avatar.spaceID, self._vector(position),
                     world_hull_yaw, speed,
@@ -13702,7 +14289,9 @@ class BattleRuntime(object):
                 # to the worker; the worker remains the sole owner of the
                 # irreversible map mutation and its canonical LAN event.
                 return True
-        world_status = world_collision.check_horizontal_collision(
+        world_status = hidden_worker_profiler.python_call(
+            'destructible_contact',
+            world_collision.check_horizontal_collision,
             self._runtime.bigworld, self._runtime.math,
             self._avatar.spaceID, self._vector(position),
             world_hull_yaw, speed,
@@ -13808,7 +14397,9 @@ class BattleRuntime(object):
             limit_name = 'speedBwd' if speed < 0.0 else 'speedFwd'
             kinetic_speed = (-float(params[limit_name]) if speed < 0.0 else
                              float(params[limit_name]))
-        world_status = world_collision.check_horizontal_collision(
+        world_status = hidden_worker_profiler.python_call(
+            'destructible_contact',
+            world_collision.check_horizontal_collision,
             self._runtime.bigworld, self._runtime.math,
             self._avatar.spaceID, pos, yaw, speed, descriptor, airborne, dt,
             True, allow_crush_drive, kinetic_speed,
@@ -13967,7 +14558,7 @@ class BattleRuntime(object):
             hit[2] + inward_normal[1] * center_depth))
         collisions = collide_vehicle_at_matrix(
             vehicle, matrix, start, end, self._runtime.math,
-            chassis_matrix=chassis_matrix)
+            chassis_matrix=chassis_matrix, profiler_category='ram')
         if not collisions:
             return None
         for collision in sorted(
@@ -15889,7 +16480,9 @@ class BattleRuntime(object):
                               source_position[2]))
         end = self._vector((target_position[0], target_position[1] + 1.5,
                             target_position[2]))
-        hit = self._runtime.bigworld.wg_collideSegment(
+        hit = hidden_worker_profiler.native_call(
+            'spotting', 'wg_collideSegment',
+            self._runtime.bigworld.wg_collideSegment,
             self._avatar.spaceID, start, end, 128)
         line_of_sight = bool(
             hit is None or
@@ -15933,7 +16526,9 @@ class BattleRuntime(object):
             if not segment:
                 return False
             start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
+            hit = hidden_worker_profiler.native_call(
+                'firing_lane', 'wg_collideSegment',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID,
                 self._vector(start), self._vector(end), 128)
             if hit is None:
@@ -16003,7 +16598,8 @@ class BattleRuntime(object):
                             collisions = collide_vehicle_at_matrix(
                                 vehicle, self._local_body_pose(), start, end,
                                 self._runtime.math,
-                                chassis_matrix=self._local_matrix)
+                                chassis_matrix=self._local_matrix,
+                                profiler_category='firing_lane')
                         elif record.get('native_remote'):
                             body_matrix, chassis_matrix = \
                                 self._projectile_vehicle_matrices(
@@ -16011,12 +16607,15 @@ class BattleRuntime(object):
                             collisions = collide_vehicle_at_matrix(
                                 vehicle, body_matrix, start, end,
                                 self._runtime.math,
-                                chassis_matrix=chassis_matrix)
+                                chassis_matrix=chassis_matrix,
+                                profiler_category='firing_lane')
                         else:
                             collide = getattr(
                                 vehicle, 'collideSegmentExt', None)
-                            collisions = (collide(start, end)
-                                          if callable(collide) else ())
+                            collisions = (hidden_worker_profiler.category_call(
+                                'firing_lane',
+                                collide, start, end)
+                                if callable(collide) else ())
                     except Exception:
                         return {'clear': False}
                     if collisions:
@@ -16103,8 +16702,7 @@ class BattleRuntime(object):
                 not getattr(source_entity, 'isStarted', False)):
             return None
         try:
-            gun_node = source_entity.model.node('HP_gunFire')
-            native = _xyz(self._runtime.math.Matrix(gun_node).translation)
+            native = self._native_muzzle_position(source_entity)
         except Exception:
             return None
         presented = source_record.get('projectile_collision_pose')
@@ -16128,6 +16726,20 @@ class BattleRuntime(object):
         """Read the same native muzzle used by the final SPG proof."""
         return self._bot_direct_launch_origin(
             source, descriptor, 0, 0, 0.0, 0.0, 0.0)
+
+    def _native_muzzle_position(self, entity):
+        """Read one exact model node and its native world transform."""
+        marker = hidden_worker_profiler.python_started('muzzle_transform')
+        failed = False
+        try:
+            gun_node = hidden_worker_profiler.native_call(
+                'muzzle', 'model.node', entity.model.node, 'HP_gunFire')
+            return _xyz(self._runtime.math.Matrix(gun_node).translation)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            hidden_worker_profiler.python_finished(marker, failed)
 
     def _bot_ballistic_solution(self, source, target, descriptor,
                                 shell_index, now):
@@ -16156,8 +16768,7 @@ class BattleRuntime(object):
                 getattr(entity, 'typeDescriptor', None) is None):
             return None
         try:
-            gun_node = entity.model.node('HP_gunFire')
-            origin = _xyz(self._runtime.math.Matrix(gun_node).translation)
+            origin = self._native_muzzle_position(entity)
         except Exception:
             # A logical pose is not a muzzle proof.  SPGs wait until the
             # native model exposes the exact launch transform.
@@ -16208,7 +16819,9 @@ class BattleRuntime(object):
 
     def _artillery_arc_probe(self, start, end):
         """Return the native world hit point, or None for one clear chord."""
-        hit = self._runtime.bigworld.wg_collideSegment(
+        hit = hidden_worker_profiler.native_call(
+            'artillery', 'wg_collideSegment',
+            self._runtime.bigworld.wg_collideSegment,
             self._avatar.spaceID, self._vector(start), self._vector(end), 128)
         if hit is None:
             return None
@@ -16800,9 +17413,7 @@ class BattleRuntime(object):
         source_position = _xyz(getattr(source, 'position', state))
         target_position = _xyz(getattr(
             target, 'position', target_record.get('state', {})))
-        gun_node = source.model.node('HP_gunFire')
-        start = self._vector(
-            self._runtime.math.Matrix(gun_node).translation)
+        start = self._vector(self._native_muzzle_position(source))
         destination = self._vector((
             target_position[0], target_position[1] + 1.2,
             target_position[2]))
@@ -16850,7 +17461,9 @@ class BattleRuntime(object):
                     candidate, body_matrix, start, end,
                     self._runtime.math, chassis_matrix=chassis_matrix)
             else:
-                candidate_collisions = candidate.collideSegmentExt(start, end)
+                candidate_collisions = hidden_worker_profiler.category_call(
+                    'projectile_vehicle',
+                    candidate.collideSegmentExt, start, end)
             if not candidate_collisions:
                 continue
             nearest = min(candidate_collisions,
@@ -17861,16 +18474,21 @@ class BattleRuntime(object):
             _field(gun, 'invisibilityFactorAtShot', 1.0), 0.0, 1.0)
 
     def _foliage_camouflage_bonus(self, observer, target, fired_recently):
-        if (self._foliage is None or not self._optional_feature_enabled(
-                'foliage camouflage')):
-            return 0.0
+        marker = hidden_worker_profiler.python_started('foliage_spotting')
+        failed = False
         try:
+            if (self._foliage is None or not self._optional_feature_enabled(
+                    'foliage camouflage')):
+                return 0.0
             return self._foliage.camouflage_bonus(
                 observer, target, fired_recently)
         except Exception as error:
+            failed = True
             self._foliage = None
             self._warn_optional_failure('foliage camouflage', error)
             return 0.0
+        finally:
+            hidden_worker_profiler.python_finished(marker, failed)
 
     def _activate_fallen_tree_foliage(self, chunk_id, item_index):
         if (self._foliage is None or not self._optional_feature_enabled(
@@ -17925,12 +18543,16 @@ class BattleRuntime(object):
         center, half_sizes = profile
         bigworld = self._runtime.bigworld
         math_module = self._runtime.math
-        chunk_matrix = bigworld.wg_getChunkMatrix(
+        chunk_matrix = hidden_worker_profiler.native_call(
+            'foliage_dynamic', 'wg_getChunkMatrix',
+            bigworld.wg_getChunkMatrix,
             self._avatar.spaceID, int(chunk_id))
         chunk_translation = getattr(chunk_matrix, 'translation', None)
         if chunk_translation is None:
             return None
-        matrix = math_module.Matrix(bigworld.wg_getDestructibleMatrix(
+        matrix = math_module.Matrix(hidden_worker_profiler.native_call(
+            'foliage_dynamic', 'wg_getDestructibleMatrix',
+            bigworld.wg_getDestructibleMatrix,
             self._avatar.spaceID, int(chunk_id), int(item_index)))
         local_center = self._vector(center)
         transformed_center = matrix.applyPoint(local_center)
@@ -18035,6 +18657,10 @@ class BattleRuntime(object):
             if stable_reads >= FALLEN_TREE_FOLIAGE_STABLE_READS:
                 settle(chunk_id, item_index)
                 self._fallen_tree_foliage_stable.pop(identity, None)
+        if changed:
+            self._profiler_foliage_revision += 1
+            hidden_worker_profiler.update_context(
+                self._hidden_worker_profile_context())
         return changed
 
     def _spot_line_of_sight(self, observer, target, target_descriptor,
@@ -18058,7 +18684,9 @@ class BattleRuntime(object):
             if not segment:
                 continue
             start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
+            hit = hidden_worker_profiler.native_call(
+                'spotting', 'wg_collideSegment',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID,
                 self._vector(start), self._vector(end), 128)
             if hit is None:
@@ -18834,7 +19462,9 @@ class BattleRuntime(object):
                     target, target.matrix, start, end,
                     self._runtime.math)
             else:
-                result = target.collideSegmentExt(start, end)
+                result = hidden_worker_profiler.category_call(
+                    'projectile_vehicle',
+                    target.collideSegmentExt, start, end)
             if not result:
                 continue
             nearest = min(result, key=lambda item: float(item.dist))
@@ -18919,7 +19549,9 @@ class BattleRuntime(object):
             0.0, _number(initial_piercing_loss, 0.0))
         distance_offset = max(0.0, _number(distance_offset, 0.0))
         if self._destructibles is None:
-            hit = self._runtime.bigworld.wg_collideSegment(
+            hit = hidden_worker_profiler.native_call(
+                'projectile_world', 'wg_collideSegment',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID, start, end, 128)
             return {
                 'world_distance': ((hit[0] - start).length
@@ -18932,7 +19564,9 @@ class BattleRuntime(object):
         piercing_loss = initial_piercing_loss
         for unused_index in range(64):
             cursor = start + direction.scale(travelled)
-            result = self._destructibles.shot_world_distance(
+            result = hidden_worker_profiler.python_call(
+                'destructible_projectile',
+                self._destructibles.shot_world_distance,
                 self._runtime.bigworld, self._avatar.spaceID,
                 cursor, end, direction, shot)
             if not isinstance(result, dict):
@@ -19041,8 +19675,10 @@ class BattleRuntime(object):
                         self._runtime.math,
                         chassis_matrix=chassis_matrix) or ())
                 else:
-                    collisions = tuple(
-                        target.collideSegmentExt(burst_position, aim) or ())
+                    collisions = tuple(hidden_worker_profiler.category_call(
+                        'projectile_vehicle',
+                        target.collideSegmentExt,
+                        burst_position, aim) or ())
                 nominal = combat_rules.he_nominal_armor(
                     collisions, target.typeDescriptor)
             except Exception:

@@ -42,7 +42,7 @@ def reset_pose_animation_writes():
     global _pose_object_allocations
     _pose_object_allocations = 0
 
-from gui.mods.offline_lan_0922 import tank_collision
+from gui.mods.offline_lan_0922 import hidden_worker_profiler, tank_collision
 
 try:
     _STRING_TYPES = (basestring,)
@@ -1093,7 +1093,8 @@ def encode_damage_sticker(vehicle, vehicle_matrix, start_point, end_point,
 
 def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
                                end_point, math_module, include_world_normal,
-                               chassis_matrix=None):
+                               chassis_matrix=None,
+                               profiler_category=None):
     """Run precise descriptor collision at supplied body/chassis matrices.
 
     #1513's native ``Vehicle.collideSegmentExt`` first rejects rays through
@@ -1122,6 +1123,9 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
         world_to_chassis.invert()
         chassis_start = world_to_chassis.applyPoint(start_point)
         chassis_end = world_to_chassis.applyPoint(end_point)
+    category = (hidden_worker_profiler.current_category(
+        'projectile_vehicle') if profiler_category is None else
+        profiler_category)
     hits = []
     for component_index, pair in enumerate(_pose_components(
             vehicle, math_module)):
@@ -1132,7 +1136,8 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
             continue
         start = chassis_start if component_index == 0 else body_start
         end = chassis_end if component_index == 0 else body_end
-        collisions = local_hit_test(
+        collisions = hidden_worker_profiler.native_call(
+            category, 'hitTester.localHitTest', local_hit_test,
             component_matrix.applyPoint(start),
             component_matrix.applyPoint(end))
         component_to_vehicle = None
@@ -1178,19 +1183,23 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
 
 def _collide_vehicle_evidence_at_matrix(vehicle, vehicle_matrix, start_point,
                                         end_point, math_module,
-                                        chassis_matrix=None):
+                                        chassis_matrix=None,
+                                        profiler_category='projectile_vehicle'):
     """Return world-normal evidence for the authoritative shot resolver."""
     return _collide_vehicle_at_matrix(
         vehicle, vehicle_matrix, start_point, end_point, math_module, True,
-        chassis_matrix=chassis_matrix)
+        chassis_matrix=chassis_matrix,
+        profiler_category=profiler_category)
 
 
 def collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
-                              end_point, math_module, chassis_matrix=None):
+                              end_point, math_module, chassis_matrix=None,
+                              profiler_category=None):
     """Return #1513's exact four-field collision values for public callers."""
     return _collide_vehicle_at_matrix(
         vehicle, vehicle_matrix, start_point, end_point, math_module, False,
-        chassis_matrix=chassis_matrix)
+        chassis_matrix=chassis_matrix,
+        profiler_category=profiler_category)
 
 
 class RemoteVehicle(object):

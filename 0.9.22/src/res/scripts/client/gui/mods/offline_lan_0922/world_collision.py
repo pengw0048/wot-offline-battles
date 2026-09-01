@@ -5,6 +5,7 @@ from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
 	_try_destroy_solid_hit, _vehicle_hull_bbox,
 	horizontal_collision_filter)
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 
 
 _MAX_DRIVABLE_GRADIENT = 1.28
@@ -18,8 +19,11 @@ def _collide_horizontal(spaceID, start, end):
 	import BigWorld
 	broken_filter = horizontal_collision_filter(start, end)
 	if broken_filter is None:
-		return BigWorld.wg_collideSegment(spaceID, start, end, 128)
-	return BigWorld.wg_collideSegment(
+		return hidden_worker_profiler.native_call(
+			'motion_commit', 'wg_collideSegment', BigWorld.wg_collideSegment,
+			spaceID, start, end, 128)
+	return hidden_worker_profiler.native_call(
+		'motion_commit', 'wg_collideSegment', BigWorld.wg_collideSegment,
 		spaceID, start, end, 128, broken_filter)
 
 
@@ -84,7 +88,8 @@ def _ground_profile(spaceID, Math, pos, sx, sz, sin_y, cos_y, direction,
 		distance = segment * sample_index
 		x = sx + sin_y * distance * direction
 		z = sz + cos_y * distance * direction
-		ground = BigWorld.wg_collideSegment(
+		ground = hidden_worker_profiler.native_call(
+			'motion_commit', 'wg_collideSegment', BigWorld.wg_collideSegment,
 			spaceID, Math.Vector3(x, pos.y + 12.0, z),
 			Math.Vector3(x, pos.y - probe_down, z), 128)
 		if ground is None:

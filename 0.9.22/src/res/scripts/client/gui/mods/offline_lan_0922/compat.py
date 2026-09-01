@@ -3,6 +3,8 @@ from __future__ import print_function
 import sys
 import traceback
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 try:
     import cPickle as _pickle
 except ImportError:
@@ -17,6 +19,15 @@ _OFFLINE_RETIRE_PENDING = '_offlineLANRetirePending'
 _account_settings_pinned = False
 # AccountSettings.DEFAULT_VALUES keys whose sections this port adopts once.
 _SETTINGS_KEYS = ('settings', 'filters', 'counters', 'notifications')
+
+
+def _vehicle_collision_profile_category(default):
+    semantic = hidden_worker_profiler.current_category(default)
+    return {
+        'projectile_vehicle': 'vehicle_collision_projectile',
+        'firing_lane': 'vehicle_collision_firing_lane',
+        'presentation': 'vehicle_collision_presentation',
+    }.get(semantic, 'vehicle_collision_other')
 
 
 def _entity_bytes(value, default=''):
@@ -1527,7 +1538,9 @@ class OfflineCompatibility(object):
             collisions = visible_native_remote_collisions(
                 vehicle, start_point, end_point)
             if collisions is None:
-                return compatibility._original_vehicle_collide_segment(
+                return hidden_worker_profiler.python_call(
+                    _vehicle_collision_profile_category('presentation'),
+                    compatibility._original_vehicle_collide_segment,
                     vehicle, start_point, end_point, skipGun, optimized)
             if skipGun:
                 collisions = [
@@ -1546,7 +1559,10 @@ class OfflineCompatibility(object):
             collisions = visible_native_remote_collisions(
                 vehicle, start_point, end_point)
             if collisions is None:
-                return compatibility._original_vehicle_collide_segment_ext(
+                return hidden_worker_profiler.python_call(
+                    _vehicle_collision_profile_category(
+                        'projectile_vehicle'),
+                    compatibility._original_vehicle_collide_segment_ext,
                     vehicle, start_point, end_point)
             if not collisions:
                 return None
