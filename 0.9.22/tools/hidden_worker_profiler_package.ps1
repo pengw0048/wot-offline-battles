@@ -266,7 +266,8 @@ function Uninstall-Profiler(
 }
 
 try {
-    $resolvedRoot = [System.IO.Path]::GetFullPath($GameRoot.Trim().Trim('"'))
+    $resolvedRoot = [System.IO.Path]::GetFullPath(
+        $GameRoot.Trim().Trim([char]34))
     Assert-ExactClient $resolvedRoot
     $modDirectory = Join-Path $resolvedRoot "mods\0.9.22.0.1"
     $markerPath = Join-Path $resolvedRoot (

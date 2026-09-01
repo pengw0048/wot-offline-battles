@@ -143,7 +143,8 @@ function New-ReportZip([string]$CaptureRoot, [string]$ZipPath) {
 }
 
 try {
-    $resolvedRoot = [System.IO.Path]::GetFullPath($GameRoot.Trim().Trim('"'))
+    $resolvedRoot = [System.IO.Path]::GetFullPath(
+        $GameRoot.Trim().Trim([char]34))
     if (-not [System.IO.File]::Exists((Join-Path $resolvedRoot "WorldOfTanks.exe"))) {
         throw "WorldOfTanks.exe is missing from: $resolvedRoot"
     }
@@ -184,7 +185,8 @@ try {
         }
     }
 
-    $resolvedOutput = [System.IO.Path]::GetFullPath($OutputRoot)
+    $resolvedOutput = [System.IO.Path]::GetFullPath(
+        $OutputRoot.Trim().Trim([char]34))
     if (-not [System.IO.Directory]::Exists($resolvedOutput)) {
         New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
     }
