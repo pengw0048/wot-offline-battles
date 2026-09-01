@@ -139,6 +139,16 @@ PROJECTILE_POSE_MAX_SWEEP_STEPS = 16
 # Historic collision poses repeat across adjacent chords and simultaneous
 # shots. Keep the synchronous advance cache bounded for the 32-bit worker.
 PROJECTILE_POSE_CACHE_ENTRIES = 4096
+# Broad-phase buckets contain the complete target-position envelope for one
+# synchronous projectile advance.  The 64 m cell size comes from the
+# contributed Alpha 6 implementation; unlike that implementation, the live
+# index covers the oldest active cursor instead of assuming at most 0.5 s of
+# projectile debt.
+PROJECTILE_SPATIAL_CELL_METRES = 64.0
+PROJECTILE_SPATIAL_MAX_TARGET_CELLS = 256
+PROJECTILE_SPATIAL_MAX_TOTAL_CELLS = 8192
+PROJECTILE_SPATIAL_MAX_QUERY_CELLS = 256
+PROJECTILE_SPATIAL_EPSILON = 1.0e-6
 # Size the fair global budget for the observed low-FPS boundary without ever
 # exceeding the previous release's 256-chord hard cap.
 PROJECTILE_SUSTAIN_SECONDS = 1.0 / 15.0
@@ -1243,6 +1253,7 @@ class BattleRuntime(object):
         self._expert_target_due = 0.0
         self._expert_target_signature = None
         self._records = {}
+        self._records_revision = 0
         self._last_snapshot = None
         self._last_frame_time = None
         self._standard_space_visibility = None
@@ -1435,6 +1446,14 @@ class BattleRuntime(object):
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None
+        self._projectile_spatial_bins = None
+        self._projectile_spatial_fallback_keys = frozenset()
+        self._projectile_spatial_records_container = None
+        self._projectile_spatial_records_revision = None
+        self._projectile_spatial_records = {}
+        self._projectile_spatial_order = {}
+        self._projectile_spatial_floor = None
+        self._projectile_spatial_ceiling = None
         self._projectile_lineage = set()
         self._projectile_epoch = None
         self._projectile_server_time_ms = None
@@ -1681,6 +1700,14 @@ class BattleRuntime(object):
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None
+        self._projectile_spatial_bins = None
+        self._projectile_spatial_fallback_keys = frozenset()
+        self._projectile_spatial_records_container = None
+        self._projectile_spatial_records_revision = None
+        self._projectile_spatial_records = {}
+        self._projectile_spatial_order = {}
+        self._projectile_spatial_floor = None
+        self._projectile_spatial_ceiling = None
         self._projectile_lineage = set()
         self._projectile_epoch = None
         self._projectile_server_time_ms = None
@@ -2601,6 +2628,7 @@ class BattleRuntime(object):
                 'kind': 'player', 'network_id': self.client.player_id,
                 'local': True, 'ready': False,
                 'shot_penalty_until': 0.0}
+            self._records_revision += 1
             self._schedule(0.0, self._wait_for_client_ready)
         except Exception as error:
             self._fail(error)
@@ -10238,10 +10266,11 @@ class BattleRuntime(object):
         result['siege_state'] = left.get('siege_state', 0)
         return result
 
-    def _prune_projectile_position_history(self):
+    def _prune_projectile_position_history(self, states=None):
         if not self._projectile_position_history or self._projectiles is None:
             return
-        states = self._projectiles.snapshot()
+        if states is None:
+            states = self._projectiles.snapshot()
         if not states:
             # `_sample_projectile_positions` already owns the exact 21-second
             # lifetime cap. An idle worker needs pre-launch history for a
@@ -10256,6 +10285,231 @@ class BattleRuntime(object):
                self._projectile_position_history[1][0] <= floor):
             self._projectile_position_history.pop(0)
 
+    def _clear_projectile_spatial_index(self):
+        self._projectile_spatial_bins = None
+        self._projectile_spatial_fallback_keys = frozenset()
+        self._projectile_spatial_records_container = None
+        self._projectile_spatial_records_revision = None
+        self._projectile_spatial_records = {}
+        self._projectile_spatial_order = {}
+        self._projectile_spatial_floor = None
+        self._projectile_spatial_ceiling = None
+
+    @staticmethod
+    def _projectile_spatial_cell(value):
+        coordinate = float(value)
+        if coordinate != coordinate or abs(coordinate) == float('inf'):
+            raise ValueError('projectile spatial coordinate is not finite')
+        return int(math.floor(
+            coordinate / PROJECTILE_SPATIAL_CELL_METRES))
+
+    def _build_projectile_spatial_bins(self, states, now,
+                                       maximum_chords=None):
+        """Index a conservative target envelope for one synchronous advance.
+
+        The oldest active projectile cursor may lag the render frame by much
+        more than one ordinary physics step.  Index every retained target pose
+        across that complete interval so delayed chords cannot lose a target
+        which has since moved to another cell.  Any incomplete or excessive
+        envelope remains an explicit full-scan candidate.
+        """
+        self._clear_projectile_spatial_index()
+        if not states:
+            return False
+        try:
+            floor = min(float(state['cursor_time']) for state in states)
+            ceiling = float(now)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        history = self._projectile_position_history
+        items = tuple(self._records.items())
+        keys = tuple(
+            key for key, record in items
+            if not (self._worker_mode and record.get('local')))
+        estimated_chords = None
+        if maximum_chords is not None:
+            estimated_chords = 0
+            try:
+                for state in states:
+                    remaining = max(
+                        0.0, ceiling - float(state['cursor_time']))
+                    estimated_chords += int(math.ceil(max(
+                        0.0, remaining / PROJECTILE_MAX_SUBSTEP_SECONDS -
+                        1.0e-12)))
+                estimated_chords = min(
+                    max(0, int(maximum_chords)), estimated_chords)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return False
+            upper_build_pose_reads = len(keys) * (len(history) + 2)
+            full_record_scans = estimated_chords * len(items)
+            if (estimated_chords <= 0 or
+                    upper_build_pose_reads >= full_record_scans):
+                return False
+        previous_time = None
+        middle_samples = []
+        try:
+            for sample_time, poses in history:
+                sample_time = float(sample_time)
+                if (sample_time != sample_time or
+                        abs(sample_time) == float('inf') or
+                        (previous_time is not None and
+                         sample_time < previous_time - 1.0e-9)):
+                    return False
+                previous_time = sample_time
+                if (sample_time > floor + 1.0e-9 and
+                        sample_time < ceiling - 1.0e-9):
+                    middle_samples.append((sample_time, poses))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (not history or floor != floor or ceiling != ceiling or
+                abs(floor) == float('inf') or
+                abs(ceiling) == float('inf') or
+                floor > ceiling + 1.0e-9 or
+                floor < float(history[0][0]) - 1.0e-9 or
+                ceiling > float(history[-1][0]) + 1.0e-9):
+            return False
+        if maximum_chords is not None:
+            build_pose_reads = len(keys) * (len(middle_samples) + 2)
+            full_record_scans = estimated_chords * len(items)
+            if (estimated_chords <= 0 or
+                    build_pose_reads >= full_record_scans):
+                return False
+        bounds = {}
+        fallback = set()
+        try:
+            for key in keys:
+                first = self._projectile_historic_pose(key, floor)
+                last = self._projectile_historic_pose(key, ceiling)
+                if first is None or last is None:
+                    fallback.add(key)
+                    continue
+                first_position = _xyz(first)
+                last_position = _xyz(last)
+                values = (
+                    float(first_position[0]), float(first_position[2]),
+                    float(last_position[0]), float(last_position[2]))
+                if any(value != value or abs(value) == float('inf')
+                       for value in values):
+                    fallback.add(key)
+                    continue
+                bounds[key] = [
+                    min(values[0], values[2]),
+                    min(values[1], values[3]),
+                    max(values[0], values[2]),
+                    max(values[1], values[3]),
+                ]
+            for unused_sample_time, poses in middle_samples:
+                for key in keys:
+                    if key in fallback:
+                        continue
+                    pose = poses.get(key)
+                    if pose is None:
+                        fallback.add(key)
+                        bounds.pop(key, None)
+                        continue
+                    position = _xyz(pose)
+                    x = float(position[0])
+                    z = float(position[2])
+                    if (x != x or z != z or abs(x) == float('inf') or
+                            abs(z) == float('inf')):
+                        fallback.add(key)
+                        bounds.pop(key, None)
+                        continue
+                    target_bounds = bounds[key]
+                    target_bounds[0] = min(target_bounds[0], x)
+                    target_bounds[1] = min(target_bounds[1], z)
+                    target_bounds[2] = max(target_bounds[2], x)
+                    target_bounds[3] = max(target_bounds[3], z)
+        except (AttributeError, KeyError, TypeError, ValueError,
+                OverflowError):
+            return False
+        bins = {}
+        entries = 0
+        padding = (PROJECTILE_BROADPHASE_RADIUS +
+                   PROJECTILE_SPATIAL_EPSILON)
+        for key, target_bounds in bounds.items():
+            try:
+                minimum_x = self._projectile_spatial_cell(
+                    target_bounds[0] - padding)
+                minimum_z = self._projectile_spatial_cell(
+                    target_bounds[1] - padding)
+                maximum_x = self._projectile_spatial_cell(
+                    target_bounds[2] + padding)
+                maximum_z = self._projectile_spatial_cell(
+                    target_bounds[3] + padding)
+                cell_count = ((maximum_x - minimum_x + 1) *
+                              (maximum_z - minimum_z + 1))
+            except (TypeError, ValueError, OverflowError):
+                fallback.add(key)
+                continue
+            if (cell_count <= 0 or
+                    cell_count > PROJECTILE_SPATIAL_MAX_TARGET_CELLS):
+                fallback.add(key)
+                continue
+            entries += cell_count
+            if entries > PROJECTILE_SPATIAL_MAX_TOTAL_CELLS:
+                self._clear_projectile_spatial_index()
+                return False
+            for cell_x in range(minimum_x, maximum_x + 1):
+                for cell_z in range(minimum_z, maximum_z + 1):
+                    bins.setdefault((cell_x, cell_z), set()).add(key)
+        self._projectile_spatial_bins = bins
+        self._projectile_spatial_fallback_keys = frozenset(fallback)
+        self._projectile_spatial_records_container = self._records
+        self._projectile_spatial_records_revision = self._records_revision
+        self._projectile_spatial_records = dict(items)
+        self._projectile_spatial_order = dict(
+            (key, index) for index, (key, unused_record) in enumerate(items))
+        self._projectile_spatial_floor = floor
+        self._projectile_spatial_ceiling = ceiling
+        return True
+
+    def _projectile_chord_records(self, start, end,
+                                   absolute_start, absolute_end):
+        """Return a conservative spatial candidate set or every record."""
+        bins = self._projectile_spatial_bins
+        if bins is None:
+            return tuple(self._records.items())
+        if (self._records is not self._projectile_spatial_records_container or
+                self._records_revision !=
+                self._projectile_spatial_records_revision):
+            return tuple(self._records.items())
+        try:
+            chord_start = float(absolute_start)
+            chord_end = float(absolute_end)
+            if (chord_start != chord_start or chord_end != chord_end or
+                    abs(chord_start) == float('inf') or
+                    abs(chord_end) == float('inf') or
+                    chord_start > chord_end + 1.0e-9 or
+                    chord_start < self._projectile_spatial_floor - 1.0e-9 or
+                    chord_end > self._projectile_spatial_ceiling + 1.0e-9):
+                return tuple(self._records.items())
+            minimum_x = self._projectile_spatial_cell(
+                min(float(start[0]), float(end[0])))
+            minimum_z = self._projectile_spatial_cell(
+                min(float(start[2]), float(end[2])))
+            maximum_x = self._projectile_spatial_cell(
+                max(float(start[0]), float(end[0])))
+            maximum_z = self._projectile_spatial_cell(
+                max(float(start[2]), float(end[2])))
+            cell_count = ((maximum_x - minimum_x + 1) *
+                          (maximum_z - minimum_z + 1))
+            if (cell_count <= 0 or
+                    cell_count > PROJECTILE_SPATIAL_MAX_QUERY_CELLS):
+                return tuple(self._records.items())
+        except (TypeError, ValueError, OverflowError):
+            return tuple(self._records.items())
+        keys = set(self._projectile_spatial_fallback_keys)
+        for cell_x in range(minimum_x, maximum_x + 1):
+            for cell_z in range(minimum_z, maximum_z + 1):
+                keys.update(bins.get((cell_x, cell_z), ()))
+        order = self._projectile_spatial_order
+        records = self._projectile_spatial_records
+        ordered = sorted(
+            (key for key in keys if key in records),
+            key=lambda key: order[key])
+        return tuple((key, records[key]) for key in ordered)
+
     def _advance_projectiles(self, now):
         self._projectile_perf = {}
         self._projectile_scan_count = 0
@@ -10264,13 +10518,14 @@ class BattleRuntime(object):
             return False
         self._flush_pending_projectile_resolutions()
         previous = self._projectile_target_positions
+        states = self._projectiles.snapshot()
         current_poses = self._projectile_record_poses()
         current = dict(
             (key, _xyz(pose)) for key, pose in current_poses.items())
         if (len(self._projectiles) or self._projectile_visual_meta or
                 self._projectile_is_authority()):
             self._sample_projectile_positions(now, current_poses)
-            self._prune_projectile_position_history()
+            self._prune_projectile_position_history(states)
         if not self._projectile_is_authority():
             self._projectile_target_positions = current
             return False
@@ -10279,7 +10534,7 @@ class BattleRuntime(object):
         self._projectile_frame_start = self._projectiles.now
         self._projectile_frame_end = max(
             self._projectile_frame_start, float(now))
-        active = len(self._projectiles)
+        active = len(states)
         sustainable = self._projectiles.sustainable_chord_budget(
             PROJECTILE_SUSTAIN_SECONDS)
         chord_budget = min(
@@ -10288,10 +10543,13 @@ class BattleRuntime(object):
         advance_start = _PROFILE_CLOCK()
         self._projectile_historic_pose_cache = {}
         try:
+            self._build_projectile_spatial_bins(
+                states, now, maximum_chords=chord_budget)
             advanced = self._projectiles.advance(
                 now, self._projectile_chord, self._projectile_terminal,
                 maximum_chords=chord_budget)
         finally:
+            self._clear_projectile_spatial_index()
             self._projectile_historic_pose_cache = None
         advance_seconds = max(0.0, _PROFILE_CLOCK() - advance_start)
         metrics = self._projectiles.last_advance_metrics()
@@ -10521,7 +10779,8 @@ class BattleRuntime(object):
         nearest_query = None
         nearest_collision_pose = None
         broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
-        for key, record in tuple(self._records.items()):
+        for key, record in self._projectile_chord_records(
+                start, end, absolute_start, absolute_end):
             self._projectile_scan_count += 1
             if key == source_key or record.get('tombstone'):
                 continue
@@ -16337,6 +16596,7 @@ class BattleRuntime(object):
                 state.get('shot_penalty_until', 0.0) or 0.0),
             'ready_deadline': self._clock() + float(
                 self._config.get('startupTimeoutSeconds', 30.0))}
+        self._records_revision += 1
         seed_pose = dict(state)
         seed_pose.update({
             'x': position[0], 'y': position[1], 'z': position[2],
@@ -17940,6 +18200,7 @@ class BattleRuntime(object):
             if self._outlined_engine_id == record.get('engine_id'):
                 self._clear_target_outline()
             self._records.pop(event.get('entity'), None)
+            self._records_revision += 1
             if record.get('arena_added'):
                 self._binding.arena_vehicle_removed(record['engine_id'])
             if self._remote_factory is not None:
@@ -17949,6 +18210,7 @@ class BattleRuntime(object):
             return
         if record.get('ready'):
             self._records.pop(event.get('entity'), None)
+            self._records_revision += 1
             forget = getattr(self._server, 'forgetVehicleEnter', None)
             if callable(forget):
                 forget(record['engine_id'])
@@ -18705,6 +18967,14 @@ class BattleRuntime(object):
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None
+        self._projectile_spatial_bins = None
+        self._projectile_spatial_fallback_keys = frozenset()
+        self._projectile_spatial_records_container = None
+        self._projectile_spatial_records_revision = None
+        self._projectile_spatial_records = {}
+        self._projectile_spatial_order = {}
+        self._projectile_spatial_floor = None
+        self._projectile_spatial_ceiling = None
         self._projectile_lineage = set()
         if self._artillery is not None:
             self._artillery.reset()
@@ -18728,6 +18998,7 @@ class BattleRuntime(object):
         self._prepared_vehicle_names = []
         self._unusable_vehicles_reported = set()
         self._records = {}
+        self._records_revision += 1
         _release_layout_caches()
         if self._map_create_attempted:
             creator = self._runtime.offline_map_creator
