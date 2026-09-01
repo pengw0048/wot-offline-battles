@@ -170,6 +170,11 @@ EXPECTED_ABI = {
             'velocityDir'),
         'ProjectileMover.setSpaceID': ('self', 'spaceID'),
         'ProjectileMover.destroy': ('self',),
+        'ProjectileMover.__notifyProjectileHit': (
+            'self', 'hitPosition', 'proj'),
+        'ProjectileMover.__killProjectile': (
+            'self', 'shotID', 'position', 'impactVelDir'),
+        'ProjectileMover.__delProjectile': ('self', 'shotID'),
         'segmentMayHitEntity': ('entity', 'startPoint', 'endPoint'),
         'collideEntities': (
             'startPoint', 'endPoint', 'entities', 'skipGun'),
@@ -190,6 +195,11 @@ EXPECTED_ABI = {
         'ModelBoundEffects.stop': ('self',),
     },
     'scripts/client/helpers/EffectsList.pyc': {
+        'EffectsList.attachTo': (
+            'self', 'model', 'data', 'key', '**args'),
+        'EffectsList.detachFrom': ('self', 'data', 'key'),
+        'EffectsList.detachAllFrom': (
+            'self', 'data', 'keepPosteffects'),
         '_ShotSoundEffectDesc.create': ('self', 'model', 'list', 'args'),
     },
     'scripts/client/gui/battle_control/controllers/feedback_adaptor.pyc': {
@@ -532,6 +542,9 @@ EXPECTED_ABI = {
         'SiegeModeControl.__switchSiegeMode': ('self',),
     },
     'scripts/client/AvatarInputHandler/control_modes.pyc': {
+        '_ShellingControl.setTargetModelMatrix': (
+            'self', 'worldMatrix'),
+        '_ShellingControl.__createTargetModel': ('self', 'bDelete'),
         'ArcadeControlMode.handleKeyEvent': (
             'self', 'isDown', 'key', 'mods', 'event'),
         'SniperControlMode.handleKeyEvent': (
@@ -543,6 +556,13 @@ EXPECTED_ABI = {
             'self', 'isDown', 'key', 'mods', 'event'),
         'PostMortemControlMode.__switch': ('self', 'isNext'),
         'PostMortemControlMode.curPostmortemDelay': ('self',),
+    },
+    'scripts/client/CombatSelectedArea.pyc': {
+        'CombatSelectedArea.setup': (
+            'self', 'position', 'direction', 'size', 'visualPath',
+            'color', 'marker'),
+        'CombatSelectedArea.relocate': (
+            'self', 'position', 'direction'),
     },
     'scripts/client/AvatarInputHandler/PostmortemDelay.pyc': {
         'PostmortemDelay.start': ('self',),
@@ -1169,6 +1189,13 @@ EXPECTED_CODE_NAMES = {
             '_ViewPointsController__doSelect'),
     },
     'scripts/client/AvatarInputHandler/control_modes.pyc': {
+        '_ShellingControl.setTargetModelMatrix': (
+            '_ShellingControl__targetModel', 'motors', 'signal',
+            'Math', 'Matrix'),
+        '_ShellingControl.__createTargetModel': (
+            'BigWorld', 'Model', 'addMotor', 'Servo', 'Math', 'Matrix',
+            'visible', 'addModel', '_ShellingControl__targetModel',
+            'setTargetModelAutoUpdate', 'delModel'),
         'ArcadeControlMode.handleKeyEvent': (
             'CMD_CM_LOCK_TARGET', 'BigWorld', 'target', 'autoAim',
             'CMD_CM_LOCK_TARGET_OFF'),
@@ -1189,6 +1216,13 @@ EXPECTED_CODE_NAMES = {
             'guiSessionProvider', 'shared', 'viewPoints', 'switch'),
         'PostMortemControlMode.curPostmortemDelay': (
             '_PostMortemControlMode__postmortemDelay',),
+    },
+    'scripts/client/CombatSelectedArea.pyc': {
+        'CombatSelectedArea.setup': (
+            'BigWorld', 'Model', 'addModel', 'Math', 'Matrix', 'Servo',
+            'addMotor', '_CombatSelectedArea__matrix'),
+        'CombatSelectedArea.relocate': (
+            '_CombatSelectedArea__matrix', 'setRotateYPR', 'translation'),
     },
     'scripts/client/AvatarPositionControl.pyc': {
         'AvatarPositionControl.switchViewpoint': (
@@ -1292,6 +1326,30 @@ EXPECTED_CODE_NAMES = {
             'dist', 'hitAngleCos', 'matInfo', 'compName'),
     },
     'scripts/client/ProjectileMover.pyc': {
+        'ProjectileMover.add': (
+            'artilleryID', 'salvo', 'addProjectile',
+            '_ProjectileMover__ballistics', 'projectile', 'BigWorld',
+            'Model', 'player', 'addModel', 'addMotor', 'visible',
+            'visibleAttachments', 'attachTo', 'FlockManager',
+            'getManager', 'onProjectile'),
+        'ProjectileMover.explode': (
+            'fireMissedTrigger', 'TriggersManager', 'g_manager',
+            'fireTrigger', 'TRIGGER_TYPE', 'PLAYER_SHOT_MISSED',
+            '_ProjectileMover__notifyProjectileHit'),
+        'ProjectileMover.__notifyProjectileHit': (
+            'effectsDescr', 'caliber', 'autoScaleProjectile', 'BigWorld',
+            'player', 'inputHandler', 'onProjectileHit', 'FlockManager',
+            'getManager', 'onProjectile'),
+        'ProjectileMover.__killProjectile': (
+            '_ProjectileMover__projectiles', 'get', 'effectsDescr',
+            'projectile', 'detachFrom', 'showExplosion',
+            '_ProjectileMover__addExplosionEffect'),
+        'ProjectileMover.__delProjectile': (
+            '_ProjectileMover__projectiles', 'pop', 'effectsDescr',
+            'projectile', 'detachAllFrom', 'model', 'delMotor', 'motor',
+            'BigWorld', 'player', 'delModel', 'fireMissedTrigger',
+            'TriggersManager', 'g_manager', 'fireTrigger', 'TRIGGER_TYPE',
+            'PLAYER_SHOT_MISSED'),
         # The native method name is a dynamic getattr string literal, while
         # ``filter`` and ``getattr`` are the actual CPython name-table entries.
         'segmentMayHitEntity': ('getattr', 'filter'),
@@ -1318,6 +1376,11 @@ EXPECTED_CODE_NAMES = {
         'ModelBoundEffects.destroy': ('stop', '_ModelBoundEffects__model'),
     },
     'scripts/client/helpers/EffectsList.pyc': {
+        'EffectsList.attachTo': (
+            'has_key', '_EffectsList__effectDescList', 'startKey',
+            'create'),
+        'EffectsList.detachFrom': ('endKey', 'delete', 'remove'),
+        'EffectsList.detachAllFrom': ('get', 'delete', 'remove'),
         '_ShotSoundEffectDesc.create': (
             'isAlive', 'isStarted', 'appearance', 'engineAudition',
             'getSoundObject', 'play', 'setRTPC'),
@@ -1861,6 +1924,11 @@ EXPECTED_GLOBALS = {
 
 
 EXPECTED_CLASS_CONSTANTS = {
+    'scripts/client/ProjectileMover.pyc': {
+        'ProjectileMover': {
+            '_ProjectileMover__PROJECTILE_TIME_AFTER_DEATH': 2.0,
+        },
+    },
     'scripts/common/BattleFeedbackCommon.pyc': {
         'BATTLE_EVENT_TYPE': {
             'SPOTTED': 0,
@@ -2197,6 +2265,11 @@ EXPECTED_EQUALITY_BRANCHES = {
 }
 
 
+EXPECTED_UNKNOWN_PROJECTILE_EXPLOSION_BRANCHES = {
+    'scripts/client/ProjectileMover.pyc': ('ProjectileMover.explode',),
+}
+
+
 def _signature(code):
     values = list(code.co_varnames[:code.co_argcount])
     offset = code.co_argcount
@@ -2419,6 +2492,76 @@ def _has_equality_return_branches(code, left_attribute, right_attribute,
     return False
 
 
+def _matches_unknown_projectile_explosion_branch(instructions):
+    """Prove an unknown shot renders one effect without launching a shot."""
+    offsets = dict(
+        (instruction['offset'], index)
+        for index, instruction in enumerate(instructions))
+    lookup_opnames = (
+        'LOAD_FAST', 'LOAD_ATTR', 'LOAD_ATTR', 'LOAD_FAST',
+        'CALL_FUNCTION', 'STORE_FAST')
+    for start in range(len(instructions) - len(lookup_opnames) + 1):
+        lookup = instructions[start:start + len(lookup_opnames)]
+        if tuple(item['opname'] for item in lookup) != lookup_opnames:
+            continue
+        if (tuple(item['value'] for item in lookup[:4]) != (
+                'self', '_ProjectileMover__projectiles', 'get', 'shotID') or
+                lookup[4]['argument'] != 1):
+            continue
+        projectile_local = lookup[-1]['value']
+        branch_start = start + len(lookup_opnames)
+        condition = instructions[branch_start:branch_start + 4]
+        if (len(condition) != 4 or
+                condition[0]['opname'] != 'LOAD_FAST' or
+                condition[0]['value'] != projectile_local or
+                condition[1]['opname'] != 'LOAD_CONST' or
+                condition[1]['value'] is not None or
+                condition[2]['opname'] != 'COMPARE_OP' or
+                condition[2]['argument'] != 8 or
+                condition[3]['opname'] != 'POP_JUMP_IF_FALSE'):
+            continue
+        live_index = offsets.get(condition[3]['argument'])
+        if live_index is None:
+            continue
+        none_branch = instructions[branch_start + 4:live_index]
+        expected_opnames = (
+            'BUILD_MAP', 'STORE_FAST',
+            'LOAD_FAST', 'LOAD_FAST', 'LOAD_CONST', 'STORE_SUBSCR',
+            'LOAD_FAST', 'LOAD_FAST', 'LOAD_CONST', 'STORE_SUBSCR',
+            'LOAD_CONST', 'LOAD_FAST', 'LOAD_CONST', 'STORE_SUBSCR',
+            'LOAD_FAST', 'LOAD_ATTR', 'LOAD_FAST', 'LOAD_FAST',
+            'LOAD_FAST', 'CALL_FUNCTION', 'POP_TOP', 'LOAD_CONST',
+            'RETURN_VALUE',
+        )
+        if tuple(item['opname'] for item in none_branch) != expected_opnames:
+            continue
+        synthetic_local = none_branch[1]['value']
+        if (none_branch[0]['argument'] != 0 or
+                tuple(item['value'] for item in none_branch[2:6]) != (
+                    'effectsDescr', synthetic_local, 'effectsDescr', None) or
+                tuple(item['value'] for item in none_branch[6:10]) != (
+                    'effectMaterial', synthetic_local, 'effectMaterial',
+                    None) or
+                tuple(item['value'] for item in none_branch[10:14]) != (
+                    0, synthetic_local, 'attackerID', None) or
+                tuple(item['value'] for item in none_branch[14:19]) != (
+                    'self', '_ProjectileMover__addExplosionEffect',
+                    'endPoint', synthetic_local, 'velocityDir') or
+                none_branch[19]['argument'] != 3 or
+                none_branch[21]['value'] is not None):
+            continue
+        if any(
+                instruction['value'] in ('add', 'addProjectile')
+                for instruction in none_branch):
+            continue
+        return True
+    return False
+
+
+def _has_unknown_projectile_explosion_branch(code):
+    return _matches_unknown_projectile_explosion_branch(_instructions(code))
+
+
 def _read_module_contract(archive, member):
     payload = archive.read(member)
     if payload[:4] != '\x03\xf3\r\n':
@@ -2594,6 +2737,7 @@ def audit(client_root):
     checked_tuple_widths = []
     checked_var_call_widths = []
     checked_equality_branches = []
+    checked_unknown_projectile_explosion_branches = []
     checked_resource_strings = []
     checked_packed_xml_paths = []
     errors = []
@@ -2610,7 +2754,8 @@ def audit(client_root):
                    set(EXPECTED_CALL_WIDTHS) |
                    set(EXPECTED_TUPLE_WIDTHS) |
                    set(EXPECTED_VAR_CALL_WIDTHS) |
-                   set(EXPECTED_EQUALITY_BRANCHES))
+                   set(EXPECTED_EQUALITY_BRANCHES) |
+                   set(EXPECTED_UNKNOWN_PROJECTILE_EXPLOSION_BRANCHES))
         for member in sorted(members):
             if member not in names:
                 errors.append('missing bytecode member: %s' % member)
@@ -2818,6 +2963,23 @@ def audit(client_root):
                     checked_equality_branches.append(
                         '%s:%s:%s==%s:%s/%s' %
                         ((member, name) + branch))
+            for name in sorted(
+                    EXPECTED_UNKNOWN_PROJECTILE_EXPLOSION_BRANCHES.get(
+                        member, ())):
+                code = code_objects.get(name)
+                if code is None:
+                    errors.append(
+                        '%s: missing %s for unknown-projectile explosion '
+                        'branch' % (member, name))
+                elif not _has_unknown_projectile_explosion_branch(code):
+                    errors.append(
+                        '%s: %s does not render an unknown projectile '
+                        'through the effect-only return branch' %
+                        (member, name))
+                else:
+                    checked_unknown_projectile_explosion_branches.append(
+                        '%s:%s:unknown-projectile-effect-only' %
+                        (member, name))
         for member, expected_strings in sorted(
                 EXPECTED_RESOURCE_STRINGS.items()):
             if member not in names:
@@ -2887,6 +3049,8 @@ def audit(client_root):
         'checkedTupleWidths': len(checked_tuple_widths),
         'checkedVarCallWidths': len(checked_var_call_widths),
         'checkedEqualityBranches': len(checked_equality_branches),
+        'checkedUnknownProjectileExplosionBranches': len(
+            checked_unknown_projectile_explosion_branches),
         'checkedResourceStrings': len(checked_resource_strings),
         'checkedPackedXmlPaths': len(checked_packed_xml_paths),
         'contracts': checked,
@@ -2904,6 +3068,8 @@ def audit(client_root):
         'tupleWidths': checked_tuple_widths,
         'varCallWidths': checked_var_call_widths,
         'equalityBranches': checked_equality_branches,
+        'unknownProjectileExplosionBranches':
+            checked_unknown_projectile_explosion_branches,
         'resourceStrings': checked_resource_strings,
         'packedXmlPaths': checked_packed_xml_paths,
     }
