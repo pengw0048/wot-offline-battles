@@ -5647,6 +5647,55 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertLessEqual(
             len(calls), self.module.MAX_VISIBILITY_PROBES_PER_FRAME)
 
+    def test_slow_callback_keeps_advisory_probe_budgets_at_render_scope(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Slow-budget-%d' % index}
+            for index in range(29)
+        ]
+        visibility_calls = []
+        lane_calls = []
+
+        class HoldAdapter(_FixedAdapter):
+            def decide(self, state, unused_clear):
+                self.calls.append(state['id'])
+                return dict(self.command)
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                HoldAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            visibility_probe=lambda *unused:
+                visibility_calls.append(True) or True,
+            firing_lane_probe=lambda *unused:
+                lane_calls.append(True) or True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        for state in runtime.states.values():
+            state.update(
+                x=0.0, y=0.0,
+                z=0.0 if state['team'] == 1 else 100.0)
+
+        runtime.update(1.0, 1.0)
+
+        self.assertEqual(5, runtime._last_update_control_steps)
+        self.assertEqual(1000000, runtime._sample_time_us)
+        self.assertEqual(29, len(runtime.adapter.calls))
+        self.assertLessEqual(
+            len(visibility_calls),
+            self.module.MAX_VISIBILITY_PROBES_PER_FRAME)
+        self.assertLessEqual(
+            len(lane_calls),
+            self.module.MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME)
+
     def test_worker_denied_stale_visibility_uses_only_remembered_pose(self):
         roster = [
             {'id': 11, 'team': 1, 'slot': 0, 'name': 'Observer'},
