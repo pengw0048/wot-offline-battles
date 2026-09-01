@@ -2002,6 +2002,122 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(21, 8 + 9 + 4)
         self.assertEqual(261, 29 * 8 + 29)
 
+    def test_countdown_receipt_cannot_authorize_changed_live_world(self):
+        command = {
+            'target_yaw': 0.0, 'throttle': 1.0, 'turn': 0.0,
+            'shell_index': 0, 'fire_allowed': False, 'target_id': None,
+            'fire_range': 0.0, 'combat_mode': 'route',
+            'aim_position': (0.0, 0.0, 200.0),
+            'face_position': (0.0, 0.0, 200.0),
+            'move_position': (0.0, 0.0, 200.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        }
+        blocked = [False]
+        direction_calls = []
+
+        def direction(position, yaw, speed, unused_descriptor):
+            direction_calls.append((blocked[0], tuple(position), float(yaw)))
+            if blocked[0]:
+                return {
+                    'clear': False, 'collision': True, 'slope': 0.0}
+            return {'clear': True, 'collision': False, 'slope': 0.0}
+
+        class StaticGrid(object):
+            prebaked = True
+            cell_size = 4.0
+
+            def near_baked_navigation(
+                    self, unused_position, unused_radius):
+                return True
+
+            def segment_has_baked_hazard(
+                    self, unused_start, unused_end, unused_mask):
+                return False
+
+            def segment_clear(self, unused_start, unused_end):
+                return True
+
+        graph = _graph()
+        graph['bake'].update({
+            'vehicle_half_width': 2.15,
+            'edge_clearance_radii': [3.0, 6.0],
+        })
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                _FixedAdapter(command),
+            direction_probe=direction,
+            world_receipt_probe=lambda position, yaw, speed, unused_descriptor: {
+                'distance': 15.0, 'half_width': 1.6, 'leading': 3.5,
+                'origin': tuple(position), 'yaw': float(yaw),
+                'direction': -1 if float(speed) < 0.0 else 1,
+            },
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, native_motion=True,
+            baked_graph=graph)
+        runtime.battle_start(dict(
+            self.start,
+            bots=[{'id': 11, 'team': 1, 'slot': 0, 'name': 'Bot'}]))
+        runtime.navigator.grid = StaticGrid()
+        initial_position = tuple(
+            runtime.states[11][name] for name in ('x', 'y', 'z'))
+
+        self.assertTrue(runtime.prewarm_world_receipts(1.0))
+        self.assertEqual(1, len(direction_calls))
+        blocked[0] = True
+        runtime.update(.04, 3.0)
+
+        self.assertEqual(2, len(direction_calls))
+        self.assertTrue(direction_calls[-1][0])
+        self.assertEqual(0, runtime.states[11]['movement_dir'])
+        self.assertEqual(initial_position, tuple(
+            runtime.states[11][name] for name in ('x', 'y', 'z')))
+
+    def test_countdown_receipt_cannot_authorize_a_changed_live_heading(self):
+        command = {
+            'target_yaw': 0.0, 'throttle': 1.0, 'turn': 0.0,
+            'shell_index': 0, 'fire_allowed': False, 'target_id': None,
+            'fire_range': 0.0, 'combat_mode': 'route',
+            'aim_position': (0.0, 0.0, 200.0),
+            'face_position': (0.0, 0.0, 200.0),
+            'move_position': (0.0, 0.0, 200.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        }
+        direction_calls = []
+
+        def direction(position, yaw, speed, unused_descriptor):
+            direction_calls.append((tuple(position), float(yaw), float(speed)))
+            return {'clear': True, 'collision': False, 'slope': 0.0}
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                _FixedAdapter(command),
+            direction_probe=direction,
+            world_receipt_probe=lambda position, yaw, speed, unused_descriptor: {
+                'distance': 15.0, 'half_width': 1.6, 'leading': 3.5,
+                'origin': tuple(position), 'yaw': float(yaw),
+                'direction': -1 if float(speed) < 0.0 else 1,
+            },
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, native_motion=True,
+            baked_graph=_graph())
+        runtime.battle_start(self.start)
+        self.assertTrue(runtime.prewarm_world_receipts(1.0))
+        self.assertEqual(1, len(direction_calls))
+        runtime.adapter.decide = (
+            lambda unused_state, unused_clear: dict(command))
+
+        # A server/native pose correction between countdown and battle start
+        # invalidates the exact heading.  The selected live direction must be
+        # proved again rather than borrowing the old receipt.
+        runtime.states[11]['yaw'] = 0.2
+        runtime.update(.04, 2.0)
+
+        self.assertEqual(2, len(direction_calls))
+
     def test_countdown_prewarm_rejects_malformed_receipt_fail_closed(self):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
@@ -5064,6 +5180,261 @@ class BotRuntimeTests(unittest.TestCase):
         # Extra render callbacks consume neither physics nor native sensing.
         self.assertLessEqual(
             max(probe_totals.values()) - min(probe_totals.values()), 29 * 4)
+
+    def test_worker_visibility_probes_are_bounded_and_cover_every_pair(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Visibility-%d' % index}
+            for index in range(29)
+        ]
+        frame = [0]
+        calls = []
+
+        class HoldAdapter(_FixedAdapter):
+            def decide(self, state, unused_clear):
+                self.calls.append(state['id'])
+                return dict(self.command)
+
+        def visibility(source, target, unused_fired=False):
+            calls.append((frame[0], int(source['id']),
+                          int(target['network_id'])))
+            return True
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                HoldAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            visibility_probe=visibility,
+            firing_lane_probe=lambda *unused: True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+
+        for frame_index in range(30):
+            frame[0] = frame_index
+            runtime.update(
+                self.module.WORKER_CONTROL_SECONDS,
+                1.0 + frame_index * self.module.WORKER_CONTROL_SECONDS)
+
+        per_frame = [sum(call[0] == frame_index for call in calls)
+                     for frame_index in range(30)]
+        self.assertLessEqual(
+            max(per_frame), self.module.MAX_VISIBILITY_PROBES_PER_FRAME)
+        expected = set(
+            (source['id'], target['id'])
+            for source in roster for target in roster
+            if source['team'] != target['team'])
+        observed = set((source_id, target_id)
+                       for unused_frame, source_id, target_id in calls)
+        self.assertEqual(expected, observed)
+        first_service = dict((pair, min(
+            call[0] for call in calls if call[1:] == pair))
+            for pair in expected)
+        self.assertLessEqual(max(first_service.values()), 14)
+
+    def test_worker_visibility_prioritizes_selected_new_and_firing_targets(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Priority-%d' % index}
+            for index in range(29)
+        ]
+        calls = []
+
+        class HoldAdapter(_FixedAdapter):
+            def decide(self, state, unused_clear):
+                self.calls.append(state['id'])
+                return dict(self.command)
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                HoldAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            visibility_probe=lambda source, target, unused_fired=False: (
+                calls.append((int(source['id']),
+                              int(target['network_id']))) or True),
+            firing_lane_probe=lambda *unused: True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+
+        all_pairs = []
+        for source in roster:
+            for target in roster:
+                if source['team'] == target['team']:
+                    continue
+                key = ('bot', source['id'], 'bot', target['id'])
+                runtime._visibility_cache[key] = (0.0, False, 0)
+                all_pairs.append(key)
+        # Put the interesting pairs at the tail of the inherited fair queue;
+        # priority must come from semantics rather than encounter order.
+        runtime._visibility_waiting = list(reversed(all_pairs))
+        fired_target_id = 25
+        new_target_id = 26
+        runtime.states[fired_target_id]['fire_seq'] = 1
+        for key in tuple(runtime._visibility_cache):
+            if key[3] == new_target_id:
+                runtime._visibility_cache.pop(key)
+        selected_target_id = 39
+        runtime._server_orders[11] = {
+            'target_kind': 'bot', 'target_id': selected_target_id,
+            'fire_allowed': False, 'shell_index': 0, 'fire_range': 500.0,
+            'combat_mode': 'engage',
+        }
+        runtime._server_order_tokens[11] = 1
+
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 10.0)
+
+        observed = set(calls)
+        fired_pairs = set(
+            (source['id'], fired_target_id) for source in roster
+            if source['team'] != runtime.states[fired_target_id]['team'])
+        new_pairs = set(
+            (source['id'], new_target_id) for source in roster
+            if source['team'] != runtime.states[new_target_id]['team'])
+        self.assertTrue(fired_pairs.issubset(observed))
+        self.assertTrue(new_pairs.issubset(observed))
+        self.assertIn((11, selected_target_id), observed)
+        self.assertLessEqual(
+            len(calls), self.module.MAX_VISIBILITY_PROBES_PER_FRAME)
+        diagnostics = runtime.diagnostic_totals()
+        self.assertEqual(1, diagnostics['visibility_selected_services'])
+        self.assertEqual(14, diagnostics['visibility_fire_services'])
+        self.assertEqual(14, diagnostics['visibility_new_services'])
+        self.assertEqual(19, diagnostics['visibility_ordinary_services'])
+
+    def test_worker_denied_stale_visibility_uses_only_remembered_pose(self):
+        roster = [
+            {'id': 11, 'team': 1, 'slot': 0, 'name': 'Observer'},
+            {'id': 25, 'team': 2, 'slot': 0, 'name': 'Target'},
+        ]
+        native_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            visibility_probe=lambda *unused: native_calls.append(True) or True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        source = runtime.states[11]
+        target = runtime.states[25]
+        source.update(x=0.0, y=0.0, z=0.0)
+        target.update(x=0.0, y=0.0, z=200.0, fire_seq=0)
+        view_range_calls = []
+        projection_calls = []
+        original_view_range = runtime._source_view_range
+        original_projection = runtime._target_detection_projection
+        runtime._source_view_range = lambda *args: (
+            view_range_calls.append(True) or original_view_range(*args))
+        runtime._target_detection_projection = lambda *args: (
+            projection_calls.append(True) or original_projection(*args))
+        pair_key = ('bot', 11, 'bot', 25)
+        team_key = (1, 'bot', 25)
+        remembered = {
+            'position': (7.0, 1.0, 9.0),
+            'x': 7.0, 'y': 1.0, 'z': 9.0,
+            'yaw': 0.25, 'speed': 2.0,
+        }
+
+        for fire_edge in (False, True):
+            with self.subTest(fire_edge=fire_edge):
+                target['fire_seq'] = 1 if fire_edge else 0
+                runtime._visibility_cache[pair_key] = (1.0, True, 0)
+                runtime._visible_target_poses[team_key] = dict(remembered)
+                runtime._spot_until[team_key] = 20.0
+                team_spotted = {}
+                runtime._begin_visibility_frame()
+                runtime._visibility_frame['budget'] = 0
+                contacts, lookup = runtime._contacts_for(
+                    source, [], 10.0, team_spotted, {})
+                runtime._finish_visibility_frame()
+
+                self.assertEqual([], native_calls)
+                self.assertEqual([], view_range_calls)
+                self.assertEqual([], projection_calls)
+                self.assertEqual(20.0, runtime._spot_until[team_key])
+                self.assertEqual({}, team_spotted)
+                self.assertEqual(1, len(contacts))
+                self.assertTrue(contacts[0]['visible'])
+                self.assertFalse(contacts[0]['direct_visible'])
+                self.assertFalse(contacts[0]['fresh_visible'])
+                self.assertEqual(remembered['position'],
+                                 contacts[0]['position'])
+                self.assertEqual(remembered['position'],
+                                 lookup[25]['position'])
+
+    def test_worker_visibility_diagnostics_measure_queue_debt_and_reset(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Debt-%d' % index}
+            for index in range(29)
+        ]
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                _FixedAdapter(command),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            visibility_probe=lambda *unused: True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 10.0)
+        first = runtime.diagnostic_totals()
+        expected_pairs = 14 * 15 * 2
+        self.assertEqual(
+            self.module.MAX_VISIBILITY_PROBES_PER_FRAME,
+            first['visibility_admitted'])
+        self.assertEqual(first['visibility_admitted'],
+                         first['visibility_completed'])
+        self.assertEqual(expected_pairs - first['visibility_completed'],
+                         first['visibility_queue_depth'])
+        self.assertEqual(first['visibility_queue_depth'],
+                         first['visibility_deferred'])
+        self.assertEqual(first['visibility_queue_depth'],
+                         first['visibility_queue_max_depth'])
+        self.assertEqual(0, first['visibility_oldest_stale_age_ms'])
+        self.assertEqual(first['visibility_admitted'],
+                         first['visibility_new_services'])
+
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 10.1)
+        second = runtime.diagnostic_totals()
+        self.assertGreaterEqual(second['visibility_oldest_stale_age_ms'], 99)
+        self.assertGreaterEqual(
+            second['visibility_oldest_stale_max_age_ms'],
+            second['visibility_oldest_stale_age_ms'])
+
+        runtime.battle_start(dict(
+            self.start, round_id=6, bots=roster))
+        reset = runtime.diagnostic_totals()
+        for key in (
+                'visibility_queue_depth', 'visibility_queue_max_depth',
+                'visibility_oldest_stale_age_ms',
+                'visibility_oldest_stale_max_age_ms',
+                'visibility_admitted', 'visibility_completed',
+                'visibility_deferred', 'visibility_selected_services',
+                'visibility_fire_services', 'visibility_new_services',
+                'visibility_ordinary_services'):
+            self.assertEqual(0, reset[key])
 
     def test_full_roster_publication_projects_each_internal_state_once(self):
         roster = [
@@ -12967,6 +13338,131 @@ class BotRuntimeTests(unittest.TestCase):
                             [11] if contact['target_team'] == 2 else [25])
                         self.assertEqual(
                             expected, contact['shootable_by_bot_ids'])
+
+    def test_worker_supplemental_lanes_are_bounded_fair_and_selected_first(self):
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'WorkerLane-%d' % index}
+            for index in range(29)
+        ]
+        frame = [0]
+        lane_calls = []
+
+        class HoldAdapter(_FixedAdapter):
+            def decide(self, state, unused_clear):
+                self.calls.append(state['id'])
+                return dict(self.command)
+
+            def decide_with_order(self, state, strategic, unused_clear):
+                self.server_orders.append(dict(strategic))
+                result = dict(self.command)
+                result['target_id'] = strategic.get('target_id')
+                result['fire_allowed'] = False
+                return result
+
+        def firing_lane(source, target):
+            lane_calls.append((frame[0], int(source['id']),
+                               int(target['network_id'])))
+            return True
+
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **unused_kwargs:
+                HoldAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            visibility_probe=lambda *unused: True,
+            firing_lane_probe=firing_lane,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, native_motion=True,
+            baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        runtime._server_orders[11] = {
+            'target_kind': 'bot', 'target_id': 25,
+            'fire_allowed': False, 'shell_index': 0,
+            'fire_range': 500.0, 'combat_mode': 'engage',
+        }
+        runtime._server_order_tokens[11] = 1
+
+        first_complete = None
+        completed_snapshot = None
+        saw_pending = False
+        for frame_index in range(80):
+            frame[0] = frame_index
+            runtime.update(
+                self.module.WORKER_CONTROL_SECONDS,
+                1.0 + frame_index * self.module.WORKER_CONTROL_SECONDS)
+            calls_before_diagnostics = len(lane_calls)
+            diagnostics = runtime.diagnostic_totals()
+            self.assertEqual(calls_before_diagnostics, len(lane_calls))
+            if diagnostics['shot_lane_pending_pairs'] > 0:
+                saw_pending = True
+            if (saw_pending and completed_snapshot is None and
+                    diagnostics['shot_lane_pending_pairs'] == 0 and
+                    diagnostics['shot_lane_completed_pairs'] >= 420):
+                completed_snapshot = diagnostics
+            observed = set((source_id, target_id)
+                           for unused_frame, source_id, target_id
+                           in lane_calls)
+            if len(observed) == 420 and first_complete is None:
+                first_complete = frame_index
+
+        per_frame = [sum(call[0] == frame_index for call in lane_calls)
+                     for frame_index in range(80)]
+        self.assertLessEqual(
+            max(per_frame),
+            self.module.MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME)
+        self.assertEqual((11, 25), lane_calls[0][1:])
+        expected = set(
+            (source['id'], target['id'])
+            for source in roster for target in roster
+            if source['team'] != target['team'])
+        self.assertTrue(expected.issubset(set(
+            (source_id, target_id)
+            for unused_frame, source_id, target_id in lane_calls)))
+        self.assertIsNotNone(first_complete)
+        # Sixteen supplemental jobs cannot complete 420 pairs inside one
+        # nominal one-second refresh. The persistent pair deadlines must carry
+        # the unfinished cohort across that boundary without starvation.
+        self.assertGreater(first_complete, 10)
+        self.assertLessEqual(first_complete, 45)
+        diagnostics = runtime.diagnostic_totals()
+        self.assertTrue(saw_pending)
+        self.assertGreater(
+            diagnostics['shot_lane_pending_max_pairs'], 0)
+        self.assertLessEqual(
+            diagnostics['shot_lane_pending_max_pairs'], 420)
+        self.assertGreaterEqual(
+            diagnostics['shot_lane_completed_pairs'], 420)
+        self.assertGreater(
+            diagnostics['shot_lane_budget_deferred_attempts'], 0)
+        self.assertGreaterEqual(
+            diagnostics['shot_lane_oldest_due_max_age_ms'], 1000)
+        self.assertLessEqual(
+            diagnostics['shot_lane_oldest_due_max_age_ms'], 5000)
+        self.assertIsNotNone(completed_snapshot)
+        self.assertEqual(
+            0, completed_snapshot['shot_lane_pending_pairs'])
+        self.assertEqual(
+            0, completed_snapshot['shot_lane_oldest_due_age_ms'])
+
+        restarted = dict(self.start)
+        restarted['round_id'] = self.start['round_id'] + 1
+        restarted['bots'] = roster
+        runtime.battle_start(restarted)
+        reset = runtime.diagnostic_totals()
+        for name in (
+                'shot_lane_pending_pairs', 'shot_lane_pending_max_pairs',
+                'shot_lane_oldest_due_age_ms',
+                'shot_lane_oldest_due_max_age_ms',
+                'shot_lane_completed_pairs',
+                'shot_lane_budget_deferred_attempts'):
+            self.assertEqual(0, reset[name])
 
     def test_unspotted_team_targets_do_not_spend_static_lane_rays(self):
         lane_pairs = []

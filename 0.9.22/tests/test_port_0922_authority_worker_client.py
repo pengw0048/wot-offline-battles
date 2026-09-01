@@ -95,9 +95,42 @@ class _WorkerRuntime(object):
             'bot_state_send_failed': 0,
             'bot_state_revision': 0,
             'bot_probes': {},
+            'bot_probe_seconds': {},
+            'probe_timing': 'pending',
             'bot_count': 0,
             'simulation_caps': 0,
             'alive_bot_ticks': 0,
+            'control': {
+                'catchup_callbacks': 0,
+                'debt_callbacks': 0,
+                'astar_budget_exhausted_callbacks': 0,
+                'astar_completed': 0,
+                'astar_failed': 0,
+            },
+            'presentation': {
+                'pose_writes': 0, 'pose_skips': 0,
+                'aim_writes': 0, 'aim_skips': 0,
+            },
+            'frame_performance': {},
+            'bot_diagnostics': {
+                'visibility_queue_depth': 0,
+                'visibility_queue_max_depth': 0,
+                'visibility_oldest_stale_age_ms': 0,
+                'visibility_oldest_stale_max_age_ms': 0,
+                'visibility_admitted': 0,
+                'visibility_completed': 0,
+                'visibility_deferred': 0,
+                'visibility_selected_services': 0,
+                'visibility_fire_services': 0,
+                'visibility_new_services': 0,
+                'visibility_ordinary_services': 0,
+                'shot_lane_pending_pairs': 0,
+                'shot_lane_pending_max_pairs': 0,
+                'shot_lane_oldest_due_age_ms': 0,
+                'shot_lane_oldest_due_max_age_ms': 0,
+                'shot_lane_completed_pairs': 0,
+                'shot_lane_budget_deferred_attempts': 0,
+            },
         }
 
     def start(self, config, message=None, lan_client=None,
@@ -1322,17 +1355,67 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                     port_config, 'write_json', side_effect=write_status):
                 with mock.patch(
                         'gui.mods.offline_lan_0922.authority_worker.time.time',
-                        side_effect=(100.0, 102.0, 104.0)):
+                        side_effect=(100.0, 102.0, 104.0)), mock.patch(
+                            'gui.mods.offline_lan_0922.authority_worker.'
+                            '_windows_process_counters', side_effect=(
+                                {'cpu_seconds': 10.0,
+                                 'working_set_bytes': 100000000,
+                                 'logical_processors': 4},
+                                {'cpu_seconds': 10.8,
+                                 'working_set_bytes': 120000000,
+                                 'logical_processors': 4},
+                                {'cpu_seconds': 11.0,
+                                 'working_set_bytes': 90000000,
+                                 'logical_processors': 4})):
                     self.assertTrue(session._write_status(force=True))
                     runtime.sample.update({
+                        'frame_callbacks': 49,
                         'authority_callbacks': 48,
                         'bot_state_generated': 61,
                         'bot_state_enqueued': 60,
                         'bot_state_send_failed': 1,
                         'bot_state_revision': 52,
                         'bot_probes': {'lane': 17},
+                        'bot_probe_seconds': {'lane': 0.034},
+                        'probe_timing': 'active',
                         'bot_count': 29,
                         'alive_bot_ticks': 116,
+                        'control': {
+                            'catchup_callbacks': 3,
+                            'debt_callbacks': 2,
+                            'astar_budget_exhausted_callbacks': 4,
+                            'astar_completed': 7,
+                            'astar_failed': 1,
+                        },
+                        'presentation': {
+                            'pose_writes': 29, 'pose_skips': 29,
+                            'aim_writes': 29, 'aim_skips': 29,
+                        },
+                        'frame_performance': {
+                            'render_callback_fps': 24.0,
+                            'frame_interval_ms': {
+                                'p50': 40.0, 'p95': 80.0,
+                                'p99': 120.0, 'max': 150.0},
+                        },
+                        'bot_diagnostics': {
+                            'visibility_queue_depth': 11,
+                            'visibility_queue_max_depth': 17,
+                            'visibility_oldest_stale_age_ms': 500,
+                            'visibility_oldest_stale_max_age_ms': 900,
+                            'visibility_admitted': 20,
+                            'visibility_completed': 18,
+                            'visibility_deferred': 7,
+                            'visibility_selected_services': 8,
+                            'visibility_fire_services': 4,
+                            'visibility_new_services': 5,
+                            'visibility_ordinary_services': 3,
+                            'shot_lane_pending_pairs': 31,
+                            'shot_lane_pending_max_pairs': 404,
+                            'shot_lane_oldest_due_age_ms': 200,
+                            'shot_lane_oldest_due_max_age_ms': 1700,
+                            'shot_lane_completed_pairs': 20,
+                            'shot_lane_budget_deferred_attempts': 10,
+                        },
                     })
                     self.assertTrue(session._write_status(force=True))
                     value = json.loads(path.read_text(encoding='utf-8'))
@@ -1341,15 +1424,83 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                     empty = json.loads(path.read_text(encoding='utf-8'))
 
         self.assertTrue(value['connected'])
+        self.assertTrue(value['process_performance']['available'])
+        self.assertAlmostEqual(
+            40.0, value['process_performance']['cpu_core_percent'])
+        self.assertAlmostEqual(
+            10.0, value['process_performance']['cpu_machine_percent'])
+        self.assertEqual(
+            120000000,
+            value['process_performance']['working_set_bytes'])
+        self.assertFalse(value['process_performance']['gpu_measured'])
         self.assertEqual('battle', value['phase'])
         self.assertEqual(2.0, value['runtime']['window_seconds'])
+        self.assertEqual(24.0, value['runtime']['render_callback_hz'])
         self.assertEqual(24.0, value['runtime']['callback_hz'])
         self.assertEqual(30.0, value['runtime']['bot_publication_hz'])
         self.assertEqual(52, value['runtime']['revision_delta'])
         self.assertEqual(1, value['runtime']['send_failed_delta'])
         self.assertEqual({'lane': 17}, value['runtime']['bot_probes'])
+        self.assertEqual(
+            {'lane': 17}, value['runtime']['logical_probe_delta'])
+        self.assertEqual(
+            {'lane': 8.5}, value['runtime']['logical_probe_hz'])
+        self.assertEqual(
+            {'lane': 34.0}, value['runtime']['timed_probe_ms_delta'])
+        self.assertEqual(3, value['runtime']['catchup_delta'])
+        self.assertEqual(2, value['runtime']['debt_callback_delta'])
+        self.assertEqual(
+            4, value['runtime']['astar_budget_exhausted_delta'])
+        self.assertEqual(7, value['runtime']['astar_completed_delta'])
+        self.assertEqual(1, value['runtime']['astar_failed_delta'])
+        self.assertEqual(
+            {'aim_skips': 29, 'aim_writes': 29,
+             'pose_skips': 29, 'pose_writes': 29},
+            value['runtime']['presentation_delta'])
+        self.assertEqual(
+            120.0,
+            value['runtime']['frame_performance'][
+                'frame_interval_ms']['p99'])
+        self.assertEqual(
+            11, value['runtime']['bot_diagnostics'][
+                'visibility_queue_depth'])
+        self.assertEqual(
+            20, value['runtime']['visibility_counter_delta'][
+                'visibility_admitted'])
+        self.assertEqual(
+            10.0, value['runtime']['visibility_counter_hz'][
+                'visibility_admitted'])
+        self.assertEqual(
+            31, value['runtime']['bot_diagnostics'][
+                'shot_lane_pending_pairs'])
+        self.assertEqual(
+            20, value['runtime']['shot_lane_counter_delta'][
+                'shot_lane_completed_pairs'])
+        self.assertEqual(
+            10.0, value['runtime']['shot_lane_counter_hz'][
+                'shot_lane_completed_pairs'])
+        self.assertEqual(
+            10, value['runtime']['shot_lane_counter_delta'][
+                'shot_lane_budget_deferred_attempts'])
+        self.assertEqual(
+            5.0, value['runtime']['shot_lane_counter_hz'][
+                'shot_lane_budget_deferred_attempts'])
         self.assertEqual({}, empty['runtime'])
         self.assertEqual([False, False, False], durable_values)
+
+    def test_unavailable_process_metrics_never_affect_worker_state(self):
+        session = WorkerSession({})
+        session.state = 'waiting'
+        with mock.patch(
+                'gui.mods.offline_lan_0922.authority_worker.'
+                '_windows_process_counters', return_value=None):
+            value = session._process_performance(10.0)
+
+        self.assertFalse(value['available'])
+        self.assertIsNone(value['cpu_core_percent'])
+        self.assertIsNone(value['working_set_bytes'])
+        self.assertFalse(value['gpu_measured'])
+        self.assertEqual('waiting', session.state)
 
     def test_in_memory_account_state_never_calls_json_writer(self):
         state = AccountState(path=None)

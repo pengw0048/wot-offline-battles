@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compare render-frame and fixed-30-Hz authority bot simulation costs.
+"""Compare render-frame and production fixed-cadence bot simulation costs.
 
 The render-frame case forces the production update body due on every frame;
-the fixed case uses its normal scheduler.  Both runs use the same deterministic
-29-bot roster, probes, descriptors, commands and 60 FPS timeline.
+the fixed case uses the hidden worker's explicit control scheduler. Both runs
+use the same deterministic 29-bot roster, probes, descriptors and commands.
 """
 
 import argparse
@@ -32,7 +32,7 @@ def _command():
     }
 
 
-def _runtime(visible=True):
+def _runtime(visible=True, control_seconds=None):
     module = fixtures._load()
     command = _command()
     runtime = module.BotRuntime(
@@ -46,7 +46,8 @@ def _runtime(visible=True):
         ground_probe=lambda *unused: 0.0,
         physics_ground_probe=lambda *unused: 0.0,
         spawn_resolver=fixtures._spawn_resolver,
-        baked_graph=fixtures._graph())
+        baked_graph=fixtures._graph(),
+        control_seconds=control_seconds)
     roster = []
     for index in range(29):
         team = 1 if index < 15 else 2
@@ -62,21 +63,60 @@ def _runtime(visible=True):
     return runtime
 
 
-def _run(seconds, fps, render_frame_baseline, visible=True):
-    runtime = _runtime(visible=visible)
+def _run(seconds, fps, render_frame_baseline, control_hz, visible=True):
+    control_seconds = (None if render_frame_baseline else
+                       1.0 / float(control_hz))
+    runtime = _runtime(
+        visible=visible, control_seconds=control_seconds)
     frame_count = int(round(float(seconds) * float(fps)))
     dt = 1.0 / float(fps)
     simulation_calls = 0
+    probe_rows = []
+    callback_times = []
+    previous_probes = runtime.probe_totals()
     started = time.perf_counter()
     for frame in range(frame_count):
         now = 100.0 + (frame + 1) * dt
         if render_frame_baseline:
             runtime._next_publication = now
+        callback_started = time.perf_counter()
         outgoing = runtime.update(dt, now)
+        callback_times.append(time.perf_counter() - callback_started)
         simulation_calls += int(any(
             message.get('type') == 'bot_state' for message in outgoing))
+        current_probes = runtime.probe_totals()
+        probe_rows.append(tuple(
+            current_probes[index] - previous_probes[index]
+            for index in range(len(current_probes))))
+        previous_probes = current_probes
     elapsed = time.perf_counter() - started
-    return simulation_calls, elapsed, runtime.probe_totals()
+    return (simulation_calls, elapsed, runtime.probe_totals(), probe_rows,
+            callback_times, runtime.diagnostic_totals())
+
+
+def _percentile(values, fraction):
+    values = sorted(float(value) for value in values)
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return values[0]
+    rank = min(1.0, max(0.0, float(fraction))) * (len(values) - 1)
+    lower = int(rank)
+    upper = min(len(values) - 1, lower + 1)
+    weight = rank - lower
+    return values[lower] * (1.0 - weight) + values[upper] * weight
+
+
+def _distribution(values):
+    return tuple(_percentile(values, fraction) * 1000.0
+                 for fraction in (0.50, 0.95, 0.99, 1.0))
+
+
+def _probe_maxima(rows):
+    if not rows:
+        return (0,) * len(fixtures._load().PROBE_KINDS)
+    return tuple(max(row[index] for row in rows)
+                 for index in range(len(rows[0])))
 
 
 def _publication_cost(states, projector, iterations, legacy_double_copy):
@@ -96,21 +136,28 @@ def main():
     parser.add_argument('--fps', type=int, default=60)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument(
+        '--control-hz', type=float, default=10.0,
+        help='fixed hidden-worker control rate (production default: 10)')
+    parser.add_argument(
         '--blocked-visibility', action='store_true',
         help='make every native visibility ray report static cover')
     args = parser.parse_args()
-    if args.seconds <= 0.0 or args.fps <= 0 or args.repeats <= 0:
-        parser.error('seconds, fps and repeats must be positive')
+    if (args.seconds <= 0.0 or args.fps <= 0 or args.repeats <= 0 or
+            args.control_hz <= 0.0):
+        parser.error('seconds, fps, repeats and control-hz must be positive')
 
     fixed_times = []
     baseline_times = []
     fixed_calls = baseline_calls = None
     for unused_repeat in range(args.repeats):
-        baseline_calls, baseline_time, baseline_probes = _run(
-            args.seconds, args.fps, True,
+        (baseline_calls, baseline_time, baseline_probes,
+         baseline_probe_rows, baseline_callback_times,
+         baseline_diagnostics) = _run(
+            args.seconds, args.fps, True, args.control_hz,
             visible=not args.blocked_visibility)
-        fixed_calls, fixed_time, fixed_probes = _run(
-            args.seconds, args.fps, False,
+        (fixed_calls, fixed_time, fixed_probes,
+         fixed_probe_rows, fixed_callback_times, fixed_diagnostics) = _run(
+            args.seconds, args.fps, False, args.control_hz,
             visible=not args.blocked_visibility)
         baseline_times.append(baseline_time)
         fixed_times.append(fixed_time)
@@ -141,17 +188,41 @@ def main():
             projection_iterations, False)
         for unused_repeat in range(args.repeats)
     ])
-    print('fps=%d bots=29 seconds=%.3f frames=%d repeats=%d' % (
-        args.fps, args.seconds,
+    print('fps=%d control_hz=%.3f bots=29 seconds=%.3f frames=%d repeats=%d' % (
+        args.fps, args.control_hz, args.seconds,
         int(round(args.seconds * args.fps)), args.repeats))
     print('render_frame_baseline calls=%d median_ms=%.3f' % (
         baseline_calls, baseline_median * 1000.0))
-    print('fixed_30hz calls=%d median_ms=%.3f' % (
+    print('fixed_control calls=%d median_ms=%.3f' % (
         fixed_calls, fixed_median * 1000.0))
-    print('render_frame_probes %s' % dict(zip(
+    print('render_frame_logical_probes %s' % dict(zip(
         runtime_module.PROBE_KINDS, baseline_probes)))
-    print('fixed_30hz_probes %s' % dict(zip(
+    print('fixed_control_logical_probes %s' % dict(zip(
         runtime_module.PROBE_KINDS, fixed_probes)))
+    print('render_frame_logical_probe_max_per_callback %s' % dict(zip(
+        runtime_module.PROBE_KINDS, _probe_maxima(baseline_probe_rows))))
+    print('fixed_control_logical_probe_max_per_callback %s' % dict(zip(
+        runtime_module.PROBE_KINDS, _probe_maxima(fixed_probe_rows))))
+    print('render_frame_callback_ms_p50_p95_p99_max %.3f/%.3f/%.3f/%.3f' %
+          _distribution(baseline_callback_times))
+    print('fixed_control_callback_ms_p50_p95_p99_max %.3f/%.3f/%.3f/%.3f' %
+          _distribution(fixed_callback_times))
+    print('fixed_control_visibility_scheduler %s' % dict(
+        (name, fixed_diagnostics.get(name)) for name in (
+            'visibility_queue_depth', 'visibility_queue_max_depth',
+            'visibility_oldest_stale_age_ms',
+            'visibility_oldest_stale_max_age_ms',
+            'visibility_admitted', 'visibility_completed',
+            'visibility_deferred', 'visibility_selected_services',
+            'visibility_fire_services', 'visibility_new_services',
+            'visibility_ordinary_services')))
+    print('fixed_control_supplemental_lane_scheduler %s' % dict(
+        (name, fixed_diagnostics.get(name)) for name in (
+            'shot_lane_pending_pairs', 'shot_lane_pending_max_pairs',
+            'shot_lane_oldest_due_age_ms',
+            'shot_lane_oldest_due_max_age_ms',
+            'shot_lane_completed_pairs',
+            'shot_lane_budget_deferred_attempts')))
     print('call_reduction=%.1f%% elapsed_speedup=%.3fx' % (
         reduction, speedup))
     print('publication_fields internal=%d wire=%d reduction=%.1f%%' % (

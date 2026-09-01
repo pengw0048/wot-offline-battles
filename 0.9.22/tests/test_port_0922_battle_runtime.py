@@ -4837,6 +4837,33 @@ class BattleRuntimeContractTests(unittest.TestCase):
             {'visibility': 3}, {
                 'role': 'authority', 'probe_timing': 'active'})
         third = diagnostics.begin(0.30, 0.18)
+        diagnostics.note_worker_runtime({
+            'control': {
+                'control_steps': 9, 'catchup_callbacks': 2,
+                'debt_callbacks': 1, 'control_debt_ms': 33.0,
+                'max_control_step_ms': 100.0,
+                'astar_pending': 3, 'astar_credit': 4.0,
+                'astar_budget_remaining': 0,
+                'astar_budget_exhausted_callbacks': 1,
+                'astar_completed': 5, 'astar_failed': 1,
+            },
+            'presentation': {
+                'pose_writes': 29, 'pose_skips': 58,
+                'aim_writes': 29, 'aim_skips': 58,
+            },
+            'bot_diagnostics': {
+                'visibility_queue_depth': 3,
+                'visibility_queue_max_depth': 8,
+                'visibility_oldest_stale_age_ms': 400,
+                'visibility_oldest_stale_max_age_ms': 900,
+                'shot_lane_pending_pairs': 31,
+                'shot_lane_pending_max_pairs': 404,
+                'shot_lane_oldest_due_age_ms': 200,
+                'shot_lane_oldest_due_max_age_ms': 1700,
+                'shot_lane_completed_pairs': 420,
+                'shot_lane_budget_deferred_attempts': 5000,
+            },
+        })
         wall[0] = 0.31
         diagnostics.finish(
             third, 0.30, 0.10, 0.10, {'spot': 0.001}, {},
@@ -4853,12 +4880,41 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('probe_ms=', first_row)
         self.assertIn('lane:5.000', first_row)
         self.assertIn('active:29,chords:58,debt_ms:50.000', first_row)
-        self.assertIn('summary v=2', payloads[0])
+        self.assertIn('summary v=3', payloads[0])
         self.assertIn('role=authority probe_timing=active', payloads[0])
-        self.assertIn('probe_ms_avg_max', payloads[0])
+        self.assertIn('gap_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('python_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('logical_probes_hz_total', payloads[0])
+        self.assertIn('logical_probe_ms_avg_max', payloads[0])
+        self.assertIn('logical_probe_ms_per_s_total', payloads[0])
+        self.assertIn('worker control_steps=9 catchup=2', payloads[0])
+        self.assertIn('visibility_queue_depth_max=3/8', payloads[0])
+        self.assertIn('visibility_oldest_ms_max=400/900', payloads[0])
+        self.assertIn('shot_lane_pending_max=31/404', payloads[0])
+        self.assertIn('shot_lane_oldest_due_ms_max=200/1700', payloads[0])
+        self.assertIn('shot_lane_completed_deferred=420/5000', payloads[0])
+        self.assertIn('pose_writes_skips=29/58', payloads[0])
         self.assertIn('projectile_avg_max', payloads[0])
         self.assertIn('chords=29.00/58', payloads[0])
         self.assertIn('scans=870.00/1740', payloads[0])
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(2, snapshot['samples'])
+        self.assertAlmostEqual(
+            150.0, snapshot['frame_interval_ms']['p50'])
+        self.assertAlmostEqual(
+            177.0, snapshot['frame_interval_ms']['p95'])
+        self.assertAlmostEqual(
+            179.4, snapshot['frame_interval_ms']['p99'])
+        self.assertAlmostEqual(
+            180.0, snapshot['frame_interval_ms']['max'])
+        self.assertAlmostEqual(
+            5.5, snapshot['python_callback_ms']['p50'])
+        self.assertFalse(snapshot['raw_native_calls_measured'])
+        self.assertEqual(
+            2, snapshot['worker_runtime']['control']['catchup_callbacks'])
+        self.assertEqual(
+            7, snapshot['logical_native_probes']['lane'][
+                'logical_count'])
         self.assertTrue(diagnostics._pending['emitted'])
         self.assertAlmostEqual(
             0.003, diagnostics._pending['stages']['diag_emit'])
@@ -4901,6 +4957,31 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1.0, diagnostics._window_seconds)
         diagnostics.reset()
         self.assertEqual(0.25, diagnostics._window_seconds)
+
+    def test_frame_diagnostic_percentile_storage_is_bounded(self):
+        diagnostics = _FrameDiagnostics(
+            writer=lambda unused: None, clock=lambda: 0.0)
+        limit = diagnostics._gap_samples.maxlen
+        row = {
+            'cause': 1, 'next': 2,
+            'wall_gap': 0.01, 'raw_dt': 0.01, 'exec': 0.001,
+            'outside': 0.009, 'offframe': 0.0,
+            'bw_minus_wall': 0.0, 'tick_dt': 0.01,
+            'motion_dt': 0.01, 'emitted': False,
+            'stages': {}, 'probes': {}, 'probe_durations': {},
+            'projectile': {}, 'context': {},
+        }
+        for index in range(limit + 7):
+            value = dict(row, wall_gap=0.01 + index * 1.0e-9)
+            diagnostics._add(value)
+
+        self.assertEqual(limit, len(diagnostics._gap_samples))
+        self.assertEqual(limit, len(diagnostics._exec_samples))
+        self.assertEqual(limit, len(diagnostics._outside_samples))
+        diagnostics._format()
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(limit, snapshot['distribution_samples'])
+        self.assertEqual(7, snapshot['distribution_dropped'])
 
     def test_network_deadlines_remove_main_thread_delay_from_periods(self):
         runtime = _runtime()
@@ -12875,6 +12956,72 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._worker_probe_attempted)
         battle._bots.set_camera_position.assert_called_once_with(None)
 
+    def test_worker_sample_exposes_control_astar_and_timed_logical_probes(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        navigator = types.SimpleNamespace(
+            searches={'first': object(), 'second': object()},
+            search_credit=0.0, search_frame_budget=0,
+            search_completed=7, search_failed=2)
+        battle._bots = types.SimpleNamespace(
+            _sample_time_us=1100000, _accumulator=0.05,
+            _control_seconds=1.0 / 30.0, navigator=navigator,
+            probe_totals=lambda: (2, 3, 4, 5, 6),
+            probe_duration_totals=lambda: (0.01, 0.02, 0.03, 0.04, 0.05),
+            probe_timing_state=lambda: 'active',
+            diagnostic_totals=lambda: {
+                'alive_bot_ticks': 29,
+                'visibility_queue_depth': 3,
+                'visibility_queue_max_depth': 8,
+                'visibility_oldest_stale_age_ms': 400,
+                'visibility_oldest_stale_max_age_ms': 900,
+                'visibility_admitted': 10,
+                'visibility_completed': 8,
+                'visibility_deferred': 4,
+                'visibility_selected_services': 3,
+                'visibility_fire_services': 2,
+                'visibility_new_services': 4,
+                'visibility_ordinary_services': 1,
+                'shot_lane_pending_pairs': 31,
+                'shot_lane_pending_max_pairs': 404,
+                'shot_lane_oldest_due_age_ms': 200,
+                'shot_lane_oldest_due_max_age_ms': 1700,
+                'shot_lane_completed_pairs': 420,
+                'shot_lane_budget_deferred_attempts': 5000})
+
+        self.assertTrue(battle._record_worker_control_diagnostics(1000000))
+        sample = battle._authority_worker_probe_sample()
+
+        self.assertEqual(1, sample['control']['control_steps'])
+        self.assertEqual(1, sample['control']['catchup_callbacks'])
+        self.assertEqual(1, sample['control']['debt_callbacks'])
+        self.assertEqual(2, sample['control']['astar_pending'])
+        self.assertEqual(
+            1, sample['control']['astar_budget_exhausted_callbacks'])
+        self.assertAlmostEqual(100.0,
+                               sample['control']['max_control_step_ms'])
+        self.assertAlmostEqual(50.0,
+                               sample['control']['control_debt_ms'])
+        self.assertEqual(2, sample['bot_probes']['visibility'])
+        self.assertAlmostEqual(
+            0.01, sample['bot_probe_seconds']['visibility'])
+        self.assertEqual('active', sample['probe_timing'])
+        self.assertEqual(29, sample['alive_bot_ticks'])
+        self.assertEqual(
+            3, sample['bot_diagnostics']['visibility_queue_depth'])
+        self.assertEqual(
+            900, sample['bot_diagnostics'][
+                'visibility_oldest_stale_max_age_ms'])
+        self.assertEqual(
+            31, sample['bot_diagnostics']['shot_lane_pending_pairs'])
+        self.assertEqual(
+            1700, sample['bot_diagnostics'][
+                'shot_lane_oldest_due_max_age_ms'])
+        self.assertEqual(
+            5000, sample['bot_diagnostics'][
+                'shot_lane_budget_deferred_attempts'])
+        self.assertFalse(sample['frame_performance'])
+
     def test_authority_replaces_local_placeholder_and_omits_remote_one(self):
         battle = BattleRuntime(_runtime())
         battle.client = _Client()
@@ -16073,6 +16220,199 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(-0.1, collision_pose['gun_pitch'])
         self.assertEqual(1, collision_pose['siege_state'])
 
+    def test_static_authority_roster_skips_repeated_pose_and_aim_writes(self):
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        battle._records = dict(
+            ('bot:%d' % bot_id, {
+                'engine_id': 1000 + bot_id, 'kind': 'bot',
+                'network_id': bot_id, 'ready': True, 'tombstone': False})
+            for bot_id in range(1, 30))
+        states = tuple({
+            'id': bot_id, 'alive': True, 'health': 500,
+            'x': float(bot_id), 'y': 2.0, 'z': 9.0,
+            'yaw': 0.75, 'pitch': 0.0, 'roll': 0.0,
+            'speed': 0.0, 'movement_dir': 0, 'rotation_dir': 0,
+            'aim_yaw': 0.9, 'gun_pitch': -0.1,
+        } for bot_id in range(1, 30))
+
+        self.assertTrue(battle._apply_authority_bot_poses(states))
+        self.assertTrue(battle._apply_authority_bot_poses(states))
+
+        self.assertEqual(29, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(29, battle._binding.update_vehicle_aim.call_count)
+        self.assertEqual(29, battle._authority_pose_writes)
+        self.assertEqual(29, battle._authority_pose_skips)
+        self.assertEqual(29, battle._authority_aim_writes)
+        self.assertEqual(29, battle._authority_aim_skips)
+        self.assertEqual(58, battle._update_bot_tracks.call_count)
+
+    def test_authority_presentation_exact_field_edges_are_not_coalesced(self):
+        state = {
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 7.0, 'y': 2.0, 'z': 9.0,
+            'yaw': 0.75, 'pitch': 0.2, 'roll': -0.3,
+            'speed': 6.0, 'movement_dir': 1, 'rotation_dir': 0,
+            'aim_yaw': 0.9, 'gun_pitch': -0.1,
+            'siege_state': 0, 'siege_time_left_ms': 0,
+            'siege_transition_total_ms': 1000}
+        cases = (
+            ('x', state['x'] + 1.0e-12, True, False),
+            ('y', state['y'] + 1.0e-12, True, False),
+            ('z', state['z'] + 1.0e-12, True, False),
+            ('yaw', state['yaw'] + 1.0e-12, True, True),
+            ('pitch', state['pitch'] + 1.0e-12, True, True),
+            ('roll', state['roll'] + 1.0e-12, True, False),
+            ('speed', state['speed'] + 1.0e-12, True, False),
+            ('alive', False, True, False),
+            ('health', 0, True, False),
+            ('siege_state', 2, True, True),
+            ('aim_yaw', state['aim_yaw'] + 1.0e-12, False, True),
+            ('gun_pitch', state['gun_pitch'] + 1.0e-12, False, True),
+        )
+        for field, value, expect_pose, expect_aim in cases:
+            with self.subTest(field=field):
+                battle = BattleRuntime(_runtime())
+                battle._binding = mock.Mock()
+                battle._records = {
+                    'bot:17': {
+                        'engine_id': 11, 'kind': 'bot', 'network_id': 17,
+                        'ready': True, 'tombstone': False}}
+                self.assertTrue(battle._apply_authority_bot_poses([state]))
+                battle._binding.reset_mock()
+
+                changed = dict(state, **{field: value})
+                self.assertTrue(
+                    battle._apply_authority_bot_poses([changed]))
+                self.assertEqual(
+                    int(expect_pose),
+                    battle._binding.set_vehicle_pose.call_count)
+                self.assertEqual(
+                    int(expect_aim),
+                    battle._binding.update_vehicle_aim.call_count)
+
+    def test_authority_presentation_cache_is_fenced_by_lifecycle(self):
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        state = {
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 7.0, 'y': 2.0, 'z': 9.0, 'yaw': 0.75,
+            'speed': 0.0, 'aim_yaw': 0.9, 'gun_pitch': -0.1}
+        record = {
+            'engine_id': 11, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'tombstone': False}
+        battle._records = {'bot:17': record}
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertEqual(1, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
+
+        record['ready'] = False
+        self.assertFalse(battle._apply_authority_bot_poses([state]))
+        record['ready'] = True
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertEqual(2, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(2, battle._binding.update_vehicle_aim.call_count)
+
+        battle._records['bot:17'] = dict(record)
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertEqual(3, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(3, battle._binding.update_vehicle_aim.call_count)
+
+        battle._generation += 1
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertEqual(4, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(4, battle._binding.update_vehicle_aim.call_count)
+
+    def test_active_motion_rewrites_once_per_control_epoch(self):
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._bots = types.SimpleNamespace(_sample_time_us=100000)
+        battle._records = {
+            'bot:17': {'engine_id': 11, 'kind': 'bot', 'network_id': 17,
+                       'ready': True, 'tombstone': False}}
+        moving = {
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 7.0, 'y': 2.0, 'z': 9.0, 'yaw': 0.75,
+            'speed': 1.0e-12, 'movement_dir': 1,
+            'aim_yaw': 0.9, 'gun_pitch': -0.1}
+
+        self.assertTrue(battle._apply_authority_bot_poses([moving]))
+        self.assertTrue(battle._apply_authority_bot_poses([moving]))
+        self.assertEqual(1, battle._binding.set_vehicle_pose.call_count)
+
+        battle._bots._sample_time_us = 133333
+        self.assertTrue(battle._apply_authority_bot_poses([moving]))
+        self.assertEqual(2, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
+
+        dead = dict(moving, alive=False, health=0)
+        self.assertTrue(battle._apply_authority_bot_poses([dead]))
+        battle._bots._sample_time_us = 166666
+        self.assertTrue(battle._apply_authority_bot_poses([dead]))
+        self.assertEqual(3, battle._binding.set_vehicle_pose.call_count)
+
+    def test_authority_stop_edge_settles_real_remote_filter_once(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        now = [10.0]
+        battle._clock = lambda: now[0]
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        battle._remote_factory = factory
+        battle._binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            runtime.vehicles.VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=battle._server_entity)
+        vehicle_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Hidden Bot'},
+            'health': 500, 'isCrewActive': True, 'gunAnglesPacked': 0},
+            _Vector(), (0.0, 0.0, 0.0))
+        vehicle = factory.get(vehicle_id)
+        real_settle = vehicle.settle_motion
+        vehicle.settle_motion = mock.Mock(wraps=real_settle)
+        battle._bots = types.SimpleNamespace(_sample_time_us=100000)
+        battle._records = {
+            'bot:17': {
+                'engine_id': vehicle_id, 'kind': 'bot', 'network_id': 17,
+                'ready': True, 'tombstone': False}}
+        moving = {
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'speed': 5.0, 'movement_dir': 1, 'rotation_dir': 0,
+            'aim_yaw': 0.0, 'gun_pitch': 0.0}
+
+        try:
+            self.assertTrue(battle._apply_authority_bot_poses([moving]))
+            now[0] = 11.0
+            battle._bots._sample_time_us = 200000
+            moving = dict(moving, x=1.0)
+            self.assertTrue(battle._apply_authority_bot_poses([moving]))
+            self.assertGreater(vehicle.filter.speed, 0.0)
+            self.assertEqual(1, vehicle.appearance.gear)
+            vehicle.settle_motion.assert_not_called()
+
+            now[0] = 12.0
+            battle._bots._sample_time_us = 300000
+            stopped = dict(moving, x=2.0, speed=0.0, movement_dir=0)
+            self.assertTrue(battle._apply_authority_bot_poses([stopped]))
+            self.assertEqual((0.0, 0.0), vehicle.speedInfo.value)
+            self.assertEqual(0.0, vehicle.filter.speed)
+            self.assertEqual(0, vehicle.appearance.gear)
+            vehicle.settle_motion.assert_called_once_with(12.0)
+
+            now[0] = 12.1
+            battle._bots._sample_time_us = 400000
+            self.assertTrue(battle._apply_authority_bot_poses([stopped]))
+            self.assertEqual(3, battle._authority_pose_writes)
+            self.assertEqual(1, battle._authority_pose_skips)
+            vehicle.settle_motion.assert_called_once_with(12.0)
+        finally:
+            factory.destroy_all()
+
     def test_hidden_worker_authority_pose_skips_track_presentation(self):
         battle = BattleRuntime(_runtime())
         battle._worker_mode = True
@@ -16204,6 +16544,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIs(descriptor, call[4])
         next_deadline = battle._bot_destructible_samples[17][0]
         self.assertAlmostEqual(runtime.bigworld.now + 0.5, next_deadline)
+        self.assertEqual(1, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
 
     def test_authority_bot_destructible_budget_is_render_rate_independent(self):
         totals = {}

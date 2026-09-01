@@ -23,6 +23,8 @@ _DIAGNOSTIC_CHUNK_LIMIT = 24
 _DIAGNOSTIC_PENDING_LIMIT = 4
 _DIAGNOSTIC_CONTACT_LIMIT = 32
 _ISOLATION_LOG_TYPE_LIMIT = 11
+_EMPTY_CONTACT_RECEIPT_LIMIT = 512
+_EMPTY_PROXIMITY_RECEIPT_LIMIT = 512
 _destructible_catalog = None
 _diagnostic_writer = None
 
@@ -153,6 +155,7 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 		state = globals().get('g_offh_tree_state')
 		if isinstance(state, dict):
 			state.get('chunks', {}).pop(chunk_id, None)
+	_bump_spatial_revision_1513()
 
 
 def _log_destructible_validation_1513(
@@ -434,6 +437,10 @@ def _clear_runtime_registry():
 			'g_offh_destr_isolation_logs',
 			'g_offh_destr_isolation_log_capped',
 			'g_offh_destr_diagnostics', 'g_offh_destr_diag_last_static',
+			'g_offh_destr_spatial_revision',
+			'g_offh_destr_empty_contact_receipts',
+			'g_offh_destr_empty_proximity_receipts',
+			'g_offh_destr_receipt_stats',
 			'g_offh_destr_runtime_space'):
 		globals().pop(name, None)
 
@@ -721,6 +728,121 @@ def _bin_keys_for_bounds(minimum_x, maximum_x, minimum_z, maximum_z):
 	for bin_x in xrange(minimum_bin_x, maximum_bin_x + 1):
 		for bin_z in xrange(minimum_bin_z, maximum_bin_z + 1):
 			yield bin_x, bin_z
+
+
+def _bin_rectangle_signature_1513(bounds):
+	"""Return the exact 8 m cell envelope covering XZ bounds."""
+	minimum = _destructible_bin_key(bounds[0], bounds[2])
+	maximum = _destructible_bin_key(bounds[1], bounds[3])
+	return minimum[0], maximum[0], minimum[1], maximum[1]
+
+
+def _spatial_revision_1513():
+	return int(globals().get('g_offh_destr_spatial_revision', 0))
+
+
+def _receipt_stat_1513(name, amount=1):
+	stats = globals().setdefault('g_offh_destr_receipt_stats', {})
+	stats[name] = int(stats.get(name, 0)) + int(amount)
+
+
+def _receipt_prefix_1513(name):
+	return ('contact' if name == 'g_offh_destr_empty_contact_receipts'
+		else 'proximity')
+
+
+def _bump_spatial_revision_1513():
+	"""Invalidate receipts after any exact spatial-index mutation."""
+	revision = _spatial_revision_1513() + 1
+	globals()['g_offh_destr_spatial_revision'] = revision
+	_receipt_stat_1513('spatial_invalidations')
+	for cache_name, prefix in (
+			('g_offh_destr_empty_contact_receipts', 'contact'),
+			('g_offh_destr_empty_proximity_receipts', 'proximity')):
+		state = globals().get(cache_name)
+		if isinstance(state, dict):
+			_receipt_stat_1513(
+				'%s_invalidated' % prefix,
+				len(state.get('entries', {})))
+	globals().pop('g_offh_destr_empty_contact_receipts', None)
+	globals().pop('g_offh_destr_empty_proximity_receipts', None)
+	return revision
+
+
+def _receipt_cache_get_1513(name, key):
+	state = globals().get(name)
+	if not isinstance(state, dict):
+		_receipt_stat_1513('%s_misses' % _receipt_prefix_1513(name))
+		return None
+	value = state.get('entries', {}).get(key)
+	_receipt_stat_1513('%s_%s' % (
+		_receipt_prefix_1513(name), 'hits' if value is not None else 'misses'))
+	return value
+
+
+def _receipt_cache_put_1513(name, key, value, limit):
+	"""Store one bounded battle-local receipt without OrderedDict reliance."""
+	state = globals().setdefault(name, {'entries': {}, 'order': []})
+	entries = state['entries']
+	order = state['order']
+	if key in entries:
+		entries[key] = value
+		return
+	while len(order) >= int(limit):
+		entries.pop(order.pop(0), None)
+		_receipt_stat_1513('%s_evictions' % _receipt_prefix_1513(name))
+	entries[key] = value
+	order.append(key)
+	_receipt_stat_1513('%s_stores' % _receipt_prefix_1513(name))
+
+
+def _loaded_chunk_signature_1513(manager, chunk_ids):
+	"""Return exact streamed counts, or ``None`` while any chunk is pending."""
+	loaded = getattr(
+		manager, '_DestructiblesManager__loadedChunkIDs', None)
+	if not isinstance(loaded, dict):
+		return None
+	result = []
+	for chunk_id in sorted(chunk_ids):
+		if chunk_id not in loaded:
+			return None
+		count = loaded[chunk_id]
+		if (isinstance(count, bool) or not isinstance(count, _INTEGER_TYPES) or
+				count < 0):
+			return None
+		result.append((int(chunk_id), int(count)))
+	return tuple(result)
+
+
+def _proximity_receipt_key_1513(spaceID, current_chunk, pos, vehicle_box):
+	origin_bounds = (float(pos.x) - _DESTRUCTIBLE_ORIGIN_RADIUS,
+		float(pos.x) + _DESTRUCTIBLE_ORIGIN_RADIUS,
+		float(pos.z) - _DESTRUCTIBLE_ORIGIN_RADIUS,
+		float(pos.z) + _DESTRUCTIBLE_ORIGIN_RADIUS)
+	return (int(spaceID), int(current_chunk),
+		_bin_rectangle_signature_1513(origin_bounds),
+		_bin_rectangle_signature_1513(_box_xz_bounds(vehicle_box)))
+
+
+def _empty_proximity_receipt_valid_1513(
+		key, manager, chunk_registry):
+	"""Reuse only a complete, unchanged streamed empty-cell receipt."""
+	state = globals().get('g_offh_destr_empty_proximity_receipts')
+	entry = (state.get('entries', {}).get(key)
+		if isinstance(state, dict) else None)
+	valid = (
+		not globals().get('g_offh_destr_falling_active') and
+		isinstance(entry, dict) and
+		entry.get('revision') == _spatial_revision_1513())
+	chunk_ids = entry.get('chunks') if valid else None
+	valid = (valid and isinstance(chunk_ids, tuple) and not any(
+		chunk_id not in chunk_registry for chunk_id in chunk_ids))
+	valid = (valid and
+		_loaded_chunk_signature_1513(manager, chunk_ids) ==
+		entry.get('stream_signature'))
+	_receipt_stat_1513(
+		'proximity_hits' if valid else 'proximity_misses')
+	return bool(valid)
 
 
 def _nearby_destructibles(registry, pos, vehicle_box=None):
@@ -1474,10 +1596,20 @@ def clear_local_prediction(token):
 def _catalog_contact_candidates(vehicle_box):
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	bounds = _box_xz_bounds(vehicle_box)
+	receipt_key = (
+		_spatial_revision_1513(), _bin_rectangle_signature_1513(bounds))
+	if _receipt_cache_get_1513(
+			'g_offh_destr_empty_contact_receipts', receipt_key):
+		return []
 	candidates = []
 	seen = set()
-	for bin_key in _bin_keys_for_bounds(*_box_xz_bounds(vehicle_box)):
-		for chunk_id, item_index in sorted(contact_bins.get(bin_key, ())):
+	had_members = False
+	for bin_key in _bin_keys_for_bounds(*bounds):
+		members = contact_bins.get(bin_key, ())
+		if members:
+			had_members = True
+		for chunk_id, item_index in sorted(members):
 			identity = (int(chunk_id), int(item_index))
 			if _destructible_isolated_1513(*identity):
 				continue
@@ -1496,6 +1628,10 @@ def _catalog_contact_candidates(vehicle_box):
 					instance['kind'], instance['item_scale'], world_box[0])
 				if candidate not in candidates:
 					candidates.append(candidate)
+	if not had_members:
+		_receipt_cache_put_1513(
+			'g_offh_destr_empty_contact_receipts', receipt_key, True,
+			_EMPTY_CONTACT_RECEIPT_LIMIT)
 	return candidates
 
 
@@ -2134,9 +2270,15 @@ def _index_catalog_instance_1513(contact_bins, key, instance,
 	"""Index one streamed instance into every exact world-footprint bin."""
 	if bin_keys is None:
 		bin_keys = _catalog_bin_keys_1513(instance['boxes'])
+	changed = False
 	for bin_key in bin_keys:
-		contact_bins.setdefault(bin_key, set()).add(key)
+		members = contact_bins.setdefault(bin_key, set())
+		before = len(members)
+		members.add(key)
+		changed = changed or len(members) != before
 	instance['bin_keys'] = tuple(sorted(bin_keys))
+	if changed:
+		_bump_spatial_revision_1513()
 	return bin_keys
 
 
@@ -2593,6 +2735,31 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 	return True
 
 
+def _drop_streamed_chunk_registry_1513(state, chunk_id):
+	"""Drop stale streamed geometry while preserving canonical destroy state."""
+	chunk_id = int(chunk_id)
+	changed = state.get('chunks', {}).pop(chunk_id, None) is not None
+	instances = globals().get('g_offh_destr_instances', {})
+	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	for identity in [key for key in list(instances) if key[0] == chunk_id]:
+		instance = instances.pop(identity)
+		changed = True
+		bin_keys = (instance.get('bin_keys')
+			if isinstance(instance, dict) else None)
+		if bin_keys is None:
+			bin_keys = list(contact_bins)
+		for bin_key in bin_keys:
+			members = contact_bins.get(bin_key)
+			if members is None:
+				continue
+			members.discard(identity)
+			if not members:
+				contact_bins.pop(bin_key, None)
+	if changed:
+		_bump_spatial_revision_1513()
+	return changed
+
+
 def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 	# Offline tree/pole felling. Online the SERVER detected tank-vs-tree
 	# contact; the client-side collision probes never return tree/column
@@ -2629,15 +2796,31 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 			globals().setdefault('g_offh_destr_pending', {})
 			globals().setdefault('g_offh_destr_falling_active', {})
 		cos_y = math.cos(yaw); sin_y = math.sin(yaw)
-		cids = set()
-		_current_cid = None
-		for _pf in (0.0, 6.0 if vel >= 0 else -6.0):
-			_mapped_cid = AreaDestructibles.chunkIDFromPosition(
-				Math.Vector3(pos.x + sin_y * _pf, pos.y,
-					pos.z + cos_y * _pf))
-			if _pf == 0.0:
-				_current_cid = _mapped_cid
-			cids.add(_mapped_cid)
+		bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
+		bbox = _vehicle_hull_bbox(td)
+		if bbox is None:
+			bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
+		try:
+			hw = max(abs(bbox[0][0]), abs(bbox[1][0]))
+			hl_b = abs(bbox[0][2])
+			hl_f = abs(bbox[1][2])
+		except (AttributeError, KeyError, TypeError, IndexError):
+			raise RuntimeError('#1513 hull hit tester bbox is invalid')
+		vehicle_box = _vehicle_swept_box(pos, yaw, vel, bbox)
+		_current_cid = AreaDestructibles.chunkIDFromPosition(
+			Math.Vector3(pos.x, pos.y, pos.z))
+		_receipt_key = None
+		if _current_cid is not None and _destructible_catalog is not None:
+			_receipt_key = _proximity_receipt_key_1513(
+				spaceID, _current_cid, pos, vehicle_box)
+			if _empty_proximity_receipt_valid_1513(
+					_receipt_key, mgr, _st['chunks']):
+				return
+		cids = set((_current_cid,))
+		_mapped_cid = AreaDestructibles.chunkIDFromPosition(
+			Math.Vector3(pos.x + sin_y * (6.0 if vel >= 0 else -6.0),
+				pos.y, pos.z + cos_y * (6.0 if vel >= 0 else -6.0)))
+		cids.add(_mapped_cid)
 		# #1513 chunks are 100 m squares.  Catalog instances can be non-uniformly
 		# scaled, so raw resource bounds cannot determine the origin reach.  Sample
 		# the current chunk plus all eight neighbours through the native mapper;
@@ -2651,27 +2834,21 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 						Math.Vector3(pos.x + _offset_x, pos.y,
 							pos.z + _offset_z)))
 		cids.discard(None)
-		bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
-		bbox = _vehicle_hull_bbox(td)
-		if bbox is None:
-			bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
-		try:
-			hw = max(abs(bbox[0][0]), abs(bbox[1][0]))
-			hl_b = abs(bbox[0][2])
-			hl_f = abs(bbox[1][2])
-		except (AttributeError, KeyError, TypeError, IndexError):
-			raise RuntimeError('#1513 hull hit tester bbox is invalid')
-		vehicle_box = _vehicle_swept_box(pos, yaw, vel, bbox)
 		instances = globals().setdefault('g_offh_destr_instances', {})
 		contact_bins = globals().setdefault(
 			'g_offh_destr_contact_bins', {})
+		_found_nearby = False
 		for cid in cids:
 			if _destructible_isolated_1513(cid):
 				continue
 			registry = _st['chunks'].get(cid)
+			_native_count = _native_chunk_destructible_count_1513(mgr, cid)
+			if (registry is not None and
+					(_native_count is None or
+					registry.get('native_count') != _native_count)):
+				_drop_streamed_chunk_registry_1513(_st, cid)
+				registry = None
 			if registry is None:
-				_native_count = _native_chunk_destructible_count_1513(
-					mgr, cid)
 				if _native_count is None:
 					if _destructible_isolated_1513(cid):
 						continue
@@ -2701,6 +2878,7 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					continue
 				registry = {
 					'bins': {}, 'extended_bins': {}, 'count': 0,
+					'native_count': _native_count,
 					'max_radius': 0.0, 'slot_diagnostics': {},
 				}
 				_retry_registry = False
@@ -2971,6 +3149,7 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 						raise
 				if not _retry_registry:
 					_st['chunks'][cid] = registry
+					_bump_spatial_revision_1513()
 					_diagnostic_chunk_1513(
 						cid, _native_count, _dfn, registry)
 				LOG_DEBUG('DestrTree: chunk registry', cid,
@@ -2980,6 +3159,7 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 			for (_ti, _tx, _ty, _tz, _ttyp, _tfn, _thp, _tmass,
 					_world_boxes, _contact_radius) in _nearby_destructibles(
 						registry, pos, vehicle_box):
+				_found_nearby = True
 				if _destructible_isolated_1513(cid, _ti):
 					continue
 				dx = _tx - pos.x; dz = _tz - pos.z
@@ -3055,6 +3235,20 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 				_st['felled'].add(_key)
 				LOG_DEBUG('DestrTree: FELLED', cid, _ti, 'type', _ttyp,
 					'hp', _thp, 'mass', _tmass, _tfn)
+		if (_receipt_key is not None and not _found_nearby and
+				not globals().get('g_offh_destr_falling_active') and
+				all(cid in _st['chunks'] and
+					not _destructible_isolated_1513(cid) for cid in cids)):
+			_chunk_ids = tuple(sorted(cids))
+			_stream_signature = _loaded_chunk_signature_1513(
+				mgr, _chunk_ids)
+			if _stream_signature is not None:
+				_receipt_cache_put_1513(
+					'g_offh_destr_empty_proximity_receipts', _receipt_key,
+					{'revision': _spatial_revision_1513(),
+					 'chunks': _chunk_ids,
+					 'stream_signature': _stream_signature},
+					_EMPTY_PROXIMITY_RECEIPT_LIMIT)
 	except Exception:
 		raise
 
@@ -3695,6 +3889,22 @@ def registry_counts():
 			counts[name[13:]] = len(value)
 		except TypeError:
 			counts[name[13:]] = 0
+	stats = globals().get('g_offh_destr_receipt_stats', {})
+	for name in ('contact_hits', 'contact_misses', 'contact_stores',
+			'contact_evictions', 'contact_invalidated',
+			'proximity_hits', 'proximity_misses', 'proximity_stores',
+			'proximity_evictions', 'proximity_invalidated',
+			'spatial_invalidations'):
+		counts['receipt_' + name] = int(stats.get(name, 0))
+	for cache_name, output_name in (
+			('g_offh_destr_empty_contact_receipts',
+				'receipt_contact_entries'),
+			('g_offh_destr_empty_proximity_receipts',
+				'receipt_proximity_entries')):
+		state = globals().get(cache_name, {})
+		counts[output_name] = len(state.get('entries', {})) \
+			if isinstance(state, dict) else 0
+	counts['spatial_revision'] = _spatial_revision_1513()
 	return counts
 
 
