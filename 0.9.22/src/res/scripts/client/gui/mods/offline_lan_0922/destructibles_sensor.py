@@ -5,6 +5,8 @@ The three sensor bodies below are dedented copies from ``offline_battle.py``.
 Only their former closure dependencies are supplied at module scope.
 """
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 _event_sink = None
 
 _DESTRUCTIBLE_BIN_METRES = 8.0
@@ -786,6 +788,8 @@ def _publish_spatial_mutation_1513(bin_keys=(), chunk_ids=(),
 			chunk_generations.get(chunk_id, 0)) + 1
 	revision = _spatial_revision_1513() + 1
 	globals()['g_offh_destr_spatial_revision'] = revision
+	hidden_worker_profiler.update_context({
+		'destructible_revision': revision})
 	_receipt_stat_1513('spatial_invalidations')
 	return revision
 
@@ -1277,7 +1281,9 @@ def _validate_native_effect_categories_1513(
 			raw_material - normal_min for raw_material in raw_materials)
 	for module_index in module_indices:
 		try:
-			native_type = bigworld.wg_getDestructibleEffectCategory(
+			native_type = hidden_worker_profiler.native_call(
+				'destructible_setup', 'wg_getDestructibleEffectCategory',
+				bigworld.wg_getDestructibleEffectCategory,
 				spaceID, chunk_id, item_index, module_index)
 		except Exception as error:
 			_isolate_destructible_1513(
@@ -1336,7 +1342,9 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			'native_count_range', chunk_id, item_index,
 			detail='count=%s' % native_count)
 		return None
-	filenames = BigWorld.wg_getChunkDestrFilenames(spaceID, chunk_id)
+	filenames = hidden_worker_profiler.native_call(
+		'destructible_setup', 'wg_getChunkDestrFilenames',
+		BigWorld.wg_getChunkDestrFilenames, spaceID, chunk_id)
 	if filenames is None:
 		return None
 	if not isinstance(filenames, (list, tuple)):
@@ -1355,12 +1363,16 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			'filename_slot', chunk_id, item_index,
 			detail='expected string')
 		return None
-	chunk_matrix = BigWorld.wg_getChunkMatrix(spaceID, chunk_id)
+	chunk_matrix = hidden_worker_profiler.native_call(
+		'destructible_setup', 'wg_getChunkMatrix',
+		BigWorld.wg_getChunkMatrix, spaceID, chunk_id)
 	chunk_translation = getattr(chunk_matrix, 'translation', None)
 	if chunk_translation is None:
 		return None
 	try:
-		matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+		matrix = Math.Matrix(hidden_worker_profiler.native_call(
+			'destructible_setup', 'wg_getDestructibleMatrix',
+			BigWorld.wg_getDestructibleMatrix,
 			spaceID, chunk_id, item_index))
 		signature, located = _catalog_instance_for_matrix_1513(
 			matrix, chunk_translation, Math)
@@ -1994,7 +2006,9 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			if not recast_budget or int(recast_budget[0]) <= 0:
 				return 'pending_hard' if pending_contact else 'deferred'
 			recast_budget[0] = int(recast_budget[0]) - 1
-		current_hit = BigWorld.wg_collideSegment(
+		current_hit = hidden_worker_profiler.native_call(
+			'destructible_motion', 'wg_collideSegment',
+			BigWorld.wg_collideSegment,
 			spaceID, next_start, segment_end, 128)
 		if current_hit is None:
 			return 'kinetic' if kinetic_contact else True
@@ -2661,7 +2675,9 @@ def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 			active[identity]['last_refresh'] = float(now)
 			continue
 		try:
-			matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+			matrix = Math.Matrix(hidden_worker_profiler.native_call(
+				'destructible_state', 'wg_getDestructibleMatrix',
+				BigWorld.wg_getDestructibleMatrix,
 				spaceID, chunk_id, item_index))
 		except Exception as error:
 			_isolate_destructible_1513(
@@ -3099,7 +3115,9 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					# infer a count from the diagnostic filename prefix; retry after
 					# the native streaming callback populates the manager map.
 					continue
-				_dfn = BigWorld.wg_getChunkDestrFilenames(spaceID, cid)
+				_dfn = hidden_worker_profiler.native_call(
+					'destructible_tree_scan', 'wg_getChunkDestrFilenames',
+					BigWorld.wg_getChunkDestrFilenames, spaceID, cid)
 				if _dfn is None:
 					if cid == _current_cid:
 						_diagnostic_chunk_pending_1513(
@@ -3122,7 +3140,9 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					'max_radius': 0.0, 'slot_diagnostics': {},
 				}
 				_retry_registry = False
-				_cm_t = BigWorld.wg_getChunkMatrix(spaceID, cid).translation
+				_cm_t = hidden_worker_profiler.native_call(
+					'destructible_tree_scan', 'wg_getChunkMatrix',
+					BigWorld.wg_getChunkMatrix, spaceID, cid).translation
 				if _cm_t is None:
 					continue
 				for _ti in xrange(_native_count):
@@ -3141,7 +3161,10 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 							(_baked_slot is not None and
 								_baked_slot.get('kind') == 'falling'))
 						try:
-							_m = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+							_m = Math.Matrix(hidden_worker_profiler.native_call(
+								'destructible_tree_scan',
+								'wg_getDestructibleMatrix',
+								BigWorld.wg_getDestructibleMatrix,
 								spaceID, cid, _ti))
 						except Exception as error:
 							if not _is_known_falling:
@@ -3774,7 +3797,9 @@ def _try_destroy_solid_hit(spaceID, segment_start, hit_pt, surf_normal,
 			_probes += ((hit_pt + _incoming.scale(3.0),
 				hit_pt - _incoming.scale(2.0)),)
 		for _seg_a, _seg_b in _probes:
-			_mi = BigWorld.wg_getMatInfoNearPoint(
+			_mi = hidden_worker_profiler.native_call(
+				'destructible_motion', 'wg_getMatInfoNearPoint',
+				BigWorld.wg_getMatInfoNearPoint,
 				spaceID, _seg_a, _seg_b, hit_pt, lambda *a: False)
 			_decoded = _decode_mat_info_1513(_mi)
 			if not _solid_destructible_candidate_1513(
@@ -3938,14 +3963,18 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 	tree_filter = _transparent_tree_shot_filter_1513(ignored_trees)
 	tree_hits = 0
 	world_dist = 99999.0
-	world_collision = bigworld.wg_collideSegment(
+	world_collision = hidden_worker_profiler.native_call(
+		'destructible_projectile', 'wg_collideSegment',
+		bigworld.wg_collideSegment,
 		spaceID, start_pos, end_pos, 128)
 	shot_yaw = math.atan2(dir_vec.x, dir_vec.z)
 	decoded = None
 	catalog_hit = None
 	while world_collision is not None:
 		world_dist = (world_collision[0] - start_pos).length
-		mat_info = bigworld.wg_getMatInfoNearPoint(
+		mat_info = hidden_worker_profiler.native_call(
+			'destructible_projectile', 'wg_getMatInfoNearPoint',
+			bigworld.wg_getMatInfoNearPoint,
 			spaceID, start_pos,
 			world_collision[0] + dir_vec.scale(0.3),
 			world_collision[0], lambda *unused: False)
@@ -3976,7 +4005,9 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			if tree_hits > 64:
 				raise RuntimeError(
 					'#1513 transparent tree shot traversal exceeded 64 hits')
-			world_collision = bigworld.wg_collideSegment(
+			world_collision = hidden_worker_profiler.native_call(
+				'destructible_projectile', 'wg_collideSegment',
+				bigworld.wg_collideSegment,
 				spaceID, start_pos, end_pos, 128, tree_filter)
 			continue
 		if destruction_accepted:
@@ -4009,7 +4040,9 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 					world_dist, stop_distance=world_dist,
 					stopped_by_destructible=True)
 			# Destructible broken by the shell: re-cast past the debris.
-			second = bigworld.wg_collideSegment(
+			second = hidden_worker_profiler.native_call(
+				'destructible_projectile', 'wg_collideSegment',
+				bigworld.wg_collideSegment,
 				spaceID, world_collision[0] + dir_vec.scale(0.6),
 				end_pos, 128)
 			return ((second[0] - start_pos).length
@@ -4118,7 +4151,9 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 		return catalog_hit['distance']
 	recast_distance = catalog_hit['exit_distance'] + _SHOT_RAY_EPSILON
 	recast_start = start_pos + dir_vec.scale(recast_distance)
-	second = bigworld.wg_collideSegment(
+	second = hidden_worker_profiler.native_call(
+		'destructible_projectile', 'wg_collideSegment',
+		bigworld.wg_collideSegment,
 		spaceID, recast_start, end_pos, 128)
 	return ((second[0] - start_pos).length
 		if second is not None else 99999.0)

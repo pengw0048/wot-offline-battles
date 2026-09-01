@@ -10,6 +10,8 @@ nullable result of ``wg_getDestructibleFilename`` straight to
 normally and is therefore the safe boundary for offline tree animation.
 """
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 
 _INSTALLED = False
 _SAFE_DESC_SPACE = [None]
@@ -49,7 +51,9 @@ def inspect_destructible_desc(cache, space_id, chunk_id, item_index):
     cached = _SAFE_DESC_BY_WIRE.get(key)
     if cached is not None:
         return 'resolved', cached
-    filenames = BigWorld.wg_getChunkDestrFilenames(space_id, chunk_id)
+    filenames = hidden_worker_profiler.native_call(
+        'destructible_setup', 'wg_getChunkDestrFilenames',
+        BigWorld.wg_getChunkDestrFilenames, space_id, chunk_id)
     if filenames is None:
         return 'pending', None
     if not isinstance(filenames, (list, tuple)):

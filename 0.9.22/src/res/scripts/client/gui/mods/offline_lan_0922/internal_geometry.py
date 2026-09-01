@@ -1,5 +1,7 @@
 import math
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 
 GEOMETRY_MODE = 'profile'
 
@@ -87,7 +89,9 @@ def _line_intervals(hit_tester, start, end, axis):
 		except Exception:
 			start_value = start
 			end_value = end
-		collisions = hit_tester.localHitTest(start_value, end_value)
+		collisions = hidden_worker_profiler.native_call(
+			'projectile_vehicle', 'hitTester.localHitTest',
+			hit_tester.localHitTest, start_value, end_value)
 	except Exception:
 		return ()
 	if not collisions:

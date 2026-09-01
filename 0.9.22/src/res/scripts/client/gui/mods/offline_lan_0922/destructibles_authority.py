@@ -19,6 +19,8 @@ import sys
 import BigWorld
 import Math
 
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
+
 _state = {'spaceID': None, 'chunks': {}, 'entities': {}}
 
 _DESTRUCTIBLE_DIAGNOSTICS = False
@@ -253,7 +255,9 @@ def _apply(spaceID, chunkID, pos, kind, destrData, dedupKey,
 		'fragile': AreaDestructibles._DAMAGE_TYPE_FRAGILE,
 		'module': AreaDestructibles._DAMAGE_TYPE_MODULE,
 	}
-	AreaDestructibles.g_destructiblesManager.orderDestructibleDestroy(
+	hidden_worker_profiler.python_call(
+		'destructible_mutation',
+		AreaDestructibles.g_destructiblesManager.orderDestructibleDestroy,
 		chunkID, dmgTypes[kind], destrData, True,
 		bool(syncWithProjectile))
 	# The native operation is irreversible.  Commit the replay/dedup ledger only
@@ -297,7 +301,9 @@ def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 			# wrapper dereferences NULL before Python can handle it.
 			return False
 	pitch = math.pi / 2.0
-	pc = BigWorld.wg_getDestructibleFallPitchConstr(
+	pc = hidden_worker_profiler.native_call(
+		'destructible_state', 'wg_getDestructibleFallPitchConstr',
+		BigWorld.wg_getDestructibleFallPitchConstr,
 		spaceID, chunkID, itemIndex, fallYaw)
 	try:
 		pitchConstr, _collisionFlags = pc

@@ -2750,6 +2750,33 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(-20.0, local_start.z)
         self.assertEqual(80.0, local_end.z)
 
+    def test_pose_collider_inherits_semantic_profiler_category(self):
+        descriptor = _Descriptor()
+        descriptor.hull.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[]))
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500})
+        categories = []
+
+        def invoke(category, unused_api, function, *args, **kwargs):
+            categories.append(category)
+            return function(*args, **kwargs)
+
+        with mock.patch.object(
+                remote_vehicle_module.hidden_worker_profiler,
+                'current_category', return_value='firing_lane') as current:
+            with mock.patch.object(
+                    remote_vehicle_module.hidden_worker_profiler,
+                    'native_call', side_effect=invoke):
+                collide_vehicle_at_matrix(
+                    vehicle, _Matrix(), _Vector(), _Vector(0.0, 0.0, 1.0),
+                    types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix))
+
+        current.assert_called_once_with('projectile_vehicle')
+        self.assertTrue(categories)
+        self.assertEqual({'firing_lane'}, set(categories))
+
     def test_pose_collider_keeps_hydraulic_chassis_on_ground_matrix(self):
         descriptor = _Descriptor()
         chassis_tester = types.SimpleNamespace(
@@ -4956,7 +4983,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('probe_ms=', first_row)
         self.assertIn('lane:5.000', first_row)
         self.assertIn('active:29,chords:58,debt_ms:50.000', first_row)
-        self.assertIn('summary v=3', payloads[0])
+        self.assertIn('summary v=4', payloads[0])
         self.assertIn('role=authority probe_timing=active', payloads[0])
         self.assertIn('gap_ms_p50_p95_p99_max=', payloads[0])
         self.assertIn('python_ms_p50_p95_p99_max=', payloads[0])
@@ -4994,6 +5021,133 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(diagnostics._pending['emitted'])
         self.assertAlmostEqual(
             0.003, diagnostics._pending['stages']['diag_emit'])
+
+    def test_frame_diagnostics_use_timing_denominator_and_total_raw_max(self):
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: 0.0, writer=lambda unused: None)
+
+        def row(gap, detailed, cause):
+            return {
+                'cause': cause, 'next': cause + 1,
+                'wall_gap': gap, 'raw_dt': gap, 'exec': 0.01,
+                'outside': max(0.0, gap - 0.01), 'offframe': 0.0,
+                'bw_minus_wall': 0.0, 'tick_dt': gap,
+                'motion_dt': gap, 'stages': {}, 'probes': {},
+                'probe_durations': {}, 'projectile': {},
+                'detailed_profile': detailed,
+                'context': {'role': 'authority'}, 'emitted': False,
+            }
+
+        trace = {
+            'category': 'spotting', 'api': 'wg_collideSegment',
+            'elapsed_ms': 2.0, 'profiler_frame': 1,
+            'start': (0.0, 0.0, 0.0), 'end': (1.0, 0.0, 0.0),
+            'result': {'hit': False}, 'sample_ordinal': 1,
+        }
+        diagnostics._add(row(2.0, {
+            'measured': True, 'mode': 'timing+bounded_trace',
+            'frame_ordinal': 1, 'clock_reads': 10,
+            'native': {
+                'spotting.wg_collideSegment': (2, 0.010, 0),
+                'ground.wg_collideSegment': (3, 0.020, 1),
+            },
+            'offframe_native': {}, 'python': {},
+            'offframe_python': {}, 'trace': (trace,),
+            'representative_trace': (trace,),
+        }, 1))
+        diagnostics._add(row(8.0, {
+            'measured': False, 'mode': 'wrapper_only_baseline',
+            'frame_ordinal': 2, 'clock_reads': 0,
+        }, 2))
+
+        payload = diagnostics._format()
+        snapshot = diagnostics.snapshot()
+
+        self.assertIn('segment_samples category=spotting', payload)
+        self.assertEqual(1, snapshot['native_timing_frames'])
+        self.assertAlmostEqual(2.0, snapshot['native_timing_seconds'])
+        self.assertAlmostEqual(
+            1.0, snapshot['native_queries'][
+                'spotting.wg_collideSegment']['calls_per_second'])
+        totals = snapshot['native_frame_totals']
+        self.assertEqual(5, totals['calls'])
+        self.assertAlmostEqual(2.5, totals['calls_per_second'])
+        self.assertEqual(5, totals['calls_per_timed_frame_max'])
+        self.assertAlmostEqual(30.0, totals['timed_ms_per_timed_frame_max'])
+        self.assertIn('timing+bounded_trace',
+                      snapshot['profiler']['ab_frames'])
+        self.assertIn('wrapper_only_baseline',
+                      snapshot['profiler']['ab_frames'])
+
+        compact = diagnostics.compact_snapshot()
+        self.assertNotIn('native_trace', compact)
+        self.assertNotIn('representative_segment_trace', compact)
+        self.assertEqual(1, compact['native_trace_omitted_from_status'])
+        self.assertEqual(
+            {'spotting': 1},
+            compact['representative_trace_omitted_from_status'])
+
+    def test_frame_diagnostics_attach_offframe_detail_to_sealed_gap(self):
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: 0.0, writer=lambda unused: None)
+        first = diagnostics.begin(0.0, 0.0)
+        diagnostics.finish(
+            first, 0.0, 0.0, 0.0, {}, {}, {}, detailed_profile={
+                'measured': True, 'mode': 'timing+bounded_trace',
+                'frame_ordinal': 1, 'native': {}, 'python': {},
+                'offframe_native': {}, 'offframe_python': {},
+            })
+        interval = {
+            'measured': True, 'mode': 'timing+bounded_trace',
+            'frame_ordinal': 1, 'clock_reads': 2,
+            'offframe_native': {
+                'destructible_state.wg_getDestructibleMatrix': (
+                    1, 0.004, 0)},
+            'offframe_python': {}, 'trace': (),
+            'representative_trace': (),
+        }
+
+        diagnostics.begin(
+            0.1, 0.1, detailed_offframe=interval)
+
+        key = 'destructible_state.wg_getDestructibleMatrix'
+        self.assertEqual(1, diagnostics._offframe_native_query_sums[key][0])
+        self.assertEqual(
+            1, diagnostics._slow[0]['detailed_profile'][
+                'offframe_native'][key][0])
+
+    def test_frame_diagnostics_emit_window_with_segment_sample(self):
+        wall = [0.0]
+        payloads = []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append,
+            window_seconds=0.25)
+        trace = {
+            'category': 'spotting', 'api': 'wg_collideSegment',
+            'elapsed_ms': 1.5, 'profiler_frame': 1,
+            'sample_ordinal': 1, 'start': (0.0, 0.0, 0.0),
+            'end': (1.0, 0.0, 0.0), 'result': {'hit': False},
+        }
+        first = diagnostics.begin(0.0, 0.0)
+        diagnostics.finish(
+            first, 0.0, 0.0, 0.0, {}, {}, {}, detailed_profile={
+                'measured': True, 'mode': 'timing+bounded_trace',
+                'frame_ordinal': 1, 'native': {
+                    'spotting.wg_collideSegment': (1, 0.0015, 0)},
+                'python': {}, 'offframe_native': {},
+                'offframe_python': {}, 'trace': (trace,),
+                'representative_trace': (trace,),
+            })
+        diagnostics.begin(0.30, 0.30)
+        wall[0] = 0.31
+
+        diagnostics.finish(2, 0.30, 0.0, 0.0, {}, {}, {})
+
+        self.assertTrue(diagnostics.enabled)
+        self.assertEqual(1, len(payloads))
+        self.assertIn('summary v=4', payloads[0])
+        self.assertIn(
+            'segment_samples category=spotting', payloads[0])
 
     def test_frame_diagnostics_disable_themselves_when_logging_fails(self):
         wall = [0.0]

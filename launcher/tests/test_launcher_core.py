@@ -1217,6 +1217,19 @@ class ClientInstallTest(unittest.TestCase):
         }, core.installed_payload_identity(
             self.game, core.PORT_0_9_22))
 
+    def test_same_build_identity_keeps_a_diagnostic_wotmod_replacement(self):
+        package = (
+            "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod")
+        self._stage_0_9_22(content="bundled", build_identity="test-build-a")
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+        self._write(self.game, package, "diagnostic replacement")
+
+        actions = core.install_client_mod(
+            self.game, core.PORT_0_9_22, self.payload)
+
+        self.assertEqual("diagnostic replacement", self._read(package))
+        self.assertIn("Install decision: keep", " ".join(actions))
+
     def test_a_missing_required_file_forces_a_reinstall(self):
         self._stage_0_9_22()
         core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)

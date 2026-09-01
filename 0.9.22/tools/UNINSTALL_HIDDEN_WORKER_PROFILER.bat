@@ -1,0 +1,13 @@
+@echo off
+setlocal
+
+set "GAME_ROOT=%~1"
+if not defined GAME_ROOT if exist "%~dp0WorldOfTanks.exe" set "GAME_ROOT=%~dp0"
+if not defined GAME_ROOT set /p "GAME_ROOT=Folder containing WorldOfTanks.exe: "
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ^
+  "%~dp0hidden_worker_profiler_package.ps1" ^
+  -Action Uninstall -GameRoot "%GAME_ROOT%"
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" pause
+exit /b %RESULT%
