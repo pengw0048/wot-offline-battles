@@ -1132,7 +1132,7 @@ def _valid_active_projectiles(value, authority_epoch, server_time_ms):
         'source_vehicle', 'source_shot', 'shell_index', 'team', 'origin',
         'velocity', 'gravity', 'max_distance', 'max_time_ms', 'is_he',
         'splash_radius',
-        'penetration_factor', 'launch_server_time_ms',
+        'penetration_factor', 'launch_server_time_ms', 'aim_time_us',
         'checked_through_ms', 'checked_distance', 'piercing_loss',
         'range_origin', 'segment_origin', 'segment_velocity',
         'segment_start_time_ms', 'ricochet_count',
@@ -1208,6 +1208,10 @@ def _valid_active_projectiles(value, authority_epoch, server_time_ms):
             projectile.get('fire_intent_seq'), 1, MAX_PROJECTILE_ID)
         fire_input_seq = _projectile_int_range(
             projectile.get('fire_input_seq'), 1, MAX_PROJECTILE_ID)
+        # Only a human trigger carries the presented clock it aimed at; a
+        # Bot resolves against the poses the authority already owns.
+        aim_time_us = _projectile_int_range(
+            projectile.get('aim_time_us'), 0, MAX_MOTION_TIME_US)
         if ((shooter_kind == 'player') !=
                 player_intent_fields.issubset(projectile_fields)):
             return False
@@ -1236,6 +1240,8 @@ def _valid_active_projectiles(value, authority_epoch, server_time_ms):
                  segment_start_time >= max_time_ms) or
                 ricochet_count is None or base_multiplier is None or
                 piercing_loss is None or epoch != authority_epoch or
+                aim_time_us is None or
+                (shooter_kind == 'bot' and aim_time_us) or
                 (shooter_kind == 'player' and
                  (fire_intent_seq is None or fire_input_seq is None))):
             return False
@@ -2279,7 +2285,7 @@ class LANClient(object):
             dispersion_angle)
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle):
+                         dispersion_angle, aim_time_us=None):
         """Queue one ordered trigger input without damage or ballistics."""
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
@@ -2292,11 +2298,21 @@ class LANClient(object):
         parsed_direction = _strict_vector3(shot_direction, 1.0)
         parsed_dispersion = _projectile_float_range(
             dispersion_angle, 0.0, MAX_PLAYER_DISPERSION_ANGLE)
+        # The aim clock is the motion-clock time of the remote vehicle
+        # poses this client was presenting at the trigger edge, so the
+        # authority can rewind its target collision poses to the exact
+        # state the player aimed at. 0 means the client had no presented
+        # remote pose clock at the trigger edge, which disables
+        # compensation for that shot rather than guessing one.
+        parsed_aim_time = (
+            0 if aim_time_us is None else
+            _projectile_int_range(aim_time_us, 0, MAX_MOTION_TIME_US))
         direction_length = (math.sqrt(sum(
             component * component for component in parsed_direction))
             if parsed_direction is not None else 0.0)
         if (parsed_shell is None or parsed_origin is None or
                 parsed_direction is None or parsed_dispersion is None or
+                parsed_aim_time is None or
                 direction_length <= 0.000001):
             return None
         parsed_direction = [
@@ -2310,6 +2326,7 @@ class LANClient(object):
                 'shot_origin': parsed_origin,
                 'shot_direction': parsed_direction,
                 'dispersion_angle': parsed_dispersion,
+                'aim_time_us': parsed_aim_time,
             }
             if not self._send(message):
                 return None
@@ -2377,7 +2394,7 @@ class LANClient(object):
             splash_radius, authority_epoch=None, penetration_factor=1.0,
             source_shot=None, fire_intent_seq=None, fire_input_seq=None,
             burst_group_seq=None, burst_index=None, burst_count=None,
-            launch_time_us=None, launch_pose=None):
+            launch_time_us=None, launch_pose=None, aim_time_us=None):
         """Enqueue one immutable projectile launch and return its shot seq."""
         if not self.ready or self.phase != 'battle':
             return None
@@ -2399,6 +2416,15 @@ class LANClient(object):
         parsed_penetration = _projectile_float_range(
             penetration_factor, 0.0, 100.0)
         parsed_source_shot = _strict_projectile_source_shot(source_shot)
+        # The aim clock is the presentation time of the remote poses the
+        # human shooter aimed at, so only a player launch can carry one;
+        # a Bot resolves against the poses this authority already owns.
+        parsed_aim_time = None
+        if aim_time_us is not None:
+            parsed_aim_time = _projectile_int_range(
+                aim_time_us, 0, MAX_MOTION_TIME_US)
+            if parsed_aim_time is None or shooter_kind != 'player':
+                return None
         if (parsed_shooter_id is None or parsed_shell is None or
                 parsed_origin is None or parsed_velocity is None or
                 parsed_gravity is None or parsed_distance is None or
@@ -2483,6 +2509,8 @@ class LANClient(object):
             if parsed_intent_seq is not None:
                 message['fire_intent_seq'] = parsed_intent_seq
                 message['fire_input_seq'] = parsed_input_seq
+            if parsed_aim_time is not None:
+                message['aim_time_us'] = parsed_aim_time
             if not self._send(message):
                 return None
             return parsed_seq

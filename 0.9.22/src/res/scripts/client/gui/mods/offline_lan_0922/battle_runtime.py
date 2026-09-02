@@ -146,10 +146,18 @@ PROJECTILE_MAX_ACTIVE = 128
 PROJECTILE_CHORDS_PER_FRAME = 32
 PROJECTILE_MAX_CHORDS_PER_FRAME = 256
 # A rotating target traces a curve in component-local space. Subdivide until
-# every frozen component query spans at most one degree; reject pathological
-# motion rather than silently treating one midpoint matrix as exact.
+# every frozen component query spans at most one degree, and keep the query
+# budget bounded when the composed rotation is faster than that.
 PROJECTILE_POSE_MAX_ANGLE_STEP = math.pi / 180.0
 PROJECTILE_POSE_MAX_SWEEP_STEPS = 16
+# A visible client presents remote vehicles from SnapshotSync's timed
+# playback clock, so a trigger aims at authority poses that are already one
+# presentation delay old. The shot carries that exact clock and the authority
+# rewinds its target collision poses by the measured difference, the same
+# "resolve what the shooter saw" contract the native ram receipts already use.
+# The bound covers a stalled presentation clock without letting a malformed
+# or drifted sample rewind gameplay by an arbitrary amount.
+PROJECTILE_MAX_POSE_REWIND_SECONDS = 0.4
 # Historic collision poses repeat across adjacent chords and simultaneous
 # shots. Keep the synchronous advance cache bounded for the 32-bit worker.
 PROJECTILE_POSE_CACHE_ENTRIES = 4096
@@ -7113,7 +7121,8 @@ class BattleRuntime(object):
             'next_shell_index', 'shell_change_pending',
             'gun_checkpoint_seq', 'gun_checkpoint',
             'aim_yaw', 'gun_pitch', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
-            'speed', 'shot_origin', 'shot_direction', 'dispersion_angle'}
+            'speed', 'shot_origin', 'shot_direction', 'dispersion_angle',
+            'aim_time_us'}
         transport_fields = {
             '_client_received_time', '_client_dispatch_delay'}
         if (not isinstance(message, dict) or
@@ -7126,6 +7135,7 @@ class BattleRuntime(object):
             shot_seq = int(message['shot_seq'])
             input_seq = int(message['input_seq'])
             pose_time_us = int(message['pose_time_us'])
+            aim_time_us = int(message['aim_time_us'])
             shell_index = int(message['shell_index'])
             next_shell_index = int(message['next_shell_index'])
             gun_checkpoint_seq = int(message['gun_checkpoint_seq'])
@@ -7151,6 +7161,7 @@ class BattleRuntime(object):
                 authority_epoch != int(self.client.authority_epoch) or
                 player_id <= 0 or intent_seq <= 0 or shot_seq <= 0 or
                 input_seq <= 0 or pose_time_us < 0 or
+                aim_time_us < 0 or
                 gun_checkpoint_seq != input_seq or
                 gun_checkpoint is None or
                 not 0 <= shell_index <= 9 or
@@ -9678,6 +9689,34 @@ class BattleRuntime(object):
             0.0, float(now) - float(self._pose_motion_local_time))
         return int(self._pose_motion_time_us + elapsed * 1000000.0)
 
+    def _aim_presentation_time_us(self):
+        """Return the motion clock of the remote poses this client presents.
+
+        SnapshotSync plays remote vehicles back on an explicit delayed clock,
+        so a trigger aims at authority poses that are already one presentation
+        delay old.  Publishing that exact clock lets the authority resolve the
+        shot against the poses the shooter saw, the same contract the native
+        ram receipts already use.  The newest presented clock is reported: it
+        is the least compensation any presented target needs, so one stalled
+        record can never rewind the whole shot further than the shooter lags.
+        """
+        newest = None
+        for record in self._records.values():
+            if record.get('local') or record.get('tombstone'):
+                continue
+            value = record.get('presentation_time_us')
+            if value is None:
+                continue
+            try:
+                value = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if value < 0:
+                continue
+            if newest is None or value > newest:
+                newest = value
+        return newest
+
     def _projectile_local_launch_time(self, launch_server_time_ms, now):
         estimated = self._projectile_estimated_server_time(now)
         if estimated is None:
@@ -9686,6 +9725,51 @@ class BattleRuntime(object):
             0.0, float(estimated - int(launch_server_time_ms)) / 1000.0)
         return max(
             0.0, min(self._projectiles.now, float(now) - age))
+
+    def _freeze_projectile_pose_rewind(self, meta, launch_time, now):
+        """Freeze how far back this shot samples its target poses.
+
+        The shooter aimed at presented poses whose motion clock is
+        ``aim_time_us``; this authority owns the newer poses.  Measure that
+        difference once, at the launch instant, and keep it for the whole
+        flight: a rewind that drifted per chord would move the target under a
+        shell already in the air.  ``aim_time_us`` 0 (no presented clock) and
+        an unavailable motion estimate both mean no compensation rather than
+        a guessed one.
+        """
+        if 'pose_rewind' in meta:
+            return float(meta['pose_rewind'])
+        rewind = 0.0
+        aim_time_us = max(0, int(meta.get('aim_time_us', 0) or 0))
+        estimated = self._estimated_motion_time_us(now)
+        if aim_time_us > 0 and estimated is not None:
+            # ``_estimated_motion_time_us`` cannot project before its anchor,
+            # so map the launch instant explicitly instead of asking for a
+            # past sample it would clamp.
+            launch_motion_us = (
+                float(estimated) -
+                max(0.0, float(now) - float(launch_time)) * 1000000.0)
+            rewind = (launch_motion_us - aim_time_us) / 1000000.0
+        rewind = max(0.0, min(PROJECTILE_MAX_POSE_REWIND_SECONDS, rewind))
+        meta['pose_rewind'] = rewind
+        return rewind
+
+    def _projectile_pose_rewind_seconds(self, meta, absolute_start):
+        """Return the retained rewind this chord can actually sample.
+
+        Pose history is bounded, so a shot fired in the first frames of a
+        round may not have a full presented-clock window behind it.  Sampling
+        the oldest retained pose is a smaller error than either fabricating a
+        pose or discarding an admitted shot.
+        """
+        rewind = max(0.0, _number(meta.get('pose_rewind'), 0.0))
+        if rewind <= 0.0:
+            return 0.0
+        history = self._projectile_position_history
+        if history:
+            rewind = min(rewind, max(
+                0.0, float(absolute_start) - float(history[0][0])))
+        return max(0.0, rewind)
 
     @staticmethod
     def _projectile_visual_age(raw):
@@ -9816,6 +9900,12 @@ class BattleRuntime(object):
             0, int(raw.get('checked_through_ms', 0) or 0))
         if base_checked_ms < segment_start_time:
             return None
+        try:
+            aim_time_us = int(raw.get('aim_time_us', 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if aim_time_us < 0:
+            return None
         result = {
             'projectile_id': projectile_id,
             'shooter_kind': shooter_kind,
@@ -9847,6 +9937,7 @@ class BattleRuntime(object):
                 0.0, _number(raw.get('checked_distance'), 0.0)),
             'piercing_loss': max(
                 0.0, _number(raw.get('piercing_loss'), 0.0)),
+            'aim_time_us': aim_time_us,
         }
         if shooter_kind == 'player':
             try:
@@ -9858,7 +9949,10 @@ class BattleRuntime(object):
                 return None
             result['fire_intent_seq'] = fire_intent_seq
             result['fire_input_seq'] = fire_input_seq
-        elif 'fire_intent_seq' in raw or 'fire_input_seq' in raw:
+        elif ('fire_intent_seq' in raw or 'fire_input_seq' in raw or
+              aim_time_us):
+            # A Bot aims with the authority's own poses, so it never carries a
+            # visible-client presentation clock.
             return None
         return result
 
@@ -9887,7 +9981,7 @@ class BattleRuntime(object):
                 'gravity', 'max_distance',
                 'max_time_ms', 'is_he', 'splash_radius',
                 'penetration_factor', 'launch_server_time_ms',
-                'fire_intent_seq', 'fire_input_seq')
+                'fire_intent_seq', 'fire_input_seq', 'aim_time_us')
             if any(meta.get(name) != normalized.get(name)
                    for name in frozen):
                 raise RuntimeError('canonical projectile launch changed')
@@ -9966,6 +10060,7 @@ class BattleRuntime(object):
         launch_time = self._projectile_local_launch_time(
             normalized['launch_server_time_ms'] +
             normalized['segment_start_time_ms'], now)
+        self._freeze_projectile_pose_rewind(meta, launch_time, now)
         payload = {
                 'shooter_kind': normalized['shooter_kind'],
                 'shooter_id': normalized['shooter_id'],
@@ -10072,6 +10167,7 @@ class BattleRuntime(object):
             launch_time = self._projectile_local_launch_time(
                 normalized['launch_server_time_ms'] +
                 normalized['segment_start_time_ms'], now)
+            self._freeze_projectile_pose_rewind(meta, launch_time, now)
             cursor_time = min(
                 self._projectiles.now,
                 launch_time + max(
@@ -10703,6 +10799,12 @@ class BattleRuntime(object):
             ceiling = float(now)
         except (KeyError, TypeError, ValueError, OverflowError):
             return False
+        # A latency-compensated chord samples target poses behind its own
+        # cursor, so the indexed envelope must cover that rewind too. An
+        # envelope the retained history cannot cover stays a full scan below.
+        floor -= max([0.0] + [
+            max(0.0, _number(meta.get('pose_rewind'), 0.0))
+            for meta in self._projectile_meta.values()])
         history = self._projectile_position_history
         items = tuple(self._records.items())
         keys = tuple(
@@ -11029,13 +11131,20 @@ class BattleRuntime(object):
                     int(first.get('siege_state', 0)) !=
                     int(second.get('siege_state', 0))):
                 siege_boundaries.add(interval_end)
-        angular_steps = max(1, int(math.ceil(
-            total_travel / PROJECTILE_POSE_MAX_ANGLE_STEP - 1.0e-12)))
-        if angular_steps > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+        # A composed rotation faster than the nominal one-degree sample is a
+        # precision limit, not a missing pose: the native query budget stays
+        # fixed at PROJECTILE_POSE_MAX_SWEEP_STEPS segments and the sampled
+        # angle widens.  Discarding the whole projectile here retired an
+        # admitted shot with no damage and no feedback whenever a target
+        # crossed a coarse authority pose step, which is a swallowed shell.
+        divisions = max(
+            1, PROJECTILE_POSE_MAX_SWEEP_STEPS - len(siege_boundaries))
+        angle_step = PROJECTILE_POSE_MAX_ANGLE_STEP
+        if total_travel > angle_step * divisions:
+            angle_step = total_travel / divisions
         absolute_boundaries = set(siege_boundaries)
         if total_travel > 1.0e-12:
-            threshold = PROJECTILE_POSE_MAX_ANGLE_STEP
+            threshold = angle_step
             travelled = 0.0
             for interval_start, interval_end, travel in intervals:
                 if travel <= 1.0e-12:
@@ -11047,7 +11156,7 @@ class BattleRuntime(object):
                     absolute_boundaries.add(
                         interval_start +
                         (interval_end - interval_start) * ratio)
-                    threshold += PROJECTILE_POSE_MAX_ANGLE_STEP
+                    threshold += angle_step
                 travelled += travel
         fractions = [0.0]
         for absolute in sorted(absolute_boundaries):
@@ -11056,7 +11165,12 @@ class BattleRuntime(object):
                 fractions.append(fraction)
         fractions.append(1.0)
         if len(fractions) - 1 > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+            # Rounding can still leave one extra boundary. Keep the exact
+            # query budget rather than turning it into a lost projectile.
+            interior = sorted(set(fractions[1:-1]))
+            fractions = ([0.0] +
+                         interior[:PROJECTILE_POSE_MAX_SWEEP_STEPS - 1] +
+                         [1.0])
         return tuple(fractions)
 
     def _projectile_frozen_target(self, target, pose):
@@ -11165,10 +11279,18 @@ class BattleRuntime(object):
         if chord_length <= 0.000001:
             return None
         history = self._projectile_position_history
+        # Latency compensation: the projectile keeps flying on the authority
+        # clock while its target poses are sampled at the presented clock the
+        # shooter actually aimed at.  Only vehicle poses move; the trajectory,
+        # the world and the destructibles stay on the authority timeline.
+        pose_rewind = self._projectile_pose_rewind_seconds(
+            meta, absolute_start)
+        pose_start = float(absolute_start) - pose_rewind
+        pose_end = float(absolute_end) - pose_rewind
         history_covers_chord = bool(
             history and
-            float(absolute_start) >= history[0][0] - 1.0e-9 and
-            float(absolute_end) <= history[-1][0] + 1.0e-9)
+            pose_start >= history[0][0] - 1.0e-9 and
+            pose_end <= history[-1][0] + 1.0e-9)
         direction_tuple = tuple(
             (float(end[index]) - float(start[index])) / chord_length
             for index in range(3))
@@ -11183,7 +11305,7 @@ class BattleRuntime(object):
         nearest_collision_pose = None
         broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
         for key, record in self._projectile_chord_records(
-                start, end, absolute_start, absolute_end):
+                start, end, pose_start, pose_end):
             self._projectile_scan_count += 1
             if key == source_key or record.get('tombstone'):
                 continue
@@ -11204,11 +11326,11 @@ class BattleRuntime(object):
                     'historic_pose_unavailable'
                 return {'reason': 'callback_error', 'fraction': 0.0}
             target_at_start = self._projectile_historic_pose(
-                key, absolute_start)
+                key, pose_start)
             target_at_end = self._projectile_historic_pose(
-                key, absolute_end)
+                key, pose_end)
             target_at_contact = self._projectile_historic_pose(
-                key, (float(absolute_start) + float(absolute_end)) * 0.5)
+                key, (pose_start + pose_end) * 0.5)
             if (target_at_start is None or target_at_end is None or
                     target_at_contact is None):
                 target = self._server_entity(record.get('engine_id'))
@@ -11291,25 +11413,23 @@ class BattleRuntime(object):
                     nearest_collision_pose = None
                 continue
             sweep_fractions = self._projectile_pose_sweep_fractions(
-                key, absolute_start, absolute_end)
+                key, pose_start, pose_end)
             if sweep_fractions is None:
+                # The angular budget no longer discards a shot; only a pose
+                # this history cannot supply reaches here.
                 record['projectile_collision_pose_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 meta['terminal_failure_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 return {'reason': 'callback_error', 'fraction': 0.0}
             candidate_segments = []
             for segment_index in range(len(sweep_fractions) - 1):
                 start_fraction = sweep_fractions[segment_index]
                 end_fraction = sweep_fractions[segment_index + 1]
                 segment_absolute_start = (
-                    float(absolute_start) +
-                    (float(absolute_end) - float(absolute_start)) *
-                    start_fraction)
+                    pose_start + (pose_end - pose_start) * start_fraction)
                 segment_absolute_end = (
-                    float(absolute_start) +
-                    (float(absolute_end) - float(absolute_start)) *
-                    end_fraction)
+                    pose_start + (pose_end - pose_start) * end_fraction)
                 segment_absolute_contact = (
                     segment_absolute_start + segment_absolute_end) * 0.5
                 segment_target_start = self._projectile_historic_pose(
@@ -17078,7 +17198,8 @@ class BattleRuntime(object):
                 penetration_factor=combat_rules.sample_penetration_factor(),
                 source_shot=source_shot,
                 fire_intent_seq=int(intent['intent_seq']),
-                fire_input_seq=int(intent['input_seq']))
+                fire_input_seq=int(intent['input_seq']),
+                aim_time_us=int(intent.get('aim_time_us', 0) or 0))
             if accepted != shot_seq:
                 raise RuntimeError(
                     'worker could not publish a canonical player launch')
@@ -19266,7 +19387,8 @@ class BattleRuntime(object):
             return self._reject_local_fire('input_send_failed')
         intent_seq = sender(
             shell_index, list(_xyz(shot_origin)),
-            list(_xyz(shot_direction)), dispersion_angle)
+            list(_xyz(shot_direction)), dispersion_angle,
+            aim_time_us=self._aim_presentation_time_us())
         if not intent_seq:
             return self._reject_local_fire('intent_send_failed')
         self._local_fire_intent = {

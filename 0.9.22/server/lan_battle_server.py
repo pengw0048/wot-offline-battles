@@ -2032,6 +2032,7 @@ class BattleState:
             "splash_radius": record["splash_radius"],
             "penetration_factor": record["penetration_factor"],
             "launch_server_time_ms": record["launch_server_time_ms"],
+            "aim_time_us": int(record.get("aim_time_us", 0) or 0),
             "checked_through_ms": record["checked_through_ms"],
             "checked_distance": record["checked_distance"],
             "piercing_loss": record["piercing_loss"],
@@ -6062,7 +6063,7 @@ class BattleState:
                     set(message) != {
                         "type", "round_id", "intent_seq", "input_seq",
                         "shell_index", "shot_origin", "shot_direction",
-                        "dispersion_angle"} or
+                        "dispersion_angle", "aim_time_us"} or
                     message.get("type") != "fire_intent"):
                 return False
             try:
@@ -6081,6 +6082,13 @@ class BattleState:
                 dispersion_angle = _bounded_float(
                     message.get("dispersion_angle"), 0.0,
                     MAX_PLAYER_DISPERSION_ANGLE)
+                # The motion-clock time of the remote vehicle poses this
+                # client was presenting at the trigger edge.  The worker
+                # rewinds the target poses it owns to that instant so the
+                # shot resolves against what the player actually aimed at.
+                # 0 means unknown and disables compensation for this shot.
+                aim_time_us = _exact_int(
+                    message.get("aim_time_us"), 0, MAX_MOTION_TIME_US)
             except (TypeError, ValueError, OverflowError):
                 return False
 
@@ -6137,6 +6145,7 @@ class BattleState:
                     component / direction_length, 8)
                     for component in shot_direction],
                 "dispersion_angle": round(dispersion_angle, 8),
+                "aim_time_us": aim_time_us,
                 "gun_checkpoint_seq": input_seq,
                 "gun_checkpoint": dict(gun_checkpoint),
             }
@@ -6175,6 +6184,7 @@ class BattleState:
                 "shot_origin": list(normalized["shot_origin"]),
                 "shot_direction": list(normalized["shot_direction"]),
                 "dispersion_angle": normalized["dispersion_angle"],
+                "aim_time_us": aim_time_us,
                 "aim_yaw": round(float(player.aim_yaw), 6),
                 "gun_pitch": round(float(player.gun_pitch), 6),
                 "x": round(float(player.x), 4),
@@ -6350,7 +6360,7 @@ class BattleState:
                 "splash_radius", "penetration_factor", "source_shot",
                 "authority_epoch", "fire_intent_seq", "fire_input_seq",
                 "burst_group_seq", "burst_index", "burst_count",
-                "launch_time_us", "launch_pose",
+                "launch_time_us", "launch_pose", "aim_time_us",
             }
             if set(message) - allowed:
                 return self._set_protocol_reject(
@@ -6403,10 +6413,21 @@ class BattleState:
                     _exact_int(message.get("fire_input_seq"), 1,
                                PROJECTILE_MAX_ID)
                     if shooter_kind == "player" else None)
+                # The worker relays the shooter's presentation clock back
+                # with the launch, so the ledger row, the snapshots and the
+                # canonical shot event all carry the exact instant the shot
+                # was aimed at.  A bot shot is authored by the worker itself
+                # against the poses it already owns and never carries one.
+                aim_time_us = (
+                    _exact_int(message.get("aim_time_us"), 0,
+                               MAX_MOTION_TIME_US)
+                    if shooter_kind == "player" else None)
                 if (shooter_kind == "bot" and
                         ("fire_intent_seq" in message or
                          "fire_input_seq" in message)):
                     raise ValueError("bot launch has a player intent")
+                if shooter_kind == "bot" and "aim_time_us" in message:
+                    raise ValueError("bot launch has a player aim clock")
                 launch_time_us = (
                     _exact_int(message.get("launch_time_us"), 0,
                                MAX_MOTION_TIME_US)
@@ -6442,6 +6463,7 @@ class BattleState:
             if fire_intent_seq is not None:
                 normalized["fire_intent_seq"] = fire_intent_seq
                 normalized["fire_input_seq"] = fire_input_seq
+                normalized["aim_time_us"] = aim_time_us
             launch_fingerprint = _message_fingerprint(normalized)
             if shooter_kind == "player":
                 shooter = self.players.get(shooter_id)
@@ -6496,6 +6518,14 @@ class BattleState:
                     return self._set_protocol_reject(
                         reject_kind, "order",
                         "player projectile sequence does not match intent")
+                if int(intent.get("aim_time_us", 0)) != int(aim_time_us):
+                    # The admitted trigger froze the presentation clock the
+                    # shooter aimed at.  A launch that rebinds it would ask
+                    # the authority to rewind to an instant this player
+                    # never saw, so it is the same ordering violation.
+                    return self._set_protocol_reject(
+                        reject_kind, "order",
+                        "player projectile aim clock does not match intent")
                 team = shooter.team
                 source_vehicle = shooter.vehicle
                 shooter_position = [
@@ -6584,6 +6614,7 @@ class BattleState:
                 "ricochet_count": 0,
                 "base_penetration_multiplier": 1.0,
                 "launch_server_time_ms": launch_server_time_ms,
+                "aim_time_us": int(aim_time_us or 0),
                 "checked_through_ms": 0,
                 "checked_distance": 0.0,
                 "piercing_loss": 0.0,
@@ -7040,10 +7071,20 @@ class BattleState:
             try:
                 base_checked_ms = _exact_int(
                     message.get("base_checked_ms"), 0)
-                if base_checked_ms != record["checked_through_ms"]:
+                # The hidden worker is the sole trusted simulation authority
+                # and its own progress cursors converge on the server by
+                # monotonic frontier (see progress_projectiles), so a
+                # terminal built on a slightly older echo of that cursor is
+                # a delayed message, not a conflict.  Only a base ahead of
+                # the canonical cursor describes progress the server never
+                # accepted.  Rejecting the older base stranded the shot
+                # forever, because nothing else retires a worker-owned
+                # projectile.
+                if base_checked_ms > record["checked_through_ms"]:
                     raise ValueError("cursor compare-and-swap failed")
                 resolved_time_ms = _exact_int(
-                    message.get("resolved_time_ms"), base_checked_ms,
+                    message.get("resolved_time_ms"),
+                    record["checked_through_ms"],
                     record["max_time_ms"])
                 checked_distance = round(_bounded_float(
                     message.get("checked_distance"),
@@ -7094,6 +7135,10 @@ class BattleState:
                 destructibles = self._normalize_projectile_destructibles(
                     message.get("destructibles"))
             except (TypeError, ValueError, OverflowError) as error:
+                # The record is live and this terminal is deterministically
+                # invalid, so no retry of the frozen wire can ever pass.
+                self._retire_rejected_projectile(
+                    projectile_id, record, request_fingerprint)
                 return self._set_protocol_exception(reject_kind, error)
 
             record["checked_through_ms"] = resolved_time_ms
@@ -7380,13 +7425,23 @@ class BattleState:
             try:
                 base_checked_ms = _exact_int(
                     message.get("base_checked_ms"), 0)
-                if base_checked_ms != record["checked_through_ms"]:
+                # The hidden worker is the sole trusted simulation authority
+                # and its own progress cursors converge on the server by
+                # monotonic frontier (see progress_projectiles), so a
+                # terminal built on a slightly older echo of that cursor is
+                # a delayed message, not a conflict.  Only a base ahead of
+                # the canonical cursor describes progress the server never
+                # accepted.  Rejecting the older base stranded the shot
+                # forever, because nothing else retires a worker-owned
+                # projectile.
+                if base_checked_ms > record["checked_through_ms"]:
                     raise ValueError("cursor compare-and-swap failed")
                 outcome = message.get("outcome")
                 if outcome not in ("impact", "miss", "expired"):
                     raise ValueError("invalid outcome")
                 resolved_time_ms = _exact_int(
-                    message.get("resolved_time_ms"), base_checked_ms,
+                    message.get("resolved_time_ms"),
+                    record["checked_through_ms"],
                     record["max_time_ms"])
                 resolution_server_time_ms = self._server_time_ms()
                 checked_distance = round(_bounded_float(
@@ -7491,6 +7546,10 @@ class BattleState:
                 destructibles = self._normalize_projectile_destructibles(
                     message.get("destructibles"))
             except (TypeError, ValueError, OverflowError) as error:
+                # The record is live and this terminal is deterministically
+                # invalid, so no retry of the frozen wire can ever pass.
+                self._retire_rejected_projectile(
+                    projectile_id, record, request_fingerprint)
                 return self._set_protocol_exception(reject_kind, error)
 
             impact_event = {
@@ -7572,6 +7631,40 @@ class BattleState:
         if expired:
             self.projectile_revision += 1
         return len(expired)
+
+    def _retire_rejected_projectile(self, projectile_id, record,
+                                    request_fingerprint):
+        """Retire one live shot whose terminal the server cannot verify."""
+        # An admitted shot must reach an observable terminal.  A payload the
+        # server cannot verify is contained to that projectile: it retires
+        # here with no damage, exactly as a lifetime expiry would, instead
+        # of leaving a live ledger row that no later message can ever
+        # resolve and that eventually exhausts the shooter's projectile
+        # capacity.  The caller already holds the state lock.
+        self.pending_events.append({
+            "kind": "projectile_impact",
+            "projectile_id": projectile_id,
+            "outcome": "expired",
+            "resolved_time_ms": record["checked_through_ms"],
+            "checked_distance": record["checked_distance"],
+            "piercing_loss": record["piercing_loss"],
+            "penetration_factor": record["penetration_factor"],
+            "hit_vehicle": False,
+            "shooter_kind": record["shooter_kind"],
+            "shooter_id": record["shooter_id"],
+            "shot_seq": record["shot_seq"],
+        })
+        self.projectiles.pop(projectile_id, None)
+        self.projectile_tombstones[projectile_id] = {
+            "projectile_id": projectile_id,
+            "outcome": "expired",
+            "launch_fingerprint": record["launch_fingerprint"],
+            "request_fingerprint": request_fingerprint,
+            "last_progress_request_fingerprint": record.get(
+                "last_progress_request_fingerprint"),
+        }
+        self.projectile_revision += 1
+        return True
 
     def _prune_orphaned_bot_launch_edges(self):
         if not self.bot_pending_projectile_launches:

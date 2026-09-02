@@ -701,6 +701,7 @@ class LanProtocolTests(unittest.TestCase):
             'shot_origin': [1.0, 2.0, 3.0],
             'shot_direction': [1.0, 0.0, 0.0],
             'dispersion_angle': 0.0,
+            'aim_time_us': 0,
         }, self.sent[-1])
         self.assertFalse(any(field in self.sent[-1]
                              for field in ('position', 'origin', 'velocity',
