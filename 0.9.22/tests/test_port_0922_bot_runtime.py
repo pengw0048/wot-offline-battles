@@ -5834,22 +5834,26 @@ class BotRuntimeTests(unittest.TestCase):
             spawn_resolver=_spawn_resolver, baked_graph=_graph())
         runtime.battle_start(dict(self.start, bots=roster))
         calls = []
-        original = self.module.lan_client.project_bot_state
+        original = self.module.lan_client.project_owned_bot_state
+        strict_projection = self.module.lan_client.project_bot_state
 
         def counted(state):
             calls.append(state['id'])
             return original(state)
 
-        self.module.lan_client.project_bot_state = counted
+        self.module.lan_client.project_owned_bot_state = counted
         try:
             publication = runtime.update(.04, 1.0)[0]
         finally:
-            self.module.lan_client.project_bot_state = original
+            self.module.lan_client.project_owned_bot_state = original
 
         internal = runtime._ordered_states()
         self.assertEqual([state['id'] for state in internal], calls)
         self.assertEqual(
             [original(state) for state in internal], publication['bots'])
+        self.assertEqual(
+            [strict_projection(state) for state in internal],
+            publication['bots'])
         self.assertNotIn('launches', publication)
         self.assertTrue(all(
             len(projected) < len(state)
@@ -13922,6 +13926,286 @@ class BotRuntimeTests(unittest.TestCase):
                 'shot_lane_completed_pairs',
                 'shot_lane_budget_deferred_attempts'):
             self.assertEqual(0, reset[name])
+        self.assertEqual([], runtime._shot_lane_work)
+        self.assertEqual(set(), runtime._shot_lane_work_set)
+        self.assertEqual(set(), runtime._shot_lane_enqueued_targets)
+
+    def test_worker_lane_queue_materializes_only_budgeted_current_pairs(self):
+        roster = [
+            {'id': 11 + index,
+             'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'LiveLane-%d' % index}
+            for index in range(29)
+        ]
+        frame = [0]
+        lane_samples = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(
+                self._stationary_command()),
+            direction_probe=lambda *unused: {
+                'clear': True, 'slope': 0.0},
+            visibility_probe=lambda *unused: True,
+            firing_lane_probe=lambda source, target: lane_samples.append((
+                frame[0], int(source['id']), int(target['network_id']),
+                tuple(target['position']))) or True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, native_motion=True,
+            baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(dict(self.start, bots=roster))
+        materialized = []
+        original_live_records = runtime._shot_lane_live_records
+
+        def counted_live_records(*args, **kwargs):
+            materialized.append(frame[0])
+            return original_live_records(*args, **kwargs)
+
+        runtime._shot_lane_live_records = counted_live_records
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 1.0)
+        self.assertLessEqual(
+            materialized.count(0),
+            self.module.MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME)
+        self.assertTrue(runtime._shot_lane_work_set)
+        self.assertTrue(all(
+            isinstance(key, tuple) and len(key) == 3
+            for key in runtime._shot_lane_work))
+
+        selected_key = next(
+            key for key in runtime._shot_lane_work_set
+            if key[1] == 'bot')
+        source_id, unused_kind, target_id = selected_key
+        target = runtime.states[target_id]
+        target.update(x=321.0, y=4.0, z=-123.0)
+        cached = list(runtime._decision_cache[source_id])
+        command = dict(cached[3])
+        command.update(target_id=target_id, fire_allowed=False)
+        cached[1] = 99.0
+        cached[3] = command
+        runtime._decision_cache[source_id] = tuple(cached)
+
+        frame[0] = 1
+        runtime.update(self.module.WORKER_CONTROL_SECONDS, 1.1)
+        self.assertLessEqual(
+            materialized.count(1),
+            self.module.MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME)
+        selected_samples = [
+            sample for sample in lane_samples
+            if sample[0] == 1 and sample[1:3] ==
+            (source_id, target_id)]
+        self.assertTrue(selected_samples)
+        self.assertEqual(
+            (321.0, 4.0, -123.0), selected_samples[0][3])
+
+    def test_compact_target_template_is_reused_per_pose_phase(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        target = {
+            'id': 25, 'team': 2, 'alive': True,
+            'x': 10.0, 'y': 1.0, 'z': 20.0, 'yaw': 0.2,
+            'speed': 3.0, 'health': 800, 'max_health': 1000,
+            'velocity': (1.0, 0.0, 2.0), 'fire_seq': 4,
+            'critical': {'crew_ko': ['commander']},
+            'profile': {'class_tag': 'mediumTank', 'armor': 80.0},
+            'unused_full_state_payload': list(range(200)),
+        }
+        runtime.states = {25: target}
+        runtime._visible = lambda *unused: True
+        copies = []
+        original_copy = runtime._copy_target_fields
+
+        def counted_copy(raw, names):
+            copies.append((raw['id'], tuple(names)))
+            return original_copy(raw, names)
+
+        runtime._copy_target_fields = counted_copy
+        tick = {}
+        first, unused_lookup = runtime._contacts_for(
+            {'id': 11, 'team': 1}, [], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+        second, unused_lookup = runtime._contacts_for(
+            {'id': 12, 'team': 1}, [], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+
+        self.assertEqual(1, len(copies))
+        self.assertNotIn('unused_full_state_payload', first[0])
+        self.assertNotIn('unused_full_state_payload', second[0])
+        self.assertEqual((1.0, 0.0, 2.0),
+                         runtime._target_velocity(first[0]))
+        self.assertEqual({'crew_ko': ['commander']},
+                         first[0]['critical'])
+        self.assertEqual('mediumTank',
+                         first[0]['profile']['class_tag'])
+        self.assertIs(
+            tick['target_templates'][('bot', 25, False)],
+            runtime._bot_observation_target(
+                25, target, tick, set()))
+
+        target.update(x=40.0, z=50.0)
+        post_phase, unused_lookup = runtime._contacts_for(
+            {'id': 13, 'team': 1}, [], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        self.assertEqual(2, len(copies))
+        self.assertEqual((40.0, 1.0, 50.0),
+                         post_phase[0]['position'])
+        self.assertEqual(
+            set((('bot', 25, False), ('bot', 25, True))),
+            set(tick['target_templates']))
+
+    def test_compact_human_target_keeps_dynamic_spotting_contract(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        player = _admit_player({
+            'id': 2, 'team': 2, 'alive': True,
+            'vehicle': 'ussr:R11_MS-1',
+            'vehicle_compact_descr': 'mounted-descriptor',
+            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.4,
+            'speed': 5.0, 'velocity': (2.0, 0.0, 4.0),
+            'health': 900, 'max_health': 1000, 'fire_seq': 7,
+            'critical': {'crew_ko': [], 'fire': True},
+            'unused_roster_payload': list(range(100)),
+        })
+
+        target = runtime._human_observation_target(player, {})
+
+        self.assertIs(player['effective_params'],
+                      target['effective_params'])
+        self.assertEqual('mounted-descriptor',
+                         target['vehicle_compact_descr'])
+        self.assertEqual({'crew_ko': [], 'fire': True},
+                         target['critical'])
+        self.assertEqual((2.0, 0.0, 4.0),
+                         runtime._target_velocity(target))
+        self.assertNotIn('unused_roster_payload', target)
+        # This is the expensive consumer which needs effective_params and the
+        # current critical crew/fire state; the compact record remains valid.
+        profile = runtime._spotting_profile(target)
+        self.assertEqual(3, len(profile))
+
+    def test_human_observation_visits_each_enemy_target_once(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        runtime.states = {11: {
+            'id': 11, 'team': 2, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 100.0,
+            'health': 100, 'max_health': 100,
+        }}
+        player = _admit_player({
+            'id': 2, 'team': 1, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0,
+        })
+        visible_calls = []
+        key_calls = []
+        runtime._visible = lambda source, target, *unused: (
+            visible_calls.append((source['id'], target['network_id'])) or
+            True)
+        original_key = runtime._observer_target_key
+
+        def counted_key(target):
+            key_calls.append(target['network_id'])
+            return original_key(target)
+
+        runtime._observer_target_key = counted_key
+        aggregate = {}
+        runtime._append_human_observations(
+            [player], 1.0, aggregate, {}, {})
+
+        self.assertEqual([(2, 11)], visible_calls)
+        self.assertEqual([11], key_calls)
+        self.assertEqual(set((2,)), aggregate[(1, 'bot', 11)][3])
+
+    def test_lane_identity_is_removed_when_target_dies_or_changes_team(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            firing_lane_probe=lambda *unused: self.fail(
+                'an invalid identity must not reach the lane probe'))
+        runtime.states = {
+            11: {'id': 11, 'team': 1, 'alive': True},
+            25: {'id': 25, 'team': 2, 'alive': True},
+        }
+        key = (11, 'bot', 25)
+        team_visibility = {(1, 'bot', 25): True}
+        runtime._shot_lane_work_cycle = 0.0
+        runtime._queue_shot_lane_identity(key, 0.0)
+        runtime.states[25]['team'] = 1
+        runtime._service_shot_lane_work(
+            1.0, 0.0, team_visibility, [], {}, set((11, 25)), {}, [16])
+        self.assertNotIn(key, runtime._shot_lane_work_set)
+
+        runtime.states[25]['team'] = 2
+        runtime.states[25]['alive'] = True
+        runtime._queue_shot_lane_identity(key, 0.0)
+        runtime.states[25]['alive'] = False
+        runtime._service_shot_lane_work(
+            1.1, 0.0, team_visibility, [], {}, set((11, 25)), {}, [16])
+        self.assertNotIn(key, runtime._shot_lane_work_set)
+
+    def test_lane_budget_debt_counts_only_due_native_work(self):
+        native_calls = []
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            firing_lane_probe=lambda *args: native_calls.append(args) or True)
+        runtime.states = {
+            11: {
+                'id': 11, 'team': 1, 'alive': True,
+                'x': 0.0, 'y': 0.0, 'z': 0.0,
+                'profile': {'class_tag': 'mediumTank'},
+            },
+            21: {
+                'id': 21, 'team': 2, 'alive': True,
+                'x': 10.0, 'y': 0.0, 'z': 0.0,
+            },
+            22: {
+                'id': 22, 'team': 2, 'alive': True,
+                'x': 10.0, 'y': 0.0, 'z': 0.0,
+            },
+            23: {
+                'id': 23, 'team': 2, 'alive': True,
+                'x': self.module.SHOT_LANE_QUERY_DISTANCE + 100.0,
+                'y': 0.0, 'z': 0.0,
+            },
+            24: {
+                'id': 24, 'team': 2, 'alive': True,
+                'x': 10.0, 'y': 0.0, 'z': 0.0,
+            },
+        }
+        runtime._shot_los_phase = lambda key: (
+            0.9 if key[2] == 22 else 0.0)
+        runtime._shot_los_cache[(11, 'bot', 24)] = (9.1, True)
+        team_visibility = dict(
+            ((1, 'bot', target_id), True)
+            for target_id in (21, 22, 23, 24))
+
+        pending = runtime._service_shot_lane_work(
+            9.5, 10.0, team_visibility, [], {}, set(), {}, [0])
+
+        self.assertEqual(4, pending)
+        self.assertEqual(1, runtime._shot_lane_budget_deferred_attempts)
+        self.assertEqual([], native_calls)
+
+    def test_old_lane_sample_needs_a_current_fresh_team_spot(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        runtime.states = {11: {
+            'id': 11, 'team': 1, 'alive': True,
+        }}
+        lane_key = (11, 'bot', 25)
+        contact_key = (1, 'bot', 25)
+        runtime._shot_los_cache[lane_key] = (1.0, True)
+        aggregate = {
+            contact_key: [True, set(), {
+                'kind': 'bot', 'network_id': 25, 'team': 2,
+                'alive': True, 'health': 100, 'max_health': 100,
+                'x': 0.0, 'y': 0.0, 'z': 10.0,
+            }, set(), set((12,))],
+        }
+
+        runtime._merge_observation_shot_lanes(
+            aggregate, {}, 1.1)
+
+        self.assertEqual(set(), aggregate[contact_key][1])
 
     def test_unspotted_team_targets_do_not_spend_static_lane_rays(self):
         lane_pairs = []

@@ -13,6 +13,8 @@ CLIENT_ROOT = ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_ROOT))
 
 from gui.mods.offline_lan_0922 import config as port_config
+from gui.mods.offline_lan_0922 import authority_worker as authority_worker_module
+from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
 from gui.mods.offline_lan_0922.account_rpc.state import AccountState
 from gui.mods.offline_lan_0922.authority_worker import (
@@ -222,6 +224,32 @@ def _projected_bot_state(bot_id=11):
     }
 
 
+def _projected_bot_equipment_states():
+    descriptors = (
+        types.SimpleNamespace(
+            id=(11, 21), compactDescr=421,
+            name='autoExtinguishers', tags=(),
+            reuseCount=1, cooldownSeconds=90.0,
+            autoactivate=True, fireStartingChanceFactor=0.9),
+        types.SimpleNamespace(
+            id=(11, 22), compactDescr=422,
+            name='largeMedkit', tags=('medkit',),
+            reuseCount=1, cooldownSeconds=90.0,
+            repairAll=True, bonusValue=0.30),
+        types.SimpleNamespace(
+            id=(11, 23), compactDescr=423,
+            name='largeRepairkit', tags=('repairkit',),
+            reuseCount=1, cooldownSeconds=90.0,
+            repairAll=True, bonusValue=0.10),
+    )
+    contracts = tuple(
+        equipment_mechanics.project_equipment(descriptor)
+        for descriptor in descriptors)
+    return [
+        equipment_mechanics.EquipmentState(contract, 0.0).snapshot(0.0)
+        for contract in contracts]
+
+
 class AuthorityWorkerClientTests(unittest.TestCase):
     @staticmethod
     def _active_client():
@@ -418,6 +446,28 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual([], client._outbound_queue)
         self.assertTrue(client.running)
 
+    def test_worker_bot_state_rejects_malformed_equipment_at_send_boundary(self):
+        canonical = _projected_bot_equipment_states()
+        incomplete = json.loads(json.dumps(canonical))
+        incomplete[0].pop('active')
+        wrong_order = json.loads(json.dumps(canonical))
+        wrong_order[0], wrong_order[1] = wrong_order[1], wrong_order[0]
+        malformed = (
+            ('mapping', {}),
+            ('short', canonical[:-1]),
+            ('incomplete', incomplete),
+            ('wrong_order', wrong_order),
+        )
+        for label, snapshots in malformed:
+            with self.subTest(label=label):
+                client = self._active_client()
+                state = _projected_bot_state()
+                state['equipment_states'] = snapshots
+
+                self.assertFalse(client.send_projected_bot_state([state]))
+                self.assertEqual([], client._outbound_queue)
+                self.assertTrue(client.running)
+
     def test_worker_replaces_unsent_continuous_bot_checkpoint(self):
         client = self._active_client()
         first = _projected_bot_state()
@@ -446,6 +496,106 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(80000, wire['sample_time_us'])
         self.assertEqual(8.0, wire['bots'][0]['x'])
         self.assertEqual(0.05, wire['bots'][0]['reload_time'])
+
+    def test_worker_combined_validation_preserves_the_legacy_edge_key(self):
+        state = _projected_bot_state()
+        state['equipment_states'] = _projected_bot_equipment_states()
+        state['equipment_states'][0].update({
+            'cooldownTimeLeft': 12.0, 'autoPendingElapsed': 0.2})
+        message = {
+            'type': 'bot_state', 'round_id': 7, 'bots': [state],
+            'sample_time_us': 40000,
+            'source_batch_horizon_us': 40000,
+            'human_ram_armors': [{
+                'seq': 1, 'first_id': 1, 'second_id': 11,
+                'available': False,
+            }],
+        }
+
+        def legacy_equipment_key(snapshots):
+            continuous_fields = frozenset((
+                'cooldownTimeLeft', 'autoPendingElapsed',
+                'aiPendingElapsed'))
+            return tuple(
+                authority_worker_module._immutable_outbound_key(dict(
+                    (name, field_value)
+                    for name, field_value in snapshot.items()
+                    if name not in continuous_fields))
+                for snapshot in snapshots)
+
+        def legacy_key(value):
+            continuous_fields = (
+                authority_worker_module._COALESCIBLE_BOT_STATE_FIELDS)
+            bot_keys = []
+            for bot_state in value.get('bots') or ():
+                fields = []
+                for name, field_value in bot_state.items():
+                    if name in continuous_fields:
+                        continue
+                    if name == 'equipment_states':
+                        field_value = legacy_equipment_key(field_value)
+                    else:
+                        field_value = (
+                            authority_worker_module._immutable_outbound_key(
+                                field_value))
+                    fields.append((name, field_value))
+                bot_keys.append(tuple(sorted(fields)))
+            return (
+                int(value.get('round_id') or 0),
+                authority_worker_module._immutable_outbound_key(
+                    value.get('human_ram_armors')),
+                tuple(bot_keys))
+
+        legacy_expected = legacy_key(message)
+        expected = (
+            authority_worker_module._validated_bot_state_coalesce_key(
+                message))
+        self.assertIsNotNone(expected)
+
+        continuous = json.loads(json.dumps(message))
+        continuous['bots'][0].update({
+            'x': 9.0, 'yaw': 0.7, 'reload_time': 0.05,
+            'combat_fire_elapsed': 0.03, 'combat_fire_timer': 0.07,
+        })
+        continuous_equipment = continuous['bots'][0][
+            'equipment_states'][0]
+        continuous_equipment.update({
+            'cooldownTimeLeft': 4.0, 'autoPendingElapsed': 0.9})
+        continuous['bots'][0]['equipment_states'][1][
+            'aiPendingElapsed'] = 0.1
+        self.assertEqual(
+            legacy_expected,
+            legacy_key(continuous))
+        self.assertEqual(
+            expected,
+            authority_worker_module._validated_bot_state_coalesce_key(
+                continuous))
+
+        durable = json.loads(json.dumps(continuous))
+        durable['bots'][0]['equipment_states'][0]['usesLeft'] = 1
+        self.assertNotEqual(
+            legacy_expected,
+            legacy_key(durable))
+        self.assertNotEqual(
+            expected,
+            authority_worker_module._validated_bot_state_coalesce_key(
+                durable))
+
+    def test_worker_equipment_cooldown_coalesces_but_consumption_does_not(self):
+        client = self._active_client()
+        first = _projected_bot_state()
+        first['equipment_states'] = _projected_bot_equipment_states()
+        first['equipment_states'][0]['cooldownTimeLeft'] = 12.0
+        cooldown = json.loads(json.dumps(first))
+        cooldown['equipment_states'][0]['cooldownTimeLeft'] = 4.0
+        consumed = json.loads(json.dumps(cooldown))
+        consumed['equipment_states'][0]['usesLeft'] -= 1
+
+        self.assertTrue(client.send_projected_bot_state([first]))
+        self.assertTrue(client.send_projected_bot_state([cooldown]))
+        self.assertEqual(1, len(client._outbound_queue))
+        self.assertTrue(client.send_projected_bot_state([consumed]))
+        self.assertEqual(2, len(client._outbound_queue))
 
     def test_worker_coalesces_across_queue_without_dropping_discrete_message(self):
         client = self._active_client()

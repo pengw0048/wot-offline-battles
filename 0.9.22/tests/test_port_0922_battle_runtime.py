@@ -16724,6 +16724,75 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(-0.1, collision_pose['gun_pitch'])
         self.assertEqual(1, collision_pose['siege_state'])
 
+    def test_authority_reuses_only_an_exact_projectile_collision_pose(self):
+        def prepared_battle():
+            battle = BattleRuntime(_runtime())
+            battle._binding = mock.Mock()
+            battle._records = {
+                'bot:17': {
+                    'engine_id': 11, 'kind': 'bot', 'network_id': 17,
+                    'ready': True, 'tombstone': False}}
+            return battle
+
+        state = {
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 7.0, 'y': 2.0, 'z': 9.0,
+            'yaw': 0.75, 'pitch': 0.2, 'roll': -0.3,
+            'speed': 0.0, 'movement_dir': 0, 'rotation_dir': 0,
+            'aim_yaw': 0.9, 'gun_pitch': -0.1, 'siege_state': 1}
+        battle = prepared_battle()
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        first = battle._records['bot:17']['projectile_collision_pose']
+        self.assertTrue(battle._apply_authority_bot_poses([state]))
+        self.assertIs(
+            first,
+            battle._records['bot:17']['projectile_collision_pose'])
+
+        cases = (
+            ('x', 8.0, 'x', 8.0),
+            ('y', 3.0, 'y', 3.0),
+            ('z', 10.0, 'z', 10.0),
+            ('yaw', 0.8, 'yaw', 0.8),
+            ('pitch', 0.25, 'pitch', 0.25),
+            ('roll', -0.25, 'roll', -0.25),
+            ('aim_yaw', 1.1, 'turret_yaw', 0.35),
+            ('turret_yaw', 0.4, 'turret_yaw', 0.4),
+            ('gun_pitch', -0.2, 'gun_pitch', -0.2),
+            ('siege_state', 2, 'siege_state', 2),
+        )
+        for field, value, pose_field, expected in cases:
+            with self.subTest(field=field):
+                battle = prepared_battle()
+                self.assertTrue(battle._apply_authority_bot_poses([state]))
+                before = battle._records['bot:17'][
+                    'projectile_collision_pose']
+                changed = dict(state, **{field: value})
+                self.assertTrue(
+                    battle._apply_authority_bot_poses([changed]))
+                after = battle._records['bot:17'][
+                    'projectile_collision_pose']
+                self.assertIsNot(before, after)
+                self.assertAlmostEqual(expected, after[pose_field])
+
+        battle = prepared_battle()
+        explicit_turret = dict(state, turret_yaw=0.4)
+        self.assertTrue(
+            battle._apply_authority_bot_poses([explicit_turret]))
+        before = battle._records['bot:17']['projectile_collision_pose']
+        self.assertTrue(battle._apply_authority_bot_poses([
+            dict(explicit_turret, aim_yaw=1.2)]))
+        self.assertIs(
+            before,
+            battle._records['bot:17']['projectile_collision_pose'])
+
+        replacement = {'x': -1.0}
+        battle._records['bot:17']['projectile_collision_pose'] = replacement
+        self.assertTrue(battle._apply_authority_bot_poses([
+            dict(explicit_turret, aim_yaw=1.2)]))
+        restored = battle._records['bot:17']['projectile_collision_pose']
+        self.assertIsNot(replacement, restored)
+        self.assertEqual(7.0, restored['x'])
+
     def test_static_authority_roster_skips_repeated_pose_and_aim_writes(self):
         battle = BattleRuntime(_runtime())
         battle._binding = mock.Mock()
@@ -16922,6 +16991,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._worker_mode = True
         battle._binding = mock.Mock()
         battle._remote_factory = mock.Mock()
+        battle._update_bot_tracks = mock.Mock(return_value=True)
         battle._records = {
             'bot:17': {'engine_id': 11, 'kind': 'bot', 'network_id': 17,
                        'ready': True, 'tombstone': False}}
@@ -16934,6 +17004,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._binding.set_vehicle_pose.assert_called_once()
         battle._binding.update_vehicle_aim.assert_called_once_with(
             11, 0.75, 0.9, -0.1)
+        battle._update_bot_tracks.assert_not_called()
         battle._remote_factory.get.assert_not_called()
 
     def test_hidden_worker_scans_human_tree_contacts(self):

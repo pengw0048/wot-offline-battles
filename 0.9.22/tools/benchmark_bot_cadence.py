@@ -35,6 +35,7 @@ def _command():
 def _runtime(visible=True, control_seconds=None):
     module = fixtures._load()
     command = _command()
+    equipment_contracts = fixtures._bot_equipment_contracts(module)
     runtime = module.BotRuntime(
         1,
         descriptor_resolver=lambda unused: fixtures._combat_descriptor(),
@@ -47,6 +48,7 @@ def _runtime(visible=True, control_seconds=None):
         physics_ground_probe=lambda *unused: 0.0,
         spawn_resolver=fixtures._spawn_resolver,
         baked_graph=fixtures._graph(),
+        bot_equipment_resolver=lambda: equipment_contracts,
         control_seconds=control_seconds)
     roster = []
     for index in range(29):
@@ -188,7 +190,8 @@ def main():
             projection_iterations, False)
         for unused_repeat in range(args.repeats)
     ])
-    print('fps=%d control_hz=%.3f bots=29 seconds=%.3f frames=%d repeats=%d' % (
+    print('fps=%d control_hz=%.3f bots=29 equipment_per_bot=3 '
+          'seconds=%.3f frames=%d repeats=%d' % (
         args.fps, args.control_hz, args.seconds,
         int(round(args.seconds * args.fps)), args.repeats))
     print('render_frame_baseline calls=%d median_ms=%.3f' % (
