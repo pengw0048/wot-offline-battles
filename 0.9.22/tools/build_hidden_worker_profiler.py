@@ -87,13 +87,15 @@ def build_marker(build_identity, package_name, package_digest,
 
 
 def install_text(build_identity):
-    return """WoT 0.9.22 #1513 hidden-worker profiler
-================================================
+    return """WoT 0.9.22 #1513 hidden-worker Python performance experiment
+====================================================================
 
 Diagnostic build: {identity}
 
-This is a reversible diagnostic WOTMOD for an existing v0.6.2 launcher
-installation. You still start the game, LAN server, visible client and hidden
+This reversible profiler overlay combines the hidden-worker Python workload
+optimizations in this source revision with comprehensive performance
+instrumentation. It is built for an existing v0.6.2 launcher installation. You
+still start the game, LAN server, visible client and hidden
 worker through that same launcher. This ZIP only avoids rebuilding or replacing
 the launcher itself.
 

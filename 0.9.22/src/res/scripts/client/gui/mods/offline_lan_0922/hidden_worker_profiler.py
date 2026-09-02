@@ -39,7 +39,8 @@ NATIVE_CATEGORIES = (
 PYTHON_PHASE_CATEGORIES = (
     'bot_prework', 'bot_runtime_update', 'bot_postdiag',
     'bot_message_freeze', 'bot_message_enqueue', 'bot_message_send',
-    'worker_message_freeze', 'worker_message_enqueue',
+    'worker_message_validate', 'worker_message_freeze',
+    'worker_message_enqueue',
     'worker_message_send',
     'bot_scheduler_control_refresh', 'bot_scheduler_catchup',
     'bot_setup', 'bot_control_observation', 'bot_selected_motion',
@@ -54,6 +55,7 @@ PYTHON_PHASE_CATEGORIES = (
 PYTHON_CATEGORIES = (
     'foliage_spotting', 'foliage_dynamic', 'destructible_scan',
     'destructible_contact', 'destructible_projectile',
+    'destructible_filter_prepare',
     'destructible_mutation', 'vehicle_collision_projectile',
     'vehicle_collision_firing_lane', 'vehicle_collision_presentation',
     'vehicle_collision_other', 'muzzle_transform') + \
@@ -68,13 +70,19 @@ WORK_COUNTERS = (
     'bot_contact_candidate_pairs', 'bot_contact_resolved_pairs',
     'bot_slope_samples', 'bot_observation_pairs', 'bot_cover_jobs',
     'bot_projected_rows', 'bot_publications',
-    'bot_visibility_pairs', 'bot_shot_lane_pairs', 'bot_ground_probes',
+    'bot_visibility_pairs', 'bot_shot_lane_pairs',
+    'bot_shot_lane_materialized', 'bot_shot_lane_budget_deferred',
+    'bot_shot_lane_identity_depth', 'bot_ground_probes',
     'bot_motion_direction_probes', 'bot_motion_receipt_probes',
     'bot_motion_commit_sweeps',
     'projectiles_active', 'projectile_segments', 'projectile_candidates',
     'projectile_terminals', 'bot_messages', 'bot_rows')
 WORK_COUNTERS += (
-    'worker_messages', 'worker_wire_bytes', 'worker_queue_depth')
+    'destructible_mutation_cells', 'destructible_mutation_chunks',
+    'destructible_mutation_global', 'destructible_filter_preparations',
+    'destructible_filter_bins', 'destructible_filter_candidates',
+    'destructible_filter_nonempty', 'worker_messages',
+    'worker_wire_bytes', 'worker_queue_depth')
 _NATIVE_CATEGORY_LOOKUP = dict((name, True) for name in NATIVE_CATEGORIES)
 _PYTHON_CATEGORY_LOOKUP = dict((name, True) for name in PYTHON_CATEGORIES)
 _WORK_COUNTER_LOOKUP = dict((name, True) for name in WORK_COUNTERS)
@@ -100,8 +108,9 @@ for _name in (
         'bot_planner_navigation_inclusive', 'bot_astar_inclusive',
         'bot_driver_inclusive'):
     PYTHON_CATEGORY_SCOPES[_name] = 'nested_inclusive'
-for _name in ('worker_message_freeze', 'worker_message_enqueue',
-              'worker_message_send'):
+PYTHON_CATEGORY_SCOPES['destructible_filter_prepare'] = 'nested_inclusive'
+for _name in ('worker_message_validate', 'worker_message_freeze',
+              'worker_message_enqueue', 'worker_message_send'):
     PYTHON_CATEGORY_SCOPES[_name] = 'message_nested_inclusive'
 for _name in ('bot_message_freeze', 'bot_message_enqueue',
               'bot_message_send'):
@@ -125,11 +134,18 @@ WORK_COUNTER_SEMANTICS = (
     'nonnegative_finite_bounded_per_interval;see_work_counter_aggregations')
 WORK_COUNTER_AGGREGATIONS = dict((name, 'sum') for name in WORK_COUNTERS)
 WORK_COUNTER_AGGREGATIONS['worker_queue_depth'] = 'sampled_max'
+WORK_COUNTER_AGGREGATIONS['bot_shot_lane_identity_depth'] = 'sampled_max'
 WORK_COUNTER_NOTES = {
     'bot_motion_commit_sweeps': (
         'logical_motion_resolver_requests_including_cache_fast_path;'
         'not_native_ray_count'),
     'worker_queue_depth': 'maximum_of_instrumented_queue_depth_samples',
+    'bot_shot_lane_identity_depth': (
+        'maximum_persistent_supplemental_identity_depth_sample'),
+    'bot_shot_lane_materialized': (
+        'supplemental_lane_identities_resolved_to_current_pose_rows'),
+    'bot_shot_lane_budget_deferred': (
+        'fresh_due_in_range_supplemental_identities_deferred_by_budget'),
 }
 PYTHON_SCOPE_SUM_RULE = (
     'sum_only_within_frame_exclusive_or_bot_step_exclusive;'

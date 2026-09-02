@@ -333,7 +333,9 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		maximum_x = max(max(lane[0], lane[2]) for lane in lane_segments)
 		minimum_z = min(min(lane[1], lane[3]) for lane in lane_segments)
 		maximum_z = max(max(lane[1], lane[3]) for lane in lane_segments)
-		_sweep_filter = prepare_horizontal_collision_filter(
+		_sweep_filter = hidden_worker_profiler.python_call(
+			'destructible_filter_prepare',
+			prepare_horizontal_collision_filter,
 			Math.Vector3(minimum_x, pos.y + 0.6, minimum_z),
 			Math.Vector3(maximum_x, pos.y + 1.6, maximum_z))
 		_crush_state = [False]

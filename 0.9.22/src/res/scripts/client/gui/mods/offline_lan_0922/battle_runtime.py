@@ -86,7 +86,8 @@ _WORKER_DIAGNOSTIC_FIELDS = (
     'visibility_new_services', 'visibility_ordinary_services',
     'shot_lane_pending_pairs', 'shot_lane_pending_max_pairs',
     'shot_lane_oldest_due_age_ms', 'shot_lane_oldest_due_max_age_ms',
-    'shot_lane_completed_pairs',
+    'shot_lane_completed_pairs', 'shot_lane_materialized_pairs',
+    'shot_lane_identity_depth', 'shot_lane_identity_max_depth',
     'shot_lane_budget_deferred_attempts')
 AMMO_SECONDS = 0.10
 NETWORK_INPUT_SECONDS = 1.0 / 30.0
@@ -1370,7 +1371,8 @@ class _FrameDiagnostics(object):
              'visibility_oldest_ms_max=%s/%s '
              'shot_lane_pending_max=%s/%s '
              'shot_lane_oldest_due_ms_max=%s/%s '
-             'shot_lane_completed_deferred=%s/%s '
+             'shot_lane_identity_depth_max=%s/%s '
+             'shot_lane_completed_materialized_deferred=%s/%s/%s '
              'pose_writes_skips=%s/%s aim_writes_skips=%s/%s\n') % (
                  control.get('control_steps'),
                  control.get('catchup_callbacks'),
@@ -1393,7 +1395,10 @@ class _FrameDiagnostics(object):
                  bot_diagnostics.get('shot_lane_oldest_due_age_ms'),
                  bot_diagnostics.get(
                      'shot_lane_oldest_due_max_age_ms'),
+                 bot_diagnostics.get('shot_lane_identity_depth'),
+                 bot_diagnostics.get('shot_lane_identity_max_depth'),
                  bot_diagnostics.get('shot_lane_completed_pairs'),
+                 bot_diagnostics.get('shot_lane_materialized_pairs'),
                  bot_diagnostics.get(
                      'shot_lane_budget_deferred_attempts'),
                  presentation.get('pose_writes'),

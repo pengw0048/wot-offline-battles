@@ -788,6 +788,12 @@ def _publish_spatial_mutation_1513(bin_keys=(), chunk_ids=(),
 			chunk_generations.get(chunk_id, 0)) + 1
 	revision = _spatial_revision_1513() + 1
 	globals()['g_offh_destr_spatial_revision'] = revision
+	hidden_worker_profiler.work_add(
+		'destructible_mutation_cells', len(bin_keys))
+	hidden_worker_profiler.work_add(
+		'destructible_mutation_chunks', len(chunk_ids))
+	if global_invalidation:
+		hidden_worker_profiler.work_add('destructible_mutation_global')
 	hidden_worker_profiler.update_context({
 		'destructible_revision': revision})
 	_receipt_stat_1513('spatial_invalidations')
@@ -2127,6 +2133,7 @@ def prepare_horizontal_collision_filter(start, end):
 	destructible admitted by an earlier lane in this sweep is visible to every
 	later lane without rebuilding the spatial candidate set.
 	"""
+	hidden_worker_profiler.work_add('destructible_filter_preparations')
 	if _destructible_catalog is None:
 		return None
 	contact_bins = globals().get('g_offh_destr_contact_bins')
@@ -2141,9 +2148,18 @@ def prepare_horizontal_collision_filter(start, end):
 	except (AttributeError, TypeError, ValueError):
 		return None
 	members = set()
+	bin_count = 0
 	for key in keys:
+		bin_count += 1
 		members.update(contact_bins.get(key, ()))
-	return _live_broken_collision_filter_1513(members)
+	hidden_worker_profiler.work_add(
+		'destructible_filter_bins', bin_count)
+	hidden_worker_profiler.work_add(
+		'destructible_filter_candidates', len(members))
+	prepared = _live_broken_collision_filter_1513(members)
+	if prepared is not None:
+		hidden_worker_profiler.work_add('destructible_filter_nonempty')
+	return prepared
 
 
 def horizontal_collision_filter(start, end):

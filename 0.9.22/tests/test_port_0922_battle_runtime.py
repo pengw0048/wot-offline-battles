@@ -4967,7 +4967,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'shot_lane_pending_max_pairs': 404,
                 'shot_lane_oldest_due_age_ms': 200,
                 'shot_lane_oldest_due_max_age_ms': 1700,
+                'shot_lane_identity_depth': 31,
+                'shot_lane_identity_max_depth': 420,
                 'shot_lane_completed_pairs': 420,
+                'shot_lane_materialized_pairs': 435,
                 'shot_lane_budget_deferred_attempts': 5000,
             },
         })
@@ -5002,7 +5005,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('visibility_oldest_ms_max=400/900', payloads[0])
         self.assertIn('shot_lane_pending_max=31/404', payloads[0])
         self.assertIn('shot_lane_oldest_due_ms_max=200/1700', payloads[0])
-        self.assertIn('shot_lane_completed_deferred=420/5000', payloads[0])
+        self.assertIn('shot_lane_identity_depth_max=31/420', payloads[0])
+        self.assertIn(
+            'shot_lane_completed_materialized_deferred=420/435/5000',
+            payloads[0])
         self.assertIn('pose_writes_skips=29/58', payloads[0])
         self.assertIn('projectile_avg_max', payloads[0])
         self.assertIn('chords=29.00/58', payloads[0])
@@ -13693,7 +13699,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'shot_lane_pending_max_pairs': 404,
                 'shot_lane_oldest_due_age_ms': 200,
                 'shot_lane_oldest_due_max_age_ms': 1700,
+                'shot_lane_identity_depth': 31,
+                'shot_lane_identity_max_depth': 420,
                 'shot_lane_completed_pairs': 420,
+                'shot_lane_materialized_pairs': 435,
                 'shot_lane_budget_deferred_attempts': 5000})
 
         self.assertTrue(battle._record_worker_control_diagnostics(1000000))
@@ -13724,6 +13733,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             1700, sample['bot_diagnostics'][
                 'shot_lane_oldest_due_max_age_ms'])
+        self.assertEqual(
+            435, sample['bot_diagnostics'][
+                'shot_lane_materialized_pairs'])
+        self.assertEqual(
+            420, sample['bot_diagnostics'][
+                'shot_lane_identity_max_depth'])
         self.assertEqual(
             5000, sample['bot_diagnostics'][
                 'shot_lane_budget_deferred_attempts'])

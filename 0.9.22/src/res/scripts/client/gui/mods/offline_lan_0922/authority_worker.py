@@ -15,6 +15,7 @@ import time
 
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import hidden_worker_profiler
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922.lan_client import (
@@ -56,6 +57,7 @@ _VISIBILITY_DIAGNOSTIC_COUNTERS = (
     'visibility_new_services', 'visibility_ordinary_services')
 _SHOT_LANE_DIAGNOSTIC_COUNTERS = (
     'shot_lane_completed_pairs',
+    'shot_lane_materialized_pairs',
     'shot_lane_budget_deferred_attempts')
 
 
@@ -315,7 +317,9 @@ class AuthorityWorkerLANClient(LANClient):
                 return False
             message['human_ram_armors'] = human_ram_armors
         try:
-            coalesce_key = _validated_bot_state_coalesce_key(message)
+            coalesce_key = hidden_worker_profiler.python_call(
+                'worker_message_validate',
+                _validated_bot_state_coalesce_key, message)
         except Exception:
             return False
         if coalesce_key is None:

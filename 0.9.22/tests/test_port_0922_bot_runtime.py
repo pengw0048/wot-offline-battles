@@ -13855,6 +13855,7 @@ class BotRuntimeTests(unittest.TestCase):
         first_complete = None
         completed_snapshot = None
         saw_pending = False
+        previous_materialized = 0
         for frame_index in range(80):
             frame[0] = frame_index
             runtime.update(
@@ -13863,6 +13864,15 @@ class BotRuntimeTests(unittest.TestCase):
             calls_before_diagnostics = len(lane_calls)
             diagnostics = runtime.diagnostic_totals()
             self.assertEqual(calls_before_diagnostics, len(lane_calls))
+            materialized_delta = (
+                diagnostics['shot_lane_materialized_pairs'] -
+                previous_materialized)
+            self.assertGreaterEqual(materialized_delta, 0)
+            self.assertLessEqual(
+                materialized_delta,
+                self.module.MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME)
+            previous_materialized = diagnostics[
+                'shot_lane_materialized_pairs']
             if diagnostics['shot_lane_pending_pairs'] > 0:
                 saw_pending = True
             if (saw_pending and completed_snapshot is None and
@@ -13902,6 +13912,11 @@ class BotRuntimeTests(unittest.TestCase):
             diagnostics['shot_lane_pending_max_pairs'], 420)
         self.assertGreaterEqual(
             diagnostics['shot_lane_completed_pairs'], 420)
+        self.assertGreaterEqual(
+            diagnostics['shot_lane_materialized_pairs'], 420)
+        self.assertGreater(diagnostics['shot_lane_identity_max_depth'], 0)
+        self.assertLessEqual(
+            diagnostics['shot_lane_identity_max_depth'], 420)
         self.assertGreater(
             diagnostics['shot_lane_budget_deferred_attempts'], 0)
         self.assertGreaterEqual(
@@ -13924,6 +13939,9 @@ class BotRuntimeTests(unittest.TestCase):
                 'shot_lane_oldest_due_age_ms',
                 'shot_lane_oldest_due_max_age_ms',
                 'shot_lane_completed_pairs',
+                'shot_lane_materialized_pairs',
+                'shot_lane_identity_depth',
+                'shot_lane_identity_max_depth',
                 'shot_lane_budget_deferred_attempts'):
             self.assertEqual(0, reset[name])
         self.assertEqual([], runtime._shot_lane_work)

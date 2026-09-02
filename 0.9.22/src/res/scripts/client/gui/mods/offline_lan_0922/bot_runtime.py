@@ -2054,6 +2054,11 @@ class BotRuntime(object):
                 self._shot_lane_oldest_due_max_age_ms),
             'shot_lane_completed_pairs': int(
                 self._shot_lane_completed_pairs),
+            'shot_lane_materialized_pairs': int(
+                self._shot_lane_materialized_pairs),
+            'shot_lane_identity_depth': len(self._shot_lane_work_set),
+            'shot_lane_identity_max_depth': int(
+                self._shot_lane_identity_max_depth),
             'shot_lane_budget_deferred_attempts': int(
                 self._shot_lane_budget_deferred_attempts),
         }
@@ -4105,6 +4110,8 @@ class BotRuntime(object):
         self._shot_lane_diagnostic_now = 0.0
         self._shot_lane_oldest_due_max_age_ms = 0
         self._shot_lane_completed_pairs = 0
+        self._shot_lane_materialized_pairs = 0
+        self._shot_lane_identity_max_depth = 0
         self._shot_lane_budget_deferred_attempts = 0
 
     def _update_shot_lane_debt_diagnostics(
@@ -7597,6 +7604,11 @@ class BotRuntime(object):
             probe_budget):
         """Service bounded current-pose jobs from one persistent identity set."""
         self._prepare_shot_lane_work(cycle_time, team_visibility)
+        identity_depth = len(self._shot_lane_work_set)
+        self._shot_lane_identity_max_depth = max(
+            self._shot_lane_identity_max_depth, identity_depth)
+        hidden_worker_profiler.work_add(
+            'bot_shot_lane_identity_depth', identity_depth)
         if not self._shot_lane_work_set:
             return 0
         now = _number(now)
@@ -7739,6 +7751,11 @@ class BotRuntime(object):
                     query_distance:
                 budget_deferred += 1
         self._shot_lane_budget_deferred_attempts += budget_deferred
+        self._shot_lane_materialized_pairs += materialized[0]
+        hidden_worker_profiler.work_add(
+            'bot_shot_lane_materialized', materialized[0])
+        hidden_worker_profiler.work_add(
+            'bot_shot_lane_budget_deferred', budget_deferred)
         return pending
 
     def _merge_observation_shot_lanes(

@@ -230,6 +230,50 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
                      'collect_hidden_worker_profile.ps1'):
             _assert_powershell_structure(self, TOOLS_ROOT / name)
 
+    def test_windows_paths_are_passed_outside_powershell_arguments(self):
+        install_batch = (TOOLS_ROOT /
+                         'INSTALL_HIDDEN_WORKER_PROFILER.bat').read_text(
+                             encoding='utf-8')
+        uninstall_batch = (TOOLS_ROOT /
+                           'UNINSTALL_HIDDEN_WORKER_PROFILER.bat').read_text(
+                               encoding='utf-8')
+        collect_batch = (TOOLS_ROOT /
+                         'COLLECT_HIDDEN_WORKER_PROFILE.bat').read_text(
+                             encoding='utf-8')
+        package_source = (TOOLS_ROOT /
+                          'hidden_worker_profiler_package.ps1').read_text(
+                              encoding='utf-8')
+        collector_source = (TOOLS_ROOT /
+                            'collect_hidden_worker_profile.ps1').read_text(
+                                encoding='utf-8')
+
+        for batch in (install_batch, uninstall_batch, collect_batch):
+            self.assertIn('setlocal DisableDelayedExpansion', batch)
+            self.assertIn(
+                'set "WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT=%GAME_ROOT%"',
+                batch)
+            self.assertNotIn('-GameRoot', batch)
+            self.assertNotIn('-OutputRoot', batch)
+        self.assertIn(
+            'set "WOT_HIDDEN_WORKER_PROFILER_OUTPUT_ROOT=%~dp0"',
+            collect_batch)
+
+        self.assertIn(
+            '[string]$GameRoot = '
+            '$env:WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT', package_source)
+        self.assertIn(
+            '[string]$GameRoot = '
+            '$env:WOT_HIDDEN_WORKER_PROFILER_GAME_ROOT', collector_source)
+        self.assertIn(
+            '[string]$OutputRoot = '
+            '$env:WOT_HIDDEN_WORKER_PROFILER_OUTPUT_ROOT', collector_source)
+        self.assertIn('function Resolve-FullPath', collector_source)
+        self.assertIn('$Value.Trim().Trim([char]34)', collector_source)
+        self.assertIn(
+            'Resolve-FullPath $GameRoot "Game folder"', collector_source)
+        self.assertIn(
+            'Resolve-FullPath $OutputRoot "Report folder"', collector_source)
+
     def test_collector_uses_only_fixed_paths_and_pid_scoped_counters(self):
         source = (TOOLS_ROOT / 'collect_hidden_worker_profile.ps1').read_text(
             encoding='utf-8')
@@ -255,6 +299,10 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
 
     def test_install_text_explains_launcher_workflow_and_restoration(self):
         text = self.builder.install_text('profiler-test-a')
+        self.assertIn('hidden-worker Python workload', text)
+        self.assertIn('profiler overlay', text)
+        self.assertIn('comprehensive performance', text)
+        self.assertIn('instrumentation', text)
         self.assertIn('let it finish its normal v0.6.2 installation', text)
         self.assertIn('still start the game, LAN server, visible client and hidden', text)
         self.assertIn('through that same launcher', text)

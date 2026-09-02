@@ -627,6 +627,43 @@ class WorldCollisionTests(unittest.TestCase):
         self.assertTrue(all(value[2] is collision_filter
                             for value in horizontal_calls))
 
+    def test_final_sweep_times_one_filter_preparation_call(self):
+        collision_filter = lambda *unused: True
+        prepare_calls = []
+
+        def prepare(start, end):
+            prepare_calls.append((start, end))
+            return collision_filter
+
+        def profile_call(category, function, *args):
+            self.assertEqual('destructible_filter_prepare', category)
+            return function(*args)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=lambda *unused: None,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.8, -0.8, -3.4),
+                    (1.8, 1.0, 3.4), None))))
+
+        with mock.patch.object(
+                world_collision, 'prepare_horizontal_collision_filter',
+                side_effect=prepare) as prepared, mock.patch.object(
+                    world_collision.hidden_worker_profiler, 'python_call',
+                    side_effect=profile_call) as timed:
+            blocked = world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+                descriptor, False, 0.04)
+
+        self.assertFalse(blocked)
+        prepared.assert_called_once()
+        timed.assert_called_once()
+        self.assertIs(prepared, timed.call_args[0][1])
+        self.assertEqual(1, len(prepare_calls))
+
     def test_sideways_motion_sweeps_hull_width_across_front_back_lanes(self):
         horizontal_calls = []
 

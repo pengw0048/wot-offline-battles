@@ -131,6 +131,7 @@ class _WorkerRuntime(object):
                 'shot_lane_oldest_due_age_ms': 0,
                 'shot_lane_oldest_due_max_age_ms': 0,
                 'shot_lane_completed_pairs': 0,
+                'shot_lane_materialized_pairs': 0,
                 'shot_lane_budget_deferred_attempts': 0,
             },
         }
@@ -423,6 +424,69 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(1.0, wire['bots'][0]['x'])
         self.assertEqual(100.0,
                          wire['bots'][0]['critical']['devices'][0]['hp'])
+
+    def test_worker_times_strict_validation_once_before_encoding(self):
+        client = self._active_client()
+        state = _projected_bot_state()
+        state['equipment_states'] = _projected_bot_equipment_states()
+        events = []
+        original_dumps = lan_client_module.json.dumps
+
+        def timed(category, function, *args, **kwargs):
+            events.append(('timing_start', category))
+            result = function(*args, **kwargs)
+            events.append(('timing_end', category))
+            return result
+
+        def recording_dumps(message, *args, **kwargs):
+            events.append(('encode', message.get('type')))
+            return original_dumps(message, *args, **kwargs)
+
+        with mock.patch.object(
+                authority_worker_module.hidden_worker_profiler,
+                'python_call', side_effect=timed):
+            with mock.patch.object(
+                    lan_client_module.json, 'dumps',
+                    side_effect=recording_dumps):
+                self.assertTrue(client.send_projected_bot_state([state]))
+
+        self.assertEqual([
+            ('timing_start', 'worker_message_validate'),
+            ('timing_end', 'worker_message_validate'),
+            ('encode', 'bot_state'),
+        ], events)
+        self.assertEqual(1, len(client._outbound_queue))
+
+    def test_worker_invalid_strict_validation_never_encodes_or_enqueues(self):
+        client = self._active_client()
+        state = _projected_bot_state()
+        state['equipment_states'] = _projected_bot_equipment_states()
+        state['equipment_states'][0].pop('active')
+        events = []
+
+        def timed(category, function, *args, **kwargs):
+            events.append(('timing_start', category))
+            result = function(*args, **kwargs)
+            events.append(('timing_end', category))
+            return result
+
+        with mock.patch.object(
+                authority_worker_module.hidden_worker_profiler,
+                'python_call', side_effect=timed):
+            with mock.patch.object(
+                    lan_client_module.json, 'dumps') as dumps:
+                with mock.patch.object(
+                        client, '_enqueue_outbound') as enqueue:
+                    self.assertFalse(
+                        client.send_projected_bot_state([state]))
+
+        self.assertEqual([
+            ('timing_start', 'worker_message_validate'),
+            ('timing_end', 'worker_message_validate'),
+        ], events)
+        dumps.assert_not_called()
+        enqueue.assert_not_called()
+        self.assertEqual([], client._outbound_queue)
 
     def test_worker_bot_state_trusted_path_rejects_noncanonical_or_unbounded(self):
         client = self._active_client()
@@ -1594,6 +1658,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                             'shot_lane_oldest_due_age_ms': 200,
                             'shot_lane_oldest_due_max_age_ms': 1700,
                             'shot_lane_completed_pairs': 20,
+                            'shot_lane_materialized_pairs': 16,
                             'shot_lane_budget_deferred_attempts': 10,
                         },
                     })
@@ -1659,6 +1724,12 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(
             10.0, value['runtime']['shot_lane_counter_hz'][
                 'shot_lane_completed_pairs'])
+        self.assertEqual(
+            16, value['runtime']['shot_lane_counter_delta'][
+                'shot_lane_materialized_pairs'])
+        self.assertEqual(
+            8.0, value['runtime']['shot_lane_counter_hz'][
+                'shot_lane_materialized_pairs'])
         self.assertEqual(
             10, value['runtime']['shot_lane_counter_delta'][
                 'shot_lane_budget_deferred_attempts'])

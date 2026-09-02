@@ -4450,6 +4450,47 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             self.assertFalse(collision_filter(75, 0, 37, 22))
             self.assertTrue(collision_filter(75, 0, 38, 22))
 
+    def test_prepared_horizontal_filter_reports_bounded_work_once(self):
+        authority = self._ground_filter_fixture(set([(37, None)]))
+
+        with mock.patch.object(
+                destructibles_sensor, '_get_destr_authority',
+                return_value=authority), mock.patch.object(
+                    destructibles_sensor.hidden_worker_profiler, 'work_add') \
+                as work_add:
+            collision_filter = (
+                destructibles_sensor.prepare_horizontal_collision_filter(
+                    _Vector(-2.0, 0.6, -1.0),
+                    _Vector(2.0, 1.6, 10.0)))
+
+        self.assertIsNotNone(collision_filter)
+        self.assertEqual([
+            mock.call('destructible_filter_preparations'),
+            mock.call('destructible_filter_bins', 6),
+            mock.call('destructible_filter_candidates', 1),
+            mock.call('destructible_filter_nonempty'),
+        ], work_add.call_args_list)
+
+    def test_spatial_mutation_reports_unique_local_scope(self):
+        with mock.patch.object(
+                destructibles_sensor.hidden_worker_profiler, 'work_add') \
+                as work_add:
+            destructibles_sensor._publish_spatial_mutation_1513(
+                bin_keys=((1, 2), (1, 2), (3, 4)),
+                chunk_ids=(22, 22, 23), global_invalidation=True)
+
+        self.assertEqual([
+            mock.call('destructible_mutation_cells', 2),
+            mock.call('destructible_mutation_chunks', 2),
+            mock.call('destructible_mutation_global'),
+        ], work_add.call_args_list)
+        self.assertEqual(1,
+            destructibles_sensor.g_offh_destr_spatial_global_generation)
+        self.assertEqual({(1, 2): 1, (3, 4): 1},
+            destructibles_sensor.g_offh_destr_spatial_cell_generations)
+        self.assertEqual({22: 1, 23: 1},
+            destructibles_sensor.g_offh_destr_spatial_chunk_generations)
+
     def test_stationary_multi_module_structure_crushes_each_module(self):
         detail, authority, unused_descriptor = (
             self._stationary_contact_status([{

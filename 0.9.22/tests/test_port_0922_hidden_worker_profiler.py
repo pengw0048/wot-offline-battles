@@ -241,14 +241,16 @@ class HiddenWorkerProfilerTests(unittest.TestCase):
 
     def test_phase_categories_publish_non_additive_scope_metadata(self):
         clock = iter((1.0, 1.002, 2.0, 2.003, 3.0, 3.004,
-                      4.0, 4.005, 5.0, 5.006))
+                      4.0, 4.005, 5.0, 5.006, 6.0, 6.007,
+                      7.0, 7.008))
         profiler = HiddenWorkerProfiler(clock=lambda: next(clock))
         profiler.begin_frame(True)
 
         for category in (
                 'bot_setup', 'bot_astar_inclusive',
                 'bot_scheduler_catchup', 'projectile_step',
-                'worker_message_send'):
+                'worker_message_validate', 'worker_message_send',
+                'destructible_filter_prepare'):
             profiler.python_call(category, lambda: None)
         profile = profiler.end_frame()
 
@@ -268,6 +270,12 @@ class HiddenWorkerProfilerTests(unittest.TestCase):
         self.assertEqual(
             'message_nested_inclusive',
             profile['python_category_scopes']['worker_message_send'])
+        self.assertEqual(
+            'message_nested_inclusive',
+            profile['python_category_scopes']['worker_message_validate'])
+        self.assertEqual(
+            'nested_inclusive',
+            profile['python_category_scopes']['destructible_filter_prepare'])
         self.assertEqual(
             BOT_UPDATE_RESIDUAL_SEMANTICS,
             profile['bot_update_residual_semantics'])
@@ -290,6 +298,14 @@ class HiddenWorkerProfilerTests(unittest.TestCase):
         self.assertTrue(profiler.work_add('worker_queue_depth', 4))
         self.assertTrue(profiler.work_add('worker_queue_depth', 2))
         self.assertTrue(profiler.work_add('worker_queue_depth', 7))
+        self.assertTrue(profiler.work_add(
+            'bot_shot_lane_identity_depth', 420))
+        self.assertTrue(profiler.work_add(
+            'bot_shot_lane_identity_depth', 84))
+        self.assertTrue(profiler.work_add(
+            'bot_shot_lane_materialized', 16))
+        self.assertTrue(profiler.work_add(
+            'destructible_filter_preparations', 9))
         self.assertFalse(profiler.work_add('unbounded-key', 1))
         self.assertFalse(profiler.work_add('bot_rows', True))
         self.assertFalse(profiler.work_add('bot_rows', -1))
@@ -304,12 +320,20 @@ class HiddenWorkerProfilerTests(unittest.TestCase):
             MAX_WORK_COUNTER_VALUE,
             profile['work']['bot_motion_commit_sweeps'])
         self.assertEqual(7, profile['work']['worker_queue_depth'])
+        self.assertEqual(
+            420, profile['work']['bot_shot_lane_identity_depth'])
+        self.assertEqual(16, profile['work']['bot_shot_lane_materialized'])
+        self.assertEqual(
+            9, profile['work']['destructible_filter_preparations'])
         self.assertNotIn('unbounded-key', profile['work'])
         self.assertNotIn('bot_rows', profile['work'])
         self.assertTrue(profile['work_counters_recorded'])
         self.assertEqual(
             'sampled_max',
             profile['work_counter_aggregations']['worker_queue_depth'])
+        self.assertEqual(
+            'sampled_max', profile['work_counter_aggregations'][
+                'bot_shot_lane_identity_depth'])
         self.assertIn(
             'not_native_ray_count',
             profile['work_counter_notes']['bot_motion_commit_sweeps'])
