@@ -3595,6 +3595,41 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(4.0 / 3.0, calls[1])
         self.assertAlmostEqual(8.0 / 3.0, calls[2])
 
+    def test_lateral_contact_correction_settles_only_proved_rise_once(self):
+        calls = []
+
+        def ground(x, unused_z, unused_y):
+            calls.append(x)
+            return x * 0.4
+
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=ground)
+        state = {
+            'id': 11, 'x': 5.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'speed': 0.0, 'half_length': 3.0,
+            'movement_dir': 0, 'rotation_dir': 0,
+            'push_x': 0.0, 'push_z': 0.0,
+            'vertical_speed': 0.0, 'airborne': False,
+            'grounded_once': True, 'last_drive_pitch': 0.0,
+        }
+
+        first_blocked = runtime._update_vertical_motion(
+            state, 0.2, (0.0, 0.0, 0.0), 0.0)
+        first_y = state['y']
+        first_call_count = len(calls)
+        second_tick_pose = (state['x'], state['y'], state['z'])
+        second_blocked = runtime._update_vertical_motion(
+            state, 0.2, second_tick_pose, 0.0)
+
+        self.assertEqual((False, False), (first_blocked, second_blocked))
+        # Five metres of correction proves this exact two-metre support rise;
+        # it must not become a 12.5-metre powered-drive placement budget.
+        self.assertAlmostEqual(2.0, first_y)
+        self.assertAlmostEqual(2.0, state['y'])
+        # First tick: centre plus three exceptional profile samples. Second
+        # settled tick: the unchanged one-centre-ray path.
+        self.assertEqual((4, 5), (first_call_count, len(calls)))
+
     def test_low_fps_bot_still_rejects_a_vertical_support_step(self):
         calls = []
 

@@ -5420,7 +5420,18 @@ class BotRuntime(object):
             lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
 
-    def _support_rise_follows_tick_path(self, state, centre, tick_pose):
+    @staticmethod
+    def _tick_horizontal_travel(state, tick_pose):
+        """Return realised x/z travel from the pre-integration tick pose."""
+        if (not isinstance(tick_pose, (list, tuple)) or
+                len(tick_pose) < 3):
+            return 0.0
+        delta_x = _number(state.get('x')) - _number(tick_pose[0])
+        delta_z = _number(state.get('z')) - _number(tick_pose[2])
+        return math.sqrt(delta_x * delta_x + delta_z * delta_z)
+
+    def _support_rise_follows_tick_path(self, state, centre, tick_pose,
+                                        horizontal_travel):
         """Confirm a suspicious raised support through bounded interior rays.
 
         Normal grounding still spends only its centre ray.  This helper is
@@ -5439,7 +5450,7 @@ class BotRuntime(object):
         start_z = _number(tick_pose[2])
         delta_x = _number(state.get('x')) - start_x
         delta_z = _number(state.get('z')) - start_z
-        distance = math.sqrt(delta_x * delta_x + delta_z * delta_z)
+        distance = max(0.0, _number(horizontal_travel))
         rise = float(centre) - start_y
         if (distance <= 0.0001 or rise <= 0.0 or
                 rise > distance * 0.55 + 0.02):
@@ -5485,6 +5496,27 @@ class BotRuntime(object):
                 _number(state.get('speed')),
                 _number(state.get('last_drive_pitch')), step)
             max_climb = max(0.6, speed * step * 2.5)
+            support_rise_obstacle = bool(
+                state.get('grounded_once', False) and
+                tank_collision.support_rise_is_obstacle(
+                    state.get('y'), centre, max_climb))
+            support_rise_continuous = False
+            if support_rise_obstacle:
+                horizontal_travel = self._tick_horizontal_travel(
+                    state, tick_pose)
+                support_rise_continuous = \
+                    self._support_rise_follows_tick_path(
+                        state, centre, tick_pose, horizontal_travel)
+                if support_rise_continuous:
+                    # A ram/contact correction may move sideways while the
+                    # longitudinal speed is zero. Settle only the exact rise
+                    # admitted by that realised sweep in the same tick. The
+                    # displacement is proof geometry, not powered-drive climb
+                    # credit, and nothing carries into the next tick.
+                    proved_support_rise = max(
+                        0.0, float(centre) - _number(tick_pose[1]))
+                    max_climb = max(
+                        max_climb, proved_support_rise)
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
             if not state.get('grounded_once', False):
@@ -5492,10 +5524,7 @@ class BotRuntime(object):
                 state['vertical_speed'] = 0.0
                 state['airborne'] = False
                 state['grounded_once'] = True
-            elif (tank_collision.support_rise_is_obstacle(
-                    state.get('y'), centre, max_climb) and
-                    not self._support_rise_follows_tick_path(
-                        state, centre, tick_pose)):
+            elif support_rise_obstacle and not support_rise_continuous:
                 # The centre ray hit a wagon deck, roof, or large prop only
                 # after this tick's horizontal integration put the hull partly
                 # inside it. Restore only this tick's pose and let LocalDriver
