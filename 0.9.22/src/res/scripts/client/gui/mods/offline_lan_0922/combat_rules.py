@@ -308,9 +308,21 @@ def _offh_he_factors(shot):
 	return damage_factor, absorption_factor, edge_factor
 
 
-def _offh_he_damage(shot, base_damage, armor_nominal, dist_frac=0.0):
+def _offh_he_spall(spall_coefficient):
+	'''Target Spall Liner multiplier on the armour absorption term.'''
+	try:
+		value = float(spall_coefficient)
+	except (TypeError, ValueError, OverflowError):
+		return 1.0
+	if value != value or abs(value) == float('inf') or value < 1.0:
+		return 1.0
+	return value
+
+
+def _offh_he_damage(shot, base_damage, armor_nominal, dist_frac=0.0,
+                    spall_coefficient=1.0):
 	'''Damage an HE burst does to a hull it did NOT get through.
-	
+
 	dist_frac is 0.0 for the vehicle actually struck and rises to 1.0 at the edge
 	of explosionRadius for everything else caught in the blast. Returns 0 when the
 	plate eats the whole thing - the normal outcome against heavy armour, and the
@@ -324,7 +336,8 @@ def _offh_he_damage(shot, base_damage, armor_nominal, dist_frac=0.0):
 	blast_factor = damage_factor + (
 		edge_factor - damage_factor) * distance_fraction
 	d = (float(base_damage) * blast_factor -
-	     absorption_factor * float(armor_nominal or 0.0))
+	     absorption_factor * float(armor_nominal or 0.0) *
+	     _offh_he_spall(spall_coefficient))
 	return int(d) if d > 0.0 else 0
 
 
@@ -566,7 +579,8 @@ def he_nominal_armor(collisions, descriptor=None):
         collision_layers(collisions), descriptor)
 
 
-def damage(shot, result, nominal_armor, random_uniform=None):
+def damage(shot, result, nominal_armor, random_uniform=None,
+           spall_coefficient=1.0):
     """Apply the legacy direct-damage formula to the resolved vehicle hit."""
     converted = legacy_shot(shot)
     shell = converted.get('shell') or {}
@@ -583,7 +597,8 @@ def damage(shot, result, nominal_armor, random_uniform=None):
     if int(result) == 2:
         return rolled
     if _offh_is_he(converted):
-        return _offh_he_damage(converted, rolled, nominal_armor, 0.0)
+        return _offh_he_damage(
+            converted, rolled, nominal_armor, 0.0, spall_coefficient)
     return 0
 
 
@@ -604,7 +619,7 @@ def he_factors(shot):
 
 
 def he_splash_damage(shot, nominal_armor, distance_fraction,
-                     random_uniform=None):
+                     random_uniform=None, spall_coefficient=1.0):
     converted = legacy_shot(shot)
     shell = converted.get('shell') or {}
     raw = shell.get('damage')
@@ -618,7 +633,8 @@ def he_splash_damage(shot, nominal_armor, distance_fraction,
     uniform = random_uniform or random.uniform
     rolled = uniform(average * 0.75, average * 1.25)
     return _offh_he_damage(
-        converted, rolled, nominal_armor, distance_fraction)
+        converted, rolled, nominal_armor, distance_fraction,
+        spall_coefficient)
 
 
 def apply_he_tuning(overrides):
