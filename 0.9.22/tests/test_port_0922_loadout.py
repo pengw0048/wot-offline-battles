@@ -108,6 +108,85 @@ class LoadoutLawTests(unittest.TestCase):
         self.assertFalse(
             loadout.modifiers(crew_skills=())['has_brotherhood'])
 
+    def test_finished_skill_count_accepts_an_enabled_combined_role(self):
+        loader_radioman = types.SimpleNamespace(skills=(
+            types.SimpleNamespace(
+                name='loader_intuition', level=100.0, isActive=True,
+                isEnable=lambda: True),))
+
+        self.assertEqual(
+            1,
+            loadout.finished_skill_count(
+                ((3, loader_radioman),), 'loader_intuition'))
+        self.assertEqual(
+            1, loadout.intuition_chances(((3, loader_radioman),)))
+
+    def test_finished_skill_count_rejects_inactive_disabled_or_partial(self):
+        crew = tuple(types.SimpleNamespace(skills=(skill,)) for skill in (
+            types.SimpleNamespace(
+                name='loader_intuition', level=100.0, isActive=False,
+                isEnable=True),
+            types.SimpleNamespace(
+                name='loader_intuition', level=100.0, isActive=True,
+                isEnable=lambda: False),
+            types.SimpleNamespace(
+                name='loader_intuition', level=99.0, isActive=True,
+                isEnable=True),
+        ))
+
+        self.assertEqual(
+            0, loadout.finished_skill_count(crew, 'loader_intuition'))
+
+    def test_discrete_skill_projection_requires_every_state_field(self):
+        values = {
+            'name': 'commander_expert',
+            'level': 100.0,
+            'isActive': True,
+            'isEnable': True,
+        }
+        self.assertEqual({
+            'name': 'commander_expert',
+            'level': 100.0,
+            'active': True,
+            'enabled': True,
+        }, loadout.project_skill_state(types.SimpleNamespace(**values)))
+        for name in tuple(values):
+            incomplete = dict(values)
+            del incomplete[name]
+            self.assertIsNone(loadout.project_skill_state(
+                types.SimpleNamespace(**incomplete)), name)
+        malformed = dict(values, isEnable=1)
+        self.assertIsNone(loadout.project_skill_state(
+            types.SimpleNamespace(**malformed)))
+        malformed = dict(values, level=float('nan'))
+        self.assertIsNone(loadout.project_skill_state(
+            types.SimpleNamespace(**malformed)))
+
+    def test_controlled_impact_requires_proved_activation_and_eligibility(self):
+        def member(**values):
+            state = {
+                'name': 'driver_rammingmaster',
+                'level': 100.0,
+                'isActive': True,
+                'isEnable': True,
+            }
+            state.update(values)
+            return types.SimpleNamespace(
+                skills=(types.SimpleNamespace(**state),))
+
+        self.assertEqual(0.15, loadout.ramming_bonus((member(),)))
+        self.assertEqual(
+            0.0, loadout.ramming_bonus((member(isActive=False),)))
+        self.assertEqual(
+            0.0, loadout.ramming_bonus((member(isEnable=False),)))
+        self.assertEqual(
+            0.1485, loadout.ramming_bonus((member(level=99.0),)))
+        self.assertEqual(
+            0.0, loadout.ramming_bonus((types.SimpleNamespace(skills=(
+                types.SimpleNamespace(
+                    name='driver_rammingmaster', level=100.0,
+                    isActive=True),)),)))
+
 
 class GunStateLoadoutTests(unittest.TestCase):
 

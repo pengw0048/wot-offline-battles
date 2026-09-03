@@ -12,7 +12,7 @@ from gui.mods.offline_lan_0922.prebaked_navigation import mod_dir
 
 
 FORMAT_NAME = 'offline-lan-0922-destructible-catalog'
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 _STRUCTURE_MAT_KIND_MIN_1513 = 73
 _STRUCTURE_MAT_KIND_MAX_1513 = 86

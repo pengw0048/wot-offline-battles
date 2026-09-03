@@ -12,6 +12,10 @@ _DESTRUCTIBLE_ORIGIN_RADIUS = 8.0
 _DESTRUCTIBLE_CHUNK_METRES_1513 = 100.0
 _SOLID_CONTACT_RADIUS_1513 = 0.5
 _SOLID_CONTACT_NORMAL_DOT_1513 = 0.5
+_TREE_SWEEP_ANGLE_STEP_1513 = 3.141592653589793 / 36.0
+_TREE_SWEEP_TRANSLATION_STEP_1513 = 8.0
+_TREE_SWEEP_MAX_SEGMENTS_1513 = 128
+_TREE_CONTACT_TOKEN_LIMIT_1513 = 64
 _CATALOG_POINT_EPSILON = 0.075
 _SHOT_RAY_EPSILON = 1.0e-4
 _SOFT_STATIC_MAX_SKIPS = 4
@@ -22,7 +26,13 @@ _DIAGNOSTIC_EMIT_SECONDS = 0.25
 _DIAGNOSTIC_CHUNK_LIMIT = 24
 _DIAGNOSTIC_PENDING_LIMIT = 4
 _DIAGNOSTIC_CONTACT_LIMIT = 32
-_ISOLATION_LOG_TYPE_LIMIT = 11
+_ISOLATION_LOG_TYPE_LIMIT = 14
+# Bounded per-chunk cache of the exact native item-name mapping.
+_ITEM_NAME_CHUNK_CACHE_LIMIT = 64
+# All callers share at most this many native effect-category probes per
+# battle-local ``BigWorld.time()`` tick.  Chunk scans retry incomplete
+# alignments on later ticks instead of multiplying work by human/Bot callers.
+_ITEM_NAME_QUERY_BUDGET = 16
 _EMPTY_CONTACT_RECEIPT_LIMIT = 512
 _EMPTY_PROXIMITY_RECEIPT_LIMIT = 512
 _destructible_catalog = None
@@ -35,6 +45,26 @@ _SHOT_THROUGH_MAX_HP_1513 = 19.0
 _SHOT_THROUGH_MIN_REDUCTION_1513 = 25.0
 _SHOT_AP_KINDS_1513 = frozenset((
 	'ARMOR_PIERCING', 'ARMOR_PIERCING_HE', 'ARMOR_PIERCING_CR'))
+
+# Exact pinned #1513 native contract for
+# ``BigWorld.wg_getDestructibleEffectCategory(spaceID, chunk, item, module)``,
+# read from the reviewed x86 entry point of the exact client executable
+# (PE timestamp 0x5a6edca4, checksum 0x019a5229):
+#
+# * a negative ``module`` selects the no-module resolve, a non-negative one the
+#   per-module resolve; both then share the same post-processing;
+# * when the (chunk, item[, module]) triple does not resolve, the entry returns
+#   no object at all, which reaches Python as an error rather than a value;
+# * when it does resolve, the category comes from the effect handler registered
+#   for that item's native group.  If no handler is registered for the group the
+#   entry returns exactly -1.
+#
+# So -1 proves the native item resolved and only says that the effect-category
+# channel is unregistered for it; it carries no destructible kind.  It is
+# neither a kind match nor evidence of a wrong wire, and the offline client
+# legitimately leaves handler groups unregistered.  Treat it as one unverified
+# identity channel, never as a wildcard.
+_NATIVE_EFFECT_CATEGORY_UNREGISTERED_1513 = -1
 
 # Exact constants from pinned #1513 ``constants.DESTRUCTIBLE_MATKIND``.
 # ``NORMAL_MAX`` is an exclusive sentinel: DestructiblesCache allocates
@@ -78,6 +108,13 @@ def is_isolated_1513(chunk_id, item_index):
 	return _destructible_isolated_1513(chunk_id, item_index)
 
 
+def isolate_destructible_1513(
+		failure_type, chunk_id, item_index=None, detail=None):
+	"""Expose exact identity quarantine to the stock-cache adapter."""
+	_isolate_destructible_1513(
+		failure_type, chunk_id, item_index, detail=detail)
+
+
 def validate_tree_identity_1513(space_id, chunk_id, item_index):
 	"""Prove a loaded #1513 slot has a safe named tree descriptor.
 
@@ -102,6 +139,9 @@ def validate_tree_identity_1513(space_id, chunk_id, item_index):
 	if status == 'pending':
 		# ``game.wg_onChunkLoad`` and the chunk filename list can settle on
 		# adjacent frames. Keep the object solid for this attempt and retry.
+		return False
+	if _destructible_isolated_1513(chunk_id, item_index):
+		# The compat lookup already recorded the first exact descriptor failure.
 		return False
 	if (desc is None or
 			desc.get('type') != AreaDestructibles.DESTR_TYPE_TREE):
@@ -152,6 +192,10 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 			speculative.discard(key)
 	globals().get('g_offh_destr_broken_cache', {}).pop(chunk_id, None)
 	if identity is None:
+		# A chunk-level drop can precede a reload with different native content,
+		# so forget both the list snapshot and its incremental alignment.  A
+		# single isolated slot does not change that chunk-wide evidence.
+		_invalidate_chunk_native_names_1513(chunk_id)
 		state = globals().get('g_offh_tree_state')
 		if isinstance(state, dict):
 			state.get('chunks', {}).pop(chunk_id, None)
@@ -178,7 +222,8 @@ def _log_destructible_validation_1513(
 			import sys
 			sys.stdout.write(
 				'[Offline LAN 0.9.22] DESTR validation logs capped '
-				'limit=12 additional_types=suppressed_for_battle\n')
+				'limit=%d additional_types=suppressed_for_battle\n' %
+				_ISOLATION_LOG_TYPE_LIMIT)
 		except Exception:
 			pass
 		return
@@ -191,6 +236,8 @@ def _log_destructible_validation_1513(
 	]
 	if item_index is not None:
 		parts.append('item=%s' % item_index)
+	parts.append('map=%s' % (
+		(_destructible_catalog or {}).get('map') or 'unknown'))
 	parts.append('repeats=suppressed_for_battle')
 	if detail is not None:
 		try:
@@ -226,11 +273,15 @@ def _isolate_destructible_1513(
 def _native_chunk_destructible_count_1513(manager, chunk_id):
 	"""Read the count written by ``game.wg_onChunkLoad`` on pinned #1513.
 
-	``wg_getChunkDestrFilenames`` is not a slot-count API: the offline client can
-	return only the named SpeedTree prefix while fragile, structure and falling
-	atoms remain addressable at later native indices.  The manager's private map
-	is populated from the engine callback's ``numDestructibles`` argument and is
-	the only exact streamed-slot boundary available to Python.
+	``wg_getChunkDestrFilenames`` is not a slot-count API.  Its ``0x006b1a10``
+	loop appends one entry per handled item and nothing at all for an item that
+	is unresolved, owns no name handler or yields a NULL name pointer.  A
+	non-NULL pointer may still yield an empty Python string, so the list length
+	is a lower bound on the item count and alone says nothing about which indices
+	exist.
+	The manager's private map is populated from the engine callback's
+	``numDestructibles`` argument and is the only exact streamed-slot boundary
+	available to Python.
 	"""
 	loaded = getattr(
 		manager, '_DestructiblesManager__loadedChunkIDs', None)
@@ -249,6 +300,565 @@ def _native_chunk_destructible_count_1513(manager, chunk_id):
 			'native_count_value', chunk_id, detail='value=%r' % (count,))
 		return None
 	return int(count)
+
+
+def _native_name_groups_1513(
+		area_destructibles, names, ignored_items=(), positional=False):
+	"""Type names and report only position-proven per-item failures."""
+	try:
+		cache = area_destructibles.g_cache
+		query = cache.getDescByFilename
+	except Exception:
+		return None, 'descriptor_cache', ()
+	if not callable(query):
+		return None, 'descriptor_cache', ()
+	ignored_items = set(int(value) for value in ignored_items)
+	names_by_type = {}
+	item_failures = []
+	for item_index, name in enumerate(names):
+		if item_index in ignored_items:
+			continue
+		# The pinned helper can append a non-NULL pointer to an empty C string.
+		# That entry identifies no descriptor, but still occupies its emitted slot.
+		if not name:
+			continue
+		try:
+			descriptor = query(name)
+		except Exception as error:
+			if positional:
+				item_failures.append(
+					(item_index, 'descriptor_cache', error))
+				continue
+			return None, 'descriptor_cache', ()
+		if not isinstance(descriptor, dict):
+			if positional:
+				item_failures.append((
+					item_index, 'name_descriptor',
+					'filename=%r expected descriptor dict' % name))
+				continue
+			return None, 'name_descriptor', ()
+		descriptor_type = descriptor.get('type')
+		if (isinstance(descriptor_type, bool) or
+				not isinstance(descriptor_type, _INTEGER_TYPES)):
+			if positional:
+				item_failures.append((
+					item_index, 'name_descriptor',
+					'filename=%r type=%r' % (name, descriptor_type)))
+				continue
+			return None, 'name_descriptor', ()
+		names_by_type.setdefault(int(descriptor_type), []).append(name)
+	return names_by_type, 'ready', tuple(item_failures)
+
+
+def _align_native_item_names_1513(
+		names_by_type, items_by_type, positional_names=None,
+		ignored_items=()):
+	"""Finish a fully enumerated native-name alignment without guessing.
+
+	When the helper emitted exactly one string per native item, cardinality and
+	the native loop order prove that list positions are item indices.  Empty
+	strings then represent anonymous slots.  A shorter list remains compacted
+	and can only be reconstructed by the stricter per-type count alignment.
+	"""
+	if positional_names is not None:
+		ignored_items = set(int(value) for value in ignored_items)
+		item_types = {}
+		for native_type, item_list in items_by_type.items():
+			for item_index in item_list:
+				item_types[item_index] = native_type
+		name_types = {}
+		for descriptor_type, name_list in names_by_type.items():
+			for name in name_list:
+				name_types[name] = descriptor_type
+		mapping = {}
+		item_failures = []
+		for item_index, name in enumerate(positional_names):
+			if item_index in ignored_items:
+				continue
+			if not name:
+				continue
+			descriptor_type = name_types.get(name)
+			native_type = item_types.get(item_index)
+			if descriptor_type != native_type:
+				if descriptor_type is not None:
+					item_failures.append((
+						item_index, 'name_type_mismatch',
+						'name=%r descriptor_type=%s native_type=%s' % (
+							name, descriptor_type, native_type)))
+				continue
+			mapping[item_index] = name
+		if item_failures:
+			return mapping, 'partial', (), tuple(item_failures)
+		return mapping, 'exact', (), ()
+	mapping = {}
+	anomalous = []
+	for native_type in sorted(names_by_type):
+		if native_type not in items_by_type:
+			# A named type with no live item of that type cannot be placed.
+			anomalous.append(native_type)
+	for native_type in sorted(items_by_type):
+		item_list = items_by_type[native_type]
+		name_list = names_by_type.get(native_type) or ()
+		if len(name_list) == len(item_list):
+			mapping.update(zip(item_list, name_list))
+			continue
+		if name_list:
+			# Some but not all items of this type are named, so this type's
+			# compaction cannot be reconstructed.
+			anomalous.append(native_type)
+	if anomalous:
+		return mapping, 'partial', tuple(sorted(set(anomalous))), ()
+	return mapping, 'exact', (), ()
+
+
+def _finish_native_item_name_alignment_1513(
+		entry, positional_names, chunk_id):
+	"""Consume exact positional failures without weakening compacted checks."""
+	mapping, status, anomalous, item_failures = (
+		_align_native_item_names_1513(
+			entry['names_by_type'], entry['items_by_type'], positional_names,
+			entry['ignored_items']))
+	for item_index, failure_type, detail in item_failures:
+		entry['ignored_items'].add(item_index)
+		_isolate_destructible_1513(
+			failure_type, chunk_id, item_index, detail=detail)
+	if item_failures:
+		return mapping, 'exact', ()
+	return mapping, status, anomalous
+
+
+def _item_name_query_allowance_1513(bigworld, work_key, requested):
+	"""Take native-name probes from one battle-local render-tick budget.
+
+	All callers that observe the same ``BigWorld.time()`` value share one
+	allowance bucket.  Whether the pinned client keeps that value stable across
+	every Python callback in one rendered frame remains a Windows measurement
+	boundary.  Unit stubs without that clock can set
+	``_offh_item_name_budget_tick`` explicitly; otherwise the stub object itself
+	is one fixed synthetic tick and an incomplete alignment safely stays pending.
+	"""
+	requested = max(0, int(requested))
+	if requested <= 0:
+		return 0
+	clock = getattr(bigworld, 'time', None)
+	stamp = None
+	if callable(clock):
+		try:
+			value = clock()
+			if (not isinstance(value, bool) and
+					isinstance(value, _INTEGER_TYPES + (float,))):
+				numeric_value = float(value)
+				if numeric_value == numeric_value:
+					stamp = ('time', numeric_value)
+		except Exception:
+			pass
+	if stamp is None:
+		stamp = ('explicit', getattr(
+			bigworld, '_offh_item_name_budget_tick', id(bigworld)))
+	state = globals().setdefault('g_offh_destr_item_name_budget', {})
+	# Battle reset clears this state.  Do not key the allowance by caller-supplied
+	# space ID: alternating IDs in one tick must not replenish the shared pool.
+	if state.get('stamp') != stamp:
+		state['stamp'] = stamp
+		state['tick_serial'] = int(state.get('tick_serial', 0)) + 1
+		state['remaining'] = _ITEM_NAME_QUERY_BUDGET
+	work_key = (int(work_key[0]), int(work_key[1]))
+	focus = state.get('focus')
+	if focus is not None and focus != work_key:
+		# Preserve the current incremental job across caller order changes.  If
+		# it has not been seen for a complete intervening tick, release it so an
+		# unloaded/abandoned chunk cannot block the active working set forever.
+		last_seen = int(state.get('focus_last_seen', 0))
+		if int(state['tick_serial']) - last_seen <= 1:
+			return 0
+		state['focus'] = None
+		focus = None
+	if focus is None:
+		state['focus'] = work_key
+	state['focus_last_seen'] = int(state['tick_serial'])
+	allowance = min(requested, state['remaining'])
+	state['remaining'] -= allowance
+	return allowance
+
+
+def _release_item_name_query_focus_1513(space_id, chunk_id):
+	state = globals().get('g_offh_destr_item_name_budget', {})
+	if state.get('focus') == (int(space_id), int(chunk_id)):
+		state.pop('focus', None)
+		state.pop('focus_last_seen', None)
+
+
+def _release_item_name_query_focus_1513_for_chunk(chunk_id):
+	"""Release an alignment job when chunk-wide state is discarded."""
+	state = globals().get('g_offh_destr_item_name_budget', {})
+	focus = state.get('focus')
+	if focus is not None and focus[1] == int(chunk_id):
+		state.pop('focus', None)
+		state.pop('focus_last_seen', None)
+
+
+def _invalidate_chunk_native_names_1513(chunk_id):
+	"""Forget cached native-name evidence after unload or native mutation."""
+	chunk_id = int(chunk_id)
+	for cache_name in ('g_offh_destr_item_names',
+			'g_offh_destr_native_name_lists'):
+		cache = globals().get(cache_name, {})
+		for key in list(cache):
+			if key[1] == chunk_id:
+				cache.pop(key, None)
+	_release_item_name_query_focus_1513_for_chunk(chunk_id)
+
+
+def _touch_item_name_cache_entry_1513(entry):
+	"""Stamp one alignment entry for deterministic battle-local LRU."""
+	serial = int(globals().get('g_offh_destr_item_name_cache_serial', 0)) + 1
+	globals()['g_offh_destr_item_name_cache_serial'] = serial
+	entry['last_access'] = serial
+
+
+def _item_name_cache_victim_1513(cache):
+	"""Choose completed LRU first, then the oldest abandoned partial job."""
+	focus = globals().get('g_offh_destr_item_name_budget', {}).get('focus')
+	eligible = [(key, entry) for key, entry in cache.items()
+		if key != focus]
+	if not eligible:
+		return None
+	completed = [(key, entry) for key, entry in eligible
+		if entry.get('result') is not None]
+	candidates = completed or eligible
+	return min(candidates,
+		key=lambda value: (int(value[1].get('last_access', 0)), value[0]))[0]
+
+
+def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
+		native_count, names):
+	"""Incrementally rebuild one chunk's exact per-item native filenames.
+
+	Exact pinned #1513 contract, read from ``WorldOfTanks.exe`` (x86 PE
+	timestamp ``0x5a6edca4``, image size ``0x206a000``, PE checksum
+	``0x019a5229`` - the same main module as the retained termination dumps):
+
+	* ``wg_getChunkDestrFilenames`` (``0x006b1a10``) walks item indices
+	  ``0 .. numDestructibles(chunk) - 1`` in order and appends one name per
+	  item only when the item resolves, its native type owns a name handler,
+	  and that handler returns a non-NULL pointer.  The pointer may address an
+	  empty C string, which is appended as ``''``.  An unresolved item, missing
+	  handler or NULL pointer appends nothing, so the returned list may be
+	  compacted in item order.  Its positions are item indices only when its
+	  length equals the exact native item count.
+	* ``wg_getDestructibleEffectCategory(space, chunk, item, -1)``
+	  (``0x006b1f10``) resolves the same item through the same provider entry
+	  (vtable ``+0x10``) that the name loop and ``wg_getDestructibleMatrix``
+	  (``0x006b2a90`` -> ``0x006b3f90``) use, so all three share one item index
+	  space.  It fails for an unresolved item and returns ``-1`` through
+	  ``or eax, 0xffffffff`` for a resolved item whose native type owns no
+	  handler, and otherwise returns that item's native destructible type.
+	* ``wg_getDestructibleFilename`` (``0x006b2580``) is deliberately never
+	  used as a per-item probe.  For a resolved item with no type handler it
+	  reaches ``PyString_FromString(NULL)`` and faults natively, and a native
+	  access violation is not a catchable Python failure.
+
+	The full-width positional proof and shorter-list type-count alignment are
+	valid only after every resolvable native item has been typed.  Advance that
+	enumeration from one shared render-tick budget and cache its progress; until
+	it completes, callers receive
+	``pending_alignment`` and must keep the chunk solid.  Unknown descriptors
+	or malformed categories are terminal evidence failures: full-width position
+	proof contains them to one item, while a compacted list stays unsafe as a
+	whole.  Neither is converted into an unnamed item.  A completed compacted
+	count mismatch is likewise terminal.  A resolver exception is the exact
+	native loop's unnamed case, but that live slot is quarantined so no later
+	native matrix/effect/destroy query can touch it.
+	"""
+	cache = globals().setdefault('g_offh_destr_item_names', {})
+	key = (int(space_id), int(chunk_id))
+	# The exact name tuple is part of the key: a mid-battle destruction can
+	# legally remove an item from the compacted list, and the mapping must be
+	# re-derived rather than reused from a superseded chunk state.
+	fingerprint = (int(native_count), tuple(names))
+	entry = cache.get(key)
+	if entry is not None and entry['fingerprint'] != fingerprint:
+		cache.pop(key, None)
+		entry = None
+	if entry is not None and entry['result'] is not None:
+		_touch_item_name_cache_entry_1513(entry)
+		return entry['result']
+	if entry is None:
+		query_count = _item_name_query_allowance_1513(
+			bigworld, key, int(native_count))
+		if native_count and query_count <= 0:
+			return None, 'pending_alignment', ()
+		if len(cache) >= _ITEM_NAME_CHUNK_CACHE_LIMIT:
+			# Evict only after this job owns positive shared budget.  Otherwise a
+			# zero-budget caller could churn useful mappings without making progress.
+			# Completed mappings are cheapest to replace; when all entries are partial,
+			# evict the least-recently-used non-focus entry so abandoned work cannot
+			# permanently starve a newly active chunk.
+			victim = _item_name_cache_victim_1513(cache)
+			if victim is None:
+				return None, 'pending_alignment', ()
+			cache.pop(victim, None)
+		full_width = len(names) == int(native_count)
+		ignored_items = set()
+		if full_width:
+			ignored_items = set(item_index for chunk, item_index in
+				globals().get('g_offh_destr_isolated_slots', ())
+				if int(chunk) == int(chunk_id))
+		names_by_type, status, item_failures = _native_name_groups_1513(
+			area_destructibles, names, ignored_items, full_width)
+		for item_index, failure_type, detail in item_failures:
+			ignored_items.add(item_index)
+			_isolate_destructible_1513(
+				failure_type, chunk_id, item_index, detail=detail)
+		if names_by_type is None:
+			entry = {
+				'fingerprint': fingerprint,
+				'result': (None, status, ()),
+			}
+		else:
+			entry = {
+				'fingerprint': fingerprint,
+				'names_by_type': names_by_type,
+				'items_by_type': {},
+				'ignored_items': ignored_items,
+				'next_item': 0,
+				'result': None,
+			}
+		_touch_item_name_cache_entry_1513(entry)
+		cache[key] = entry
+	else:
+		_touch_item_name_cache_entry_1513(entry)
+		query_count = _item_name_query_allowance_1513(
+			bigworld, key, int(native_count) - entry['next_item'])
+	if entry['result'] is not None:
+		_release_item_name_query_focus_1513(space_id, chunk_id)
+		return entry['result']
+	if entry['next_item'] >= int(native_count):
+		entry['result'] = _finish_native_item_name_alignment_1513(
+			entry, names if len(names) == int(native_count) else None,
+			chunk_id)
+		_release_item_name_query_focus_1513(space_id, chunk_id)
+		return entry['result']
+	query = getattr(bigworld, 'wg_getDestructibleEffectCategory', None)
+	if not callable(query):
+		entry['result'] = (None, 'category_abi', ())
+		_release_item_name_query_focus_1513(space_id, chunk_id)
+		return entry['result']
+	end_item = entry['next_item'] + query_count
+	for item_index in range(entry['next_item'], end_item):
+		identity = (int(chunk_id), int(item_index))
+		if _destructible_isolated_1513(*identity):
+			if identity in globals().get(
+					'g_offh_destr_name_unresolved_slots', ()):
+				# The first null-safe resolver query already proved that the native
+				# name loop omits this slot.  Preserve that exact evidence across
+				# mapping eviction without ever touching the quarantined slot again.
+				continue
+			if len(names) == int(native_count):
+				# A full-width name list already proves every remaining slot by
+				# position.  A catalog/matrix/descriptor failure for one exact
+				# slot must stay slot-local when this mapping is rebuilt after a
+				# neighbouring item is destroyed; do not turn it into a chunk-wide
+				# outage.  The ignored slot itself remains quarantined everywhere.
+				entry['ignored_items'].add(item_index)
+				continue
+			entry['result'] = (None, 'isolated_item', ())
+			_release_item_name_query_focus_1513(space_id, chunk_id)
+			return entry['result']
+		try:
+			native_type = query(space_id, chunk_id, item_index, -1)
+		except Exception as error:
+			# The native name loop resolves through the same provider and omits
+			# this item.  Preserve that alignment fact, but quarantine the live
+			# slot so no later matrix/effect/destroy call can touch it.
+			globals().setdefault(
+				'g_offh_destr_name_unresolved_slots', set()).add(identity)
+			_isolate_destructible_1513(
+				'name_item_unresolved', chunk_id, item_index, detail=error)
+			if len(names) == int(native_count):
+				entry['ignored_items'].add(item_index)
+			continue
+		if (isinstance(native_type, bool) or
+				not isinstance(native_type, _INTEGER_TYPES)):
+			if len(names) == int(native_count):
+				entry['ignored_items'].add(item_index)
+				_isolate_destructible_1513(
+					'category_abi', chunk_id, item_index,
+					detail='native category is not an integer')
+				continue
+			entry['result'] = (None, 'category_abi', ())
+			_release_item_name_query_focus_1513(space_id, chunk_id)
+			return entry['result']
+		if native_type == -1:
+			continue
+		entry['items_by_type'].setdefault(
+			int(native_type), []).append(item_index)
+	entry['next_item'] = end_item
+	if end_item < int(native_count):
+		return None, 'pending_alignment', ()
+	entry['result'] = _finish_native_item_name_alignment_1513(
+		entry, names if len(names) == int(native_count) else None,
+		chunk_id)
+	_release_item_name_query_focus_1513(space_id, chunk_id)
+	return entry['result']
+
+
+def _chunk_native_name_list_1513(bigworld, space_id, chunk_id, native_count):
+	"""Read and validate one chunk's possibly compacted native name list.
+
+	The native helper itself walks the whole chunk, so retain its validated
+	snapshot for all scanners and streamed-shot callers until the chunk unloads
+	or a known native mutation invalidates it.  Returns
+	``(names, status)`` with ``'ready'``, ``'pending'`` at a legal streaming
+	boundary, or an isolating reason with ``None``.  A malformed list is a
+	chunk-level ABI violation, because the engine's own name loop cannot append
+	a non-string or more entries than the chunk has native items.  An empty
+	string is legal when a name handler returns a non-NULL pointer to ``'\0'``.
+	"""
+	key = (int(space_id), int(chunk_id))
+	cache = globals().setdefault('g_offh_destr_native_name_lists', {})
+	entry = cache.get(key)
+	if entry is not None:
+		if entry['native_count'] == int(native_count):
+			_touch_item_name_cache_entry_1513(entry)
+			return entry['names'], 'ready'
+		cache.pop(key, None)
+	try:
+		names = bigworld.wg_getChunkDestrFilenames(space_id, chunk_id)
+	except Exception as error:
+		_isolate_destructible_1513(
+			'filename_query', chunk_id, detail=error)
+		return None, 'filename_query'
+	if names is None:
+		return None, 'pending'
+	if not isinstance(names, (list, tuple)):
+		_isolate_destructible_1513(
+			'filename_payload', chunk_id,
+			detail='expected list or tuple')
+		return None, 'filename_payload'
+	if len(names) > native_count:
+		_isolate_destructible_1513(
+			'filename_prefix', chunk_id,
+			detail='names=%s count=%s' % (len(names), native_count))
+		return None, 'filename_prefix'
+	for name in names:
+		if not isinstance(name, _STRING_TYPES):
+			_isolate_destructible_1513(
+				'filename_payload', chunk_id,
+				detail='names=%s count=%s entry=%r' % (
+					len(names), native_count, name))
+			return None, 'name_abi'
+	names = tuple(names)
+	if len(cache) >= _ITEM_NAME_CHUNK_CACHE_LIMIT:
+		victim = min(cache.items(), key=lambda value: (
+			int(value[1].get('last_access', 0)), value[0]))[0]
+		cache.pop(victim, None)
+	entry = {'native_count': int(native_count), 'names': names}
+	_touch_item_name_cache_entry_1513(entry)
+	cache[key] = entry
+	return names, 'ready'
+
+
+def _chunk_native_names_1513(bigworld, area_destructibles, space_id, chunk_id,
+		native_count, names):
+	"""Align one chunk's validated name list to its native item indices.
+
+	All calls and chunks share at most ``_ITEM_NAME_QUERY_BUDGET`` native category
+	queries per render tick.  ``pending_alignment`` is retryable.  A shorter
+	compacted list keeps every completed evidence failure chunk-wide because it
+	cannot identify which slot owns contradictory name evidence.  A full-width
+	list preserves slots, including legal empty strings, so descriptor, category,
+	or type failures are contained to their exact item.
+	"""
+	mapping, status, anomalous = _chunk_item_names_1513(
+		bigworld, area_destructibles, space_id, chunk_id, native_count, names)
+	if status == 'pending_alignment':
+		return None, status
+	if mapping is None or anomalous or status != 'exact':
+		_isolate_destructible_1513(
+			'name_alignment', chunk_id,
+			detail='status=%s types=%r names=%s count=%s' % (
+				status, anomalous, len(names), native_count))
+		return None, status
+	return mapping, status
+
+
+def resolve_native_item_name_1513(space_id, chunk_id, item_index):
+	"""Return ``(status, filename)`` for one native slot on pinned #1513.
+
+	``'exact'`` carries this item's own native filename, or ``None`` when the
+	item owns no name.  ``'pending'`` is the legal streaming boundary.  Every
+	other status means no per-item name evidence exists for this chunk.
+	"""
+	import AreaDestructibles
+	import BigWorld
+	chunk_id = int(chunk_id)
+	item_index = int(item_index)
+	if _destructible_isolated_1513(chunk_id, item_index):
+		return 'invalid', None
+	manager = getattr(AreaDestructibles, 'g_destructiblesManager', None)
+	if manager is None:
+		return 'pending', None
+	try:
+		manager_space_id = manager.getSpaceID()
+	except Exception:
+		return 'pending', None
+	if manager_space_id != space_id:
+		return 'pending', None
+	native_count = _native_chunk_destructible_count_1513(manager, chunk_id)
+	if native_count is None:
+		return 'pending', None
+	if item_index < 0 or item_index >= native_count:
+		_isolate_destructible_1513(
+			'native_count_range', chunk_id, item_index,
+			detail='count=%s' % native_count)
+		return 'invalid', None
+	names, status = _chunk_native_name_list_1513(
+		BigWorld, space_id, chunk_id, native_count)
+	if names is None:
+		return ('pending' if status == 'pending' else 'invalid'), None
+	mapping, unused_status = _chunk_native_names_1513(
+		BigWorld, AreaDestructibles, space_id, chunk_id, native_count, names)
+	if unused_status == 'pending_alignment':
+		return 'pending', None
+	if (mapping is None or
+			_destructible_isolated_1513(chunk_id, item_index)):
+		return 'invalid', None
+	return 'exact', mapping.get(item_index)
+
+
+
+def _live_filename_identity_1513(area_destructibles, raw_filename,
+		normalized_filename, catalog_filename, expected_kind):
+	"""Classify one live/catalog filename disagreement for a native slot.
+
+	The live name is now recovered for this exact native item rather than read
+	directly out of the possibly compacted chunk list, so a disagreement is real
+	evidence instead of an alignment artefact.  Classes:
+
+	* ``none`` - this item owns no native name, so there is no evidence;
+	* ``match`` - the normalized names are equal;
+	* ``conflict`` - the exact normalized names differ.  Sharing only the broad
+	  destructible kind does not prove an alias or identical geometry.
+
+	An exact transform and an exact wire do not make a SpeedTree atom and a
+	fragile model one item, so a conflict is never accepted.  Returns
+	``(classification, live_kind)``.
+	"""
+	if not normalized_filename:
+		return 'none', None
+	if normalized_filename == catalog_filename:
+		return 'match', expected_kind
+	try:
+		descriptor = area_destructibles.g_cache.getDescByFilename(raw_filename)
+	except Exception:
+		# An unreadable descriptor cache is not evidence of an alias.
+		return 'conflict', None
+	if not isinstance(descriptor, dict):
+		return 'conflict', None
+	live_kind = _catalog_kind_for_type_1513(
+		area_destructibles, descriptor.get('type'))
+	return 'conflict', live_kind
 
 
 def set_diagnostics(enabled, writer=None):
@@ -345,7 +955,8 @@ def _diagnostic_counts_1513(values):
 		or '-'
 
 
-def _diagnostic_chunk_1513(chunk_id, native_count, filenames, registry):
+def _diagnostic_chunk_1513(chunk_id, native_count, names, item_names,
+		names_status, registry):
 	"""Emit one aggregate after a complete first scan of a streamed chunk."""
 	if not _DIAGNOSTICS_ENABLED:
 		return
@@ -360,14 +971,18 @@ def _diagnostic_chunk_1513(chunk_id, native_count, filenames, registry):
 	_diagnostic_enqueue_1513('chunk', ('ready', int(chunk_id)), (
 		('chunk', int(chunk_id)),
 		('slots', int(native_count)),
-		('names', len(filenames)),
+		('names', len(names)),
+		('named_items', -1 if item_names is None else len(item_names)),
+		('names_status', str(names_status)),
 		('named', sum(1 for slot in ordered if slot['raw'] == 'named')),
 		('blank', sum(1 for slot in ordered if slot['raw'] == 'blank')),
 		('name_mismatch', sum(
 			1 for slot in ordered if slot.get('raw_mismatch'))),
-		('v3_unique', signatures.count('unique')),
-		('v3_ambig', signatures.count('ambig')),
-		('v3_miss', signatures.count('miss')),
+		('name_conflict', sum(
+			1 for slot in ordered if slot.get('raw_conflict'))),
+		('v4_unique', signatures.count('unique')),
+		('v4_ambig', signatures.count('ambig')),
+		('v4_miss', signatures.count('miss')),
 		('effects', _diagnostic_counts_1513(effects)),
 		('registered', _diagnostic_counts_1513(registered)),
 		('boxes', sum(slot['boxes'] for slot in ordered)),
@@ -430,10 +1045,17 @@ def _clear_runtime_registry():
 			'g_offh_destr_chunks', 'g_offh_destr_instances',
 			'g_offh_destr_contact_bins', 'g_offh_destr_pending',
 			'g_offh_destr_speculative',
+			'g_offh_destr_catalog_published',
+			'g_offh_destr_catalog_publish_pending',
 			'g_offh_destr_falling_active', 'g_offh_destr_ground_skips',
 			'g_offh_destr_broken_cache',
+			'g_offh_destr_item_names',
+			'g_offh_destr_native_name_lists',
+			'g_offh_destr_item_name_budget',
+			'g_offh_destr_item_name_cache_serial',
 			'g_offh_destr_isolated_chunks',
 			'g_offh_destr_isolated_slots',
+			'g_offh_destr_name_unresolved_slots',
 			'g_offh_destr_isolation_logs',
 			'g_offh_destr_isolation_log_capped',
 			'g_offh_destr_diagnostics', 'g_offh_destr_diag_last_static',
@@ -703,10 +1325,11 @@ def set_catalog(catalog):
 					'ambiguous destructible candidate is invalid')
 		ambiguous_signatures.add(signature)
 	_destructible_catalog = {
+		'map': catalog.get('map'),
 		'resources': prepared, 'quantization': quantization,
 		'max_radius': max_radius, 'instances': instance_index,
 		'ambiguous_instances': ambiguous_signatures,
-		'has_instance_index': catalog_version >= 3,
+		'has_instance_index': catalog_version >= 4,
 		'baked_instances': baked_instances,
 		'baked_shot_bins': baked_shot_bins,
 	}
@@ -1124,21 +1747,41 @@ def _validate_native_effect_categories_1513(
 			return False
 		module_indices = tuple(
 			raw_material - normal_min for raw_material in raw_materials)
+	descriptor_type = descriptor.get('type') if isinstance(
+		descriptor, dict) else None
+	identity = 'catalog=%s catalog_kind=%s descriptor_type=%r' % (
+		record['filename'], expected_kind, descriptor_type)
 	for module_index in module_indices:
 		try:
 			native_type = bigworld.wg_getDestructibleEffectCategory(
 				spaceID, chunk_id, item_index, module_index)
 		except Exception as error:
+			# The pinned entry point reports an unresolved (chunk, item, module)
+			# triple as an error, so this is a real identity failure.
 			_isolate_destructible_1513(
 				'effect_query', chunk_id, item_index,
-				detail='module=%s error=%s' % (module_index, error))
+				detail='operation=effect_category module=%s %s error=%s' % (
+					module_index, identity, error))
 			return False
+		if native_type == _NATIVE_EFFECT_CATEGORY_UNREGISTERED_1513:
+			# The item resolved but its native effect group has no handler, so
+			# this channel cannot confirm or contradict the catalog kind.  The
+			# exact wire and the unique matrix signature already agreed, and
+			# isolating here would hide legal #1513 destructibles.
+			_log_destructible_validation_1513(
+				'effect_category_unregistered', 'accepted_native_identity',
+				chunk_id, item_index,
+				detail='operation=effect_category module=%s %s '
+					'native=-1 wire=live_validated' % (
+						module_index, identity))
+			continue
 		if _catalog_kind_for_type_1513(
 				area_destructibles, native_type) != expected_kind:
 			_isolate_destructible_1513(
 				'effect_category', chunk_id, item_index,
-				detail='module=%s expected=%s native=%r' % (
-					module_index, expected_kind, native_type))
+				detail='operation=effect_category module=%s %s '
+					'native=%r wire=live_validated' % (
+						module_index, identity, native_type))
 			return False
 	return True
 
@@ -1185,41 +1828,51 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			'native_count_range', chunk_id, item_index,
 			detail='count=%s' % native_count)
 		return None
-	filenames = BigWorld.wg_getChunkDestrFilenames(spaceID, chunk_id)
-	if filenames is None:
+	names, names_status = _chunk_native_name_list_1513(
+		BigWorld, spaceID, chunk_id, native_count)
+	if names is None:
 		return None
-	if not isinstance(filenames, (list, tuple)):
+	item_names, names_status = _chunk_native_names_1513(
+		BigWorld, AreaDestructibles, spaceID, chunk_id, native_count, names)
+	if names_status == 'pending_alignment':
+		return None
+	if item_names is None or _destructible_isolated_1513(
+			chunk_id, item_index):
+		return None
+	try:
+		chunk_matrix = BigWorld.wg_getChunkMatrix(spaceID, chunk_id)
+		chunk_translation = getattr(chunk_matrix, 'translation', None)
+	except Exception as error:
 		_isolate_destructible_1513(
-			'filename_payload', chunk_id,
-			detail='expected list or tuple')
+			'native_chunk_matrix', chunk_id, detail=error)
 		return None
-	if len(filenames) > native_count:
-		_isolate_destructible_1513(
-			'filename_prefix', chunk_id,
-			detail='names=%s count=%s' % (len(filenames), native_count))
-		return None
-	if item_index < len(filenames) and not isinstance(
-			filenames[item_index], _STRING_TYPES):
-		_isolate_destructible_1513(
-			'filename_slot', chunk_id, item_index,
-			detail='expected string')
-		return None
-	chunk_matrix = BigWorld.wg_getChunkMatrix(spaceID, chunk_id)
-	chunk_translation = getattr(chunk_matrix, 'translation', None)
 	if chunk_translation is None:
 		return None
 	try:
 		matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
 			spaceID, chunk_id, item_index))
+	except Exception as error:
+		_isolate_destructible_1513(
+			('falling_matrix_query' if baked['kind'] == 'falling' else
+			 'native_matrix_query'),
+			chunk_id, item_index, detail=error)
+		return None
+	try:
 		signature, located = _catalog_instance_for_matrix_1513(
 			matrix, chunk_translation, Math)
 	except Exception as error:
-		if baked['kind'] != 'falling':
-			raise
 		_isolate_destructible_1513(
-			'falling_matrix_query', chunk_id, item_index, detail=error)
+			('falling_matrix_signature' if baked['kind'] == 'falling' else
+			 'native_matrix_signature'),
+			chunk_id, item_index, detail=error)
 		return None
 	if located is None:
+		failure_type = ('catalog_signature_ambiguous'
+			if signature in catalog.get('ambiguous_instances', ())
+			else 'catalog_signature_miss')
+		_isolate_destructible_1513(
+			failure_type, chunk_id, item_index,
+			detail='signature=%r' % (signature,))
 		return None
 	if located['wire'] != identity:
 		baked_wire = located['wire']
@@ -1231,17 +1884,56 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			detail='live=%r baked=%r' % (identity, baked_wire))
 		return None
 	if signature != baked['signature']:
+		_isolate_destructible_1513(
+			'catalog_signature_mismatch', chunk_id, item_index,
+			detail='live=%r baked=%r' % (
+				signature, baked['signature']))
 		return None
 	record = catalog['resources'].get(located['filename'])
 	if record is None or record['kind'] != baked['kind']:
+		_isolate_destructible_1513(
+			'catalog_resource_identity', chunk_id, item_index,
+			detail='filename=%s live_kind=%s baked_kind=%s' % (
+				located['filename'],
+				record.get('kind') if record is not None else None,
+				baked['kind']))
+		return None
+	raw_filename = item_names.get(item_index) or ''
+	name_class, live_kind = _live_filename_identity_1513(
+		AreaDestructibles, raw_filename,
+		_normalized_filename(raw_filename), located['filename'],
+		record['kind'])
+	if name_class == 'conflict':
+		# The proximity scanner and this streamed-shot admission must reach the
+		# same identity decision for the same native item.  ``located['wire']``
+		# is already proved equal to this identity above.
+		detail = ('native=%s catalog=%s native_kind=%s catalog_kind=%s '
+			'names=%s' % (
+				_normalized_filename(raw_filename), located['filename'],
+				live_kind, record['kind'], names_status))
+		_isolate_destructible_1513(
+			'filename_identity_conflict', chunk_id, item_index, detail=detail)
 		return None
 	filename = record['filename']
-	desc = AreaDestructibles.g_cache.getDescByFilename(filename)
-	if desc is None:
+	try:
+		desc = AreaDestructibles.g_cache.getDescByFilename(filename)
+	except Exception as error:
+		_isolate_destructible_1513(
+			'catalog_descriptor', chunk_id, item_index, detail=error)
+		return None
+	if not isinstance(desc, dict):
+		_isolate_destructible_1513(
+			'catalog_descriptor', chunk_id, item_index,
+			detail='filename=%s payload=%s' % (
+				filename, type(desc).__name__))
 		return None
 	expected_kind = _catalog_kind_for_type_1513(
 		AreaDestructibles, desc.get('type'))
 	if expected_kind != record['kind']:
+		_isolate_destructible_1513(
+			'catalog_kind_identity', chunk_id, item_index,
+			detail='filename=%s descriptor_kind=%s catalog_kind=%s' % (
+				filename, expected_kind, record['kind']))
 		return None
 	if not _validate_native_effect_categories_1513(
 			BigWorld, AreaDestructibles, record, desc,
@@ -1255,16 +1947,17 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			float(chunk_translation.x), float(chunk_translation.y),
 			float(chunk_translation.z))
 	except Exception as error:
-		if record['kind'] != 'falling':
-			raise
 		_isolate_destructible_1513(
-			'falling_matrix_transform', chunk_id, item_index, detail=error)
+			('falling_matrix_transform' if record['kind'] == 'falling' else
+			 'native_matrix_transform'),
+			chunk_id, item_index, detail=error)
 		return None
 	if not world_boxes:
-		if record['kind'] == 'falling':
-			_isolate_destructible_1513(
-				'falling_collision_boxes', chunk_id, item_index,
-				detail='collision box is unavailable')
+		_isolate_destructible_1513(
+			('falling_collision_boxes' if record['kind'] == 'falling' else
+			 'native_collision_boxes'),
+			chunk_id, item_index,
+			detail='collision box is unavailable')
 		return None
 	instance = {
 		'filename': located['filename'],
@@ -1455,30 +2148,279 @@ def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None,
 	return center, half_axes
 
 
-def _vehicle_contact_box(pos, yaw, bbox, epsilon=0.075, travel=0.0):
-	"""Return only the leading hull face plus this frame's travel."""
+def _tree_trig_interval_1513(cosine_factor, sine_factor, start, end):
+	"""Return exact extrema of ``a*cos(yaw) + b*sin(yaw)``."""
+	import math
+	start = float(start)
+	end = float(end)
+	if end < start:
+		start, end = end, start
+	values = (
+		cosine_factor * math.cos(start) + sine_factor * math.sin(start),
+		cosine_factor * math.cos(end) + sine_factor * math.sin(end))
+	result = [values[0], values[1]]
+	stationary = math.atan2(sine_factor, cosine_factor)
+	first = int(math.ceil((start - stationary) / math.pi))
+	last = int(math.floor((end - stationary) / math.pi))
+	for offset in range(first, last + 1):
+		angle = stationary + offset * math.pi
+		result.append(
+			cosine_factor * math.cos(angle) +
+			sine_factor * math.sin(angle))
+	return min(result), max(result)
+
+
+def _tree_rotation_interval_bbox_1513(bbox, half_angle):
+	"""Enclose the native hull over one bounded yaw interval."""
+	minimum, maximum = bbox[:2]
+	half_angle = abs(float(half_angle))
+	x_values = []
+	z_values = []
+	for local_x in (float(minimum[0]), float(maximum[0])):
+		for local_z in (float(minimum[2]), float(maximum[2])):
+			low, high = _tree_trig_interval_1513(
+				local_x, local_z, -half_angle, half_angle)
+			x_values.extend((low, high))
+			low, high = _tree_trig_interval_1513(
+				local_z, -local_x, -half_angle, half_angle)
+			z_values.extend((low, high))
+	return (
+		(min(x_values), float(minimum[1]), min(z_values)),
+		(max(x_values), float(maximum[1]), max(z_values)), None)
+
+
+def _finite_tree_motion_value_1513(value):
+	import math
+	try:
+		value = float(value)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if math.isnan(value) or math.isinf(value):
+		return None
+	return value
+
+
+def _tree_pose_sweep_boxes_1513(
+		start_pos, start_yaw, end_pos, end_yaw, bbox):
+	"""Build bounded zonotope slices for one previous-to-current hull sweep.
+
+	Each slice analytically encloses every intermediate hull orientation, then
+	adds the exact linear translation as a fourth generator.  The union is a
+	continuous swept-hull cover; no finite set of contact rays is used.
+	"""
+	import math
+	values = tuple(_finite_tree_motion_value_1513(value) for value in (
+		start_pos.x, start_pos.y, start_pos.z, start_yaw,
+		end_pos.x, end_pos.y, end_pos.z, end_yaw))
+	if any(value is None for value in values):
+		return None
+	(sx, sy, sz, start_yaw, ex, ey, ez, end_yaw) = values
+	try:
+		minimum, maximum = bbox[:2]
+		minimum = tuple(_finite_tree_motion_value_1513(value)
+			for value in minimum[:3])
+		maximum = tuple(_finite_tree_motion_value_1513(value)
+			for value in maximum[:3])
+	except (AttributeError, KeyError, TypeError, IndexError):
+		return None
+	if (any(value is None for value in minimum + maximum) or
+			any(minimum[index] > maximum[index] for index in range(3))):
+		return None
+	dx = ex - sx
+	dy = ey - sy
+	dz = ez - sz
+	distance = (dx * dx + dz * dz) ** 0.5
+	yaw_delta = ((end_yaw - start_yaw + math.pi) %
+		(2.0 * math.pi)) - math.pi
+	steps = max(1,
+		int(math.ceil(distance / _TREE_SWEEP_TRANSLATION_STEP_1513)),
+		int(math.ceil(abs(yaw_delta) / _TREE_SWEEP_ANGLE_STEP_1513)))
+	if steps > _TREE_SWEEP_MAX_SEGMENTS_1513:
+		return None
+	boxes = []
+	for index in range(steps):
+		t0 = float(index) / float(steps)
+		t1 = float(index + 1) / float(steps)
+		p0 = (sx + dx * t0, sy + dy * t0, sz + dz * t0)
+		p1 = (sx + dx * t1, sy + dy * t1, sz + dz * t1)
+		yaw0 = start_yaw + yaw_delta * t0
+		yaw1 = start_yaw + yaw_delta * t1
+		mid_yaw = (yaw0 + yaw1) * 0.5
+		interval_bbox = _tree_rotation_interval_bbox_1513(
+			(minimum, maximum, None), (yaw1 - yaw0) * 0.5)
+		interval_minimum, interval_maximum = interval_bbox[:2]
+		local_center_x = (
+			interval_minimum[0] + interval_maximum[0]) * 0.5
+		local_center_y = (
+			interval_minimum[1] + interval_maximum[1]) * 0.5
+		local_center_z = (
+			interval_minimum[2] + interval_maximum[2]) * 0.5
+		half_x = (interval_maximum[0] - interval_minimum[0]) * 0.5
+		half_y = (interval_maximum[1] - interval_minimum[1]) * 0.5
+		half_z = (interval_maximum[2] - interval_minimum[2]) * 0.5
+		cos_y = math.cos(mid_yaw)
+		sin_y = math.sin(mid_yaw)
+		travel = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+		center = (
+			p0[0] + cos_y * local_center_x +
+				sin_y * local_center_z + travel[0] * 0.5,
+			p0[1] + local_center_y + travel[1] * 0.5,
+			p0[2] - sin_y * local_center_x +
+				cos_y * local_center_z + travel[2] * 0.5)
+		half_axes = (
+			(cos_y * half_x, 0.0, -sin_y * half_x),
+			(0.0, half_y, 0.0),
+			(sin_y * half_z, 0.0, cos_y * half_z),
+			(travel[0] * 0.5, travel[1] * 0.5,
+				travel[2] * 0.5))
+		boxes.append((center, half_axes))
+	return tuple(boxes)
+
+
+def _tree_xz_zonotope_hull_1513(sweep_box):
+	"""Return the convex XZ polygon of one generated sweep slice."""
+	center, half_axes = sweep_box[:2]
+	generators = tuple((float(axis[0]), float(axis[2]))
+		for axis in half_axes
+		if axis[0] * axis[0] + axis[2] * axis[2] > 1.0e-16)
+	points = [(float(center[0]), float(center[2]))]
+	for generator in generators:
+		points = [(point[0] + sign * generator[0],
+			point[1] + sign * generator[1])
+			for point in points for sign in (-1.0, 1.0)]
+	points = sorted(set(points))
+	if len(points) <= 2:
+		return tuple(points)
+
+	def cross(origin, left, right):
+		return ((left[0] - origin[0]) * (right[1] - origin[1]) -
+			(left[1] - origin[1]) * (right[0] - origin[0]))
+
+	lower = []
+	for point in points:
+		while (len(lower) >= 2 and
+				cross(lower[-2], lower[-1], point) <= 1.0e-12):
+			lower.pop()
+		lower.append(point)
+	upper = []
+	for point in reversed(points):
+		while (len(upper) >= 2 and
+				cross(upper[-2], upper[-1], point) <= 1.0e-12):
+			upper.pop()
+		upper.append(point)
+	return tuple(lower[:-1] + upper[:-1])
+
+
+def _point_near_tree_sweep_1513(x, z, sweep_box,
+		contact_radius=_SOLID_CONTACT_RADIUS_1513):
+	"""Test a tree origin against a swept zonotope plus its circular skin."""
+	hull = _tree_xz_zonotope_hull_1513(sweep_box)
+	if not hull:
+		return False
+	point = (float(x), float(z))
+	if len(hull) == 1:
+		dx = point[0] - hull[0][0]
+		dz = point[1] - hull[0][1]
+		return dx * dx + dz * dz <= contact_radius * contact_radius
+	inside = True
+	minimum_distance_squared = None
+	for index, start in enumerate(hull):
+		end = hull[(index + 1) % len(hull)]
+		edge_x = end[0] - start[0]
+		edge_z = end[1] - start[1]
+		if edge_x * (point[1] - start[1]) - edge_z * (
+				point[0] - start[0]) < -1.0e-8:
+			inside = False
+		length_squared = edge_x * edge_x + edge_z * edge_z
+		if length_squared <= 1.0e-16:
+			fraction = 0.0
+		else:
+			fraction = ((point[0] - start[0]) * edge_x +
+				(point[1] - start[1]) * edge_z) / length_squared
+			fraction = max(0.0, min(1.0, fraction))
+		nearest_x = start[0] + edge_x * fraction
+		nearest_z = start[1] + edge_z * fraction
+		distance_squared = ((point[0] - nearest_x) ** 2 +
+			(point[1] - nearest_z) ** 2)
+		if (minimum_distance_squared is None or
+				distance_squared < minimum_distance_squared):
+			minimum_distance_squared = distance_squared
+	if inside:
+		return True
+	return (minimum_distance_squared is not None and
+		minimum_distance_squared <=
+		contact_radius * contact_radius + 1.0e-8)
+
+
+def _tree_candidates_for_sweeps_1513(
+		chunk_id, registry, sweep_boxes, tree_type,
+		contact_radius=_SOLID_CONTACT_RADIUS_1513):
+	"""Return exact named tree records and known isolated contacts."""
+	candidates = {}
+	isolated_hits = set()
+	seen = set()
+	for sweep_box in sweep_boxes:
+		minimum_x, maximum_x, minimum_z, maximum_z = (
+			_box_xz_bounds(sweep_box))
+		minimum_x -= contact_radius
+		maximum_x += contact_radius
+		minimum_z -= contact_radius
+		maximum_z += contact_radius
+		for bin_key in _bin_keys_for_bounds(
+				minimum_x, maximum_x, minimum_z, maximum_z):
+			for item in registry.get('bins', {}).get(bin_key, ()):
+				item_index = int(item[0])
+				identity = (int(chunk_id), item_index, None)
+				if identity in seen:
+					continue
+				if (item[4] != tree_type or
+						not _normalized_filename(item[5])):
+					continue
+				if not _point_near_tree_sweep_1513(
+						item[1], item[3], sweep_box, contact_radius):
+					continue
+				seen.add(identity)
+				if _destructible_isolated_1513(chunk_id, item_index):
+					isolated_hits.add(identity)
+					continue
+				candidates[identity] = item
+	return candidates, isolated_hits
+
+
+def _vehicle_contact_box(pos, yaw, bbox, epsilon=0.075, travel=0.0,
+		motion_yaw=None):
+	"""Return the complete current hull plus only this frame's real travel."""
 	import math
 	minimum, maximum = bbox[:2]
 	margin = max(0.0, float(epsilon))
 	travel = float(travel)
-	if travel < 0.0:
-		minimum_forward = float(minimum[2]) - margin + travel
-		maximum_forward = float(minimum[2]) + margin
-	else:
-		minimum_forward = float(maximum[2]) - margin
-		maximum_forward = float(maximum[2]) + margin + travel
-	half_width = max(abs(float(minimum[0])), abs(float(maximum[0]))) + margin
-	cos_y = math.cos(yaw)
-	sin_y = math.sin(yaw)
+	minimum_x = float(minimum[0]) - margin
+	maximum_x = float(maximum[0]) + margin
+	minimum_forward = float(minimum[2]) - margin
+	maximum_forward = float(maximum[2]) + margin
+	center_x = (minimum_x + maximum_x) * 0.5
+	half_width = (maximum_x - minimum_x) * 0.5
 	center_forward = (minimum_forward + maximum_forward) * 0.5
 	half_forward = (maximum_forward - minimum_forward) * 0.5
+	if motion_yaw is None:
+		travel_yaw = float(yaw) if travel >= 0.0 else float(yaw) + math.pi
+	else:
+		travel_yaw = float(motion_yaw)
+	travel_distance = abs(travel)
+	travel_x = math.sin(travel_yaw) * travel_distance
+	travel_z = math.cos(travel_yaw) * travel_distance
+	cos_y = math.cos(yaw)
+	sin_y = math.sin(yaw)
 	center_y = pos.y + (float(minimum[1]) + float(maximum[1])) * 0.5
 	half_y = (float(maximum[1]) - float(minimum[1])) * 0.5 + margin
-	center = (pos.x + sin_y * center_forward, center_y,
-		pos.z + cos_y * center_forward)
+	center = (
+		pos.x + cos_y * center_x + sin_y * center_forward + travel_x * 0.5,
+		center_y,
+		pos.z - sin_y * center_x + cos_y * center_forward + travel_z * 0.5)
 	half_axes = ((cos_y * half_width, 0.0, -sin_y * half_width),
 		(0.0, half_y, 0.0),
-		(sin_y * half_forward, 0.0, cos_y * half_forward))
+		(sin_y * half_forward, 0.0, cos_y * half_forward),
+		(travel_x * 0.5, 0.0, travel_z * 0.5))
 	return center, half_axes
 
 
@@ -1508,6 +2450,7 @@ def note_destroyed(kind, chunkID, itemIndex, matKind=None, now=None):
 		return False
 	if _destructible_isolated_1513(chunkID, itemIndex):
 		return False
+	_invalidate_chunk_native_names_1513(chunkID)
 	if now is None:
 		import BigWorld
 		now = BigWorld.time()
@@ -1562,7 +2505,8 @@ def commit_local_prediction(spaceID, token, position, yaw, speed):
 	The visible client owns the native contact that its copied vehicle physics
 	just observed.  Commit that presentation before movement is advanced; the
 	hidden worker still publishes the canonical LAN event for other clients.
-	Only checksum-pinned fragile items and exact structure modules reach here.
+	Only checksum-pinned fragile items, falling atoms and exact structure modules
+	reach here.
 	"""
 	import Math
 	authority = _get_destr_authority()
@@ -1580,6 +2524,7 @@ def commit_local_prediction(spaceID, token, position, yaw, speed):
 			continue
 		kind = instance.get('kind')
 		if not ((kind == 'fragile' and mat_kind is None) or
+				(kind == 'falling' and mat_kind is None) or
 				(kind == 'structure' and mat_kind is not None)):
 			continue
 		boxes = tuple(box for box in instance.get('boxes', ())
@@ -1593,6 +2538,9 @@ def commit_local_prediction(spaceID, token, position, yaw, speed):
 		elif kind == 'fragile':
 			accepted = authority.destroy_fragile(
 				spaceID, chunk_id, item_index, point, False)
+		elif kind == 'falling':
+			accepted = authority.destroy_column(
+				spaceID, chunk_id, item_index, yaw, speed, point)
 		else:
 			accepted = authority.destroy_module(
 				spaceID, chunk_id, item_index, mat_kind, point, False)
@@ -1600,9 +2548,9 @@ def commit_local_prediction(spaceID, token, position, yaw, speed):
 			raise RuntimeError(
 				'local native destructible prediction was not accepted: '
 				'chunk=%s item=%s' % (chunk_id, item_index))
-		note_destroyed(
-			'fragile' if kind == 'fragile' else 'module',
-			chunk_id, item_index, mat_kind)
+		event_kind = ('fragile' if kind == 'fragile' else
+			'column' if kind == 'falling' else 'module')
+		note_destroyed(event_kind, chunk_id, item_index, mat_kind)
 		committed.append((chunk_id, item_index, mat_kind))
 	return begin_local_prediction(committed) or bool(committed)
 
@@ -2030,15 +2978,28 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		raise ValueError(
 			'catalog motion proposals require detail and kinetic classification')
 	_diagnostic_flush_1513(now)
+	publish_failures, publish_kinds = _retry_catalog_publications_1513()
+	if publish_failures:
+		# Backpressure is an operation-local pending result.  Do not admit more
+		# irreversible native mutations until the already committed event is
+		# observable, and retain its exact identity for the worker retry.
+		return _catalog_motion_result(
+			'pending', publish_failures, return_status=return_status,
+			return_detail=return_detail, kinds=publish_kinds,
+			requires_commit=False if proposal_only else None)
 	if _destructible_catalog is None:
 		return _catalog_motion_result(
-			'clear', return_status=return_status,
-			return_detail=return_detail)
+			'pending' if publish_failures else 'clear', publish_failures,
+			return_status=return_status, return_detail=return_detail,
+			kinds=publish_kinds,
+			requires_commit=False if proposal_only else None)
 	bbox = _vehicle_hull_bbox(td)
 	if bbox is None:
 		return _catalog_motion_result(
-			'clear', return_status=return_status,
-			return_detail=return_detail)
+			'pending' if publish_failures else 'clear', publish_failures,
+			return_status=return_status, return_detail=return_detail,
+			kinds=publish_kinds,
+			requires_commit=False if proposal_only else None)
 	import Math
 	auth = _get_destr_authority()
 	_refresh_destroyed_falling_instances_1513(spaceID, auth, now)
@@ -2052,22 +3013,26 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	candidates = _catalog_contact_candidates(vehicle_box)
 	if not candidates:
 		return _catalog_motion_result(
-			'clear', return_status=return_status,
-			return_detail=return_detail)
+			'pending' if publish_failures else 'clear', publish_failures,
+			return_status=return_status, return_detail=return_detail,
+			kinds=publish_kinds,
+			requires_commit=False if proposal_only else None)
 
 	grouped = {}
 	for candidate in candidates:
 		grouped.setdefault((candidate[0], candidate[1]), []).append(candidate)
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_box = (_vehicle_contact_box(
-		pos, yaw, bbox, travel=float(vel) * max(0.0, float(dt)))
-		if kinetic_speed is not None and motion_yaw is None else None)
+		pos, yaw, bbox, travel=float(vel) * max(0.0, float(dt)),
+		motion_yaw=motion_yaw)
+		if kinetic_speed is not None else None)
 	blocked = False
 	crushed = False
 	kinetic = False
 	approach = False
-	exact_token = set()
-	contact_kinds = set()
+	publication_pending = bool(publish_failures)
+	exact_token = set(publish_failures)
+	contact_kinds = set(publish_kinds)
 	commit_candidates = []
 
 	for identity in sorted(grouped):
@@ -2082,7 +3047,7 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 				candidate[:5])
 			key = (chunk_id, item_index, mat_kind)
 			contact_candidate = (contact_box is not None and
-				kind in ('fragile', 'structure') and
+				kind in ('fragile', 'structure', 'falling') and
 				any(_boxes_intersect(contact_box, world_box)
 					for world_box in instances.get(
 						(chunk_id, item_index), {}).get('boxes', ())
@@ -2128,13 +3093,15 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 				else:
 					blocked = True
 				continue
-			if contact_candidate:
-				exact_token.add(key)
 			if physical_crushable and commit_enabled:
 				commit_candidates.append((candidate, vel, False))
 			elif physical_crushable:
+				exact_token.add(key)
 				blocked = True
 			elif cap_crushable:
+				# Cap-only admission reaches here only for exact current-hull
+				# contact; planning look-ahead returned ``approach`` above.
+				exact_token.add(key)
 				if kinetic_commit:
 					commit_candidates.append((candidate, kinetic_speed, True))
 				else:
@@ -2151,65 +3118,67 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	accepted_now = False
 	used_kinetic_speed = False
 	requires_commit = False
-	if not blocked and not kinetic:
-		for candidate, gate_speed, used_cap in commit_candidates:
-			chunk_id, item_index, mat_kind, unused_filename, kind = (
-				candidate[:5])
-			if _destructible_isolated_1513(chunk_id, item_index):
-				continue
-			if proposal_only:
-				exact_token.add((chunk_id, item_index, mat_kind))
-				requires_commit = True
-				used_kinetic_speed = used_kinetic_speed or used_cap
-				crushed = True
-				continue
-			mat_info = _synthetic_mat_info(candidate, Math)
-			point = mat_info[1]
-			if kind == 'fragile':
-				accepted = auth.destroy_fragile(
-					spaceID, chunk_id, item_index, point, False)
-				event_kind = 'fragile'
-			elif kind == 'structure':
-				accepted = auth.destroy_module(
-					spaceID, chunk_id, item_index, mat_kind, point, False)
-				event_kind = 'module'
-			elif kind == 'falling' and not used_cap:
-				accepted = auth.destroy_column(
-					spaceID, chunk_id, item_index, yaw, vel, point)
-				event_kind = 'column'
-			else:
-				blocked = True
-				break
-			if not accepted:
-				raise RuntimeError(
-					'native catalog contact destroy was not accepted: '
-					'chunk=%s item=%s' % (chunk_id, item_index))
-			# A proposal includes every candidate that it asks authority to
-			# commit, including the narrow swept-ahead strip beyond the exact
-			# leading-face box.  Return the same identity after a successful
-			# native commit: the mutation itself is the authoritative receipt.
-			# Without this, the worker destroys the prop but reports an empty or
-			# partial token and the visible client rolls back through the gap.
+	# A hard or still-kinetic sibling may stop the chassis, but it must not hide
+	# an independently proved crushable identity in the same sweep.  Preserve
+	# and, when requested, commit that exact subset before returning the overall
+	# blocking status.
+	for candidate, gate_speed, used_cap in commit_candidates:
+		chunk_id, item_index, mat_kind, unused_filename, kind = (
+			candidate[:5])
+		if _destructible_isolated_1513(chunk_id, item_index):
+			continue
+		if proposal_only:
 			exact_token.add((chunk_id, item_index, mat_kind))
-			note_destroyed(
-				event_kind, chunk_id, item_index, mat_kind, now)
-			_publish_destroyed(
-				event_kind, chunk_id, item_index, point, yaw, vel,
-				mat_kind if event_kind == 'module' else None)
-			accepted_now = True
+			requires_commit = True
 			used_kinetic_speed = used_kinetic_speed or used_cap
-			_diagnostic_contact_1513(
-				'swept_native_accept', chunk_id, item_index,
-				fields=(('kind', kind), ('mat', mat_kind),
-					('speed', '%.3f' % float(gate_speed))), now=now)
 			crushed = True
+			continue
+		mat_info = _synthetic_mat_info(candidate, Math)
+		point = mat_info[1]
+		if kind == 'fragile':
+			accepted = auth.destroy_fragile(
+				spaceID, chunk_id, item_index, point, False)
+			event_kind = 'fragile'
+		elif kind == 'structure':
+			accepted = auth.destroy_module(
+				spaceID, chunk_id, item_index, mat_kind, point, False)
+			event_kind = 'module'
+		elif kind == 'falling' and not used_cap:
+			accepted = auth.destroy_column(
+				spaceID, chunk_id, item_index, yaw, vel, point)
+			event_kind = 'column'
+		else:
+			blocked = True
+			continue
+		if not accepted:
+			raise RuntimeError(
+				'native catalog contact destroy was not accepted: '
+				'chunk=%s item=%s' % (chunk_id, item_index))
+		# Return every identity that authority was asked to mutate.  This
+		# includes physical-speed look-ahead and exact cap-qualified contact;
+		# the native mutation itself is the authoritative commit receipt.
+		exact_token.add((chunk_id, item_index, mat_kind))
+		note_destroyed(
+			event_kind, chunk_id, item_index, mat_kind, now)
+		if not _publish_catalog_once_1513(
+				event_kind, chunk_id, item_index, point, yaw, vel,
+				mat_kind if event_kind == 'module' else None):
+			publication_pending = True
+		accepted_now = True
+		used_kinetic_speed = used_kinetic_speed or used_cap
+		_diagnostic_contact_1513(
+			'swept_native_accept', chunk_id, item_index,
+			fields=(('kind', kind), ('mat', mat_kind),
+				('speed', '%.3f' % float(gate_speed))), now=now)
+		crushed = True
 
-	status = ('hard' if blocked else
+	status = ('pending' if publication_pending else
+		'hard' if blocked else
 		'kinetic' if kinetic else
 		'crushed' if crushed else
 		'approach' if approach else 'clear')
 	return _catalog_motion_result(
-		status, None if blocked else exact_token, accepted_now,
+		status, exact_token, accepted_now,
 		used_kinetic_speed, return_status, return_detail, contact_kinds,
 		requires_commit if proposal_only else None)
 
@@ -2571,6 +3540,34 @@ def _decode_mat_info_1513(payload):
 	return hitPt, surfNormal, chunkID, itemIndex, matKind, fname
 
 
+def _runtime_material_descriptor_1513(
+		area_destructibles, filename, chunk_id, item_index):
+	"""Read one material descriptor without escaping an exact runtime wire.
+
+	A non-empty native filename is identity evidence for this slot, so an
+	unreadable or malformed descriptor permanently quarantines that wire.  The
+	pinned client may legitimately report an anonymous material; without a name
+	the same cache failure is only a failed attempt and remains retryable through
+	the exact catalog/matrix path.
+	"""
+	normalized = _normalized_filename(filename)
+	try:
+		descriptor = area_destructibles.g_cache.getDescByFilename(filename)
+	except Exception as error:
+		if normalized:
+			_isolate_destructible_1513(
+				'material_descriptor', chunk_id, item_index, detail=error)
+		return None
+	if not isinstance(descriptor, dict) or 'type' not in descriptor:
+		if normalized:
+			_isolate_destructible_1513(
+				'material_descriptor', chunk_id, item_index,
+				detail='filename=%s payload=%s' % (
+					normalized, type(descriptor).__name__))
+		return None
+	return descriptor
+
+
 def _descriptor_value(value, name, default=None):
 	"""Read copied mappings or native #1513 component attributes."""
 	if isinstance(value, dict):
@@ -2638,6 +3635,52 @@ def _publish_destroyed(kind, chunkID, itemIndex, pos, fallYaw=0.0,
 	return True
 
 
+def _publish_catalog_once_1513(
+		kind, chunk_id, item_index, point, yaw, speed, mat_kind=None):
+	"""Retry one native-committed catalog event until LAN admission."""
+	key = (int(chunk_id), int(item_index),
+		int(mat_kind) if mat_kind is not None else None)
+	published = globals().setdefault(
+		'g_offh_destr_catalog_published', set())
+	if key in published:
+		return True
+	pending = globals().setdefault(
+		'g_offh_destr_catalog_publish_pending', {})
+	payload = pending.get(key)
+	if payload is None:
+		payload = (
+			str(kind), key[0], key[1], _position_payload(point),
+			float(yaw), float(speed), key[2])
+		pending[key] = payload
+	try:
+		_publish_destroyed(
+			payload[0], payload[1], payload[2], payload[3],
+			payload[4], payload[5], payload[6])
+	except Exception:
+		return False
+	pending.pop(key, None)
+	published.add(key)
+	return True
+
+
+def _retry_catalog_publications_1513():
+	"""Retry native-committed catalog events before geometry can move away."""
+	pending = globals().get('g_offh_destr_catalog_publish_pending', {})
+	failed = set()
+	kinds = set()
+	for key in sorted(pending):
+		payload = pending.get(key)
+		if payload is None:
+			continue
+		if not _publish_catalog_once_1513(
+				payload[0], payload[1], payload[2], payload[3],
+				payload[4], payload[5], payload[6]):
+			failed.add(key)
+			kinds.add('structure' if payload[0] == 'module' else
+				'falling' if payload[0] == 'column' else 'fragile')
+	return failed, kinds
+
+
 def reset(spaceID=None):
 	_clear_runtime_registry()
 	if spaceID is not None:
@@ -2669,13 +3712,19 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 	if (matKind < _DESTRUCTIBLE_MAT_KIND_MIN_1513 or
 			matKind > _DESTRUCTIBLE_MAT_KIND_MAX_1513):
 		return False
-	desc = AreaDestructibles.g_cache.getDescByFilename(fname)
+	desc = _runtime_material_descriptor_1513(
+		AreaDestructibles, fname, chunkID, itemIndex)
 	if not desc:
 		_dnd = globals().setdefault('g_offh_destr_nodesc', set())
 		if _dkey not in _dnd:
 			_dnd.add(_dkey)
 			LOG_DEBUG('Destr no desc: matKind=', matKind,
 				'fname=', repr(fname), 'chunk=', chunkID, 'idx=', itemIndex)
+		# The native helper can legally return an anonymous destructible; its
+		# exact registered/catalog OBB may provide identity later in this contact
+		# traversal.  A non-empty native name with no descriptor is contradictory
+		# evidence for this exact wire and must remain quarantined.  The shared
+		# descriptor reader above records that first divergence.
 		return False
 
 	# Data-driven vegetation gate: soft vegetation (bush/shrub/fern)
@@ -2690,27 +3739,101 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 		return False
 	if typ == AreaDestructibles.DESTR_TYPE_STRUCTURE:
 		modules = desc.get('modules')
+		if not isinstance(modules, dict):
+			if _normalized_filename(fname):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex,
+					detail='structure modules payload is unavailable')
+			return False
 		if (not (_STRUCTURE_MAT_KIND_MIN_1513 <= matKind <
-				_STRUCTURE_MAT_KIND_MAX_1513) or
-				not isinstance(modules, dict) or modules.get(matKind) is None):
+				_STRUCTURE_MAT_KIND_MAX_1513) or modules.get(matKind) is None):
 			return False
 	if _destructible_catalog is not None and typ in (
 			AreaDestructibles.DESTR_TYPE_FALLING_ATOM,
 			AreaDestructibles.DESTR_TYPE_FRAGILE,
 			AreaDestructibles.DESTR_TYPE_STRUCTURE):
-		record = _destructible_catalog['resources'].get(
-			_normalized_filename(fname))
 		expected_kind = _catalog_kind_for_type_1513(
 			AreaDestructibles, typ)
-		if record is None or record['kind'] != expected_kind:
-			return False
+		normalized_fname = _normalized_filename(fname)
+		if _destructible_catalog.get('has_instance_index'):
+			identity = (int(chunkID), int(itemIndex))
+			instance = globals().setdefault(
+				'g_offh_destr_instances', {}).get(identity)
+			if instance is None:
+				instance = _stream_baked_shot_instance_1513(
+					spaceID, identity)
+			if instance is None:
+				# This exact wire is pending, isolated, absent from the catalog, or
+				# failed live matrix/category validation.  The native surface stays
+				# solid; a global same-kind resource is not admission evidence.
+				return False
+			if (not isinstance(instance, dict) or
+					instance.get('kind') != expected_kind or
+					instance.get('filename') != normalized_fname):
+				failure_type = ('filename_identity_conflict'
+					if isinstance(instance, dict) and
+						instance.get('filename') != normalized_fname
+					else 'catalog_live_admission')
+				_isolate_destructible_1513(
+					failure_type, chunkID, itemIndex,
+					detail='material=%s admitted=%s material_kind=%s admitted_kind=%s' % (
+						normalized_fname,
+						instance.get('filename') if isinstance(instance, dict) else None,
+						expected_kind,
+						instance.get('kind') if isinstance(instance, dict) else None))
+				return False
+			if expected_kind == 'structure':
+				try:
+					module_admitted = any(
+						box[2] == matKind for box in instance.get('boxes', ()))
+				except (IndexError, TypeError):
+					module_admitted = False
+				if not module_admitted:
+					_isolate_destructible_1513(
+						'catalog_module_identity', chunkID, itemIndex,
+						detail='material=%s admitted_modules=%r' % (
+							matKind, tuple(box[2] for box in
+								instance.get('boxes', ())
+								if isinstance(box, (list, tuple)) and
+								len(box) > 2)))
+					return False
+		else:
+			record = _destructible_catalog['resources'].get(normalized_fname)
+			if record is None or record['kind'] != expected_kind:
+				return False
 	if typ == AreaDestructibles.DESTR_TYPE_TREE:
 		_hp_gate = desc.get('health', 0)
-		if _hp_gate < 10 or _hp_gate > 1000:
+		try:
+			_valid_tree_health = 10 <= _hp_gate <= 1000
+		except TypeError:
+			_valid_tree_health = False
+		if not _valid_tree_health:
+			if _normalized_filename(fname) and not isinstance(
+					_hp_gate, _INTEGER_TYPES + (float,)):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex,
+					detail='tree health=%r' % (_hp_gate,))
 			return False
 		if not validate_tree_identity_1513(
 				spaceID, chunkID, itemIndex):
 			return False
+		# An unloaded tree retains stock queued-order admission.  Once the manager
+		# reports the chunk loaded, require this exact slot's reconstructed name;
+		# ``validate_tree_identity_1513`` above has already established the same
+		# safe descriptor boundary and normally leaves this mapping cached.
+		if AreaDestructibles.g_destructiblesManager.isChunkLoaded(chunkID):
+			name_status, native_filename = resolve_native_item_name_1513(
+				spaceID, chunkID, itemIndex)
+			if name_status != 'exact':
+				return False
+			if (_normalized_filename(native_filename) !=
+					_normalized_filename(fname)):
+				_isolate_destructible_1513(
+					'filename_identity_conflict', chunkID, itemIndex,
+					detail='material=%s admitted=%s material_kind=tree' % (
+						_normalized_filename(fname),
+						_normalized_filename(native_filename)))
+				return False
 	# All bookkeeping (chunk bootstrap, dedup, encoding) lives in
 	# the authority - this path is now just a contact sensor.
 	_auth = _get_destr_authority()
@@ -2743,6 +3866,7 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 		raise RuntimeError(
 			'native destructible destroy was not accepted: chunk=%s item=%s' %
 			(chunkID, itemIndex))
+	_invalidate_chunk_native_names_1513(chunkID)
 	_event_kind = (
 		'tree' if typ == AreaDestructibles.DESTR_TYPE_TREE else
 		'column' if typ == AreaDestructibles.DESTR_TYPE_FALLING_ATOM else
@@ -2776,6 +3900,7 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 def _drop_streamed_chunk_registry_1513(state, chunk_id):
 	"""Drop stale streamed geometry while preserving canonical destroy state."""
 	chunk_id = int(chunk_id)
+	_invalidate_chunk_native_names_1513(chunk_id)
 	changed = state.get('chunks', {}).pop(chunk_id, None) is not None
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
@@ -2798,7 +3923,370 @@ def _drop_streamed_chunk_registry_1513(state, chunk_id):
 	return changed
 
 
-def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
+def _tree_runtime_state_1513(space_id=None):
+	state = globals().setdefault('g_offh_tree_state', {
+		'chunks': {}, 'felled': set(), 'spaceID': None})
+	if space_id is not None and state.get('spaceID') != int(space_id):
+		return None
+	native_committed = state.setdefault(
+		'native_committed', state.setdefault('felled', set()))
+	state['felled'] = native_committed
+	state.setdefault('canonical_published', set())
+	state.setdefault('publish_pending', {})
+	return state
+
+
+def _tree_motion_detail_1513(status, token=None, accepted_now=False,
+		requires_commit=False):
+	return {
+		'status': str(status),
+		'token': tuple(sorted(token or ())) or None,
+		'accepted_now': bool(accepted_now),
+		'kinds': 'tree',
+		'requires_commit': bool(requires_commit),
+	}
+
+
+def _tree_motion_axis_samples_1513(minimum, maximum):
+	import math
+	minimum = float(minimum)
+	maximum = float(maximum)
+	span = maximum - minimum
+	segments = max(1, int(math.ceil(
+		span / (_DESTRUCTIBLE_CHUNK_METRES_1513 * 0.5))))
+	if segments > 32:
+		return None
+	return tuple(minimum + span * float(index) / float(segments)
+		for index in range(segments + 1))
+
+
+def _tree_motion_required_chunks_1513(sweep_boxes):
+	"""Map only chunk cells intersected by the segmented sweep broadphase."""
+	import AreaDestructibles
+	import Math
+	mapper = getattr(AreaDestructibles, 'chunkIDFromPosition', None)
+	if not callable(mapper):
+		return 'hard', ()
+	chunk_ids = set()
+	for sweep_box in sweep_boxes:
+		minimum_x, maximum_x, minimum_z, maximum_z = _box_xz_bounds(
+			sweep_box)
+		minimum_x -= _SOLID_CONTACT_RADIUS_1513
+		maximum_x += _SOLID_CONTACT_RADIUS_1513
+		minimum_z -= _SOLID_CONTACT_RADIUS_1513
+		maximum_z += _SOLID_CONTACT_RADIUS_1513
+		x_values = _tree_motion_axis_samples_1513(minimum_x, maximum_x)
+		z_values = _tree_motion_axis_samples_1513(minimum_z, maximum_z)
+		if x_values is None or z_values is None:
+			return 'hard', ()
+		y = float(sweep_box[0][1])
+		for x in x_values:
+			for z in z_values:
+				try:
+					chunk_id = mapper(Math.Vector3(x, y, z))
+				except Exception:
+					return 'pending', ()
+				if chunk_id is None:
+					continue
+				if (isinstance(chunk_id, bool) or
+						not isinstance(chunk_id, _INTEGER_TYPES) or
+						int(chunk_id) < 0):
+					return 'hard', ()
+				chunk_ids.add(int(chunk_id))
+	if not chunk_ids:
+		return 'pending', ()
+	return 'ready', tuple(sorted(chunk_ids))
+
+
+def prewarm_tree_registry(spaceID, pos, yaw, td=None, now=None):
+	"""Build nearby exact native registries without destroying any object."""
+	try:
+		result = _fell_trees_near(
+			spaceID, pos, yaw, 0.0, td, registration_only=True)
+	except Exception:
+		result = None
+	if isinstance(result, dict):
+		return result
+	return {
+		'status': 'pending', 'ready_chunks': (),
+		'pending_chunks': (), 'isolated_chunks': (),
+	}
+
+
+def _tree_motion_resolution_1513(
+		spaceID, start_pos, start_yaw, end_pos, end_yaw, speed, td, now,
+		dt, requested_chunks=None):
+	"""Return registry-complete tree candidates for one trusted pose sweep."""
+	speed = _finite_tree_motion_value_1513(speed)
+	dt = _finite_tree_motion_value_1513(dt)
+	if speed is None or dt is None or dt <= 0.0 or dt > 0.25:
+		return 'hard', {}, set(), {}, set()
+	bbox = _vehicle_hull_bbox(td)
+	if bbox is None:
+		return 'hard', {}, set(), {}, set()
+	sweep_boxes = _tree_pose_sweep_boxes_1513(
+		start_pos, start_yaw, end_pos, end_yaw, bbox)
+	if not sweep_boxes:
+		return 'hard', {}, set(), {}, set()
+	# One registration pass covers the current chunk and its eight neighbours.
+	# Do not repeat the complete native alignment for every sweep slice: the
+	# shared 16-query frame budget must advance one focused chunk predictably.
+	prewarm_tree_registry(spaceID, end_pos, end_yaw, td, now)
+	required_status, required_chunks = (
+		_tree_motion_required_chunks_1513(sweep_boxes))
+	if required_status == 'hard':
+		return required_status, {}, set(), {}, set()
+	if required_status != 'ready':
+		required_chunks = ()
+	scan_chunks = set(required_chunks)
+	for chunk_id in requested_chunks or ():
+		if (isinstance(chunk_id, bool) or
+				not isinstance(chunk_id, _INTEGER_TYPES) or
+				int(chunk_id) < 0):
+			return 'hard', {}, set(), {}, set()
+		scan_chunks.add(int(chunk_id))
+	state = _tree_runtime_state_1513(spaceID)
+	chunk_status = {}
+	for chunk_id in sorted(scan_chunks):
+		if _destructible_isolated_1513(chunk_id):
+			chunk_status[chunk_id] = 'hard'
+		elif state is None or chunk_id not in state.get('chunks', {}):
+			chunk_status[chunk_id] = 'pending'
+		else:
+			chunk_status[chunk_id] = 'ready'
+	try:
+		import AreaDestructibles
+		tree_type = AreaDestructibles.DESTR_TYPE_TREE
+	except (AttributeError, ImportError):
+		return 'hard', {}, set(), chunk_status, set()
+	candidates = {}
+	isolated_hits = set()
+	for chunk_id in sorted(scan_chunks):
+		if chunk_status.get(chunk_id) != 'ready':
+			continue
+		chunk_candidates, chunk_isolated_hits = (
+			_tree_candidates_for_sweeps_1513(
+				chunk_id, state['chunks'][chunk_id], sweep_boxes, tree_type))
+		candidates.update(chunk_candidates)
+		isolated_hits.update(chunk_isolated_hits)
+	if len(candidates) > _TREE_CONTACT_TOKEN_LIMIT_1513:
+		return 'hard', {}, set(), chunk_status, isolated_hits
+	try:
+		authority = _get_destr_authority()
+		active = set(identity for identity in candidates
+			if not authority.is_destroyed(*identity))
+	except Exception:
+		active = set(candidates)
+	# A terminal chunk quarantine has no exact positional proof and must not
+	# create an endless pending retry.  Exact candidates in ready chunks remain
+	# actionable even when another intersected chunk is pending or isolated.
+	status = ('ready' if candidates or (
+		required_status == 'ready' and not any(
+			value == 'pending' for value in chunk_status.values())) else 'pending')
+	return status, candidates, active, chunk_status, isolated_hits
+
+
+def _tree_motion_proposal(
+		spaceID, start_pos, start_yaw, end_pos, end_yaw, speed, td, now,
+		dt=0.04):
+	"""Return a mutation-free exact tree token for a continuous hull sweep."""
+	_diagnostic_flush_1513(now)
+	status, candidates, active, unused_chunk_status, isolated_hits = (
+		_tree_motion_resolution_1513(
+		spaceID, start_pos, start_yaw, end_pos, end_yaw, speed, td, now, dt)
+	)
+	# A position-proven isolated identity is a terminal conflict for this exact
+	# contact even when an unrelated intersected chunk is still streaming.
+	if not candidates and isolated_hits:
+		return _tree_motion_detail_1513('hard')
+	if status != 'ready':
+		return _tree_motion_detail_1513(status)
+	if not candidates:
+		return _tree_motion_detail_1513('clear')
+	return _tree_motion_detail_1513(
+		'crushed', set(candidates), accepted_now=False,
+		requires_commit=bool(active))
+
+
+def _parse_tree_contact_token_1513(token):
+	if not isinstance(token, (list, tuple, set, frozenset)):
+		return None
+	result = set()
+	for row in token:
+		if not isinstance(row, (list, tuple)) or len(row) != 3:
+			return None
+		chunk_id, item_index, mat_kind = row
+		if (isinstance(chunk_id, bool) or
+				not isinstance(chunk_id, _INTEGER_TYPES) or
+				int(chunk_id) < 0 or
+				isinstance(item_index, bool) or
+				not isinstance(item_index, _INTEGER_TYPES) or
+				int(item_index) < 0 or mat_kind is not None):
+			return None
+		result.add((int(chunk_id), int(item_index), None))
+	if not result or len(result) > _TREE_CONTACT_TOKEN_LIMIT_1513:
+		return None
+	return result
+
+
+def _tree_commit_identity_status_1513(
+		spaceID, identity, item, authority):
+	chunk_id, item_index, mat_kind = identity
+	try:
+		if authority.is_destroyed(chunk_id, item_index, mat_kind):
+			return 'destroyed'
+	except Exception:
+		return 'pending'
+	status, filename = resolve_native_item_name_1513(
+		spaceID, chunk_id, item_index)
+	if status == 'pending':
+		return 'pending'
+	if (status != 'exact' or
+			_normalized_filename(filename) !=
+			_normalized_filename(item[5])):
+		if status == 'exact':
+			_isolate_destructible_1513(
+				'tree_prediction_name', chunk_id, item_index,
+				detail='registry=%r native=%r' % (item[5], filename))
+		return 'hard'
+	try:
+		valid = validate_tree_identity_1513(
+			spaceID, chunk_id, item_index)
+	except Exception:
+		return 'pending'
+	if valid:
+		return 'ready'
+	return ('hard' if _destructible_isolated_1513(
+		chunk_id, item_index) else 'pending')
+
+
+def _publish_tree_once_1513(
+		state, spaceID, identity, object_pos, fall_yaw, speed):
+	key = identity[:2]
+	if key in state['canonical_published']:
+		return True
+	payload = state['publish_pending'].get(key)
+	if payload is None:
+		payload = (
+			int(spaceID), int(identity[0]), int(identity[1]),
+			(float(object_pos.x), float(object_pos.y), float(object_pos.z)),
+			float(fall_yaw), float(speed))
+		state['publish_pending'][key] = payload
+	try:
+		_publish_destroyed(
+			'tree', payload[1], payload[2], payload[3], payload[4],
+			payload[5])
+	except Exception:
+		return False
+	state['publish_pending'].pop(key, None)
+	state['canonical_published'].add(key)
+	return True
+
+
+def _commit_tree_contacts_1513(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
+		now, dt, publish):
+	requested = _parse_tree_contact_token_1513(token)
+	if requested is None:
+		return _tree_motion_detail_1513('hard')
+	status, candidates, unused_active, chunk_status, isolated_hits = (
+		_tree_motion_resolution_1513(
+		spaceID, start_pos, start_yaw, end_pos, end_yaw, speed, td, now, dt,
+		set(identity[0] for identity in requested))
+	)
+	if status == 'hard':
+		return _tree_motion_detail_1513(status)
+	requested_chunk_status = set(chunk_status.get(identity[0], 'pending')
+		for identity in requested)
+	if 'hard' in requested_chunk_status:
+		return _tree_motion_detail_1513('hard')
+	if 'pending' in requested_chunk_status:
+		return _tree_motion_detail_1513('pending')
+	if requested.intersection(isolated_hits):
+		return _tree_motion_detail_1513('hard')
+	if not requested.issubset(set(candidates)):
+		return _tree_motion_detail_1513('hard')
+	authority = _get_destr_authority()
+	identity_status = {}
+	for identity in sorted(requested):
+		identity_status[identity] = _tree_commit_identity_status_1513(
+			spaceID, identity, candidates[identity], authority)
+	if any(value == 'hard' for value in identity_status.values()):
+		return _tree_motion_detail_1513('hard')
+	if any(value == 'pending' for value in identity_status.values()):
+		return _tree_motion_detail_1513('pending')
+	import Math
+	dx = float(end_pos.x) - float(start_pos.x)
+	dz = float(end_pos.z) - float(start_pos.z)
+	distance = (dx * dx + dz * dz) ** 0.5
+	if distance > 1.0e-8:
+		import math
+		fall_yaw = math.atan2(dx, dz)
+	else:
+		fall_yaw = float(end_yaw)
+		if float(speed) < 0.0:
+			import math
+			fall_yaw += math.pi
+	fall_speed = float(speed)
+	state = _tree_runtime_state_1513(spaceID)
+	if state is None:
+		return _tree_motion_detail_1513('pending')
+	accepted_now = False
+	object_positions = {}
+	for identity in sorted(requested):
+		item = candidates[identity]
+		object_pos = Math.Vector3(item[1], item[2], item[3])
+		object_positions[identity] = object_pos
+		if identity_status[identity] == 'destroyed':
+			state['native_committed'].add(identity[:2])
+			continue
+		try:
+			accepted = authority.destroy_tree(
+				spaceID, identity[0], identity[1], fall_yaw,
+				fall_speed, object_pos)
+		except Exception:
+			accepted = False
+		if not accepted:
+			try:
+				accepted = authority.is_destroyed(*identity)
+			except Exception:
+				accepted = False
+		if not accepted:
+			return _tree_motion_detail_1513('pending')
+		accepted_now = True
+		state['native_committed'].add(identity[:2])
+		_invalidate_chunk_native_names_1513(identity[0])
+	if publish:
+		for identity in sorted(requested):
+			if not _publish_tree_once_1513(
+					state, spaceID, identity, object_positions[identity],
+					fall_yaw, fall_speed):
+				return _tree_motion_detail_1513('pending')
+	return _tree_motion_detail_1513(
+		'crushed', requested, accepted_now=accepted_now,
+		requires_commit=False)
+
+
+def commit_local_tree_prediction(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
+		now, dt=0.04, publish=False):
+	"""Apply the trusted visible client's exact tree token locally."""
+	return _commit_tree_contacts_1513(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
+		now, dt, bool(publish))
+
+
+def commit_tree_contacts(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
+		now, dt=0.04, publish=True):
+	"""Commit and publish a worker-validated exact tree contact token."""
+	return _commit_tree_contacts_1513(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
+		now, dt, bool(publish))
+
+
+def _fell_trees_near(
+		spaceID, pos, yaw, vel, td=None, registration_only=False):
 	# Offline tree/pole felling. Online the SERVER detected tank-vs-tree
 	# contact; the client-side collision probes never return tree/column
 	# materials, so trees could never fall offline. Instead: enumerate
@@ -2815,6 +4303,9 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 		structure_type = getattr(
 			AreaDestructibles, 'DESTR_TYPE_STRUCTURE', None)
 		if mgr.getSpaceID() != spaceID:
+			# Countdown prewarm is the earliest safe battle-owned caller.  Bind a
+			# stale cross-battle manager now so later registration ticks can consume
+			# fresh onChunkLoad counts instead of deferring this reset to contact.
 			mgr.startSpace(spaceID)
 		if globals().get('g_offh_destr_runtime_space') != spaceID:
 			_clear_runtime_registry()
@@ -2825,6 +4316,9 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 			# dedup sets would suppress destruction of fresh objects.
 			_st['chunks'] = {}
 			_st['felled'] = set()
+			_st['native_committed'] = _st['felled']
+			_st['canonical_published'] = set()
+			_st['publish_pending'] = {}
 			_st['spaceID'] = spaceID
 			globals().setdefault('g_offh_destr_ordered', set())
 			globals().setdefault('g_offh_destr_chunks', set())
@@ -2833,6 +4327,7 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 			globals().setdefault('g_offh_destr_contact_bins', {})
 			globals().setdefault('g_offh_destr_pending', {})
 			globals().setdefault('g_offh_destr_falling_active', {})
+		_st = _tree_runtime_state_1513(spaceID)
 		cos_y = math.cos(yaw); sin_y = math.sin(yaw)
 		bbox = ((-1.6, -1.0, -3.6), (1.6, 1.0, 3.6), None)
 		bbox = _vehicle_hull_bbox(td)
@@ -2851,32 +4346,57 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 		if _current_cid is not None and _destructible_catalog is not None:
 			_receipt_key = _proximity_receipt_key_1513(
 				spaceID, _current_cid, pos, vehicle_box)
-			if _empty_proximity_receipt_valid_1513(
-					_receipt_key, mgr, _st['chunks']):
+			if (not registration_only and
+					_empty_proximity_receipt_valid_1513(
+					_receipt_key, mgr, _st['chunks'])):
 				return
 		cids = set((_current_cid,))
 		_mapped_cid = AreaDestructibles.chunkIDFromPosition(
 			Math.Vector3(pos.x + sin_y * (6.0 if vel >= 0 else -6.0),
 				pos.y, pos.z + cos_y * (6.0 if vel >= 0 else -6.0)))
 		cids.add(_mapped_cid)
+		_prewarm_priority = {}
 		# #1513 chunks are 100 m squares.  Catalog instances can be non-uniformly
 		# scaled, so raw resource bounds cannot determine the origin reach.  Sample
-		# the current chunk plus all eight neighbours through the native mapper;
-		# the pinned catalog's transformed maximum XZ reach is below 50 m.
-		if _destructible_catalog is not None:
+		# the current chunk plus all eight neighbours through the native mapper.
+		# Registration-only tree prewarm deliberately uses the same neighbourhood:
+		# at 16 name probes per frame it starts the next chunk before contact rather
+		# than waiting 0.5-1 seconds after the vehicle crosses the boundary.
+		if _destructible_catalog is not None or registration_only:
 			for _offset_x in (-_DESTRUCTIBLE_CHUNK_METRES_1513, 0.0,
 					_DESTRUCTIBLE_CHUNK_METRES_1513):
 				for _offset_z in (-_DESTRUCTIBLE_CHUNK_METRES_1513, 0.0,
 						_DESTRUCTIBLE_CHUNK_METRES_1513):
-					cids.add(AreaDestructibles.chunkIDFromPosition(
+					_neighbour_cid = AreaDestructibles.chunkIDFromPosition(
 						Math.Vector3(pos.x + _offset_x, pos.y,
-							pos.z + _offset_z)))
+							pos.z + _offset_z))
+					cids.add(_neighbour_cid)
+					if _neighbour_cid is not None:
+						_forward_offset = (
+							_offset_x * sin_y + _offset_z * cos_y)
+						_lateral_offset = abs(
+							_offset_x * cos_y - _offset_z * sin_y)
+						_prewarm_priority[_neighbour_cid] = max(
+							_prewarm_priority.get(
+								_neighbour_cid,
+								(-float('inf'), -float('inf'))),
+							(_forward_offset, -_lateral_offset))
 		cids.discard(None)
 		instances = globals().setdefault('g_offh_destr_instances', {})
 		contact_bins = globals().setdefault(
 			'g_offh_destr_contact_bins', {})
 		_found_nearby = False
-		for cid in cids:
+		_cid_order = sorted(cids)
+		if registration_only:
+			# Finish the occupied chunk first, then the most forward mapped
+			# neighbours.  This makes the single shared 16-query budget useful
+			# for the chunk the vehicle will enter instead of depending on opaque
+			# numeric chunk-ID ordering.
+			_cid_order = sorted(cids, key=lambda cid: (
+				0 if cid == _current_cid else 1,
+				-_prewarm_priority.get(cid, (0.0, 0.0))[0],
+				-_prewarm_priority.get(cid, (0.0, 0.0))[1], cid))
+		for cid in _cid_order:
 			if _destructible_isolated_1513(cid):
 				continue
 			registry = _st['chunks'].get(cid)
@@ -2894,25 +4414,35 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 						_diagnostic_chunk_pending_1513(
 							'count_pending', cid)
 					# ``game.wg_onChunkLoad`` has not admitted this chunk yet. Do not
-					# infer a count from the diagnostic filename prefix; retry after
-					# the native streaming callback populates the manager map.
+					# infer a count from the possibly compacted name list, whose length is only
+					# a lower bound; retry after the native streaming callback
+					# populates the manager map.
 					continue
-				_dfn = BigWorld.wg_getChunkDestrFilenames(spaceID, cid)
-				if _dfn is None:
+				# The pinned chunk name list may be compacted, so recover the exact
+				# ``item_index -> filename`` mapping under the cardinality contract.
+				_names, _names_status = _chunk_native_name_list_1513(
+					BigWorld, spaceID, cid, _native_count)
+				if _names_status == 'pending':
 					if cid == _current_cid:
 						_diagnostic_chunk_pending_1513(
 							'names_pending', cid, _native_count)
 					continue # chunk not streamed in yet; retry next tick
-				if not isinstance(_dfn, (list, tuple)):
-					_isolate_destructible_1513(
-						'filename_payload', cid,
-						detail='expected list or tuple')
+				if _names is None:
 					continue
-				if len(_dfn) > _native_count:
-					_isolate_destructible_1513(
-						'filename_prefix', cid,
-						detail='names=%s count=%s' %
-							(len(_dfn), _native_count))
+				# Complete the bounded native alignment before admitting any slot.
+				# A shorter list uses per-type reconstruction; a full-width list keeps
+				# its positions.  An incomplete alignment retries on a later scan and a
+				# terminal evidence failure isolates the whole chunk.
+				_item_names, _names_status = _chunk_native_names_1513(
+					BigWorld, AreaDestructibles, spaceID, cid,
+					_native_count, _names)
+				if _names_status == 'pending_alignment':
+					if cid == _current_cid:
+						_diagnostic_chunk_pending_1513(
+							'name_alignment_pending', cid, _native_count)
+					continue
+				if (_item_names is None or
+						_destructible_isolated_1513(cid)):
 					continue
 				registry = {
 					'bins': {}, 'extended_bins': {}, 'count': 0,
@@ -2920,17 +4450,22 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					'max_radius': 0.0, 'slot_diagnostics': {},
 				}
 				_retry_registry = False
-				_cm_t = BigWorld.wg_getChunkMatrix(spaceID, cid).translation
+				try:
+					_cm_t = BigWorld.wg_getChunkMatrix(
+						spaceID, cid).translation
+				except Exception as error:
+					_isolate_destructible_1513(
+						'native_chunk_matrix', cid, detail=error)
+					continue
 				if _cm_t is None:
 					continue
 				for _ti in xrange(_native_count):
 					try:
 						if _destructible_isolated_1513(cid, _ti):
 							continue
-						# #1513's offline chunk list keeps the native item slots,
-						# but returns blank filenames for many non-tree items.  Read
-						# the item matrix first and recover the resource only through
-						# the checksum-pinned whole-map instance signature.
+						# Recover the resource through the checksum-pinned whole-map
+						# instance signature.  The already aligned exact native name is
+						# an independent identity channel.
 						_is_active_falling = ((cid, _ti) in globals().setdefault(
 							'g_offh_destr_falling_active', {}))
 						_baked_slot = ((_destructible_catalog or {}).get(
@@ -2942,26 +4477,21 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 							_m = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
 								spaceID, cid, _ti))
 						except Exception as error:
-							if not _is_known_falling:
-								raise
 							_isolate_destructible_1513(
-								'falling_matrix_query', cid, _ti, detail=error)
+								('falling_matrix_query' if _is_known_falling else
+								 'native_matrix_query'),
+								cid, _ti, detail=error)
 							continue
-						_raw_filename = (
-							_dfn[_ti] if _ti < len(_dfn) else '')
-						if not isinstance(_raw_filename, _STRING_TYPES):
-							_isolate_destructible_1513(
-								'filename_slot', cid, _ti,
-								detail='expected string')
-							continue
+						_raw_filename = _item_names.get(_ti) or ''
 						_raw_normalized = _normalized_filename(_raw_filename)
 						_slot_diag = {
-							'raw': 'named' if _raw_normalized else 'blank',
+							'raw': ('named' if _raw_normalized else 'blank'),
 							'signature_state': 'none',
 							'effect_category': '-',
 							'result': 'pending',
 							'boxes': 0,
 							'raw_mismatch': False,
+							'raw_conflict': False,
 						}
 						# Retained for the whole battle, one dict per native slot
 						# including every tree, so only keep it when a reader exists.
@@ -2992,35 +4522,42 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 								_slot_diag['result'] = 'isolated'
 								continue
 						else:
-							_signature, _located = (
-								_catalog_instance_for_matrix_1513(
-									_m, _cm_t, Math))
+							try:
+								_signature, _located = (
+									_catalog_instance_for_matrix_1513(
+										_m, _cm_t, Math))
+							except Exception as error:
+								_isolate_destructible_1513(
+									'native_matrix_signature', cid, _ti,
+									detail=error)
+								_slot_diag['result'] = 'isolated'
+								continue
 						if (_destructible_catalog is not None and
 								_destructible_catalog.get('has_instance_index')):
 							if _signature in _destructible_catalog[
 									'ambiguous_instances']:
 								_slot_diag['signature_state'] = 'ambig'
-								_slot_diag['result'] = 'sig_ambig'
 								# Multiple native identities have exactly the same
-								# matrix. A blank slot cannot select one without
-								# guessing.
+								# matrix. No native slot may select one without
+								# guessing, even when it owns a name.
+								_isolate_destructible_1513(
+									'catalog_signature_ambiguous', cid, _ti,
+									detail='signature=%r' % (_signature,))
+								_slot_diag['result'] = 'isolated'
 								continue
 							_slot_diag['signature_state'] = (
 								'unique' if _located is not None else 'miss')
+							if _located is None and not _raw_normalized:
+								# An unnamed item needs the catalog placement as its
+								# only resource identity.  Without one, canonical replay
+								# must not later treat the wire as admitted.
+								_isolate_destructible_1513(
+									'catalog_signature_miss', cid, _ti,
+									detail='unnamed signature=%r' % (_signature,))
+								_slot_diag['result'] = 'isolated'
+								continue
 						_instance_box_index = None
 						if _located is not None:
-							if (_raw_normalized and
-									_raw_normalized != _located['filename']):
-								# This helper is only a partial diagnostic prefix in
-								# #1513. The checksum-pinned unique matrix signature,
-								# exact native wire and effect category below are the
-								# authoritative identity boundary.
-								_slot_diag['raw_mismatch'] = True
-								_log_destructible_validation_1513(
-									'filename_mismatch', 'accepted_catalog_identity',
-									cid, _ti,
-									detail='native=%s catalog=%s' % (
-										_raw_normalized, _located['filename']))
 							if _located['wire'] != (int(cid), int(_ti)):
 								_live_wire = (int(cid), int(_ti))
 								_baked_wire = _located['wire']
@@ -3032,6 +4569,34 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 								_isolate_destructible_1513(
 									'wire_identity_mismatch', _baked_wire[0],
 									_baked_wire[1], detail=_wire_detail)
+								_slot_diag['result'] = 'isolated'
+								continue
+							_located_kind = _destructible_catalog['resources'][
+								_located['filename']]['kind']
+							_name_class, _live_kind = (
+								_live_filename_identity_1513(
+									AreaDestructibles, _raw_filename,
+									_raw_normalized, _located['filename'],
+									_located_kind))
+							if _name_class not in ('none', 'match'):
+								_slot_diag['raw_mismatch'] = True
+							_name_detail = (
+								'native=%s catalog=%s native_kind=%s '
+								'catalog_kind=%s names=%s' % (
+									_raw_normalized, _located['filename'],
+									_live_kind, _located_kind, _names_status))
+							if _name_class == 'conflict':
+								# This item's own exact native name resolves to a
+								# different native kind than the catalog instance
+								# sharing its transform, so an exact matrix and an
+								# exact wire are not enough.  The wire is already
+								# proved equal above, so one isolation covers both
+								# sides of the conflicting mapping and keeps it out of
+								# every native descriptor, effect and destroy call.
+								_isolate_destructible_1513(
+									'filename_identity_conflict', cid, _ti,
+									detail=_name_detail)
+								_slot_diag['raw_conflict'] = True
 								_slot_diag['result'] = 'isolated'
 								continue
 							_catalog_record = _destructible_catalog[
@@ -3048,35 +4613,69 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 								if (_catalog_record is not None and
 										_destructible_catalog.get(
 											'has_instance_index')):
-									# A v3 catalog resource without its exact placement
+									# A v4 catalog resource without its exact placement
 									# signature is not this native item.
-									_slot_diag['result'] = 'sig_miss'
+									_isolate_destructible_1513(
+										'catalog_signature_miss', cid, _ti,
+										detail='filename=%s signature=%r' % (
+											_raw_normalized, _signature))
+									_slot_diag['result'] = 'isolated'
 									continue
-						desc = AreaDestructibles.g_cache.getDescByFilename(
-							_filename)
+						try:
+							desc = AreaDestructibles.g_cache.getDescByFilename(
+								_filename)
+						except Exception as error:
+							_isolate_destructible_1513(
+								'native_descriptor', cid, _ti, detail=error)
+							_slot_diag['result'] = 'isolated'
+							continue
 						if desc is None:
-							# A non-empty raw name is the only safe evidence that this
-							# #1513 prefix slot is a tree. Quarantine that invalid tree;
-							# blank/later slots can be real non-tree objects and remain
-							# solid and available to catalog recovery.
-							if (_raw_normalized and
-									_catalog_record is None):
+							# This item's own exact native name has no client
+							# descriptor, so it cannot be animated or destroyed safely.
+							# An unnamed item can still be a real non-tree object and
+							# stays solid and available to catalog recovery.
+							if _raw_normalized or _catalog_record is not None:
 								_isolate_destructible_1513(
-									'tree_descriptor', cid, _ti,
+									('native_descriptor' if _raw_normalized else
+									 'catalog_descriptor'),
+									cid, _ti,
 									detail='named filename has no descriptor')
 								_slot_diag['result'] = 'isolated'
 								continue
 							_slot_diag['result'] = 'desc_missing'
 							continue
-						typ = desc['type']
+						try:
+							typ = desc['type']
+						except Exception as error:
+							_isolate_destructible_1513(
+								'native_descriptor', cid, _ti, detail=error)
+							_slot_diag['result'] = 'isolated'
+							continue
+						_descriptor_kind = _catalog_kind_for_type_1513(
+							AreaDestructibles, typ)
+						if (_catalog_record is not None and
+								_catalog_record['kind'] != _descriptor_kind):
+							_isolate_destructible_1513(
+								'catalog_kind_identity', cid, _ti,
+								detail='filename=%s descriptor_kind=%s '
+									'catalog_kind=%s' % (
+										_raw_normalized, _descriptor_kind,
+										_catalog_record['kind']))
+							_slot_diag['result'] = 'isolated'
+							continue
 						if typ in (AreaDestructibles.DESTR_TYPE_FRAGILE,
 								structure_type,
 								AreaDestructibles.DESTR_TYPE_FALLING_ATOM):
-							_expected_kind = _catalog_kind_for_type_1513(
-								AreaDestructibles, typ)
-							if (_catalog_record is None or
-									_catalog_record['kind'] != _expected_kind):
-								_slot_diag['result'] = 'kind_mismatch'
+							_expected_kind = _descriptor_kind
+							if _catalog_record is None:
+								if _destructible_catalog is not None:
+									_isolate_destructible_1513(
+										'catalog_identity_missing', cid, _ti,
+										detail='filename=%s descriptor_kind=%s' % (
+											_raw_normalized, _expected_kind))
+									_slot_diag['result'] = 'isolated'
+								else:
+									_slot_diag['result'] = 'kind_mismatch'
 								continue
 							if _located is not None:
 								if not _validate_native_effect_categories_1513(
@@ -3120,13 +4719,13 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 									_catalog_record, _m, _cm_t, Math,
 									_instance_box_index)
 								if not _world_boxes:
-									if _catalog_record['kind'] == 'falling':
-										_isolate_destructible_1513(
-											'falling_collision_boxes', cid, _ti,
-											detail='collision box is unavailable')
-										_slot_diag['result'] = 'isolated'
-									else:
-										_slot_diag['result'] = 'boxes_empty'
+									_isolate_destructible_1513(
+										('falling_collision_boxes'
+										 if _catalog_record['kind'] == 'falling'
+										 else 'native_collision_boxes'),
+										cid, _ti,
+										detail='collision box is unavailable')
+									_slot_diag['result'] = 'isolated'
 									continue
 								for _world_box in _world_boxes:
 									_center, _half_axes = _world_box[:2]
@@ -3139,11 +4738,12 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 										_contact_radius,
 										_center_radius + _horizontal_radius)
 						except Exception as error:
-							if (_catalog_record is None or
-									_catalog_record['kind'] != 'falling'):
-								raise
 							_isolate_destructible_1513(
-								'falling_matrix_transform', cid, _ti,
+								('falling_matrix_transform'
+								 if (_catalog_record is not None and
+									_catalog_record['kind'] == 'falling')
+								 else 'native_matrix_transform'),
+								cid, _ti,
 								detail=error)
 							_slot_diag['result'] = 'isolated'
 							continue
@@ -3183,17 +4783,36 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 							_catalog_record['kind']
 							if _catalog_record is not None else 'tree')
 						_slot_diag['boxes'] = len(_world_boxes)
-					except Exception:
-						raise
+					except Exception as error:
+						# Every operation in this loop belongs to one exact native
+						# slot.  Keep a malformed descriptor/transform local instead
+						# of aborting the whole chunk or proximity callback.
+						_isolate_destructible_1513(
+							'native_slot_registry', cid, _ti, detail=error)
+						continue
 				if not _retry_registry:
 					_st['chunks'][cid] = registry
 					_bump_spatial_revision_1513()
 					_diagnostic_chunk_1513(
-						cid, _native_count, _dfn, registry)
+						cid, _native_count, _names, _item_names,
+						_names_status, registry)
 				LOG_DEBUG('DestrTree: chunk registry', cid,
 					registry['count'], 'trees/poles')
+			if registration_only:
+				continue
 			if not registry['count']:
 				continue
+			_tree_vehicle_box = vehicle_box
+			if vel < 0.0:
+				# Preserve the legacy scanner's fixed 0.8 m reverse reach.  Its
+				# velocity-scaled look-ahead historically applied only forwards.
+				_tree_vehicle_box = _vehicle_swept_box(
+					pos, yaw, vel, bbox, travel_reach=0.8)
+			_tree_candidates, unused_tree_isolated_hits = (
+				_tree_candidates_for_sweeps_1513(
+					cid, registry, (_tree_vehicle_box,),
+					AreaDestructibles.DESTR_TYPE_TREE, 0.0))
+			_tree_candidate_keys = set(_tree_candidates)
 			for (_ti, _tx, _ty, _tz, _ttyp, _tfn, _thp, _tmass,
 					_world_boxes, _contact_radius) in _nearby_destructibles(
 						registry, pos, vehicle_box):
@@ -3216,6 +4835,11 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					# proximity alone.  Stock WGVehiclePhysics (when available) or
 					# the native solid ray below remains the contact authority.
 					continue
+				elif _ttyp == AreaDestructibles.DESTR_TYPE_TREE:
+					if abs(vel) < 1.0:
+						continue
+					if (cid, _ti, None) not in _tree_candidate_keys:
+						continue
 				else:
 					if abs(vel) < 1.0:
 						continue
@@ -3231,6 +4855,14 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 				_key = ((cid, _ti, _mat_kind) if _mat_kind is not None
 					else (cid, _ti))
 				if _key in _st['felled']:
+					if (_ttyp == AreaDestructibles.DESTR_TYPE_TREE and
+							_key in _st['publish_pending']):
+						_object_pos = Math.Vector3(_tx, _ty, _tz)
+						if not _publish_tree_once_1513(
+								_st, spaceID, (cid, _ti, None), _object_pos,
+								yaw if vel >= 0 else yaw + math.pi, vel):
+							raise RuntimeError(
+								'tree proximity event was not admitted')
 					continue
 				fall_yaw = yaw if vel >= 0 else (yaw + math.pi)
 				_auth = _get_destr_authority()
@@ -3263,16 +4895,40 @@ def _fell_trees_near(spaceID, pos, yaw, vel, td=None):
 					raise RuntimeError(
 						'native proximity destroy was not accepted: '
 						'chunk=%s item=%s' % (cid, _ti))
-				_publish_destroyed(
-					('fragile' if _ttyp == AreaDestructibles.DESTR_TYPE_FRAGILE
-					 else 'module' if _ttyp == structure_type
-					 else 'tree' if _ttyp == AreaDestructibles.DESTR_TYPE_TREE
-					 else 'column'),
-					cid, _ti, _object_pos, fall_yaw, vel,
-					_mat_kind)
+				_invalidate_chunk_native_names_1513(cid)
 				_st['felled'].add(_key)
+				if _ttyp == AreaDestructibles.DESTR_TYPE_TREE:
+					if not _publish_tree_once_1513(
+							_st, spaceID, (cid, _ti, None), _object_pos,
+							fall_yaw, vel):
+						raise RuntimeError(
+							'tree proximity event was not admitted')
+				else:
+					_publish_destroyed(
+						('fragile'
+						 if _ttyp == AreaDestructibles.DESTR_TYPE_FRAGILE
+						 else 'module' if _ttyp == structure_type
+						 else 'column'),
+						cid, _ti, _object_pos, fall_yaw, vel,
+						_mat_kind)
 				LOG_DEBUG('DestrTree: FELLED', cid, _ti, 'type', _ttyp,
 					'hp', _thp, 'mass', _tmass, _tfn)
+		if registration_only:
+			_ready_chunks = tuple(sorted(cid for cid in cids
+				if cid in _st['chunks'] and
+				not _destructible_isolated_1513(cid)))
+			_pending_chunks = tuple(sorted(cid for cid in cids
+				if cid not in _st['chunks'] and
+				not _destructible_isolated_1513(cid)))
+			_isolated_chunks = tuple(sorted(cid for cid in cids
+				if _destructible_isolated_1513(cid)))
+			return {
+				'status': ('invalid' if _isolated_chunks else
+					'pending' if _pending_chunks or not cids else 'ready'),
+				'ready_chunks': _ready_chunks,
+				'pending_chunks': _pending_chunks,
+				'isolated_chunks': _isolated_chunks,
+			}
 		if (_receipt_key is not None and not _found_nearby and
 				not globals().get('g_offh_destr_falling_active') and
 				all(cid in _st['chunks'] and
@@ -3304,13 +4960,20 @@ def _solid_destructible_candidate_1513(mat_info, contact_pt,
 		return False
 
 	import AreaDestructibles
-	desc = AreaDestructibles.g_cache.getDescByFilename(fname)
+	desc = _runtime_material_descriptor_1513(
+		AreaDestructibles, fname, chunkID, itemIndex)
 	if not desc:
 		return False
-	typ = desc['type']
+	typ = desc.get('type')
 	if typ == AreaDestructibles.DESTR_TYPE_STRUCTURE:
 		modules = desc.get('modules')
-		if modules is None or modules.get(matKind) is None:
+		if not isinstance(modules, dict):
+			if _normalized_filename(fname):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex,
+					detail='structure modules payload is unavailable')
+			return False
+		if modules.get(matKind) is None:
 			return False
 	elif typ not in (AreaDestructibles.DESTR_TYPE_FRAGILE,
 			getattr(AreaDestructibles, 'DESTR_TYPE_FALLING_ATOM', None)):
@@ -3503,7 +5166,8 @@ def _stock_crushable_1513(mat_info, vel, td, item_scale=None):
 	unused_hit, unused_normal, chunkID, itemIndex, matKind, fname = decoded
 	import AreaDestructibles
 	import DestructiblesCache
-	desc = AreaDestructibles.g_cache.getDescByFilename(fname)
+	desc = _runtime_material_descriptor_1513(
+		AreaDestructibles, fname, chunkID, itemIndex)
 	if desc is None:
 		return False
 	if item_scale is None:
@@ -3523,24 +5187,49 @@ def _stock_crushable_1513(mat_info, vel, td, item_scale=None):
 	if item_scale <= 0.0 or mass <= 0.0:
 		raise RuntimeError('#1513 destructible kinetic inputs are invalid')
 	instant_damage = 0.5 * mass * vel * vel * 0.00015
-	if desc['type'] == AreaDestructibles.DESTR_TYPE_STRUCTURE:
-		module = desc.get('modules', {}).get(matKind)
+	desc_type = desc.get('type')
+	if desc_type == AreaDestructibles.DESTR_TYPE_STRUCTURE:
+		modules = desc.get('modules')
+		if not isinstance(modules, dict):
+			if _normalized_filename(fname):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex,
+					detail='structure modules payload is unavailable')
+			return False
+		module = modules.get(matKind)
 		if module is None:
 			return False
-		ref_health = module['health']
-	elif desc['type'] in (AreaDestructibles.DESTR_TYPE_FRAGILE,
+		try:
+			ref_health = module['health']
+		except (KeyError, TypeError):
+			if _normalized_filename(fname):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex,
+					detail='structure module health is unavailable')
+			return False
+	elif desc_type in (AreaDestructibles.DESTR_TYPE_FRAGILE,
 			getattr(AreaDestructibles, 'DESTR_TYPE_FALLING_ATOM', None)):
 		try:
 			instant_damage *= pow(
 				mass / float(AreaDestructibles.g_cache.unitVehicleMass),
 				float(desc['kineticDamageCorrection']))
 			ref_health = desc['health']
-		except (KeyError, TypeError, ValueError, ZeroDivisionError):
+		except (AttributeError, KeyError, TypeError, ValueError,
+				ZeroDivisionError) as error:
+			if _normalized_filename(fname):
+				_isolate_destructible_1513(
+					'material_descriptor', chunkID, itemIndex, detail=error)
 			return False
 	else:
 		return False
-	return (DestructiblesCache.scaledDestructibleHealth(
-		item_scale, ref_health) < instant_damage)
+	try:
+		return (DestructiblesCache.scaledDestructibleHealth(
+			item_scale, ref_health) < instant_damage)
+	except Exception as error:
+		if _normalized_filename(fname):
+			_isolate_destructible_1513(
+				'material_descriptor', chunkID, itemIndex, detail=error)
+		return False
 
 
 def _try_destroy_solid_hit(spaceID, segment_start, hit_pt, surf_normal,
@@ -3655,16 +5344,14 @@ def _shot_through_health_1513(desc, mat_kind):
 def _scaled_shot_through_health_1513(desc, mat_kind, item_scale):
 	if desc is None:
 		return None
-	health = _shot_through_health_1513(desc, mat_kind)
-	if health is None:
-		return None
-	if item_scale is None:
-		return None
 	try:
+		health = _shot_through_health_1513(desc, mat_kind)
+		if health is None or item_scale is None:
+			return None
 		import DestructiblesCache
 		return float(DestructiblesCache.scaledDestructibleHealth(
 			float(item_scale), health))
-	except (AttributeError, ImportError, TypeError, ValueError):
+	except Exception:
 		return None
 
 
@@ -3694,11 +5381,21 @@ def _validated_tree_shot_identity_1513(spaceID, decoded):
 			mat_kind > _DESTRUCTIBLE_MAT_KIND_MAX_1513):
 		return None
 	import AreaDestructibles
-	desc = AreaDestructibles.g_cache.getDescByFilename(filename)
+	desc = _runtime_material_descriptor_1513(
+		AreaDestructibles, filename, chunk_id, item_index)
 	if desc is None or desc.get('type') != AreaDestructibles.DESTR_TYPE_TREE:
 		return None
 	health = desc.get('health', 0)
-	if health < 10 or health > 1000:
+	try:
+		valid_health = 10 <= health <= 1000
+	except TypeError:
+		valid_health = False
+	if not valid_health:
+		if _normalized_filename(filename) and not isinstance(
+				health, _INTEGER_TYPES + (float,)):
+			_isolate_destructible_1513(
+				'material_descriptor', chunk_id, item_index,
+				detail='tree health=%r' % (health,))
 		return None
 	if not validate_tree_identity_1513(spaceID, chunk_id, item_index):
 		return None
@@ -3773,8 +5470,9 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			continue
 		if destruction_accepted:
 			if shot is not None:
-				desc = __import__('AreaDestructibles').g_cache.getDescByFilename(
-					decoded[5])
+				area_destructibles = __import__('AreaDestructibles')
+				desc = _runtime_material_descriptor_1513(
+					area_destructibles, decoded[5], decoded[2], decoded[3])
 				item_scale = _registered_item_scale_1513(
 					decoded[2], decoded[3], decoded[5])
 				health = _scaled_shot_through_health_1513(
@@ -3889,7 +5587,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 		fields=(('kind', kind), ('mat', mat_kind)))
 	if shot is not None:
 		import AreaDestructibles
-		desc = AreaDestructibles.g_cache.getDescByFilename(candidate[3])
+		desc = _runtime_material_descriptor_1513(
+			AreaDestructibles, candidate[3], chunk_id, item_index)
 		health = _scaled_shot_through_health_1513(
 			desc, mat_kind, candidate[5])
 		can_continue = (_shot_kind_1513(shot) in _SHOT_AP_KINDS_1513 and

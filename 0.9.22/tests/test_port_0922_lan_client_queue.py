@@ -239,6 +239,39 @@ class LanClientQueueTests(unittest.TestCase):
             'type': 'battle_receipt_ack', 'receipt_id': 'server:7:1'},
             client._outbound_queue[0][1])
 
+    def test_worker_destructible_result_accepts_64_identities_only(self):
+        client = self.activate(worker=True)
+        client.ready = True
+        client.phase = 'battle'
+        client.round_id = 7
+        client.bot_authority_id = lan_client_module.WORKER_AUTHORITY_ID
+        token = [(7, item_index, None) for item_index in range(64)]
+
+        self.assertTrue(client.send_player_destructible_contact_result(
+            1, 3, True, token))
+        queued = client._outbound_queue[0][1]
+        self.assertEqual(64, len(queued['token']))
+        self.assertFalse(client.send_player_destructible_contact_result(
+            1, 4, True, token + [(7, 64, None)]))
+        self.assertEqual(1, len(client._outbound_queue))
+
+    def test_input_destructible_backlog_is_projected_to_bounded_window(self):
+        client = self.activate()
+        client.ready = True
+        client.phase = 'battle'
+        client.round_id = 7
+        contacts = [{'seq': seq} for seq in range(1, 18)]
+
+        self.assertTrue(client.send_input(
+            0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
+            shell_index=0, destructible_contacts=contacts))
+
+        queued = client._outbound_queue[0][1]
+        self.assertEqual(
+            list(range(1, 17)),
+            [row['seq'] for row in queued['destructible_contacts']])
+        self.assertEqual(17, len(contacts))
+
     def test_invalid_battle_receipt_is_acked_without_stopping_waiting_client(self):
         client = self.activate()
         client.ready = True

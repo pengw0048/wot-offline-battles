@@ -36,7 +36,7 @@ class FoliageBaker0922Tests(unittest.TestCase):
     def test_contract_is_pinned_to_client_1513(self):
         self.assertEqual('offline-lan-0922-foliage',
                          self.baker.FORMAT_NAME)
-        self.assertEqual(3, self.baker.FORMAT_VERSION)
+        self.assertEqual(4, self.baker.FORMAT_VERSION)
         self.assertEqual('offline-lan-0922-foliage-manifest',
                          self.baker.MANIFEST_FORMAT)
         self.assertEqual('0.9.22.0.1-cn-1513', self.baker.GAME_VERSION)
@@ -189,22 +189,23 @@ class FoliageBaker0922Tests(unittest.TestCase):
             self.assertTrue(all(
                 len(row) == 9 for row in data['fallen_trees']))
 
-    def test_known_fallen_trees_retain_empty_wgde_slot_offsets(self):
-        sentinels = {
-            '07_lakeville': (
-                (33149, 192),
-                (-2.4453, -0.0003, -2.7824,
-                 3.0829, 5.9032, 2.3934, None)),
-            '23_westfeld': (
-                (31871, 129),
-                (-2.7035, -0.001, -3.1126,
-                 2.3801, 6.3586, 1.32, None)),
-        }
-        for map_name, (wire, profile) in sentinels.items():
+    def test_fallen_tree_wires_are_unique_and_dense_per_chunk(self):
+        """A fallen tree owns one native item index, never a shared one.
+
+        A fallen tree's wire comes from the same WGDE enumeration as the
+        destructible catalog, where an empty row references no scene instance
+        and consumes no streamed item index.  A duplicate wire inside one map
+        would mean two trees claim one native item.
+        """
+        for map_name in self.baker.SUPPORTED_MAPS:
             data = json.loads(
                 (DATA_ROOT / (map_name + '.json')).read_text(
                     encoding='utf-8'))
-            self.assertIn(list(wire) + list(profile), data['fallen_trees'])
+            wires = [tuple(row[:2]) for row in data['fallen_trees']]
+            self.assertEqual(len(wires), len(set(wires)), map_name)
+            for chunk_id, item_index in wires:
+                self.assertGreaterEqual(chunk_id, 0, map_name)
+                self.assertGreaterEqual(item_index, 0, map_name)
 
     def test_runtime_loader_only_validates_selected_foliage_record(self):
         with tempfile.TemporaryDirectory() as directory:

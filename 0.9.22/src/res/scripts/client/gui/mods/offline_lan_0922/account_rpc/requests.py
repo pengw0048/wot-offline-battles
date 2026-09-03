@@ -20,12 +20,13 @@ except NameError:
 
 class Result(object):
     def __init__(self, result_id, error='', stream=None, ext=None,
-                 before_response=None):
+                 before_response=None, wait_for_before_response=False):
         self.result_id = result_id
         self.error = error
         self.stream = stream
         self.ext = ext
         self.before_response = before_response
+        self.wait_for_before_response = bool(wait_for_before_response)
 
 
 def _garage(context):
@@ -43,7 +44,9 @@ def _fitting(context, mutate):
     #1513 refreshes the garage from ``PlayerAccount.update``, which unpickles
     its argument and runs the normal ``_update`` event path.  Publishing the
     reshaped inventory section reuses the same builder a full sync uses, so the
-    pushed diff and a later re-sync can never disagree.
+    pushed diff and a later re-sync can never disagree.  The success response
+    waits for that refresh because an immediate battle snapshots crew and
+    equipment from ``g_currentVehicle``, not directly from ``GarageState``.
     """
     started = _clock()
     state = _garage(context)
@@ -66,19 +69,35 @@ def _fitting(context, mutate):
     if not callable(push):
         _report_fitting_cost(started, mutated, saved, saved, None)
         return Result(commands.RES_SUCCESS)
+    push_and_wait = context.get('push_update_and_wait')
 
     touched = state.touched_vehicles()
     touched_items = state.touched_items()
 
-    def publish():
+    def publish(on_complete=None):
         diff = data.inventory(
             state.snapshot(), validate=False, only_vehicles=touched,
             only_items=touched_items)
         built = _clock()
-        push(diff)
+        completed = [False]
+
+        def complete(unused_player=None):
+            if completed[0] or not callable(on_complete):
+                return
+            completed[0] = True
+            on_complete()
+
+        if callable(on_complete) and callable(push_and_wait):
+            if not push_and_wait(diff, after_publish=complete):
+                complete()
+        else:
+            push(diff)
+            complete()
         _report_fitting_cost(started, mutated, saved, built, diff)
 
-    return Result(commands.RES_SUCCESS, before_response=publish)
+    return Result(
+        commands.RES_SUCCESS, before_response=publish,
+        wait_for_before_response=True)
 
 
 def _report_fitting_cost(started, mutated, saved, built, diff):

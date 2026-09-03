@@ -11,6 +11,8 @@ sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
+from gui.mods.offline_lan_0922 import internal_hit_layouts
+from gui.mods.offline_lan_0922 import internal_layout_profiles
 
 
 class _Extra(object):
@@ -113,6 +115,32 @@ def _descriptor():
             crewRoles=(('commander',), ('driver',), ('loader',))))
 
 
+def _layout_descriptor(name, crew_roles):
+    def component(component_name, **values):
+        defaults = {
+            'name': component_name,
+            'id': 1,
+            'compactDescr': 1,
+            'models': None,
+            'materials': {},
+            'hitTester': types.SimpleNamespace(bbox=(
+                (-1.5, -0.5, -2.5), (1.5, 1.5, 2.5), None)),
+            'weight': 100.0,
+        }
+        defaults.update(values)
+        return _Strict1513Component(**defaults)
+
+    return _Strict1513Component(
+        type=types.SimpleNamespace(name=name, crewRoles=crew_roles),
+        chassis=component('chassis'),
+        hull=component('hull'),
+        turret=component('turret', yawLimits=(-3.14, 3.14)),
+        gun=component('gun', maxAmmo=30, shots=()),
+        engine=component('engine', weight=120.0),
+        fuelTank=component('fuelTank', weight=40.0),
+        radio=component('radio', weight=15.0))
+
+
 class CriticalDamageTests(unittest.TestCase):
 
     def setUp(self):
@@ -206,7 +234,6 @@ class CriticalDamageTests(unittest.TestCase):
 
     def test_internal_layout_build_never_probes_native_mapping_api(self):
         from gui.mods.offline_lan_0922 import internal_geometry
-        from gui.mods.offline_lan_0922 import internal_hit_layouts
 
         components = []
 
@@ -252,6 +279,126 @@ class CriticalDamageTests(unittest.TestCase):
         self.assertEqual(('ussr', 'ms1'), layout['profile_key'])
         self.assertGreater(len(layout['targets']), 0)
         self.assertEqual(0, sum(value.mapping_calls for value in components))
+
+    def test_internal_layout_exact_0922_alias_inventory(self):
+        aliases = internal_layout_profiles.PROFILE_ALIASES_0922
+        profiles = internal_layout_profiles.PROFILES
+        absent = {
+            ('germany', 'pziiia'),
+            ('usa', 'm48a1'),
+            ('usa', 't71'),
+        }
+
+        self.assertEqual(218, len(aliases))
+        self.assertEqual(218, len(set(aliases.values())))
+        self.assertTrue(set(aliases).isdisjoint(profiles))
+        self.assertTrue(all(target in profiles for target in aliases.values()))
+        self.assertTrue(all(source[0] == target[0]
+                            for source, target in aliases.items()))
+        self.assertTrue(absent.isdisjoint(set(aliases.values())))
+        direct = set(profiles) - set(aliases.values()) - absent
+        self.assertEqual(30, len(direct))
+        self.assertEqual(248, len(direct) + len(aliases))
+
+    def test_internal_layout_uses_exact_aliases_not_suffix_guesses(self):
+        expected = {
+            'germany:G10_PzIII_AusfJ': ('germany', 'pziii'),
+            'germany:G05_StuG_40_AusfG': ('germany', 'stugiii'),
+            'usa:A58_T67': ('usa', 't49'),
+            'france:F38_Bat_Chatillon155_58': (
+                'france', 'batchatillon155'),
+            'germany:G79_Pz_IV_AusfGH': ('germany', 'pziv'),
+            'germany:G03_PzV_Panther': ('germany', 'pzv'),
+            'germany:G04_PzVI_Tiger_I': ('germany', 'pzvi'),
+            'usa:A69_T110E5': ('usa', 't110'),
+            'ussr:R90_IS_4M': ('ussr', 'is4'),
+            'ussr:R38_KV-220_beta': ('ussr', 'kv220action'),
+            'ussr:R67_M3_LL': ('ussr', 'm3stuartll'),
+        }
+        for vehicle_name, profile_key in expected.items():
+            with self.subTest(vehicle=vehicle_name):
+                actual_key, profile = internal_hit_layouts._compiled_profile(
+                    vehicle_name)
+                self.assertEqual(profile_key, actual_key)
+                self.assertIs(
+                    internal_layout_profiles.PROFILES[profile_key], profile)
+
+        for vehicle_name in (
+                'germany:G102_Pz_III',
+                'germany:G101_StuG_III',
+                'usa:A100_T49',
+                'germany:G14_PzIII_A',
+                'usa:A84_M48A1',
+                'usa:A91_T71',
+                'ussr:R999_MS-1'):
+            with self.subTest(unmapped=vehicle_name):
+                unused_key, profile = internal_hit_layouts._compiled_profile(
+                    vehicle_name)
+                self.assertIsNone(profile)
+
+    def test_internal_layout_0922_crew_drift_bindings(self):
+        cases = (
+            (
+                'china:Ch02_Type62',
+                (('commander',), ('gunner',), ('driver',),
+                 ('loader', 'radioman')),
+                (
+                    ('commander', ('commander',), 0, 'crew_00'),
+                    ('gunner1', ('gunner',), 1, 'crew_01'),
+                    ('driver', ('driver',), 2, 'crew_02'),
+                    ('loader1', ('loader', 'radioman'), 3, 'crew_03'),
+                )),
+            (
+                'usa:A27_T82',
+                (('commander', 'gunner', 'radioman'), ('driver',),
+                 ('gunner',), ('loader',)),
+                (
+                    ('commander', ('commander', 'gunner', 'radioman'),
+                     0, 'crew_00'),
+                    ('driver', ('driver',), 1, 'crew_01'),
+                    ('gunner1', ('gunner',), 2, 'crew_02'),
+                    ('loader1', ('loader',), 3, 'crew_04'),
+                )),
+            (
+                'ussr:R78_SU_85I',
+                (('commander',), ('gunner',), ('driver',),
+                 ('loader', 'radioman')),
+                (
+                    ('commander', ('commander',), 0, 'crew_00'),
+                    ('gunner1', ('gunner',), 1, 'crew_02'),
+                    ('driver', ('driver',), 2, 'crew_03'),
+                    ('loader1', ('loader', 'radioman'), 3, 'crew_04'),
+                )),
+        )
+        internal_hit_layouts._LAYOUT_CACHE.clear()
+        self.addCleanup(internal_hit_layouts._LAYOUT_CACHE.clear)
+        for vehicle_name, crew_roles, expected in cases:
+            with self.subTest(vehicle=vehicle_name):
+                layout = internal_hit_layouts.build_layout(
+                    _layout_descriptor(vehicle_name, crew_roles),
+                    log_build=False)
+                self.assertTrue(layout['valid'], layout['errors'])
+                actual = tuple(
+                    (target['entity'], target['roles'],
+                     target['crew_index'], target['zone_id'])
+                    for target in layout['targets']
+                    if target['kind'] == 'crew')
+                self.assertEqual(expected, actual)
+
+    def test_internal_layout_crew_profile_mismatch_remains_fail_closed(self):
+        vehicle_name = 'china:Ch02_Type62'
+        stale_roles = (
+            ('commander', 'radioman'), ('gunner',), ('driver',), ('loader',))
+        internal_hit_layouts._LAYOUT_CACHE.clear()
+        self.addCleanup(internal_hit_layouts._LAYOUT_CACHE.clear)
+
+        layout = internal_hit_layouts.build_layout(
+            _layout_descriptor(vehicle_name, stale_roles), log_build=False)
+
+        self.assertFalse(layout['valid'])
+        self.assertTrue(any(
+            error.startswith('crew_roles_profile_mismatch:')
+            for error in layout['errors']))
 
     def test_external_track_uses_copied_082_crit_loop(self):
         vehicle = types.SimpleNamespace(

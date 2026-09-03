@@ -196,9 +196,13 @@ def _modules():
         VehicleDescr=lambda compactDescr: _Descriptor(compactDescr),
         getDefaultAmmoForGun=lambda gun: [20010, 30, 20011, 15],
         getTypeOfCompactDescr=item_type)
+    skill_names = [
+        'unused_skill_%d' % index for index in range(61)]
+    skill_names[:3] = ['repair', 'camouflage', 'brotherhood']
+    skill_names[48] = 'loader_intuition'
     tankmen = types.SimpleNamespace(
         TankmanDescr=_TankmanDescriptor,
-        SKILL_NAMES=('repair', 'camouflage', 'brotherhood'))
+        SKILL_NAMES=tuple(skill_names))
     return vehicles, tankmen
 
 
@@ -946,14 +950,15 @@ class GaragePersistenceTests(unittest.TestCase):
 
     def test_a_learned_crew_skill_survives_a_restart(self):
         state = self._state()
-        state.add_tankman_skill(101, 2)
+        state.add_tankman_skill(101, 48)
         store = self._store()
         store.mark_dirty()
         store.flush(state.snapshot())
 
         restored = self._restart()['vehicles'][0]
 
-        self.assertEqual(b'tman:101|brotherhood', restored['tankmen'][101])
+        self.assertEqual(
+            b'tman:101|loader_intuition', restored['tankmen'][101])
 
     def test_battle_crew_receipt_and_descriptors_commit_once_together(self):
         snapshot = copy.deepcopy(SNAPSHOT)

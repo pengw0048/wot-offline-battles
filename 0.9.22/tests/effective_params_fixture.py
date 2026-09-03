@@ -73,8 +73,13 @@ def effective_params():
             'shot_factor': 0.25,
         },
         'skills': {
+            'sixth_sense': False,
+            'expert': False,
             'deadeye': False,
             'intuition_chances': 0,
+            'controlled_impact': False,
+            'designated_target': False,
+            'last_effort': False,
         },
         'crew': {
             'members': [{
@@ -141,6 +146,28 @@ def effective_params():
             'activation_targets': [],
             'crew_roster': ['commander'],
         },
+    }
+
+
+def bot_default_crew_factors(unused_descriptor, crew=None):
+    """Exact factor shape supplied by #1513 to pure-Python Bot fixtures."""
+    if crew is not None:
+        raise AssertionError('Bot fixtures require the plain default crew')
+    crew_factor = 0.57 + 0.0043 * 110.0
+    crew_multiplier = 1.0 / crew_factor
+    return {
+        'turret/rotationSpeed': crew_factor,
+        'gun/rotationSpeed': crew_factor,
+        'gun/reloadTime': crew_multiplier,
+        'gun/aimingTime': crew_multiplier,
+        'shotDispersion': (crew_multiplier,),
+        'repairSpeed': 0.57,
+        'vehicle/rotationSpeed': 1.0,
+        'engine/power': 1.0,
+        'chassis/terrainResistance': (1.0, 1.0, 1.0),
+        'radio/distance': 1.0,
+        'circularVisionRadius': 1.0,
+        'camouflage': 0.57,
     }
 
 

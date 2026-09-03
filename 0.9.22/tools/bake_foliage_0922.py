@@ -37,7 +37,7 @@ import navigation_graph_schema
 
 
 FORMAT_NAME = 'offline-lan-0922-foliage'
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 GAME_VERSION = '0.9.22.0.1-cn-1513'
 DECODER_VERSION = '0.9.22.0.1'

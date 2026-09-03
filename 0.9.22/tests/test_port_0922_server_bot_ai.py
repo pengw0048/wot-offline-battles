@@ -498,6 +498,70 @@ class ServerBotTacticsTests(unittest.TestCase):
         self.assertEqual({'x': -362.0, 'y': 0.0, 'z': 106.0}, anchor)
         self.assertFalse(route_join)
 
+    def _malinovka_east_hill_bot(self, speed):
+        """The shipped 02_malinovka team-1 slot 2 line-up and its lane.
+
+        That slot parks at (70, -366) facing -0.73 rad while its authored first
+        connector lies 184 m away at 1.83 rad off the hull - one of 246 shipped
+        spawn slots, across 33 of the 41 baked maps, where the rear-facing
+        filter discarded the reviewed egress.
+        """
+        graph = json.loads(
+            (PORT_ROOT / 'navgraphs' / '02_malinovka.json').read_text())
+        baked = next(
+            route for route in graph['routes']['1']
+            if route['id'] == 'east_hill_loop')
+        route = _route(
+            baked['id'],
+            [(point[0], point[1], point[2])
+             for point in baked['waypoints']])
+        bot = _bot(24, 1, 2, route, 'mediumTank')
+        bot['state'] = _state(24, 1, 70.0, -366.0)
+        bot['state']['yaw'] = -0.7306
+        bot['state']['speed'] = speed
+        return bot
+
+    def test_parked_spawn_yaw_keeps_the_authored_first_connector(self):
+        """A parking orientation is not a travel direction."""
+        planner = BotPlanner()
+
+        route_id, index, point, unused_anchor, route_join = planner._route(
+            self._malinovka_east_hill_bot(0.0), 1.0)
+
+        self.assertEqual('east_hill_loop', route_id)
+        self.assertEqual(1, index)
+        self.assertEqual({'x': 234.0, 'y': 0.0, 'z': -282.0}, point)
+        self.assertTrue(route_join)
+
+    def test_a_moving_hull_still_skips_a_rear_facing_connector(self):
+        """Once under way the hull yaw is a real travel direction again."""
+        planner = BotPlanner()
+
+        route_id, index, point, unused_anchor, unused_join = planner._route(
+            self._malinovka_east_hill_bot(6.0), 1.0)
+
+        self.assertEqual('east_hill_loop', route_id)
+        self.assertEqual(3, index)
+        self.assertEqual({'x': 430.0, 'y': 0.0, 'z': -98.0}, point)
+
+    def test_reverse_recovery_keeps_the_nearest_connector_after_reset(self):
+        """Negative speed is recovery, not a strategic travel heading."""
+        planner = BotPlanner()
+        bot = self._malinovka_east_hill_bot(6.0)
+        unused_route, first_index, unused_point, unused_anchor, unused_join = \
+            planner._route(bot, 1.0)
+        self.assertEqual(3, first_index)
+
+        planner._route_states.pop(bot['id'])
+        bot['state']['speed'] = -6.0
+        route_id, index, point, unused_anchor, route_join = planner._route(
+            bot, 2.0)
+
+        self.assertEqual('east_hill_loop', route_id)
+        self.assertEqual(1, index)
+        self.assertEqual({'x': 234.0, 'y': 0.0, 'z': -282.0}, point)
+        self.assertTrue(route_join)
+
     def test_route_corridor_does_not_accept_lateral_or_distant_bypasses(self):
         route = _route('bounded-corridor', [
             (0, -20, False), (0, 0, False), (12, 0, False),

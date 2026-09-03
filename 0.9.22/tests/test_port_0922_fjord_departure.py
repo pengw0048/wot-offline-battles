@@ -6,6 +6,7 @@ import sys
 import unittest
 
 import test_port_0922_bot_runtime as runtime_fixtures
+from effective_params_fixture import bot_default_crew_factors
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -116,6 +117,10 @@ class SpawnDepartureTests(unittest.TestCase):
 
     def test_flat_spawn_traffic_departs_at_15_and_24_fps(self):
         module = runtime_fixtures._load()
+        original_factors = module.loadout.attribute_factors
+        module.loadout.attribute_factors = bot_default_crew_factors
+        self.addCleanup(
+            setattr, module.loadout, 'attribute_factors', original_factors)
         bots = _bots()
 
         def spawn(team, slot):

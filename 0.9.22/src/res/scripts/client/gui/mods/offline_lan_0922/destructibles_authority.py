@@ -281,11 +281,14 @@ def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 	# demands a plain int destrID; a float/long index reaching it raised
 	# 'argument 1 must be set to an int'. Coerce here.
 	chunkID = int(chunkID); itemIndex = int(itemIndex)
-	# The pinned scalar ``wg_getDestructibleFilename`` wrapper dereferences a
-	# nullable native string before Python can handle it.  For a currently loaded
-	# chunk, prove this is a named SpeedTree and cache its descriptor before the
-	# stock animation path.  Unloaded chunks retain the stock queued-order
-	# behavior; the installed safe resolver performs the same check on load.
+	# The pinned scalar ``wg_getDestructibleFilename`` (``0x006b2580``) is safe
+	# only for an item whose native type owns a name handler: otherwise it
+	# reaches ``PyString_FromString(NULL)`` at ``0x006b270c`` and faults, which
+	# Python cannot contain.  For a currently loaded chunk, resolve this item's
+	# own exact name through the reconstructed chunk-list compaction and cache
+	# its descriptor before the stock animation path.  Unloaded chunks retain the
+	# stock queued-order behavior; the installed safe resolver performs the same
+	# check on load.
 	mgr = AreaDestructibles.g_destructiblesManager
 	if mgr.isChunkLoaded(chunkID):
 		desc = destructibles_compat.resolve_destructible_desc(

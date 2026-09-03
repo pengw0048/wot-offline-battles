@@ -12,7 +12,8 @@ PACKAGE_ROOT = (PORT_ROOT / 'src' / 'res' / 'scripts' / 'client' /
 sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import BattleState, CLIENT_BUILD_0922, Player  # noqa: E402
-from effective_params_fixture import effective_params  # noqa: E402
+from effective_params_fixture import (  # noqa: E402
+    bot_default_crew_factors, effective_params)
 
 
 def _load_bot_runtime():
@@ -154,6 +155,12 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.bot_runtime = _load_bot_runtime()
+        cls._attribute_factors = cls.bot_runtime.loadout.attribute_factors
+        cls.bot_runtime.loadout.attribute_factors = bot_default_crew_factors
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.bot_runtime.loadout.attribute_factors = cls._attribute_factors
 
     @staticmethod
     def _roster():

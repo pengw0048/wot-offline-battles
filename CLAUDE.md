@@ -15,9 +15,12 @@ or editing that implementation: `0.8.2/CLAUDE.md` or `0.9.22/CLAUDE.md`.
 - Lead with the observed outcome and supporting evidence. Separate a confirmed
   fact from an inference, and say exactly which boundary still needs a real
   Windows client.
-- Prefer the smallest coherent fix. Do not add speculative compatibility
-  layers, configuration, or infrastructure merely because they may be useful
-  later.
+- Prefer the correct root-cause fix with a complete, data-driven scope. Keep
+  changes no broader than the affected class of behavior, but do not optimize
+  for the smallest diff when the same defect can affect other vehicles, maps,
+  or adapters. Audit and cover the full affected class; do not add speculative
+  compatibility layers, configuration, or infrastructure unrelated to the
+  demonstrated problem.
 - Present meaningful tradeoffs instead of silently choosing one. If empirical
   behavior contradicts documentation or a prior conclusion, reproduce the
   behavior first and update the conclusion.

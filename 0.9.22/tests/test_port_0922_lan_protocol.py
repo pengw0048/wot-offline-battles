@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -13,14 +14,19 @@ sys.path.insert(0, str(ROOT / '0.9.22' / 'server'))
 
 from gui.mods.offline_lan_0922.lan_client import (
     HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
-    LEAN_SNAPSHOT_MANIFEST_CAPABILITY, _strict_projectile_effect,
+    LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
+    _strict_projectile_effect, _valid_player_environment_contract,
     project_bot_state)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from lan_battle_server import (
     BattleState, CLIENT_BUILD_082, CLIENT_BUILD_0922, Player,
-    _bot_combat_log_message, _server_event_log_message, _server_log)
+    PLAYER_FIRE_INTENT_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
+    PLAYER_INPUT_FAULT_ENV, PREBATTLE_SECONDS,
+    RAM_CONTACT_LEDGER_CAPABILITY, TICK_HZ,
+    _bot_combat_log_message, _player_input_fault_class,
+    _server_event_log_message, _server_log)
 from effective_params_fixture import effective_params
 
 
@@ -1232,6 +1238,310 @@ class LanProtocolTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ShippingClientInputContractTests(unittest.TestCase):
+    """Frames built by the shipping client must satisfy the real validator.
+
+    The launcher always installs the matching client/server pair, so any frame
+    ``LANClient.send_input`` queues has to pass the bundled server's
+    pre-admission validation.  Anything that does not is a contract mismatch
+    that would show up in play as a stream of rejected input.
+    """
+
+    def setUp(self):
+        self.client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
+        self.client.ready = True
+        self.client.phase = 'battle'
+        self.client.player_id = 1
+        self.client.host_player_id = 1
+        self.client.bot_authority_id = -1
+        self.client.capabilities = (
+            HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+            RAM_CONTACT_LEDGER_CAPABILITY)
+        self.client.server_capabilities = self.client.capabilities
+        self.sent = []
+        self.client._send = lambda message, **unused: (
+            self.sent.append(message) or True)
+        self.state = BattleState(map_name='04_himmelsdorf')
+        self.state.client_build = CLIENT_BUILD_0922
+        self.state.phase = 'battle'
+        self.state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
+        self.player = Player(
+            1, _Socket(), ('127.0.0.1', 1), team=1, slot=0,
+            client_position=True,
+            capabilities=self.client.capabilities,
+            effective_params=effective_params())
+        self.state.players[1] = self.player
+        self.client.round_id = self.state.round_id
+
+    def _checkpoint(self):
+        return {
+            'reload_time': 0.0, 'reload_duration': 5.0,
+            'clip': 1, 'clip_size': 1, 'dispersion': 0.02,
+        }
+
+    def _send(self, **changes):
+        keyword_args = {
+            'position': (0.0, 0.0, 0.0),
+            'yaw': 0.0,
+            'pitch': 0.0,
+            'roll': 0.0,
+            'up_cosine': 1.0,
+            'speed': 0.0,
+            'shell_index': 0,
+            'next_shell_index': 0,
+            'shell_change_pending': False,
+            'gun_checkpoint': self._checkpoint(),
+            'pose_time_us': self.state._logical_motion_time_us(),
+        }
+        keyword_args.update(changes)
+        forward = keyword_args.pop('forward', 0.0)
+        turn = keyword_args.pop('turn', 0.0)
+        aim_yaw = keyword_args.pop('aim_yaw', 0.0)
+        gun_pitch = keyword_args.pop('gun_pitch', 0.0)
+        return self.client.send_input(
+            forward, turn, aim_yaw, gun_pitch, **keyword_args)
+
+    def test_natural_client_frames_are_admitted_by_the_server(self):
+        # Angle wrap boundaries, full control range, both shell states, siege
+        # and contact rows: everything a real driving session produces.
+        cases = (
+            ('origin', {}),
+            ('wrapped_aim', {'aim_yaw': 3.5, 'yaw': 3.5}),
+            ('wrapped_aim_negative', {'aim_yaw': -3.5, 'yaw': -3.5}),
+            ('turret_plus_hull', {'aim_yaw': math.pi + math.pi}),
+            ('many_turns', {'aim_yaw': 40.0 * math.pi + 0.25}),
+            ('pi_seam', {'aim_yaw': math.pi, 'yaw': -math.pi}),
+            ('full_throttle', {'forward': 1.0, 'turn': -1.0, 'speed': 25.0}),
+            ('reverse', {'forward': -1.0, 'turn': 1.0, 'speed': -12.5}),
+            ('steep_hull', {'pitch': 0.6, 'roll': -0.6, 'up_cosine': 0.5}),
+            ('steep_hull_beyond', {'pitch': 1.4, 'roll': -1.4}),
+            ('gun_up', {'gun_pitch': -0.4}),
+            ('gun_down', {'gun_pitch': 0.25}),
+            ('gun_beyond_envelope', {'gun_pitch': -math.pi / 2.0}),
+            ('shell_change', {
+                'shell_index': 0, 'next_shell_index': 2,
+                'shell_change_pending': True}),
+            ('last_shell', {
+                'shell_index': 9, 'next_shell_index': 9,
+                'shell_change_pending': False}),
+            ('siege_on', {'siege_enabled': True}),
+            ('siege_off', {'siege_enabled': False}),
+            ('fire_seq', {'fire_seq': 12}),
+            ('clip_gun', {'gun_checkpoint': {
+                'reload_time': 2.5, 'reload_duration': 5.0,
+                'clip': 3, 'clip_size': 6, 'dispersion': 0.04}}),
+            ('empty_clip', {'gun_checkpoint': {
+                'reload_time': 5.0, 'reload_duration': 5.0,
+                'clip': 0, 'clip_size': 1, 'dispersion': 0.5}}),
+            ('map_corner', {'position': (-999.0, -80.0, 999.0)}),
+            ('ram_rows', {'ram_contacts': [{'seq': value}
+                                           for value in range(1, 20)]}),
+            ('destructible_rows', {
+                'destructible_contacts': [{'seq': value}
+                                          for value in range(1, 20)]}),
+        )
+        for name, changes in cases:
+            with self.subTest(frame=name):
+                self.assertTrue(self._send(**changes))
+                message = self.sent[-1]
+                self.assertEqual(
+                    self.player.input_processed_seq + 1,
+                    message['input_seq'])
+                # The server's own pre-admission validator, not a copy of it.
+                self.assertEqual(
+                    ('', ''),
+                    self.state._player_input_frame_failure(
+                        self.player, message, False)[0])
+                self.assertTrue(self.state.update_input(1, message))
+                self.assertEqual(
+                    message['input_seq'], self.player.input_seq)
+
+    def test_periodic_angles_are_normalized_not_clipped(self):
+        for raw in (3.5, -3.5, 7.0, -7.0, 40.0 * math.pi + 0.25,
+                    math.pi, -math.pi):
+            with self.subTest(aim_yaw=raw):
+                self.assertTrue(self._send(aim_yaw=raw, yaw=raw))
+                message = self.sent[-1]
+                for name in ('aim_yaw', 'yaw'):
+                    value = message[name]
+                    self.assertLessEqual(abs(value), math.pi + 1e-9)
+                    # Mathematically the same orientation, not an endpoint.
+                    difference = (raw - value) / (2.0 * math.pi)
+                    self.assertAlmostEqual(
+                        difference, round(difference), places=9)
+
+    def test_an_out_of_world_pose_is_dropped_without_using_a_sequence(self):
+        self.assertTrue(self._send())
+        self.assertTrue(self.state.update_input(1, self.sent[-1]))
+        committed = self.client._input_seq
+
+        for position in ((3000.0, 0.0, 0.0), (0.0, 2000.0, 0.0),
+                         (0.0, 0.0, -3000.0)):
+            with self.subTest(position=position):
+                self.assertFalse(self._send(position=position))
+                self.assertEqual(committed, self.client._input_seq)
+
+        # The dropped frames consumed no identifier, so the next frame is
+        # still the server's exact next eligible sequence.
+        self.assertTrue(self._send())
+        self.assertEqual(committed + 1, self.client._input_seq)
+        self.assertTrue(self.state.update_input(1, self.sent[-1]))
+        self.assertEqual(committed + 1, self.player.input_seq)
+
+    def test_an_out_of_range_fire_sequence_is_dropped_locally(self):
+        self.assertTrue(self._send())
+        committed = self.client._input_seq
+
+        self.assertFalse(self._send(fire_seq=MAX_PROJECTILE_ID + 1))
+
+        self.assertEqual(committed, self.client._input_seq)
+
+    def test_an_exhausted_input_sequence_is_not_queued_or_advanced(self):
+        self.client._input_seq_round = self.client.round_id
+        self.client._input_seq = MAX_PROJECTILE_ID
+        sent = len(self.sent)
+
+        self.assertFalse(self._send())
+
+        self.assertEqual(sent, len(self.sent))
+        self.assertEqual(MAX_PROJECTILE_ID, self.client._input_seq)
+
+    def test_the_client_resumes_from_the_server_terminal_frontier(self):
+        self.client.round_id = 7
+        self.client._input_seq_round = 7
+        self.client._input_seq = 4
+        self.client._landing_observation_round = 7
+
+        # Applied 4, terminal 6: two later frames reached a terminal decision
+        # the client has not folded yet.
+        self.assertTrue(self.client._adopt_player_input_frontier([
+            _snapshot_player(input_seq=4, input_processed_seq=6)]))
+        self.assertEqual(6, self.client._input_seq)
+
+        # A frontier that contradicts the applied sequence is not adopted.
+        self.assertFalse(self.client._adopt_player_input_frontier([
+            _snapshot_player(input_seq=8, input_processed_seq=6)]))
+
+    def test_snapshot_validation_covers_the_terminal_frontier_relation(self):
+        self.assertTrue(_valid_player_environment_contract(
+            _snapshot_player(input_seq=4), required=True))
+        self.assertTrue(_valid_player_environment_contract(
+            _snapshot_player(input_seq=4, input_processed_seq=6),
+            required=True))
+        self.assertFalse(_valid_player_environment_contract(
+            _snapshot_player(input_seq=4, input_processed_seq=3),
+            required=True))
+        self.assertFalse(_valid_player_environment_contract(
+            _snapshot_player(input_seq=4, input_processed_seq=True),
+            required=True))
+
+    def test_the_server_publishes_both_input_frontiers(self):
+        self.assertTrue(self._send())
+        self.assertTrue(self.state.update_input(1, self.sent[-1]))
+        self.assertFalse(self.state.update_input(1, dict(
+            self.sent[-1], input_seq=2, health=0)))
+
+        public = self.state._public_player(self.player)
+
+        self.assertEqual(1, public['input_seq'])
+        self.assertEqual(2, public['input_processed_seq'])
+
+
+class InputFaultInjectionTests(unittest.TestCase):
+    """The Windows acceptance hook must use the production validator."""
+
+    def setUp(self):
+        self.state = BattleState(map_name='04_himmelsdorf')
+        self.state.client_build = CLIENT_BUILD_0922
+        self.state.phase = 'battle'
+        self.state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
+        self.player = Player(
+            1, _Socket(), ('127.0.0.1', 1), team=1, slot=0,
+            client_position=True,
+            capabilities=(
+                HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+                RAM_CONTACT_LEDGER_CAPABILITY),
+            effective_params=effective_params())
+        self.state.players[1] = self.player
+
+    def _frame(self):
+        player = self.player
+        return {
+            'type': 'input', 'round_id': self.state.round_id,
+            'input_seq': player.input_processed_seq + 1,
+            'pose_time_us': self.state._logical_motion_time_us(),
+            'forward': 0.0, 'turn': 0.0, 'speed': 0.0,
+            'aim_yaw': 0.0, 'gun_pitch': 0.0,
+            'x': player.x, 'y': player.y, 'z': player.z,
+            'yaw': player.yaw, 'pitch': 0.0, 'roll': 0.0,
+            'fire_seq': 0, 'shell_index': 0, 'next_shell_index': 0,
+            'shell_change_pending': False,
+            'gun_checkpoint': {
+                'reload_time': 0.0, 'reload_duration': 5.0,
+                'clip': 1, 'clip_size': 1, 'dispersion': 0.02,
+            },
+        }
+
+    def test_the_hook_is_inert_unless_a_class_is_armed(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(PLAYER_INPUT_FAULT_ENV, None)
+            self.assertEqual('', _player_input_fault_class())
+            self.assertTrue(self.state.update_input(1, self._frame()))
+            self.assertEqual(1, self.player.input_seq)
+
+    def test_an_unknown_class_is_ignored(self):
+        with mock.patch.dict(
+                os.environ, {PLAYER_INPUT_FAULT_ENV: 'not_a_class'}):
+            self.assertEqual('', _player_input_fault_class())
+            self.assertTrue(self.state.update_input(1, self._frame()))
+
+    def test_one_armed_class_breaks_exactly_one_frame_per_round(self):
+        for fault_class in sorted(PLAYER_INPUT_FAULT_CLASSES):
+            with self.subTest(fault=fault_class):
+                self.setUp()
+                self.assertTrue(self.state.update_input(1, self._frame()))
+                with mock.patch.dict(
+                        os.environ,
+                        {PLAYER_INPUT_FAULT_ENV: fault_class}):
+                    self.assertFalse(
+                        self.state.update_input(1, self._frame()))
+                    # It fails production validation, so the terminal frontier
+                    # advances and nothing was applied.
+                    self.assertEqual(2, self.player.input_processed_seq)
+                    self.assertEqual(1, self.player.input_seq)
+                    self.assertEqual(
+                        'rejected',
+                        self.player.input_decisions[2]['outcome'])
+                    self.assertTrue(
+                        self.player.last_input_reject['consumed'])
+
+                    # Exactly one frame per round: the next one applies even
+                    # while the hook stays armed.
+                    self.assertTrue(
+                        self.state.update_input(1, self._frame()))
+                    self.assertEqual(3, self.player.input_seq)
+
+    def test_shell_pair_fault_is_illegal_at_every_valid_shell_index(self):
+        for shell_index in range(10):
+            with self.subTest(shell_index=shell_index):
+                self.setUp()
+                frame = self._frame()
+                frame.update({
+                    'shell_index': shell_index,
+                    'next_shell_index': shell_index,
+                    'shell_change_pending': False,
+                })
+                with mock.patch.dict(
+                        os.environ,
+                        {PLAYER_INPUT_FAULT_ENV: 'shell_pair'}):
+                    self.assertFalse(self.state.update_input(1, frame))
+                self.assertEqual(1, self.player.input_processed_seq)
+                self.assertEqual(0, self.player.input_seq)
+                self.assertEqual(
+                    'shell_selection',
+                    self.player.last_input_reject['reason'])
 
 
 class OrderedEventVocabularyTests(unittest.TestCase):

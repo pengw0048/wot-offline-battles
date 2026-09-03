@@ -244,6 +244,97 @@ class AccountRpcTests(unittest.TestCase):
         self.assertEqual(diff['inventory'],
                          refresh.call_args[0][0]['inventory'])
 
+    def test_add_skill_success_waits_for_current_vehicle_refresh(self):
+        trace = []
+        snapshot = _full_garage_snapshot()
+        snapshot['vehicles'][1]['tankmen'][202] = b'loader-2'
+
+        class TankmanDescriptor(object):
+            def __init__(self, compact_descr):
+                self.compact_descr = compact_descr
+
+            def addSkill(self, name):
+                self.compact_descr += b'|' + name.encode('ascii')
+
+            def makeCompactDescr(self):
+                return self.compact_descr
+
+        skill_names = ['skill_%d' % index for index in range(61)]
+        skill_names[48] = 'loader_intuition'
+        tankmen = types.SimpleNamespace(
+            SKILL_NAMES=skill_names, TankmanDescr=TankmanDescriptor)
+        context = {
+            'garage': account_requests.garage.GarageState(
+                snapshot, tankmen_module=tankmen),
+        }
+        server = FakeServer(
+            lambda: self.player,
+            lambda delay, fn: self.pending.append((delay, fn)), context)
+
+        def update(payload):
+            diff = pickle.loads(payload)
+            trace.append(('account-update', diff))
+
+        self.player.update = update
+        self.player.onCmdResponse = (
+            lambda *args: trace.append('response'))
+
+        def delayed_refresh(unused_diff, after_refresh=None):
+            trace.append('refresh-start')
+
+            def complete():
+                trace.append('refresh-complete')
+                if callable(after_refresh):
+                    after_refresh()
+
+            self.pending.append((0.0, complete))
+            return True
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.account_rpc.server.'
+                '_refresh_garage_views', side_effect=delayed_refresh):
+            server.doCmdInt3(
+                45, commands.CMD_TMAN_ADD_SKILL, 202, 48, 0)
+
+            self._run()
+            self.assertEqual([], trace)
+            self._run()
+            self.assertEqual('account-update', trace[0][0])
+            self.assertEqual('refresh-start', trace[1])
+            self._run()
+
+        diff = trace[0][1]
+        self.assertEqual(
+            b'loader-2|loader_intuition',
+            diff['inventory'][8]['compDescr'][202])
+        self.assertEqual(
+            b'commander-2', diff['inventory'][8]['compDescr'][201])
+        self.assertNotIn(101, diff['inventory'][8]['compDescr'])
+        self.assertEqual(10, diff['inventory'][8]['vehicle'][202])
+        self.assertEqual([201, 202], diff['inventory'][1]['crew'][10])
+        self.assertNotIn(9, diff['inventory'][1]['crew'])
+        self.assertEqual(
+            ['refresh-start', 'refresh-complete', 'response'], trace[1:])
+
+    def test_fitting_success_is_dropped_if_account_retires_before_publish(self):
+        active = [self.player]
+        context = {
+            'garage': account_requests.garage.GarageState(
+                copy.deepcopy(SELECTED_VEHICLE)),
+        }
+        server = FakeServer(
+            lambda: active[0],
+            lambda delay, fn: self.pending.append((delay, fn)), context)
+
+        server.doCmdIntArr(
+            46, commands.CMD_EQUIP_SHELLS, [9, 10010, 7])
+        self._run()
+        active[0] = None
+        self._run()
+
+        self.assertEqual([], self.player.updates)
+        self.assertEqual([], self.player.responses)
+
     def test_response_is_dropped_after_account_is_retired(self):
         active = [self.player]
         server = FakeServer(

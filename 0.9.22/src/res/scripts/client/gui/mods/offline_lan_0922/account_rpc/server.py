@@ -9,7 +9,7 @@ import zlib
 from gui.mods.offline_lan_0922.account_rpc import commands, data, requests
 
 
-def _refresh_garage_views(diff):
+def _refresh_garage_views(diff, after_refresh=None):
     """Complete the stock refresh chain for a locally applied inventory diff.
 
     ``gui/shared/personality.onClientUpdate`` runs
@@ -23,13 +23,25 @@ def _refresh_garage_views(diff):
 
     This is a fallback: when the stock listener already completes the chain,
     both calls are idempotent.  Any failure here is presentation only.
+    ``after_refresh`` is called exactly once after the chain finishes or can
+    no longer be started.
     """
+    completed = [False]
+
+    def complete():
+        if completed[0]:
+            return
+        completed[0] = True
+        if callable(after_refresh):
+            after_refresh()
+
     try:
         import adisp
         from gui.ClientUpdateManager import g_clientUpdateManager
         from gui.shared.items_cache import CACHE_SYNC_REASON
         from gui.shared.personality import ServicesLocator
     except ImportError:
+        complete()
         return False
 
     @adisp.process
@@ -41,12 +53,15 @@ def _refresh_garage_views(diff):
         except Exception as error:
             print('[Offline LAN 0.9.22] the garage views did not refresh: '
                   '%s' % error)
+        finally:
+            complete()
 
     try:
         refresh()
     except Exception as error:
         print('[Offline LAN 0.9.22] the garage refresh could not start: %s'
               % error)
+        complete()
         return False
     return True
 
@@ -79,6 +94,8 @@ class FakeServer(object):
             callback = BigWorld.callback
         self._callback = callback
         self._context.setdefault('push_update', self._push_update)
+        self._context.setdefault(
+            'push_update_and_wait', self._push_update)
 
     def _push_update(self, diff, after_publish=None):
         """Publish one account diff through the exact #1513 entity method.
@@ -115,14 +132,22 @@ class FakeServer(object):
             if self._player() is not player:
                 return
             player.update(payload)
+
+            def finish():
+                if (self._player() is player and
+                        callable(after_publish)):
+                    after_publish(player)
+
             # The fallback exists for fitting changes whose inventory payload
             # must be re-read by the current-vehicle cache.  Reapplying a
             # stats-only update needlessly runs that expensive inventory path
-            # a second time.
+            # a second time.  An accepted fitting command chains its success
+            # response through ``after_publish``, so finish only after the
+            # CurrentVehicle listener can read the new descriptor.
             if 'inventory' in diff:
-                _refresh_garage_views(diff)
-            if callable(after_publish):
-                after_publish(player)
+                _refresh_garage_views(diff, after_refresh=finish)
+            else:
+                finish()
 
         self._callback(0.0, publish)
         return True
@@ -169,9 +194,13 @@ class FakeServer(object):
     def _respond(self, request_id, command, args):
         result = requests.dispatch(command, self._context, args)
 
-        def before_response():
+        def before_response(on_complete):
             if callable(result.before_response):
+                if result.wait_for_before_response:
+                    result.before_response(on_complete)
+                    return
                 result.before_response()
+            on_complete()
 
         if result.result_id == commands.RES_STREAM:
             desc, payload = pack_stream(result.stream)
@@ -180,15 +209,21 @@ class FakeServer(object):
                 player = self._player()
                 if player is None:
                     return
-                before_response()
-                player.onCmdResponse(request_id, result.result_id, result.error)
 
-                def stream():
-                    if self._player() is player:
-                        player.onStreamComplete(
-                            request_id, desc, payload)
+                def respond():
+                    if self._player() is not player:
+                        return
+                    player.onCmdResponse(
+                        request_id, result.result_id, result.error)
 
-                self._callback(0.0, stream)
+                    def stream():
+                        if self._player() is player:
+                            player.onStreamComplete(
+                                request_id, desc, payload)
+
+                    self._callback(0.0, stream)
+
+                before_response(respond)
 
             self._callback(0.0, respond_then_stream)
         elif result.ext is not None:
@@ -198,9 +233,13 @@ class FakeServer(object):
                 player = self._player()
                 if player is None:
                     return
-                before_response()
-                player.onCmdResponseExt(
-                    request_id, result.result_id, result.error, ext)
+
+                def respond():
+                    if self._player() is player:
+                        player.onCmdResponseExt(
+                            request_id, result.result_id, result.error, ext)
+
+                before_response(respond)
 
             self._callback(0.0, respond_ext)
         else:
@@ -208,9 +247,13 @@ class FakeServer(object):
                 player = self._player()
                 if player is None:
                     return
-                before_response()
-                player.onCmdResponse(
-                    request_id, result.result_id, result.error)
+
+                def complete():
+                    if self._player() is player:
+                        player.onCmdResponse(
+                            request_id, result.result_id, result.error)
+
+                before_response(complete)
 
             self._callback(0.0, respond)
         return request_id
