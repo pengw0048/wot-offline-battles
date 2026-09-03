@@ -1136,6 +1136,45 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertTrue(committed['accepted_now'])
         self.assertEqual([0], [call[2] for call in destroy_calls])
 
+    def test_local_tree_commit_keeps_names_for_next_tree_in_same_chunk(self):
+        positions = (_Vector(0.0, 0.0, 4.0),
+                     _Vector(0.0, 0.0, 12.0))
+        (unused_manager, area, bigworld, math_module, descriptor,
+         authority, destroyed, unused_destroy_calls) = (
+            self._tree_motion_fixture(positions))
+        full_names = ('speedtree/test/motion-0.spt',
+                      'speedtree/test/motion-1.spt')
+
+        # #1513 omits the destroyed first item from later chunk-name reads,
+        # while the surviving tree keeps native item index 1.
+        bigworld.wg_getChunkDestrFilenames.side_effect = (
+            lambda unused_space, unused_chunk:
+            (full_names[1],) if destroyed else full_names)
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            prewarmed = destructibles_sensor.prewarm_tree_registry(
+                1, _Vector(), 0.0, descriptor, 1.0)
+            first = destructibles_sensor.commit_local_tree_prediction(
+                1, ((22, 0, None),), _Vector(), 0.0,
+                _Vector(0.0, 0.0, 6.0), 0.0, 6.0,
+                descriptor, 1.0, publish=False)
+            destructibles_compat.reset_safe_descriptor_cache(1)
+            status, second_desc = (
+                destructibles_compat.inspect_destructible_desc(
+                    area.g_cache, 1, 22, 1))
+
+        self.assertEqual('ready', prewarmed['status'])
+        self.assertEqual('crushed', first['status'])
+        self.assertEqual('resolved', status)
+        self.assertEqual(area.DESTR_TYPE_TREE, second_desc['type'])
+        self.assertEqual(1, bigworld.wg_getChunkDestrFilenames.call_count)
+
     def test_multi_tree_local_commit_preflights_every_registry_position(self):
         (unused_manager, area, bigworld, math_module, descriptor,
          authority, unused_destroyed, destroy_calls) = (
@@ -9627,7 +9666,7 @@ class NativeItemNameContractTests(unittest.TestCase):
         # A reload of identical native content must not re-derive identities.
         self.assertEqual(after_first, len(queries))
 
-    def test_changed_name_list_re_derives_the_mapping(self):
+    def test_chunk_reload_with_changed_name_list_re_derives_the_mapping(self):
         first_tree = 'speedtree/02_malinovka/willow.spt'
         second_tree = 'speedtree/02_malinovka/aspen.spt'
         self.descriptors[first_tree] = {'type': self.TREE, 'health': 10}
@@ -9638,6 +9677,7 @@ class NativeItemNameContractTests(unittest.TestCase):
 
         first = destructibles_sensor._chunk_item_names_1513(
             bigworld, area, 1, 22, 1, (first_tree,))
+        destructibles_sensor._invalidate_chunk_native_names_1513(22)
         second = destructibles_sensor._chunk_item_names_1513(
             bigworld, area, 1, 22, 1, (second_tree,))
 
@@ -9773,6 +9813,31 @@ class NativeItemNameContractTests(unittest.TestCase):
         self.assertEqual((('tree',), 'ready'), first)
         self.assertEqual(first, second)
         self.assertEqual(first, third)
+        self.assertEqual(2, query.call_count)
+
+    def test_native_name_snapshot_survives_mutation_until_chunk_drop(self):
+        tree = 'speedtree/02_malinovka/birchfall.spt'
+        query = mock.Mock(side_effect=((tree, tree), (tree,)))
+        bigworld = types.SimpleNamespace(
+            wg_getChunkDestrFilenames=query)
+        area = types.ModuleType('AreaDestructibles')
+        area.DESTRUCTIBLE_HIDING_DELAY = 0.2
+
+        first = destructibles_sensor._chunk_native_name_list_1513(
+            bigworld, 1, 22, 2)
+        with mock.patch.dict(sys.modules, {'AreaDestructibles': area}):
+            self.assertTrue(destructibles_sensor.note_destroyed(
+                'fragile', 22, 0, None, 1.0))
+        after_mutation = destructibles_sensor._chunk_native_name_list_1513(
+            bigworld, 1, 22, 2)
+        destructibles_sensor._drop_streamed_chunk_registry_1513(
+            {'chunks': {22: {}}}, 22)
+        after_drop = destructibles_sensor._chunk_native_name_list_1513(
+            bigworld, 1, 22, 2)
+
+        self.assertEqual(((tree, tree), 'ready'), first)
+        self.assertEqual(first, after_mutation)
+        self.assertEqual(((tree,), 'ready'), after_drop)
         self.assertEqual(2, query.call_count)
 
 if __name__ == '__main__':

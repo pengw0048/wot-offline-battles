@@ -534,7 +534,7 @@ def _release_item_name_query_focus_1513_for_chunk(chunk_id):
 
 
 def _invalidate_chunk_native_names_1513(chunk_id):
-	"""Forget cached native-name evidence after unload or native mutation."""
+	"""Forget cached native-name evidence after a real chunk unload."""
 	chunk_id = int(chunk_id)
 	for cache_name in ('g_offh_destr_item_names',
 			'g_offh_destr_native_name_lists'):
@@ -608,9 +608,10 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 	"""
 	cache = globals().setdefault('g_offh_destr_item_names', {})
 	key = (int(space_id), int(chunk_id))
-	# The exact name tuple is part of the key: a mid-battle destruction can
-	# legally remove an item from the compacted list, and the mapping must be
-	# re-derived rather than reused from a superseded chunk state.
+	# The exact name tuple is part of the key for a newly observed load.  During
+	# one load lifetime the first complete item-to-name mapping must stay stable:
+	# #1513 compacts this list after destruction while native item indices do not
+	# change, so rebuilding from the post-mutation list loses the remaining names.
 	fingerprint = (int(native_count), tuple(names))
 	entry = cache.get(key)
 	if entry is not None and entry['fingerprint'] != fingerprint:
@@ -743,8 +744,10 @@ def _chunk_native_name_list_1513(bigworld, space_id, chunk_id, native_count):
 	"""Read and validate one chunk's possibly compacted native name list.
 
 	The native helper itself walks the whole chunk, so retain its validated
-	snapshot for all scanners and streamed-shot callers until the chunk unloads
-	or a known native mutation invalidates it.  Returns
+	pre-mutation snapshot for all scanners and streamed-shot callers until the
+	chunk unloads.  Native destruction compacts later helper results without
+	changing the surviving item indices, so those results cannot replace the
+	load-lifetime snapshot.  Returns
 	``(names, status)`` with ``'ready'``, ``'pending'`` at a legal streaming
 	boundary, or an isolating reason with ``None``.  A malformed list is a
 	chunk-level ABI violation, because the engine's own name loop cannot append
@@ -2504,7 +2507,6 @@ def note_destroyed(kind, chunkID, itemIndex, matKind=None, now=None):
 		return False
 	if _destructible_isolated_1513(chunkID, itemIndex):
 		return False
-	_invalidate_chunk_native_names_1513(chunkID)
 	if now is None:
 		import BigWorld
 		now = BigWorld.time()
@@ -3933,7 +3935,6 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 		raise RuntimeError(
 			'native destructible destroy was not accepted: chunk=%s item=%s' %
 			(chunkID, itemIndex))
-	_invalidate_chunk_native_names_1513(chunkID)
 	_event_kind = (
 		'tree' if typ == AreaDestructibles.DESTR_TYPE_TREE else
 		'column' if typ == AreaDestructibles.DESTR_TYPE_FALLING_ATOM else
@@ -4449,7 +4450,6 @@ def _commit_tree_contacts_1513(
 			return _tree_motion_detail_1513('pending')
 		accepted_now = True
 		state['native_committed'].add(identity[:2])
-		_invalidate_chunk_native_names_1513(identity[0])
 	if publish:
 		for identity in sorted(requested):
 			if not _publish_tree_once_1513(
@@ -4518,8 +4518,6 @@ def commit_local_tree_prediction(
 			return _tree_motion_detail_1513('pending')
 		state['native_committed'].add(identity[:2])
 		accepted_now = True
-	for chunk_id in set(identity[0] for identity in object_positions):
-		_invalidate_chunk_native_names_1513(chunk_id)
 	return _tree_motion_detail_1513(
 		'crushed', requested, accepted_now=accepted_now,
 		requires_commit=False)
@@ -5157,7 +5155,6 @@ def _fell_trees_near(
 					raise RuntimeError(
 						'native proximity destroy was not accepted: '
 						'chunk=%s item=%s' % (cid, _ti))
-				_invalidate_chunk_native_names_1513(cid)
 				_st['felled'].add(_key)
 				if _ttyp == AreaDestructibles.DESTR_TYPE_TREE:
 					if not _publish_tree_once_1513(
