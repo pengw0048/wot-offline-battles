@@ -821,13 +821,13 @@ class BattleProjectileTests(unittest.TestCase):
         battle._apply_combat_event = lambda event, update_state=False: (
             order.append(('combat', event['kind'])))
 
-        self.assertIsNone(battle._apply_ordered_event({
+        self.assertTrue(battle._apply_ordered_event({
             'kind': 'projectile_impact',
             'projectile_id': 'player:7:1',
             'resolved_time_ms': 500,
             'impact': [5.0, 0.875, 0.0],
         }))
-        self.assertIsNone(battle._apply_ordered_event({
+        self.assertTrue(battle._apply_ordered_event({
             'kind': 'hit', 'source': 'shot'}))
 
         self.assertEqual('stop', order[0][0])
