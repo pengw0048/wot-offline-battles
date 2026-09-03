@@ -11103,8 +11103,21 @@ class BattleRuntime(object):
         self._prune_projectile_position_history()
         self._projectile_target_positions = current
         if now >= self._next_projectile_progress_time:
-            self._next_projectile_progress_time = (
-                now + PROJECTILE_PROGRESS_SECONDS)
+            # Advance the deadline along the fixed cadence grid instead of
+            # restarting a whole interval from this frame.  A late worker
+            # frame otherwise pushes every following publication out by its
+            # own overshoot, so the confirmed cursor that gates tracer
+            # advancement and terminal submission degrades with worker frame
+            # time rather than staying at the intended rate.  Missed
+            # intervals are skipped, never replayed as a burst.
+            if self._next_projectile_progress_time <= 0.0:
+                self._next_projectile_progress_time = float(now)
+            overshoot = max(
+                0.0, float(now) - self._next_projectile_progress_time)
+            intervals = int(math.floor(
+                (overshoot + 1e-9) / PROJECTILE_PROGRESS_SECONDS)) + 1
+            self._next_projectile_progress_time += (
+                intervals * PROJECTILE_PROGRESS_SECONDS)
             self._publish_projectile_progress()
         return advanced
 
