@@ -152,6 +152,42 @@ def validate_tree_identity_1513(space_id, chunk_id, item_index):
 	return True
 
 
+def trusted_tree_identity_status_1513(space_id, chunk_id, item_index):
+	"""Classify one exact wire without re-deciding the client's contact.
+
+	The trusted visible client has already started the native fall before it
+	reports this wire.  The worker therefore checks only that the exact #1513
+	slot resolves to a fallable tree; it must not run a second pose/contact test.
+	"""
+	chunk_id = int(chunk_id)
+	item_index = int(item_index)
+	state = _tree_runtime_state_1513(space_id)
+	key = (chunk_id, item_index)
+	if (state is not None and
+			(key in state['canonical_published'] or
+			 key in state['publish_pending'])):
+		# A first report already froze this wire as a tree.  Its retransmission
+		# must not depend on a name or matrix which may have changed after the
+		# native fall started.
+		return 'tree'
+	if _destructible_isolated_1513(chunk_id, item_index):
+		return 'hard'
+	status, filename = resolve_native_item_name_1513(
+		space_id, chunk_id, item_index)
+	if status == 'pending':
+		return 'pending'
+	if status != 'exact' or not _normalized_filename(filename):
+		return 'other'
+	try:
+		import AreaDestructibles
+		desc = AreaDestructibles.g_cache.getDescByFilename(filename)
+	except Exception:
+		return 'pending'
+	if desc is None or desc.get('type') != AreaDestructibles.DESTR_TYPE_TREE:
+		return 'other'
+	return 'tree'
+
+
 def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 	"""Remove synthetic collision state without touching native authority."""
 	chunk_id = int(chunk_id)
@@ -2455,7 +2491,14 @@ def note_destroyed(kind, chunkID, itemIndex, matKind=None, now=None):
 		state = _tree_runtime_state_1513(space_id)
 		if state is None:
 			return False
-		state['native_committed'].add((int(chunkID), int(itemIndex)))
+		key = (int(chunkID), int(itemIndex))
+		state['native_committed'].add(key)
+		# This function is called for a server-canonical tree event, never for
+		# the visible client's local prediction.  Remembering that distinction
+		# lets a restarted worker accept later duplicate contacts without trying
+		# to replace the already canonical fall direction.
+		state['canonical_published'].add(key)
+		state['publish_pending'].pop(key, None)
 		return True
 	if kind not in ('fragile', 'module', 'column'):
 		return False
@@ -4022,11 +4065,13 @@ def _tree_motion_required_chunks_1513(sweep_boxes):
 	return 'ready', tuple(sorted(chunk_ids))
 
 
-def prewarm_tree_registry(spaceID, pos, yaw, td=None, now=None):
+def prewarm_tree_registry(spaceID, pos, yaw, td=None, now=None,
+		priority_chunks=None):
 	"""Build nearby exact native registries without destroying any object."""
 	try:
 		result = _fell_trees_near(
-			spaceID, pos, yaw, 0.0, td, registration_only=True)
+			spaceID, pos, yaw, 0.0, td, registration_only=True,
+			priority_chunks=priority_chunks)
 	except Exception:
 		result = None
 	if isinstance(result, dict):
@@ -4052,16 +4097,19 @@ def _tree_motion_resolution_1513(
 		start_pos, start_yaw, end_pos, end_yaw, bbox)
 	if not sweep_boxes:
 		return 'hard', {}, set(), {}, set()
-	# One registration pass covers the current chunk and its eight neighbours.
-	# Do not repeat the complete native alignment for every sweep slice: the
-	# shared 16-query frame budget must advance one focused chunk predictably.
-	prewarm_tree_registry(spaceID, end_pos, end_yaw, td, now)
 	required_status, required_chunks = (
 		_tree_motion_required_chunks_1513(sweep_boxes))
 	if required_status == 'hard':
 		return required_status, {}, set(), {}, set()
 	if required_status != 'ready':
 		required_chunks = ()
+	# One registration pass covers the current chunk and its eight neighbours.
+	# The chunks touched by the *current* hull sweep pre-empt background
+	# neighbourhood warming.  Otherwise a large adjacent chunk can own the
+	# shared name-query focus for seconds while the contact chunk stays pending.
+	prewarm_tree_registry(
+		spaceID, end_pos, end_yaw, td, now,
+		priority_chunks=required_chunks)
 	scan_chunks = set(required_chunks)
 	for chunk_id in requested_chunks or ():
 		if (isinstance(chunk_id, bool) or
@@ -4207,6 +4255,128 @@ def _publish_tree_once_1513(
 	return True
 
 
+def _tree_fall_yaw_1513(start_pos, end_pos, end_yaw, speed):
+	dx = float(end_pos.x) - float(start_pos.x)
+	dz = float(end_pos.z) - float(start_pos.z)
+	if dx * dx + dz * dz > 1.0e-16:
+		import math
+		return math.atan2(dx, dz)
+	fall_yaw = float(end_yaw)
+	if float(speed) < 0.0:
+		import math
+		fall_yaw += math.pi
+	return fall_yaw
+
+
+def _trusted_tree_event_position_1513(
+		spaceID, identity, fallback_position):
+	"""Read the exact tree origin when available, else use its contact pose."""
+	try:
+		import BigWorld
+		import Math
+		chunk_matrix = Math.Matrix(BigWorld.wg_getChunkMatrix(
+			spaceID, identity[0]))
+		item_matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+			spaceID, identity[0], identity[1]))
+		chunk_translation = chunk_matrix.translation
+		item_translation = item_matrix.translation
+		return Math.Vector3(
+			float(chunk_translation.x) + float(item_translation.x),
+			float(chunk_translation.y) + float(item_translation.y),
+			float(chunk_translation.z) + float(item_translation.z))
+	except Exception:
+		# The visible client already proved and presented the contact.  A worker
+		# whose copy of this chunk is still streaming must not withhold the
+		# canonical event; the contact endpoint is in the same local vicinity and
+		# is sufficient for the replica controller bootstrap.
+		return fallback_position
+
+
+def _registered_tree_position_1513(spaceID, identity):
+	"""Return the exact registry position proved by the local proposal."""
+	state = _tree_runtime_state_1513(spaceID)
+	registry = (state.get('chunks', {}).get(identity[0])
+		if state is not None else None)
+	if not isinstance(registry, dict):
+		return None
+	try:
+		import AreaDestructibles
+		import Math
+		tree_type = AreaDestructibles.DESTR_TYPE_TREE
+	except (AttributeError, ImportError):
+		return None
+	seen = set()
+	for bin_name in ('bins', 'extended_bins'):
+		for values in registry.get(bin_name, {}).values():
+			for item in values:
+				if id(item) in seen:
+					continue
+				seen.add(id(item))
+				if (int(item[0]) == int(identity[1]) and
+						item[4] == tree_type and
+						_normalized_filename(item[5])):
+					return Math.Vector3(
+						float(item[1]), float(item[2]), float(item[3]))
+	return None
+
+
+def commit_trusted_tree_contacts_1513(
+		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed,
+		now, publish=True):
+	"""Freeze and publish a visible client's already-presented tree contact.
+
+	The worker checks only the exact identity and never repeats collision or
+	native presentation.  The first admitted payload owns direction, position
+	and speed; later reports are idempotent confirmations or retries of that
+	same frozen LAN publication.
+	"""
+	requested = _parse_tree_contact_token_1513(token)
+	if requested is None:
+		return _tree_motion_detail_1513('hard')
+	state = _tree_runtime_state_1513(spaceID)
+	if state is None:
+		return _tree_motion_detail_1513('pending')
+	fall_yaw = _tree_fall_yaw_1513(
+		start_pos, end_pos, end_yaw, speed)
+	pending = False
+	hard = False
+	accepted_now = False
+	for identity in sorted(requested):
+		key = identity[:2]
+		if key in state['canonical_published']:
+			continue
+		if key not in state['publish_pending']:
+			identity_status = trusted_tree_identity_status_1513(
+				spaceID, identity[0], identity[1])
+			if identity_status == 'pending':
+				pending = True
+				continue
+			if identity_status != 'tree':
+				hard = True
+				continue
+			object_pos = _trusted_tree_event_position_1513(
+				spaceID, identity, end_pos)
+		else:
+			# ``_publish_tree_once_1513`` reuses its frozen payload and ignores
+			# these values.  Avoid any second name/matrix/native decision here.
+			object_pos = end_pos
+		if publish:
+			was_published = key in state['canonical_published']
+			if not _publish_tree_once_1513(
+					state, spaceID, identity, object_pos,
+					fall_yaw, float(speed)):
+				pending = True
+				continue
+			accepted_now = accepted_now or not was_published
+	if hard:
+		return _tree_motion_detail_1513('hard')
+	if pending:
+		return _tree_motion_detail_1513('pending')
+	return _tree_motion_detail_1513(
+		'crushed', requested, accepted_now=accepted_now,
+		requires_commit=False)
+
+
 def _commit_tree_contacts_1513(
 		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
 		now, dt, publish):
@@ -4294,10 +4464,65 @@ def _commit_tree_contacts_1513(
 def commit_local_tree_prediction(
 		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
 		now, dt=0.04, publish=False):
-	"""Apply the trusted visible client's exact tree token locally."""
-	return _commit_tree_contacts_1513(
-		spaceID, token, start_pos, start_yaw, end_pos, end_yaw, speed, td,
-		now, dt, bool(publish))
+	"""Apply one already-proved visible-client tree contact immediately.
+
+	The proposal immediately preceding this call owns the hull test.  Repeating
+	that geometry here creates a second decision point, so this transaction only
+	parses its exact tree wires, reads their current positions and asks the native
+	presentation once.  A no-receipt result stays uncommitted until a new real
+	contact calls this function again.
+	"""
+	requested = _parse_tree_contact_token_1513(token)
+	if requested is None:
+		return _tree_motion_detail_1513('hard')
+	state = _tree_runtime_state_1513(spaceID)
+	if state is None:
+		prewarm_tree_registry(
+			spaceID, end_pos, end_yaw, td, now,
+			priority_chunks=tuple(identity[0] for identity in requested))
+		state = _tree_runtime_state_1513(spaceID)
+		if state is None:
+			return _tree_motion_detail_1513('pending')
+	authority = _get_destr_authority()
+	fall_yaw = _tree_fall_yaw_1513(
+		start_pos, end_pos, end_yaw, speed)
+	object_positions = {}
+	for identity in sorted(requested):
+		if _destructible_isolated_1513(identity[0], identity[1]):
+			return _tree_motion_detail_1513('hard')
+		if authority.is_destroyed(*identity):
+			state['native_committed'].add(identity[:2])
+			continue
+		object_pos = _registered_tree_position_1513(spaceID, identity)
+		if object_pos is None:
+			prewarm_tree_registry(
+				spaceID, end_pos, end_yaw, td, now,
+				priority_chunks=(identity[0],))
+			object_pos = _registered_tree_position_1513(spaceID, identity)
+		if object_pos is None:
+			state = _tree_runtime_state_1513(spaceID)
+			status = ('hard' if state is not None and
+				identity[0] in state.get('chunks', {}) else 'pending')
+			return _tree_motion_detail_1513(status)
+		object_positions[identity] = object_pos
+	# Resolve the complete proposal before making its first irreversible native
+	# call.  One still-streaming sibling can therefore never strand an already
+	# fallen tree outside the contact sent to the worker.
+	accepted_now = False
+	destroy_tree = getattr(
+		authority, 'destroy_validated_tree', authority.destroy_tree)
+	for identity in sorted(object_positions):
+		if not destroy_tree(
+				spaceID, identity[0], identity[1], fall_yaw,
+				float(speed), object_positions[identity]):
+			return _tree_motion_detail_1513('pending')
+		state['native_committed'].add(identity[:2])
+		accepted_now = True
+	for chunk_id in set(identity[0] for identity in object_positions):
+		_invalidate_chunk_native_names_1513(chunk_id)
+	return _tree_motion_detail_1513(
+		'crushed', requested, accepted_now=accepted_now,
+		requires_commit=False)
 
 
 def commit_tree_contacts(
@@ -4310,7 +4535,8 @@ def commit_tree_contacts(
 
 
 def _fell_trees_near(
-		spaceID, pos, yaw, vel, td=None, registration_only=False):
+		spaceID, pos, yaw, vel, td=None, registration_only=False,
+		priority_chunks=None):
 	# Offline tree/pole felling. Online the SERVER detected tank-vs-tree
 	# contact; the client-side collision probes never return tree/column
 	# materials, so trees could never fall offline. Instead: enumerate
@@ -4412,12 +4638,24 @@ def _fell_trees_near(
 		_found_nearby = False
 		_cid_order = sorted(cids)
 		if registration_only:
+			_priority_chunks = tuple(sorted(set(int(value)
+				for value in (priority_chunks or ()) if value is not None)))
+			if _priority_chunks:
+				cids.update(_priority_chunks)
+				_cid_order = sorted(cids)
+				_focus = globals().get(
+					'g_offh_destr_item_name_budget', {}).get('focus')
+				_valid_focus = set((int(spaceID), value)
+					for value in _priority_chunks)
+				if _focus is not None and _focus not in _valid_focus:
+					_release_item_name_query_focus_1513_for_chunk(_focus[1])
 			# Finish the occupied chunk first, then the most forward mapped
 			# neighbours.  This makes the single shared 16-query budget useful
 			# for the chunk the vehicle will enter instead of depending on opaque
 			# numeric chunk-ID ordering.
 			_cid_order = sorted(cids, key=lambda cid: (
-				0 if cid == _current_cid else 1,
+				0 if cid in _priority_chunks else
+				1 if cid == _current_cid else 2,
 				-_prewarm_priority.get(cid, (0.0, 0.0))[0],
 				-_prewarm_priority.get(cid, (0.0, 0.0))[1], cid))
 		for cid in _cid_order:

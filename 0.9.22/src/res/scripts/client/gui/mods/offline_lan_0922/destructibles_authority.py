@@ -28,8 +28,6 @@ _applies_reported = [0]
 _CHUNK_REPORT_LIMIT = 24
 _chunks_reported = [0]
 
-_TREE_PRESENTATION_REDRIVE_LIMIT = 3
-
 _PROP_BY_KIND = {
 	'tree': 'fallenTrees',
 	'column': 'fallenColumns',
@@ -121,6 +119,23 @@ def destroyed_keys(chunkID):
 	"""Return this chunk's accepted (itemIndex, matKind) keys. Read only."""
 	c = _state.get('chunks', {}).get(chunkID)
 	return c['keys'] if c is not None else ()
+
+
+def accept_tree_without_presentation(spaceID, chunkID, itemIndex):
+	"""Record one canonical tree after its single native attempt was a no-op.
+
+	The shared event is already authoritative.  Keeping this logical receipt
+	out of ``fallenTrees`` prevents a later controller creation from replaying
+	the native animation after the vehicle has left the contact.
+	"""
+	spaceID = int(spaceID); chunkID = int(chunkID); itemIndex = int(itemIndex)
+	_reset_if_new_space(spaceID)
+	c = _chunk(chunkID)
+	key = (itemIndex, None)
+	if key in c['keys']:
+		return False
+	c['keys'].add(key)
+	return True
 
 
 def _ensure_chunk(spaceID, chunkID, pos):
@@ -264,9 +279,9 @@ def _apply(spaceID, chunkID, pos, kind, destrData, dedupKey,
 	AreaDestructibles.g_destructiblesManager.orderDestructibleDestroy(
 		chunkID, dmgTypes[kind], destrData, True,
 		bool(syncWithProjectile))
-	# The native operation is irreversible.  Commit the replay/dedup ledger only
-	# after it has accepted the destroy; otherwise a transient ABI/engine failure
-	# would make every later canonical replay look like a successful duplicate.
+	# Reaching this point is the native acceptance boundary.  The method either
+	# applied the order or retained it for a streamed chunk; it reports failure by
+	# raising.  Do not invent a second asynchronous receipt requirement here.
 	c[prop].append(destrData)
 	c['keys'].add(dedupKey)
 	if ctrl is not None:
@@ -318,7 +333,7 @@ def _tree_damage_type():
 	return AreaDestructibles._DAMAGE_TYPE_TREE
 
 
-def _tree_body_present(spaceID, chunkID, itemIndex):
+def _tree_body_present(spaceID, chunkID, itemIndex, start_if_stalled=False):
 	import AreaDestructibles
 	animator = AreaDestructibles.g_destructiblesAnimator
 	bodies = getattr(animator, '_DestructiblesAnimator__bodies')
@@ -327,27 +342,28 @@ def _tree_body_present(spaceID, chunkID, itemIndex):
 				body.get('chunkID') != chunkID or
 				body.get('destrIndex') != itemIndex):
 			continue
-		# ``__startUpdate`` is the stock idempotent entry point.  Its only
-		# unrecoverable state is a non-empty body list which still claims to be
-		# updating after its callback id disappeared.  Repair just that stable
-		# lost-callback state, then let the normal method decide whether to start.
-		is_updating = getattr(
-			animator, '_DestructiblesAnimator__isUpdating')
-		callback_id = getattr(
-			animator, '_DestructiblesAnimator__updateCallbackID')
-		if bodies and is_updating and callback_id is None:
-			setattr(animator, '_DestructiblesAnimator__isUpdating', False)
-		getattr(animator, '_DestructiblesAnimator__startUpdate')()
+		if start_if_stalled:
+			# This belongs to the original native application, never to a later
+			# network echo or frame retry.  Repair the stable lost-callback state
+			# immediately while the contact is being handled.
+			is_updating = getattr(
+				animator, '_DestructiblesAnimator__isUpdating')
+			callback_id = getattr(
+				animator, '_DestructiblesAnimator__updateCallbackID')
+			if bodies and is_updating and callback_id is None:
+				setattr(animator, '_DestructiblesAnimator__isUpdating', False)
+				getattr(animator, '_DestructiblesAnimator__startUpdate')()
 		return True
 	return False
 
 
-def _tree_presentation_state(spaceID, chunkID, itemIndex, entry,
-		redrive):
-	"""Observe one accepted tree order and optionally redrive it once."""
+def _tree_presentation_state(
+		spaceID, chunkID, itemIndex, entry, start_if_stalled=False):
+	"""Observe the synchronous native receipt for one accepted tree order."""
 	import AreaDestructibles
 	manager = AreaDestructibles.g_destructiblesManager
-	if _tree_body_present(spaceID, chunkID, itemIndex):
+	if _tree_body_present(
+			spaceID, chunkID, itemIndex, start_if_stalled):
 		entry['status'] = 'presented'
 		return 'presented'
 	loaded = manager.isChunkLoaded(chunkID)
@@ -364,26 +380,22 @@ def _tree_presentation_state(spaceID, chunkID, itemIndex, entry,
 	if _tree_wait_ordered(manager, chunkID, entry['data']):
 		entry['status'] = 'queued'
 		return 'queued'
+	# Once a synchronous body/matrix receipt or exact unloaded wait order has
+	# admitted the tree, losing that transient observation later does not undo
+	# the accepted native operation.  Most importantly, observation never sends
+	# another destroy order after the vehicle has left the contact.
+	if entry.get('status') in ('presented', 'queued'):
+		return entry['status']
 	entry['status'] = 'pending'
-	if (not loaded or not redrive or
-			entry.get('redrives', 0) >= _TREE_PRESENTATION_REDRIVE_LIMIT):
-		return 'pending'
-	entry['redrives'] = entry.get('redrives', 0) + 1
-	manager.orderDestructibleDestroy(
-		chunkID, _tree_damage_type(), entry['data'], True, False)
-	# The loaded native path is synchronous in #1513.  Re-read all three
-	# receipts after the retry so callers can observe success immediately.
-	return _tree_presentation_state(
-		spaceID, chunkID, itemIndex, entry, False)
+	return 'pending'
 
 
 def ensure_tree_presentation(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 	"""Return ``presented``, ``queued`` or ``pending`` for an accepted tree.
 
-	A loaded ``pending`` tree is re-driven exactly once by each invocation.
 	The fall arguments are retained in this public signature so callers can use
-	the same identity tuple as ``destroy_tree``; retries deliberately use the
-	original accepted encoded data instead of recomputing it.
+	the same identity tuple as ``destroy_tree``.  This is observation only: a
+	canonical echo must never become a delayed local destroy-order retry.
 	"""
 	spaceID = int(spaceID); chunkID = int(chunkID); itemIndex = int(itemIndex)
 	_reset_if_new_space(spaceID)
@@ -392,29 +404,12 @@ def ensure_tree_presentation(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 	if entry is None or (itemIndex, None) not in c['keys']:
 		return 'pending'
 	return _tree_presentation_state(
-		spaceID, chunkID, itemIndex, entry, True)
+		spaceID, chunkID, itemIndex, entry)
 
 
-def retry_tree_presentations():
-	"""Retry accepted tree orders lacking a native presentation receipt."""
-	_ensure_shape()
-	spaceID = _state['spaceID']
-	if spaceID is None:
-		return 0
-	newly_presented = 0
-	for chunkID, c in list(_state['chunks'].items()):
-		presentations = c.get('treePresentations', {})
-		for itemIndex, entry in list(presentations.items()):
-			if (entry.get('status') == 'presented' or
-					(itemIndex, None) not in c['keys']):
-				continue
-			if _tree_presentation_state(
-					spaceID, chunkID, itemIndex, entry, True) == 'presented':
-				newly_presented += 1
-	return newly_presented
-
-
-def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+def _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos,
+		validate_identity):
 	import AreaDestructibles
 	from gui.mods.offline_lan_0922 import destructibles_compat
 	# Native getDestructibleDesc (called by the game's __launchFallEffect)
@@ -430,7 +425,7 @@ def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 	# stock queued-order behavior; the installed safe resolver performs the same
 	# check on load.
 	mgr = AreaDestructibles.g_destructiblesManager
-	if mgr.isChunkLoaded(chunkID):
+	if validate_identity and mgr.isChunkLoaded(chunkID):
 		desc = destructibles_compat.resolve_destructible_desc(
 			AreaDestructibles.g_cache, spaceID, chunkID, itemIndex)
 		if (desc is None or
@@ -460,16 +455,39 @@ def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 			# Matrix observation is a receipt, not a prerequisite for the stock
 			# destroy call.  The animator body remains the primary evidence.
 			initial_signature = None
+	entry = {
+		'data': data,
+		'pos': (float(pos[0]), float(pos[1]), float(pos[2])),
+		'initialMatrixSignature': initial_signature,
+		'status': 'pending',
+	}
 	accepted = _apply(
 		spaceID, chunkID, pos, 'tree', data, (itemIndex, None))
 	if accepted:
-		_chunk(chunkID)['treePresentations'][itemIndex] = {
-			'data': data,
-			'pos': (float(pos[0]), float(pos[1]), float(pos[2])),
-			'initialMatrixSignature': initial_signature,
-			'status': 'pending', 'redrives': 0,
-		}
+		# Observe/kick only as part of this original contact.  No frame or
+		# canonical-echo path is allowed to start this animation later.
+		try:
+			_tree_presentation_state(
+				spaceID, chunkID, itemIndex, entry, start_if_stalled=True)
+		except Exception as error:
+			# Native acceptance is already irreversible.  Optional presentation
+			# observation must never swallow the trusted contact publication.
+			_log('DestrAuth: tree presentation observation failed',
+				chunkID, itemIndex, error)
+		_chunk(chunkID)['treePresentations'][itemIndex] = entry
 	return accepted
+
+
+def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+	"""Safely destroy a tree whose exact native identity is not yet proved."""
+	return _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos, True)
+
+
+def destroy_validated_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+	"""Destroy an exact tree wire already proved by a trusted proposal/event."""
+	return _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos, False)
 
 
 def destroy_column(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
