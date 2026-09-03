@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CLIENT_SCRIPTS = ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
-from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime
+from gui.mods.offline_lan_0922.battle_runtime import (
+    BattleRuntime, PROJECTILE_PROGRESS_SECONDS)
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory
 from gui.mods.offline_lan_0922.projectile_manager import InFlightProjectiles
@@ -2793,6 +2794,54 @@ class BattleProjectileTests(unittest.TestCase):
         battle._next_projectile_progress_time = 99.0
         self.assertTrue(battle._advance_projectiles(10.6))
         self.assertEqual('impact', battle.client.resolutions[0][0][3])
+
+    def test_progress_cadence_survives_slow_worker_frames(self):
+        """A late worker frame must not push the whole cadence out with it.
+
+        The confirmed cursor published here gates both tracer advancement and
+        terminal submission, so restarting a full interval from every late
+        frame would degrade projectile authority with worker frame time.
+        """
+        battle, bigworld = _battle()
+        battle._next_projectile_progress_time = 0.0
+        self.assertTrue(battle._accept_projectile_event(_event()))
+
+        step = 0.03
+        window = 1.2
+        deadlines = []
+        published = 0
+        frame = step
+        while frame <= window + 1e-9:
+            bigworld.now = frame
+            before = len(battle.client.progress)
+            battle._advance_projectiles(frame)
+            if len(battle.client.progress) > before:
+                published += 1
+                deadlines.append(battle._next_projectile_progress_time)
+            frame = round(frame + step, 10)
+
+        # Every deadline sits on the fixed cadence grid: consecutive
+        # deadlines differ by whole intervals, never by one interval plus
+        # the frame that happened to be late.
+        self.assertGreater(len(deadlines), 2)
+        for earlier, later in zip(deadlines, deadlines[1:]):
+            gap = later - earlier
+            intervals = gap / PROJECTILE_PROGRESS_SECONDS
+            self.assertAlmostEqual(
+                intervals, round(intervals), places=6,
+                msg='deadline gap %r is not a whole cadence interval' % gap)
+
+        # The publication count follows the interval, not interval + frame.
+        # Restarting the interval from each late frame yields a 0.13 s period
+        # at this frame step and would lose roughly a fifth of the updates.
+        self.assertGreaterEqual(
+            published, int(math.floor(window / PROJECTILE_PROGRESS_SECONDS)))
+
+        # A deadline is never pushed more than one interval past the frame
+        # that consumed it.
+        self.assertLess(
+            battle._next_projectile_progress_time - frame + step,
+            PROJECTILE_PROGRESS_SECONDS + 1e-9)
 
     def test_destructible_receipt_retries_with_same_progress_until_ack(self):
         battle, bigworld = _battle()
