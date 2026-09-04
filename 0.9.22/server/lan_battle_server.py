@@ -263,6 +263,19 @@ PROJECTILE_MAX_DESTRUCTIBLES = 64
 PROJECTILE_MAX_LIFETIME_MS = 20000
 PLAYER_FIRE_INTENT_MAX_PENDING = 1
 PLAYER_FIRE_INTENT_HISTORY = 64
+# One trigger-edge presentation entry per live Bot identity (1..30).
+PLAYER_PRESENTATION_LEDGER_FIELDS = frozenset((
+    "bot_id", "bot_state_revision", "presentation_time_us"))
+PLAYER_PRESENTATION_LEDGER_MAX = 30
+# A displayed Bot pose normally trails authority by 60-90 ms and can trail it
+# by 160-200 ms after a worker stall.  One second is a wide but finite bound:
+# beyond it the shooter's client clock is broken rather than merely late, and
+# rewinding authority that far would be a worse answer than a typed rejection.
+PLAYER_PRESENTATION_MAX_LAG_US = 1000000
+# Ordinary LAN transport puts a trigger a few milliseconds behind its server
+# admission.  Half a second bounds a stalled sender without letting a broken
+# clock rewind the round projectile ledger.
+PLAYER_TRIGGER_MAX_LAG_MS = 500
 PLAYER_FIRE_ORIGIN_RADIUS = 25.0
 MAX_PLAYER_DISPERSION_ANGLE = 0.5
 MAX_PLAYER_CLIP_SIZE = 255
@@ -284,7 +297,7 @@ DESTRUCTIBLE_CATALOG_V5_CAPABILITY = "destructible_catalog_v5"
 LEAN_SNAPSHOT_MANIFEST_CAPABILITY = "lean_snapshot_manifest_v1"
 RAM_CONTACT_LEDGER_CAPABILITY = "ram_contact_ledger_v2"
 HUMAN_RAM_TIMELINE_CAPABILITY = "human_ram_timeline_v1"
-PLAYER_FIRE_INTENT_CAPABILITY = "player_fire_intent_v4"
+PLAYER_FIRE_INTENT_CAPABILITY = "player_fire_intent_v5"
 PLAYER_ENVIRONMENT_CAPABILITY = "player_environment_v2"
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 VEHICLE_OVERLAY_CAPABILITY = "vehicle_overlay_v1"
@@ -564,11 +577,15 @@ def _server_event_log_message(event, players, bot_states):
         direction = tuple(
             float(value) / speed for value in velocity) if speed > 0.0 else (
                 0.0, 0.0, 0.0)
+        # ``id`` and ``launch_ms`` are the join keys for the hidden worker's
+        # PLAYER SHOT TIMING line and this server's PROJECTILE TERMINAL line.
         return (
-            "SHOT attacker=%s seq=%s shell=%s input=%s "
+            "SHOT attacker=%s seq=%s shell=%s input=%s id=%s launch_ms=%s "
             "origin=(%.2f,%.2f,%.2f) direction=(%.5f,%.5f,%.5f)" % (
                 event.get("attacker"), event.get("shot_seq"),
                 event.get("shell_index"), event.get("fire_input_seq"),
+                event.get("projectile_id"),
+                event.get("launch_server_time_ms"),
                 float(origin[0]), float(origin[1]), float(origin[2]),
                 direction[0], direction[1], direction[2]))
     if kind == "hit":
@@ -6152,21 +6169,120 @@ class BattleState:
             self.remove_player(player.player_id, expected=player)
         return bool(delivered)
 
+    def _validated_presentation_ledger(self, raw_ledger, pose_time_us):
+        """Admit the delayed Bot poses a shooter displayed at its trigger.
+
+        The ledger is evidence of presentation, never of a hit.  Each entry is
+        checked against the canonical Bot lineup, the current wire revision
+        window and the shooter's own trigger time; the hidden worker then
+        rebuilds those timelines from its own retained history.  An empty list
+        is the legal "no timed Bot record was presented" statement.
+        """
+        if (not isinstance(raw_ledger, list) or
+                len(raw_ledger) > PLAYER_PRESENTATION_LEDGER_MAX):
+            return None
+        result = []
+        seen = set()
+        for raw in raw_ledger:
+            if (not isinstance(raw, dict) or
+                    set(raw) != PLAYER_PRESENTATION_LEDGER_FIELDS):
+                return None
+            try:
+                bot_id = _exact_int(raw.get("bot_id"), 1, 30)
+                revision = _exact_int(
+                    raw.get("bot_state_revision"), 0, 2147483647)
+                presentation_time_us = _exact_int(
+                    raw.get("presentation_time_us"), 0, MAX_MOTION_TIME_US)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if bot_id in seen or bot_id not in self.bot_states:
+                return None
+            if (revision > self.bot_state_revision or
+                    revision + 255 < self.bot_state_revision):
+                return None
+            if (presentation_time_us > self.bot_state_time_us or
+                    presentation_time_us > pose_time_us or
+                    presentation_time_us <
+                    pose_time_us - PLAYER_PRESENTATION_MAX_LAG_US):
+                return None
+            seen.add(bot_id)
+            result.append({
+                "bot_id": bot_id,
+                "bot_state_revision": revision,
+                "presentation_time_us": presentation_time_us,
+            })
+        result.sort(key=lambda entry: entry["bot_id"])
+        return result
+
+    def _validated_trigger_launch_time_ms(self, raw_time_ms):
+        """Validate one trigger frozen directly in the round tick domain."""
+        try:
+            trigger_time_ms = _exact_int(
+                raw_time_ms, 0, MAX_MOTION_TIME_US // 1000)
+        except (TypeError, ValueError, OverflowError):
+            return None, "trigger_clock_invalid"
+        receipt_time_ms = self._server_time_ms()
+        if trigger_time_ms > receipt_time_ms + PROJECTILE_CLOCK_LEEWAY_MS:
+            return None, "trigger_clock_future"
+        if receipt_time_ms - trigger_time_ms > PLAYER_TRIGGER_MAX_LAG_MS:
+            return None, "trigger_clock_stale"
+        # A small ahead estimate is legal clock/RTT quantization, but an
+        # admitted projectile may never start after the server's receipt.
+        return min(trigger_time_ms, receipt_time_ms), None
+
     def submit_fire_intent(self, player_id, message):
         """Consume one ordered trigger or relay it to the native authority."""
         with self.lock:
             if (self.client_build != CLIENT_BUILD_0922 or
-                    not self._message_round_matches(message) or
                     not isinstance(message, dict) or
-                    set(message) != {
-                        "type", "round_id", "intent_seq", "input_seq",
-                        "shell_index", "shot_origin", "shot_direction",
-                        "dispersion_angle"} or
                     message.get("type") != "fire_intent"):
                 return False
             try:
+                player_id = _exact_int(player_id, 1, PROJECTILE_MAX_ID)
+                round_id = _exact_int(
+                    message.get("round_id"), 1, PROJECTILE_MAX_ID)
                 intent_seq = _exact_int(
                     message.get("intent_seq"), 1, PROJECTILE_MAX_ID)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if round_id != self.round_id:
+                return False
+            player = self.players.get(player_id)
+            if player is None:
+                return False
+            try:
+                fingerprint = _message_fingerprint({
+                    "player_id": int(player_id),
+                    "wire": message,
+                })
+            except (TypeError, ValueError, OverflowError, RuntimeError):
+                return False
+            previous = player.fire_intent_fingerprints.get(intent_seq)
+            if previous is not None:
+                return previous == fingerprint
+            if intent_seq != player.fire_intent_seq + 1:
+                return False
+
+            def reject(reason):
+                return self._commit_fire_intent_rejection_locked(
+                    player, intent_seq, fingerprint, reason)
+
+            expected_fields = frozenset((
+                "type", "round_id", "intent_seq", "input_seq",
+                "shell_index", "shot_origin", "shot_direction",
+                "dispersion_angle", "presentation_ledger",
+                "trigger_server_time_ms"))
+            if set(message) not in (
+                    expected_fields,
+                    expected_fields - frozenset((
+                        "presentation_ledger",)),
+                    expected_fields - frozenset((
+                        "trigger_server_time_ms",)),
+                    expected_fields - frozenset((
+                        "presentation_ledger",
+                        "trigger_server_time_ms"))):
+                return reject("fire_intent_wire_shape")
+            try:
                 input_seq = _exact_int(
                     message.get("input_seq"), 1, PROJECTILE_MAX_ID)
                 shell_index = _exact_int(message.get("shell_index"), 0, 9)
@@ -6181,24 +6297,7 @@ class BattleState:
                     message.get("dispersion_angle"), 0.0,
                     MAX_PLAYER_DISPERSION_ANGLE)
             except (TypeError, ValueError, OverflowError):
-                return False
-
-            player = self.players.get(player_id)
-            if player is None:
-                return False
-            fingerprint = _message_fingerprint({
-                "player_id": int(player_id),
-                "wire": message,
-            })
-            previous = player.fire_intent_fingerprints.get(intent_seq)
-            if previous is not None:
-                return previous == fingerprint
-            if intent_seq != player.fire_intent_seq + 1:
-                return False
-
-            def reject(reason):
-                return self._commit_fire_intent_rejection_locked(
-                    player, intent_seq, fingerprint, reason)
+                return reject("fire_intent_field_invalid")
 
             if self.battle_result is not None:
                 return reject("battle_finished")
@@ -6212,6 +6311,11 @@ class BattleState:
                 return reject("player_dead")
             if self._player_overturn_danger(player_id):
                 return reject("player_overturned")
+            trigger_launch_time_ms, trigger_error = \
+                self._validated_trigger_launch_time_ms(
+                    message.get("trigger_server_time_ms"))
+            if trigger_error is not None:
+                return reject(trigger_error)
 
             direction_length = math.sqrt(sum(
                 component * component for component in shot_direction))
@@ -6245,6 +6349,10 @@ class BattleState:
                 return reject("shell_mismatch")
             if player.pose_time_us is None:
                 return reject("pose_unavailable")
+            presentation_ledger = self._validated_presentation_ledger(
+                message.get("presentation_ledger"), int(player.pose_time_us))
+            if presentation_ledger is None:
+                return reject("presentation_ledger_invalid")
             if player.fire_seq >= PROJECTILE_MAX_ID:
                 return reject("fire_sequence_exhausted")
             if len(player.pending_fire_intents) >= \
@@ -6264,6 +6372,8 @@ class BattleState:
                 "shot_seq": int(player.fire_seq) + 1,
                 "input_seq": input_seq,
                 "pose_time_us": int(player.pose_time_us),
+                "presentation_ledger": [
+                    dict(entry) for entry in presentation_ledger],
                 "shell_index": shell_index,
                 "next_shell_index": int(player.next_shell_index),
                 "shell_change_pending": bool(
@@ -6286,7 +6396,14 @@ class BattleState:
             }
             player.fire_intent_seq = intent_seq
             player.fire_intent_fingerprints[intent_seq] = fingerprint
-            player.pending_fire_intents[intent_seq] = dict(relay)
+            # The visible client freezes this value in the same round-clock
+            # domain used by projectile events. Keeping the validated value in
+            # the pending intent makes retries and delayed canonical launches
+            # reuse the trigger instant without consulting a jumping motion
+            # clock or a later server tick.
+            player.pending_fire_intents[intent_seq] = dict(
+                relay,
+                trigger_launch_time_ms=trigger_launch_time_ms)
             while (len(player.fire_intent_fingerprints) >
                    PLAYER_FIRE_INTENT_HISTORY):
                 player.fire_intent_fingerprints.popitem(last=False)
@@ -6595,6 +6712,12 @@ class BattleState:
                     return self._set_protocol_reject(
                         reject_kind, "order",
                         "player projectile sequence does not match intent")
+                try:
+                    trigger_launch_time_ms = _exact_int(
+                        intent.get("trigger_launch_time_ms"), 0,
+                        self._server_time_ms())
+                except (TypeError, ValueError, OverflowError) as error:
+                    return self._set_protocol_exception(reject_kind, error)
                 team = shooter.team
                 source_vehicle = shooter.vehicle
                 shooter_position = [
@@ -6670,7 +6793,7 @@ class BattleState:
 
             launch_server_time_ms = (
                 int(round(float(mapped_launch_time_us) / 1000.0))
-                if shooter_kind == "bot" else self._server_time_ms())
+                if shooter_kind == "bot" else trigger_launch_time_ms)
             record = dict(normalized)
             record.update({
                 "projectile_id": projectile_id,

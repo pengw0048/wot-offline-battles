@@ -636,15 +636,25 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertTrue(client.send_input(
             0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
             shell_index=0))
+        enqueue_attempts = []
+        original_enqueue = client._enqueue_outbound
+
+        def observe_enqueue(message, encoded_size, generation):
+            enqueue_attempts.append(message)
+            return original_enqueue(message, encoded_size, generation)
+
+        client._enqueue_outbound = observe_enqueue
         original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
         lan_client_module.MAX_OUTBOUND_MESSAGES = 1
         try:
             self.assertIsNone(client.send_fire(
                 position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
                 gravity=9.81, max_distance=500.0, max_time_ms=5000,
-                source_shot=source_shot))
+                source_shot=source_shot, trigger_server_time_ms=100))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
+        self.assertEqual(1, len(enqueue_attempts))
+        self.assertEqual('fire_intent', enqueue_attempts[0]['type'])
         self.assertEqual(0, client._fire_intent_seq)
 
         client = self.activate()
@@ -657,7 +667,7 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual(1, client.send_fire(
             position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
             gravity=9.81, max_distance=500.0, max_time_ms=5000,
-            source_shot=source_shot))
+            source_shot=source_shot, trigger_server_time_ms=100))
         self.assertEqual(1, client._fire_intent_seq)
         self.assertEqual(
             'fire_intent', client._outbound_queue[1][1]['type'])

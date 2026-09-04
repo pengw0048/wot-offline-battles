@@ -13,7 +13,7 @@ sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import (  # noqa: E402
     BattleState, CLIENT_BUILD_082, CLIENT_BUILD_0922, ClientHandler,
-    MAX_LINE_BYTES,
+    MAX_LINE_BYTES, MAX_MOTION_TIME_US,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PREBATTLE_SECONDS,
     HUMAN_RAM_TIMELINE_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
@@ -116,6 +116,8 @@ def _fire_intent(state, player_id=1, **changes):
         'shot_origin': [player.x, player.y + 1.0, player.z],
         'shot_direction': [0.0, 0.0, 1.0],
         'dispersion_angle': 0.01,
+        'presentation_ledger': [],
+        'trigger_server_time_ms': state._server_time_ms(),
     }
     message.update(changes)
     return message
@@ -1345,8 +1347,13 @@ class ServerProjectileLedgerTests(unittest.TestCase):
     def test_modern_player_launch_is_atomic_and_idempotent(self):
         state = _state()
         message = _launch()
+        mapped = []
 
-        self.assertTrue(_launch_authority(state, message))
+        self.assertTrue(_launch_authority(
+            state, message,
+            before_launch=lambda: mapped.append(
+                state.players[1].pending_fire_intents[1][
+                    'trigger_launch_time_ms'])))
         self.assertEqual(1, state.players[1].fire_seq)
         self.assertEqual(['1:p:1:1'], sorted(state.projectiles))
         shot = state.pending_events[-1]
@@ -1372,8 +1379,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         for key, value in state._projectile_snapshot()[0].items():
             self.assertEqual(value, shot[key])
         self.assertEqual(1.570796, shot['shot_yaw'])
-        self.assertEqual(state._server_time_ms(),
-                         shot['launch_server_time_ms'])
+        # The launch instant is the mapped visible trigger frozen at intent
+        # admission, not the tick the canonical launch reached the server.
+        self.assertEqual(mapped, [shot['launch_server_time_ms']])
 
         event_count = len(state.pending_events)
         self.assertTrue(_launch_authority(state, dict(message)))
@@ -1541,40 +1549,94 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(1, public['next_shell_index'])
         self.assertFalse(public['shell_change_pending'])
 
-    def test_malformed_fire_intents_do_not_advance_the_server_frontier(self):
+    def test_unidentifiable_fire_intents_do_not_advance_the_frontier(self):
         state = _state()
         player = state.players[1]
         results = []
         player.offer_reliable = lambda message: (
             results.append(dict(message)) or True)
         self.assertTrue(_update_player_input(state, 1))
-        malformed = (
-            {'round_id': state.round_id + 1},
-            {'intent_seq': 2},
-            {'input_seq': '1'},
-            {'shot_origin': (0.0, 1.0, 0.0)},
-            {'shot_origin': [5001.0, 1.0, 0.0]},
-            {'shot_direction': [float('nan'), 0.0, 1.0]},
-            {'dispersion_angle': float('inf')},
-            {'dispersion_angle': 0.5001},
+        unidentifiable = (
+            _fire_intent(state, round_id=state.round_id + 1),
+            _fire_intent(state, round_id=float(state.round_id)),
+            _fire_intent(state, type='equipment_intent'),
+            _fire_intent(state, intent_seq=2),
+            _fire_intent(state, intent_seq='1'),
         )
+        missing_round = _fire_intent(state)
+        missing_round.pop('round_id')
+        missing_sequence = _fire_intent(state)
+        missing_sequence.pop('intent_seq')
 
-        for changes in malformed:
-            with self.subTest(changes=changes):
-                self.assertFalse(state.submit_fire_intent(
-                    1, _fire_intent(state, **changes)))
+        for message in unidentifiable + (missing_round, missing_sequence):
+            with self.subTest(message=message):
+                self.assertFalse(state.submit_fire_intent(1, message))
                 self.assertEqual(0, player.fire_intent_seq)
                 self.assertFalse(player.fire_intent_fingerprints)
                 self.assertFalse(player.fire_intent_results)
                 self.assertFalse(results)
-
-        missing = _fire_intent(state)
-        missing.pop('shot_origin')
-        self.assertFalse(state.submit_fire_intent(1, missing))
         self.assertFalse(state.submit_fire_intent(
-            1, dict(_fire_intent(state), unexpected=True)))
+            99, _fire_intent(state)))
         self.assertEqual(0, player.fire_intent_seq)
         self.assertFalse(results)
+
+    def test_identified_malformed_fire_intents_receive_one_terminal(self):
+        cases = (
+            ('input_type', {'input_seq': '1'}, None,
+             'fire_intent_field_invalid'),
+            ('origin_type', {'shot_origin': '0,1,0'}, None,
+             'fire_intent_field_invalid'),
+            ('origin_bounds', {'shot_origin': [5001.0, 1.0, 0.0]}, None,
+             'fire_intent_field_invalid'),
+            ('direction_nan', {
+                'shot_direction': [float('nan'), 0.0, 1.0]}, None,
+             'fire_intent_field_invalid'),
+            ('dispersion_inf', {'dispersion_angle': float('inf')}, None,
+             'fire_intent_field_invalid'),
+            ('dispersion_bounds', {'dispersion_angle': 0.5001}, None,
+             'fire_intent_field_invalid'),
+            ('missing_origin', {}, 'shot_origin',
+             'fire_intent_wire_shape'),
+            ('extra_field', {'unexpected': True}, None,
+             'fire_intent_wire_shape'),
+        )
+        for label, changes, missing, reason in cases:
+            with self.subTest(label=label):
+                state = _state()
+                player = state.players[1]
+                results = []
+                relayed = []
+                player.offer_reliable = lambda result: (
+                    results.append(dict(result)) or True)
+                state.simulation_worker.offer_reliable = lambda relay: (
+                    relayed.append(dict(relay)) or True)
+                self.assertTrue(_update_player_input(state, 1))
+                message = _fire_intent(state, **changes)
+                if missing is not None:
+                    message.pop(missing)
+
+                self.assertTrue(state.submit_fire_intent(1, message))
+                self.assertEqual(1, player.fire_intent_seq)
+                self.assertEqual((False, reason),
+                                 player.fire_intent_results[1])
+                self.assertEqual(reason, results[0]['reason'])
+                self.assertFalse(player.pending_fire_intents)
+                self.assertFalse(relayed)
+
+                # One exact malformed retry folds into the recorded terminal;
+                # a changed retry conflicts without replacing or redelivering
+                # it, and the next legal trigger still reaches authority.
+                self.assertTrue(state.submit_fire_intent(1, dict(message)))
+                self.assertFalse(state.submit_fire_intent(
+                    1, dict(message, shell_index=1)))
+                self.assertEqual(1, len(results))
+                self.assertEqual((False, reason),
+                                 player.fire_intent_results[1])
+                self.assertTrue(_update_player_input(state, 1))
+                self.assertTrue(state.submit_fire_intent(
+                    1, _fire_intent(state)))
+                self.assertIn(2, player.pending_fire_intents)
+                self.assertEqual(2, relayed[0]['intent_seq'])
 
     def test_finite_untrusted_fire_rays_receive_terminal_results(self):
         cases = (
@@ -1763,6 +1825,334 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(0, player.fire_seq)
         self.assertIsNone(state.simulation_worker)
         self.assertIsNotNone(state.battle_result)
+
+    def _presented_bot(self, state, bot_id=16, team=2):
+        """Publish one canonical Bot the shooter can legally have displayed."""
+        state.bot_manifest_authority_id = SIMULATION_WORKER_AUTHORITY_ID
+        state.bot_states[bot_id] = {
+            'id': bot_id, 'team': team,
+            'vehicle': 'ussr:R11_MS-1', 'health': 500,
+            'max_health': 500, 'alive': True,
+            'display_health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+            'critical': {}, 'combat_revision': 0,
+            'combat_base_revision': 0, 'combat_ack_seq': 0,
+            'combat_fire_elapsed': 0.0, 'combat_fire_timer': 0.0,
+        }
+        # A live round is many seconds and many revisions old by the time a
+        # player fires; the clock and revision windows below are meaningless
+        # against a freshly zeroed fixture.
+        state.motion_time_offset_us = 10000000
+        state.bot_state_revision = 300
+        state.bot_state_time_us = state._logical_motion_time_us()
+        return bot_id
+
+    def _ledger_entry(self, state, bot_id=16, lag_us=90000, revision=None):
+        return {
+            'bot_id': bot_id,
+            'bot_state_revision': (
+                state.bot_state_revision if revision is None else revision),
+            'presentation_time_us': max(
+                0, int(state.players[1].pose_time_us) - int(lag_us)),
+        }
+
+    def test_player_launch_uses_the_frozen_visible_trigger_clock(self):
+        state = _state()
+        player = state.players[1]
+        state.tick = 450
+        self.assertTrue(_update_player_input(state, 1))
+        trigger_time_ms = state._server_time_ms()
+        # Admission is 133 ms later. A simultaneous catch-up correction moves
+        # the independent motion clock by another 300 ms, but must not change
+        # the trigger already frozen in the round projectile clock.
+        state.tick += 4
+        state.motion_time_offset_us += 300000
+        receipt_tick_ms = state._server_time_ms()
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, trigger_server_time_ms=trigger_time_ms)))
+        relay = player.pending_fire_intents[1]
+        mapped = int(relay['trigger_launch_time_ms'])
+
+        self.assertEqual(trigger_time_ms, mapped)
+        self.assertEqual(receipt_tick_ms - 133, mapped)
+
+        state.tick += 6
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID, _launch(
+                fire_intent_seq=1, fire_input_seq=relay['input_seq'],
+                shot_seq=relay['shot_seq'],
+                authority_epoch=state.authority_epoch)))
+        record = state.projectiles['1:p:1:1']
+        self.assertEqual(mapped, record['launch_server_time_ms'])
+        self.assertEqual(
+            state._server_time_ms() - 333,
+            record['launch_server_time_ms'])
+
+    def test_trigger_clock_bounds_have_typed_terminal_results(self):
+        state = _state()
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() - 500)))
+        self.assertEqual(
+            state._server_time_ms() - 500,
+            state.players[1].pending_fire_intents[1][
+                'trigger_launch_time_ms'])
+
+        state = _state()
+        player = state.players[1]
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        delivered = []
+        player.offer_reliable = lambda message: (
+            delivered.append(dict(message)) or True)
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() - 501)))
+        self.assertEqual(
+            (False, 'trigger_clock_stale'), player.fire_intent_results[1])
+        self.assertEqual('trigger_clock_stale', delivered[-1]['reason'])
+        self.assertNotIn(1, player.pending_fire_intents)
+
+        # A small ahead estimate is legal clock quantization, but canonical
+        # projectile time is clamped once to server receipt.
+        state = _state()
+        player = state.players[1]
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        receipt_time_ms = state._server_time_ms()
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, trigger_server_time_ms=receipt_time_ms + 250)))
+        self.assertEqual(
+            receipt_time_ms,
+            int(player.pending_fire_intents[1]['trigger_launch_time_ms']))
+
+        state = _state()
+        player = state.players[1]
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        delivered = []
+        player.offer_reliable = lambda message: (
+            delivered.append(dict(message)) or True)
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() + 251)))
+        self.assertEqual(
+            (False, 'trigger_clock_future'), player.fire_intent_results[1])
+        self.assertEqual('trigger_clock_future', delivered[-1]['reason'])
+        self.assertNotIn(1, player.pending_fire_intents)
+
+    def test_invalid_trigger_clock_is_a_typed_local_failure(self):
+        missing = object()
+        for raw_time in (missing, None, True, 1.0, -1,
+                         MAX_MOTION_TIME_US // 1000 + 1):
+            state = _state()
+            player = state.players[1]
+            self.assertTrue(_update_player_input(state, 1))
+            delivered = []
+            player.offer_reliable = lambda message: (
+                delivered.append(dict(message)) or True)
+            intent = _fire_intent(state, trigger_server_time_ms=raw_time)
+            if raw_time is missing:
+                intent.pop('trigger_server_time_ms')
+
+            self.assertTrue(state.submit_fire_intent(1, intent))
+            self.assertEqual(
+                (False, 'trigger_clock_invalid'),
+                player.fire_intent_results[1])
+            self.assertEqual('trigger_clock_invalid', delivered[-1]['reason'])
+            self.assertNotIn(1, player.pending_fire_intents)
+
+    def test_mapped_launch_time_is_invariant_to_further_delay(self):
+        times = []
+        for extra_ticks in (0, 3, 30):
+            state = _state()
+            player = state.players[1]
+            self.assertTrue(_update_player_input(state, 1))
+            self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+            relay = player.pending_fire_intents[1]
+            state.tick += extra_ticks
+            self.assertTrue(state.launch_projectile(
+                SIMULATION_WORKER_AUTHORITY_ID, _launch(
+                    fire_intent_seq=1, fire_input_seq=relay['input_seq'],
+                    shot_seq=relay['shot_seq'],
+                    authority_epoch=state.authority_epoch)))
+            record = state.projectiles['1:p:1:1']
+            times.append(record['launch_server_time_ms'])
+            # An exact retry after even more delay reuses the same instant.
+            state.tick += 10
+            self.assertTrue(state.launch_projectile(
+                SIMULATION_WORKER_AUTHORITY_ID, _launch(
+                    fire_intent_seq=1, fire_input_seq=relay['input_seq'],
+                    shot_seq=relay['shot_seq'],
+                    authority_epoch=state.authority_epoch)))
+            self.assertEqual(
+                times[-1], state.projectiles['1:p:1:1'][
+                    'launch_server_time_ms'])
+        self.assertEqual(1, len(set(times)))
+
+    def test_bot_launch_timing_is_unchanged_by_the_player_mapping(self):
+        state = _state()
+        state.bot_states[16] = {
+            'id': 16, 'team': 2, 'vehicle': 'ussr:R11_MS-1',
+            'health': 500, 'max_health': 500, 'alive': True,
+            'display_health': 500, 'fire_seq': 0,
+        }
+        state.bot_pending_projectile_launches.add((16, 1))
+        state.bot_launch_clock_offset_us = (
+            state._server_time_ms() * 1000 - 100000)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot')))
+        record = state.projectiles['1:b:16:1']
+        self.assertEqual(
+            int(round((100000 + state.bot_launch_clock_offset_us) / 1000.0)),
+            record['launch_server_time_ms'])
+
+    def test_fire_intent_relays_the_validated_presentation_ledger(self):
+        state = _state()
+        player = state.players[1]
+        bot_id = self._presented_bot(state)
+        self.assertTrue(_update_player_input(state, 1))
+        entry = self._ledger_entry(state, bot_id)
+        delivered = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            delivered.append(dict(message)) or True)
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, presentation_ledger=[entry])))
+        self.assertEqual([entry], delivered[-1]['presentation_ledger'])
+        self.assertEqual(
+            [entry], player.pending_fire_intents[1]['presentation_ledger'])
+        # An exact retransmission is idempotent; a conflicting one is not.
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, intent_seq=1, presentation_ledger=[entry])))
+        self.assertEqual(1, len(delivered))
+        self.assertFalse(state.submit_fire_intent(1, _fire_intent(
+            state, intent_seq=1, presentation_ledger=[])))
+        self.assertEqual(1, len(delivered))
+
+    def test_empty_presentation_ledger_is_a_legal_statement(self):
+        state = _state()
+        self._presented_bot(state)
+        self.assertTrue(_update_player_input(state, 1))
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, presentation_ledger=[])))
+        self.assertEqual(
+            [], state.players[1].pending_fire_intents[1][
+                'presentation_ledger'])
+
+    def test_missing_presentation_ledger_is_a_typed_local_failure(self):
+        state = _state()
+        player = state.players[1]
+        self.assertTrue(_update_player_input(state, 1))
+        message = _fire_intent(state)
+        message.pop('presentation_ledger')
+        delivered = []
+        player.offer_reliable = lambda result: (
+            delivered.append(dict(result)) or True)
+
+        self.assertTrue(state.submit_fire_intent(1, message))
+        self.assertEqual(1, player.fire_intent_seq)
+        self.assertEqual(
+            (False, 'presentation_ledger_invalid'),
+            player.fire_intent_results[1])
+        self.assertEqual('presentation_ledger_invalid', delivered[-1]['reason'])
+        self.assertEqual({}, dict(player.pending_fire_intents))
+        # The exact malformed retry is idempotent and does not republish its
+        # terminal; the next sequence can still be admitted normally.
+        self.assertTrue(state.submit_fire_intent(1, dict(message)))
+        self.assertEqual(1, len(delivered))
+        self.assertTrue(_update_player_input(state, 1))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertIn(2, player.pending_fire_intents)
+
+    def test_invalid_presentation_evidence_is_a_typed_local_failure(self):
+        bot_id = 16
+        for label, ledger in (
+                ('unknown_bot', None),
+                ('duplicate_bot', None),
+                ('future_revision', None),
+                ('retired_revision', None),
+                ('future_presentation', None),
+                ('stale_presentation', None),
+                ('malformed_entry', [{'bot_id': bot_id}]),
+                ('extra_field', None),
+                ('oversized', None)):
+            state = _state()
+            player = state.players[1]
+            self._presented_bot(state, bot_id)
+            self.assertTrue(_update_player_input(state, 1))
+            entry = self._ledger_entry(state, bot_id)
+            if label == 'unknown_bot':
+                ledger = [dict(entry, bot_id=17)]
+            elif label == 'duplicate_bot':
+                ledger = [dict(entry), dict(entry)]
+            elif label == 'future_revision':
+                ledger = [dict(entry,
+                               bot_state_revision=state.bot_state_revision + 1)]
+            elif label == 'retired_revision':
+                ledger = [dict(
+                    entry,
+                    bot_state_revision=state.bot_state_revision - 256)]
+            elif label == 'future_presentation':
+                ledger = [dict(
+                    entry,
+                    presentation_time_us=int(player.pose_time_us) + 1)]
+            elif label == 'stale_presentation':
+                ledger = [dict(entry, presentation_time_us=max(
+                    0, int(player.pose_time_us) - 2000000))]
+            elif label == 'extra_field':
+                ledger = [dict(entry, presented_pose=[0.0, 0.0, 0.0])]
+            elif label == 'oversized':
+                ledger = [dict(entry, bot_id=index)
+                          for index in range(1, 32)]
+            delivered = []
+            player.offer_reliable = lambda message: (
+                delivered.append(dict(message)) or True)
+
+            self.assertTrue(
+                state.submit_fire_intent(1, _fire_intent(
+                    state, presentation_ledger=ledger)), label)
+            # One bad shot settles as an observable local terminal; it never
+            # reaches the authority and never ends the round.
+            self.assertEqual(
+                (False, 'presentation_ledger_invalid'),
+                player.fire_intent_results[1], label)
+            self.assertEqual(
+                'presentation_ledger_invalid',
+                delivered[-1]['reason'], label)
+            self.assertNotIn(1, player.pending_fire_intents)
+            self.assertIsNone(state.battle_result, label)
+            # The next legal trigger still works.
+            self.assertTrue(_update_player_input(state, 1))
+            self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+                state, intent_seq=2,
+                presentation_ledger=[self._ledger_entry(state, bot_id)])),
+                label)
+
+    def test_bot_revision_window_matches_the_ram_evidence_contract(self):
+        state = _state()
+        bot_id = self._presented_bot(state)
+        self.assertTrue(_update_player_input(state, 1))
+        entry = self._ledger_entry(state, bot_id, revision=45)
+
+        self.assertTrue(state.submit_fire_intent(
+            1, _fire_intent(state, presentation_ledger=[entry])))
+        self.assertEqual(
+            [entry],
+            state.players[1].pending_fire_intents[1]['presentation_ledger'])
+        self.assertTrue(_update_player_input(state, 1))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, intent_seq=2,
+            presentation_ledger=[
+                self._ledger_entry(state, bot_id, revision=44)])))
+        self.assertEqual(
+            (False, 'presentation_ledger_invalid'),
+            state.players[1].fire_intent_results[2])
 
     def test_worker_fire_rejection_is_committed_after_visible_delivery(self):
         state = _state()
