@@ -1549,40 +1549,94 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(1, public['next_shell_index'])
         self.assertFalse(public['shell_change_pending'])
 
-    def test_malformed_fire_intents_do_not_advance_the_server_frontier(self):
+    def test_unidentifiable_fire_intents_do_not_advance_the_frontier(self):
         state = _state()
         player = state.players[1]
         results = []
         player.offer_reliable = lambda message: (
             results.append(dict(message)) or True)
         self.assertTrue(_update_player_input(state, 1))
-        malformed = (
-            {'round_id': state.round_id + 1},
-            {'intent_seq': 2},
-            {'input_seq': '1'},
-            {'shot_origin': (0.0, 1.0, 0.0)},
-            {'shot_origin': [5001.0, 1.0, 0.0]},
-            {'shot_direction': [float('nan'), 0.0, 1.0]},
-            {'dispersion_angle': float('inf')},
-            {'dispersion_angle': 0.5001},
+        unidentifiable = (
+            _fire_intent(state, round_id=state.round_id + 1),
+            _fire_intent(state, round_id=float(state.round_id)),
+            _fire_intent(state, type='equipment_intent'),
+            _fire_intent(state, intent_seq=2),
+            _fire_intent(state, intent_seq='1'),
         )
+        missing_round = _fire_intent(state)
+        missing_round.pop('round_id')
+        missing_sequence = _fire_intent(state)
+        missing_sequence.pop('intent_seq')
 
-        for changes in malformed:
-            with self.subTest(changes=changes):
-                self.assertFalse(state.submit_fire_intent(
-                    1, _fire_intent(state, **changes)))
+        for message in unidentifiable + (missing_round, missing_sequence):
+            with self.subTest(message=message):
+                self.assertFalse(state.submit_fire_intent(1, message))
                 self.assertEqual(0, player.fire_intent_seq)
                 self.assertFalse(player.fire_intent_fingerprints)
                 self.assertFalse(player.fire_intent_results)
                 self.assertFalse(results)
-
-        missing = _fire_intent(state)
-        missing.pop('shot_origin')
-        self.assertFalse(state.submit_fire_intent(1, missing))
         self.assertFalse(state.submit_fire_intent(
-            1, dict(_fire_intent(state), unexpected=True)))
+            99, _fire_intent(state)))
         self.assertEqual(0, player.fire_intent_seq)
         self.assertFalse(results)
+
+    def test_identified_malformed_fire_intents_receive_one_terminal(self):
+        cases = (
+            ('input_type', {'input_seq': '1'}, None,
+             'fire_intent_field_invalid'),
+            ('origin_type', {'shot_origin': '0,1,0'}, None,
+             'fire_intent_field_invalid'),
+            ('origin_bounds', {'shot_origin': [5001.0, 1.0, 0.0]}, None,
+             'fire_intent_field_invalid'),
+            ('direction_nan', {
+                'shot_direction': [float('nan'), 0.0, 1.0]}, None,
+             'fire_intent_field_invalid'),
+            ('dispersion_inf', {'dispersion_angle': float('inf')}, None,
+             'fire_intent_field_invalid'),
+            ('dispersion_bounds', {'dispersion_angle': 0.5001}, None,
+             'fire_intent_field_invalid'),
+            ('missing_origin', {}, 'shot_origin',
+             'fire_intent_wire_shape'),
+            ('extra_field', {'unexpected': True}, None,
+             'fire_intent_wire_shape'),
+        )
+        for label, changes, missing, reason in cases:
+            with self.subTest(label=label):
+                state = _state()
+                player = state.players[1]
+                results = []
+                relayed = []
+                player.offer_reliable = lambda result: (
+                    results.append(dict(result)) or True)
+                state.simulation_worker.offer_reliable = lambda relay: (
+                    relayed.append(dict(relay)) or True)
+                self.assertTrue(_update_player_input(state, 1))
+                message = _fire_intent(state, **changes)
+                if missing is not None:
+                    message.pop(missing)
+
+                self.assertTrue(state.submit_fire_intent(1, message))
+                self.assertEqual(1, player.fire_intent_seq)
+                self.assertEqual((False, reason),
+                                 player.fire_intent_results[1])
+                self.assertEqual(reason, results[0]['reason'])
+                self.assertFalse(player.pending_fire_intents)
+                self.assertFalse(relayed)
+
+                # One exact malformed retry folds into the recorded terminal;
+                # a changed retry conflicts without replacing or redelivering
+                # it, and the next legal trigger still reaches authority.
+                self.assertTrue(state.submit_fire_intent(1, dict(message)))
+                self.assertFalse(state.submit_fire_intent(
+                    1, dict(message, shell_index=1)))
+                self.assertEqual(1, len(results))
+                self.assertEqual((False, reason),
+                                 player.fire_intent_results[1])
+                self.assertTrue(_update_player_input(state, 1))
+                self.assertTrue(state.submit_fire_intent(
+                    1, _fire_intent(state)))
+                self.assertIn(2, player.pending_fire_intents)
+                self.assertEqual(2, relayed[0]['intent_seq'])
 
     def test_finite_untrusted_fire_rays_receive_terminal_results(self):
         cases = (

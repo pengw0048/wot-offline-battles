@@ -6233,28 +6233,56 @@ class BattleState:
     def submit_fire_intent(self, player_id, message):
         """Consume one ordered trigger or relay it to the native authority."""
         with self.lock:
+            if (self.client_build != CLIENT_BUILD_0922 or
+                    not isinstance(message, dict) or
+                    message.get("type") != "fire_intent"):
+                return False
+            try:
+                player_id = _exact_int(player_id, 1, PROJECTILE_MAX_ID)
+                round_id = _exact_int(
+                    message.get("round_id"), 1, PROJECTILE_MAX_ID)
+                intent_seq = _exact_int(
+                    message.get("intent_seq"), 1, PROJECTILE_MAX_ID)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if round_id != self.round_id:
+                return False
+            player = self.players.get(player_id)
+            if player is None:
+                return False
+            try:
+                fingerprint = _message_fingerprint({
+                    "player_id": int(player_id),
+                    "wire": message,
+                })
+            except (TypeError, ValueError, OverflowError, RuntimeError):
+                return False
+            previous = player.fire_intent_fingerprints.get(intent_seq)
+            if previous is not None:
+                return previous == fingerprint
+            if intent_seq != player.fire_intent_seq + 1:
+                return False
+
+            def reject(reason):
+                return self._commit_fire_intent_rejection_locked(
+                    player, intent_seq, fingerprint, reason)
+
             expected_fields = frozenset((
                 "type", "round_id", "intent_seq", "input_seq",
                 "shell_index", "shot_origin", "shot_direction",
                 "dispersion_angle", "presentation_ledger",
                 "trigger_server_time_ms"))
-            if (self.client_build != CLIENT_BUILD_0922 or
-                    not self._message_round_matches(message) or
-                    not isinstance(message, dict) or
-                    set(message) not in (
-                        expected_fields,
-                        expected_fields - frozenset((
-                            "presentation_ledger",)),
-                        expected_fields - frozenset((
-                            "trigger_server_time_ms",)),
-                        expected_fields - frozenset((
-                            "presentation_ledger",
-                            "trigger_server_time_ms"))) or
-                    message.get("type") != "fire_intent"):
-                return False
+            if set(message) not in (
+                    expected_fields,
+                    expected_fields - frozenset((
+                        "presentation_ledger",)),
+                    expected_fields - frozenset((
+                        "trigger_server_time_ms",)),
+                    expected_fields - frozenset((
+                        "presentation_ledger",
+                        "trigger_server_time_ms"))):
+                return reject("fire_intent_wire_shape")
             try:
-                intent_seq = _exact_int(
-                    message.get("intent_seq"), 1, PROJECTILE_MAX_ID)
                 input_seq = _exact_int(
                     message.get("input_seq"), 1, PROJECTILE_MAX_ID)
                 shell_index = _exact_int(message.get("shell_index"), 0, 9)
@@ -6269,24 +6297,7 @@ class BattleState:
                     message.get("dispersion_angle"), 0.0,
                     MAX_PLAYER_DISPERSION_ANGLE)
             except (TypeError, ValueError, OverflowError):
-                return False
-
-            player = self.players.get(player_id)
-            if player is None:
-                return False
-            fingerprint = _message_fingerprint({
-                "player_id": int(player_id),
-                "wire": message,
-            })
-            previous = player.fire_intent_fingerprints.get(intent_seq)
-            if previous is not None:
-                return previous == fingerprint
-            if intent_seq != player.fire_intent_seq + 1:
-                return False
-
-            def reject(reason):
-                return self._commit_fire_intent_rejection_locked(
-                    player, intent_seq, fingerprint, reason)
+                return reject("fire_intent_field_invalid")
 
             if self.battle_result is not None:
                 return reject("battle_finished")
