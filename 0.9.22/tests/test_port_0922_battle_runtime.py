@@ -1576,19 +1576,15 @@ class _Client(object):
         return True
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle, aim_time_us=None):
+                         dispersion_angle):
         self._fire_intent_seq += 1
-        # The real client turns an unknown presented clock into wire 0,
-        # which disables compensation for that shot.
         self.sent.append((
             'fire_intent', (shell_index,),
             {'input_seq': self._input_seq,
              'intent_seq': self._fire_intent_seq,
              'shot_origin': list(shot_origin),
              'shot_direction': list(shot_direction),
-             'dispersion_angle': float(dispersion_angle),
-             'aim_time_us': (0 if aim_time_us is None
-                             else int(aim_time_us))}))
+             'dispersion_angle': float(dispersion_angle)}))
         return self._fire_intent_seq
 
 
@@ -19818,7 +19814,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [0.0, 2.0, 0.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.25,
-            'aim_time_us': 0,
         }, intent[2])
         current_input = next(item for item in client.sent
                              if item[0] == 'input')
@@ -19931,93 +19926,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle.shoot(0.2, -0.1))
         self.assertEqual([], battle._avatar.dispersion_queries)
         client.send_fire_intent.assert_called_once_with(
-            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, aim_time_us=None)
-
-    def test_shot_publishes_the_newest_presented_remote_aim_clock(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._publish_ammo_state = mock.Mock()
-        battle._publish_reload_event = mock.Mock()
-        battle._resolve_hit = mock.Mock()
-        battle._avatar.gunRotator.turretYaw = 0.2
-        battle._avatar.gunRotator.gunPitch = -0.1
-        # The delayed playback clock differs per record.  The newest one is
-        # the least compensation any presented target needs, so a stalled
-        # record can never rewind the shot further than the shooter lags.
-        battle._records = {
-            'player:1': {'engine_id': 10, 'local': True},
-            'bot:2': {
-                'engine_id': 11, 'local': False, 'tombstone': False,
-                'presentation_time_us': 4000000},
-            'bot:3': {
-                'engine_id': 12, 'local': False, 'tombstone': False,
-                'presentation_time_us': 4250000},
-        }
-
-        self.assertTrue(battle.shoot(0.2, -0.1))
-
-        intent = next(item for item in client.sent
-                      if item[0] == 'fire_intent')
-        self.assertEqual(4250000, intent[2]['aim_time_us'])
-
-    def test_shot_without_a_presented_remote_pose_publishes_no_aim_clock(
-            self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._publish_ammo_state = mock.Mock()
-        battle._publish_reload_event = mock.Mock()
-        battle._resolve_hit = mock.Mock()
-        battle._avatar.gunRotator.turretYaw = 0.2
-        battle._avatar.gunRotator.gunPitch = -0.1
-        # The local vehicle is never played back, and a tombstone is no
-        # longer presented, so neither clock may be aimed at.
-        battle._records = {
-            'player:1': {
-                'engine_id': 10, 'local': True, 'tombstone': False,
-                'presentation_time_us': 9000000},
-            'bot:2': {
-                'engine_id': 11, 'local': False, 'tombstone': True,
-                'presentation_time_us': 8000000},
-            'bot:3': {
-                'engine_id': 12, 'local': False, 'tombstone': False},
-        }
-
-        self.assertIsNone(battle._aim_presentation_time_us())
-        self.assertTrue(battle.shoot(0.2, -0.1))
-
-        intent = next(item for item in client.sent
-                      if item[0] == 'fire_intent')
-        self.assertEqual(0, intent[2]['aim_time_us'])
+            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25)
 
     def test_trigger_advances_gun_through_hud_ready_edge_before_validation(self):
         runtime = _runtime()
@@ -20130,7 +20039,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [1.0, 3.0, 3.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.02,
-            'aim_time_us': 0,
             '_client_received_time': 10.0,
             '_client_dispatch_delay': 0.01,
         }
@@ -20148,102 +20056,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, 'worker fire intent is malformed'):
             battle.on_fire_intent(dict(intent, unexpected='wire field'))
-
-    def test_worker_fire_intent_requires_the_admitted_aim_clock(self):
-        battle = BattleRuntime(_runtime())
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle.client = _Client()
-        battle.client.authority_epoch = 4
-        battle._start_message = {'round_id': 7}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 4.0,
-            'shot_origin': [1.0, 3.0, 3.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'aim_time_us': 4250000,
-        }
-        without_clock = dict(intent)
-        del without_clock['aim_time_us']
-
-        with self.assertRaisesRegex(
-                RuntimeError, 'worker fire intent is malformed'):
-            battle.on_fire_intent(without_clock)
-        with self.assertRaisesRegex(
-                RuntimeError, 'worker fire intent violates its contract'):
-            battle.on_fire_intent(dict(intent, aim_time_us=-1))
-        self.assertEqual({}, battle._player_fire_intents)
-
-        self.assertTrue(battle.on_fire_intent(intent))
-        self.assertEqual(
-            4250000, battle._player_fire_intents[(2, 3)]['aim_time_us'])
-
-    def test_worker_launch_forwards_the_admitted_aim_clock(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._start_message = {'round_id': 7}
-        battle._projectile_is_authority = lambda: True
-        battle._config = {'perfect_accuracy': True}
-        client = _Client()
-        client.authority_epoch = 4
-        client.send_projectile_launch = mock.Mock(
-            side_effect=lambda *args, **unused_kwargs: args[2])
-        battle.client = client
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        effective = _effective_params_snapshot(ammo=[[101, 40]])
-        battle._records = {'player:2': {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': {
-                'alive': True, 'shell_index': 0, 'speed': 0.0,
-                'turn': 0.0, 'effective_params': effective,
-            },
-        }}
-        gun = gun_mechanics.GunState(
-            descriptor, effective['loadout'], ammo_layout={101: 40})
-        gun.reload_time = 0.0
-        gun.clip = 1
-        gun._effective_params = effective
-        battle._player_authority_guns = {2: gun}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
-            'shot_origin': [4.0, 2.0, 8.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'aim_time_us': 4250000,
-        }
-
-        self.assertTrue(battle.on_fire_intent(intent))
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
-
-        call = client.send_projectile_launch.call_args
-        self.assertEqual(['player', 2, 5, 0], list(call.args[:4]))
-        self.assertEqual(4250000, call.kwargs['aim_time_us'])
 
     def test_worker_resolves_immediate_player_destructible_contact(self):
         battle = BattleRuntime(_runtime())
@@ -21190,7 +21002,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [4.0, 2.0, 8.0],
             'shot_direction': [0.6, 0.0, 0.8],
             'dispersion_angle': 0.02,
-            'aim_time_us': 0,
         }
 
         with mock.patch.object(
@@ -21271,7 +21082,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [4.0, 2.0, 8.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.02,
-            'aim_time_us': 0,
         }
 
         self.assertTrue(battle.on_fire_intent(intent))

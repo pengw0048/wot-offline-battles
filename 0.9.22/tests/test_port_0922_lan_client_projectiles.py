@@ -212,7 +212,6 @@ class ProjectileWireTests(unittest.TestCase):
             burst_group_seq=values.get('burst_group_seq'),
             burst_index=values.get('burst_index'),
             burst_count=values.get('burst_count'),
-            aim_time_us=values.get('aim_time_us'),
             launch_time_us=(values.get('launch_time_us', 100000)
                             if shooter_kind == 'bot' else None),
             launch_pose=(values.get(
@@ -269,43 +268,6 @@ class ProjectileWireTests(unittest.TestCase):
             message['burst_count']))
         self.assertEqual([1.0, 2.0, 3.0], message['origin'])
 
-    def test_player_launch_relays_only_a_supplied_player_aim_clock(self):
-        client = self.active_worker_client()
-
-        self.assertEqual(1, self.launch(
-            client, shot_seq=1, authority_epoch=4,
-            fire_intent_seq=1, fire_input_seq=1))
-        self.assertNotIn('aim_time_us', client._outbound_queue[-1][1])
-
-        self.assertEqual(2, self.launch(
-            client, shot_seq=2, authority_epoch=4,
-            fire_intent_seq=2, fire_input_seq=2, aim_time_us=940000))
-        self.assertEqual(
-            940000, wire_copy(client._outbound_queue[-1][1])['aim_time_us'])
-
-        # A shot admitted without a presented clock still relays the
-        # explicit zero the worker froze for it.
-        self.assertEqual(3, self.launch(
-            client, shot_seq=3, authority_epoch=4,
-            fire_intent_seq=3, fire_input_seq=3, aim_time_us=0))
-        self.assertEqual(
-            0, wire_copy(client._outbound_queue[-1][1])['aim_time_us'])
-
-        queued = len(client._outbound_queue)
-        # A Bot never aims at a presented client clock.
-        self.assertIsNone(self.launch(
-            client, 'bot', 17, 4, authority_epoch=4, aim_time_us=0))
-        self.assertIsNone(self.launch(
-            client, 'bot', 17, 4, authority_epoch=4, aim_time_us=940000))
-        for invalid in (-1, module.MAX_MOTION_TIME_US + 1, 940000.0,
-                        True, '940000'):
-            with self.subTest(aim_time_us=invalid):
-                self.assertIsNone(self.launch(
-                    client, shot_seq=4, authority_epoch=4,
-                    fire_intent_seq=4, fire_input_seq=4,
-                    aim_time_us=invalid))
-        self.assertEqual(queued, len(client._outbound_queue))
-
     def test_failed_fire_intent_enqueue_rolls_back_sequence(self):
         client = self.active_client()
         self.assertTrue(self.send_player_input(client))
@@ -335,7 +297,6 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
-            'aim_time_us',
         }, set(message))
         self.assertEqual('fire_intent', message['type'])
         self.assertEqual(2, message['intent_seq'])
@@ -343,35 +304,6 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual([1.0, 2.0, 3.0], message['shot_origin'])
         self.assertEqual([1.0, 0.0, 0.0], message['shot_direction'])
         self.assertEqual(0.02, message['dispersion_angle'])
-        self.assertEqual(0, message['aim_time_us'])
-
-    def test_fire_intent_carries_presented_aim_clock_or_zero(self):
-        client = self.active_client()
-        self.assertTrue(self.send_player_input(client))
-
-        self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01,
-            aim_time_us=940000))
-        message = wire_copy(client._outbound_queue[-1][1])
-        self.assertEqual(940000, message['aim_time_us'])
-        self.assertEqual(1, message['intent_seq'])
-
-        # No presented remote pose clock disables compensation for that
-        # shot with an explicit zero instead of guessing a rewind.
-        self.assertEqual(2, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, aim_time_us=None))
-        self.assertEqual(
-            0, wire_copy(client._outbound_queue[-1][1])['aim_time_us'])
-
-        queued = len(client._outbound_queue)
-        for invalid in (-1, module.MAX_MOTION_TIME_US + 1, 940000.0,
-                        True, '940000'):
-            with self.subTest(aim_time_us=invalid):
-                self.assertIsNone(client.send_fire_intent(
-                    2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01,
-                    aim_time_us=invalid))
-        self.assertEqual(queued, len(client._outbound_queue))
-        self.assertEqual(2, client._fire_intent_seq)
 
     def test_player_input_carries_one_atomic_queued_shell_selection(self):
         client = self.active_client()
@@ -635,7 +567,6 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
-            'aim_time_us',
         }, set(message))
 
     def test_progress_shape_is_exact_and_duplicate_ids_fail_closed(self):
@@ -1074,61 +1005,11 @@ class ProjectileWireTests(unittest.TestCase):
             'splash_radius': 0.0,
             'penetration_factor': 1.0,
             'launch_server_time_ms': 900,
-            'aim_time_us': 940000,
             'checked_through_ms': 50,
             'checked_distance': 5.0,
             'piercing_loss': 0.0,
             'authority_epoch': epoch,
         }
-
-    @staticmethod
-    def active_bot_projectile(epoch=2):
-        """One Bot ledger row, which never carries a presented aim clock."""
-        projectile = ProjectileWireTests.active_projectile(epoch)
-        del projectile['fire_intent_seq']
-        del projectile['fire_input_seq']
-        projectile.update({
-            'projectile_id': 'bot:17:1',
-            'shooter_kind': 'bot',
-            'shooter_id': 17,
-            'aim_time_us': 0,
-        })
-        return projectile
-
-    def client_after_ledger_snapshot(self, projectile):
-        client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
-        client.running = True
-        client._handle_message(self.welcome())
-        client.phase = 'battle'
-        client._handle_message({
-            'type': 'snapshot',
-            'protocol': module.PROTOCOL_VERSION,
-            'round_id': 3,
-            'server_tick': 10,
-            'bot_state_revision': 0,
-            'bot_authority_id': module.WORKER_AUTHORITY_ID,
-            'server_time_ms': 1000,
-            'authority_epoch': 2,
-            'projectile_revision': 1,
-            'projectiles': [projectile],
-            'bot_manifest': [],
-            'players': [{
-                'id': 7,
-                'input_seq': 0,
-                'up_cosine': 1.0,
-                'landing_observation_seq': 0,
-                'critical_revision': 0,
-                'critical_base_revision': 0,
-                'critical_ack_seq': 0,
-                'equipment_states': [],
-                'equipment_revision': 0,
-                'equipment_intent_seq': 0,
-                'equipment_intent_result': {
-                    'intent_seq': 0, 'accepted': False, 'reason': ''},
-            }],
-            'bots': [],
-        })
-        return client
 
     def test_snapshot_preserves_and_validates_ledger_then_failover_epoch(self):
         client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
@@ -1360,32 +1241,6 @@ class ProjectileWireTests(unittest.TestCase):
                     'players': [],
                     'bots': [],
                 })
-                self.assertTrue(client.running)
-                self.assertIsNone(client.last_error)
-                self.assertIsNone(client.last_snapshot)
-
-    def test_snapshot_ledger_binds_the_aim_clock_to_human_shots(self):
-        human = self.client_after_ledger_snapshot(self.active_projectile())
-        self.assertEqual(
-            940000, human.last_snapshot['projectiles'][0]['aim_time_us'])
-        bot = self.client_after_ledger_snapshot(
-            self.active_bot_projectile())
-        self.assertEqual(
-            0, bot.last_snapshot['projectiles'][0]['aim_time_us'])
-
-        missing = self.active_projectile()
-        del missing['aim_time_us']
-        invalid_projectiles = (
-            missing,
-            dict(self.active_projectile(), aim_time_us=-1),
-            dict(self.active_projectile(),
-                 aim_time_us=module.MAX_MOTION_TIME_US + 1),
-            dict(self.active_projectile(), aim_time_us=940000.0),
-            dict(self.active_bot_projectile(), aim_time_us=1),
-        )
-        for projectile in invalid_projectiles:
-            with self.subTest(aim_time_us=projectile.get('aim_time_us')):
-                client = self.client_after_ledger_snapshot(projectile)
                 self.assertTrue(client.running)
                 self.assertIsNone(client.last_error)
                 self.assertIsNone(client.last_snapshot)

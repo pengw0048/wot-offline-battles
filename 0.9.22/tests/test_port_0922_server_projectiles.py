@@ -13,7 +13,7 @@ sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import (  # noqa: E402
     BattleState, CLIENT_BUILD_082, CLIENT_BUILD_0922, ClientHandler,
-    MAX_LINE_BYTES, MAX_MOTION_TIME_US,
+    MAX_LINE_BYTES,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PREBATTLE_SECONDS,
     HUMAN_RAM_TIMELINE_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
@@ -116,7 +116,6 @@ def _fire_intent(state, player_id=1, **changes):
         'shot_origin': [player.x, player.y + 1.0, player.z],
         'shot_direction': [0.0, 0.0, 1.0],
         'dispersion_angle': 0.01,
-        'aim_time_us': 0,
     }
     message.update(changes)
     return message
@@ -209,7 +208,6 @@ def _launch_authority(state, message, before_launch=None):
             'shot_seq': relay['shot_seq'],
             'fire_intent_seq': intent_seq,
             'fire_input_seq': input_seq,
-            'aim_time_us': relay['aim_time_us'],
         })
     if callable(before_launch):
         before_launch()
@@ -1420,8 +1418,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             state, 1, x=3.25, y=1.5, z=-4.75, yaw=0.25,
             aim_yaw=-0.5, gun_pitch=0.125))
         message = _fire_intent(
-            state, 1, shot_origin=[3.25, 2.5, -4.75],
-            aim_time_us=1234567)
+            state, 1, shot_origin=[3.25, 2.5, -4.75])
 
         self.assertTrue(state.submit_fire_intent(1, message))
         self.assertEqual(1, len(relayed))
@@ -1439,9 +1436,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual([3.25, 2.5, -4.75], relay['shot_origin'])
         self.assertEqual([0.0, 0.0, 1.0], relay['shot_direction'])
         self.assertEqual(0.01, relay['dispersion_angle'])
-        # The trigger edge froze the motion-clock time of the remote poses
-        # this client was presenting, so the authority can rewind to it.
-        self.assertEqual(1234567, relay['aim_time_us'])
         self.assertEqual(0, relay['next_shell_index'])
         self.assertFalse(relay['shell_change_pending'])
         self.assertEqual(player.input_seq, relay['gun_checkpoint_seq'])
@@ -1461,12 +1455,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             origin=list(relay['shot_origin']), velocity=[100.0, 0.0, 0.0],
             authority_epoch=state.authority_epoch,
             fire_intent_seq=relay['intent_seq'],
-            fire_input_seq=relay['input_seq'],
-            aim_time_us=relay['aim_time_us'])
+            fire_input_seq=relay['input_seq'])
         self.assertTrue(state.launch_projectile(
             SIMULATION_WORKER_AUTHORITY_ID, launch))
-        self.assertEqual(
-            1234567, state.projectiles['1:p:1:1']['aim_time_us'])
 
     def test_player_fire_intent_survives_worker_stall_beyond_five_seconds(self):
         state = _state(players=1)
@@ -1485,170 +1476,13 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 velocity=[0.0, 0.0, 100.0],
                 authority_epoch=state.authority_epoch,
                 fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'],
-                aim_time_us=relay['aim_time_us'])))
+                fire_input_seq=relay['input_seq'])))
 
         projectile_id = state._projectile_id(1, 'player', 1, 1)
         self.assertNotIn(1, player.pending_fire_intents)
         self.assertEqual(
             (True, projectile_id), player.fire_intent_results[1])
         self.assertIn(projectile_id, state.projectiles)
-
-    def test_fire_intent_requires_an_exact_bounded_aim_clock(self):
-        state = _state(players=1)
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        missing = _fire_intent(state)
-        del missing['aim_time_us']
-
-        self.assertFalse(state.submit_fire_intent(1, missing))
-        for value in (None, -1, MAX_MOTION_TIME_US + 1, 1.0, True,
-                      '1000', [1000]):
-            with self.subTest(aim_time_us=value):
-                self.assertFalse(state.submit_fire_intent(
-                    1, _fire_intent(state, aim_time_us=value)))
-        self.assertFalse(player.pending_fire_intents)
-        self.assertEqual(0, player.fire_intent_seq)
-
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, aim_time_us=MAX_MOTION_TIME_US)))
-        self.assertEqual(
-            MAX_MOTION_TIME_US,
-            player.pending_fire_intents[1]['aim_time_us'])
-
-        # Zero is the legal "unknown presentation clock" value and simply
-        # disables compensation for that shot.
-        state = _state(players=1)
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, aim_time_us=0)))
-        self.assertEqual(
-            0, state.players[1].pending_fire_intents[1]['aim_time_us'])
-
-    def test_player_launch_must_replay_the_admitted_aim_clock(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, aim_time_us=4200000)))
-        relay = player.pending_fire_intents[1]
-        launch = _launch(
-            authority_epoch=state.authority_epoch,
-            fire_intent_seq=relay['intent_seq'],
-            fire_input_seq=relay['input_seq'])
-
-        # Rebinding the presentation clock would ask the authority to rewind
-        # its target poses to an instant this shooter never saw.
-        self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            dict(launch, aim_time_us=4200001)))
-        self.assertEqual(
-            'order', state.last_projectile_launch_reject_code)
-        self.assertEqual(
-            'player projectile aim clock does not match intent',
-            state.last_projectile_launch_reject)
-        self.assertFalse(state.projectiles)
-        self.assertIn(1, player.pending_fire_intents)
-
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            dict(launch, aim_time_us=4200000)))
-        self.assertEqual(
-            4200000, state.projectiles['1:p:1:1']['aim_time_us'])
-
-    def test_bot_launch_may_not_carry_a_presented_aim_clock(self):
-        state = _state()
-        state.bot_states[16] = {
-            'id': 16, 'team': 2, 'alive': True, 'fire_seq': 1,
-            'shell_index': 0, 'health': 1000, 'max_health': 1000,
-            'vehicle': 'ussr:R11_MS-1',
-            'x': 20.0, 'y': 0.0, 'z': 0.0,
-            'burst_active': False, 'burst_group_seq': 1,
-            'burst_count': 1, 'burst_next_index': 1,
-            'burst_interval': 0.0, 'burst_time_left': 0.0,
-            'burst_shell_index': 0,
-        }
-        state.bot_pending_projectile_launches.add((16, 1))
-        state.bot_pending_projectile_metadata[(16, 1)] = {
-            'burst_group_seq': 1, 'burst_index': 0,
-            'burst_count': 1, 'shell_index': 0,
-            'sample_start_us': 0, 'sample_end_us': 300000,
-            'launch_clock_offset_us':
-                state._server_time_ms() * 1000 - 300000,
-        }
-        launch = _launch(
-            shooter_id=16, shooter_kind='bot', shot_seq=1,
-            launch_time_us=300000, origin=[20.0, 1.0, 0.0],
-            burst_group_seq=1, burst_index=0, burst_count=1)
-
-        # Only a human trigger has a presented clock to rewind to; a bot
-        # launch that claimed one would move every target under its own
-        # authority poses.
-        self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            dict(launch, aim_time_us=4200000)))
-        self.assertEqual(
-            'bot launch has a player aim clock',
-            state.last_projectile_launch_reject)
-        self.assertFalse(state.projectiles)
-        self.assertIn((16, 1), state.bot_pending_projectile_launches)
-
-        self.assertTrue(_launch_authority(state, launch))
-        self.assertEqual(0, state.projectiles['1:b:16:1']['aim_time_us'])
-
-    def test_projectile_wire_echoes_the_aim_clock_for_players_only(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, aim_time_us=7500000)))
-        relay = player.pending_fire_intents[1]
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                authority_epoch=state.authority_epoch,
-                fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'],
-                aim_time_us=relay['aim_time_us'])))
-        state.bot_states[16] = {
-            'id': 16, 'team': 2, 'alive': True, 'fire_seq': 1,
-            'shell_index': 0, 'health': 1000, 'max_health': 1000,
-            'vehicle': 'ussr:R11_MS-1',
-            'x': 20.0, 'y': 0.0, 'z': 0.0,
-            'burst_active': False, 'burst_group_seq': 1,
-            'burst_count': 1, 'burst_next_index': 1,
-            'burst_interval': 0.0, 'burst_time_left': 0.0,
-            'burst_shell_index': 0,
-        }
-        state.bot_pending_projectile_launches.add((16, 1))
-        state.bot_pending_projectile_metadata[(16, 1)] = {
-            'burst_group_seq': 1, 'burst_index': 0,
-            'burst_count': 1, 'shell_index': 0,
-            'sample_start_us': 0, 'sample_end_us': 300000,
-            'launch_clock_offset_us':
-                state._server_time_ms() * 1000 - 300000,
-        }
-        self.assertTrue(_launch_authority(state, _launch(
-            shooter_id=16, shooter_kind='bot', shot_seq=1,
-            launch_time_us=300000, origin=[20.0, 1.0, 0.0],
-            burst_group_seq=1, burst_index=0, burst_count=1)))
-
-        # A bot shot is authored by the worker against poses it already
-        # owns, so its row carries no presentation clock to rewind to.
-        shot = next(event for event in state.pending_events
-                    if event.get('kind') == 'shot')
-        bot_shot = next(event for event in state.pending_events
-                        if event.get('kind') == 'bot_shot')
-        self.assertEqual(7500000, shot['aim_time_us'])
-        self.assertEqual(0, bot_shot['aim_time_us'])
-        snapshot = dict(
-            (row['projectile_id'], row['aim_time_us'])
-            for row in state._projectile_snapshot())
-        self.assertEqual(
-            {'1:p:1:1': 7500000, '1:b:16:1': 0}, snapshot)
-        ledger = dict(
-            (row['projectile_id'], row['aim_time_us'])
-            for row in state.current_battle_message()['projectiles'])
-        self.assertEqual(snapshot, ledger)
 
     def test_late_next_gun_checkpoint_is_kept_and_old_retry_cannot_replace_it(self):
         state = _state(players=1)
@@ -1697,8 +1531,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             SIMULATION_WORKER_AUTHORITY_ID, _launch(
                 authority_epoch=state.authority_epoch,
                 fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'],
-                aim_time_us=relay['aim_time_us'])))
+                fire_input_seq=relay['input_seq'])))
 
         self.assertEqual(1, player.shell_index)
         self.assertEqual(1, player.next_shell_index)
@@ -2001,7 +1834,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'shot_seq': relay['shot_seq'],
             'fire_intent_seq': relay['intent_seq'],
             'fire_input_seq': relay['input_seq'],
-            'aim_time_us': relay['aim_time_us'],
         })
         player.alive = False
         handler = object.__new__(ClientHandler)
@@ -2648,7 +2480,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     SIMULATION_WORKER_AUTHORITY_ID,
                     _ricochet('1:p:1:1', **changes)))
                 # The malformed ricochet still commits nothing: no segment,
-                # no cursor motion and no damage.  The shot it named cannot
+                # no cursor motion and no damage. The shot it named cannot
                 # stay live either, so it retires as an expired terminal.
                 self.assertEqual(0, record['ricochet_count'])
                 self.assertEqual(0, record['checked_through_ms'])
@@ -2680,7 +2512,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(50, record['checked_through_ms'])
 
         # The worker built this ricochet from an older echo of its own
-        # progress cursor.  Its cursors converge by monotonic frontier, so
+        # progress cursor. Its cursors converge by monotonic frontier, so
         # the older base is a delayed message, not a conflicting claim.
         self.assertTrue(state.ricochet_projectile(
             SIMULATION_WORKER_AUTHORITY_ID,
