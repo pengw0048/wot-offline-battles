@@ -20492,7 +20492,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         entity.showShooting = stock_show_shooting
 
-        self.assertTrue(battle.shoot(0.2, -0.1))
+        fire_output = io.StringIO()
+        with contextlib.redirect_stdout(fire_output):
+            self.assertTrue(battle.shoot(0.2, -0.1))
+        self.assertEqual(1, fire_output.getvalue().count(
+            'FIRE TRIGGER intent=1 input=1 shell=0'))
         self.assertEqual([], battle._avatar.dispersion_queries)
         self.assertEqual(1, battle._gun_state.clip)
         intent = next(item for item in client.sent
@@ -20616,7 +20620,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._avatar.gunRotator.turretYaw = 0.2
         battle._avatar.gunRotator.gunPitch = -0.1
 
-        self.assertFalse(battle.shoot(0.2, -0.1))
+        fire_output = io.StringIO()
+        with contextlib.redirect_stdout(fire_output):
+            self.assertFalse(battle.shoot(0.2, -0.1))
+        self.assertNotIn('FIRE TRIGGER', fire_output.getvalue())
         self.assertEqual([], battle._avatar.dispersion_queries)
         client.send_fire_intent.assert_called_once_with(
             0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0)
@@ -20752,6 +20759,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
             'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
             'shell_index': 0, 'next_shell_index': 0,
             'shell_change_pending': False,
             'gun_checkpoint_seq': 8,
@@ -20767,19 +20775,36 @@ class BattleRuntimeContractTests(unittest.TestCase):
             '_client_dispatch_delay': 0.01,
         }
 
-        self.assertTrue(battle.on_fire_intent(intent))
-        retry = dict(
-            intent, _client_received_time=10.5,
-            _client_dispatch_delay=0.02)
-        self.assertTrue(battle.on_fire_intent(retry))
+        output = io.StringIO()
+        with mock.patch.object(
+                battle_runtime_module, '_PROFILE_CLOCK', return_value=20.0), \
+                contextlib.redirect_stdout(output):
+            self.assertTrue(battle.on_fire_intent(intent))
+            retry = dict(
+                intent, _client_received_time=10.5,
+                _client_dispatch_delay=0.02)
+            self.assertTrue(battle.on_fire_intent(retry))
 
         stored = battle._player_fire_intents[(2, 3)]
         self.assertNotIn('_client_received_time', stored)
         self.assertNotIn('_client_dispatch_delay', stored)
         self.assertEqual(1, len(battle._player_fire_intents))
+        self.assertEqual(
+            20.0, battle._fire_timeline[(2, 3)]['received_wall'])
+        self.assertEqual(1, output.getvalue().count(
+            'FIRE INTENT RECEIVED player=2 intent=3'))
         with self.assertRaisesRegex(
                 RuntimeError, 'worker fire intent is malformed'):
             battle.on_fire_intent(dict(intent, unexpected='wire field'))
+        for invalid in (True, 1.0, -1,
+                        battle_runtime_module.lan_protocol.MAX_MOTION_TIME_US //
+                        1000 + 1):
+            with self.subTest(trigger_launch_time_ms=invalid), \
+                    self.assertRaisesRegex(
+                        RuntimeError, 'violates its contract'):
+                battle.on_fire_intent(dict(
+                    intent, intent_seq=4,
+                    trigger_launch_time_ms=invalid))
 
     def test_worker_fire_fast_path_revisits_older_intents_in_order(self):
         battle = BattleRuntime(_runtime())
@@ -20797,6 +20822,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
             'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
             'shell_index': 0, 'next_shell_index': 0,
             'shell_change_pending': False,
             'gun_checkpoint_seq': 8,
@@ -20837,6 +20863,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
             'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
             'shell_index': 0, 'next_shell_index': 0,
             'shell_change_pending': False,
             'gun_checkpoint_seq': 8,
@@ -20876,16 +20903,105 @@ class BattleRuntimeContractTests(unittest.TestCase):
             },
         }}
 
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.0))
         self.assertNotIn(key, battle._player_fire_intents)
         self.assertIn(key, battle._player_fire_intent_history)
         self.assertEqual(1, client.send_projectile_launch.call_count)
+        self.assertEqual(1, output.getvalue().count('FIRE LAUNCH'))
+        self.assertIn('path=frame_retry', output.getvalue())
 
         # The ordinary frame remains safe to call after the deferred intent
         # has been launched: no second canonical projectile is emitted.
         self.assertTrue(battle._advance_player_fire_authority(0.1, 10.1))
         self.assertEqual(1, client.send_projectile_launch.call_count)
         client.send_fire_intent_result.assert_not_called()
+
+    def test_worker_fast_path_preinstalls_and_advances_before_echo(self):
+        runtime = _runtime()
+        runtime.bigworld.now = 10.0
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._start_message = {'round_id': 7}
+        battle._config = {'perfect_accuracy': True}
+        client = _Client()
+        client.authority_epoch = 4
+        client.is_bot_authority = lambda: True
+        client.send_projectile_launch = mock.Mock(
+            side_effect=lambda *args, **unused_kwargs: args[2])
+        client.send_projectile_progress = mock.Mock(return_value=True)
+        battle.client = client
+        battle._projectiles = battle_runtime_module.InFlightProjectiles(
+            initial_time=10.0)
+        battle._projectile_epoch = 4
+        battle._projectile_server_time_ms = 1000
+        battle._projectile_server_local_time = 10.0
+        battle._next_projectile_progress_time = 10.0
+        descriptor = _Descriptor()
+        entity = _Vehicle(
+            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        battle._records = {'player:2': {
+            'engine_id': 11, 'network_id': 2, 'kind': 'player',
+            'local': False, 'ready': True, 'tombstone': False,
+            'state': {
+                'vehicle': 'ussr:R11_MS-1',
+                'alive': True, 'shell_index': 0,
+                'speed': 0.0, 'turn': 0.0,
+                'effective_params': _effective_params_snapshot(
+                    ammo=[[101, 40]]),
+            },
+        }}
+        intent = {
+            'type': 'fire_intent', 'round_id': 7,
+            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
+            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
+            'shell_index': 0, 'next_shell_index': 0,
+            'shell_change_pending': False,
+            'gun_checkpoint_seq': 8,
+            'gun_checkpoint': _human_gun_checkpoint(),
+            'aim_yaw': 0.2, 'gun_pitch': -0.1,
+            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
+            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
+            'shot_origin': [4.0, 2.0, 8.0],
+            'shot_direction': [0.0, 0.0, 1.0],
+            'dispersion_angle': 0.02,
+            'presentation_ledger': [],
+        }
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.assertTrue(battle.on_fire_intent(intent))
+            client.send_projectile_launch.assert_not_called()
+            self.assertTrue(battle.flush_admitted_player_fire_intents())
+
+        projectile_id = '7:p:2:5'
+        self.assertTrue(battle._projectiles.contains(projectile_id))
+        self.assertTrue(battle._projectile_meta[
+            projectile_id]['local_launch_pending'])
+        self.assertEqual(1, client.send_projectile_launch.call_count)
+        self.assertIn('path=poll', output.getvalue())
+
+        battle._projectile_record_poses = mock.Mock(return_value={})
+        battle._sample_projectile_positions = mock.Mock()
+        battle._prune_projectile_position_history = mock.Mock()
+        battle._build_projectile_spatial_bins = mock.Mock()
+        battle._clear_projectile_spatial_index = mock.Mock()
+        battle._projectile_chord = mock.Mock(return_value=None)
+        battle._projectile_terminal = mock.Mock(return_value=None)
+
+        self.assertTrue(battle._advance_projectiles(10.05))
+
+        client.send_projectile_progress.assert_called_once()
+        cursor = client.send_projectile_progress.call_args.args[1][0]
+        self.assertEqual(projectile_id, cursor['projectile_id'])
+        self.assertGreater(cursor['checked_through_ms'], 0)
 
     def test_worker_resolves_immediate_player_destructible_contact(self):
         battle = BattleRuntime(_runtime())
@@ -21822,6 +21938,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
             'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
             'shell_index': 0, 'next_shell_index': 0,
             'shell_change_pending': False,
             'gun_checkpoint_seq': 8,
@@ -21928,6 +22045,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
             'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'trigger_launch_time_ms': 900,
             'shell_index': 0, 'next_shell_index': 1,
             'shell_change_pending': True,
             'gun_checkpoint_seq': 8,
@@ -22013,6 +22131,66 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual({}, battle._player_fire_launch_pending)
         self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
+
+    def test_worker_fire_rejection_rolls_back_provisional_projectile(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        battle._start_message = {'round_id': 7}
+        battle._projectiles = battle_runtime_module.InFlightProjectiles()
+        projectile_id = '7:p:2:5'
+        self.assertTrue(battle._projectiles.launch(
+            projectile_id, (0.0, 1.0, 0.0), (10.0, 0.0, 0.0),
+            (0.0, -9.81, 0.0), 0.0, 10.0, 500.0))
+        battle._projectile_meta = {projectile_id: {
+            'projectile_id': projectile_id,
+            'manager_key': projectile_id,
+            'local_launch_pending': True,
+        }}
+        battle._player_fire_launch_pending = {2: {
+            'intent_seq': 3, 'input_seq': 4, 'shot_seq': 5,
+            'projectile_id': projectile_id,
+            'sent_at': 1.0, 'sent_wall': 2.0,
+        }}
+
+        self.assertTrue(battle.on_fire_intent_result({
+            'type': 'fire_intent_result', 'round_id': 7,
+            'player_id': 2, 'intent_seq': 3, 'accepted': False,
+            'reason': 'projectile_launch_rejected',
+        }))
+
+        self.assertFalse(battle._projectiles.contains(projectile_id))
+        self.assertNotIn(projectile_id, battle._projectile_meta)
+        self.assertEqual({}, battle._player_fire_launch_pending)
+        self.assertTrue(battle._projectiles.launch(
+            projectile_id, (0.0, 1.0, 0.0), (10.0, 0.0, 0.0),
+            (0.0, -9.81, 0.0), 0.0, 10.0, 500.0))
+
+    def test_worker_commit_timeline_uses_monotonic_process_clock(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        battle._clock = mock.Mock(return_value=999.0)
+        gun = types.SimpleNamespace(
+            shot_index=0, commit_fire=mock.Mock(return_value=True))
+        battle._player_authority_guns = {2: gun}
+        battle._player_fire_launch_pending = {2: {
+            'intent_seq': 3, 'input_seq': 4, 'shot_seq': 5,
+            'sent_at': 999.0, 'sent_wall': 10.0,
+        }}
+        output = io.StringIO()
+
+        with mock.patch.object(
+                battle_runtime_module, '_PROFILE_CLOCK', return_value=10.125), \
+                contextlib.redirect_stdout(output):
+            self.assertTrue(battle._accept_player_fire_commit({
+                'shooter_kind': 'player', 'shooter_id': 2,
+                'fire_intent_seq': 3, 'fire_input_seq': 4,
+                'shot_seq': 5, 'shell_index': 0,
+            }, {'engine_id': None}))
+
+        self.assertIn(
+            'FIRE COMMIT player=2 intent=3 shot_seq=5 '
+            'launch_to_commit_ms=125', output.getvalue())
+        battle._clock.assert_not_called()
 
     def test_server_shot_event_confirms_local_after_mailbox_returns(self):
         runtime = _runtime()

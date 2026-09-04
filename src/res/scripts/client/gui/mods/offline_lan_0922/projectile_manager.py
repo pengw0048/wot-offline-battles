@@ -223,8 +223,13 @@ class InFlightProjectiles(object):
         return total
 
     def launch(self, key, start, velocity, gravity, launch_time, max_time,
-               max_distance, payload=None):
-        """Freeze and register one unique launch, returning acceptance."""
+               max_distance, payload=None, admission_time=None):
+        """Freeze and register one unique launch, returning acceptance.
+
+        ``admission_time`` is an optional caller-owned clock horizon. It lets
+        an event received between two manager advances retain its exact launch
+        instant without advancing or skipping older projectiles first.
+        """
         try:
             frozen_key = _freeze_key(key)
             hash(frozen_key)
@@ -235,11 +240,14 @@ class InFlightProjectiles(object):
             frozen_max_time = _finite_number(max_time)
             frozen_max_distance = _finite_number(max_distance)
             frozen_payload = _safe_copy(payload)
+            horizon = self._admission_horizon(admission_time)
         except Exception:
+            return False
+        if horizon is None:
             return False
         if frozen_launch_time < 0.0:
             return False
-        if frozen_launch_time > self._now + _EPSILON:
+        if frozen_launch_time > horizon + _EPSILON:
             return False
         if frozen_max_time <= 0.0 or frozen_max_distance <= 0.0:
             return False
@@ -259,15 +267,116 @@ class InFlightProjectiles(object):
             self._install(state)
         return True
 
-    def restore(self, snapshot):
+    def restore(self, snapshot, admission_time=None):
         """Restore one active cursor from a detached takeover snapshot.
 
         The launch trajectory remains authoritative.  Any supplied ``position``
         or ``elapsed`` value is ignored and recomputed from ``cursor_time`` so a
         takeover cannot introduce a discontinuity or rescan an elapsed chord.
+        ``admission_time`` has the same bounded clock meaning as it does for
+        ``launch``.
         """
-        if self._advancing or not isinstance(snapshot, dict):
+        if self._advancing:
             return False
+        state = self._state_from_snapshot(snapshot, admission_time)
+        if state is None:
+            return False
+        if state.key in self._known_keys:
+            return False
+        if len(self) >= self._maximum_active:
+            return False
+
+        self._known_keys.add(state.key)
+        self._install(state)
+        return True
+
+    def rollback_provisional(self, key):
+        """Explicitly forget one locally provisional launch identity.
+
+        Unlike ``remove``, this releases the duplicate-launch fence so a
+        rejected provisional launch may reuse its server-assigned identity.
+        The operation also succeeds after the local projectile has already
+        reached a terminal state.  Callers must invoke this only while
+        reconciling a provisional launch with an authoritative rejection.
+        """
+        if self._advancing:
+            return False
+        try:
+            frozen_key = _freeze_key(key)
+            hash(frozen_key)
+        except Exception:
+            return False
+        if frozen_key not in self._known_keys:
+            return False
+
+        self._remove_active(frozen_key)
+        self._known_keys.discard(frozen_key)
+        return True
+
+    def replace_authoritative(self, snapshot, provisional_key=None,
+                              admission_time=None):
+        """Atomically replace a known provisional launch from a snapshot.
+
+        The entire detached snapshot is validated before the current active
+        state is touched. ``provisional_key`` may identify a different local
+        key when the canonical authority corrected the identity. A locally
+        terminal known identity may be restored, while an active replacement
+        retains its scheduling position. This is an explicit reconciliation
+        escape hatch and never releases the canonical duplicate-launch fence.
+        """
+        if self._advancing:
+            return False
+        state = self._state_from_snapshot(snapshot, admission_time)
+        if state is None:
+            return False
+        try:
+            old_key = _freeze_key(
+                state.key if provisional_key is None else provisional_key)
+            hash(old_key)
+        except Exception:
+            return False
+        if old_key not in self._known_keys:
+            return False
+        if state.key != old_key and state.key in self._known_keys:
+            return False
+        replacing_active = old_key in self._states
+        if not replacing_active and len(self) >= self._maximum_active:
+            return False
+
+        if replacing_active and state.key == old_key:
+            self._states[state.key] = state
+        elif replacing_active:
+            try:
+                order_index = self._order.index(old_key)
+            except ValueError:
+                return False
+            if old_key not in self._round_robin:
+                return False
+            replacement_queue = deque(
+                state.key if key == old_key else key
+                for key in self._round_robin)
+            del self._states[old_key]
+            self._states[state.key] = state
+            self._order[order_index] = state.key
+            self._round_robin = replacement_queue
+        else:
+            self._install(state)
+        self._known_keys.discard(old_key)
+        self._known_keys.add(state.key)
+        return True
+
+    def _admission_horizon(self, admission_time):
+        if admission_time is None:
+            return self._now
+        horizon = _finite_number(admission_time)
+        if horizon + _EPSILON < self._now:
+            return None
+        return horizon
+
+    def _state_from_snapshot(self, snapshot, admission_time=None):
+        """Validate and detach a restore/replace snapshot without mutation."""
+        if not isinstance(snapshot, dict):
+            return None
         try:
             frozen_key = _freeze_key(snapshot['key'])
             hash(frozen_key)
@@ -280,37 +389,37 @@ class InFlightProjectiles(object):
             frozen_cursor_time = _finite_number(snapshot['cursor_time'])
             frozen_distance = _finite_number(snapshot['distance'])
             frozen_payload = _safe_copy(snapshot.get('payload'))
+            horizon = self._admission_horizon(admission_time)
         except Exception:
-            return False
+            return None
+        if horizon is None:
+            return None
         if frozen_launch_time < 0.0:
-            return False
+            return None
         if frozen_max_time <= 0.0 or frozen_max_distance <= 0.0:
-            return False
+            return None
         if frozen_cursor_time < frozen_launch_time:
-            return False
-        if frozen_cursor_time > self._now:
-            return False
+            return None
+        if frozen_cursor_time > horizon:
+            return None
         if frozen_cursor_time > frozen_launch_time + frozen_max_time:
-            return False
+            return None
         if frozen_distance < 0.0 or frozen_distance > frozen_max_distance:
-            return False
-        if frozen_key in self._known_keys:
-            return False
-        if len(self) >= self._maximum_active:
-            return False
+            return None
 
-        state = _ProjectileState(
-            frozen_key, frozen_start, frozen_velocity, frozen_gravity,
-            frozen_launch_time, frozen_max_time, frozen_max_distance,
-            frozen_payload, self._maximum_substep)
-        state.cursor_time = frozen_cursor_time
-        state.position = trajectory_position(
-            state.start, state.velocity, state.gravity,
-            state.cursor_time - state.launch_time)
-        state.distance = frozen_distance
-        self._known_keys.add(frozen_key)
-        self._install(state)
-        return True
+        try:
+            state = _ProjectileState(
+                frozen_key, frozen_start, frozen_velocity, frozen_gravity,
+                frozen_launch_time, frozen_max_time, frozen_max_distance,
+                frozen_payload, self._maximum_substep)
+            state.cursor_time = frozen_cursor_time
+            state.position = trajectory_position(
+                state.start, state.velocity, state.gravity,
+                state.cursor_time - state.launch_time)
+            state.distance = frozen_distance
+        except Exception:
+            return None
+        return state
 
     def remove(self, key):
         """Retire a projectile without a terminal callback."""

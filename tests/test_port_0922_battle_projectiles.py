@@ -10,6 +10,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SCRIPTS = ROOT / 'src' / 'res' / 'scripts' / 'client'
+SERVER_SCRIPTS = ROOT / 'server'
+sys.path.insert(0, str(SERVER_SCRIPTS))
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922.battle_runtime import (
@@ -19,6 +21,7 @@ from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
 from gui.mods.offline_lan_0922.projectile_manager import InFlightProjectiles
 from gui.mods.offline_lan_0922 import combat_rules, critical_damage
 from gui.mods.offline_lan_0922 import lan_client
+import lan_battle_server as server_runtime
 
 
 class _Vector(object):
@@ -287,6 +290,90 @@ def _event():
 
 
 class BattleProjectileTests(unittest.TestCase):
+    def _preinstalled_high_precision_player_projectile(self):
+        battle, unused_bigworld = _battle(now=10.0)
+        battle._worker_mode = True
+        battle._start_message = {'round_id': 9}
+        battle._projectile_server_time_ms = 5000
+        battle._projectile_server_local_time = 10.0
+        record = battle._records['player:7']
+        record['state']['vehicle'] = 'ussr:R11_MS-1'
+        intent = {
+            'player_id': 7, 'intent_seq': 5, 'shot_seq': 3,
+            'input_seq': 11, 'shell_index': 2,
+            'x': 10.123456789, 'y': 20.234567891, 'z': 30.345678912,
+            'trigger_launch_time_ms': 5000,
+        }
+        origin = (1.123456789, 2.234567891, 3.345678912)
+        velocity = (0.0, 0.0, 100.123456789)
+        source_shot = {
+            'speed': 100.123456789,
+            'gravity': 9.876543219,
+            'maxDistance': 720.123456789,
+            'piercingPower': [201.123456789, 189.987654321],
+            'deadeye': True,
+            'shell': {
+                'kind': 'ARMOR_PIERCING',
+                'caliber': 75.123456789,
+                'damage': [110.123456789, 45.987654321],
+                'explosionRadius': 0.0,
+            },
+        }
+        projectile_id = battle._preinstall_player_projectile(
+            intent, record, origin, velocity,
+            9.876543219, 720.123456789, 20000, False, 0.0,
+            1.234567891, source_shot, 10.0)
+        self.assertEqual('9:p:7:3', projectile_id)
+
+        # This is the event shape produced after the server applies its
+        # six-decimal vector, projectile-law and scalar wire contract.
+        echo = _event()
+        echo.update({
+            'projectile_id': '9:p:7:3',
+            'shooter_kind': 'player',
+            'shooter_id': 7,
+            'source_vehicle': 'ussr:R11_MS-1',
+            'source_shot': {
+                'speed': 100.123457,
+                'gravity': 9.876543,
+                'maxDistance': 720.123457,
+                'piercingPower': [201.123457, 189.987654],
+                'deadeye': True,
+                'shell': {
+                    'kind': 'ARMOR_PIERCING',
+                    'caliber': 75.123457,
+                    'damage': [110.123457, 45.987654],
+                    'explosionRadius': 0.0,
+                },
+            },
+            'shot_seq': 3,
+            'burst_group_seq': 3,
+            'burst_index': 0,
+            'burst_count': 1,
+            'shell_index': 2,
+            'fire_intent_seq': 5,
+            'fire_input_seq': 11,
+            'origin': [1.123457, 2.234568, 3.345679],
+            'velocity': [0.0, 0.0, 100.123457],
+            'range_origin': [10.123457, 20.234568, 30.345679],
+            'segment_origin': [1.123457, 2.234568, 3.345679],
+            'segment_velocity': [0.0, 0.0, 100.123457],
+            'segment_start_time_ms': 0,
+            'ricochet_count': 0,
+            'base_penetration_multiplier': 1.0,
+            'gravity': 9.876543,
+            'maxDistance': 720.123457,
+            'max_time_ms': 20000,
+            'is_he': False,
+            'splash_radius': 0.0,
+            'penetration_factor': 1.234568,
+            'launch_server_time_ms': 5000,
+            'authority_epoch': 1,
+        })
+        canonical = battle._projectile_wire_meta(echo)
+        self.assertIsNotNone(canonical)
+        return battle, echo, canonical
+
     def _vehicle_chord_battle(self, shooter_kind='player', target_kind='bot',
                               shell_kind='ARMOR_PIERCING'):
         battle, bigworld = _battle()
@@ -335,6 +422,565 @@ class BattleProjectileTests(unittest.TestCase):
                      '_send_splash_hit', '_critical_hit', '_shell_damage'):
             with self.subTest(name=name):
                 self.assertFalse(hasattr(BattleRuntime, name))
+
+    def test_round_projectile_ids_match_server_player_and_bot_formats(self):
+        self.assertEqual(
+            '12:p:34:56',
+            BattleRuntime._projectile_id_for_round(
+                12, 'player', 34, 56))
+        self.assertEqual(
+            '12:b:34:56',
+            BattleRuntime._projectile_id_for_round(
+                12, 'bot', 34, 56))
+
+    def test_provisional_launch_between_manager_and_now_keeps_true_age(self):
+        battle, unused_bigworld = _battle(now=10.0)
+        battle._worker_mode = True
+        battle._start_message = {'round_id': 9}
+        battle._projectile_server_time_ms = 5000
+        battle._projectile_server_local_time = 10.0
+        battle._records['player:7']['state']['vehicle'] = 'ussr:R11_MS-1'
+        intent = {
+            'player_id': 7, 'intent_seq': 1, 'shot_seq': 1,
+            'input_seq': 1, 'shell_index': 0,
+            'x': 0.0, 'y': 0.0, 'z': 0.0,
+            'trigger_launch_time_ms': 5062,
+        }
+        event = _event()
+        admission_now = 10.125
+        expected_launch = battle._projectile_local_launch_time(
+            intent['trigger_launch_time_ms'], admission_now)
+
+        self.assertGreater(expected_launch, battle._projectiles.now)
+        self.assertLess(expected_launch, admission_now)
+        projectile_id = battle._preinstall_player_projectile(
+            intent, battle._records['player:7'], event['origin'],
+            event['velocity'], event['gravity'], event['maxDistance'],
+            event['max_time_ms'], event['is_he'], event['splash_radius'],
+            event['penetration_factor'], event['source_shot'], admission_now)
+
+        state = battle._projectiles.get(projectile_id)
+        self.assertAlmostEqual(expected_launch, state['launch_time'])
+        self.assertAlmostEqual(expected_launch, state['cursor_time'])
+        self.assertAlmostEqual(10.0, battle._projectiles.now)
+
+        chords = []
+        terminal = mock.Mock()
+        self.assertTrue(battle._projectiles.advance(
+            admission_now,
+            lambda unused_state, unused_start, unused_end,
+            absolute_start, absolute_end: chords.append(
+                (absolute_start, absolute_end)),
+            terminal))
+
+        self.assertTrue(chords)
+        self.assertAlmostEqual(expected_launch, chords[0][0])
+        self.assertAlmostEqual(admission_now, chords[-1][1])
+        self.assertAlmostEqual(
+            admission_now - expected_launch,
+            sum(end - start for start, end in chords))
+        state = battle._projectiles.get(projectile_id)
+        self.assertAlmostEqual(
+            admission_now - expected_launch, state['elapsed'])
+        terminal.assert_not_called()
+
+    def test_half_even_player_preinstall_matches_real_server_echo(self):
+        half_even_edge = 0.0078125
+        launch_server_time_ms = 15000
+        source_shot = {
+            'speed': 100.0,
+            'gravity': 9.81,
+            'maxDistance': 1000.0,
+            'piercingPower': [220.0, 200.0],
+            'deadeye': False,
+            'shell': {
+                'kind': 'ARMOR_PIERCING',
+                'caliber': 105.0,
+                'damage': [390.0, 150.0],
+                'explosionRadius': 0.0,
+            },
+        }
+        intent = {
+            'player_id': 7, 'intent_seq': 5, 'shot_seq': 3,
+            'input_seq': 11, 'shell_index': 0,
+            'x': half_even_edge, 'y': 0.0, 'z': 0.0,
+            'trigger_launch_time_ms': launch_server_time_ms,
+        }
+        origin = (half_even_edge, 1.0, 0.0)
+        velocity = (100.0, 0.0, 0.0)
+        battle, unused_bigworld = _battle(now=10.0)
+        battle._worker_mode = True
+        battle._start_message = {'round_id': 9}
+        battle._projectile_server_time_ms = launch_server_time_ms
+        battle._projectile_server_local_time = 10.0
+        battle._records['player:7']['state']['vehicle'] = 'ussr:R11_MS-1'
+
+        projectile_id = battle._preinstall_player_projectile(
+            intent, battle._records['player:7'], origin, velocity,
+            source_shot['gravity'], source_shot['maxDistance'], 10000,
+            False, 0.0, 1.0, source_shot, 10.0)
+        self.assertEqual('9:p:7:3', projectile_id)
+
+        server = server_runtime.BattleState(map_name='04_himmelsdorf')
+        server.client_build = server_runtime.CLIENT_BUILD_0922
+        server.phase = 'battle'
+        server.tick = int(round(
+            server_runtime.PREBATTLE_SECONDS * server_runtime.TICK_HZ))
+        server.round_id = 9
+        server.authority_epoch = 1
+        server.bot_authority_id = (
+            server_runtime.SIMULATION_WORKER_AUTHORITY_ID)
+        server.simulation_worker = server_runtime.SimulationWorker(
+            mock.Mock(), ('127.0.0.1', 28782))
+        player = server_runtime.Player(
+            7, mock.Mock(), ('127.0.0.1', 7),
+            vehicle='ussr:R11_MS-1', team=1)
+        player.fire_seq = 2
+        player.pending_fire_intents[5] = {
+            'shot_seq': 3, 'input_seq': 11,
+            'trigger_launch_time_ms': launch_server_time_ms,
+            'x': half_even_edge, 'y': 0.0, 'z': 0.0,
+        }
+        server.players[7] = player
+        launch = {
+            'type': 'projectile_launch', 'round_id': 9,
+            'authority_epoch': 1,
+            'shooter_kind': 'player', 'shooter_id': 7,
+            'shot_seq': 3, 'shell_index': 0,
+            'fire_intent_seq': 5, 'fire_input_seq': 11,
+            'burst_group_seq': 3, 'burst_index': 0, 'burst_count': 1,
+            'origin': list(origin), 'velocity': list(velocity),
+            'gravity': source_shot['gravity'],
+            'max_distance': source_shot['maxDistance'],
+            'max_time_ms': 10000, 'is_he': False,
+            'splash_radius': 0.0, 'penetration_factor': 1.0,
+            'source_shot': source_shot,
+        }
+
+        self.assertTrue(server.launch_projectile(
+            server_runtime.SIMULATION_WORKER_AUTHORITY_ID, launch))
+        echo = server.pending_events[-1]
+        self.assertEqual(0.007812, echo['origin'][0])
+        self.assertEqual(0.007812, echo['range_origin'][0])
+        canonical = battle._projectile_wire_meta(echo)
+        provisional = battle._projectile_meta[projectile_id]
+        self.assertEqual(
+            canonical,
+            dict((name, provisional[name]) for name in canonical))
+        self.assertEqual(
+            (), battle._projectile_launch_mismatches(
+                provisional, canonical))
+
+    def test_empty_snapshot_preserves_terminal_provisional_until_echo(self):
+        battle, echo, canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = canonical['projectile_id']
+        self.assertTrue(battle._projectiles.advance(
+            10.05,
+            lambda unused_state, unused_start, unused_end,
+            unused_absolute_start, unused_absolute_end: {
+                'reason': 'max_distance', 'fraction': 1.0},
+            battle._projectile_terminal))
+        pending = battle._projectile_meta[projectile_id][
+            'pending_resolution']
+
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [], 'projectile_revision': 1,
+        }))
+
+        self.assertIs(
+            pending,
+            battle._projectile_meta[projectile_id]['pending_resolution'])
+        self.assertTrue(
+            battle._projectile_meta[projectile_id][
+                'local_launch_pending'])
+        self.assertEqual([], battle.client.resolutions)
+
+        self.assertTrue(battle._accept_projectile_event(echo))
+        self.assertTrue(battle._accept_projectile_event(dict(echo)))
+        self.assertEqual(1, len(battle.client.resolutions))
+        self.assertNotIn(
+            'local_launch_pending', battle._projectile_meta[projectile_id])
+
+    def test_rejected_terminal_provisional_releases_snapshot_reuse_fence(self):
+        battle, echo, canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = canonical['projectile_id']
+        battle._player_fire_launch_pending[7] = {
+            'intent_seq': 5, 'projectile_id': projectile_id,
+        }
+        self.assertTrue(battle._projectiles.advance(
+            10.05,
+            lambda unused_state, unused_start, unused_end,
+            unused_absolute_start, unused_absolute_end: {
+                'reason': 'max_distance', 'fraction': 1.0},
+            battle._projectile_terminal))
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [], 'projectile_revision': 1,
+        }))
+        self.assertIn(projectile_id, battle._projectile_meta)
+
+        with mock.patch.object(sys, 'stdout', io.StringIO()):
+            self.assertTrue(battle.on_fire_intent_result({
+                'type': 'fire_intent_result', 'round_id': 9,
+                'player_id': 7, 'intent_seq': 5,
+                'accepted': False, 'reason': 'projectile_launch_rejected',
+            }))
+
+        self.assertNotIn(projectile_id, battle._projectile_meta)
+        self.assertNotIn(7, battle._player_fire_launch_pending)
+        self.assertFalse(battle._projectiles.contains(projectile_id))
+        range_origin = echo['range_origin']
+        retry_intent = {
+            'player_id': 7,
+            'intent_seq': echo['fire_intent_seq'],
+            'shot_seq': echo['shot_seq'],
+            'input_seq': echo['fire_input_seq'],
+            'shell_index': echo['shell_index'],
+            'x': range_origin[0], 'y': range_origin[1],
+            'z': range_origin[2],
+            'trigger_launch_time_ms': echo['launch_server_time_ms'],
+        }
+        reused_id = battle._preinstall_player_projectile(
+            retry_intent, battle._records['player:7'], echo['origin'],
+            echo['velocity'], echo['gravity'], echo['maxDistance'],
+            echo['max_time_ms'], echo['is_he'], echo['splash_radius'],
+            echo['penetration_factor'], echo['source_shot'], 10.05)
+
+        self.assertEqual(projectile_id, reused_id)
+        self.assertTrue(battle._projectiles.contains(projectile_id))
+        self.assertTrue(
+            battle._projectile_meta[projectile_id][
+                'local_launch_pending'])
+
+    def test_high_precision_player_preinstall_matches_canonical_echo(self):
+        battle, echo, canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = canonical['projectile_id']
+        provisional = battle._projectile_meta[projectile_id]
+
+        self.assertEqual(
+            canonical,
+            dict((name, provisional[name]) for name in canonical))
+        self.assertEqual(
+            (), battle._projectile_launch_mismatches(
+                provisional, canonical))
+        manager_before = battle._projectiles.get(projectile_id)
+        self.assertIsNotNone(manager_before)
+
+        with mock.patch.object(
+                battle._projectiles, 'launch',
+                wraps=battle._projectiles.launch) as launch:
+            self.assertTrue(battle._accept_projectile_event(echo))
+            self.assertTrue(battle._accept_projectile_event(dict(echo)))
+
+        launch.assert_not_called()
+        self.assertEqual(1, len(battle._projectiles))
+        self.assertEqual(
+            manager_before, battle._projectiles.get(projectile_id))
+        self.assertNotIn(
+            'local_launch_pending', battle._projectile_meta[projectile_id])
+
+    def test_matching_snapshot_advances_provisional_manager_cursor(self):
+        battle, echo, unused_canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = echo['projectile_id']
+        echo.update({
+            'checked_through_ms': 100,
+            'checked_distance': 10.0,
+        })
+        battle._runtime.bigworld.now = 10.1
+
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [echo], 'projectile_revision': 1,
+        }))
+
+        state = battle._projectiles.get(projectile_id)
+        self.assertAlmostEqual(10.1, state['cursor_time'])
+        self.assertEqual(10.0, state['distance'])
+        meta = battle._projectile_meta[projectile_id]
+        self.assertEqual(100, meta['base_checked_ms'])
+        self.assertNotIn('local_launch_pending', meta)
+
+    def test_matching_older_snapshot_does_not_rewind_provisional_cursor(self):
+        battle, echo, unused_canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = echo['projectile_id']
+        self.assertTrue(battle._projectiles.advance(
+            10.15,
+            lambda unused_state, unused_start, unused_end,
+            unused_absolute_start, unused_absolute_end: None,
+            mock.Mock()))
+        before = battle._projectiles.get(projectile_id)
+        echo.update({
+            'checked_through_ms': 100,
+            'checked_distance': 10.0,
+        })
+        battle._runtime.bigworld.now = 10.2
+
+        with mock.patch.object(
+                battle._projectiles, 'replace_authoritative',
+                wraps=battle._projectiles.replace_authoritative) as replace:
+            self.assertTrue(battle._reconcile_projectile_snapshot({
+                'projectiles': [echo], 'projectile_revision': 1,
+            }))
+
+        replace.assert_not_called()
+        self.assertEqual(before, battle._projectiles.get(projectile_id))
+        self.assertNotIn(
+            'local_launch_pending', battle._projectile_meta[projectile_id])
+
+    def test_invalid_matching_snapshot_preserves_provisional_state(self):
+        battle, echo, unused_canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = echo['projectile_id']
+        before_manager = battle._projectiles.get(projectile_id)
+        before_meta = dict(battle._projectile_meta[projectile_id])
+        echo.update({
+            'checked_through_ms': 100,
+            'checked_distance': echo['maxDistance'] + 1.0,
+        })
+        battle._runtime.bigworld.now = 10.1
+
+        output = io.StringIO()
+        with mock.patch.object(sys, 'stdout', output):
+            self.assertTrue(battle._reconcile_projectile_snapshot({
+                'projectiles': [echo], 'projectile_revision': 1,
+            }))
+
+        self.assertEqual(
+            before_manager, battle._projectiles.get(projectile_id))
+        self.assertEqual(before_meta, battle._projectile_meta[projectile_id])
+        self.assertIn(
+            'stage=canonical_snapshot reason=takeover_rejected',
+            output.getvalue())
+
+    def test_canonical_echo_replaces_mismatched_provisional_launch(self):
+        replacements = (
+            ('origin', {
+                'origin': [4.123457, 5.234568, 6.345679],
+                'segment_origin': [4.123457, 5.234568, 6.345679],
+            }),
+            ('velocity', {
+                'velocity': [100.123457, 0.0, 0.0],
+                'segment_velocity': [100.123457, 0.0, 0.0],
+            }),
+            ('launch_server_time_ms', {
+                'launch_server_time_ms': 4900,
+            }),
+        )
+        for mismatch_name, replacement in replacements:
+            with self.subTest(field=mismatch_name):
+                battle, echo, unused_canonical = (
+                    self._preinstalled_high_precision_player_projectile())
+                projectile_id = echo['projectile_id']
+                previous = battle._projectiles.get(projectile_id)
+                echo.update(replacement)
+                canonical = battle._projectile_wire_meta(echo)
+                self.assertIsNotNone(canonical)
+                written = []
+
+                with mock.patch.object(sys, 'stdout') as stdout:
+                    stdout.write = written.append
+                    self.assertTrue(battle._accept_projectile_event(echo))
+
+                current = battle._projectiles.get(projectile_id)
+                self.assertIsNotNone(current)
+                self.assertEqual(1, len(battle._projectiles))
+                self.assertNotEqual(previous, current)
+                self.assertEqual(
+                    canonical,
+                    dict((name, battle._projectile_meta[
+                        projectile_id][name]) for name in canonical))
+                if mismatch_name == 'origin':
+                    self.assertEqual(tuple(echo['origin']), current['start'])
+                elif mismatch_name == 'velocity':
+                    self.assertEqual(
+                        tuple(echo['velocity']), current['velocity'])
+                else:
+                    self.assertEqual(4900, battle._projectile_meta[
+                        projectile_id]['launch_server_time_ms'])
+                    self.assertAlmostEqual(9.9, current['launch_time'])
+                failure = ''.join(written)
+                self.assertIn('PROJECTILE FAILURE', failure)
+                self.assertIn(
+                    'stage=canonical_echo reason=launch_mismatch', failure)
+                self.assertIn('error=%s' % mismatch_name, failure)
+
+    def test_invalid_canonical_replacement_preserves_provisional_state(self):
+        battle, echo, unused_canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = echo['projectile_id']
+        before_manager = battle._projectiles.get(projectile_id)
+        before_meta = dict(battle._projectile_meta[projectile_id])
+        before_terminal = dict(battle._projectile_terminal_data)
+        echo.update({
+            'origin': [4.123457, 5.234568, 6.345679],
+            'segment_origin': [4.123457, 5.234568, 6.345679],
+            'checked_distance': echo['maxDistance'] + 1.0,
+        })
+
+        output = io.StringIO()
+        with mock.patch.object(sys, 'stdout', output):
+            self.assertFalse(battle._accept_projectile_event(echo))
+
+        self.assertEqual(
+            before_manager, battle._projectiles.get(projectile_id))
+        self.assertEqual(
+            before_meta, battle._projectile_meta[projectile_id])
+        self.assertEqual(before_terminal, battle._projectile_terminal_data)
+        self.assertIn(
+            'stage=canonical_echo reason=replacement_rejected',
+            output.getvalue())
+
+    def test_mismatched_echo_replaces_terminal_provisional_without_submission(self):
+        battle, echo, unused_canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = echo['projectile_id']
+        self.assertTrue(battle._projectiles.advance(
+            10.05,
+            lambda unused_state, unused_start, unused_end,
+            unused_absolute_start, unused_absolute_end: {
+                'reason': 'max_distance', 'fraction': 1.0},
+            battle._projectile_terminal))
+        self.assertIsNotNone(
+            battle._projectile_meta[projectile_id].get(
+                'pending_resolution'))
+        echo.update({
+            'origin': [4.123457, 5.234568, 6.345679],
+            'segment_origin': [4.123457, 5.234568, 6.345679],
+        })
+        battle._runtime.bigworld.now = 10.05
+
+        output = io.StringIO()
+        with mock.patch.object(sys, 'stdout', output):
+            self.assertTrue(battle._accept_projectile_event(echo))
+
+        state = battle._projectiles.get(projectile_id)
+        self.assertIsNotNone(state)
+        self.assertEqual(tuple(echo['origin']), state['start'])
+        meta = battle._projectile_meta[projectile_id]
+        self.assertNotIn('local_launch_pending', meta)
+        self.assertNotIn('pending_resolution', meta)
+        self.assertEqual([], battle.client.resolutions)
+        self.assertIn(
+            'stage=canonical_echo reason=launch_mismatch',
+            output.getvalue())
+
+    def test_provisional_terminal_waits_for_matching_canonical_echo(self):
+        battle, echo, canonical = (
+            self._preinstalled_high_precision_player_projectile())
+        projectile_id = canonical['projectile_id']
+
+        self.assertTrue(battle._projectiles.advance(
+            10.05,
+            lambda unused_state, unused_start, unused_end,
+            unused_absolute_start, unused_absolute_end: {
+                'reason': 'max_distance', 'fraction': 1.0},
+            battle._projectile_terminal))
+
+        self.assertFalse(battle._projectiles.contains(projectile_id))
+        self.assertEqual([], battle.client.resolutions)
+        provisional = battle._projectile_meta[projectile_id]
+        self.assertTrue(provisional['local_launch_pending'])
+        self.assertIsNotNone(provisional.get('pending_resolution'))
+
+        with mock.patch.object(
+                battle._projectiles, 'launch',
+                wraps=battle._projectiles.launch) as launch:
+            self.assertTrue(battle._accept_projectile_event(echo))
+            self.assertEqual(1, len(battle.client.resolutions))
+            self.assertTrue(battle._accept_projectile_event(dict(echo)))
+
+        launch.assert_not_called()
+        self.assertFalse(battle._projectiles.contains(projectile_id))
+        self.assertEqual(1, len(battle.client.resolutions))
+        self.assertNotIn(
+            'local_launch_pending', battle._projectile_meta[projectile_id])
+
+    def test_bot_launch_waits_for_canonical_echo_before_manager_install(self):
+        battle, unused_bigworld = _battle(now=0.0)
+        battle._worker_mode = True
+        battle._start_message = {'round_id': 9}
+        shell = types.SimpleNamespace(
+            kind='ARMOR_PIERCING', caliber=75.0,
+            damage=(110.0, 45.0), explosionRadius=0.0)
+        shot = types.SimpleNamespace(
+            speed=100.0, gravity=9.8, maxDistance=720.0,
+            piercingPower=(200.0, 180.0), shell=shell)
+        source = types.SimpleNamespace(
+            id=77, isStarted=True,
+            typeDescriptor=types.SimpleNamespace(
+                gun=types.SimpleNamespace(shots=(shot,))))
+        battle._records = {'bot:11': {
+            'engine_id': 77, 'network_id': 11, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {
+                'vehicle': 'ussr:R11_MS-1',
+                'health': 100, 'alive': True,
+            },
+        }}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 77 else None)
+        state = {
+            'id': 11, 'shell_index': 0,
+            'shot_yaw': 0.0, 'shot_pitch': 0.0,
+            'shot_origin': (1.0, 3.0, 3.0),
+            'burst_group_seq': 1, 'burst_index': 0, 'burst_count': 1,
+            'launch_time_us': 0,
+            'launch_pose': (1.0, 2.0, 3.0, 0.0, 0.0, 0.0),
+            'profile': {'class_tag': 'mediumTank'},
+        }
+        projectile_id = '9:b:11:1'
+
+        with mock.patch.object(
+                battle._projectiles, 'launch',
+                wraps=battle._projectiles.launch) as launch:
+            self.assertTrue(battle._launch_bot_projectile(state, 1))
+            launch.assert_not_called()
+            self.assertNotIn(projectile_id, battle._projectile_meta)
+            self.assertFalse(battle._projectiles.contains(projectile_id))
+
+            args, kwargs = battle.client.launches[-1]
+            echo = _event()
+            echo.update({
+                'kind': 'bot_shot',
+                'attacker_bot': 11,
+                'projectile_id': projectile_id,
+                'shooter_kind': 'bot',
+                'shooter_id': 11,
+                'source_vehicle': 'ussr:R11_MS-1',
+                'source_shot': kwargs['source_shot'],
+                'shot_seq': 1,
+                'burst_group_seq': 1,
+                'burst_index': 0,
+                'burst_count': 1,
+                'shell_index': 0,
+                'origin': args[4],
+                'velocity': args[5],
+                'range_origin': [1.0, 2.0, 3.0],
+                'segment_origin': args[4],
+                'segment_velocity': args[5],
+                'gravity': args[6],
+                'maxDistance': args[7],
+                'max_time_ms': args[8],
+                'is_he': args[9],
+                'splash_radius': args[10],
+                'penetration_factor': kwargs['penetration_factor'],
+                'launch_server_time_ms': 0,
+                'authority_epoch': 1,
+            })
+            echo.pop('attacker', None)
+            echo.pop('fire_intent_seq', None)
+            echo.pop('fire_input_seq', None)
+
+            self.assertTrue(battle._accept_projectile_event(echo))
+
+        self.assertEqual(1, launch.call_count)
+        self.assertTrue(battle._projectiles.contains(projectile_id))
+        self.assertIn(projectile_id, battle._projectile_meta)
+        self.assertNotIn(
+            'local_launch_pending', battle._projectile_meta[projectile_id])
 
     def test_all_shooter_target_pairs_cap_destructibles_at_the_vehicle(self):
         for shooter_kind in ('player', 'bot'):

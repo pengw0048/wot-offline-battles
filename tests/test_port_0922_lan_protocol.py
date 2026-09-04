@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT / 'server'))
 from gui.mods.offline_lan_0922.lan_client import (
     HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
-    _strict_projectile_effect, _valid_player_environment_contract,
+    _projectile_wire_round, _strict_projectile_effect,
+    _valid_player_environment_contract,
     project_bot_state)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
@@ -88,6 +89,13 @@ class LanProtocolTests(unittest.TestCase):
         worker.bot_authority_id = worker.player_id
         worker._send = self.client._send
         return worker
+
+    def test_projectile_wire_round_uses_cross_runtime_half_even_grid(self):
+        self.assertEqual(0.007812, _projectile_wire_round(0.0078125))
+        self.assertEqual(-0.007812, _projectile_wire_round(-0.0078125))
+        self.assertEqual(0.000002, _projectile_wire_round(0.0000015))
+        self.assertEqual(
+            -1.0, math.copysign(1.0, _projectile_wire_round(-0.0000001)))
 
     def test_v5_explicit_control_messages(self):
         self.assertTrue(self.client.leave_battle())

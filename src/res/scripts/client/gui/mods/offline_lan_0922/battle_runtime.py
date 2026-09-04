@@ -155,6 +155,13 @@ EXPERT_DEVICE_DELAY_SECONDS = 4.0
 PROJECTILE_PROGRESS_SECONDS = 0.10
 PROJECTILE_MAX_TIME_MS = 20000
 PROJECTILE_MAX_ACTIVE = 128
+_PROJECTILE_IMMUTABLE_FIELDS = (
+    'projectile_id', 'shooter_kind', 'shooter_id', 'source_vehicle',
+    'source_shot', 'shot_seq', 'shell_index',
+    'burst_group_seq', 'burst_index', 'burst_count',
+    'origin', 'velocity', 'range_origin', 'gravity', 'max_distance',
+    'max_time_ms', 'is_he', 'splash_radius', 'penetration_factor',
+    'launch_server_time_ms', 'fire_intent_seq', 'fire_input_seq')
 PROJECTILE_CHORDS_PER_FRAME = 32
 PROJECTILE_MAX_CHORDS_PER_FRAME = 256
 # A rotating target traces a curve in component-local space. Subdivide until
@@ -1587,6 +1594,7 @@ class BattleRuntime(object):
         self._player_fire_intents = collections.OrderedDict()
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
+        self._fire_timeline = collections.OrderedDict()
         self._local_fire_intent = None
         self._fire_intent_reject_round = None
         self._fire_intent_reject_counts = {}
@@ -1870,6 +1878,7 @@ class BattleRuntime(object):
         self._player_fire_intents = collections.OrderedDict()
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
+        self._fire_timeline = collections.OrderedDict()
         self._local_fire_intent = None
         self._fire_intent_reject_round = None
         self._fire_intent_reject_counts = {}
@@ -7299,6 +7308,7 @@ class BattleRuntime(object):
         required = {
             'type', 'round_id', 'authority_epoch', 'player_id', 'intent_seq',
             'shot_seq', 'input_seq', 'pose_time_us', 'shell_index',
+            'trigger_launch_time_ms',
             'next_shell_index', 'shell_change_pending',
             'gun_checkpoint_seq', 'gun_checkpoint',
             'aim_yaw', 'gun_pitch', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
@@ -7316,6 +7326,7 @@ class BattleRuntime(object):
             shot_seq = int(message['shot_seq'])
             input_seq = int(message['input_seq'])
             pose_time_us = int(message['pose_time_us'])
+            trigger_launch_time_ms = int(message['trigger_launch_time_ms'])
             shell_index = int(message['shell_index'])
             next_shell_index = int(message['next_shell_index'])
             gun_checkpoint_seq = int(message['gun_checkpoint_seq'])
@@ -7344,6 +7355,12 @@ class BattleRuntime(object):
                 authority_epoch != int(self.client.authority_epoch) or
                 player_id <= 0 or intent_seq <= 0 or shot_seq <= 0 or
                 input_seq <= 0 or pose_time_us < 0 or
+                isinstance(message['trigger_launch_time_ms'], bool) or
+                not isinstance(message['trigger_launch_time_ms'],
+                               _INTEGER_TYPES) or
+                trigger_launch_time_ms < 0 or
+                trigger_launch_time_ms >
+                lan_protocol.MAX_MOTION_TIME_US // 1000 or
                 gun_checkpoint_seq != input_seq or
                 gun_checkpoint is None or
                 presentation_ledger is None or
@@ -7378,6 +7395,16 @@ class BattleRuntime(object):
                for value in self._player_fire_intents.values()):
             raise RuntimeError('worker received overlapping fire intents')
         self._player_fire_intents[key] = frozen
+        poll_delay = _number(message.get('_client_dispatch_delay'), 0.0)
+        self._remember_fire_timeline(key, {
+            'received_wall': _PROFILE_CLOCK(),
+            'poll_delay': max(0.0, poll_delay),
+        })
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] FIRE INTENT RECEIVED player=%d intent=%d '
+            'shot_seq=%d poll_delay_ms=%.0f\n' % (
+                player_id, intent_seq, shot_seq,
+                max(0.0, poll_delay) * 1000.0))
         return True
 
     def flush_admitted_player_fire_intents(self):
@@ -7499,6 +7526,20 @@ class BattleRuntime(object):
                     not isinstance(pending, dict) or
                     sequence != int(pending.get('intent_seq', 0))):
                 return False
+            projectile_id = pending.get('projectile_id')
+            meta = self._projectile_meta.get(projectile_id)
+            if meta is not None and meta.get('local_launch_pending'):
+                manager_key = meta.get('manager_key', projectile_id)
+                rolled_back = (self._projectiles is not None and
+                               self._projectiles.rollback_provisional(
+                                   manager_key))
+                self._report_projectile_terminal_failure(
+                    meta, {}, 'fire_intent_result', 'server_rejected')
+                self._projectile_meta.pop(projectile_id, None)
+                self._projectile_terminal_data.pop(projectile_id, None)
+                if not rolled_back:
+                    self._report_projectile_terminal_failure(
+                        meta, {}, 'fire_intent_result', 'rollback_failed')
             self._player_fire_launch_pending.pop(player_id, None)
             return True
         pending = self._local_fire_intent
@@ -9577,6 +9618,13 @@ class BattleRuntime(object):
                 raise RuntimeError(
                     'canonical player shot violates worker gun state')
             self._player_fire_launch_pending.pop(player_id, None)
+            commit_wall = _PROFILE_CLOCK()
+            launch_wall = float(pending.get('sent_wall', commit_wall))
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] FIRE COMMIT player=%d intent=%d '
+                'shot_seq=%d launch_to_commit_ms=%.0f\n' % (
+                    player_id, intent_seq, shot_seq,
+                    max(0.0, commit_wall - launch_wall) * 1000.0))
             return True
         if not record.get('local'):
             return False
@@ -9608,6 +9656,15 @@ class BattleRuntime(object):
                 gun.reload_time, gun.reload_duration, force=True)
             if self._sender is not None:
                 self._sender.send_current()
+        projectile_id = event.get('projectile_id')
+        if projectile_id is not None:
+            now_wall = _PROFILE_CLOCK()
+            self._remember_fire_timeline(str(projectile_id), {
+                'trigger': float(pending.get('sent_wall', now_wall)),
+                'shown': None,
+                'cursor_logs': 0,
+                'moving_logged': False,
+            })
         self._local_fire_intent = None
         return True
 
@@ -9767,6 +9824,17 @@ class BattleRuntime(object):
                     delattr(entity, name)
                 except Exception:
                     pass
+        projectile_id = event.get('projectile_id')
+        timeline = self._fire_timeline.get(str(projectile_id))
+        if timeline is not None and timeline.get('shown') is None:
+            shown_wall = _PROFILE_CLOCK()
+            timeline['shown'] = shown_wall
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] FIRE SHOWN intent=%d shot_seq=%d '
+                'projectile=%s since_trigger_ms=%.0f\n' % (
+                    int(event.get('fire_intent_seq', 0) or 0),
+                    int(event.get('shot_seq', 0) or 0), projectile_id,
+                    max(0.0, shown_wall - timeline['trigger']) * 1000.0))
         return True
 
     def _projectile_is_authority(self):
@@ -9901,11 +9969,10 @@ class BattleRuntime(object):
     def _projectile_local_launch_time(self, launch_server_time_ms, now):
         estimated = self._projectile_estimated_server_time(now)
         if estimated is None:
-            return min(float(now), self._projectiles.now)
+            return max(0.0, float(now))
         age = max(
             0.0, float(estimated - int(launch_server_time_ms)) / 1000.0)
-        return max(
-            0.0, min(self._projectiles.now, float(now) - age))
+        return max(0.0, float(now) - age)
 
     @staticmethod
     def _projectile_visual_age(raw):
@@ -10076,6 +10143,122 @@ class BattleRuntime(object):
             return None
         return result
 
+    @staticmethod
+    def _projectile_source_shot_for_server(source_shot):
+        """Mirror the server's six-decimal mounted-shot wire contract."""
+        normalized = lan_protocol._strict_projectile_source_shot(source_shot)
+        if normalized is None:
+            return None
+        shell = normalized['shell']
+        frozen_shell = {
+            'kind': shell['kind'],
+            'caliber': lan_protocol._projectile_wire_round(shell['caliber']),
+            'damage': [lan_protocol._projectile_wire_round(value)
+                       for value in shell['damage']],
+            'explosionRadius': lan_protocol._projectile_wire_round(
+                shell['explosionRadius']),
+        }
+        for name in lan_protocol.PROJECTILE_HE_FACTOR_FIELDS:
+            if name in shell:
+                frozen_shell[name] = lan_protocol._projectile_wire_round(
+                    shell[name])
+        return {
+            'speed': lan_protocol._projectile_wire_round(
+                normalized['speed']),
+            'gravity': lan_protocol._projectile_wire_round(
+                normalized['gravity']),
+            'maxDistance': lan_protocol._projectile_wire_round(
+                normalized['maxDistance']),
+            'piercingPower': [lan_protocol._projectile_wire_round(value)
+                              for value in normalized['piercingPower']],
+            'deadeye': bool(normalized['deadeye']),
+            'shell': frozen_shell,
+        }
+
+    @staticmethod
+    def _projectile_id_for_round(
+            round_id, shooter_kind, shooter_id, shot_seq):
+        """Return the deterministic identity used by the LAN server."""
+        marker = {'player': 'p', 'bot': 'b'}.get(shooter_kind)
+        if marker is None:
+            return None
+        values = (round_id, shooter_id, shot_seq)
+        if any(isinstance(value, bool) or
+               not isinstance(value, _INTEGER_TYPES) for value in values):
+            return None
+        if any(value <= 0 for value in values):
+            return None
+        return '%d:%s:%d:%d' % (
+            values[0], marker, values[1], values[2])
+
+    def _local_player_projectile_meta(
+            self, intent, record, origin, velocity, gravity, maximum,
+            max_time_ms, is_he, splash_radius, penetration_factor,
+            source_shot):
+        """Build exactly the launch record the server will echo."""
+        state = record.get('state') or {}
+        projectile_id = self._projectile_id_for_round(
+            (self._start_message or {}).get('round_id'), 'player',
+            intent.get('player_id'), intent.get('shot_seq'))
+        source_vehicle = state.get('vehicle')
+        frozen_shot = self._projectile_source_shot_for_server(source_shot)
+        if (projectile_id is None or
+                not isinstance(source_vehicle, _STRING_TYPES) or
+                not source_vehicle or len(source_vehicle) > 128 or
+                frozen_shot is None):
+            return None
+
+        def vector(values):
+            return [lan_protocol._projectile_wire_round(value)
+                    for value in values]
+
+        try:
+            shot_seq = int(intent['shot_seq'])
+            raw = {
+                'projectile_id': projectile_id,
+                'shooter_kind': 'player',
+                'shooter_id': int(intent['player_id']),
+                'source_vehicle': str(source_vehicle),
+                'source_shot': frozen_shot,
+                'shot_seq': shot_seq,
+                'burst_group_seq': shot_seq,
+                'burst_index': 0,
+                'burst_count': 1,
+                'shell_index': int(intent['shell_index']),
+                'fire_intent_seq': int(intent['intent_seq']),
+                'fire_input_seq': int(intent['input_seq']),
+                'origin': vector(origin),
+                'velocity': vector(velocity),
+                'range_origin': vector((
+                    intent['x'], intent['y'], intent['z'])),
+                'segment_origin': vector(origin),
+                'segment_velocity': vector(velocity),
+                'segment_start_time_ms': 0,
+                'ricochet_count': 0,
+                'base_penetration_multiplier': 1.0,
+                'gravity': lan_protocol._projectile_wire_round(gravity),
+                'max_distance': lan_protocol._projectile_wire_round(maximum),
+                'max_time_ms': int(max_time_ms),
+                'is_he': bool(is_he),
+                'splash_radius': lan_protocol._projectile_wire_round(
+                    splash_radius),
+                'penetration_factor': lan_protocol._projectile_wire_round(
+                    penetration_factor),
+                'launch_server_time_ms': int(
+                    intent['trigger_launch_time_ms']),
+                'checked_through_ms': 0,
+                'checked_distance': 0.0,
+                'piercing_loss': 0.0,
+            }
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        return self._projectile_wire_meta(raw)
+
+    @staticmethod
+    def _projectile_launch_mismatches(current, canonical):
+        return tuple(name for name in _PROJECTILE_IMMUTABLE_FIELDS
+                     if current.get(name) != canonical.get(name))
+
     def _projectile_presentation_offsets(self, normalized):
         """Bind one admitted shot to the target timelines its shooter saw.
 
@@ -10115,17 +10298,22 @@ class BattleRuntime(object):
             offsets['bot:%d' % bot_id] = float(lag_us) / 1000000.0
         return offsets
 
+    def _new_projectile_meta(self, normalized):
+        projectile_id = normalized['projectile_id']
+        meta = dict(normalized)
+        meta['manager_key'] = (
+            projectile_id if normalized['ricochet_count'] == 0 else
+            (projectile_id, normalized['ricochet_count']))
+        meta['destructibles_pending'] = []
+        meta['presentation_offsets'] = (
+            self._projectile_presentation_offsets(normalized))
+        return meta
+
     def _install_projectile_meta(self, normalized):
         projectile_id = normalized['projectile_id']
         meta = self._projectile_meta.get(projectile_id)
         if meta is None:
-            meta = dict(normalized)
-            meta['manager_key'] = (
-                projectile_id if normalized['ricochet_count'] == 0 else
-                (projectile_id, normalized['ricochet_count']))
-            meta['destructibles_pending'] = []
-            meta['presentation_offsets'] = (
-                self._projectile_presentation_offsets(normalized))
+            meta = self._new_projectile_meta(normalized)
             self._projectile_meta[projectile_id] = meta
             self._report_player_shot_timing(meta)
         else:
@@ -10135,17 +10323,8 @@ class BattleRuntime(object):
             meta.setdefault(
                 'manager_key', projectile_id if current_count == 0 else
                 (projectile_id, current_count))
-            frozen = (
-                'shooter_kind', 'shooter_id', 'source_vehicle',
-                'source_shot', 'shot_seq', 'shell_index',
-                'burst_group_seq', 'burst_index', 'burst_count',
-                'origin', 'velocity', 'range_origin',
-                'gravity', 'max_distance',
-                'max_time_ms', 'is_he', 'splash_radius',
-                'penetration_factor', 'launch_server_time_ms',
-                'fire_intent_seq', 'fire_input_seq')
             if any(meta.get(name) != normalized.get(name)
-                   for name in frozen):
+                   for name in _PROJECTILE_IMMUTABLE_FIELDS):
                 raise RuntimeError('canonical projectile launch changed')
             incoming_count = normalized['ricochet_count']
             if incoming_count < current_count or incoming_count > (
@@ -10202,6 +10381,178 @@ class BattleRuntime(object):
         self._confirm_bot_projectile_launch(normalized)
         return meta
 
+    def _projectile_manager_snapshot(self, normalized, now):
+        launch_time = self._projectile_local_launch_time(
+            normalized['launch_server_time_ms'] +
+            normalized['segment_start_time_ms'], now)
+        cursor_time = min(
+            float(now),
+            launch_time + max(
+                0, normalized['base_checked_ms'] -
+                normalized['segment_start_time_ms']) / 1000.0)
+        return {
+            'key': (normalized['projectile_id']
+                    if normalized['ricochet_count'] == 0 else
+                    (normalized['projectile_id'],
+                     normalized['ricochet_count'])),
+            'start': normalized['segment_origin'],
+            'velocity': normalized['segment_velocity'],
+            'gravity': (0.0, -normalized['gravity'], 0.0),
+            'launch_time': launch_time,
+            'max_time': max(
+                0.001, float(
+                    normalized['max_time_ms'] -
+                    normalized['segment_start_time_ms']) / 1000.0),
+            'max_distance': normalized['max_distance'],
+            'payload': {
+                'shooter_kind': normalized['shooter_kind'],
+                'shooter_id': normalized['shooter_id'],
+                'shot_seq': normalized['shot_seq'],
+                'shell_index': normalized['shell_index'],
+                'range_origin': normalized['range_origin'],
+                'base_penetration_multiplier': normalized[
+                    'base_penetration_multiplier'],
+                'ricochet_count': normalized['ricochet_count'],
+                'segment_start_time_ms': normalized[
+                    'segment_start_time_ms'],
+            },
+            'cursor_time': max(launch_time, cursor_time),
+            'distance': normalized['checked_distance'],
+        }
+
+    def _admit_projectile_manager_state(
+            self, normalized, now, replacement_key=None):
+        snapshot = self._projectile_manager_snapshot(normalized, now)
+        if replacement_key is not None:
+            return bool(self._projectiles.replace_authoritative(
+                snapshot, provisional_key=replacement_key,
+                admission_time=now))
+        if normalized['ricochet_count'] != 0:
+            return bool(self._projectiles.restore(
+                snapshot, admission_time=now))
+        return bool(self._projectiles.launch(
+            snapshot['key'], snapshot['start'], snapshot['velocity'],
+            snapshot['gravity'], snapshot['launch_time'],
+            snapshot['max_time'], snapshot['max_distance'],
+            payload=snapshot['payload'], admission_time=now))
+
+    def _find_provisional_projectile(self, normalized):
+        direct = self._projectile_meta.get(normalized['projectile_id'])
+        if direct is not None and direct.get('local_launch_pending'):
+            return direct
+        identity = (
+            normalized.get('shooter_kind'), normalized.get('shooter_id'),
+            normalized.get('shot_seq'), normalized.get('fire_intent_seq'))
+        for meta in self._projectile_meta.values():
+            if (meta.get('local_launch_pending') and
+                    (meta.get('shooter_kind'), meta.get('shooter_id'),
+                     meta.get('shot_seq'), meta.get('fire_intent_seq')) ==
+                    identity):
+                return meta
+        return None
+
+    def _reconcile_provisional_projectile(
+            self, normalized, now, authoritative_snapshot=False):
+        """Confirm or atomically correct one locally launched player shell."""
+        provisional = self._find_provisional_projectile(normalized)
+        if provisional is None:
+            return None
+        mismatch = self._projectile_launch_mismatches(
+            provisional, normalized)
+        if not mismatch:
+            old_key = provisional.get(
+                'manager_key', provisional['projectile_id'])
+            state = (self._projectiles.get(old_key)
+                     if self._projectiles is not None else None)
+            if authoritative_snapshot and state is not None:
+                snapshot = self._projectile_manager_snapshot(
+                    normalized, now)
+                if snapshot['cursor_time'] > state['cursor_time'] + 1e-9:
+                    accepted = self._projectiles.replace_authoritative(
+                        snapshot, provisional_key=old_key,
+                        admission_time=now)
+                    if not accepted:
+                        diagnostic = {
+                            'projectile_id': provisional.get(
+                                'projectile_id'),
+                            'terminal_failure_boundary': provisional.get(
+                                'terminal_failure_boundary'),
+                        }
+                        self._report_projectile_terminal_failure(
+                            diagnostic, state, 'canonical_snapshot',
+                            'takeover_rejected')
+                        return False
+            meta = self._install_projectile_meta(normalized)
+            meta.pop('local_launch_pending', None)
+            return meta
+
+        old_id = provisional['projectile_id']
+        old_key = provisional.get('manager_key', old_id)
+        state = (self._projectiles.get(old_key)
+                 if self._projectiles is not None else None)
+        replacement = self._new_projectile_meta(normalized)
+        accepted = self._admit_projectile_manager_state(
+            normalized, now, replacement_key=old_key)
+        if not accepted:
+            diagnostic = {
+                'projectile_id': provisional.get('projectile_id'),
+                'terminal_failure_boundary': provisional.get(
+                    'terminal_failure_boundary'),
+            }
+            self._report_projectile_terminal_failure(
+                diagnostic, state or {}, 'canonical_echo',
+                'replacement_rejected', ','.join(mismatch))
+            return False
+
+        self._report_projectile_terminal_failure(
+            provisional, state or {}, 'canonical_echo',
+            'launch_mismatch', ','.join(mismatch))
+        if self._projectile_meta.get(old_id) is provisional:
+            self._projectile_meta.pop(old_id, None)
+        self._projectile_terminal_data.pop(old_id, None)
+        self._projectile_meta[normalized['projectile_id']] = replacement
+        return replacement
+
+    def _preinstall_player_projectile(
+            self, intent, record, origin, velocity, gravity, maximum,
+            max_time_ms, is_he, splash_radius, penetration_factor,
+            source_shot, now):
+        """Start one server-admitted human shell before its canonical echo."""
+        projectile_id = self._projectile_id_for_round(
+            (self._start_message or {}).get('round_id'), 'player',
+            intent.get('player_id'), intent.get('shot_seq'))
+        diagnostic = {'projectile_id': projectile_id or 'unknown'}
+        if (not self._projectile_is_authority() or
+                self._projectiles is None or
+                not self._set_projectile_epoch(
+                    getattr(self.client, 'authority_epoch', None), now)):
+            self._report_projectile_terminal_failure(
+                diagnostic, {}, 'local_preinstall', 'authority_unavailable')
+            return None
+        normalized = self._local_player_projectile_meta(
+            intent, record, origin, velocity, gravity, maximum,
+            max_time_ms, is_he, splash_radius, penetration_factor,
+            source_shot)
+        if normalized is None:
+            self._report_projectile_terminal_failure(
+                diagnostic, {}, 'local_preinstall', 'normalization_failed')
+            return None
+        meta = self._install_projectile_meta(normalized)
+        meta['local_launch_pending'] = True
+        if not self._admit_projectile_manager_state(normalized, now):
+            self._projectile_meta.pop(normalized['projectile_id'], None)
+            self._report_projectile_terminal_failure(
+                meta, {}, 'local_preinstall', 'manager_rejected')
+            return None
+        if not self._projectile_position_history:
+            poses = self._projectile_record_poses()
+            self._sample_projectile_positions(now, poses)
+            self._projectile_target_positions = dict(
+                (key, _xyz(pose)) for key, pose in poses.items())
+        meta['awaiting_resolution'] = False
+        meta['awaiting_ricochet'] = False
+        return normalized['projectile_id']
+
     def _accept_projectile_event(self, event):
         """Register one server-admitted launch on the elected simulator."""
         if not self._projectile_is_authority() or self._projectiles is None:
@@ -10213,55 +10564,27 @@ class BattleRuntime(object):
         normalized = self._projectile_wire_meta(event)
         if normalized is None:
             raise RuntimeError('canonical projectile event is malformed')
-        meta = self._install_projectile_meta(normalized)
+        now = self._clock()
+        meta = self._reconcile_provisional_projectile(normalized, now)
+        if meta is False:
+            return False
+        if meta is None:
+            meta = self._install_projectile_meta(normalized)
         projectile_id = normalized['projectile_id']
         manager_key = meta['manager_key']
         if self._projectiles.contains(manager_key):
             return True
-        now = self._clock()
-        launch_time = self._projectile_local_launch_time(
-            normalized['launch_server_time_ms'] +
-            normalized['segment_start_time_ms'], now)
-        payload = {
-                'shooter_kind': normalized['shooter_kind'],
-                'shooter_id': normalized['shooter_id'],
-                'shot_seq': normalized['shot_seq'],
-                'shell_index': normalized['shell_index'],
-                'range_origin': normalized['range_origin'],
-                'base_penetration_multiplier': normalized[
-                    'base_penetration_multiplier'],
-                'ricochet_count': normalized['ricochet_count'],
-                'segment_start_time_ms': normalized[
-                    'segment_start_time_ms'],
-            }
-        if normalized['ricochet_count'] == 0:
-            accepted = self._projectiles.launch(
-                manager_key, normalized['segment_origin'],
-                normalized['segment_velocity'],
-                (0.0, -normalized['gravity'], 0.0), launch_time,
-                float(normalized['max_time_ms']) / 1000.0,
-                normalized['max_distance'], payload=payload)
-        else:
-            cursor_time = min(
-                self._projectiles.now,
-                launch_time + max(
-                    0, normalized['base_checked_ms'] -
-                    normalized['segment_start_time_ms']) / 1000.0)
-            accepted = self._projectiles.restore({
-                'key': manager_key,
-                'start': normalized['segment_origin'],
-                'velocity': normalized['segment_velocity'],
-                'gravity': (0.0, -normalized['gravity'], 0.0),
-                'launch_time': launch_time,
-                'max_time': max(
-                    0.001, float(
-                        normalized['max_time_ms'] -
-                        normalized['segment_start_time_ms']) / 1000.0),
-                'max_distance': normalized['max_distance'],
-                'payload': payload,
-                'cursor_time': max(launch_time, cursor_time),
-                'distance': normalized['checked_distance'],
-            })
+        if (meta.get('pending_resolution') is not None or
+                meta.get('pending_ricochet') is not None or
+                meta.get('awaiting_resolution') or
+                meta.get('awaiting_ricochet')):
+            # A provisional projectile may terminal before its canonical echo.
+            # The terminal proposal stayed behind the echo barrier; never
+            # manufacture a second launch for the retired manager identity.
+            self._submit_projectile_ricochet(meta)
+            self._submit_projectile_resolution(meta)
+            return True
+        accepted = self._admit_projectile_manager_state(normalized, now)
         if not accepted:
             self._projectile_meta.pop(projectile_id, None)
             raise RuntimeError('canonical projectile launch was not admitted')
@@ -10295,8 +10618,13 @@ class BattleRuntime(object):
                 # metadata or an authority simulator entry.
                 continue
             active_ids.add(projectile_id)
+            installed = self._reconcile_provisional_projectile(
+                normalized, now, authoritative_snapshot=True)
+            if installed is False:
+                continue
+            if installed is None:
+                installed = self._install_projectile_meta(normalized)
             normalized_rows.append(normalized)
-            installed = self._install_projectile_meta(normalized)
             self._ensure_projectile_visual(installed, now)
         if not self._projectile_is_authority():
             return True
@@ -10331,44 +10659,14 @@ class BattleRuntime(object):
                 # shooter that disconnected after firing remains resolvable;
                 # only wait when even that canonical descriptor is unavailable.
                 continue
-            launch_time = self._projectile_local_launch_time(
-                normalized['launch_server_time_ms'] +
-                normalized['segment_start_time_ms'], now)
-            cursor_time = min(
-                self._projectiles.now,
-                launch_time + max(
-                    0, normalized['base_checked_ms'] -
-                    normalized['segment_start_time_ms']) / 1000.0)
-            restored = self._projectiles.restore({
-                'key': meta['manager_key'],
-                'start': normalized['segment_origin'],
-                'velocity': normalized['segment_velocity'],
-                'gravity': (0.0, -normalized['gravity'], 0.0),
-                'launch_time': launch_time,
-                'max_time': max(
-                    0.001, float(
-                        normalized['max_time_ms'] -
-                        normalized['segment_start_time_ms']) / 1000.0),
-                'max_distance': normalized['max_distance'],
-                'payload': {
-                    'shooter_kind': normalized['shooter_kind'],
-                    'shooter_id': normalized['shooter_id'],
-                    'shot_seq': normalized['shot_seq'],
-                    'shell_index': normalized['shell_index'],
-                    'range_origin': normalized['range_origin'],
-                    'base_penetration_multiplier': normalized[
-                        'base_penetration_multiplier'],
-                    'ricochet_count': normalized['ricochet_count'],
-                    'segment_start_time_ms': normalized[
-                        'segment_start_time_ms'],
-                },
-                'cursor_time': max(launch_time, cursor_time),
-                'distance': normalized['checked_distance'],
-            })
+            restored = self._projectiles.restore(
+                self._projectile_manager_snapshot(normalized, now),
+                admission_time=now)
             if not restored:
                 raise RuntimeError('active projectile restore failed')
         for projectile_id, meta in tuple(self._projectile_meta.items()):
             if (projectile_id not in active_ids and
+                    not meta.get('local_launch_pending') and
                     (meta.get('awaiting_resolution') or
                      meta.get('pending_resolution') is not None or
                      meta.get('awaiting_ricochet') or
@@ -10557,6 +10855,22 @@ class BattleRuntime(object):
             existing_visual['confirmed_elapsed'] = max(
                 float(existing_visual.get('confirmed_elapsed', 0.0)),
                 confirmed_elapsed)
+            timeline = self._fire_timeline.get(str(projectile_id))
+            if (timeline is not None and
+                    timeline.get('shown') is not None and
+                    int(timeline.get('cursor_logs', 0)) < 8):
+                timeline['cursor_logs'] = int(
+                    timeline.get('cursor_logs', 0)) + 1
+                wall = _PROFILE_CLOCK()
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] FIRE CURSOR projectile=%s '
+                    'confirmed_ms=%.0f display_ms=%.0f '
+                    'since_trigger_ms=%.0f\n' % (
+                        projectile_id,
+                        existing_visual['confirmed_elapsed'] * 1000.0,
+                        float(existing_visual.get(
+                            'display_elapsed', 0.0)) * 1000.0,
+                        max(0.0, wall - timeline['trigger']) * 1000.0))
             if (existing_visual.get('active', False) or
                     not existing_visual.get('admitted', True) or
                     not existing_visual.get('launch_retryable', False)):
@@ -10688,6 +11002,21 @@ class BattleRuntime(object):
                 visual['active'] = False
                 visual['launch_retryable'] = False
                 continue
+            if display_elapsed > previous_elapsed:
+                timeline = self._fire_timeline.get(str(projectile_id))
+                if (timeline is not None and
+                        timeline.get('shown') is not None and
+                        not timeline.get('moving_logged', False)):
+                    timeline['moving_logged'] = True
+                    wall = _PROFILE_CLOCK()
+                    sys.stdout.write(
+                        '[Offline LAN 0.9.22] FIRE TRACER MOVING '
+                        'projectile=%s since_trigger_ms=%.0f '
+                        'since_shown_ms=%.0f confirmed_ms=%.0f\n' % (
+                            projectile_id,
+                            max(0.0, wall - timeline['trigger']) * 1000.0,
+                            max(0.0, wall - timeline['shown']) * 1000.0,
+                            confirmed_elapsed * 1000.0))
             advanced = advanced or display_elapsed > previous_elapsed
         return advanced
 
@@ -12561,7 +12890,8 @@ class BattleRuntime(object):
 
     def _submit_projectile_ricochet(self, meta):
         pending = meta.get('pending_ricochet')
-        if (pending is None or meta.get('progress_pending') is not None or
+        if (pending is None or meta.get('local_launch_pending') or
+                meta.get('progress_pending') is not None or
                 meta.get('awaiting_ricochet') or
                 not self._projectile_is_authority()):
             return False
@@ -12623,7 +12953,8 @@ class BattleRuntime(object):
 
     def _submit_projectile_resolution(self, meta):
         pending = meta.get('pending_resolution')
-        if (pending is None or meta.get('progress_pending') is not None or
+        if (pending is None or meta.get('local_launch_pending') or
+                meta.get('progress_pending') is not None or
                 meta.get('awaiting_resolution') or
                 not self._projectile_is_authority()):
             return False
@@ -18161,6 +18492,13 @@ class BattleRuntime(object):
             self._bot_fire_confirmations.pop(bot_id, None)
         return True
 
+    def _remember_fire_timeline(self, key, value):
+        """Keep bounded monotonic timestamps for per-shot diagnostics."""
+        self._fire_timeline.pop(key, None)
+        self._fire_timeline[key] = value
+        while len(self._fire_timeline) > 64:
+            self._fire_timeline.popitem(last=False)
+
     def _remember_player_fire_intent(self, key, intent):
         frozen = dict(intent)
         previous = self._player_fire_intent_history.get(key)
@@ -18184,6 +18522,7 @@ class BattleRuntime(object):
             'reason=%s reload=%.3f\n' % (
                 int(intent['player_id']), int(intent['intent_seq']),
                 str(reason), remaining))
+        self._fire_timeline.pop(key, None)
         self._remember_player_fire_intent(key, intent)
         self._player_fire_intents.pop(key, None)
         return True
@@ -18226,6 +18565,116 @@ class BattleRuntime(object):
         gun.load_started = True
         gun._client_checkpoint_seq = input_seq
         return gun.can_fire(True)
+
+    def _launch_player_fire_intent(
+            self, key, intent, now, defer_missing_player=False,
+            path='frame_retry'):
+        """Freeze, publish and provisionally start one admitted human shot."""
+        player_id = int(intent['player_id'])
+        if player_id in self._player_fire_launch_pending:
+            return False
+        record = self._records.get('player:%s' % player_id)
+        if record is None and defer_missing_player:
+            return False
+        if record is None or record.get('tombstone'):
+            return self._reject_player_fire_intent(
+                key, 'player_unavailable')
+        entity = self._server_entity(record.get('engine_id'))
+        if (entity is None or not getattr(entity, 'isStarted', False) or
+                getattr(entity, 'typeDescriptor', None) is None):
+            return False
+        state = record.get('state') or {}
+        if not bool(state.get('alive', True)):
+            return self._reject_player_fire_intent(key, 'player_dead')
+        gun = self._player_authority_guns.get(player_id)
+        if gun is None:
+            return False
+        effective = gun._effective_params
+        shell_index = int(intent['shell_index'])
+        if not self._apply_player_gun_checkpoint(gun, intent):
+            return self._reject_player_fire_intent(key, 'gun_not_ready')
+        try:
+            source_shot = dict(effective['gun']['shots'][
+                shell_index]['source_shot'])
+            # A shot freezes the perk state of its physical gunner at the
+            # accepted fire edge. The immutable round snapshot owns skill
+            # affiliation; current critical state owns consciousness.
+            source_shot['deadeye'] = bool(
+                effective_params.living_skill_count(
+                    effective, 'gunner_sniper',
+                    state.get('critical') or {}))
+            speed = float(source_shot['speed'])
+            gravity = float(source_shot['gravity'])
+            maximum = float(source_shot['maxDistance'])
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise RuntimeError(
+                'worker player mounted shot contract is invalid')
+        if speed <= 0.0 or gravity <= 0.0 or maximum <= 0.0:
+            raise RuntimeError(
+                'worker player gun has invalid projectile parameters')
+        try:
+            origin = tuple(float(value) for value in intent['shot_origin'])
+            direction = self._vector(tuple(
+                float(value) for value in intent['shot_direction']))
+            dispersion_angle = float(intent['dispersion_angle'])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise RuntimeError('worker player trigger ray is unavailable')
+        direction.normalise()
+        if direction.length <= 0.0:
+            raise RuntimeError('worker player muzzle direction is empty')
+        gun.scatter(
+            direction,
+            bool(self._config and self._config.get(
+                'perfect_accuracy', False)),
+            dispersion_angle=dispersion_angle)
+        velocity = tuple(value * speed for value in _xyz(direction))
+        shot_seq = int(intent['shot_seq'])
+        is_he = combat_rules.is_he(source_shot)
+        splash_radius = (
+            combat_rules.he_radius(source_shot) if is_he else 0.0)
+        penetration_factor = combat_rules.sample_penetration_factor()
+        accepted = self.client.send_projectile_launch(
+            'player', player_id, shot_seq, shell_index,
+            list(origin), list(velocity), gravity, maximum,
+            PROJECTILE_MAX_TIME_MS, is_he, splash_radius,
+            authority_epoch=self.client.authority_epoch,
+            penetration_factor=penetration_factor,
+            source_shot=source_shot,
+            fire_intent_seq=int(intent['intent_seq']),
+            fire_input_seq=int(intent['input_seq']))
+        if accepted != shot_seq:
+            raise RuntimeError(
+                'worker could not publish a canonical player launch')
+
+        launch_wall = _PROFILE_CLOCK()
+        projectile_id = self._projectile_id_for_round(
+            (self._start_message or {}).get('round_id'), 'player',
+            player_id, shot_seq)
+        self._player_fire_launch_pending[player_id] = {
+            'intent_seq': int(intent['intent_seq']),
+            'input_seq': int(intent['input_seq']),
+            'shot_seq': shot_seq,
+            'projectile_id': projectile_id,
+            'sent_at': float(now),
+            'sent_wall': launch_wall,
+        }
+        self._remember_player_fire_intent(key, intent)
+        self._preinstall_player_projectile(
+            intent, record, origin, velocity, gravity, maximum,
+            PROJECTILE_MAX_TIME_MS, is_he, splash_radius,
+            penetration_factor, source_shot, now)
+        received = self._fire_timeline.pop(key, None)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] FIRE LAUNCH player=%d intent=%d '
+            'shot_seq=%d wait_ms=%s poll_delay_ms=%s path=%s\n' % (
+                player_id, int(intent['intent_seq']), shot_seq,
+                ('%.0f' % (max(
+                    0.0, launch_wall - received['received_wall']) * 1000.0)
+                 if received is not None else '-'),
+                ('%.0f' % (received['poll_delay'] * 1000.0)
+                 if received is not None else '-'), str(path)))
+        self._player_fire_intents.pop(key, None)
+        return True
 
     def _advance_player_fire_authority(
             self, dt, now, intent_keys=None, defer_missing_player=False):
@@ -18289,93 +18738,11 @@ class BattleRuntime(object):
             for player_id in tuple(self._player_authority_guns):
                 if player_id not in live_players:
                     self._player_authority_guns.pop(player_id, None)
+        path = 'poll' if intent_keys is not None else 'frame_retry'
         for key, intent in pending_intents:
-            player_id = int(intent['player_id'])
-            if player_id in self._player_fire_launch_pending:
-                continue
-            record = self._records.get('player:%s' % player_id)
-            if record is None and defer_missing_player:
-                continue
-            if record is None or record.get('tombstone'):
-                self._reject_player_fire_intent(key, 'player_unavailable')
-                continue
-            entity = self._server_entity(record.get('engine_id'))
-            if (entity is None or not getattr(entity, 'isStarted', False) or
-                    getattr(entity, 'typeDescriptor', None) is None):
-                continue
-            state = record.get('state') or {}
-            if not bool(state.get('alive', True)):
-                self._reject_player_fire_intent(key, 'player_dead')
-                continue
-            gun = self._player_authority_guns.get(player_id)
-            if gun is None:
-                continue
-            effective = gun._effective_params
-            shell_index = int(intent['shell_index'])
-            if not self._apply_player_gun_checkpoint(gun, intent):
-                self._reject_player_fire_intent(key, 'gun_not_ready')
-                continue
-            try:
-                source_shot = dict(effective['gun']['shots'][
-                    shell_index]['source_shot'])
-                # A shot freezes the perk state of its physical gunner at
-                # the accepted fire edge.  The immutable round snapshot owns
-                # skill affiliation; the current critical state owns whether
-                # that carrier is conscious for this shot.
-                source_shot['deadeye'] = bool(
-                    effective_params.living_skill_count(
-                        effective, 'gunner_sniper',
-                        state.get('critical') or {}))
-                speed = float(source_shot['speed'])
-                gravity = float(source_shot['gravity'])
-                maximum = float(source_shot['maxDistance'])
-            except (IndexError, KeyError, TypeError, ValueError):
-                raise RuntimeError(
-                    'worker player mounted shot contract is invalid')
-            if speed <= 0.0 or gravity <= 0.0 or maximum <= 0.0:
-                raise RuntimeError(
-                    'worker player gun has invalid projectile parameters')
-            try:
-                origin = tuple(float(value) for value in
-                               intent['shot_origin'])
-                direction = self._vector(tuple(
-                    float(value) for value in intent['shot_direction']))
-                dispersion_angle = float(intent['dispersion_angle'])
-            except (KeyError, TypeError, ValueError, OverflowError):
-                raise RuntimeError(
-                    'worker player trigger ray is unavailable')
-            direction.normalise()
-            if direction.length <= 0.0:
-                raise RuntimeError('worker player muzzle direction is empty')
-            gun.scatter(
-                direction,
-                bool(self._config and self._config.get(
-                    'perfect_accuracy', False)),
-                dispersion_angle=dispersion_angle)
-            velocity = tuple(
-                value * speed for value in _xyz(direction))
-            shot_seq = int(intent['shot_seq'])
-            is_he = combat_rules.is_he(source_shot)
-            accepted = self.client.send_projectile_launch(
-                'player', player_id, shot_seq, shell_index,
-                list(origin), list(velocity), gravity, maximum,
-                PROJECTILE_MAX_TIME_MS, is_he,
-                combat_rules.he_radius(source_shot) if is_he else 0.0,
-                authority_epoch=self.client.authority_epoch,
-                penetration_factor=combat_rules.sample_penetration_factor(),
-                source_shot=source_shot,
-                fire_intent_seq=int(intent['intent_seq']),
-                fire_input_seq=int(intent['input_seq']))
-            if accepted != shot_seq:
-                raise RuntimeError(
-                    'worker could not publish a canonical player launch')
-            self._player_fire_launch_pending[player_id] = {
-                'intent_seq': int(intent['intent_seq']),
-                'input_seq': int(intent['input_seq']),
-                'shot_seq': shot_seq, 'sent_at': float(now),
-            }
-            self._remember_player_fire_intent(key, intent)
-            self._player_fire_intents.pop(key, None)
+            self._launch_player_fire_intent(
+                key, intent, now,
+                defer_missing_player=defer_missing_player, path=path)
         return True
 
     def _launch_bot_projectile(self, state, shot_seq):
@@ -20441,6 +20808,7 @@ class BattleRuntime(object):
         trigger_server_time_ms = self._projectile_estimated_server_time(now)
         if trigger_server_time_ms is None:
             return self._reject_local_fire('trigger_clock_unavailable')
+        trigger_wall = _PROFILE_CLOCK()
         if not self._sender.send_current():
             return self._reject_local_fire('input_send_failed')
         intent_seq = sender(
@@ -20453,7 +20821,14 @@ class BattleRuntime(object):
             'intent_seq': int(intent_seq),
             'input_seq': int(getattr(self.client, '_input_seq', 0)),
             'sent_at': float(now),
+            'sent_wall': trigger_wall,
         }
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] FIRE TRIGGER intent=%d input=%d '
+            'shell=%d\n' % (
+                int(intent_seq),
+                int(getattr(self.client, '_input_seq', 0)),
+                int(shell_index)))
         return True
 
     @staticmethod
@@ -21084,6 +21459,7 @@ class BattleRuntime(object):
         self._player_fire_intents = collections.OrderedDict()
         self._player_fire_intent_history = collections.OrderedDict()
         self._player_fire_launch_pending = {}
+        self._fire_timeline = collections.OrderedDict()
         self._local_fire_intent = None
         self._fire_intent_reject_round = None
         self._fire_intent_reject_counts = {}

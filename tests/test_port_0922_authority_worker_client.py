@@ -1394,6 +1394,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         message = {
             'type': 'fire_intent', 'round_id': 7,
             'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
+            'trigger_launch_time_ms': 900,
         }
         result = {
             'type': 'fire_intent_result', 'round_id': 7,

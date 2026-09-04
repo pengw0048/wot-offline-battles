@@ -29,7 +29,7 @@ DESTRUCTIBLE_CATALOG_V5_CAPABILITY = 'destructible_catalog_v5'
 LEAN_SNAPSHOT_MANIFEST_CAPABILITY = 'lean_snapshot_manifest_v1'
 RAM_CONTACT_LEDGER_CAPABILITY = 'ram_contact_ledger_v2'
 HUMAN_RAM_TIMELINE_CAPABILITY = 'human_ram_timeline_v1'
-PLAYER_FIRE_INTENT_CAPABILITY = 'player_fire_intent_v5'
+PLAYER_FIRE_INTENT_CAPABILITY = 'player_fire_intent_v6'
 PLAYER_ENVIRONMENT_CAPABILITY = 'player_environment_v2'
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 SIMULATION_WORKER_CAPABILITY = 'simulation_worker_v1'
@@ -751,6 +751,24 @@ def _projectile_float_range(value, minimum, maximum):
     if parsed < minimum or parsed > maximum:
         return None
     return parsed
+
+
+def _projectile_wire_round(value):
+    """Round identically on the shipped Python 2.7 and Python 3 server."""
+    number = float(value)
+    numerator, denominator = number.as_integer_ratio()
+    negative = math.copysign(1.0, number) < 0.0
+    scaled = abs(numerator) * 1000000
+    quotient, remainder = divmod(scaled, denominator)
+    twice_remainder = remainder * 2
+    if (twice_remainder > denominator or
+            (twice_remainder == denominator and quotient % 2)):
+        quotient += 1
+    if quotient == 0:
+        return -0.0 if negative else 0.0
+    if negative:
+        quotient = -quotient
+    return float(quotient) / 1000000.0
 
 
 def _valid_visible_authority_id(value):
