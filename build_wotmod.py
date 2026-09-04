@@ -120,7 +120,7 @@ def _release_config():
         'vehicle': 'ussr:R11_MS-1',
         'max_health': 90,
         'startupTimeoutSeconds': 30.0,
-        'prebattleCountdownSeconds': 15.0,
+        'prebattleCountdownSeconds': 10.0,
         'battleDurationSeconds': 900.0,
         'physics_tuning': {},
         'he_tuning': {},

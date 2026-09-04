@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
     # Zero keeps the legacy automatic balancing behavior.
     'preferred_team': 0,
     'startupTimeoutSeconds': 30.0,
-    'prebattleCountdownSeconds': 15.0,
+    'prebattleCountdownSeconds': 10.0,
     'battleDurationSeconds': 900.0,
     'physics_tuning': {},
     'he_tuning': {},
