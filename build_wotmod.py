@@ -23,7 +23,7 @@ import navigation_graph_schema as _navigation_schema
 
 
 MOD_ID = 'org.peng.offline_lan_0922'
-MOD_VERSION = '0.6.6'
+MOD_VERSION = '0.6.7'
 BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 BUILD_IDENTITY_FILENAME = 'build_identity.json'
 BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
