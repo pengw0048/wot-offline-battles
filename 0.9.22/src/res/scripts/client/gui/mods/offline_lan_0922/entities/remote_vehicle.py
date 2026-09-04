@@ -277,9 +277,14 @@ class _RemoteShotPresenter(object):
     """Shared #1513 tracer and gun-recoil resources for remote vehicles.
 
     Muzzle flash and shot sound stay on the stock ``ShowShooting`` extra.
-    The retail client receives a separate tracer message online, so the
-    offline relay must also feed ``ProjectileMover`` explicitly.  This is the
-    #1513 adaptation of the mature 0.8.2 remote-shot presentation path.
+    Canonical projectile motion is already resolved by the hidden worker, so
+    its tracer is a stock projectile model attached to a ``BigWorld.Servo``
+    over a Python-owned matrix.  Only authoritative positions may move that
+    matrix.  ``ProjectileMover`` remains a lazy owner for its reviewed
+    unknown-id world-explosion path and the non-ledgered legacy presentation
+    fallback; canonical tank and SPG shell tracers never enter its native
+    free-running ballistics simulator. Combat-equipment artillery descriptors
+    are outside the standard-battle catalog and fail closed on this ledger.
     """
 
     # A stock gun can emit a short autocannon burst, so keep a generous
@@ -289,6 +294,9 @@ class _RemoteShotPresenter(object):
     _VISUAL_REFILL_PER_SECOND = 5.0
     _MAX_ACTIVE_PER_ATTACKER = 24
     _MAX_ACTIVE_TOTAL = 128
+    # Stock ProjectileMover keeps the stopped projectile effect alive for
+    # this long before detachAllFrom/delMotor/delModel.
+    _TERMINAL_TAIL_SECONDS = 2.0
 
     def __init__(self, bigworld, math_module, model_assembler, space_id):
         self._bigworld = bigworld
@@ -299,6 +307,8 @@ class _RemoteShotPresenter(object):
         self._next_shot_id = 1000000
         self._projectile_shots = {}
         self._projectile_order = []
+        self._projectile_tails = {}
+        self._projectile_tail_order = []
         self._visual_budgets = {}
         self._visual_admissions = {}
         self._failure_stages = set()
@@ -419,7 +429,7 @@ class _RemoteShotPresenter(object):
             direction = self._direction(vehicle)
             velocity = direction.scale(float(speed))
             maximum = _component_value(shot, 'maxDistance', 5000.0)
-            shot_id = self.play_canonical(
+            shot_id = self._play_legacy_tracer(
                 vehicle.typeDescriptor, vehicle._offlineLANShotIndex,
                 start, velocity, gravity, maximum or 5000.0, vehicle.id)
             # Preserve the pre-ledger RemoteVehicle.showShooting contract.
@@ -428,17 +438,81 @@ class _RemoteShotPresenter(object):
         except Exception:
             return False
 
+    def _play_legacy_tracer(self, descriptor, shell_index, origin, velocity,
+                            gravity, max_distance, attacker_id):
+        """Preserve the non-ledgered #1513 ProjectileMover presentation.
+
+        Current authoritative launches carry a projectile id and never enter
+        this method.  Old presentation-only ``showShooting`` calls have no
+        position-update or terminal identity, so their stock self-retiring
+        mover remains the only bounded lifecycle available.
+        """
+        if self._closed or not self._launches_enabled:
+            return False
+        shot = self._shot_at(descriptor, shell_index)
+        shell = _component_value(shot, 'shell')
+        effects_index = _component_value(shell, 'effectsIndex')
+        start = self._finite_vector(origin)
+        speed = self._finite_vector(velocity)
+        gravity = self._finite_float(gravity)
+        maximum = self._finite_float(max_distance)
+        try:
+            attacker_id = int(attacker_id)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (shot is None or shell is None or effects_index is None or
+                start is None or speed is None or gravity is None or
+                maximum is None or gravity < 0.0 or maximum <= 0.0 or
+                attacker_id <= 0 or
+                not self.admit_visual(attacker_id, None)):
+            return False
+        mover = None
+        visual_id = None
+        try:
+            from items import vehicles
+            effects_descr = vehicles.g_cache.shotEffects[effects_index]
+            if effects_descr is None:
+                return False
+            mover = self._projectile_mover()
+            if mover is None:
+                return False
+            camera = getattr(self._bigworld, 'camera', None)
+            camera = camera() if callable(camera) else None
+            camera_position = self._finite_vector(
+                getattr(camera, 'position', None))
+            if camera_position is None:
+                camera_position = start
+            visual_id = self._next_shot_id
+            self._next_shot_id += 1
+            mover.add(
+                visual_id, effects_descr, gravity, start, speed, start,
+                maximum, attacker_id, camera_position)
+            artillery = effects_descr.get('artilleryID') is not None
+            active = getattr(
+                mover, '_ProjectileMover__projectiles', None)
+            if (not artillery and
+                    (not isinstance(active, dict) or
+                     visual_id not in active)):
+                self._report_failure('legacy native add rejected')
+                return False
+            return visual_id
+        except Exception as error:
+            self._report_failure('legacy tracer creation', error)
+            return False
+
     def play_canonical(self, descriptor, shell_index, origin, velocity,
                        gravity, max_distance, attacker_id,
                        projectile_id=None, reference_position=None,
                        reference_velocity=None, is_ricochet=False):
-        """Present one canonical launch through the exact #1513 mover ABI.
+        """Create one tracer whose pose is owned by authoritative updates.
 
         The origin and velocity belong to the authoritative launch event.
         They must never be recomputed from the vehicle's presentation pose,
         which may already have advanced by the time a relay event arrives.
-        Invalid native-boundary values fail closed before ProjectileMover is
-        constructed or called.
+        ``reference_position`` and ``reference_velocity`` are the latest
+        hidden-worker-confirmed cursor when a launch arrives late.  No
+        ballistic motor is created here, so the tracer cannot run ahead of
+        that cursor while the next collision receipt is pending.
         """
         if self._closed or not self._launches_enabled:
             return False
@@ -447,10 +521,10 @@ class _RemoteShotPresenter(object):
         effects_index = _component_value(shell, 'effectsIndex')
         if shot is None or shell is None or effects_index is None:
             return False
-        visual_start = self._finite_vector(origin)
-        reference_start = (visual_start if reference_position is None else
-                           self._finite_vector(reference_position))
-        reference_velocity = self._finite_vector(
+        launch_start = self._finite_vector(origin)
+        visual_start = (launch_start if reference_position is None else
+                        self._finite_vector(reference_position))
+        visual_velocity = self._finite_vector(
             velocity if reference_velocity is None else reference_velocity)
         gravity = self._finite_float(gravity)
         maximum = self._finite_float(max_distance)
@@ -458,25 +532,33 @@ class _RemoteShotPresenter(object):
             attacker_id = int(attacker_id)
         except (TypeError, ValueError, OverflowError):
             return False
-        existing = None
-        if projectile_id is not None:
+        if projectile_id is None:
+            return False
+        try:
+            projectile_id = str(projectile_id)
+        except Exception:
+            return False
+        if not projectile_id or len(projectile_id) > 128:
+            return False
+        existing = self._projectile_shots.get(projectile_id)
+        if existing is not None:
+            if not existing.get('creation_failed', False):
+                return existing['visual_id']
             try:
-                projectile_id = str(projectile_id)
-            except Exception:
+                released = self._release_controlled(existing)
+            except Exception as error:
+                released = False
+                self._report_failure(
+                    'failed tracer creation cleanup retry', error)
+            if not released:
                 return False
-            if not projectile_id or len(projectile_id) > 128:
-                return False
-            existing = self._projectile_shots.get(projectile_id)
-        if (visual_start is None or reference_start is None or
-                reference_velocity is None or gravity is None or
+            self._remove_projectile_mapping(projectile_id)
+        if (launch_start is None or visual_start is None or
+                visual_velocity is None or gravity is None or
                 maximum is None or gravity < 0.0 or maximum <= 0.0 or
                 attacker_id <= 0):
             return False
-        if (existing is None and
-                not self.admit_visual(attacker_id, projectile_id)):
-            return False
-        mover = None
-        shot_id = None
+        entry = None
         try:
             from items import vehicles
             effects_descr = vehicles.g_cache.shotEffects[effects_index]
@@ -486,143 +568,194 @@ class _RemoteShotPresenter(object):
                 artillery = effects_descr.get('artilleryID') is not None
             except AttributeError:
                 return False
-            mover = self._projectile_mover()
-            if mover is None:
+            if artillery:
+                # #1513 builds artilleryID only for the Env_Artillery/strike
+                # effect family, which the standard-battle catalog excludes.
+                # PySalvo exposes neither a confirmed-pose update nor a
+                # per-projectile stop boundary, so never admit one onto the
+                # canonical ledger. Ordinary tank and SPG effects provide the
+                # controllable projectile tuple handled below.
+                self._visual_admissions.pop(projectile_id, None)
+                self._report_failure(
+                    'canonical combat-equipment artillery rejected')
                 return False
-            self._prune_stale_projectiles(mover)
-            existing = (self._projectile_shots.get(projectile_id)
-                        if projectile_id is not None else None)
-            if existing is not None:
-                existing_id, existing_artillery = existing[:2]
-                if existing_artillery:
-                    return existing_id
-                active = getattr(
-                    mover, '_ProjectileMover__projectiles', None)
-                if (isinstance(active, dict) and
-                        existing_id in active):
-                    return existing_id
-                # The native simulator discarded or retired the projectile
-                # without an authoritative terminal.  Drop only our stale
-                # dedupe entry so the active snapshot can recreate it.
-                self._remove_projectile_mapping(projectile_id)
-            if not self._ensure_visual_capacity(mover, attacker_id):
+            try:
+                projectile = effects_descr['projectile']
+                model_name, own_model_name, projectile_effects = projectile
+            except (KeyError, TypeError, ValueError):
                 return False
-            camera = getattr(self._bigworld, 'camera', None)
-            camera = camera() if callable(camera) else None
-            camera_position = self._finite_vector(
-                getattr(camera, 'position', None))
-            if camera_position is None:
-                camera_position = reference_start
-            shot_id = self._next_shot_id
+            attach = getattr(projectile_effects, 'attachTo', None)
+            detach = getattr(projectile_effects, 'detachFrom', None)
+            detach_all = getattr(projectile_effects, 'detachAllFrom', None)
+            if (not callable(attach) or not callable(detach) or
+                    not callable(detach_all)):
+                return False
+            player = self._bigworld.player()
+            add_model = getattr(player, 'addModel', None)
+            del_model = getattr(player, 'delModel', None)
+            model_factory = getattr(self._bigworld, 'Model', None)
+            servo_factory = getattr(self._bigworld, 'Servo', None)
+            if (player is None or not callable(add_model) or
+                    not callable(del_model) or not callable(model_factory) or
+                    not callable(servo_factory)):
+                return False
+            try:
+                player_vehicle_id = int(player.playerVehicleID)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                player_vehicle_id = 0
+            own_shot = attacker_id == player_vehicle_id
+            selected_name = own_model_name if own_shot else model_name
+            if not selected_name:
+                return False
+            if (not self.admit_visual(attacker_id, projectile_id) or
+                    not self._ensure_visual_capacity(attacker_id)):
+                return False
+            visual_id = self._next_shot_id
             self._next_shot_id += 1
-            # Exact #1513 ABI:
-            # add(id, effects, gravity, refStart, refVelocity, start,
-            #     maxDistance, attackerID, tracerCameraPos)
-            mover.add(
-                shot_id, effects_descr, gravity, reference_start,
-                reference_velocity, visual_start, maximum, attacker_id,
-                camera_position)
-            # ``ProjectileMover.add`` has no return-value contract.  In
-            # #1513 it silently returns without creating a projectile during
-            # replay time-warp and when the native ballistics simulator
-            # rejects the launch.  Do not turn that failure into a permanent
-            # projectile-id dedupe entry: a later authoritative snapshot must
-            # be allowed to retry it.
-            active = getattr(
-                mover, '_ProjectileMover__projectiles', None)
-            if (not artillery and
-                    (not isinstance(active, dict) or shot_id not in active)):
-                self._report_failure('native add rejected')
-                return False
-            if is_ricochet:
-                hold = getattr(mover, 'hold', None)
-                if not callable(hold):
-                    self._hide_untracked(mover, shot_id, reference_start)
-                    return False
-                try:
-                    hold(shot_id)
-                except Exception as error:
-                    self._hide_untracked(mover, shot_id, reference_start)
-                    self._report_failure('native hold exception', error)
-                    return False
-            if projectile_id is not None:
-                self._projectile_shots[projectile_id] = (
-                    shot_id, artillery, attacker_id, reference_start)
-                self._projectile_order.append(projectile_id)
-            return shot_id
+            pose = self._math.Matrix()
+            self._write_projectile_pose(
+                pose, visual_start, visual_velocity)
+            model = model_factory(selected_name)
+            servo = servo_factory(pose)
+            entry = {
+                'visual_id': visual_id,
+                'model': model,
+                'servo': servo,
+                'pose': pose,
+                'effects_descr': effects_descr,
+                'projectile_effects': projectile_effects,
+                'effects_data': {},
+                'attacker_id': attacker_id,
+                'position': visual_start,
+                'velocity': visual_velocity,
+                'in_scene': False,
+                'motor_attached': False,
+                'flying_attached': False,
+                'effects_cleared': False,
+                'kind': 'controlled',
+                'ricochet': bool(is_ricochet),
+                'own_shot': own_shot,
+                'input_hit_notified': False,
+                'flock_hit_notified': False,
+                'missed_notified': False,
+                'creation_failed': False,
+                'terminal': False,
+                'release_scheduled': False,
+            }
+            add_model(model)
+            entry['in_scene'] = True
+            model.addMotor(servo)
+            entry['motor_attached'] = True
+            # This matches stock ProjectileMover: the model mesh is hidden,
+            # while the attached ``flying`` effect owns the visible tracer.
+            model.visible = False
+            model.visibleAttachments = True
+            attach(
+                model, entry['effects_data'], 'flying',
+                isPlayerVehicle=own_shot, isArtillery=False)
+            entry['flying_attached'] = True
+            self._projectile_shots[projectile_id] = entry
+            self._projectile_order.append(projectile_id)
+            self._notify_projectile_launch(launch_start)
+            return visual_id
         except Exception as error:
-            if mover is not None and shot_id is not None:
-                self._hide_untracked(mover, shot_id, reference_start)
-            self._launches_enabled = False
-            self._report_failure('launch exception', error)
+            if entry is not None:
+                try:
+                    released = self._release_controlled(entry)
+                except Exception as cleanup_error:
+                    released = False
+                    self._report_failure(
+                        'failed tracer creation cleanup', cleanup_error)
+                if not released:
+                    entry['creation_failed'] = True
+                    self._projectile_shots[projectile_id] = entry
+                    if projectile_id not in self._projectile_order:
+                        self._projectile_order.append(projectile_id)
+            self._report_failure('controlled tracer creation', error)
             return False
 
-    def _prune_stale_projectiles(self, mover):
-        """Release dedupe rows already retired by native ballistics."""
-        active = getattr(mover, '_ProjectileMover__projectiles', None)
-        if not isinstance(active, dict):
-            return False
-        changed = False
-        for projectile_id, entry in tuple(self._projectile_shots.items()):
-            shot_id, artillery = entry[:2]
-            if not artillery and shot_id not in active:
-                self._remove_projectile_mapping(projectile_id)
-                changed = True
-        return changed
-
-    def _ensure_visual_capacity(self, mover, attacker_id):
-        """Retire oldest visuals before native pools can grow unbounded."""
+    def _ensure_visual_capacity(self, attacker_id):
+        """Retire oldest visuals before scene resources grow unbounded."""
         while True:
             attacker_active = sum(
                 1 for entry in self._projectile_shots.values()
-                if len(entry) > 2 and entry[2] == attacker_id)
-            total_active = len(self._projectile_shots)
+                if entry.get('attacker_id') == attacker_id) + sum(
+                    1 for entry in self._projectile_tails.values()
+                    if entry.get('attacker_id') == attacker_id)
+            total_active = (
+                len(self._projectile_shots) + len(self._projectile_tails))
             if (attacker_active < self._MAX_ACTIVE_PER_ATTACKER and
                     total_active < self._MAX_ACTIVE_TOTAL):
                 return True
+            require_attacker = (
+                attacker_active >= self._MAX_ACTIVE_PER_ATTACKER)
+            tail_candidate = None
+            for visual_id in tuple(self._projectile_tail_order):
+                entry = self._projectile_tails.get(visual_id)
+                if entry is None:
+                    self._remove_tail_order(visual_id)
+                    continue
+                if (require_attacker and
+                        entry.get('attacker_id') != attacker_id):
+                    continue
+                tail_candidate = visual_id
+                break
+            if tail_candidate is not None:
+                if not self._retire_tail_for_pressure(tail_candidate):
+                    self._launches_enabled = False
+                    return False
+                continue
             candidate = None
             for projectile_id in tuple(self._projectile_order):
                 entry = self._projectile_shots.get(projectile_id)
                 if entry is None:
                     self._remove_projectile_order(projectile_id)
                     continue
-                if (attacker_active >= self._MAX_ACTIVE_PER_ATTACKER and
-                        len(entry) > 2 and entry[2] != attacker_id):
+                if (require_attacker and
+                        entry.get('attacker_id') != attacker_id):
                     continue
                 candidate = projectile_id
                 break
             if candidate is None:
                 return False
-            if not self._retire_for_pressure(mover, candidate):
-                # A failed native hide is the exact moment to stop adding
-                # cosmetic work.  Authority continues without this presenter.
+            if not self._retire_for_pressure(candidate):
+                # A failed scene teardown is the exact moment to stop adding
+                # cosmetic work. Authority continues without this presenter.
                 self._launches_enabled = False
                 return False
 
-    def _retire_for_pressure(self, mover, projectile_id):
+    def _retire_tail_for_pressure(self, visual_id):
+        entry = self._projectile_tails.get(visual_id)
+        if entry is None:
+            self._remove_tail_order(visual_id)
+            return True
+        try:
+            released = self._release_controlled(entry)
+        except Exception as error:
+            released = False
+            self._report_failure('controlled tracer tail pressure', error)
+        if not released:
+            return False
+        self._remove_tail_mapping(visual_id)
+        return True
+
+    def _retire_for_pressure(self, projectile_id):
         entry = self._projectile_shots.get(projectile_id)
         if entry is None:
             return True
-        shot_id = entry[0]
-        endpoint = entry[3] if len(entry) > 3 else None
-        if not self._hide_untracked(mover, shot_id, endpoint):
-            return False
-        attacker_id = entry[2] if len(entry) > 2 else 0
+        if entry.get('kind') == 'controlled':
+            try:
+                released = self._release_controlled(entry)
+            except Exception as error:
+                released = False
+                self._report_failure(
+                    'controlled tracer active pressure', error)
+            if not released:
+                return False
+        attacker_id = entry.get('attacker_id', 0)
         self._remove_projectile_mapping(projectile_id)
         if attacker_id > 0:
             self._visual_admissions[projectile_id] = (attacker_id, False)
-        return True
-
-    def _hide_untracked(self, mover, shot_id, endpoint):
-        callback = getattr(mover, 'hide', None)
-        endpoint = self._finite_vector(endpoint)
-        if not callable(callback) or endpoint is None:
-            return False
-        try:
-            callback(shot_id, endpoint)
-        except Exception as error:
-            self._report_failure('pressure hide exception', error)
-            return False
         return True
 
     def _remove_projectile_mapping(self, projectile_id):
@@ -635,17 +768,282 @@ class _RemoteShotPresenter(object):
         except ValueError:
             pass
 
+    def _remove_tail_mapping(self, visual_id):
+        self._projectile_tails.pop(visual_id, None)
+        self._remove_tail_order(visual_id)
+
+    def _remove_tail_order(self, visual_id):
+        try:
+            self._projectile_tail_order.remove(visual_id)
+        except ValueError:
+            pass
+
+    def update_canonical(self, projectile_id, position, velocity=None):
+        """Move one tracer only to a hidden-worker-confirmed cursor."""
+        if self._closed or projectile_id is None:
+            return False
+        try:
+            projectile_id = str(projectile_id)
+        except Exception:
+            return False
+        entry = self._projectile_shots.get(projectile_id)
+        point = self._finite_vector(position)
+        if (entry is None or entry.get('kind') != 'controlled' or
+                entry.get('creation_failed', False) or
+                entry.get('terminal', False) or point is None):
+            return False
+        direction = entry.get('velocity')
+        if velocity is not None:
+            direction = self._finite_vector(velocity)
+            if direction is None:
+                return False
+        try:
+            self._write_projectile_pose(entry['pose'], point, direction)
+        except Exception as error:
+            self._report_failure('controlled tracer update', error)
+            return False
+        entry['position'] = point
+        entry['velocity'] = direction
+        return True
+
+    def _write_projectile_pose(self, pose, position, velocity):
+        """Write the stock projectile's +Z axis along its current velocity."""
+        if pose is None or position is None:
+            raise RuntimeError('controlled projectile pose is unavailable')
+        if velocity is not None and velocity.length > 1.0e-9:
+            horizontal = math.sqrt(
+                velocity.x * velocity.x + velocity.z * velocity.z)
+            yaw = math.atan2(velocity.x, velocity.z)
+            pitch = -math.atan2(velocity.y, horizontal)
+            pose.setRotateYPR((yaw, pitch, 0.0))
+        pose.translation = position
+
+    def _notify_projectile_launch(self, position):
+        """Preserve the stock projectile disturbance notification."""
+        try:
+            import FlockManager
+            manager = FlockManager.getManager()
+            callback = getattr(manager, 'onProjectile', None)
+            if callable(callback):
+                callback(position)
+        except Exception as error:
+            self._report_failure('projectile launch notification', error)
+
+    def _notify_projectile_hit(self, entry, position):
+        """Preserve #1513 input and flock feedback before visual teardown."""
+        if not entry.get('input_hit_notified'):
+            try:
+                input_handler = self._bigworld.player().inputHandler
+                callback = getattr(input_handler, 'onProjectileHit', None)
+                caliber = entry['effects_descr']['caliber']
+                if not callable(callback):
+                    raise RuntimeError(
+                        '#1513 projectile-hit input handler is unavailable')
+                callback(position, caliber, bool(entry.get('own_shot')))
+                entry['input_hit_notified'] = True
+            except Exception as error:
+                self._report_failure('projectile hit notification', error)
+        if not entry.get('flock_hit_notified'):
+            try:
+                import FlockManager
+                manager = FlockManager.getManager()
+                callback = getattr(manager, 'onProjectile', None)
+                if not callable(callback):
+                    raise RuntimeError(
+                        '#1513 projectile flock notification is unavailable')
+                callback(position)
+                entry['flock_hit_notified'] = True
+            except Exception as error:
+                self._report_failure('projectile flock notification', error)
+
+    def _notify_projectile_missed(self, entry):
+        """Preserve the stock own-shot world-miss trigger exactly once."""
+        if (not entry.get('own_shot') or
+                entry.get('missed_notified')):
+            return False
+        try:
+            import TriggersManager
+            callback = getattr(
+                getattr(TriggersManager, 'g_manager', None),
+                'fireTrigger', None)
+            trigger_type = getattr(
+                getattr(TriggersManager, 'TRIGGER_TYPE', None),
+                'PLAYER_SHOT_MISSED', None)
+            if not callable(callback) or trigger_type is None:
+                raise RuntimeError(
+                    '#1513 projectile-miss trigger is unavailable')
+            callback(trigger_type)
+            entry['missed_notified'] = True
+            return True
+        except Exception as error:
+            self._report_failure('projectile miss notification', error)
+            return False
+
+    def _release_controlled(self, entry):
+        """Detach every controlled tracer owner in a retry-safe order."""
+        effects = entry.get('projectile_effects')
+        data = entry.get('effects_data')
+        model = entry.get('model')
+        servo = entry.get('servo')
+        if entry.get('flying_attached'):
+            callback = getattr(effects, 'detachFrom', None)
+            if not callable(callback):
+                return False
+            callback(data, 'stopFlying')
+            entry['flying_attached'] = False
+        if not entry.get('effects_cleared'):
+            callback = getattr(effects, 'detachAllFrom', None)
+            if not callable(callback):
+                return False
+            callback(data, False)
+            entry['effects_cleared'] = True
+        if entry.get('motor_attached'):
+            callback = getattr(model, 'delMotor', None)
+            if not callable(callback):
+                return False
+            callback(servo)
+            entry['motor_attached'] = False
+        if entry.get('in_scene'):
+            player = self._bigworld.player()
+            callback = getattr(player, 'delModel', None)
+            if not callable(callback):
+                return False
+            callback(model)
+            entry['in_scene'] = False
+        return True
+
+    def _schedule_controlled_release(self, entry):
+        """Keep the stopped stock effect for its reviewed two-second tail."""
+        if entry.get('release_scheduled', False):
+            return True
+        visual_id = entry['visual_id']
+        callback = getattr(self._bigworld, 'callback', None)
+        if not callable(callback):
+            self._launches_enabled = False
+            self._report_failure(
+                'controlled tracer tail scheduling', RuntimeError(
+                    '#1513 BigWorld.callback is unavailable'))
+            return False
+
+        def release():
+            current = self._projectile_tails.get(visual_id)
+            if current is not entry:
+                return
+            entry['release_scheduled'] = False
+            try:
+                released = self._release_controlled(entry)
+            except Exception as error:
+                released = False
+                self._report_failure(
+                    'controlled tracer tail cleanup', error)
+            if released:
+                self._remove_tail_mapping(visual_id)
+            else:
+                # A retained scene owner cannot be bounded safely by later
+                # cosmetic work. Battle authority remains unaffected.
+                self._launches_enabled = False
+
+        entry['release_scheduled'] = True
+        try:
+            callback(self._TERMINAL_TAIL_SECONDS, release)
+        except Exception as error:
+            entry['release_scheduled'] = False
+            self._launches_enabled = False
+            self._report_failure(
+                'controlled tracer tail scheduling', error)
+            return False
+        return True
+
+    def reset_canonical(self, recycle_mover=True):
+        """Release one epoch's visuals without permanently closing us.
+
+        Controlled tracers are detached individually. The lazy stock mover is
+        also recycled to retire its tracked legacy ballistics and callbacks;
+        a later legacy shot or world explosion creates a fresh space-bound
+        mover. This does not claim a per-shot stop contract for PySalvo,
+        which never enters the canonical projectile ledger.
+        """
+        failed = False
+        for projectile_id in tuple(self._projectile_order):
+            entry = self._projectile_shots.get(projectile_id)
+            if entry is None:
+                self._remove_projectile_order(projectile_id)
+                continue
+            if entry.get('kind') != 'controlled':
+                self._remove_projectile_mapping(projectile_id)
+                continue
+            try:
+                released = self._release_controlled(entry)
+            except Exception as error:
+                released = False
+                self._report_failure('controlled tracer reset', error)
+            if released:
+                self._remove_projectile_mapping(projectile_id)
+            else:
+                failed = True
+        for visual_id in tuple(self._projectile_tail_order):
+            entry = self._projectile_tails.get(visual_id)
+            if entry is None:
+                self._remove_tail_order(visual_id)
+                continue
+            try:
+                released = self._release_controlled(entry)
+            except Exception as error:
+                released = False
+                self._report_failure('controlled tracer tail reset', error)
+            if released:
+                self._remove_tail_mapping(visual_id)
+            else:
+                failed = True
+        mover = self._mover
+        if recycle_mover and mover is not None:
+            callback = getattr(mover, 'destroy', None)
+            if not callable(callback):
+                failed = True
+            else:
+                try:
+                    callback()
+                except Exception as error:
+                    failed = True
+                    self._report_failure('projectile mover reset', error)
+                else:
+                    self._mover = None
+        if not failed:
+            self._visual_budgets = {}
+            self._visual_admissions = {}
+        else:
+            # Retained native owners cannot be correlated safely with the
+            # next authority epoch. Keep combat running, but fail closed for
+            # later cosmetic launches in this battle.
+            self._launches_enabled = False
+        return not failed
+
+    def _take_unused_shot_id(self, mover):
+        """Reserve one increasing id not owned by native or canonical state."""
+        active = getattr(mover, '_ProjectileMover__projectiles', None)
+        mapped = set(
+            entry['visual_id'] for entry in self._projectile_shots.values())
+        mapped.update(self._projectile_tails)
+        while True:
+            shot_id = self._next_shot_id
+            self._next_shot_id += 1
+            if shot_id in mapped:
+                continue
+            if isinstance(active, dict) and shot_id in active:
+                continue
+            return shot_id
+
     def stop_canonical(self, projectile_id, end_position,
-                       explosion=None):
-        """Retire one authoritative tracer at its canonical terminal point.
+                       explosion=None, missed=False):
+        """Pin and stop one tracer, then retire its stock terminal tail.
 
         ``explosion`` carries ``(effectsDescr, effectMaterial, velocityDir)``
-        for a terminal on the world.  Retail sends that terminal straight to
-        ``ProjectileMover.explode`` so its native ballistics simulator can
-        correct the impact point and schedule the material effect.  ``hide``
-        deliberately clears ``showExplosion`` and is reserved for vehicle or
-        effect-free terminals.  If the explosion call itself fails, hiding is
-        the safe fallback so a tracer cannot remain alive indefinitely.
+        for a terminal on the world.  The controlled tracer is moved to the
+        impact before its flying state is stopped. Its scene owners stay for
+        the reviewed stock tail interval, then release asynchronously. A lazy
+        ProjectileMover receives an unused id solely
+        for the exact #1513 unknown-id material-explosion branch; it never
+        owns or advances this tracer.
         """
         if self._closed or projectile_id is None:
             return False
@@ -656,40 +1054,95 @@ class _RemoteShotPresenter(object):
         entry = self._projectile_shots.get(projectile_id)
         end = self._finite_vector(end_position)
         if entry is None:
-            # A denied or pressure-retired visual still receives the complete
-            # authoritative terminal.  Forget only its cosmetic admission.
-            self._visual_admissions.pop(projectile_id, None)
-            return False
+            # A visual can fail or be pressure-retired before a world
+            # terminal arrives. Unknown ids preserve only the material hit
+            # effect, without creating a late tracer. Denied visuals must not
+            # bypass their admission.
+            admission = self._visual_admissions.pop(projectile_id, None)
+            if (admission is None or not admission[1] or end is None or
+                    not explosion):
+                return False
+            mover = self._projectile_mover()
+            if mover is None:
+                return False
+            shot_id = self._take_unused_shot_id(mover)
+            return self._explode_canonical(
+                mover, shot_id, end, explosion)
         if end is None:
             return False
-        shot_id = entry[0]
-        mover = self._mover
-        if mover is None:
+        if entry.get('kind') != 'controlled':
             return False
-        if self._explode_canonical(mover, shot_id, end, explosion):
+        delayed_release = False
+        if entry.get('creation_failed', False):
+            try:
+                released = self._release_controlled(entry)
+            except Exception as error:
+                self._report_failure(
+                    'failed tracer creation terminal cleanup', error)
+                return False
+            if not released:
+                return False
+        else:
+            direction = entry.get('velocity')
+            if explosion:
+                try:
+                    unused_descr, unused_material, direction = explosion
+                except (TypeError, ValueError):
+                    direction = entry.get('velocity')
+            direction = self._finite_vector(direction)
+            if direction is None:
+                direction = entry.get('velocity')
+            try:
+                # Pinning is deliberately the first native-visible action.
+                self._write_projectile_pose(entry['pose'], end, direction)
+                entry['position'] = end
+                entry['velocity'] = direction
+                if missed:
+                    self._notify_projectile_missed(entry)
+                self._notify_projectile_hit(entry, end)
+                if entry.get('flying_attached'):
+                    callback = getattr(
+                        entry.get('projectile_effects'), 'detachFrom', None)
+                    if not callable(callback):
+                        raise RuntimeError(
+                            '#1513 projectile stopFlying is unavailable')
+                    callback(entry.get('effects_data'), 'stopFlying')
+                    entry['flying_attached'] = False
+                entry['terminal'] = True
+                self._remove_projectile_mapping(projectile_id)
+                visual_id = entry['visual_id']
+                self._projectile_tails[visual_id] = entry
+                self._projectile_tail_order.append(visual_id)
+                delayed_release = self._schedule_controlled_release(
+                    entry)
+                released = False
+            except Exception as error:
+                self._report_failure('controlled tracer terminal', error)
+                return False
+        if released:
             self._remove_projectile_mapping(projectile_id)
-            self._visual_admissions.pop(projectile_id, None)
-            return True
-        callback = getattr(mover, 'hide', None) if mover is not None else None
-        if not callable(callback):
-            return False
+        retirement_safe = bool(released or delayed_release)
+        admission = self._visual_admissions.pop(projectile_id, None)
+        if not explosion or admission is None or not admission[1]:
+            return retirement_safe
+        mover = self._projectile_mover()
+        if mover is None:
+            return retirement_safe
+        shot_id = self._take_unused_shot_id(mover)
         try:
-            callback(shot_id, end)
-        except Exception as error:
-            self._launches_enabled = False
-            self._report_failure('terminal hide exception', error)
-            return False
-        self._remove_projectile_mapping(projectile_id)
-        self._visual_admissions.pop(projectile_id, None)
-        return True
+            self._explode_canonical(mover, shot_id, end, explosion)
+        except Exception:
+            # Visual ownership is already safely retired. The explosion path
+            # reports and disables itself without resurrecting the tracer.
+            pass
+        return retirement_safe
 
     def _explode_canonical(self, mover, shot_id, end, explosion):
         """Play the retail ground explosion for one world terminal.
 
-        Keeping the positive shot id alive is important: the retail method
-        first asks ``PyBallisticsSimulator.explodeProjectile`` for its corrected
-        terminal point and direction, or marks the live projectile to render
-        the explosion from the native terminal callback.
+        The id is deliberately absent from ProjectileMover's private map.
+        Exact #1513 then constructs only a temporary effect dictionary and
+        calls its material-explosion helper directly.
         """
         if not explosion or not self._explosions_enabled:
             return False
@@ -754,7 +1207,7 @@ class _RemoteShotPresenter(object):
 
     def _projectile_mover(self):
         if (self._mover is None and not self._closed and
-                self._launches_enabled):
+                self._explosions_enabled):
             mover = None
             try:
                 from ProjectileMover import ProjectileMover
@@ -776,7 +1229,7 @@ class _RemoteShotPresenter(object):
                         destroy()
                     except Exception:
                         pass
-                self._launches_enabled = False
+                self._explosions_enabled = False
                 self._report_failure('mover setup', error)
                 return None
         return self._mover
@@ -853,19 +1306,34 @@ class _RemoteShotPresenter(object):
 
     def destroy(self):
         self._closed = True
+        first_error = None
+        try:
+            if not self.reset_canonical(recycle_mover=False):
+                first_error = RuntimeError(
+                    'controlled projectile visual cleanup failed')
+        except Exception as error:
+            first_error = error
         mover = self._mover
         if mover is not None:
             callback = getattr(mover, 'destroy', None)
             if not callable(callback):
-                raise RuntimeError(
-                    '#1513 ProjectileMover has no destroy lifecycle')
-            callback()
-        # Keep the mover and its projectile ownership intact when native
-        # teardown raises.  ``destroy_all`` may then retry the same object
-        # instead of leaking a callback subscription with no Python owner.
-        self._mover = None
+                if first_error is None:
+                    first_error = RuntimeError(
+                        '#1513 ProjectileMover has no destroy lifecycle')
+            else:
+                try:
+                    callback()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                else:
+                    self._mover = None
+        if first_error is not None:
+            raise first_error
         self._projectile_shots = {}
         self._projectile_order = []
+        self._projectile_tails = {}
+        self._projectile_tail_order = []
         self._visual_budgets = {}
         self._visual_admissions = {}
 
@@ -1696,6 +2164,8 @@ class RemoteVehicle(object):
         native_started = self._start_shooting_effect(max(1, int(burst_count)))
         tracer_started = bool(
             self._shot_presenter is not None and
+            not bool(getattr(
+                self, '_offlineLANCanonicalTracerOwned', False)) and
             self._shot_presenter.play_tracer(self))
         self.last_shot_effect = (native_started, tracer_started)
         return native_started or tracer_started
@@ -2453,10 +2923,20 @@ class RemoteVehicleFactory(object):
             attacker_id, projectile_id, now)
 
     def stop_projectile_tracer(self, projectile_id, end_position,
-                               explosion=None):
+                               explosion=None, missed=False):
         """Retire one canonical tracer after a server terminal event."""
         return self._shot_presenter.stop_canonical(
-            projectile_id, end_position, explosion)
+            projectile_id, end_position, explosion, missed)
+
+    def update_projectile_visual(self, projectile_id, position,
+                                 velocity=None):
+        """Move a tracer to the latest hidden-worker-confirmed cursor."""
+        return self._shot_presenter.update_canonical(
+            projectile_id, position, velocity)
+
+    def reset_projectile_visuals(self):
+        """Release the old epoch's visuals while keeping the factory live."""
+        return self._shot_presenter.reset_canonical()
 
     def engine_owns(self, entity_id):
         """Whether BigWorld still knows this client-only entity.

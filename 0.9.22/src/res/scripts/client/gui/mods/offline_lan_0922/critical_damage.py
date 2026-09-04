@@ -309,10 +309,10 @@ def _offh_extinguish(target_mock, is_player_target, reason):
 		LOG_DEBUG('fuel tank restore after fire failed:', str(_fx))
 
 
-def _offh_knock_out_everything(mock, is_player):
-	'''A destroyed tank has everything destroyed: every module at 0 HP and every
-	crewman down. Used for drowning AND for an ordinary kill - previously only
-	drowning called it, so a normal death left most module icons untouched.'''
+def _offh_knock_out_everything(mock):
+	'''Put every module at 0 HP and every crewman down for a terminal state.
+
+	The stock #1513 death path owns the terminal damage-panel presentation.'''
 	try:
 		if getattr(mock, 'devices_hp', None) is None:
 			mock.devices_hp = {}
@@ -348,57 +348,7 @@ def _offh_knock_out_everything(mock, is_player):
 		_refresh_mobility_flags(mock)
 	except Exception:
 		pass
-	LOG_DEBUG('KNOCKOUT called: is_player=%s devices=%d crew=%d' % (is_player, len(_OFFH_DEATH_DEVICES), len(_roster)))
-	if not is_player:
-		return
-	try:
-		import BigWorld
-		from gui import WindowsManager as _wmko
-		_p = BigWorld.player()
-		_bw = getattr(_wmko.g_windowsManager, 'battleWindow', None)
-		_dp = getattr(_bw, 'damagePanel', None) if _bw is not None else None
-		_ui = [_module_ui_name(_n) for _n in _OFFH_DEATH_DEVICES] + list(_roster)
-		LOG_DEBUG('KNOCKOUT: is_player=%s panel=%s names=%s' % (is_player, _dp is not None, _ui))
-		for _n in _ui:
-			try: _p.guiSessionProvider.invalidateVehicleState(2, _p.playerVehicleID, _n, 'destroyed')
-			except Exception: pass
-			if _dp is not None:
-				try: _dp.updateState(_n, 'destroyed')
-				except Exception: pass
-		# Retail greys the panel and deactivates the crew from DamagePanel._updateOther
-		# the moment the vehicle reads dead. That tick needs a real BigWorld entity, so
-		# offline it never runs and the crew icons stayed lit on a destroyed tank.
-		if _dp is not None:
-			try: _dp.onVehicleDestroyed()
-			except Exception: pass
-			try: _dp.onCrewDeactivated()
-			except Exception: pass
-		# onVehicleDestroyed greys the WHOLE panel out, wiping the red module icons we
-		# just set, and it can also fire again later. Push them again on the next
-		# frames so the destroyed state is what stays visible.
-		def _reassert(_names=list(_ui), _panel=_dp, _hp=_offh_hp_display(mock)):
-			if _panel is None:
-				return
-			for _m in _names:
-				try: _panel.updateState(_m, 'destroyed')
-				except Exception: pass
-			# A drowned tank keeps its last HP; anything else is already 0 here.
-			try: _panel.updateHealth(_hp)
-			except Exception: pass
-		try:
-			import BigWorld as _bwr
-			# Spread over the whole post-mortem: WG's DamagePanel._updateSelf ticks every
-			# 30 ms and calls onVehicleDestroyed() the moment the vehicle reads as dead,
-			# which greys the panel. Re-push past that point so the red module icons are
-			# what remains on screen.
-			_bwr.callback(0.1, _reassert)
-			_bwr.callback(0.5, _reassert)
-			_bwr.callback(1.5, _reassert)
-			_bwr.callback(3.0, _reassert)
-		except Exception:
-			pass
-	except Exception:
-		pass
+	LOG_DEBUG('KNOCKOUT called: devices=%d crew=%d' % (len(_OFFH_DEATH_DEVICES), len(_roster)))
 
 
 def _offh_module_test_mode():
@@ -799,9 +749,7 @@ def _dev_critical_set(mock):
 def _module_ui_name(name):
 	'''Damage-panel device name = extra name minus 'Health'; tracks keep their side.
 
-	The battle scope defines its own and publishes it over this one. This module-level
-	copy exists because _offh_knock_out_everything is module-level too: without it the
-	name lookup raised NameError and took the whole panel block down with it.'''
+	The battle scope defines its own and publishes it over this one.'''
 	return name[:-6] if name.endswith('Health') else name
 
 
@@ -1810,7 +1758,7 @@ def apply_drowning(vehicle):
 	if vehicle is None:
 		return None
 	before = _state(vehicle)
-	_offh_knock_out_everything(vehicle, False)
+	_offh_knock_out_everything(vehicle)
 	after = _state(vehicle)
 	return _payload(
 		before, after, getattr(vehicle, 'typeDescriptor', None), 'drowning')
@@ -1830,7 +1778,7 @@ def apply_death(vehicle, cause='shot'):
     before = _state(vehicle)
     if bool(getattr(vehicle, 'is_on_fire', False)):
         _offh_extinguish(vehicle, False, cause)
-    _offh_knock_out_everything(vehicle, False)
+    _offh_knock_out_everything(vehicle)
     after = _state(vehicle)
     return _payload(
         before, after, getattr(vehicle, 'typeDescriptor', None), cause)

@@ -873,9 +873,19 @@ class NativeRemoteVehicleFactory(object):
             attacker_id, projectile_id, now)
 
     def stop_projectile_tracer(self, projectile_id, end_position,
-                               explosion=None):
+                               explosion=None, missed=False):
         return self._shot_presenter.stop_canonical(
-            projectile_id, end_position, explosion)
+            projectile_id, end_position, explosion, missed)
+
+    def update_projectile_visual(self, projectile_id, position,
+                                 velocity=None):
+        """Move a tracer to the latest hidden-worker-confirmed cursor."""
+        return self._shot_presenter.update_canonical(
+            projectile_id, position, velocity)
+
+    def reset_projectile_visuals(self):
+        """Release the old epoch's visuals while keeping the factory live."""
+        return self._shot_presenter.reset_canonical()
 
     def engine_owns(self, entity_id):
         entities = getattr(self._bigworld, 'entities', None)

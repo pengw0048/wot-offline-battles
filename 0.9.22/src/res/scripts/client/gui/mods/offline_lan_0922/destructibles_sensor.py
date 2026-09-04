@@ -197,6 +197,7 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 		if key[0] == chunk_id and (identity is None or key == identity)]
 	active = globals().get('g_offh_destr_falling_active', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	affected_bin_keys = set()
 	for isolated_identity in identities:
 		instance = instances.pop(isolated_identity)
 		bin_keys = (instance.get('bin_keys')
@@ -205,6 +206,7 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 			# Compatibility fixtures can install an instance without its reverse
 			# index.  Real registered instances always retain the exact bin keys.
 			bin_keys = list(contact_bins)
+		affected_bin_keys.update(bin_keys)
 		for bin_key in bin_keys:
 			members = contact_bins.get(bin_key)
 			if members is None:
@@ -227,6 +229,7 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 				(identity is None or key[:2] == identity)):
 			speculative.discard(key)
 	globals().get('g_offh_destr_broken_cache', {}).pop(chunk_id, None)
+	chunk_changed = False
 	if identity is None:
 		# A chunk-level drop can precede a reload with different native content,
 		# so forget both the list snapshot and its incremental alignment.  A
@@ -234,8 +237,12 @@ def _drop_isolated_destructible_1513(chunk_id, item_index=None):
 		_invalidate_chunk_native_names_1513(chunk_id)
 		state = globals().get('g_offh_tree_state')
 		if isinstance(state, dict):
-			state.get('chunks', {}).pop(chunk_id, None)
-	_bump_spatial_revision_1513()
+			chunk_changed = state.get('chunks', {}).pop(
+				chunk_id, None) is not None
+	if affected_bin_keys or chunk_changed:
+		_bump_spatial_revision_1513(
+			affected_bin_keys,
+			(chunk_id,) if chunk_changed else ())
 
 
 def _log_destructible_validation_1513(
@@ -1078,8 +1085,8 @@ def _diagnostic_static_recast_1513(cleared, now=None):
 		chunk_id, item_index, fields=fields, now=now)
 
 
-def _clear_runtime_registry():
-	for name in ('g_offh_destr_seen', 'g_offh_destr_nodesc',
+def _clear_runtime_registry(preserve_spatial_batch=False):
+	names = ('g_offh_destr_seen', 'g_offh_destr_nodesc',
 			'g_offh_tree_state', 'g_offh_destr_ordered',
 			'g_offh_destr_chunks', 'g_offh_destr_instances',
 			'g_offh_destr_contact_bins', 'g_offh_destr_pending',
@@ -1099,10 +1106,16 @@ def _clear_runtime_registry():
 			'g_offh_destr_isolation_log_capped',
 			'g_offh_destr_diagnostics', 'g_offh_destr_diag_last_static',
 			'g_offh_destr_spatial_revision',
+			'g_offh_destr_spatial_global_generation',
+			'g_offh_destr_spatial_cell_generations',
+			'g_offh_destr_spatial_chunk_generations',
 			'g_offh_destr_empty_contact_receipts',
 			'g_offh_destr_empty_proximity_receipts',
 			'g_offh_destr_receipt_stats',
-			'g_offh_destr_runtime_space'):
+			'g_offh_destr_runtime_space')
+	if not preserve_spatial_batch:
+		names += ('g_offh_destr_spatial_mutation_batch',)
+	for name in names:
 		globals().pop(name, None)
 
 
@@ -1413,22 +1426,121 @@ def _receipt_prefix_1513(name):
 		else 'proximity')
 
 
-def _bump_spatial_revision_1513():
-	"""Invalidate receipts after any exact spatial-index mutation."""
+def _publish_spatial_mutation_1513(bin_keys=(), chunk_ids=(),
+		global_invalidation=False):
+	"""Publish one atomic spatial-index mutation to local generations."""
+	bin_keys = set((int(key[0]), int(key[1])) for key in bin_keys)
+	chunk_ids = set(int(chunk_id) for chunk_id in chunk_ids)
+	if not bin_keys and not chunk_ids and not global_invalidation:
+		return _spatial_revision_1513()
+	if global_invalidation:
+		name = 'g_offh_destr_spatial_global_generation'
+		globals()[name] = int(globals().get(name, 0)) + 1
+	cell_generations = globals().setdefault(
+		'g_offh_destr_spatial_cell_generations', {})
+	for bin_key in bin_keys:
+		cell_generations[bin_key] = int(
+			cell_generations.get(bin_key, 0)) + 1
+	chunk_generations = globals().setdefault(
+		'g_offh_destr_spatial_chunk_generations', {})
+	for chunk_id in chunk_ids:
+		chunk_generations[chunk_id] = int(
+			chunk_generations.get(chunk_id, 0)) + 1
 	revision = _spatial_revision_1513() + 1
 	globals()['g_offh_destr_spatial_revision'] = revision
 	_receipt_stat_1513('spatial_invalidations')
-	for cache_name, prefix in (
-			('g_offh_destr_empty_contact_receipts', 'contact'),
-			('g_offh_destr_empty_proximity_receipts', 'proximity')):
-		state = globals().get(cache_name)
-		if isinstance(state, dict):
-			_receipt_stat_1513(
-				'%s_invalidated' % prefix,
-				len(state.get('entries', {})))
-	globals().pop('g_offh_destr_empty_contact_receipts', None)
-	globals().pop('g_offh_destr_empty_proximity_receipts', None)
 	return revision
+
+
+def _flush_spatial_mutation_batch_1513():
+	state = globals().get('g_offh_destr_spatial_mutation_batch')
+	if not isinstance(state, dict):
+		return _spatial_revision_1513()
+	bin_keys = state.get('bin_keys', set())
+	chunk_ids = state.get('chunk_ids', set())
+	global_invalidation = bool(state.get('global'))
+	state['bin_keys'] = set()
+	state['chunk_ids'] = set()
+	state['global'] = False
+	return _publish_spatial_mutation_1513(
+		bin_keys, chunk_ids, global_invalidation)
+
+
+def _begin_spatial_mutation_batch_1513():
+	state = globals().setdefault(
+		'g_offh_destr_spatial_mutation_batch', {
+			'depth': 0, 'bin_keys': set(), 'chunk_ids': set(),
+			'global': False,
+		})
+	state['depth'] = int(state.get('depth', 0)) + 1
+
+
+def _end_spatial_mutation_batch_1513():
+	state = globals().get('g_offh_destr_spatial_mutation_batch')
+	if not isinstance(state, dict):
+		return _spatial_revision_1513()
+	state['depth'] = max(0, int(state.get('depth', 0)) - 1)
+	if state['depth']:
+		return _spatial_revision_1513()
+	try:
+		return _flush_spatial_mutation_batch_1513()
+	finally:
+		globals().pop('g_offh_destr_spatial_mutation_batch', None)
+
+
+def _batched_spatial_mutations_1513(function):
+	"""Coalesce one synchronous operation's live index changes."""
+	def batched(*args, **kwargs):
+		_begin_spatial_mutation_batch_1513()
+		try:
+			return function(*args, **kwargs)
+		finally:
+			_end_spatial_mutation_batch_1513()
+	batched.__name__ = function.__name__
+	batched.__doc__ = function.__doc__
+	return batched
+
+
+def _bump_spatial_revision_1513(bin_keys=None, chunk_ids=None):
+	"""Invalidate only receipts whose exact cells or chunks changed.
+
+	A no-argument call is the fail-closed compatibility seam for a mutation
+	whose locality is unknown. Production index writers always supply the
+	affected cells and/or streamed chunks.
+	"""
+	global_invalidation = bin_keys is None and chunk_ids is None
+	bin_keys = set() if bin_keys is None else set(bin_keys)
+	chunk_ids = set() if chunk_ids is None else set(chunk_ids)
+	state = globals().get('g_offh_destr_spatial_mutation_batch')
+	if isinstance(state, dict) and int(state.get('depth', 0)) > 0:
+		state.setdefault('bin_keys', set()).update(bin_keys)
+		state.setdefault('chunk_ids', set()).update(chunk_ids)
+		state['global'] = bool(state.get('global')) or global_invalidation
+		return _spatial_revision_1513()
+	return _publish_spatial_mutation_1513(
+		bin_keys, chunk_ids, global_invalidation)
+
+
+def _spatial_cell_signature_1513(rectangles):
+	"""Return local generations for the union of exact 8 m rectangles."""
+	cell_generations = globals().get(
+		'g_offh_destr_spatial_cell_generations', {})
+	keys = set()
+	for rectangle in rectangles:
+		for bin_x in xrange(int(rectangle[0]), int(rectangle[1]) + 1):
+			for bin_z in xrange(int(rectangle[2]), int(rectangle[3]) + 1):
+				keys.add((bin_x, bin_z))
+	return (int(globals().get(
+		'g_offh_destr_spatial_global_generation', 0)), tuple(
+			(key, int(cell_generations.get(key, 0)))
+			for key in sorted(keys)))
+
+
+def _spatial_chunk_signature_1513(chunk_ids):
+	chunk_generations = globals().get(
+		'g_offh_destr_spatial_chunk_generations', {})
+	return tuple((int(chunk_id), int(chunk_generations.get(
+		int(chunk_id), 0))) for chunk_id in sorted(chunk_ids))
 
 
 def _receipt_cache_get_1513(name, key):
@@ -1456,6 +1568,38 @@ def _receipt_cache_put_1513(name, key, value, limit):
 	entries[key] = value
 	order.append(key)
 	_receipt_stat_1513('%s_stores' % _receipt_prefix_1513(name))
+
+
+def _receipt_cache_delete_1513(name, key):
+	state = globals().get(name)
+	if not isinstance(state, dict):
+		return False
+	entries = state.get('entries', {})
+	if key not in entries:
+		return False
+	del entries[key]
+	try:
+		state.get('order', []).remove(key)
+	except ValueError:
+		pass
+	return True
+
+
+def _empty_contact_receipt_valid_1513(key):
+	name = 'g_offh_destr_empty_contact_receipts'
+	state = globals().get(name)
+	entry = (state.get('entries', {}).get(key)
+		if isinstance(state, dict) else None)
+	valid = (isinstance(entry, dict) and
+		entry.get('cell_signature') ==
+		_spatial_cell_signature_1513((key,)))
+	if valid:
+		_receipt_stat_1513('contact_hits')
+		return True
+	if entry is not None and _receipt_cache_delete_1513(name, key):
+		_receipt_stat_1513('contact_invalidated')
+	_receipt_stat_1513('contact_misses')
+	return False
 
 
 def _loaded_chunk_signature_1513(manager, chunk_ids):
@@ -1489,21 +1633,28 @@ def _proximity_receipt_key_1513(spaceID, current_chunk, pos, vehicle_box):
 def _empty_proximity_receipt_valid_1513(
 		key, manager, chunk_registry):
 	"""Reuse only a complete, unchanged streamed empty-cell receipt."""
-	state = globals().get('g_offh_destr_empty_proximity_receipts')
+	name = 'g_offh_destr_empty_proximity_receipts'
+	state = globals().get(name)
 	entry = (state.get('entries', {}).get(key)
 		if isinstance(state, dict) else None)
-	valid = (
-		not globals().get('g_offh_destr_falling_active') and
-		isinstance(entry, dict) and
-		entry.get('revision') == _spatial_revision_1513())
+	if globals().get('g_offh_destr_falling_active'):
+		_receipt_stat_1513('proximity_misses')
+		return False
+	valid = isinstance(entry, dict)
 	chunk_ids = entry.get('chunks') if valid else None
 	valid = (valid and isinstance(chunk_ids, tuple) and not any(
 		chunk_id not in chunk_registry for chunk_id in chunk_ids))
+	valid = (valid and entry.get('cell_signature') ==
+		_spatial_cell_signature_1513((key[2], key[3])))
+	valid = (valid and entry.get('chunk_signature') ==
+		_spatial_chunk_signature_1513(chunk_ids))
 	valid = (valid and
 		_loaded_chunk_signature_1513(manager, chunk_ids) ==
 		entry.get('stream_signature'))
-	_receipt_stat_1513(
-		'proximity_hits' if valid else 'proximity_misses')
+	if not valid and entry is not None and _receipt_cache_delete_1513(
+			name, key):
+		_receipt_stat_1513('proximity_invalidated')
+	_receipt_stat_1513('proximity_hits' if valid else 'proximity_misses')
 	return bool(valid)
 
 
@@ -2112,6 +2263,7 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	}
 
 
+@_batched_spatial_mutations_1513
 def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
 	"""Live-validate catalog wires covering one exact vehicle sweep."""
 	catalog = _destructible_catalog or {}
@@ -2633,10 +2785,8 @@ def _catalog_contact_candidates(vehicle_box):
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
 	bounds = _box_xz_bounds(vehicle_box)
-	receipt_key = (
-		_spatial_revision_1513(), _bin_rectangle_signature_1513(bounds))
-	if _receipt_cache_get_1513(
-			'g_offh_destr_empty_contact_receipts', receipt_key):
+	receipt_key = _bin_rectangle_signature_1513(bounds)
+	if _empty_contact_receipt_valid_1513(receipt_key):
 		return []
 	candidates = []
 	seen = set()
@@ -2666,7 +2816,8 @@ def _catalog_contact_candidates(vehicle_box):
 					candidates.append(candidate)
 	if not had_members:
 		_receipt_cache_put_1513(
-			'g_offh_destr_empty_contact_receipts', receipt_key, True,
+			'g_offh_destr_empty_contact_receipts', receipt_key,
+			{'cell_signature': _spatial_cell_signature_1513((receipt_key,))},
 			_EMPTY_CONTACT_RECEIPT_LIMIT)
 	return candidates
 
@@ -2934,13 +3085,54 @@ def ground_collision_filter(x, z):
 	return _broken_collision_filter(members, accepted_trees)
 
 
-def horizontal_collision_filter(start, end):
-	"""Hide exact broken identities from one horizontal hull ray.
+def _live_broken_collision_filter_1513(members, accepted_trees=()):
+	"""Return one sweep-local callback backed by the live accepted ledger."""
+	accepted_trees = accepted_trees or ()
+	if not members and not accepted_trees:
+		return None
+	authority = _get_destr_authority() if members else None
+	destroyed_keys = getattr(authority, 'destroyed_keys', None)
+	if members and not callable(destroyed_keys) and not accepted_trees:
+		return None
+	member_ids = frozenset((int(chunk_id), int(item_index))
+		for chunk_id, item_index in members)
+
+	def reject_broken_skin(*hit):
+		try:
+			identity = (int(hit[3]), int(hit[2]))
+		except (IndexError, TypeError, ValueError, OverflowError):
+			return True
+		if identity in accepted_trees:
+			accepted = True
+		elif identity not in member_ids or not callable(destroyed_keys):
+			return True
+		else:
+			mat_kind = hit[0]
+			predicted = globals().get('g_offh_destr_speculative', set())
+			broken = _broken_item_materials_1513(
+				authority, identity[0]).get(identity[1], ())
+			accepted = mat_kind in broken or None in broken
+			if (not accepted and
+					identity + (mat_kind,) not in predicted and
+					identity + (None,) not in predicted):
+				return True
+		globals()['g_offh_destr_ground_skips'] = globals().get(
+			'g_offh_destr_ground_skips', 0) + 1
+		return False
+
+	return reject_broken_skin
+
+
+def prepare_horizontal_collision_filter(start, end):
+	"""Prepare one exact broken-skin filter for a complete sweep envelope.
 
 	The native callback is safer than treating a 0.2-second hide window as a
 	blanket pass: the engine skips only the accepted ``(chunk, item, material)``
 	or exact accepted tree, then immediately returns an unrelated prop or backing
 	wall on the same ray.
+	The returned callback reads the accepted ledger at invocation time, so a
+	destructible admitted by an earlier lane in this sweep is visible to every
+	later lane without rebuilding the spatial candidate set.
 	"""
 	accepted_trees = _accepted_tree_collision_keys_1513()
 	if _destructible_catalog is None and not accepted_trees:
@@ -2958,7 +3150,12 @@ def horizontal_collision_filter(start, end):
 	if contact_bins:
 		for key in keys:
 			members.update(contact_bins.get(key, ()))
-	return _broken_collision_filter(members, accepted_trees)
+	return _live_broken_collision_filter_1513(members, accepted_trees)
+
+
+def horizontal_collision_filter(start, end):
+	"""Hide exact broken identities from one horizontal hull ray."""
+	return prepare_horizontal_collision_filter(start, end)
 
 
 def _broken_item_materials_1513(authority, chunkID):
@@ -3342,7 +3539,7 @@ def _catalog_bin_keys_1513(world_boxes):
 
 
 def _index_catalog_instance_1513(contact_bins, key, instance,
-		bin_keys=None):
+		bin_keys=None, invalidated_bin_keys=()):
 	"""Index one streamed instance into every exact world-footprint bin."""
 	if bin_keys is None:
 		bin_keys = _catalog_bin_keys_1513(instance['boxes'])
@@ -3354,7 +3551,8 @@ def _index_catalog_instance_1513(contact_bins, key, instance,
 		changed = changed or len(members) != before
 	instance['bin_keys'] = tuple(sorted(bin_keys))
 	if changed:
-		_bump_spatial_revision_1513()
+		_bump_spatial_revision_1513(
+			set(bin_keys).union(invalidated_bin_keys))
 	return bin_keys
 
 
@@ -3439,6 +3637,7 @@ def _falling_native_state_1513(spaceID, chunkID, itemIndex, math_module):
 		matches and 'touchdownCallback' in matches[0])
 
 
+@_batched_spatial_mutations_1513
 def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 	"""Follow each destroyed falling atom's live native transform exactly."""
 	instances = globals().get('g_offh_destr_instances', {})
@@ -3572,7 +3771,8 @@ def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 		state = active[identity]
 		state['last_refresh'] = float(now)
 		_index_catalog_instance_1513(
-			contact_bins, identity, instance, new_bin_keys)
+			contact_bins, identity, instance, new_bin_keys,
+			old_bin_keys)
 		if not synthetic_collision_active:
 			# The animator deletes touchdownCallback on first ground contact.  Stop
 			# following the matrix at that exact boundary, but keep the resting OBB
@@ -3972,6 +4172,7 @@ def _drop_streamed_chunk_registry_1513(state, chunk_id):
 	changed = state.get('chunks', {}).pop(chunk_id, None) is not None
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	affected_bin_keys = set()
 	for identity in [key for key in list(instances) if key[0] == chunk_id]:
 		instance = instances.pop(identity)
 		changed = True
@@ -3979,6 +4180,7 @@ def _drop_streamed_chunk_registry_1513(state, chunk_id):
 			if isinstance(instance, dict) else None)
 		if bin_keys is None:
 			bin_keys = list(contact_bins)
+		affected_bin_keys.update(bin_keys)
 		for bin_key in bin_keys:
 			members = contact_bins.get(bin_key)
 			if members is None:
@@ -3987,7 +4189,8 @@ def _drop_streamed_chunk_registry_1513(state, chunk_id):
 			if not members:
 				contact_bins.pop(bin_key, None)
 	if changed:
-		_bump_spatial_revision_1513()
+		_bump_spatial_revision_1513(
+			affected_bin_keys, (chunk_id,))
 	return changed
 
 
@@ -4532,6 +4735,7 @@ def commit_tree_contacts(
 		now, dt, bool(publish))
 
 
+@_batched_spatial_mutations_1513
 def _fell_trees_near(
 		spaceID, pos, yaw, vel, td=None, registration_only=False,
 		priority_chunks=None):
@@ -4556,7 +4760,9 @@ def _fell_trees_near(
 			# fresh onChunkLoad counts instead of deferring this reset to contact.
 			mgr.startSpace(spaceID)
 		if globals().get('g_offh_destr_runtime_space') != spaceID:
-			_clear_runtime_registry()
+			# This function already owns a fresh mutation batch. Preserve only its
+			# empty/deferred transaction shell while clearing every prior battle.
+			_clear_runtime_registry(preserve_spatial_batch=True)
 			globals()['g_offh_destr_runtime_space'] = int(spaceID)
 		_st = globals().setdefault('g_offh_tree_state', {'chunks': {}, 'felled': set(), 'spaceID': None})
 		if _st.get('spaceID') != spaceID:
@@ -5052,7 +5258,7 @@ def _fell_trees_near(
 						continue
 				if not _retry_registry:
 					_st['chunks'][cid] = registry
-					_bump_spatial_revision_1513()
+					_bump_spatial_revision_1513(chunk_ids=(cid,))
 					_diagnostic_chunk_1513(
 						cid, _native_count, _names, _item_names,
 						_names_status, registry)
@@ -5192,14 +5398,20 @@ def _fell_trees_near(
 				not globals().get('g_offh_destr_falling_active') and
 				all(cid in _st['chunks'] and
 					not _destructible_isolated_1513(cid) for cid in cids)):
+			# Publish this scan's staged index changes before freezing the local
+			# generation signatures carried by the negative receipt.
+			_flush_spatial_mutation_batch_1513()
 			_chunk_ids = tuple(sorted(cids))
 			_stream_signature = _loaded_chunk_signature_1513(
 				mgr, _chunk_ids)
 			if _stream_signature is not None:
 				_receipt_cache_put_1513(
 					'g_offh_destr_empty_proximity_receipts', _receipt_key,
-					{'revision': _spatial_revision_1513(),
-					 'chunks': _chunk_ids,
+					{'chunks': _chunk_ids,
+					 'cell_signature': _spatial_cell_signature_1513(
+						 (_receipt_key[2], _receipt_key[3])),
+					 'chunk_signature': _spatial_chunk_signature_1513(
+						 _chunk_ids),
 					 'stream_signature': _stream_signature},
 					_EMPTY_PROXIMITY_RECEIPT_LIMIT)
 	except Exception:
@@ -5879,7 +6091,9 @@ def registry_counts():
 	counts = {}
 	for name in ('g_offh_destr_seen', 'g_offh_destr_instances',
 			'g_offh_destr_contact_bins', 'g_offh_destr_pending',
-			'g_offh_destr_falling_active', 'g_offh_destr_chunks'):
+			'g_offh_destr_falling_active', 'g_offh_destr_chunks',
+			'g_offh_destr_spatial_cell_generations',
+			'g_offh_destr_spatial_chunk_generations'):
 		value = globals().get(name)
 		try:
 			counts[name[13:]] = len(value)
@@ -5910,7 +6124,9 @@ def registry_sizes():
 	sizes = {}
 	for name in ('g_offh_destr_seen', 'g_offh_destr_instances',
 			'g_offh_destr_contact_bins', 'g_offh_destr_pending',
-			'g_offh_destr_falling_active', 'g_offh_destr_chunks'):
+			'g_offh_destr_falling_active', 'g_offh_destr_chunks',
+			'g_offh_destr_spatial_cell_generations',
+			'g_offh_destr_spatial_chunk_generations'):
 		value = globals().get(name)
 		total = sys.getsizeof(value, 64) if value is not None else 0
 		try:

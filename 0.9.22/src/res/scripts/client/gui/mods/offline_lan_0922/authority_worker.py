@@ -14,6 +14,7 @@ import sys
 import time
 
 from gui.mods.offline_lan_0922 import burst_mechanics
+from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922.lan_client import (
@@ -49,8 +50,6 @@ _COALESCIBLE_BOT_STATE_FIELDS = frozenset((
     'speed', 'movement_dir', 'rotation_dir', 'reload_time',
     'burst_time_left', 'siege_time_left_ms',
     'combat_fire_elapsed', 'combat_fire_timer'))
-_COALESCIBLE_EQUIPMENT_FIELDS = frozenset((
-    'cooldownTimeLeft', 'autoPendingElapsed', 'aiPendingElapsed'))
 _VISIBILITY_DIAGNOSTIC_COUNTERS = (
     'visibility_admitted', 'visibility_completed', 'visibility_deferred',
     'visibility_selected_services', 'visibility_fire_services',
@@ -136,81 +135,84 @@ def _immutable_outbound_key(value):
     return value
 
 
-def _equipment_edge_key(snapshots):
-    if not isinstance(snapshots, (list, tuple)):
-        return _immutable_outbound_key(snapshots)
-    return tuple(_immutable_outbound_key(dict(
-        (name, value) for name, value in snapshot.items()
-        if name not in _COALESCIBLE_EQUIPMENT_FIELDS))
-        if isinstance(snapshot, dict) else _immutable_outbound_key(snapshot)
-        for snapshot in snapshots)
+def _validated_equipment_edge_key(snapshots):
+    """Validate one Bot ledger and retain only its durable transitions."""
+    if not isinstance(snapshots, list):
+        return None
+    try:
+        canonical = equipment_mechanics.canonical_bot_equipment_states(
+            snapshots)
+    except (TypeError, ValueError):
+        return None
+    # canonical_bot_equipment_states owns fresh contract dictionaries. Queue
+    # coalescing compares keys by equality rather than hashing them, so those
+    # dictionaries can remain in the private key without another recursive
+    # freeze. Cooldown and pending clocks were strictly validated above but
+    # are continuous data; quantity and activation are durable edges.
+    return tuple(
+        (contract, uses_left, active)
+        for contract, uses_left, unused_cooldown, active, unused_pending
+        in canonical)
 
 
-def _bot_state_coalesce_key(message):
-    """Identify checkpoints that differ only in supersedable continuous data."""
-    bots = message.get('bots') or ()
-    bot_keys = []
-    for state in bots:
-        fields = []
-        for name, value in state.items():
-            if name in _COALESCIBLE_BOT_STATE_FIELDS:
-                continue
-            if name == 'equipment_states':
-                value = _equipment_edge_key(value)
-            else:
-                value = _immutable_outbound_key(value)
-            fields.append((name, value))
-        bot_keys.append(tuple(sorted(fields)))
-    return (
-        int(message.get('round_id') or 0),
-        _immutable_outbound_key(message.get('human_ram_armors')),
-        tuple(bot_keys))
-
-
-def _trusted_projected_bot_states(bots):
-    """Verify the shallow shape produced by BotRuntime's wire projector."""
+def _validated_bot_state_coalesce_key(message):
+    """Validate one projected checkpoint while freezing its durable edges."""
+    bots = message.get('bots')
     if not isinstance(bots, (list, tuple)) or len(bots) > 30:
-        return False
+        return None
     ammo_fields = frozenset((
         'shell_index', 'next_shell_index', 'ammo_remaining',
         'ammo_reload_pending'))
+    siege_fields = frozenset((
+        'siege_state', 'siege_time_left_ms',
+        'siege_transition_total_ms'))
+    bot_keys = []
     for state in bots:
         if not isinstance(state, dict):
-            return False
-        fields = set(state)
-        if not fields.issubset(_PROJECTED_BOT_STATE_FIELDS):
-            return False
+            return None
+        fields = set()
+        edge_fields = []
+        for name, value in state.items():
+            if name not in _PROJECTED_BOT_STATE_FIELDS:
+                return None
+            fields.add(name)
+            if name in _COALESCIBLE_BOT_STATE_FIELDS:
+                continue
+            if name == 'equipment_states':
+                value = _validated_equipment_edge_key(value)
+                if value is None:
+                    return None
+            else:
+                value = _immutable_outbound_key(value)
+            edge_fields.append((name, value))
         if (('shot_yaw' in fields) != ('shot_pitch' in fields)):
-            return False
+            return None
         present_ammo = fields.intersection(ammo_fields)
         if present_ammo and present_ammo != ammo_fields:
-            return False
+            return None
         if (present_ammo and
                 not isinstance(state.get('ammo_reload_pending'), bool)):
-            return False
-        siege_fields = frozenset((
-            'siege_state', 'siege_time_left_ms',
-            'siege_transition_total_ms'))
+            return None
         present_siege = fields.intersection(siege_fields)
         if present_siege and present_siege != siege_fields:
-            return False
+            return None
         if (present_siege and
                 not siege_mechanics.valid_wire_state(
                     state.get('siege_state'),
                     state.get('siege_time_left_ms'),
                     transition_total_ms=state.get(
                         'siege_transition_total_ms'))):
-            return False
+            return None
         try:
             burst_mechanics.BurstClock().restore(
                 state, state.get('fire_seq', 0))
         except ValueError:
-            return False
+            return None
         try:
             reload_time = float(state['reload_time'])
             reload_duration = float(state['reload_duration'])
         except (KeyError, TypeError, ValueError, OverflowError):
-            return False
+            return None
         if (isinstance(state.get('reload_time'), bool) or
                 isinstance(state.get('reload_duration'), bool) or
                 math.isnan(reload_time) or math.isinf(reload_time) or
@@ -218,8 +220,12 @@ def _trusted_projected_bot_states(bots):
                 math.isinf(reload_duration) or
                 reload_duration <= 0.0 or reload_time < 0.0 or
                 reload_time > reload_duration):
-            return False
-    return True
+            return None
+        bot_keys.append(tuple(sorted(edge_fields)))
+    return (
+        int(message.get('round_id') or 0),
+        _immutable_outbound_key(message.get('human_ram_armors')),
+        tuple(bot_keys))
 
 
 def _authority_id(value):
@@ -284,8 +290,7 @@ class AuthorityWorkerLANClient(LANClient):
                                  source_batch_horizon_us=None,
                                  human_ram_armors=None):
         """Queue BotRuntime's canonical publication as one frozen wire blob."""
-        if (not self.is_bot_authority() or
-                not _trusted_projected_bot_states(bots)):
+        if not self.is_bot_authority():
             return False
         message = {
             'type': 'bot_state', 'round_id': self.round_id, 'bots': bots}
@@ -310,8 +315,10 @@ class AuthorityWorkerLANClient(LANClient):
                 return False
             message['human_ram_armors'] = human_ram_armors
         try:
-            coalesce_key = _bot_state_coalesce_key(message)
+            coalesce_key = _validated_bot_state_coalesce_key(message)
         except Exception:
+            return False
+        if coalesce_key is None:
             return False
         return self._send_preencoded_trusted(
             message, coalesce_key=coalesce_key)
