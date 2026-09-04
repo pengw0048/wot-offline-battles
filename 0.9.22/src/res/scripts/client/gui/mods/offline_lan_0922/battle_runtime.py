@@ -13440,10 +13440,18 @@ class BattleRuntime(object):
                 # control scheduler consumes elapsed time. RemoteVehicle's
                 # MatrixAnimation interpolates between changed poses; exact
                 # duplicate render pulls do not require native rewrites.
-                presented = self._run_optional_feature(
-                    'bot pose presentation',
-                    self._present_authority_bot_poses,
-                    (presentation_states, now), disable=False)
+                if self._worker_mode:
+                    # The worker also commits native destructible queries and
+                    # canonical projectile collision poses here. Keep those
+                    # failures loud before Bot state publication or projectile
+                    # advancement can make the frame irreversible.
+                    presented = self._present_authority_bot_poses(
+                        presentation_states, now)
+                else:
+                    presented = self._run_optional_feature(
+                        'bot pose presentation',
+                        self._present_authority_bot_poses,
+                        (presentation_states, now), disable=False)
                 if presented:
                     bot_count = presented[0]
             if profiling:
