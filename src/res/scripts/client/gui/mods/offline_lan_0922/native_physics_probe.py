@@ -842,10 +842,17 @@ class WorkerPhysicsProbe(object):
             record['skipped'] = 'hasSiegeMode'
             record['init'].append({'call': '-', 'result': '<skipped: hasSiegeMode>'})
             return record
-        self._step('%s BigWorld.WGVehiclePhysics()' % label)
-        physics = bigworld.WGVehiclePhysics()
-        record['physics'] = physics
+        # One fresh object per recipe: no retail path ever runs the client
+        # init on a body the detailed parser has already touched.  Rejected
+        # objects are kept referenced until the probe ends rather than
+        # destroyed mid-frame.
+        physics = None
         for name in self._config.get('init_order') or ():
+            if physics is not None:
+                record.setdefault('discarded', []).append(physics)
+            self._step('%s BigWorld.WGVehiclePhysics()' % label)
+            physics = bigworld.WGVehiclePhysics()
+            record['physics'] = physics
             if name == 'detailed':
                 entry = self._init_detailed(
                     physics, physics_shared, descriptor, label)

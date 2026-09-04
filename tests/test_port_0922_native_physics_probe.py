@@ -483,6 +483,15 @@ class NativePhysicsProbeTests(unittest.TestCase):
             [body['init_mode'] for body in report['standalone_bodies']])
         self.assertEqual('<configure returned False>',
                          report['standalone_bodies'][0]['init'][0]['result'])
+        # The client recipe ran on a fresh object, never on the rejected one:
+        # construct stage + 3 Bots = 4 objects in the first probe (detailed
+        # only), 2 per body in the second (detailed rejected, then client).
+        self.assertEqual(12, len(_FakePhysics.created))
+        rejected = [physics for physics in _FakePhysics.created
+                    if physics.__dict__.get('initialised') is not True]
+        self.assertEqual(8, len(rejected))
+        self.assertTrue(all('centerOfMass' not in physics.__dict__
+                            for physics in rejected))
 
     def test_siege_descriptors_are_skipped(self):
         bots = self._bots(retail=False)
