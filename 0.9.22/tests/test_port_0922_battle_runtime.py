@@ -19511,6 +19511,79 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(record['spot_visible'])
         self.assertTrue(record['spot_marker_visible'])
 
+    def _spg_distant_target_battle(self, tags=('SPG',)):
+        """Build one SPG aiming at a team-spotted target beyond the AOI."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_descriptor = _Descriptor()
+        battle._local_descriptor.type.tags = tuple(tags)
+        battle._local_position = (0.0, 0.0, 0.0)
+        local = _Vehicle(
+            10, battle._local_descriptor, _Vector(), (0, 0, 0),
+            {'health': 500})
+        enemy = _Vehicle(
+            12, _Descriptor(), _Vector(700.0, 0.0, 0.0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities.update({10: local, 12: enemy})
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._set_record_spot_visibility = lambda record, visible: \
+            record.update(spot_visible=bool(visible)) or bool(visible)
+        record = {
+            'engine_id': 12, 'network_id': 17, 'kind': 'bot',
+            'ready': True, 'local': False, 'presentation': True,
+            'tombstone': False, 'spot_visible': False,
+            'spot_marker_visible': True,
+            'spot_until': 20.0, 'spot_next': 999.0,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+        battle._records = {'bot:17': record}
+        return runtime, battle, record
+
+    def test_every_spg_aiming_view_keeps_the_distant_spotted_target(self):
+        runtime, battle, record = self._spg_distant_target_battle()
+        handler = battle._avatar.inputHandler
+        modes = runtime.avatar_input_handler._CTRL_MODE
+        # The pinned client ABI proves only POSTMORTEM, so the port must also
+        # work when the trajectory-view constant is not exposed by name.
+        self.assertFalse(hasattr(modes, 'ARTY'))
+
+        # Overhead strategic view, the trajectory view resolved through the
+        # literal fallback, and the trajectory view resolved through an
+        # exposed constant must all draw the same team-spotted target.
+        for step, mode in enumerate(
+                ('strategic', 'arty', 'strategic', 'arty')):
+            if step == 3:
+                modes.ARTY = 'arty'
+            handler._AvatarInputHandler__ctrlModeName = mode
+            self.assertTrue(battle._spg_aiming_view_active())
+            battle._update_spotting(10.0 + 0.1 * step)
+            self.assertTrue(
+                record['spot_visible'],
+                'SPG lost its distant target in %s view' % mode)
+            self.assertTrue(record['spot_marker_visible'])
+
+        # An unknown or non-aiming control mode keeps the ordinary AOI.
+        for step, mode in enumerate(('video', 'arcade')):
+            handler._AvatarInputHandler__ctrlModeName = mode
+            self.assertFalse(battle._spg_aiming_view_active())
+            battle._update_spotting(10.4 + 0.1 * step)
+            self.assertFalse(record['spot_visible'])
+            self.assertTrue(record['spot_marker_visible'])
+
+    def test_non_spg_never_draws_a_target_beyond_the_vehicle_aoi(self):
+        runtime, battle, record = self._spg_distant_target_battle(
+            tags=('mediumTank',))
+        handler = battle._avatar.inputHandler
+        runtime.avatar_input_handler._CTRL_MODE.ARTY = 'arty'
+
+        for step, mode in enumerate(('strategic', 'arty', 'arcade')):
+            handler._AvatarInputHandler__ctrlModeName = mode
+            self.assertFalse(battle._spg_aiming_view_active())
+            battle._update_spotting(10.0 + 0.1 * step)
+            self.assertFalse(record['spot_visible'])
+            self.assertTrue(record['spot_marker_visible'])
+
     def test_dead_local_vehicle_uses_server_validated_ally_relay(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
