@@ -44,6 +44,7 @@ from gui.mods.offline_lan_0922.projectile_runtime import (
     projectile_range_distance, trajectory_position)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
+from gui.mods.offline_lan_0922 import worker_lsprof
 from gui.mods.offline_lan_0922 import (
     ballistics, combat_rules, critical_damage, descriptor_donation,
     destructibles_compat, device_damage, effective_params,
@@ -1482,6 +1483,7 @@ class BattleRuntime(object):
         self._authority_pose_skips = 0
         self._authority_aim_writes = 0
         self._authority_aim_skips = 0
+        self._worker_lsprof = None
         self._frame_diagnostics = (
             _FrameDiagnostics(
                 initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS)
@@ -10987,6 +10989,19 @@ class BattleRuntime(object):
             display_elapsed = min(
                 previous_elapsed + dt, confirmed_elapsed)
             visual['display_elapsed'] = display_elapsed
+            if display_elapsed > previous_elapsed:
+                timeline = self._fire_timeline.get(str(projectile_id))
+                if (timeline is not None and
+                        not timeline['moving_logged']):
+                    timeline['moving_logged'] = True
+                    sys.stdout.write(
+                        '[Offline LAN 0.9.22] FIRE TRACER MOVING '
+                        'projectile=%s since_trigger_ms=%.0f '
+                        'since_shown_ms=%.0f confirmed_ms=%.0f\n' % (
+                            projectile_id,
+                            (frame - timeline['trigger']) * 1000.0,
+                            (frame - timeline['shown']) * 1000.0,
+                            confirmed_elapsed * 1000.0))
             position, velocity = self._projectile_visual_pose(
                 visual, display_elapsed)
             try:
@@ -13745,6 +13760,13 @@ class BattleRuntime(object):
             return
         if self._worker_mode:
             self._worker_frame_callbacks += 1
+            profiler = self._worker_lsprof
+            if profiler is None:
+                profiler = worker_lsprof.create_for_worker()
+                self._worker_lsprof = profiler
+            profiler.tick(
+                self._battle_live,
+                (self._start_message or {}).get('round_id'))
         diagnostics = self._frame_diagnostics
         profiling = diagnostics is not None and diagnostics.enabled
         entry_wall = _PROFILE_CLOCK() if profiling else 0.0

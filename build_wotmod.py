@@ -657,15 +657,17 @@ def _validate_entry(staging_root):
         raise SystemExit('unexpected Python bytecode magic: %r' % magic)
 
 
-def build():
+def build_wotmod_package(dist_root):
+    """Compile and archive only the WOTMOD; return ``(path, sha256)``.
+
+    This is the package-only stage shared by the release build and diagnostic
+    delta builds.  It never touches the server executable or the overlay.
+    """
     _validate_python()
     repo_root = os.path.abspath(os.path.dirname(__file__))
     source_root = os.path.join(repo_root, 'src')
-    dist_root = os.path.join(repo_root, 'dist')
     if not os.path.isdir(dist_root):
         os.makedirs(dist_root)
-    _remove_stale_outputs(dist_root)
-    build_identity = _generated_build_identity()
     staging_parent = tempfile.mkdtemp(prefix='offline-lan-0922-')
     try:
         staging_root = os.path.join(staging_parent, 'package')
@@ -684,32 +686,45 @@ def build():
         filename = '%s_%s.wotmod' % (MOD_ID, MOD_VERSION)
         destination = os.path.join(dist_root, filename)
         _archive_tree(staging_root, destination)
-        with open(destination, 'rb') as stream:
-            digest = hashlib.sha256(stream.read()).hexdigest()
-        checksum_path = destination + '.sha256'
-        with open(checksum_path, 'wb') as stream:
-            stream.write(('%s  %s\n' % (digest, filename)).encode('ascii'))
-        native_bridge_source = os.path.join(
-            repo_root, 'native', NATIVE_BRIDGE_FILENAME)
-        if not os.path.isfile(native_bridge_source):
-            raise SystemExit(
-                'native instance guard bridge is missing: %s' %
-                native_bridge_source)
-        native_bridge_path = os.path.join(
-            dist_root, NATIVE_BRIDGE_FILENAME)
-        shutil.copy2(native_bridge_source, native_bridge_path)
-        overlay_root, overlay_zip = _write_client_overlay(
-            dist_root, destination, checksum_path, digest,
-            native_bridge_source=native_bridge_path,
-            build_identity=build_identity)
-        print('build identity=%s version=%s' %
-              (build_identity, MOD_VERSION))
-        print(destination)
-        print('sha256=%s' % digest)
-        print(overlay_root)
-        print(overlay_zip)
     finally:
         shutil.rmtree(staging_parent)
+    with open(destination, 'rb') as stream:
+        digest = hashlib.sha256(stream.read()).hexdigest()
+    return destination, digest
+
+
+def build():
+    _validate_python()
+    repo_root = os.path.abspath(os.path.dirname(__file__))
+    dist_root = os.path.join(repo_root, 'dist')
+    if not os.path.isdir(dist_root):
+        os.makedirs(dist_root)
+    _remove_stale_outputs(dist_root)
+    build_identity = _generated_build_identity()
+    destination, digest = build_wotmod_package(dist_root)
+    filename = os.path.basename(destination)
+    checksum_path = destination + '.sha256'
+    with open(checksum_path, 'wb') as stream:
+        stream.write(('%s  %s\n' % (digest, filename)).encode('ascii'))
+    native_bridge_source = os.path.join(
+        repo_root, 'native', NATIVE_BRIDGE_FILENAME)
+    if not os.path.isfile(native_bridge_source):
+        raise SystemExit(
+            'native instance guard bridge is missing: %s' %
+            native_bridge_source)
+    native_bridge_path = os.path.join(
+        dist_root, NATIVE_BRIDGE_FILENAME)
+    shutil.copy2(native_bridge_source, native_bridge_path)
+    overlay_root, overlay_zip = _write_client_overlay(
+        dist_root, destination, checksum_path, digest,
+        native_bridge_source=native_bridge_path,
+        build_identity=build_identity)
+    print('build identity=%s version=%s' %
+          (build_identity, MOD_VERSION))
+    print(destination)
+    print('sha256=%s' % digest)
+    print(overlay_root)
+    print(overlay_zip)
 
 
 if __name__ == '__main__':
