@@ -4763,12 +4763,16 @@ class BotRuntimeTests(unittest.TestCase):
         first = next(message for message in self.runtime.update(.04, 10.0)
                      if message.get('type') == 'bot_state')
         self.assertEqual(40000, first['sample_time_us'])
+        self.assertEqual(40000, first['edge_sample_time_us'])
+        first_edge_revision = first['edge_revision']
 
         # This render callback is banked until the next authority deadline.
         self.assertEqual([], self.runtime.update(.02, 10.02))
         second = next(message for message in self.runtime.update(.02, 10.04)
                       if message.get('type') == 'bot_state')
         self.assertEqual(80000, second['sample_time_us'])
+        self.assertEqual(first_edge_revision, second['edge_revision'])
+        self.assertEqual(40000, second['edge_sample_time_us'])
 
         # A slow callback is divided into stable integration slices, but the
         # complete elapsed interval is consumed before update returns.
@@ -4781,12 +4785,20 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [330000, 330000],
             [message['source_batch_horizon_us'] for message in stalled])
+        self.assertEqual(
+            [first_edge_revision, first_edge_revision],
+            [message['edge_revision'] for message in stalled])
+        self.assertEqual(
+            [40000, 40000],
+            [message['edge_sample_time_us'] for message in stalled])
         self.assertEqual([], self.runtime.update(0.0, 10.33))
 
         self.runtime.battle_start(dict(self.start, round_id=6))
         reset = next(message for message in self.runtime.update(.03, 20.0)
                      if message.get('type') == 'bot_state')
         self.assertEqual(30000, reset['sample_time_us'])
+        self.assertGreater(reset['edge_revision'], first_edge_revision)
+        self.assertEqual(30000, reset['edge_sample_time_us'])
 
     def test_one_second_callback_advances_all_time_and_preserves_events(self):
         self.runtime.battle_start(self.start)
@@ -4845,6 +4857,48 @@ class BotRuntimeTests(unittest.TestCase):
                 (89.8, 89.0), snapshots):
             self.assertAlmostEqual(
                 expected, snapshot[2]['cooldownTimeLeft'])
+
+    def test_publication_edge_revision_is_monotonic_across_reverted_edges(self):
+        continuous = set((
+            'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw',
+            'gun_pitch', 'speed', 'movement_dir', 'rotation_dir',
+            'reload_time', 'burst_time_left', 'siege_time_left_ms',
+            'combat_fire_elapsed', 'combat_fire_timer'))
+        represented = set(('critical', 'equipment_states', 'ammo_remaining'))
+        self.assertEqual(
+            set(self.module.lan_client._BOT_STATE_WIRE_FIELDS),
+            continuous | represented |
+            set(self.module._PUBLICATION_EDGE_SCALAR_FIELDS))
+
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        states = [state]
+        first = self.runtime._mark_publication_edge(
+            states, [], [], 10)
+
+        state['x'] += 1.0
+        continuous = self.runtime._mark_publication_edge(
+            states, [], [], 20)
+        self.assertEqual(first, continuous)
+
+        original_fire_seq = state['fire_seq']
+        state['fire_seq'] += 1
+        fired = self.runtime._mark_publication_edge(
+            states, [{'id': 11, 'fire_seq': state['fire_seq']}], [], 30)
+        self.assertGreater(fired[1], first[1])
+        self.assertEqual(30, fired[0])
+
+        state['fire_seq'] = original_fire_seq
+        reverted = self.runtime._mark_publication_edge(
+            states, [], [], 40)
+        self.assertGreater(reverted[1], fired[1])
+        self.assertEqual(40, reverted[0])
+
+        rammed = self.runtime._mark_publication_edge(states, [], [{
+            'bot_id': 11, 'target_kind': 'bot', 'target_id': 12,
+            'ram_seq': 1,
+        }], 50)
+        self.assertGreater(rammed[1], reverted[1])
 
     def test_worker_stall_refreshes_control_once_and_consumes_all_elapsed(self):
         adapter = _Adapter()
@@ -9937,6 +9991,79 @@ class BotRuntimeTests(unittest.TestCase):
         cleared_wire = state['equipment_states']
         self.assertIsNot(pending_wire, cleared_wire)
         self.assertIsNone(cleared_wire[2]['aiPendingElapsed'])
+
+    def test_equipment_revision_tracks_every_discrete_ledger_edge(self):
+        contracts = _bot_equipment_contracts(self.module, reuse_count=0)
+        limiter = self.module.equipment_mechanics.project_equipment(
+            types.SimpleNamespace(
+                id=(11, 24), compactDescr=424,
+                name='removedRpmLimiter', tags=('trigger',),
+                reuseCount=-1, cooldownSeconds=0.0,
+                enginePowerFactor=1.1, engineHpLossPerSecond=1.5))
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+
+        def mark(sample_time_us):
+            return runtime._mark_publication_edge(
+                [state], [], [], sample_time_us)[1]
+
+        revision = mark(0)
+        extinguisher = self.module.equipment_mechanics.EquipmentState(
+            contracts[0])
+        runtime._equipment_states[11][0] = extinguisher
+        next_revision = mark(1)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        extinguisher.uses_left = 0
+        next_revision = mark(2)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        rpm_limiter = self.module.equipment_mechanics.EquipmentState(limiter)
+        runtime._equipment_states[11].append(rpm_limiter)
+        next_revision = mark(3)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        self.assertIsNotNone(rpm_limiter.activate(
+            runtime._equipment_now, requested_active=True))
+        next_revision = mark(4)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        medkit = runtime._equipment_states[11][1]
+        self.assertIsNone(medkit.poll_bot(
+            runtime._equipment_now, {'crew_ko': ['commander']}))
+        next_revision = mark(5)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        runtime._advance_equipment_clock(0.2)
+        self.assertEqual(revision, mark(6))
+        self.assertIsNone(medkit.poll_bot(runtime._equipment_now, {}))
+        next_revision = mark(7)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        repair = runtime._equipment_states[11][2]
+        self.assertIsNotNone(repair.activate(
+            runtime._equipment_now,
+            {'destroyed': ['engineHealth']},
+            selected='engineHealth'))
+        next_revision = mark(8)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        self.assertEqual(0, repair.uses_left)
+        runtime._advance_equipment_clock(
+            repair.ready_at - runtime._equipment_now)
+        self.assertGreater(mark(9), revision)
 
     def test_bot_medkit_clears_stun_only_after_a_later_simulation_frame(self):
         contracts = _bot_equipment_contracts(self.module)

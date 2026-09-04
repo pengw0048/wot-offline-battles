@@ -106,6 +106,20 @@ _HUMAN_TARGET_STATIC_FIELDS = (
 _BOT_TARGET_STATIC_FIELDS = (
     'profile', 'class_tag', 'armor',
 )
+# Every projected Bot field outside this list is either continuous pose/time
+# state or represented by a compact owner revision below. ``combat_seq`` owns
+# the nested critical payload after _mark_combat_publication has run.
+_PUBLICATION_EDGE_SCALAR_FIELDS = (
+    'id', 'fire_seq', 'shell_index', 'next_shell_index',
+    'ammo_reload_pending', 'reload_duration', 'clip', 'clip_size',
+    'burst_active', 'burst_group_seq', 'burst_count', 'burst_next_index',
+    'burst_interval', 'burst_shell_index',
+    'siege_state', 'siege_transition_total_ms',
+    'health', 'alive', 'combat_base_revision', 'combat_seq',
+    'death_reason', 'display_health', 'world_pose',
+    'stun_end_server_time_ms',
+)
+_PUBLICATION_EDGE_MISSING = object()
 # The server never assigns a visible target beyond 560 metres. Keep a
 # conservative 25-metre broad-phase margin for the advisory roster scan; the
 # selected target's independent 0.20-second final-fire check does not use this
@@ -1914,6 +1928,9 @@ class BotRuntime(object):
         # maps it onto its own motion epoch so variable worker execution time
         # cannot be mistaken for a variable vehicle speed.
         self._sample_time_us = 0
+        self._edge_revision = 0
+        self._edge_sample_time_us = 0
+        self._publication_edge_signature = None
         self._manifest_sent = False
         self._pending_manifest = None
         self._pending_manifest_round_id = None
@@ -2557,6 +2574,46 @@ class BotRuntime(object):
         state['equipment_states'] = wire_states
         return True
 
+    def _equipment_publication_edge(self, bot_id):
+        """Return durable ledger transitions without rebuilding wire rows."""
+        return tuple(
+            equipment.trusted_snapshot_edge(self._equipment_now)
+            for equipment in self._equipment_states.get(int(bot_id), ()))
+
+    def _current_publication_edge_signature(
+            self, states, launches, ram_reports):
+        """Describe every non-coalescible worker-owned publication edge."""
+        bot_edges = []
+        for state in states:
+            scalar = tuple(
+                state.get(name, _PUBLICATION_EDGE_MISSING)
+                for name in _PUBLICATION_EDGE_SCALAR_FIELDS)
+            bot_edges.append((
+                scalar,
+                tuple(state.get('ammo_remaining') or ()),
+                self._equipment_publication_edge(state['id']),
+                (state.get('shot_yaw', _PUBLICATION_EDGE_MISSING),
+                 state.get('shot_pitch', _PUBLICATION_EDGE_MISSING)),
+            ))
+        launch_edges = tuple(
+            (launch.get('id'), launch.get('fire_seq'))
+            for launch in launches)
+        ram_edges = tuple(
+            (report.get('bot_id'), report.get('target_kind'),
+             report.get('target_id'), report.get('ram_seq'))
+            for report in ram_reports)
+        return tuple(bot_edges), launch_edges, ram_edges
+
+    def _mark_publication_edge(
+            self, states, launches, ram_reports, sample_time_us):
+        signature = self._current_publication_edge_signature(
+            states, launches, ram_reports)
+        if signature != self._publication_edge_signature:
+            self._edge_revision += 1
+            self._edge_sample_time_us = int(sample_time_us)
+            self._publication_edge_signature = signature
+        return self._edge_sample_time_us, self._edge_revision
+
     def _observe_bot_stun(self, state, raw, server_time_ms):
         """Anchor one server-owned stun end time to the worker sim clock."""
         raw = raw if isinstance(raw, dict) else {}
@@ -2714,6 +2771,7 @@ class BotRuntime(object):
             self.states = {}
             self._accumulator = 0.0
             self._sample_time_us = 0
+            self._publication_edge_signature = None
             self._manifest_sent = False
             self._pending_manifest = None
             self._pending_manifest_round_id = None
@@ -2808,6 +2866,7 @@ class BotRuntime(object):
             isinstance(message.get('bot_manifest'), (list, tuple)))
         if previous_authority != self.authority_id:
             self._sample_time_us = 0
+            self._publication_edge_signature = None
             self._manifest_sent = False
             self._pending_manifest = None
             self._pending_manifest_round_id = None
@@ -10047,9 +10106,14 @@ class BotRuntime(object):
                 self._equipment_wire_exposed_in_update.add(int(state['id']))
             wire_states.append(projected)
         self._sample_time_us = step_end_time_us
+        edge_sample_time_us, edge_revision = self._mark_publication_edge(
+            ordered_states, launches, self._pending_ram_reports,
+            self._sample_time_us)
         publication = {
             'type': 'bot_state', 'bots': wire_states,
             'sample_time_us': self._sample_time_us,
+            'edge_sample_time_us': edge_sample_time_us,
+            'edge_revision': edge_revision,
         }
         if launches:
             # Never put these local-only SPG proof receipts on the LAN wire.

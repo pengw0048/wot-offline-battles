@@ -261,10 +261,19 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         client.ready = True
         client.phase = 'battle'
         client.round_id = 7
+        client.authority_epoch = 3
         client.bot_authority_id = WORKER_AUTHORITY_ID
         client._stopping = False
         with client._outbound_lock:
             client._outbound_accepting = True
+        raw_send = client.send_projected_bot_state
+
+        def send_projected_bot_state(bots, *args, **kwargs):
+            kwargs.setdefault('edge_sample_time_us', 1)
+            kwargs.setdefault('edge_revision', 1)
+            return raw_send(bots, *args, **kwargs)
+
+        client.send_projected_bot_state = send_projected_bot_state
         return client
 
     def test_client_mode_is_player_by_default_and_worker_only_by_opt_in(self):
@@ -421,19 +430,24 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wire = json.loads(client.sock.sent[0].decode('utf-8'))
         self.assertEqual(40000, wire['sample_time_us'])
         self.assertEqual(40000, wire['source_batch_horizon_us'])
+        self.assertNotIn('edge_sample_time_us', wire)
+        self.assertNotIn('edge_revision', wire)
         self.assertEqual(1.0, wire['bots'][0]['x'])
         self.assertEqual(100.0,
                          wire['bots'][0]['critical']['devices'][0]['hp'])
 
-    def test_worker_bot_state_trusted_path_rejects_noncanonical_or_unbounded(self):
+    def test_worker_bot_state_trusted_path_relies_on_projection_and_encoder(self):
         client = self._active_client()
         extra = _projected_bot_state()
         extra['profile'] = {'class_tag': 'mediumTank'}
-        self.assertFalse(client.send_projected_bot_state([extra]))
+        projected = lan_client_module.project_owned_bot_state(extra)
+        self.assertNotIn('profile', projected)
+        self.assertTrue(client.send_projected_bot_state([projected]))
 
         half_shot = _projected_bot_state()
         half_shot['shot_yaw'] = 0.2
-        self.assertFalse(client.send_projected_bot_state([half_shot]))
+        with self.assertRaises(KeyError):
+            lan_client_module.project_owned_bot_state(half_shot)
 
         nonfinite = _projected_bot_state()
         nonfinite['x'] = float('nan')
@@ -444,30 +458,19 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'x' * lan_client_module.MAX_MESSAGE_BYTES]
         self.assertFalse(client.send_projected_bot_state([oversized]))
 
-        self.assertEqual([], client._outbound_queue)
+        self.assertEqual(1, len(client._outbound_queue))
         self.assertTrue(client.running)
 
-    def test_worker_bot_state_rejects_malformed_equipment_at_send_boundary(self):
-        canonical = _projected_bot_equipment_states()
-        incomplete = json.loads(json.dumps(canonical))
-        incomplete[0].pop('active')
-        wrong_order = json.loads(json.dumps(canonical))
-        wrong_order[0], wrong_order[1] = wrong_order[1], wrong_order[0]
-        malformed = (
-            ('mapping', {}),
-            ('short', canonical[:-1]),
-            ('incomplete', incomplete),
-            ('wrong_order', wrong_order),
-        )
-        for label, snapshots in malformed:
-            with self.subTest(label=label):
-                client = self._active_client()
-                state = _projected_bot_state()
-                state['equipment_states'] = snapshots
-
-                self.assertFalse(client.send_projected_bot_state([state]))
-                self.assertEqual([], client._outbound_queue)
-                self.assertTrue(client.running)
+    def test_worker_bot_state_does_not_revalidate_owned_equipment(self):
+        client = self._active_client()
+        state = _projected_bot_state()
+        state['equipment_states'] = _projected_bot_equipment_states()
+        with mock.patch.object(
+                equipment_mechanics, 'canonical_bot_equipment_states',
+                side_effect=AssertionError('owned ledger was revalidated')):
+            self.assertTrue(client.send_projected_bot_state([state]))
+        self.assertEqual(1, len(client._outbound_queue))
+        self.assertTrue(client.running)
 
     def test_worker_replaces_unsent_continuous_bot_checkpoint(self):
         client = self._active_client()
@@ -498,89 +501,41 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(8.0, wire['bots'][0]['x'])
         self.assertEqual(0.05, wire['bots'][0]['reload_time'])
 
-    def test_worker_combined_validation_preserves_the_legacy_edge_key(self):
+    def test_worker_coalesce_key_uses_owner_revision_not_current_sample(self):
+        client = self._active_client()
         state = _projected_bot_state()
-        state['equipment_states'] = _projected_bot_equipment_states()
-        state['equipment_states'][0].update({
-            'cooldownTimeLeft': 12.0, 'autoPendingElapsed': 0.2})
-        message = {
-            'type': 'bot_state', 'round_id': 7, 'bots': [state],
-            'sample_time_us': 40000,
-            'source_batch_horizon_us': 40000,
-            'human_ram_armors': [{
-                'seq': 1, 'first_id': 1, 'second_id': 11,
-                'available': False,
-            }],
-        }
+        self.assertTrue(client.send_projected_bot_state(
+            [state], sample_time_us=40000,
+            source_batch_horizon_us=40000,
+            edge_sample_time_us=40000, edge_revision=7))
+        state['x'] = 9.0
+        self.assertTrue(client.send_projected_bot_state(
+            [state], sample_time_us=80000,
+            source_batch_horizon_us=80000,
+            edge_sample_time_us=40000, edge_revision=7))
 
-        def legacy_equipment_key(snapshots):
-            continuous_fields = frozenset((
-                'cooldownTimeLeft', 'autoPendingElapsed',
-                'aiPendingElapsed'))
-            return tuple(
-                authority_worker_module._immutable_outbound_key(dict(
-                    (name, field_value)
-                    for name, field_value in snapshot.items()
-                    if name not in continuous_fields))
-                for snapshot in snapshots)
+        self.assertEqual(1, len(client._outbound_queue))
+        wire = json.loads(
+            client._outbound_queue[0][1].payload.decode('utf-8'))
+        self.assertEqual(80000, wire['sample_time_us'])
+        self.assertEqual(9.0, wire['bots'][0]['x'])
 
-        def legacy_key(value):
-            continuous_fields = (
-                authority_worker_module._COALESCIBLE_BOT_STATE_FIELDS)
-            bot_keys = []
-            for bot_state in value.get('bots') or ():
-                fields = []
-                for name, field_value in bot_state.items():
-                    if name in continuous_fields:
-                        continue
-                    if name == 'equipment_states':
-                        field_value = legacy_equipment_key(field_value)
-                    else:
-                        field_value = (
-                            authority_worker_module._immutable_outbound_key(
-                                field_value))
-                    fields.append((name, field_value))
-                bot_keys.append(tuple(sorted(fields)))
-            return (
-                int(value.get('round_id') or 0),
-                authority_worker_module._immutable_outbound_key(
-                    value.get('human_ram_armors')),
-                tuple(bot_keys))
+    def test_worker_human_ram_results_and_authority_epoch_are_edges(self):
+        client = self._active_client()
+        state = _projected_bot_state()
+        result = [{
+            'seq': 4, 'first_id': 1, 'second_id': 2,
+            'available': False,
+        }]
+        self.assertTrue(client.send_projected_bot_state(
+            [state], human_ram_armors=result))
+        self.assertTrue(client.send_projected_bot_state(
+            [state], human_ram_armors=[]))
+        client.authority_epoch += 1
+        self.assertTrue(client.send_projected_bot_state(
+            [state], human_ram_armors=[]))
 
-        legacy_expected = legacy_key(message)
-        expected = (
-            authority_worker_module._validated_bot_state_coalesce_key(
-                message))
-        self.assertIsNotNone(expected)
-
-        continuous = json.loads(json.dumps(message))
-        continuous['bots'][0].update({
-            'x': 9.0, 'yaw': 0.7, 'reload_time': 0.05,
-            'combat_fire_elapsed': 0.03, 'combat_fire_timer': 0.07,
-        })
-        continuous_equipment = continuous['bots'][0][
-            'equipment_states'][0]
-        continuous_equipment.update({
-            'cooldownTimeLeft': 4.0, 'autoPendingElapsed': 0.9})
-        continuous['bots'][0]['equipment_states'][1][
-            'aiPendingElapsed'] = 0.1
-        self.assertEqual(
-            legacy_expected,
-            legacy_key(continuous))
-        self.assertEqual(
-            expected,
-            authority_worker_module._validated_bot_state_coalesce_key(
-                continuous))
-
-        durable = json.loads(json.dumps(continuous))
-        durable['bots'][0]['equipment_states'][0]['usesLeft'] = 1
-        self.assertNotEqual(
-            legacy_expected,
-            legacy_key(durable))
-        self.assertNotEqual(
-            expected,
-            authority_worker_module._validated_bot_state_coalesce_key(
-                durable))
+        self.assertEqual(3, len(client._outbound_queue))
 
     def test_worker_equipment_cooldown_coalesces_but_consumption_does_not(self):
         client = self._active_client()
@@ -595,7 +550,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertTrue(client.send_projected_bot_state([first]))
         self.assertTrue(client.send_projected_bot_state([cooldown]))
         self.assertEqual(1, len(client._outbound_queue))
-        self.assertTrue(client.send_projected_bot_state([consumed]))
+        self.assertTrue(client.send_projected_bot_state(
+            [consumed], edge_sample_time_us=2, edge_revision=2))
         self.assertEqual(2, len(client._outbound_queue))
 
     def test_worker_coalesces_across_queue_without_dropping_discrete_message(self):
@@ -611,7 +567,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             source_batch_horizon_us=40000))
         self.assertTrue(client.send_projected_bot_state(
             [fired], sample_time_us=80000,
-            source_batch_horizon_us=80000))
+            source_batch_horizon_us=80000,
+            edge_sample_time_us=80000, edge_revision=2))
         self.assertTrue(client._send({
             'type': 'projectile_launch', 'shot_seq': 3}))
         later = json.loads(json.dumps(fired))
@@ -619,7 +576,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         later['reload_time'] = 0.04
         self.assertTrue(client.send_projected_bot_state(
             [later], sample_time_us=120000,
-            source_batch_horizon_us=120000))
+            source_batch_horizon_us=120000,
+            edge_sample_time_us=80000, edge_revision=2))
 
         self.assertEqual(3, len(client._outbound_queue))
         self.assertEqual([
@@ -679,7 +637,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             source_batch_horizon_us=40000))
         self.assertTrue(client.send_projected_bot_state(
             [damaged], sample_time_us=80000,
-            source_batch_horizon_us=80000))
+            source_batch_horizon_us=80000,
+            edge_sample_time_us=80000, edge_revision=2))
 
         self.assertEqual(2, len(client._outbound_queue))
         wires = [json.loads(item[1].payload.decode('utf-8'))
@@ -699,9 +658,11 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         reverted_key['x'] = 12.0
 
         self.assertTrue(client.send_projected_bot_state([first]))
-        self.assertTrue(client.send_projected_bot_state([edge]))
+        self.assertTrue(client.send_projected_bot_state(
+            [edge], edge_sample_time_us=2, edge_revision=2))
         self.assertTrue(client._send({'type': 'projectile_launch'}))
-        self.assertTrue(client.send_projected_bot_state([reverted_key]))
+        self.assertTrue(client.send_projected_bot_state(
+            [reverted_key], edge_sample_time_us=3, edge_revision=3))
 
         self.assertEqual(4, len(client._outbound_queue))
         self.assertEqual('projectile_launch',
@@ -744,7 +705,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             self.assertTrue(client.send_projected_bot_state([
                 _projected_bot_state(11)]))
             self.assertFalse(client.send_projected_bot_state([
-                _projected_bot_state(12)]))
+                _projected_bot_state(12)],
+                edge_sample_time_us=2, edge_revision=2))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
 

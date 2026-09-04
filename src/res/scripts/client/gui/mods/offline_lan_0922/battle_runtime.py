@@ -18295,6 +18295,10 @@ class BattleRuntime(object):
             projected_sender = getattr(
                 self.client, 'send_projected_bot_state', None)
             if callable(projected_sender):
+                state_kwargs['edge_sample_time_us'] = message.get(
+                    'edge_sample_time_us')
+                state_kwargs['edge_revision'] = message.get(
+                    'edge_revision')
                 return projected_sender(message.get('bots'), **state_kwargs)
             return self.client.send_bot_state(
                 message.get('bots'), **state_kwargs)

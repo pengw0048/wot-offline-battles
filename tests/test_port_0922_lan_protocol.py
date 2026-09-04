@@ -15,9 +15,9 @@ sys.path.insert(0, str(ROOT / 'server'))
 from gui.mods.offline_lan_0922.lan_client import (
     HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
-    _projectile_wire_round, _strict_projectile_effect,
-    _valid_player_environment_contract,
-    project_bot_state)
+    _project_human_ram_armors, _projectile_wire_round,
+    _strict_projectile_effect,
+    _valid_player_environment_contract, project_bot_state)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
@@ -131,24 +131,27 @@ class LanProtocolTests(unittest.TestCase):
 
     def test_worker_bot_state_projects_human_ram_armor_results_exactly(self):
         worker = self._worker_client()
-        worker._send_preencoded_trusted = self.client._send
+        worker._send_preencoded_trusted = (
+            lambda message, coalesce_key=None: self.client._send(message))
         result = {
             'seq': 7, 'first_id': 1, 'second_id': 2,
             'available': True, 'armor_first': 45.0,
             'armor_second': 80.0,
         }
 
+        self.assertEqual([result], _project_human_ram_armors([result]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, armor_first=float('nan'))]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, unexpected=True)]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, first_id=2, second_id=1)]))
         self.assertTrue(worker.send_projected_bot_state(
             [], sample_time_us=40000,
             source_batch_horizon_us=40000,
+            edge_sample_time_us=40000, edge_revision=1,
             human_ram_armors=[result]))
         self.assertEqual([result], self.sent[-1]['human_ram_armors'])
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, armor_first=float('nan'))]))
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, unexpected=True)]))
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, first_id=2, second_id=1)]))
 
     def test_projectile_effect_carries_only_an_exact_stun_end_time(self):
         effect = {

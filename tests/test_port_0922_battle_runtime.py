@@ -6026,7 +6026,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertTrue(battle._send_bot_message({
             'type': 'bot_state', 'bots': [], 'sample_time_us': 40000,
-            'source_batch_horizon_us': 40000}))
+            'source_batch_horizon_us': 40000,
+            'edge_sample_time_us': 40000, 'edge_revision': 7}))
 
         self.assertEqual([
             mock.call((0.0, 0.0, 0.0), 0.0, 0.1, -0.1),
@@ -6048,7 +6049,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((-0.0, 1.0), second_inward)
         battle.client.send_projected_bot_state.assert_called_once_with(
             [], sample_time_us=40000,
-            source_batch_horizon_us=40000, human_ram_armors=[{
+            source_batch_horizon_us=40000,
+            edge_sample_time_us=40000, edge_revision=7,
+            human_ram_armors=[{
                 'seq': 7, 'first_id': 1, 'second_id': 2,
                 'available': True, 'armor_first': 45.0,
                 'armor_second': 80.0,
@@ -24343,19 +24346,23 @@ class BattleRuntimeContractTests(unittest.TestCase):
                  'fire_seq': 0}]
 
         self.assertTrue(battle._send_bot_message({
-            'type': 'bot_state', 'bots': bots}))
+            'type': 'bot_state', 'bots': bots,
+            'edge_sample_time_us': 1, 'edge_revision': 2}))
 
-        battle.client.send_projected_bot_state.assert_called_once_with(bots)
+        battle.client.send_projected_bot_state.assert_called_once_with(
+            bots, edge_sample_time_us=1, edge_revision=2)
         battle.client.send_bot_state.assert_not_called()
 
         battle.client.send_projected_bot_state.reset_mock()
         self.assertTrue(battle._send_bot_message({
             'type': 'bot_state', 'bots': bots,
             'sample_time_us': 40000,
-            'source_batch_horizon_us': 40000}))
+            'source_batch_horizon_us': 40000,
+            'edge_sample_time_us': 30000, 'edge_revision': 3}))
         battle.client.send_projected_bot_state.assert_called_once_with(
             bots, sample_time_us=40000,
-            source_batch_horizon_us=40000)
+            source_batch_horizon_us=40000,
+            edge_sample_time_us=30000, edge_revision=3)
 
     @staticmethod
     def _pending_manifest_outbox(payload, round_id=7, authority_id=-1):

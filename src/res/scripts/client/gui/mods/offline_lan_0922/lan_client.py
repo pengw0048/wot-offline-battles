@@ -658,15 +658,13 @@ def project_bot_state(state):
 
 
 def project_owned_bot_state(state):
-    """Project BotRuntime-owned state before the strict worker send gate.
-
-    BotRuntime creates the equipment ledger from validated descriptors and
-    never accepts it from a visible client.  Re-validating the same immutable
-    equipment contracts for every Bot here is therefore duplicate work.  The
-    dedicated worker transport must validate the projected equipment ledger
-    once at its immediate synchronous send boundary before encoding it.
-    """
-    return _project_bot_state_impl(state, False)
+    """Select wire fields from one trusted BotRuntime-owned state."""
+    projected = dict((name, state[name]) for name in _BOT_STATE_WIRE_FIELDS
+                     if name in state)
+    if 'shot_yaw' in state:
+        projected['shot_yaw'] = state['shot_yaw']
+        projected['shot_pitch'] = state['shot_pitch']
+    return projected
 
 
 def _project_human_ram_armors(raw_results):
@@ -3160,8 +3158,11 @@ class LANClient(object):
 
     def send_projected_bot_state(self, bots, sample_time_us=None,
                                  source_batch_horizon_us=None,
-                                 human_ram_armors=None):
+                                 human_ram_armors=None,
+                                 edge_sample_time_us=None,
+                                 edge_revision=None):
         """Send BotRuntime's already-projected canonical publication once."""
+        del edge_sample_time_us, edge_revision
         if not self.is_bot_authority():
             return False
         if (not isinstance(bots, (list, tuple)) or len(bots) > 30 or
