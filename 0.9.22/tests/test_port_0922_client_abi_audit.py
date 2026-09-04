@@ -72,6 +72,13 @@ def _unknown_projectile_explosion_fixture():
 
 
 class ClientAbiProjectileAuditTests(unittest.TestCase):
+    def test_spg_aiming_control_modes_are_pinned(self):
+        modes = AUDIT.EXPECTED_CLASS_CONSTANTS[
+            'scripts/client/AvatarInputHandler/aih_constants.pyc'][
+                'CTRL_MODE_NAME']
+        self.assertEqual('strategic', modes['STRATEGIC'])
+        self.assertEqual('arty', modes['ARTY'])
+
     def test_controlled_tracer_dependencies_are_pinned(self):
         effects = AUDIT.EXPECTED_ABI[
             'scripts/client/helpers/EffectsList.pyc']
