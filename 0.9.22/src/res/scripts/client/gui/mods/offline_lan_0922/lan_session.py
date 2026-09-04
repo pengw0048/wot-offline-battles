@@ -611,6 +611,10 @@ class LANSession(object):
                     self._postbattle_result_retry_attempted.discard(arena)
                     if archived:
                         self._archived_result_replayed = True
+                        # The native 1501 ACK already made this a historical
+                        # result.  Rehydrate the process-local cache without
+                        # publishing the same service message again.
+                        self._notified_results.add(arena)
                     self._completed_results.add(arena)
                     # #1513 BattleResultsCache accepts one request at a time.
                     # Its callback runs after releasing that wait gate, so

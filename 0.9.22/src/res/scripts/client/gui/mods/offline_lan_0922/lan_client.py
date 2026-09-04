@@ -75,6 +75,17 @@ MAX_PROJECTILE_SPLASH_RADIUS = 100.0
 MAX_PLAYER_DISPERSION_ANGLE = 0.5
 MAX_PLAYER_CLIP_SIZE = 255
 MAX_PLAYER_RELOAD_SECONDS = 3600.0
+# The exact ordered-input wire contract enforced by the bundled LAN
+# server's pre-admission validator.  The launcher always installs the
+# matching pair, so these mirror it field for field: a frame this
+# client queues must already satisfy the same envelope.
+MAX_PLAYER_INPUT_SPEED = 200.0
+MAX_PLAYER_GUN_PITCH = 1.2
+MAX_PLAYER_INPUT_ATTITUDE = 0.61
+PLAYER_INPUT_WORLD_BOUNDS = (2000.0, 1000.0, 2000.0)
+MAX_PLAYER_RAM_CONTACTS = 16
+MAX_PLAYER_DESTRUCTIBLE_CONTACTS = 16
+MAX_PLAYER_DESTRUCTIBLE_CONTACT_TOKEN = 64
 MAX_PROJECTILE_PIERCING_LOSS = 100000.0
 MAX_CRITICAL_DEVICE_HP = effective_params_wire.MAX_CRITICAL_DEVICE_HP
 CRITICAL_DELTA_DEVICE_NAMES = frozenset((
@@ -387,6 +398,22 @@ def _valid_stun_contract(vehicle):
          attacker_id > 0))
 
 
+def _canonical_angle(value, default=0.0):
+    """Return one mathematically equivalent angle inside [-pi, pi].
+
+    Yaw is periodic, so an accumulated turret plus hull sum is normalized
+    rather than clipped: clipping would silently point the reported gun
+    somewhere the player is not aiming, while normalization reports the exact
+    same orientation inside the server's ordered-input contract.
+    """
+    angle = _finite_float(value, default)
+    period = 2.0 * math.pi
+    angle = math.fmod(angle + math.pi, period)
+    if angle < 0.0:
+        angle += period
+    return angle - math.pi
+
+
 def _exact_finite_float(value, default=None):
     if isinstance(value, bool):
         return default
@@ -533,17 +560,14 @@ def _valid_bot_equipment_contract(state, required=False):
     if not isinstance(snapshots, list):
         return False
     try:
-        contracts = equipment_mechanics.bot_consumable_contracts(
-            None, snapshot=snapshots)
-        equipment_mechanics.restore_equipment_states(
-            snapshots, contracts=contracts, now=0.0)
+        equipment_mechanics.validate_bot_equipment_states(snapshots)
     except (TypeError, ValueError):
         return False
     return True
 
 
 def _valid_player_environment_contract(state, required=False):
-    """Validate the canonical pose and landing frontier in a player row."""
+    """Validate canonical pose, input and landing frontiers in a player row."""
     required_fields = {
         'input_seq', 'up_cosine', 'landing_observation_seq'}
     if not required_fields.issubset(state):
@@ -553,8 +577,14 @@ def _valid_player_environment_contract(state, required=False):
     landing_sequence = _projectile_int_range(
         state.get('landing_observation_seq'), 0, MAX_PROJECTILE_ID)
     up_cosine = _exact_finite_float(state.get('up_cosine'))
+    processed_sequence = input_sequence
+    if 'input_processed_seq' in state:
+        processed_sequence = _projectile_int_range(
+            state.get('input_processed_seq'), 0, MAX_PROJECTILE_ID)
     return bool(
         input_sequence is not None and landing_sequence is not None and
+        processed_sequence is not None and
+        processed_sequence >= input_sequence and
         up_cosine is not None and -1.0 <= up_cosine <= 1.0)
 
 
@@ -572,8 +602,8 @@ def _strict_mapping_list(value, limit=30):
     return [dict(item) for item in value]
 
 
-def project_bot_state(state):
-    """Return only fields consumed by the v5 server bot-state sanitizer."""
+def _project_bot_state_impl(state, validate_equipment):
+    """Project one internal state, optionally proving its equipment ledger."""
     if not isinstance(state, dict):
         return None
     projected = dict((name, state[name]) for name in _BOT_STATE_WIRE_FIELDS
@@ -624,7 +654,7 @@ def project_bot_state(state):
             projected, projected.get('fire_seq', 0))
     except ValueError:
         return None
-    if ('equipment_states' in state and
+    if (validate_equipment and 'equipment_states' in state and
             not _valid_bot_equipment_contract(state)):
         return None
     if 'stun_end_server_time_ms' in state:
@@ -634,6 +664,23 @@ def project_bot_state(state):
             return None
         projected['stun_end_server_time_ms'] = stun_end
     return projected
+
+
+def project_bot_state(state):
+    """Return only fields consumed by the v5 server bot-state sanitizer."""
+    return _project_bot_state_impl(state, True)
+
+
+def project_owned_bot_state(state):
+    """Project BotRuntime-owned state before the strict worker send gate.
+
+    BotRuntime creates the equipment ledger from validated descriptors and
+    never accepts it from a visible client.  Re-validating the same immutable
+    equipment contracts for every Bot here is therefore duplicate work.  The
+    dedicated worker transport must validate the projected equipment ledger
+    once at its immediate synchronous send boundary before encoding it.
+    """
+    return _project_bot_state_impl(state, False)
 
 
 def _project_human_ram_armors(raw_results):
@@ -1845,14 +1892,31 @@ class LANClient(object):
             self._landing_observation_pending = None
             self._landing_observation_queue = []
         next_input_seq = self._input_seq + 1
+        if next_input_seq > MAX_PROJECTILE_ID:
+            # The server cannot represent another ordered identity in this
+            # round.  Do not queue MAX+1 and move the local frontier into a
+            # permanent sequence gap; the next round resets both sides.
+            return False
+        parsed_fire_seq = _projectile_int_range(
+            max(0, int(fire_seq or 0)), 0, MAX_PROJECTILE_ID)
+        if parsed_fire_seq is None:
+            return False
         message = {
             'type': 'input',
             'round_id': self.round_id,
             'forward': max(-1.0, min(1.0, _finite_float(forward))),
             'turn': max(-1.0, min(1.0, _finite_float(turn))),
-            'aim_yaw': _finite_float(aim_yaw),
-            'gun_pitch': _finite_float(gun_pitch),
-            'fire_seq': max(0, int(fire_seq or 0)),
+            # Periodic: hull yaw plus turret yaw can leave the principal
+            # interval, so report the equivalent canonical angle.
+            'aim_yaw': _canonical_angle(aim_yaw),
+            # Not periodic.  The gun elevation request is bounded by the wire
+            # envelope, which is far wider than any #1513 gun's descriptor
+            # pitch limits; VehicleGunRotator still owns the exact per-vehicle
+            # limits, so no reachable angle is altered here.
+            'gun_pitch': max(
+                -MAX_PLAYER_GUN_PITCH,
+                min(MAX_PLAYER_GUN_PITCH, _finite_float(gun_pitch))),
+            'fire_seq': parsed_fire_seq,
         }
         timeline_enabled = bool(
             HUMAN_RAM_TIMELINE_CAPABILITY in self.capabilities and
@@ -1860,16 +1924,26 @@ class LANClient(object):
         if timeline_enabled:
             message['input_seq'] = next_input_seq
         if position is not None and len(position) >= 3:
-            message['x'] = _finite_float(position[0])
-            message['y'] = _finite_float(position[1])
-            message['z'] = _finite_float(position[2])
-            message['yaw'] = _finite_float(yaw)
+            coordinates = [
+                _finite_float(position[index]) for index in range(3)]
+            if any(abs(coordinate) > bound for coordinate, bound in
+                   zip(coordinates, PLAYER_INPUT_WORLD_BOUNDS)):
+                # No #1513 map reaches this envelope.  Fabricating a clamped
+                # world pose would report a position the vehicle is not in, so
+                # drop the frame locally instead; the ordered sequence is
+                # committed only after the frame is queued, so nothing later
+                # is blocked.
+                return False
+            message['x'], message['y'], message['z'] = coordinates
+            message['yaw'] = _canonical_angle(yaw)
             if pitch is not None:
                 message['pitch'] = max(
-                    -0.61, min(0.61, _finite_float(pitch)))
+                    -MAX_PLAYER_INPUT_ATTITUDE,
+                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(pitch)))
             if roll is not None:
                 message['roll'] = max(
-                    -0.61, min(0.61, _finite_float(roll)))
+                    -MAX_PLAYER_INPUT_ATTITUDE,
+                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(roll)))
             if up_cosine is not None:
                 if (isinstance(up_cosine, bool) or
                         not isinstance(up_cosine, integer_types + (float,))):
@@ -1886,7 +1960,8 @@ class LANClient(object):
                 message['pose_time_us'] = parsed_pose_time
         if speed is not None:
             message['speed'] = max(
-                -200.0, min(200.0, _finite_float(speed)))
+                -MAX_PLAYER_INPUT_SPEED,
+                min(MAX_PLAYER_INPUT_SPEED, _finite_float(speed)))
         if shell_index is not None:
             parsed_shell = _projectile_int_range(shell_index, 0, 9)
             if parsed_shell is None:
@@ -1921,11 +1996,13 @@ class LANClient(object):
             message['gun_checkpoint'] = parsed_checkpoint
         if isinstance(ram_contacts, list):
             message['ram_contacts'] = [
-                dict(value) for value in ram_contacts[:16]
+                dict(value) for value in ram_contacts[
+                    :MAX_PLAYER_RAM_CONTACTS]
                 if isinstance(value, dict)]
         if isinstance(destructible_contacts, list):
             message['destructible_contacts'] = [
-                dict(value) for value in destructible_contacts[:16]
+                dict(value) for value in destructible_contacts[
+                    :MAX_PLAYER_DESTRUCTIBLE_CONTACTS]
                 if isinstance(value, dict)]
         if siege_enabled is not None:
             if not isinstance(siege_enabled, bool):
@@ -2155,6 +2232,16 @@ class LANClient(object):
             own.get('landing_observation_seq'), 0, MAX_PROJECTILE_ID)
         if input_seq is None or landing_seq is None:
             return False
+        if 'input_processed_seq' in own:
+            # The server's terminal frontier can run ahead of its last applied
+            # input when one recoverable frame was rejected.  Resume from the
+            # next eligible sequence so a reconnect never retries an
+            # identifier whose decision is already terminal.
+            processed_seq = _projectile_int_range(
+                own.get('input_processed_seq'), 0, MAX_PROJECTILE_ID)
+            if processed_seq is None or processed_seq < input_seq:
+                return False
+            input_seq = processed_seq
         if self._input_seq_round != self.round_id:
             self._input_seq_round = self.round_id
             self._input_seq = input_seq
@@ -2824,7 +2911,8 @@ class LANClient(object):
                 not self.is_bot_authority() or
                 not isinstance(accepted, bool) or
                 not isinstance(token, (list, tuple)) or
-                not 1 <= len(token) <= 16):
+                not 1 <= len(token) <=
+                MAX_PLAYER_DESTRUCTIBLE_CONTACT_TOKEN):
             return False
         parsed_player = _projectile_int_range(
             player_id, 1, MAX_PROJECTILE_ID)

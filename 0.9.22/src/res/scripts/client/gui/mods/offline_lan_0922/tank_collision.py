@@ -260,6 +260,22 @@ def _axes(yaw):
     return ((cosine, -sine), (sine, cosine))
 
 
+def descriptor_spall_coefficient(type_descriptor):
+    """Return ``miscAttrs.antifragmentationLiningFactor``, or 1.0 without one.
+
+    1.0 is the descriptor's own no-liner value, so an absent field leaves the
+    armour absorption term unchanged rather than inventing a reduction.
+    """
+    misc = _value(type_descriptor, 'miscAttrs', {}) or {}
+    try:
+        spall = float(_value(misc, 'antifragmentationLiningFactor', 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if spall < 1.0 or not _finite(spall):
+        return 1.0
+    return spall
+
+
 def descriptor_ram_profile(type_descriptor, ramming_bonus=0.0):
     """Return source-backed non-contact ram inputs from one descriptor.
 

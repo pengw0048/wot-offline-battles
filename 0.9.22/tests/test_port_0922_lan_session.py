@@ -575,7 +575,7 @@ class LANSessionTests(unittest.TestCase):
         self.assertIn('native battle-results service is unavailable',
                       written[0])
 
-    def test_new_session_rebuilds_only_latest_archived_result_entry(self):
+    def test_new_session_silently_rebuilds_latest_archived_result_entry(self):
         class Store(object):
             def pending_arenas(self):
                 return []
@@ -606,8 +606,9 @@ class LANSessionTests(unittest.TestCase):
             self.assertFalse(session._publish_postbattle_results())
 
         self.assertEqual([(456, False, False, True)], requested)
-        session._publish_battle_service_message.assert_called_once_with(
-            456, {'arenaUniqueID': 456})
+        self.assertEqual({456}, session._completed_results)
+        self.assertTrue(session._archived_result_replayed)
+        session._publish_battle_service_message.assert_not_called()
 
     def test_postbattle_results_drain_one_request_at_a_time(self):
         class Store(object):
@@ -656,6 +657,10 @@ class LANSessionTests(unittest.TestCase):
         ], requested)
         self.assertEqual({123, 124, 456}, session._completed_results)
         self.assertTrue(session._archived_result_replayed)
+        self.assertEqual([
+            mock.call(123, {'arenaUniqueID': 123}),
+            mock.call(124, {'arenaUniqueID': 124}),
+        ], session._publish_battle_service_message.call_args_list)
 
     def test_departed_battle_posts_clickable_result_without_opening_it(self):
         class Store(object):

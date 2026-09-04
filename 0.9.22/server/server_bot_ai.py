@@ -1669,15 +1669,29 @@ class BotPlanner(object):
             # Bot snapshots carry hull yaw in the same shared frame as uploaded
             # routes. Skip only a truly rear-facing connector; a side road remains a
             # valid lane opening and must not be flattened into the next macro point.
-            yaw = _number(bot["state"].get("yaw"))
-            while index < route_limit:
-                point = waypoints[index]
-                bearing = math.atan2(_number(point.get("x")) - bx,
-                                     _number(point.get("z")) - bz)
-                delta = (bearing - yaw + math.pi) % (math.pi * 2.0) - math.pi
-                if abs(delta) <= 1.75:
-                    break
-                index += 1
+            #
+            # A parked hull's yaw is a parking orientation, not a travel
+            # direction, so there is nothing for a connector to be "behind" yet.
+            # Applying the filter at the spawn discarded the authored first
+            # connector on 246 of the 1230 shipped spawn slots across 33 of the
+            # 41 baked maps - a median of 58 m away - and sent those tanks
+            # straight at a farther macro point instead of down the reviewed
+            # lane. Turning in place is cheap; leaving the authored egress is
+            # not.
+            # Positive longitudinal speed proves that hull yaw is the current
+            # route direction. Negative speed is a temporary reverse recovery,
+            # not a request to abandon the nearest connector behind that yaw.
+            if _number(bot["state"].get("speed")) > 0.5:
+                yaw = _number(bot["state"].get("yaw"))
+                while index < route_limit:
+                    point = waypoints[index]
+                    bearing = math.atan2(_number(point.get("x")) - bx,
+                                         _number(point.get("z")) - bz)
+                    delta = ((bearing - yaw + math.pi) %
+                             (math.pi * 2.0) - math.pi)
+                    if abs(delta) <= 1.75:
+                        break
+                    index += 1
             state = {"index": index, "route_id": route_id,
                      "join_index": index,
                      "join_anchor": {"x": bx,

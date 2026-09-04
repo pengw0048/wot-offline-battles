@@ -316,6 +316,17 @@ Python-to-native call boundary. A clean Python traceback log does not prove a
 native adapter is safe, and a static disassembly does not prove the crash is
 fixed.
 
+To exercise ordered-input recovery on the exact client, arm the LAN server's
+one-shot input-fault hook before launching it:
+
+```bat
+set WOT_0922_INPUT_FAULT=aim_yaw
+```
+
+Any class in `PLAYER_INPUT_FAULT_CLASSES` breaks exactly one frame per round
+per player by rewriting one field, which then fails the production
+pre-admission validator. Leave the variable unset in normal play.
+
 ## Validation and release
 
 Ordinary changes run the focused test, the port suite, Python 2.7 source

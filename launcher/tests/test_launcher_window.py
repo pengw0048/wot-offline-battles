@@ -205,7 +205,7 @@ class WindowTest(unittest.TestCase):
         return game_root
 
     def test_layout_separates_play_vehicle_and_repair_controls(self):
-        self.assertEqual("0.6.3", wot_launcher.LAUNCHER_VERSION)
+        self.assertEqual("0.6.5", wot_launcher.LAUNCHER_VERSION)
         self.assertEqual(
             "Single player",
             self.window.battle_tabs.tab(self.window.single_panel).get("text"))
@@ -268,12 +268,12 @@ class WindowTest(unittest.TestCase):
 
     def test_launcher_session_identity_is_visible_and_persisted(self):
         self.assertIn(
-            "Launcher session: version=0.6.3 build=unknown role=launcher",
+            "Launcher session: version=0.6.5 build=unknown role=launcher",
             self._log_text())
         with open(core.launcher_log_path(), encoding="utf-8") as stream:
             persisted = stream.read()
         self.assertIn(
-            "Launcher session: version=0.6.3 build=unknown role=launcher",
+            "Launcher session: version=0.6.5 build=unknown role=launcher",
             persisted)
 
     def test_first_run_prompts_once_when_the_launcher_starts(self):

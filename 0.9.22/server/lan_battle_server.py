@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import math
 import random
@@ -96,7 +97,17 @@ OUTBOUND_STALL_TIMEOUT_SECONDS = 5.0
 MAX_PENDING_RAM_CONTACTS = 32
 MAX_PENDING_PLAYER_DESTRUCTIBLE_CONTACTS = 16
 MAX_PLAYER_DESTRUCTIBLE_REJECTIONS = 16
+MAX_PLAYER_DESTRUCTIBLE_CONTACT_TOKEN = 64
+MAX_PLAYER_DESTRUCTIBLE_INFLIGHT = 64
+# A 0.1-second copied-physics step can legitimately rotate a fast light tank
+# by several tenths of a radian.  This envelope is deliberately wider than
+# every #1513 descriptor while still bounding an untrusted swept-pose payload.
+MAX_PLAYER_DESTRUCTIBLE_ANGULAR_SPEED = 8.0
+MAX_PLAYER_DESTRUCTIBLE_VERTICAL_TRAVEL = 0.25
+MAX_PLAYER_DESTRUCTIBLE_LINEAR_SLOP = 0.25
 MAX_PLAYER_INPUT_FINGERPRINTS = 128
+MAX_PLAYER_INPUT_DECISIONS = 128
+MAX_PLAYER_INPUT_REJECT_REASONS = 32
 MAX_PLAYER_EQUIPMENT_FINGERPRINTS = 64
 MAX_CRITICAL_DEVICE_HP = effective_params_wire.MAX_CRITICAL_DEVICE_HP
 HUMAN_POSE_HISTORY_SECONDS = 1.5
@@ -643,6 +654,48 @@ def _validated_bot_reload_progress(raw, required=False):
             duration <= 0.0 or remaining < 0.0 or remaining > duration):
         raise ValueError("bot reload progress is invalid")
     return remaining, duration
+
+
+INPUT_OUTCOME_APPLIED = "applied"
+INPUT_OUTCOME_INACTIVE = "inactive"
+INPUT_OUTCOME_REJECTED = "rejected"
+PLAYER_INPUT_FAULT_ENV = "WOT_0922_INPUT_FAULT"
+# Deterministic acceptance hook.  Each entry rewrites exactly one field of one
+# ordered input frame into a value the shipping client never emits, so the
+# frame then fails the *production* pre-admission validator.  Nothing here
+# bypasses validation, and the hook stays inert unless the environment
+# variable names a class.
+PLAYER_INPUT_FAULT_CLASSES = {
+    "aim_yaw": ("aim_yaw", 7.0),
+    "gun_pitch": ("gun_pitch", 2.5),
+    "vehicle_yaw": ("yaw", 9.0),
+    "position": ("x", 4000.0),
+    "up_cosine": ("up_cosine", 1.5),
+    "pose_clock": ("pose_time_us", 1.5),
+    "fire_seq": ("fire_seq", True),
+    "shell_pair": ("next_shell_index", 10),
+    "gun_checkpoint": ("gun_checkpoint", {"reload_time": 0.0}),
+    "siege_state": ("siege_enabled", 1),
+    "extra_field": ("damage", 1000),
+    "missing_field": ("round_id", None),
+}
+
+
+def _player_input_fault_class():
+    """Return the armed recoverable input-fault class, or an empty string."""
+    selected = str(os.environ.get(PLAYER_INPUT_FAULT_ENV, "") or "").strip()
+    return selected if selected in PLAYER_INPUT_FAULT_CLASSES else ""
+
+
+def _injected_player_input_fault(message, fault_class):
+    """Return one copy of ``message`` broken in exactly one field."""
+    name, value = PLAYER_INPUT_FAULT_CLASSES[fault_class]
+    faulted = dict(message)
+    if value is None:
+        faulted.pop(name, None)
+    else:
+        faulted[name] = value
+    return faulted
 
 
 def _canonical_human_gun_checkpoint(raw):
@@ -1691,11 +1744,27 @@ class Player(_EndpointSendMixin):
     destructible_contact_resolved_seq: int = 0
     destructible_contacts: OrderedDict = field(
         default_factory=OrderedDict, repr=False)
+    destructible_contact_resolutions: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
     destructible_contact_rejections: OrderedDict = field(
         default_factory=OrderedDict, repr=False)
+    # ``input_seq`` is the last *applied* ordered input: the frame
+    # whose controls, pose, shell selection and gun checkpoint were
+    # committed.  ``input_processed_seq`` is the contiguous terminal
+    # frontier, which also advances over a frame that reached an
+    # idempotent rejected or inactive decision without applying any
+    # state.  Consumers that need the current pose/gun checkpoint
+    # must keep using ``input_seq``.
     input_seq: int = 0
     input_fingerprints: OrderedDict = field(
         default_factory=OrderedDict, repr=False)
+    input_processed_seq: int = 0
+    input_decisions: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
+    last_input_reject: dict = field(default_factory=dict, repr=False)
+    input_reject_counts: dict = field(
+        default_factory=dict, repr=False)
+    input_fault_round: int = 0
     landing_observation_seq: int = 0
     landing_observation_input_seq: int = 0
     landing_observation_fingerprints: OrderedDict = field(
@@ -2834,9 +2903,15 @@ class BattleState:
             player.destructible_contact_seq = 0
             player.destructible_contact_resolved_seq = 0
             player.destructible_contacts.clear()
+            player.destructible_contact_resolutions.clear()
             player.destructible_contact_rejections.clear()
             player.input_seq = 0
             player.input_fingerprints.clear()
+            player.input_processed_seq = 0
+            player.input_decisions.clear()
+            player.last_input_reject = {}
+            player.input_reject_counts.clear()
+            player.input_fault_round = 0
             player.landing_observation_seq = 0
             player.landing_observation_input_seq = 0
             player.landing_observation_fingerprints.clear()
@@ -3523,7 +3598,8 @@ class BattleState:
     @staticmethod
     def _destructible_contact_result_token(raw_token):
         if (not isinstance(raw_token, list) or
-                not 1 <= len(raw_token) <= 16):
+                not 1 <= len(raw_token) <=
+                MAX_PLAYER_DESTRUCTIBLE_CONTACT_TOKEN):
             return None
         token = set()
         for raw in raw_token:
@@ -3544,6 +3620,29 @@ class BattleState:
             return None
         return tuple(sorted(token, key=lambda row: (
             row[0], row[1], -1 if row[2] is None else row[2])))
+
+    @staticmethod
+    def _player_destructible_contact_is_resolved(player, seq):
+        return bool(
+            seq <= player.destructible_contact_resolved_seq or
+            seq in player.destructible_contact_resolutions)
+
+    @staticmethod
+    def _record_player_destructible_contact_resolution(
+            player, seq):
+        """Record one bounded terminal row and advance its contiguous prefix."""
+        if BattleState._player_destructible_contact_is_resolved(player, seq):
+            return
+        player.destructible_contact_resolutions[int(seq)] = True
+        next_seq = int(player.destructible_contact_resolved_seq) + 1
+        while next_seq in player.destructible_contact_resolutions:
+            player.destructible_contact_resolutions.pop(next_seq, None)
+            player.destructible_contact_resolved_seq = next_seq
+            next_seq += 1
+        if (len(player.destructible_contact_resolutions) >
+                MAX_PLAYER_DESTRUCTIBLE_INFLIGHT):
+            raise RuntimeError(
+                "destructible selective-ack window exceeded")
 
     def report_player_destructible_contact_result(self, player_id, message):
         """Consume one hidden-worker verdict for an admitted player sweep."""
@@ -3570,10 +3669,9 @@ class BattleState:
                 message.get("token"))
             if target is None or seq is None or token is None:
                 return False
-            if seq <= target.destructible_contact_resolved_seq:
+            if self._player_destructible_contact_is_resolved(target, seq):
                 return True
-            if (not target.destructible_contacts or
-                    seq != next(iter(target.destructible_contacts))):
+            if seq not in target.destructible_contacts:
                 return False
             pending = target.destructible_contacts[seq]
             expected = self._destructible_contact_result_token(
@@ -3586,7 +3684,7 @@ class BattleState:
                         known = any(
                             (kind, chunk_id, item_index, None) in
                             self.destructibles
-                            for kind in ("fragile", "column"))
+                            for kind in ("fragile", "column", "tree"))
                     else:
                         known = (
                             "module", chunk_id, item_index, mat_kind) in \
@@ -3595,7 +3693,8 @@ class BattleState:
                         return False
             target.destructible_contacts.pop(seq, None)
             if message["accepted"]:
-                target.destructible_contact_resolved_seq = seq
+                self._record_player_destructible_contact_resolution(
+                    target, seq)
             else:
                 self._reject_player_destructible_contact(
                     target, seq, pending)
@@ -3604,8 +3703,8 @@ class BattleState:
     def _reject_player_destructible_contact(
             self, player, seq, admitted_pose=None):
         """Publish one terminal rejection and retain a snapshot fallback."""
-        player.destructible_contact_resolved_seq = max(
-            player.destructible_contact_resolved_seq, seq)
+        self._record_player_destructible_contact_resolution(
+            player, seq)
         player.destructible_contact_rejections[seq] = True
         while (len(player.destructible_contact_rejections) >
                MAX_PLAYER_DESTRUCTIBLE_REJECTIONS):
@@ -8888,7 +8987,7 @@ class BattleState:
         if (not isinstance(raw_contact, dict) or
                 set(raw_contact) != {
                     "seq", "x", "y", "z", "yaw", "speed", "dt",
-                    "token"}):
+                    "end_x", "end_y", "end_z", "end_yaw", "token"}):
             return None
         try:
             seq = _exact_int(raw_contact.get("seq"), 1, PROJECTILE_MAX_ID)
@@ -8901,12 +9000,35 @@ class BattleState:
                 raw_contact.get("speed"), -200.0, 200.0)
             step = _bounded_float(
                 raw_contact.get("dt"), 0.0, 0.1, False)
+            end_x = _bounded_float(
+                raw_contact.get("end_x"), -2000.0, 2000.0)
+            end_y = _bounded_float(
+                raw_contact.get("end_y"), -1000.0, 1000.0)
+            end_z = _bounded_float(
+                raw_contact.get("end_z"), -2000.0, 2000.0)
+            end_yaw = _bounded_float(
+                raw_contact.get("end_yaw"),
+                -math.pi * 2.0, math.pi * 2.0)
         except (TypeError, ValueError, OverflowError):
             return None
         raw_token = raw_contact.get("token")
-        if (seq is None or not 0.001 <= abs(speed) or
+        if (seq is None or None in (end_x, end_y, end_z, end_yaw) or
                 not isinstance(raw_token, list) or
-                not 1 <= len(raw_token) <= 16):
+                not 1 <= len(raw_token) <=
+                MAX_PLAYER_DESTRUCTIBLE_CONTACT_TOKEN):
+            return None
+        move_x = end_x - x
+        move_y = end_y - y
+        move_z = end_z - z
+        move_distance = math.hypot(move_x, move_z)
+        yaw_delta = (end_yaw - yaw + math.pi) % (
+            2.0 * math.pi) - math.pi
+        if (abs(move_y) > MAX_PLAYER_DESTRUCTIBLE_VERTICAL_TRAVEL or
+                move_distance > abs(speed) * step +
+                MAX_PLAYER_DESTRUCTIBLE_LINEAR_SLOP or
+                abs(yaw_delta) >
+                MAX_PLAYER_DESTRUCTIBLE_ANGULAR_SPEED * step + 0.001 or
+                (move_distance <= 0.0001 and abs(yaw_delta) <= 0.00001)):
             return None
         token = set()
         for raw in raw_token:
@@ -8935,31 +9057,114 @@ class BattleState:
             "yaw": round(yaw, 5),
             "speed": round(speed, 4),
             "dt": round(step, 6),
+            "end_x": round(end_x, 4),
+            "end_y": round(end_y, 4),
+            "end_z": round(end_z, 4),
+            "end_yaw": round(end_yaw, 5),
             "token": [list(row) for row in ordered],
         }
 
     @staticmethod
-    def _admit_player_input(player, message):
-        """Admit one ordered input transaction and fold exact retries."""
-        try:
-            sequence = _exact_int(
-                message.get("input_seq"), 1, PROJECTILE_MAX_ID)
-            fingerprint = json.dumps(
-                message, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=True)
-        except (TypeError, ValueError, OverflowError):
-            return False, False
-        previous = player.input_fingerprints.get(sequence)
-        if previous is not None:
-            return previous == fingerprint, previous == fingerprint
-        if sequence != player.input_seq + 1:
-            return False, False
-        player.input_seq = sequence
-        player.input_fingerprints[sequence] = fingerprint
+    def _player_input_identity(message):
+        """Return the exact ordered sequence, raw payload and digest.
+
+        The identity is always the raw wire payload, so an exact retry folds
+        even when a diagnostic hook later rewrites a field of the frame.
+        """
+        sequence = _exact_int(
+            message.get("input_seq"), 1, PROJECTILE_MAX_ID)
+        payload = _message_fingerprint(message)
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+        return sequence, payload, digest
+
+    def _record_player_input_decision(self, player, sequence, fingerprint,
+                                      outcome, reason="", field="",
+                                      active=True):
+        """Advance only the terminal frontier and retain its typed outcome."""
+        player.input_processed_seq = int(sequence)
+        player.input_decisions[int(sequence)] = {
+            "fingerprint": str(fingerprint),
+            "outcome": str(outcome),
+            "reason": str(reason),
+            "field": str(field),
+            "active": bool(active),
+        }
+        while len(player.input_decisions) > MAX_PLAYER_INPUT_DECISIONS:
+            player.input_decisions.popitem(last=False)
+        return outcome
+
+    def _note_player_input_rejection(self, player, sequence, reason,
+                                     field="", consumed=False, active=True):
+        """Keep one bounded typed first cause for the socket diagnostics."""
+        counts = player.input_reject_counts
+        if (reason not in counts and
+                len(counts) >= MAX_PLAYER_INPUT_REJECT_REASONS):
+            counts.clear()
+        counts[reason] = counts.get(reason, 0) + 1
+        player.last_input_reject = {
+            "reason": str(reason),
+            "field": str(field),
+            "player_id": int(player.player_id),
+            "round_id": int(self.round_id),
+            "submitted_seq": (
+                None if sequence is None else int(sequence)),
+            "expected_seq": int(player.input_processed_seq) + 1,
+            "processed_seq": int(player.input_processed_seq),
+            "applied_seq": int(player.input_seq),
+            "checkpoint_seq": int(player.gun_checkpoint_seq),
+            "active": bool(active),
+            "consumed": bool(consumed),
+            "repeats": int(counts[reason]),
+        }
+        return False
+
+    def _reject_player_input_frame(self, player, sequence, fingerprint,
+                                   reason, field="", active=True):
+        """End one expected frame without applying any part of its state."""
+        # Record the diagnostic against the pre-decision frontiers, then
+        # advance only the terminal frontier.  No control, pose, shell, gun
+        # checkpoint or contact state may be written on this path.
+        self._note_player_input_rejection(
+            player, sequence, reason, field, consumed=True, active=active)
+        self._record_player_input_decision(
+            player, sequence, fingerprint, INPUT_OUTCOME_REJECTED, reason,
+            field, active)
+        return False
+
+    def _admit_applied_player_input(self, player, sequence, payload, digest):
+        """Reserve a validated frame on both ordered-input frontiers."""
+        self._record_player_input_decision(
+            player, sequence, digest, INPUT_OUTCOME_APPLIED, "")
+        player.input_seq = int(sequence)
+        player.input_fingerprints[int(sequence)] = payload
         while (len(player.input_fingerprints) >
                MAX_PLAYER_INPUT_FINGERPRINTS):
             player.input_fingerprints.popitem(last=False)
-        return True, False
+        return True
+
+    def player_input_rejection_log(self, player_id):
+        """Return one bounded typed first-cause line for the socket reader."""
+        with self.lock:
+            player = self.players.get(player_id)
+            detail = (
+                dict(player.last_input_reject) if player is not None else {})
+        if not detail or detail.get("round_id") != self.round_id:
+            # Nothing typed for this round: the message did not identify a
+            # live player of the current round at all.
+            return ("player-input:%d" % player_id,
+                    "PLAYER INPUT rejected sender=%d round=%d "
+                    "reason=unidentified" % (player_id, self.round_id))
+        return (
+            "player-input:%d:%s" % (player_id, detail["reason"]),
+            "PLAYER INPUT rejected sender=%s round=%s reason=%s field=%s "
+            "seq=%s expected=%s processed=%s applied=%s checkpoint=%s "
+            "active=%s consumed=%s repeats=%s" % (
+                detail["player_id"], detail["round_id"], detail["reason"],
+                detail["field"] or "-", detail["submitted_seq"],
+                detail["expected_seq"], detail["processed_seq"],
+                detail["applied_seq"], detail["checkpoint_seq"],
+                int(detail["active"]), int(detail["consumed"]),
+                detail["repeats"]))
 
     def _record_player_pose_sample(self, player, message):
         """Store one source-timed pose without extrapolating a broken clock."""
@@ -9003,67 +9208,168 @@ class BattleState:
             player.pose_history.popleft()
         return True
 
+    # Every entry is the exact static contract the shipping client
+    # canonicalizes against.  Periodic angles are normalized by the client to
+    # the principal interval; the wider period accepted here keeps an
+    # already-legal orientation valid without clipping it.
+    MODERN_INPUT_BOUNDED_FIELDS = (
+        ("forward", -1.0, 1.0),
+        ("turn", -1.0, 1.0),
+        ("speed", -200.0, 200.0),
+        ("aim_yaw", -math.pi * 2.0, math.pi * 2.0),
+        ("gun_pitch", -1.2, 1.2),
+        ("x", -2000.0, 2000.0),
+        ("y", -1000.0, 1000.0),
+        ("z", -2000.0, 2000.0),
+        ("yaw", -math.pi * 2.0, math.pi * 2.0),
+        ("pitch", -0.61, 0.61),
+        ("roll", -0.61, 0.61),
+    )
+
     def _modern_input_envelope_valid(self, player, message,
                                      validate_contacts=False):
         """Validate one input envelope without advancing any ledger."""
-        bounded_fields = {
-            "forward": (-1.0, 1.0),
-            "turn": (-1.0, 1.0),
-            "speed": (-200.0, 200.0),
-            "aim_yaw": (-math.pi * 2.0, math.pi * 2.0),
-            "gun_pitch": (-1.2, 1.2),
-            "x": (-2000.0, 2000.0),
-            "y": (-1000.0, 1000.0),
-            "z": (-2000.0, 2000.0),
-            "yaw": (-math.pi * 2.0, math.pi * 2.0),
-            "pitch": (-0.61, 0.61),
-            "roll": (-0.61, 0.61),
-        }
+        return not self._modern_input_envelope_failure(
+            player, message, validate_contacts)[0]
+
+    def _modern_input_envelope_failure(self, player, message,
+                                       validate_contacts=False):
+        """Return one typed (reason, field) failure or ("", "")."""
         try:
             _exact_int(message.get("round_id"), 1, PROJECTILE_MAX_ID)
-            for name, bounds in bounded_fields.items():
-                if name in message:
-                    _bounded_float(message[name], bounds[0], bounds[1])
-            if "pose_time_us" in message:
-                _exact_int(
-                    message["pose_time_us"], 0, MAX_MOTION_TIME_US)
-            if "fire_seq" in message:
-                _exact_int(message["fire_seq"], 0, PROJECTILE_MAX_ID)
-            if "input_seq" in message:
-                _exact_int(
-                    message["input_seq"], 1, PROJECTILE_MAX_ID)
-            elif HUMAN_RAM_TIMELINE_CAPABILITY in player.capabilities:
-                return False
         except (TypeError, ValueError, OverflowError):
-            return False
+            return "envelope_round_id", "round_id"
+        for name, low, high in self.MODERN_INPUT_BOUNDED_FIELDS:
+            if name not in message:
+                continue
+            try:
+                _bounded_float(message[name], low, high)
+            except (TypeError, ValueError, OverflowError):
+                return "envelope_numeric", name
+        for name, low, high in (
+                ("pose_time_us", 0, MAX_MOTION_TIME_US),
+                ("fire_seq", 0, PROJECTILE_MAX_ID),
+                ("input_seq", 1, PROJECTILE_MAX_ID)):
+            if name not in message:
+                continue
+            try:
+                _exact_int(message[name], low, high)
+            except (TypeError, ValueError, OverflowError):
+                return "envelope_integer", name
+        if ("input_seq" not in message and
+                HUMAN_RAM_TIMELINE_CAPABILITY in player.capabilities):
+            return "envelope_integer", "input_seq"
         if ("siege_enabled" in message and
                 not isinstance(message["siege_enabled"], bool)):
-            return False
+            return "envelope_siege", "siege_enabled"
         if not validate_contacts:
             # Active frames retain the established per-row rejection path.
             # A bad optional contact must not reject the ordered control frame
             # and leave every subsequent input stuck behind a sequence gap.
-            return True
+            return "", ""
         raw_ram_contacts = message.get("ram_contacts", [])
         if (not isinstance(raw_ram_contacts, list) or
                 len(raw_ram_contacts) > 16):
-            return False
+            return "envelope_contacts", "ram_contacts"
         for raw_ram in raw_ram_contacts:
             if self._normalize_ram_contact_envelope(
                     player, raw_ram)[0] is None:
-                return False
+                return "envelope_contacts", "ram_contacts"
         if "ram_contact" in message and self._normalize_ram_contact_envelope(
                 player, message["ram_contact"])[0] is None:
-            return False
+            return "envelope_contacts", "ram_contact"
         raw_destructible_contacts = message.get(
             "destructible_contacts", [])
         if (not isinstance(raw_destructible_contacts, list) or
                 len(raw_destructible_contacts) >
                 MAX_PENDING_PLAYER_DESTRUCTIBLE_CONTACTS):
-            return False
-        return all(
-            self._validated_player_destructible_contact(raw) is not None
-            for raw in raw_destructible_contacts)
+            return "envelope_contacts", "destructible_contacts"
+        for raw in raw_destructible_contacts:
+            if self._validated_player_destructible_contact(raw) is None:
+                return "envelope_contacts", "destructible_contacts"
+        return "", ""
+
+    def _player_input_frame_failure(self, player, message, inactive_modern):
+        """Validate one whole frame before any frontier or state advances.
+
+        Returns ``((reason, field), parsed)``.  ``reason`` is empty for a
+        frame whose complete envelope is in contract, and ``parsed`` then
+        carries the canonical shell selection, gun checkpoint and world-up
+        the caller may commit.
+        """
+        parsed = {
+            "shell_selection": None,
+            "gun_checkpoint": None,
+            "up_cosine": None,
+        }
+        if self.client_build == CLIENT_BUILD_0922:
+            fields = set(message)
+            if "type" in message and message.get("type") != "input":
+                return ("field_whitelist", "type"), parsed
+            missing = MODERN_INPUT_REQUIRED_FIELDS - fields
+            if missing:
+                return ("field_required", sorted(missing)[0]), parsed
+            extra = fields - MODERN_INPUT_FIELDS
+            if extra:
+                return ("field_whitelist", sorted(extra)[0]), parsed
+        has_next_shell = "next_shell_index" in message
+        has_shell_pending = "shell_change_pending" in message
+        if has_next_shell != has_shell_pending:
+            return ("shell_pair_shape", (
+                "next_shell_index" if has_next_shell
+                else "shell_change_pending")), parsed
+        if has_next_shell and "shell_index" not in message:
+            return ("shell_pair_shape", "shell_index"), parsed
+        if "shell_index" in message:
+            try:
+                loaded_shell = _exact_int(message.get("shell_index"), 0, 9)
+            except (TypeError, ValueError, OverflowError):
+                return ("shell_selection", "shell_index"), parsed
+            try:
+                next_shell = (_exact_int(
+                    message.get("next_shell_index"), 0, 9)
+                    if has_next_shell else loaded_shell)
+            except (TypeError, ValueError, OverflowError):
+                return ("shell_selection", "next_shell_index"), parsed
+            pending_shell = (
+                message.get("shell_change_pending")
+                if has_shell_pending else False)
+            if not isinstance(pending_shell, bool):
+                return ("shell_selection", "shell_change_pending"), parsed
+            if not pending_shell and next_shell != loaded_shell:
+                return ("shell_selection", "next_shell_index"), parsed
+            parsed["shell_selection"] = (
+                loaded_shell, next_shell, pending_shell)
+        checkpoint_required = bool(
+            message.get("type") == "input" and
+            PLAYER_FIRE_INTENT_CAPABILITY in player.capabilities)
+        if checkpoint_required and "gun_checkpoint" not in message:
+            return ("gun_checkpoint_missing", "gun_checkpoint"), parsed
+        if "gun_checkpoint" in message:
+            if (parsed["shell_selection"] is None or
+                    HUMAN_RAM_TIMELINE_CAPABILITY not in
+                    player.capabilities):
+                return ("gun_checkpoint_context", "gun_checkpoint"), parsed
+            try:
+                parsed["gun_checkpoint"] = _canonical_human_gun_checkpoint(
+                    message.get("gun_checkpoint"))
+            except (TypeError, ValueError, OverflowError):
+                return ("gun_checkpoint_shape", "gun_checkpoint"), parsed
+        if (self.client_build == CLIENT_BUILD_0922 and
+                "up_cosine" in message):
+            raw_up_cosine = message.get("up_cosine")
+            if (isinstance(raw_up_cosine, bool) or
+                    not isinstance(raw_up_cosine, (int, float)) or
+                    not math.isfinite(float(raw_up_cosine)) or
+                    not -1.0 <= float(raw_up_cosine) <= 1.0):
+                return ("world_up", "up_cosine"), parsed
+            parsed["up_cosine"] = float(raw_up_cosine)
+        if self.client_build == CLIENT_BUILD_0922:
+            reason, field = self._modern_input_envelope_failure(
+                player, message, validate_contacts=inactive_modern)
+            if reason:
+                return (reason, field), parsed
+        return ("", ""), parsed
 
     @staticmethod
     def _player_pose_for_destructible_contact(player, contact):
@@ -9074,104 +9380,134 @@ class BattleState:
             if (abs(float(sample["x"]) - float(contact["x"])) > 0.02 or
                     abs(float(sample["y"]) - float(contact["y"])) > 0.05 or
                     abs(float(sample["z"]) - float(contact["z"])) > 0.02 or
-                    abs(yaw_delta) > 0.002 or
-                    abs(float(sample["speed"]) -
-                        float(contact["speed"])) > 5.0 or
-                    float(sample["forward"]) *
-                    float(contact["speed"]) <= 0.0):
+                    abs(yaw_delta) > 0.002):
                 continue
             return sample
         return None
 
     def update_input(self, player_id, message):
+        """Reach one idempotent terminal decision for one ordered frame.
+
+        The ordered ledger separates three concepts.  ``input_processed_seq``
+        is the contiguous frontier of frames that reached a terminal decision,
+        applied or not.  ``input_seq`` is the last frame whose gameplay state
+        was actually committed.  ``input_decisions`` remembers the bounded
+        fingerprint and typed outcome per sequence so an exact retry folds and
+        a changed payload at the same sequence conflicts.
+
+        A recoverable validation failure therefore ends that one operation
+        without applying any field and without installing a gun checkpoint,
+        while the next well-formed frame can still advance automatically.
+        """
         with self.lock:
-            if not self._message_round_matches(message):
-                return False
             player = self.players.get(player_id)
-            if player is None or not player.connected:
+            if player is None:
                 return False
-            inactive_modern = False
-            if self.client_build == CLIENT_BUILD_0922:
-                fields = set(message)
-                if (("type" in message and
-                     message.get("type") != "input") or
-                        not MODERN_INPUT_REQUIRED_FIELDS.issubset(fields) or
-                        fields - MODERN_INPUT_FIELDS):
-                    # Reject the whole transaction before sequence, gun,
-                    # controls or pose state can advance.
-                    return False
-                inactive_modern = bool(
+            inactive_modern = bool(
+                self.client_build == CLIENT_BUILD_0922 and (
                     self.phase != "battle" or
                     self.battle_result is not None or
-                    not player.participating or not player.alive)
-            shell_selection = None
-            gun_checkpoint = None
-            has_next_shell = "next_shell_index" in message
-            has_shell_pending = "shell_change_pending" in message
-            if has_next_shell != has_shell_pending:
-                return False
-            if has_next_shell and "shell_index" not in message:
-                return False
-            if "shell_index" in message:
+                    not player.participating or not player.alive))
+            submitted_sequence = None
+            if isinstance(message, dict) and "input_seq" in message:
                 try:
-                    loaded_shell = _exact_int(
-                        message.get("shell_index"), 0, 9)
-                    next_shell = (_exact_int(
-                        message.get("next_shell_index"), 0, 9)
-                        if has_next_shell else loaded_shell)
+                    submitted_sequence = _exact_int(
+                        message.get("input_seq"), 1, PROJECTILE_MAX_ID)
                 except (TypeError, ValueError, OverflowError):
-                    return False
-                pending_shell = (
-                    message.get("shell_change_pending")
-                    if has_shell_pending else False)
-                if (not isinstance(pending_shell, bool) or
-                        (not pending_shell and next_shell != loaded_shell)):
-                    return False
-                shell_selection = (
-                    loaded_shell, next_shell, pending_shell)
-            checkpoint_required = bool(
-                message.get("type") == "input" and
-                PLAYER_FIRE_INTENT_CAPABILITY in player.capabilities)
-            if checkpoint_required and "gun_checkpoint" not in message:
-                return False
-            if "gun_checkpoint" in message:
-                if (
-                        shell_selection is None or
-                        HUMAN_RAM_TIMELINE_CAPABILITY not in
-                        player.capabilities):
-                    return False
+                    pass
+            if not self._message_round_matches(message):
+                return self._note_player_input_rejection(
+                    player, submitted_sequence, "round_mismatch",
+                    "round_id", active=not inactive_modern)
+            if not player.connected:
+                return self._note_player_input_rejection(
+                    player, submitted_sequence, "player_disconnected",
+                    active=False)
+            ledger = bool(
+                HUMAN_RAM_TIMELINE_CAPABILITY in player.capabilities)
+            sequence = None
+            payload = ""
+            digest = ""
+            if ledger:
                 try:
-                    gun_checkpoint = _canonical_human_gun_checkpoint(
-                        message.get("gun_checkpoint"))
+                    sequence, payload, digest = (
+                        self._player_input_identity(message))
                 except (TypeError, ValueError, OverflowError):
-                    return False
-            reported_up_cosine = None
-            if (self.client_build == CLIENT_BUILD_0922 and
-                    "up_cosine" in message):
-                raw_up_cosine = message.get("up_cosine")
-                if (isinstance(raw_up_cosine, bool) or
-                        not isinstance(raw_up_cosine, (int, float)) or
-                        not math.isfinite(float(raw_up_cosine)) or
-                        not -1.0 <= float(raw_up_cosine) <= 1.0):
-                    return False
-                reported_up_cosine = float(raw_up_cosine)
-            if self.client_build == CLIENT_BUILD_0922:
-                if not self._modern_input_envelope_valid(
-                        player, message, validate_contacts=inactive_modern):
-                    return False
-                if inactive_modern:
-                    # A complete input frame may already be queued when death,
-                    # leave, or the round result overtakes it. Validate its
-                    # entire non-mutating envelope first, then fold it without
-                    # advancing sequence, pose, gun, or control state.
+                    # Without a usable exact sequence this message cannot be
+                    # allowed to consume another operation's ordered slot.
+                    return self._note_player_input_rejection(
+                        player, None, "sequence_identity", "input_seq")
+                decision = player.input_decisions.get(sequence)
+                if decision is not None:
+                    if decision["fingerprint"] != digest:
+                        # A changed payload may never replace a decision that
+                        # already became terminal at this sequence.
+                        return self._note_player_input_rejection(
+                            player, sequence, "identity_conflict",
+                            "input_seq")
+                    if decision["outcome"] == INPUT_OUTCOME_REJECTED:
+                        return self._note_player_input_rejection(
+                            player, sequence, decision["reason"],
+                            decision.get("field", "input_seq"),
+                            consumed=True,
+                            active=decision.get("active", True))
                     return True
-            if HUMAN_RAM_TIMELINE_CAPABILITY in player.capabilities:
-                accepted, duplicate = self._admit_player_input(
-                    player, message)
-                if not accepted:
-                    return False
-                if duplicate:
-                    return True
+                if sequence <= player.input_processed_seq:
+                    # Evicted from the bounded ledger: safely rejected, and it
+                    # can never resurrect state.
+                    return self._note_player_input_rejection(
+                        player, sequence, "sequence_retired", "input_seq")
+                if sequence != player.input_processed_seq + 1:
+                    return self._note_player_input_rejection(
+                        player, sequence, "sequence_gap", "input_seq")
+                fault_class = _player_input_fault_class()
+                if (fault_class and
+                        player.input_fault_round != self.round_id):
+                    # Deterministic acceptance hook: break exactly one frame
+                    # per round and let the production validator reject it.
+                    player.input_fault_round = int(self.round_id)
+                    _server_log(
+                        "PLAYER INPUT fault injected sender=%d round=%d "
+                        "class=%s seq=%d" % (
+                            player.player_id, self.round_id, fault_class,
+                            sequence))
+                    message = _injected_player_input_fault(
+                        message, fault_class)
+            (reason, field), parsed = self._player_input_frame_failure(
+                player, message, inactive_modern)
+            if reason:
+                if not ledger:
+                    # No ordered ledger to consume, but the socket reader
+                    # still needs the typed first cause instead of a generic
+                    # line.
+                    return self._note_player_input_rejection(
+                        player, None, reason, field,
+                        active=not inactive_modern)
+                return self._reject_player_input_frame(
+                    player, sequence, digest, reason, field,
+                    active=not inactive_modern)
+            shell_selection = parsed["shell_selection"]
+            gun_checkpoint = parsed["gun_checkpoint"]
+            reported_up_cosine = parsed["up_cosine"]
+            if self.client_build == CLIENT_BUILD_0922 and inactive_modern:
+                # A complete input frame may already be queued when death,
+                # leave, or the round result overtakes it. Its whole
+                # non-mutating envelope is validated above; fold it as a
+                # terminal no-op that advances only the processed frontier so
+                # the frames queued behind it never wait on a sequence gap.
+                if ledger:
+                    self._record_player_input_decision(
+                        player, sequence, digest,
+                        INPUT_OUTCOME_INACTIVE, "inactive", active=False)
+                return True
+            if ledger:
+                # Every client-controlled validation path has returned above.
+                # Reserve the transport identity before projecting the
+                # prevalidated fields so an unexpected internal handler fault
+                # cannot recreate the original permanent sequence gap.  This
+                # is fault containment, not a general rollback transaction.
+                self._admit_applied_player_input(
+                    player, sequence, payload, digest)
                 if gun_checkpoint is not None:
                     checkpoint_seq = int(player.input_seq)
                     player.gun_checkpoint_seq = checkpoint_seq
@@ -9345,7 +9681,12 @@ class BattleState:
                             continue
                         if seq != player.destructible_contact_seq + 1:
                             break
-                        if player.destructible_contacts:
+                        if (seq >
+                                player.destructible_contact_resolved_seq +
+                                MAX_PLAYER_DESTRUCTIBLE_INFLIGHT):
+                            break
+                        if (len(player.destructible_contacts) >=
+                                MAX_PENDING_PLAYER_DESTRUCTIBLE_CONTACTS):
                             break
                         contact = (
                             None if seq in conflicting else
@@ -11862,6 +12203,10 @@ class BattleState:
             "input_seq": int(player.input_seq),
             "landing_observation_seq": int(
                 player.landing_observation_seq),
+            # The terminal frontier lets a reconnecting or resynchronizing
+            # client resume at the next eligible sequence instead of retrying
+            # an identifier whose decision is already terminal.
+            "input_processed_seq": int(player.input_processed_seq),
             "siege_state": int(player.siege_state),
             "siege_time_left_ms": int(math.ceil(
                 max(0, int(player.siege_transition_ticks)) *
@@ -11919,6 +12264,9 @@ class BattleState:
             result["destructible_contacts"] = [
                 dict(value)
                 for value in player.destructible_contacts.values()]
+        if player.destructible_contact_resolutions:
+            result["destructible_contact_resolved_seqs"] = sorted(
+                player.destructible_contact_resolutions)
         if player.destructible_contact_rejections:
             result["destructible_contact_rejected_seqs"] = list(
                 player.destructible_contact_rejections)
@@ -12673,10 +13021,13 @@ class ClientHandler(socketserver.BaseRequestHandler):
                         if message_type == "input":
                             if server.state.update_input(
                                     player.player_id, message) is False:
+                                # Rate-limit per player *and* typed reason so
+                                # the first causal field survives any later
+                                # cascade of ordering rejections.
                                 _server_log_limited(
-                                    "player-input:%d" % player.player_id,
-                                    "PLAYER INPUT rejected sender=%d" %
-                                    player.player_id)
+                                    *server.state.
+                                    player_input_rejection_log(
+                                        player.player_id))
                         elif message_type == "track_repair":
                             if not server.state.report_track_repair(
                                     player.player_id, message):

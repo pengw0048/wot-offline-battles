@@ -10,6 +10,7 @@ CLIENT_SCRIPTS = ROOT / '0.9.22' / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922 import combat_rules
+from gui.mods.offline_lan_0922 import tank_collision
 
 
 def _shot(kind='ARMOR_PIERCING', caliber=90.0,
@@ -789,6 +790,50 @@ class CombatRulesTests(unittest.TestCase):
         self.assertEqual(200, center)
         self.assertEqual(65, middle)
         self.assertEqual(60, edge)
+
+    def test_spall_liner_scales_the_he_armour_absorption_term(self):
+        shot = _shot(
+            kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
+        uniform = lambda low, high: (low + high) * 0.5
+
+        bare = combat_rules.he_splash_damage(
+            shot, 50.0, 0.0, random_uniform=uniform)
+        lined = combat_rules.he_splash_damage(
+            shot, 50.0, 0.0, random_uniform=uniform, spall_coefficient=1.5)
+        direct_bare = combat_rules.damage(
+            shot, 1, 50.0, random_uniform=uniform)
+        direct_lined = combat_rules.damage(
+            shot, 1, 50.0, random_uniform=uniform, spall_coefficient=1.5)
+
+        # 400 * 0.5 - 1.3 * 50 * spall
+        self.assertEqual(135, bare)
+        self.assertEqual(102, lined)
+        self.assertEqual(135, direct_bare)
+        self.assertEqual(102, direct_lined)
+
+    def test_he_absorption_ignores_an_absent_or_invalid_spall_factor(self):
+        shot = _shot(
+            kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
+        uniform = lambda low, high: (low + high) * 0.5
+        baseline = combat_rules.he_splash_damage(
+            shot, 50.0, 0.0, random_uniform=uniform)
+
+        for value in (None, 'x', float('nan'), float('inf'), 0.0, -2.0, 0.5):
+            self.assertEqual(baseline, combat_rules.he_splash_damage(
+                shot, 50.0, 0.0, random_uniform=uniform,
+                spall_coefficient=value), value)
+
+    def test_spall_coefficient_reads_the_1513_descriptor_default(self):
+        self.assertEqual(1.0, tank_collision.descriptor_spall_coefficient(
+            types.SimpleNamespace(miscAttrs={})))
+        self.assertEqual(1.0, tank_collision.descriptor_spall_coefficient(None))
+        self.assertEqual(1.5, tank_collision.descriptor_spall_coefficient(
+            types.SimpleNamespace(
+                miscAttrs={'antifragmentationLiningFactor': 1.5})))
+        # A liner never reduces absorption below the no-liner value.
+        self.assertEqual(1.0, tank_collision.descriptor_spall_coefficient(
+            types.SimpleNamespace(
+                miscAttrs={'antifragmentationLiningFactor': 0.4})))
 
     def test_native_1513_shell_type_overrides_all_he_factors(self):
         shell_type = types.SimpleNamespace(

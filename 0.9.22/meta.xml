@@ -1,6 +1,6 @@
 <root>
     <id>org.peng.offline_lan_0922</id>
-  <version>0.6.3</version>
+  <version>0.6.5</version>
     <name>Offline LAN battles for World of Tanks 0.9.22</name>
     <description>Version-pinned standard battles with a LAN coordinator and tactical bots.</description>
 </root>

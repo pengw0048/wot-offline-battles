@@ -97,8 +97,14 @@ def _chunk(chunkID):
 	_ensure_shape()
 	c = _state['chunks'].get(chunkID)
 	if c is None:
-		c = {'fallenTrees': [], 'fallenColumns': [], 'destroyedFragiles': [], 'destroyedModules': [], 'keys': set()}
+		c = {
+			'fallenTrees': [], 'fallenColumns': [],
+			'destroyedFragiles': [], 'destroyedModules': [],
+			'keys': set(), 'treePresentations': {},
+		}
 		_state['chunks'][chunkID] = c
+	elif not isinstance(c.get('treePresentations'), dict):
+		c['treePresentations'] = {}
 	return c
 
 
@@ -113,6 +119,23 @@ def destroyed_keys(chunkID):
 	"""Return this chunk's accepted (itemIndex, matKind) keys. Read only."""
 	c = _state.get('chunks', {}).get(chunkID)
 	return c['keys'] if c is not None else ()
+
+
+def accept_tree_without_presentation(spaceID, chunkID, itemIndex):
+	"""Record one canonical tree after its single native attempt was a no-op.
+
+	The shared event is already authoritative.  Keeping this logical receipt
+	out of ``fallenTrees`` prevents a later controller creation from replaying
+	the native animation after the vehicle has left the contact.
+	"""
+	spaceID = int(spaceID); chunkID = int(chunkID); itemIndex = int(itemIndex)
+	_reset_if_new_space(spaceID)
+	c = _chunk(chunkID)
+	key = (itemIndex, None)
+	if key in c['keys']:
+		return False
+	c['keys'].add(key)
+	return True
 
 
 def _ensure_chunk(spaceID, chunkID, pos):
@@ -256,9 +279,9 @@ def _apply(spaceID, chunkID, pos, kind, destrData, dedupKey,
 	AreaDestructibles.g_destructiblesManager.orderDestructibleDestroy(
 		chunkID, dmgTypes[kind], destrData, True,
 		bool(syncWithProjectile))
-	# The native operation is irreversible.  Commit the replay/dedup ledger only
-	# after it has accepted the destroy; otherwise a transient ABI/engine failure
-	# would make every later canonical replay look like a successful duplicate.
+	# Reaching this point is the native acceptance boundary.  The method either
+	# applied the order or retained it for a streamed chunk; it reports failure by
+	# raising.  Do not invent a second asynchronous receipt requirement here.
 	c[prop].append(destrData)
 	c['keys'].add(dedupKey)
 	if ctrl is not None:
@@ -274,20 +297,135 @@ def _apply(spaceID, chunkID, pos, kind, destrData, dedupKey,
 	return True
 
 
-def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+def _tree_matrix_signature(spaceID, chunkID, itemIndex):
+	"""Return a value signature for one native destructible transform."""
+	matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+		spaceID, chunkID, itemIndex))
+	translation = matrix.translation
+	values = [translation.x, translation.y, translation.z]
+	for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+			(0.0, 0.0, 1.0)):
+		vector = matrix.applyVector(Math.Vector3(*axis))
+		values.extend((vector.x, vector.y, vector.z))
+	return tuple(float(value) for value in values)
+
+
+def _tree_matrix_changed(before, after):
+	return (len(before) == len(after) and
+		any(abs(left - right) > 1.0e-5
+			for left, right in zip(before, after)))
+
+
+def _tree_wait_ordered(manager, chunkID, destrData):
+	waiting = getattr(
+		manager, '_DestructiblesManager__destructiblesWaitDestroy', None)
+	if not isinstance(waiting, dict):
+		return False
+	for order in waiting.get(chunkID, ()):
+		if (isinstance(order, (tuple, list)) and len(order) == 3 and
+				order[0] == _tree_damage_type() and order[1] == destrData):
+			return True
+	return False
+
+
+def _tree_damage_type():
+	import AreaDestructibles
+	return AreaDestructibles._DAMAGE_TYPE_TREE
+
+
+def _tree_body_present(spaceID, chunkID, itemIndex, start_if_stalled=False):
+	import AreaDestructibles
+	animator = AreaDestructibles.g_destructiblesAnimator
+	bodies = getattr(animator, '_DestructiblesAnimator__bodies')
+	for body in bodies:
+		if (body.get('spaceID') != spaceID or
+				body.get('chunkID') != chunkID or
+				body.get('destrIndex') != itemIndex):
+			continue
+		if start_if_stalled:
+			# This belongs to the original native application, never to a later
+			# network echo or frame retry.  Repair the stable lost-callback state
+			# immediately while the contact is being handled.
+			is_updating = getattr(
+				animator, '_DestructiblesAnimator__isUpdating')
+			callback_id = getattr(
+				animator, '_DestructiblesAnimator__updateCallbackID')
+			if bodies and is_updating and callback_id is None:
+				setattr(animator, '_DestructiblesAnimator__isUpdating', False)
+				getattr(animator, '_DestructiblesAnimator__startUpdate')()
+		return True
+	return False
+
+
+def _tree_presentation_state(
+		spaceID, chunkID, itemIndex, entry, start_if_stalled=False):
+	"""Observe the synchronous native receipt for one accepted tree order."""
+	import AreaDestructibles
+	manager = AreaDestructibles.g_destructiblesManager
+	if _tree_body_present(
+			spaceID, chunkID, itemIndex, start_if_stalled):
+		entry['status'] = 'presented'
+		return 'presented'
+	loaded = manager.isChunkLoaded(chunkID)
+	if loaded and entry['initialMatrixSignature'] is not None:
+		try:
+			current_signature = _tree_matrix_signature(
+				spaceID, chunkID, itemIndex)
+		except Exception:
+			current_signature = None
+		if (current_signature is not None and _tree_matrix_changed(
+				entry['initialMatrixSignature'], current_signature)):
+			entry['status'] = 'presented'
+			return 'presented'
+	if _tree_wait_ordered(manager, chunkID, entry['data']):
+		entry['status'] = 'queued'
+		return 'queued'
+	# Once a synchronous body/matrix receipt or exact unloaded wait order has
+	# admitted the tree, losing that transient observation later does not undo
+	# the accepted native operation.  Most importantly, observation never sends
+	# another destroy order after the vehicle has left the contact.
+	if entry.get('status') in ('presented', 'queued'):
+		return entry['status']
+	entry['status'] = 'pending'
+	return 'pending'
+
+
+def ensure_tree_presentation(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+	"""Return ``presented``, ``queued`` or ``pending`` for an accepted tree.
+
+	The fall arguments are retained in this public signature so callers can use
+	the same identity tuple as ``destroy_tree``.  This is observation only: a
+	canonical echo must never become a delayed local destroy-order retry.
+	"""
+	spaceID = int(spaceID); chunkID = int(chunkID); itemIndex = int(itemIndex)
+	_reset_if_new_space(spaceID)
+	c = _chunk(chunkID)
+	entry = c['treePresentations'].get(itemIndex)
+	if entry is None or (itemIndex, None) not in c['keys']:
+		return 'pending'
+	return _tree_presentation_state(
+		spaceID, chunkID, itemIndex, entry)
+
+
+def _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos,
+		validate_identity):
 	import AreaDestructibles
 	from gui.mods.offline_lan_0922 import destructibles_compat
 	# Native getDestructibleDesc (called by the game's __launchFallEffect)
 	# demands a plain int destrID; a float/long index reaching it raised
 	# 'argument 1 must be set to an int'. Coerce here.
 	chunkID = int(chunkID); itemIndex = int(itemIndex)
-	# The pinned scalar ``wg_getDestructibleFilename`` wrapper dereferences a
-	# nullable native string before Python can handle it.  For a currently loaded
-	# chunk, prove this is a named SpeedTree and cache its descriptor before the
-	# stock animation path.  Unloaded chunks retain the stock queued-order
-	# behavior; the installed safe resolver performs the same check on load.
+	# The pinned scalar ``wg_getDestructibleFilename`` (``0x006b2580``) is safe
+	# only for an item whose native type owns a name handler: otherwise it
+	# reaches ``PyString_FromString(NULL)`` at ``0x006b270c`` and faults, which
+	# Python cannot contain.  For a currently loaded chunk, resolve this item's
+	# own exact name through the reconstructed chunk-list compaction and cache
+	# its descriptor before the stock animation path.  Unloaded chunks retain the
+	# stock queued-order behavior; the installed safe resolver performs the same
+	# check on load.
 	mgr = AreaDestructibles.g_destructiblesManager
-	if mgr.isChunkLoaded(chunkID):
+	if validate_identity and mgr.isChunkLoaded(chunkID):
 		desc = destructibles_compat.resolve_destructible_desc(
 			AreaDestructibles.g_cache, spaceID, chunkID, itemIndex)
 		if (desc is None or
@@ -308,7 +446,48 @@ def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
 		pitch = pitchConstr
 	speed = max(1, min(3, int(abs(speed))))
 	data = AreaDestructibles.encodeFallenTree(itemIndex, fallYaw, pitch, speed)
-	return _apply(spaceID, chunkID, pos, 'tree', data, (itemIndex, None))
+	initial_signature = None
+	if mgr.isChunkLoaded(chunkID):
+		try:
+			initial_signature = _tree_matrix_signature(
+				spaceID, chunkID, itemIndex)
+		except Exception:
+			# Matrix observation is a receipt, not a prerequisite for the stock
+			# destroy call.  The animator body remains the primary evidence.
+			initial_signature = None
+	entry = {
+		'data': data,
+		'pos': (float(pos[0]), float(pos[1]), float(pos[2])),
+		'initialMatrixSignature': initial_signature,
+		'status': 'pending',
+	}
+	accepted = _apply(
+		spaceID, chunkID, pos, 'tree', data, (itemIndex, None))
+	if accepted:
+		# Observe/kick only as part of this original contact.  No frame or
+		# canonical-echo path is allowed to start this animation later.
+		try:
+			_tree_presentation_state(
+				spaceID, chunkID, itemIndex, entry, start_if_stalled=True)
+		except Exception as error:
+			# Native acceptance is already irreversible.  Optional presentation
+			# observation must never swallow the trusted contact publication.
+			_log('DestrAuth: tree presentation observation failed',
+				chunkID, itemIndex, error)
+		_chunk(chunkID)['treePresentations'][itemIndex] = entry
+	return accepted
+
+
+def destroy_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+	"""Safely destroy a tree whose exact native identity is not yet proved."""
+	return _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos, True)
+
+
+def destroy_validated_tree(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
+	"""Destroy an exact tree wire already proved by a trusted proposal/event."""
+	return _destroy_tree(
+		spaceID, chunkID, itemIndex, fallYaw, speed, pos, False)
 
 
 def destroy_column(spaceID, chunkID, itemIndex, fallYaw, speed, pos):
