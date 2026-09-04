@@ -11292,13 +11292,20 @@ class BattleRuntime(object):
                     int(first.get('siege_state', 0)) !=
                     int(second.get('siege_state', 0))):
                 siege_boundaries.add(interval_end)
-        angular_steps = max(1, int(math.ceil(
-            total_travel / PROJECTILE_POSE_MAX_ANGLE_STEP - 1.0e-12)))
-        if angular_steps > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+        # A composed rotation faster than the nominal one-degree sample is a
+        # precision limit, not a missing pose: the native query budget stays
+        # fixed at PROJECTILE_POSE_MAX_SWEEP_STEPS segments and the sampled
+        # angle widens. Discarding the whole projectile here retired an
+        # admitted shot with no damage and no feedback whenever a target
+        # crossed a coarse authority pose step, which is a swallowed shell.
+        divisions = max(
+            1, PROJECTILE_POSE_MAX_SWEEP_STEPS - len(siege_boundaries))
+        angle_step = PROJECTILE_POSE_MAX_ANGLE_STEP
+        if total_travel > angle_step * divisions:
+            angle_step = total_travel / divisions
         absolute_boundaries = set(siege_boundaries)
         if total_travel > 1.0e-12:
-            threshold = PROJECTILE_POSE_MAX_ANGLE_STEP
+            threshold = angle_step
             travelled = 0.0
             for interval_start, interval_end, travel in intervals:
                 if travel <= 1.0e-12:
@@ -11310,7 +11317,7 @@ class BattleRuntime(object):
                     absolute_boundaries.add(
                         interval_start +
                         (interval_end - interval_start) * ratio)
-                    threshold += PROJECTILE_POSE_MAX_ANGLE_STEP
+                    threshold += angle_step
                 travelled += travel
         fractions = [0.0]
         for absolute in sorted(absolute_boundaries):
@@ -11319,7 +11326,12 @@ class BattleRuntime(object):
                 fractions.append(fraction)
         fractions.append(1.0)
         if len(fractions) - 1 > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+            # Rounding can still leave one extra boundary. Keep the exact
+            # query budget rather than turning it into a lost projectile.
+            interior = sorted(set(fractions[1:-1]))
+            fractions = ([0.0] +
+                         interior[:PROJECTILE_POSE_MAX_SWEEP_STEPS - 1] +
+                         [1.0])
         return tuple(fractions)
 
     def _projectile_frozen_target(self, target, pose):
@@ -11556,10 +11568,12 @@ class BattleRuntime(object):
             sweep_fractions = self._projectile_pose_sweep_fractions(
                 key, absolute_start, absolute_end)
             if sweep_fractions is None:
+                # The angular budget no longer discards a shot; only a pose
+                # this history cannot supply reaches here.
                 record['projectile_collision_pose_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 meta['terminal_failure_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 return {'reason': 'callback_error', 'fraction': 0.0}
             candidate_segments = []
             for segment_index in range(len(sweep_fractions) - 1):

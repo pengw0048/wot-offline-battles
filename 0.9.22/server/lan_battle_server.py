@@ -7139,10 +7139,20 @@ class BattleState:
             try:
                 base_checked_ms = _exact_int(
                     message.get("base_checked_ms"), 0)
-                if base_checked_ms != record["checked_through_ms"]:
+                # The hidden worker is the sole trusted simulation authority
+                # and its own progress cursors converge on the server by
+                # monotonic frontier (see progress_projectiles), so a
+                # terminal built on a slightly older echo of that cursor is
+                # a delayed message, not a conflict. Only a base ahead of
+                # the canonical cursor describes progress the server never
+                # accepted. Rejecting the older base stranded the shot
+                # forever, because nothing else retires a worker-owned
+                # projectile.
+                if base_checked_ms > record["checked_through_ms"]:
                     raise ValueError("cursor compare-and-swap failed")
                 resolved_time_ms = _exact_int(
-                    message.get("resolved_time_ms"), base_checked_ms,
+                    message.get("resolved_time_ms"),
+                    record["checked_through_ms"],
                     record["max_time_ms"])
                 checked_distance = round(_bounded_float(
                     message.get("checked_distance"),
@@ -7193,6 +7203,10 @@ class BattleState:
                 destructibles = self._normalize_projectile_destructibles(
                     message.get("destructibles"))
             except (TypeError, ValueError, OverflowError) as error:
+                # The record is live and this terminal is deterministically
+                # invalid, so no retry of the frozen wire can ever pass.
+                self._retire_rejected_projectile(
+                    projectile_id, record, request_fingerprint)
                 return self._set_protocol_exception(reject_kind, error)
 
             record["checked_through_ms"] = resolved_time_ms
@@ -7479,13 +7493,23 @@ class BattleState:
             try:
                 base_checked_ms = _exact_int(
                     message.get("base_checked_ms"), 0)
-                if base_checked_ms != record["checked_through_ms"]:
+                # The hidden worker is the sole trusted simulation authority
+                # and its own progress cursors converge on the server by
+                # monotonic frontier (see progress_projectiles), so a
+                # terminal built on a slightly older echo of that cursor is
+                # a delayed message, not a conflict. Only a base ahead of
+                # the canonical cursor describes progress the server never
+                # accepted. Rejecting the older base stranded the shot
+                # forever, because nothing else retires a worker-owned
+                # projectile.
+                if base_checked_ms > record["checked_through_ms"]:
                     raise ValueError("cursor compare-and-swap failed")
                 outcome = message.get("outcome")
                 if outcome not in ("impact", "miss", "expired"):
                     raise ValueError("invalid outcome")
                 resolved_time_ms = _exact_int(
-                    message.get("resolved_time_ms"), base_checked_ms,
+                    message.get("resolved_time_ms"),
+                    record["checked_through_ms"],
                     record["max_time_ms"])
                 resolution_server_time_ms = self._server_time_ms()
                 checked_distance = round(_bounded_float(
@@ -7590,6 +7614,10 @@ class BattleState:
                 destructibles = self._normalize_projectile_destructibles(
                     message.get("destructibles"))
             except (TypeError, ValueError, OverflowError) as error:
+                # The record is live and this terminal is deterministically
+                # invalid, so no retry of the frozen wire can ever pass.
+                self._retire_rejected_projectile(
+                    projectile_id, record, request_fingerprint)
                 return self._set_protocol_exception(reject_kind, error)
 
             impact_event = {
@@ -7671,6 +7699,40 @@ class BattleState:
         if expired:
             self.projectile_revision += 1
         return len(expired)
+
+    def _retire_rejected_projectile(self, projectile_id, record,
+                                    request_fingerprint):
+        """Retire one live shot whose terminal the server cannot verify."""
+        # An admitted shot must reach an observable terminal. A payload the
+        # server cannot verify is contained to that projectile: it retires
+        # here with no damage, exactly as a lifetime expiry would, instead
+        # of leaving a live ledger row that no later message can ever
+        # resolve and that eventually exhausts the shooter's projectile
+        # capacity. The caller already holds the state lock.
+        self.pending_events.append({
+            "kind": "projectile_impact",
+            "projectile_id": projectile_id,
+            "outcome": "expired",
+            "resolved_time_ms": record["checked_through_ms"],
+            "checked_distance": record["checked_distance"],
+            "piercing_loss": record["piercing_loss"],
+            "penetration_factor": record["penetration_factor"],
+            "hit_vehicle": False,
+            "shooter_kind": record["shooter_kind"],
+            "shooter_id": record["shooter_id"],
+            "shot_seq": record["shot_seq"],
+        })
+        self.projectiles.pop(projectile_id, None)
+        self.projectile_tombstones[projectile_id] = {
+            "projectile_id": projectile_id,
+            "outcome": "expired",
+            "launch_fingerprint": record["launch_fingerprint"],
+            "request_fingerprint": request_fingerprint,
+            "last_progress_request_fingerprint": record.get(
+                "last_progress_request_fingerprint"),
+        }
+        self.projectile_revision += 1
+        return True
 
     def _prune_orphaned_bot_launch_edges(self):
         if not self.bot_pending_projectile_launches:
