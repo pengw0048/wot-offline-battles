@@ -264,7 +264,12 @@ class NativePhysicsProbeTests(unittest.TestCase):
         for bot in self.bots:
             physics = bot['entity'].filter.getVehiclePhysics()
             self.assertEqual(0, physics.movementSignals)
-            self.assertEqual((0, 0), bot['entity'].filter.inputs[-1])
+            if bot['bot_id'] in (11, 12):
+                # Driven bodies end with an explicit zero input.
+                self.assertEqual((0, 0), bot['entity'].filter.inputs[-1])
+            else:
+                # Undriven bodies are never touched.
+                self.assertEqual([], bot['entity'].filter.inputs)
 
     def test_stage_exception_is_recorded_and_probe_continues(self):
         def broken(*unused):
