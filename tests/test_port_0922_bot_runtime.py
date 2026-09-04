@@ -4357,7 +4357,7 @@ class BotRuntimeTests(unittest.TestCase):
     def test_traffic_wait_does_not_enter_reverse_recovery(self):
         from gui.mods.offline_lan_0922.ai.driver import LocalDriver
         driver = LocalDriver()
-        driver_state = driver._state(11, (0.0, 0.0, 0.0))
+        driver_state = driver._state(11, 0, (0.0, 0.0, 0.0))
         driver_state['stuck_time'] = 10.0
         driver_state['recovery_time'] = 0.5
 
@@ -10876,7 +10876,7 @@ class BotRuntimeTests(unittest.TestCase):
             x=16.0, y=0.0, z=16.0, yaw=math.pi * 0.5,
             speed=0.0, grounded_once=True)
         runtime.adapter.driver = self.module.ai_driver.LocalDriver()
-        runtime.adapter.driver._state(11, (16.0, 0.0, 16.0))[
+        runtime.adapter.driver._state(11, 0, (16.0, 0.0, 16.0))[
             'steering_yaw'] = command['target_yaw']
         return runtime
 
@@ -13400,48 +13400,19 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual('human', self.runtime.states[11]['target_kind'])
         self.assertEqual(2, self.runtime.states[11]['target_id'])
 
-    def test_spawn_route_join_paths_are_scoped_to_each_bot(self):
+    def test_driver_decision_receives_slot_and_signed_reverse_speed(self):
+        self.runtime.battle_start(self.start)
+        self.runtime.states[11]['speed'] = -2.0
+
+        self.runtime.update(.04, 1.0, players=[])
+
+        decision = self.adapters[0].calls[0][0]
+        self.assertEqual(0, decision['slot'])
+        self.assertEqual(-2.0, decision['speed'])
+
+    def test_spawn_route_join_offsets_macro_goal_before_private_astar(self):
         calls = []
 
-        class Navigator(object):
-            def next_target(self, bot_id, position, goal, path_key, now,
-                            anchor, avoid, lookahead_distance=None):
-                calls.append((bot_id, path_key, anchor))
-                return goal
-
-        runtime = self.module.BotRuntime(1)
-        runtime.navigator = Navigator()
-        runtime.states = {
-            11: {'team': 2},
-            12: {'team': 2},
-        }
-        strategic = {
-            'combat_mode': 'route', 'route_id': 'forest', 'route_index': 1,
-            'route_join': True,
-        }
-        runtime._navigation_target(
-            11, (-12.0, 0.0, 0.0), (0.0, 0.0, 80.0),
-            dict(strategic, route_anchor=(-12.0, 0.0, 0.0)),
-            {'now': 1.0, 'neighbours': ()})
-        runtime._navigation_target(
-            12, (12.0, 0.0, 0.0), (0.0, 0.0, 80.0),
-            dict(strategic, route_anchor=(12.0, 0.0, 0.0)),
-            {'now': 1.0, 'neighbours': ()})
-
-        self.assertEqual(('route_join', 11, 2, 'forest', 1), calls[0][1])
-        self.assertEqual(('route_join', 12, 2, 'forest', 1), calls[1][1])
-        self.assertNotEqual(calls[0][1], calls[1][1])
-        self.assertNotEqual(calls[0][2], calls[1][2])
-
-        runtime._navigation_target(
-            11, (0.0, 0.0, 40.0), (0.0, 0.0, 80.0),
-            dict(strategic, route_join=False,
-                 route_anchor=(0.0, 0.0, 20.0)),
-            {'now': 2.0, 'neighbours': ()})
-        self.assertEqual(('route', 2, 'forest', 1), calls[2][1])
-        self.assertIsNone(calls[2][2])
-
-    def test_shared_route_lanes_are_unique_stable_and_keep_their_side(self):
         class Grid(object):
             cell_size = 4.0
 
@@ -13461,64 +13432,725 @@ class BotRuntimeTests(unittest.TestCase):
             def dry_segment_clear(*unused):
                 return True
 
+        class Navigator(object):
+            grid = Grid()
+            bot_states = {}
+
+            def next_target(self, bot_id, position, goal, path_key, now,
+                            anchor, avoid, lookahead_distance=None):
+                calls.append((bot_id, goal, path_key, anchor))
+                # The navigation result is deliberately unrelated to the
+                # macro goal. A post-A* translation would change this tuple.
+                return (1.0, 0.0, 24.0)
+
         runtime = self.module.BotRuntime(1)
-        runtime.navigator = types.SimpleNamespace(
-            grid=Grid(), bot_states={})
-        runtime.baked_graph = {'bounds': (-100.0, -100.0, 100.0, 100.0)}
+        runtime.navigator = Navigator()
+        runtime.baked_graph = {
+            'bounds': (-100.0, -100.0, 100.0, 120.0)}
+        route = {
+            'id': 'forest',
+            'waypoints': ((0.0, 0.0, False),
+                          (0.0, 80.0, False)),
+        }
+        # Slots are intentionally unrelated to lateral position. Cohort
+        # projection, not slot order or first update order, owns the lanes.
+        positions = {
+            11: (-20.0, 0.0, 0.0), 12: (20.0, 0.0, 0.0),
+            13: (0.0, 0.0, 0.0), 14: (10.0, 0.0, 0.0),
+            15: (-10.0, 0.0, 0.0),
+        }
+        slots = {11: 9, 12: 1, 13: 14, 14: 0, 15: 7}
         runtime.states = dict((bot_id, {
-            'id': bot_id, 'team': 1, 'slot': slot,
-            'half_length': 3.5, 'half_width': 1.7,
-        }) for slot, bot_id in enumerate(range(11, 16)))
-        position = (0.0, 0.0, 0.0)
-        selected = (0.0, 0.0, 40.0)
-        goal = (0.0, 0.0, 80.0)
+            'id': bot_id, 'team': 2, 'slot': slots[bot_id],
+            'x': position[0], 'y': position[1], 'z': position[2],
+            'yaw': 0.0, 'half_length': 3.5, 'half_width': 1.7,
+            'route': route,
+        }) for bot_id, position in positions.items())
+        runtime._server_orders = dict((bot_id, {
+            'route_id': 'forest', 'route_index': 1, 'route_join': True,
+            'move_position': (0.0, 0.0, 80.0),
+            'route_anchor': position,
+        }) for bot_id, position in positions.items())
         strategic = {
             'combat_mode': 'route', 'route_id': 'forest', 'route_index': 1,
-            'route_anchor': (0.0, 0.0, 0.0),
+            'route_join': True,
+        }
+        results = {}
+        for bot_id in (14, 11, 15, 12, 13):
+            results[bot_id] = runtime._navigation_target(
+                bot_id, positions[bot_id], (0.0, 0.0, 80.0),
+                dict(strategic, route_anchor=positions[bot_id]),
+                {'now': 1.0, 'neighbours': ()})
+
+        self.assertEqual({(1.0, 0.0, 24.0)}, set(results.values()))
+        self.assertEqual(5, len(set(call[2] for call in calls)))
+        self.assertEqual([bot_id for bot_id in (14, 11, 15, 12, 13)],
+                         [call[0] for call in calls])
+        for bot_id, astar_goal, path_key, anchor in calls:
+            self.assertEqual('route_join', path_key[0])
+            self.assertEqual(bot_id, path_key[1])
+            self.assertEqual(2, path_key[2])
+            self.assertEqual('forest', path_key[3])
+            self.assertEqual(1, path_key[4])
+            self.assertEqual(positions[bot_id], anchor)
+            self.assertAlmostEqual(positions[bot_id][0] * 0.5,
+                                   astar_goal[0])
+            self.assertEqual(80.0, astar_goal[2])
+
+        runtime._navigation_target(
+            11, (0.0, 0.0, 40.0), (0.0, 0.0, 80.0),
+            dict(strategic, route_join=False,
+                 route_anchor=(0.0, 0.0, 20.0)),
+            {'now': 2.0, 'neighbours': ()})
+        self.assertEqual(('route', 2, 'forest', 1), calls[-1][2])
+        self.assertIsNone(calls[-1][3])
+
+    def test_route_lane_binding_uses_full_cohort_not_first_update_order(self):
+        route = {
+            'id': 'forest',
+            'waypoints': ((0.0, 0.0, False),
+                          (0.0, 80.0, False)),
+        }
+        positions = {
+            11: (-20.0, 0.0, 0.0), 12: (20.0, 0.0, 0.0),
+            13: (0.0, 0.0, 0.0), 14: (10.0, 0.0, 0.0),
+            15: (-10.0, 0.0, 0.0),
+        }
+        slots = {11: 9, 12: 1, 13: 14, 14: 0, 15: 7}
+        strategic = {
+            'route_id': 'forest', 'route_index': 1,
+            'route_anchor': positions[13], 'route_join': True,
         }
 
-        first = [runtime._route_lane_target(
-            bot_id, position, goal, selected, strategic, 1.0)
-                 for bot_id in range(11, 16)]
-        repeated = [runtime._route_lane_target(
-            bot_id, position, goal, selected, strategic, 1.1)
-                    for bot_id in range(11, 16)]
-        desired = [runtime.states[bot_id]['_route_lane_desired']
-                   for bot_id in range(11, 16)]
+        def bindings(insertion_order, first_bot):
+            runtime = self.module.BotRuntime(1)
+            runtime.states = {}
+            for bot_id in insertion_order:
+                position = positions[bot_id]
+                runtime.states[bot_id] = {
+                    'id': bot_id, 'team': 1, 'slot': slots[bot_id],
+                    'x': position[0], 'y': position[1], 'z': position[2],
+                    'yaw': 0.0, 'route': route,
+                }
+            runtime._server_orders = dict((bot_id, {
+                'route_id': 'forest', 'route_index': 1,
+                'route_join': True,
+            }) for bot_id in positions)
+            runtime._route_lane_binding(
+                first_bot, (1, 'forest'), (0.0, 0.0, 80.0), strategic)
+            return dict((bot_id, (
+                runtime.states[bot_id]['_route_lane_desired'],
+                runtime.states[bot_id]['_route_lane_row_desired']))
+                for bot_id in positions)
 
-        self.assertEqual(list(self.module.ROUTE_LANE_OFFSETS), desired)
-        self.assertEqual(5, len(set(point[0] for point in first)))
-        self.assertEqual(first, repeated)
-        self.assertEqual([0.0, -5.0, 5.0, -10.0, 10.0],
-                         [point[0] for point in first])
+        forward = bindings((11, 12, 13, 14, 15), 11)
+        reversed_first = bindings((15, 14, 13, 12, 11), 12)
+        self.assertEqual(forward, reversed_first)
+        self.assertEqual(5, len(set(value[0] for value in forward.values())))
+        ordered_by_spawn_x = sorted(positions, key=lambda bot_id:
+                                    positions[bot_id][0])
+        target_x = [-forward[bot_id][0] for bot_id in ordered_by_spawn_x]
+        self.assertEqual(sorted(target_x), target_x)
+        self.assertEqual({0.0}, set(value[1] for value in forward.values()))
 
-        advanced = dict(strategic, route_index=2)
-        second_segment = [runtime._route_lane_target(
-            bot_id, position, goal, selected, advanced, 2.0)
-                          for bot_id in range(11, 16)]
-        self.assertEqual(first, second_segment)
-        self.assertEqual(desired, [
-            runtime.states[bot_id]['_route_lane_desired']
-            for bot_id in range(11, 16)])
+    def test_route_lane_cohort_prefers_authoritative_server_route(self):
+        runtime = self.module.BotRuntime(1)
+        local_route = {'id': 'old-local-route', 'waypoints': (
+            (0.0, 0.0, False), (80.0, 0.0, False))}
+        runtime.states = {
+            11: {'id': 11, 'team': 1, 'slot': 0,
+                 'x': -10.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                 'route': local_route},
+            12: {'id': 12, 'team': 1, 'slot': 1,
+                 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                 'route': local_route},
+            13: {'id': 13, 'team': 1, 'slot': 2,
+                 'x': 10.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                 'route': local_route},
+        }
+        runtime._server_orders = {
+            11: {'route_id': 'server-west', 'route_index': 1,
+                 'route_join': True},
+            12: {'route_id': 'server-east', 'route_index': 1,
+                 'route_join': True},
+            13: {'route_id': 'server-west', 'route_index': 1,
+                 'route_join': True},
+        }
+        strategic = {
+            'route_id': 'server-west', 'route_index': 1,
+            'route_join': True, 'route_anchor': (0.0, 0.0, 0.0),
+        }
 
-        # Moving one member to another route preserves every remaining lease;
-        # a newly joining member receives the now-unoccupied centre lane.
-        runtime._route_lane_target(
-            11, position, goal, selected,
-            dict(strategic, route_id='hill'), 3.0)
-        retained = [runtime.states[bot_id]['_route_lane_desired']
-                    for bot_id in range(12, 16)]
+        runtime._route_lane_binding(
+            11, (1, 'server-west'), (0.0, 0.0, 80.0), strategic)
+
+        self.assertEqual((1, 'server-west'),
+                         runtime.states[11]['_route_lane_group'])
+        self.assertEqual((1, 'server-west'),
+                         runtime.states[13]['_route_lane_group'])
+        self.assertNotIn('_route_lane_group', runtime.states[12])
+        self.assertEqual(
+            {-5.0, 5.0},
+            {runtime.states[11]['_route_lane_desired'],
+             runtime.states[13]['_route_lane_desired']})
+        # The stale local route points east; the authoritative anchor and goal
+        # point north. Both orientation and lateral ordering must follow the
+        # server order, or the two spawn sides cross on their way to the gate.
+        self.assertEqual((0.0, 1.0),
+                         runtime.states[11]['_route_lane_forward'])
+        self.assertEqual(5.0,
+                         runtime.states[11]['_route_lane_desired'])
+        self.assertEqual(-5.0,
+                         runtime.states[13]['_route_lane_desired'])
+
+    def test_route_lane_binding_separates_authoritative_spawn_gates(self):
+        route = {'id': 'city', 'waypoints': (
+            (0.0, 0.0, False), (0.0, 80.0, False),
+            (80.0, 80.0, False))}
+        positions = {
+            11: (-10.0, 0.0, 0.0), 12: (10.0, 0.0, 0.0),
+            13: (0.0, 0.0, 70.0), 14: (0.0, 0.0, 90.0),
+        }
+        orders = {
+            11: {'route_id': 'city', 'route_index': 1,
+                 'route_join': True, 'route_anchor': positions[11],
+                 'move_position': (0.0, 0.0, 80.0)},
+            12: {'route_id': 'city', 'route_index': 1,
+                 'route_join': True, 'route_anchor': positions[12],
+                 'move_position': (0.0, 0.0, 80.0)},
+            13: {'route_id': 'city', 'route_index': 2,
+                 'route_join': True, 'route_anchor': positions[13],
+                 'move_position': (80.0, 0.0, 80.0)},
+            14: {'route_id': 'city', 'route_index': 2,
+                 'route_join': True, 'route_anchor': positions[14],
+                 'move_position': (80.0, 0.0, 80.0)},
+        }
+
+        def bind(first_gate_order):
+            runtime = self.module.BotRuntime(1)
+            runtime.states = dict((bot_id, {
+                'id': bot_id, 'team': 1, 'slot': bot_id - 11,
+                'x': position[0], 'y': position[1], 'z': position[2],
+                'yaw': 0.0, 'route': route,
+            }) for bot_id, position in positions.items())
+            runtime._server_orders = dict(
+                (bot_id, dict(order)) for bot_id, order in orders.items())
+            for bot_id in first_gate_order:
+                order = runtime._server_orders[bot_id]
+                runtime._route_lane_binding(
+                    bot_id, (1, 'city'), order['move_position'], order)
+            result = dict((bot_id, (
+                runtime.states[bot_id]['_route_lane_desired'],
+                runtime.states[bot_id]['_route_lane_row_desired'],
+                runtime.states[bot_id]['_route_lane_gate'],
+                runtime.states[bot_id]['_route_lane_forward']))
+                for bot_id in positions)
+            return runtime, result
+
+        runtime, forward = bind((11, 13))
+        unused_runtime, reversed_first = bind((14, 12))
+        self.assertEqual(forward, reversed_first)
+        self.assertEqual({-5.0, 5.0},
+                         {forward[11][0], forward[12][0]})
+        self.assertEqual({-5.0, 5.0},
+                         {forward[13][0], forward[14][0]})
+        self.assertEqual({(1, True)},
+                         {forward[11][2], forward[12][2]})
+        self.assertEqual({(2, True)},
+                         {forward[13][2], forward[14][2]})
+        self.assertEqual({(0.0, 1.0)},
+                         {forward[11][3], forward[12][3]})
+        self.assertEqual({(1.0, 0.0)},
+                         {forward[13][3], forward[14][3]})
+
+        # Route progress changes the segment direction, but never the
+        # persistent team/route lane lease assigned at the spawn gate.
+        retained = dict((bot_id, forward[bot_id][:3]) for bot_id in positions)
+        for bot_id in positions:
+            runtime._server_orders[bot_id].update(
+                route_index=2, route_join=False,
+                route_anchor=(0.0, 0.0, 80.0),
+                move_position=(80.0, 0.0, 80.0))
+            runtime._route_lane_binding(
+                bot_id, (1, 'city'), (80.0, 0.0, 80.0),
+                runtime._server_orders[bot_id])
+        self.assertEqual(retained, dict((bot_id, (
+            runtime.states[bot_id]['_route_lane_desired'],
+            runtime.states[bot_id]['_route_lane_row_desired'],
+            runtime.states[bot_id]['_route_lane_gate']))
+            for bot_id in positions))
+
+    def test_route_rebalance_keeps_leases_and_gives_newcomer_unique_pair(self):
+        class Grid(object):
+            @staticmethod
+            def _ground(unused_x, unused_z, unused_hint):
+                return 0.0
+
+            @staticmethod
+            def segment_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def point_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def dry_segment_clear(*unused):
+                return True
+
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = types.SimpleNamespace(grid=Grid(), bot_states={})
+        runtime.baked_graph = {
+            'bounds': (-100.0, -100.0, 100.0, 120.0)}
+        route = {'id': 'forest', 'waypoints': (
+            (0.0, 0.0, False), (0.0, 80.0, False))}
+        positions = (-20.0, -10.0, 0.0, 10.0, 20.0)
+        runtime.states = dict((11 + index, {
+            'id': 11 + index, 'team': 1, 'slot': index,
+            'x': x, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+            'route': route,
+        }) for index, x in enumerate(positions))
+        runtime._server_orders = dict((11 + index, {
+            'route_id': 'forest', 'route_index': 1, 'route_join': True,
+        }) for index in range(len(positions)))
+        strategic = {
+            'route_id': 'forest', 'route_index': 1,
+            'route_join': True, 'route_anchor': (0.0, 0.0, 0.0),
+        }
+        runtime._route_lane_binding(
+            11, (1, 'forest'), (0.0, 0.0, 80.0), strategic)
+        retained = dict((bot_id, (
+            state['_route_lane_desired'],
+            state['_route_lane_row_desired']))
+            for bot_id, state in runtime.states.items())
+
         runtime.states[16] = {
             'id': 16, 'team': 1, 'slot': 5,
+            'x': -30.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
             'half_length': 3.5, 'half_width': 1.7,
+            'route': route,
         }
-        runtime._route_lane_target(
-            16, position, goal, selected, strategic, 3.1)
-        self.assertEqual([5.0, -5.0, 10.0, -10.0], retained)
-        self.assertEqual(0.0, runtime.states[16]['_route_lane_desired'])
-        self.assertEqual(retained, [
-            runtime.states[bot_id]['_route_lane_desired']
-            for bot_id in range(12, 16)])
+        runtime._server_orders[16] = {
+            'route_id': 'forest', 'route_index': 1, 'route_join': True}
+        runtime._route_lane_binding(
+            16, (1, 'forest'), (0.0, 0.0, 80.0), strategic)
+
+        self.assertEqual(retained, dict((bot_id, (
+            runtime.states[bot_id]['_route_lane_desired'],
+            runtime.states[bot_id]['_route_lane_row_desired']))
+            for bot_id in retained))
+        occupied = set(retained.values())
+        newcomer = (
+            runtime.states[16]['_route_lane_desired'],
+            runtime.states[16]['_route_lane_row_desired'])
+        self.assertNotIn(newcomer, occupied)
+        self.assertEqual(10.0, newcomer[0])
+        self.assertEqual(4.0, abs(newcomer[1]))
+        lane_goal, unused_identity = runtime._route_lane_goal(
+            16, (-30.0, 0.0, 0.0), (0.0, 0.0, 80.0),
+            dict(strategic, route_anchor=(-30.0, 0.0, 0.0)),
+            1.0, True)
+        self.assertLessEqual(
+            math.hypot(lane_goal[0], lane_goal[2] - 80.0) +
+            self.module.ai_driver.WAYPOINT_ARRIVAL_RADIUS,
+            self.module.ROUTE_JOIN_ARRIVAL_RADIUS)
+
+        # A dead member releases its pair; an outer newcomer uses that empty
+        # lane without disturbing any surviving lease.
+        released_id = next(bot_id for bot_id, pair in retained.items()
+                           if pair == (-10.0, 0.0))
+        runtime.states[released_id]['alive'] = False
+        runtime.states[17] = {
+            'id': 17, 'team': 1, 'slot': 6,
+            'x': 30.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+            'route': route,
+        }
+        runtime._server_orders[17] = {
+            'route_id': 'forest', 'route_index': 1, 'route_join': True}
+        runtime._route_lane_binding(
+            17, (1, 'forest'), (0.0, 0.0, 80.0), strategic)
+        self.assertEqual(
+            (-10.0, 0.0),
+            (runtime.states[17]['_route_lane_desired'],
+             runtime.states[17]['_route_lane_row_desired']))
+
+    def test_same_route_rejoin_rotates_goal_without_reassigning_lease(self):
+        class Grid(object):
+            @staticmethod
+            def _ground(unused_x, unused_z, unused_hint):
+                return 0.0
+
+            @staticmethod
+            def segment_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def point_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def dry_segment_clear(*unused):
+                return True
+
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = types.SimpleNamespace(grid=Grid(), bot_states={})
+        runtime.baked_graph = {
+            'bounds': (-100.0, -100.0, 120.0, 120.0)}
+        runtime.states = {11: {
+            'id': 11, 'team': 1, 'slot': 0,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+            'route': {'id': 'city', 'waypoints': (
+                (0.0, 0.0, False), (0.0, 80.0, False),
+                (80.0, 80.0, False))},
+            '_route_lane_group': (1, 'city'),
+            '_route_lane_gate': (1, True),
+            '_route_lane_desired': 5.0,
+            '_route_lane_row_desired': 0.0,
+            '_route_lane_forward': (0.0, 1.0),
+            '_route_lane_segment': (1, 'city', 1, True),
+            '_route_lane_offset': 5.0,
+            '_route_lane_row': 0.0,
+            '_route_lane_goal': (-5.0, 0.0, 80.0),
+        }}
+        runtime._server_orders = {11: {
+            'id': 11, 'route_id': 'city', 'route_index': 1,
+            'route_join': True,
+            'route_anchor': (0.0, 0.0, 0.0),
+            'move_position': (0.0, 0.0, 80.0),
+        }}
+        self.assertTrue(runtime._apply_orders({
+            'bot_order_revision': 1,
+            'bot_orders': [{
+                'id': 11, 'route_id': 'city', 'route_index': 2,
+                'route_join': True,
+                'route_anchor': {'x': 0.0, 'y': 0.0, 'z': 80.0},
+                'move_position': {'x': 80.0, 'y': 0.0, 'z': 80.0},
+            }],
+        }))
+        strategic = runtime._server_orders[11]
+
+        desired = runtime._route_lane_binding(
+            11, (1, 'city'), (80.0, 0.0, 80.0), strategic)
+
+        self.assertEqual((5.0, 0.0), desired)
+        self.assertEqual((2, True),
+                         runtime.states[11]['_route_lane_gate'])
+        self.assertEqual((1.0, 0.0),
+                         runtime.states[11]['_route_lane_forward'])
+        for name in ('_route_lane_segment', '_route_lane_offset',
+                     '_route_lane_row', '_route_lane_goal'):
+            self.assertNotIn(name, runtime.states[11])
+
+        lane_goal, unused_identity = runtime._route_lane_goal(
+            11, (0.0, 0.0, 80.0), (80.0, 0.0, 80.0),
+            strategic, 2.0, True)
+        self.assertEqual((80.0, 0.0, 85.0), lane_goal)
+        self.assertEqual(5.0,
+                         runtime.states[11]['_route_lane_desired'])
+        self.assertEqual(0.0,
+                         runtime.states[11]['_route_lane_row_desired'])
+
+    def test_route_join_lane_narrows_for_every_static_safety_boundary(self):
+        module = self.module
+
+        class Grid(object):
+            cell_size = 4.0
+
+            def __init__(self, mode):
+                self.mode = mode
+
+            def _ground(self, x, unused_z, unused_hint):
+                if self.mode == 'ground' and x < -8.0:
+                    return None
+                return 0.0
+
+            def point_has_baked_hazard(self, point, mask):
+                return bool(
+                    self.mode == 'shallow' and point[0] < -8.0 and
+                    mask & module.BAKED_SHALLOW_WATER)
+
+            def segment_has_baked_hazard(
+                    self, unused_start, end, mask):
+                return bool(
+                    self.mode == 'fatal' and end[0] < -8.0 and
+                    mask & module.BAKED_FATAL_HAZARDS)
+
+            def dry_segment_clear(self, unused_start, end, unused_now):
+                return not (self.mode == 'segment' and end[0] < -8.0)
+
+        route = {
+            'id': 'city',
+            'waypoints': ((0.0, 0.0, False),
+                          (0.0, 80.0, False)),
+        }
+        strategic = {
+            'combat_mode': 'route', 'route_id': 'city', 'route_index': 1,
+            'route_join': True, 'route_anchor': (0.0, 0.0, 0.0),
+        }
+        for mode in ('ground', 'shallow', 'fatal', 'segment', 'bounds'):
+            with self.subTest(mode=mode):
+                grid = Grid(mode)
+                runtime = module.BotRuntime(1)
+                runtime.navigator = types.SimpleNamespace(
+                    grid=grid, bot_states={})
+                runtime.baked_graph = {
+                    'bounds': ((-8.0 if mode == 'bounds' else -100.0),
+                               -100.0, 100.0, 100.0)}
+                runtime.states = {14: {
+                    'id': 14, 'team': 1, 'slot': 3,
+                    'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                    'half_length': 3.5, 'half_width': 1.7,
+                    'route': route,
+                    '_route_lane_group': (1, 'city'),
+                    '_route_lane_desired': 10.0,
+                    '_route_lane_row_desired': 0.0,
+                    '_route_lane_forward': (0.0, 1.0),
+                }}
+
+                candidate, unused_identity = runtime._route_lane_goal(
+                    14, (0.0, 0.0, 0.0), (0.0, 0.0, 80.0),
+                    strategic, 1.0, True)
+
+                self.assertEqual(-5.0, candidate[0])
+                self.assertEqual(5.0,
+                                 runtime.states[14]['_route_lane_offset'])
+                self.assertLessEqual(
+                    math.hypot(candidate[0], candidate[2] - 80.0) +
+                    module.ai_driver.WAYPOINT_ARRIVAL_RADIUS,
+                    module.ROUTE_JOIN_ARRIVAL_RADIUS)
+                # Once narrowed, a changing probe result cannot make the same
+                # join leg oscillate back to its wider preferred lane.
+                grid.mode = 'clear'
+                repeated, unused_identity = runtime._route_lane_goal(
+                    14, (0.0, 0.0, 0.0), (0.0, 0.0, 80.0),
+                    strategic, 1.1, True)
+                self.assertEqual(candidate, repeated)
+
+    def test_route_join_conclusive_astar_failure_narrows_on_next_request(self):
+        calls = []
+
+        class Grid(object):
+            cell_size = 4.0
+
+            @staticmethod
+            def _ground(unused_x, unused_z, unused_hint):
+                return 0.0
+
+            @staticmethod
+            def segment_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def point_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def dry_segment_clear(*unused):
+                return True
+
+        class Navigator(object):
+            def __init__(self):
+                self.grid = Grid()
+                self.bot_states = {}
+
+            def next_target(self, bot_id, position, goal, path_key, now,
+                            anchor, avoid, lookahead_distance=None):
+                calls.append((goal, path_key))
+                self.bot_states[bot_id] = {
+                    'navigation_status': 'blocked',
+                    'planned_goal': tuple(goal),
+                }
+                return tuple(goal)
+
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = Navigator()
+        runtime.baked_graph = {
+            'bounds': (-100.0, -100.0, 100.0, 100.0)}
+        runtime.states = {14: {
+            'id': 14, 'team': 1, 'slot': 3,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+            'route': {'id': 'city', 'waypoints': (
+                (0.0, 0.0, False), (0.0, 80.0, False))},
+            '_route_lane_group': (1, 'city'),
+            '_route_lane_desired': 10.0,
+            '_route_lane_row_desired': 0.0,
+            '_route_lane_forward': (0.0, 1.0),
+        }}
+        strategic = {
+            'combat_mode': 'route', 'route_id': 'city', 'route_index': 1,
+            'route_join': True, 'route_anchor': (0.0, 0.0, 0.0),
+        }
+
+        runtime._navigation_target(
+            14, (0.0, 0.0, 0.0), (0.0, 0.0, 80.0), strategic,
+            {'now': 1.0, 'speed': 0.0})
+        runtime._navigation_target(
+            14, (0.0, 0.0, 0.0), (0.0, 0.0, 80.0), strategic,
+            {'now': 1.2, 'speed': 0.0})
+
+        self.assertEqual([-10.0, -5.0], [call[0][0] for call in calls])
+        self.assertEqual([10000, 5000], [call[1][5] for call in calls])
+        self.assertNotEqual(calls[0][1], calls[1][1])
+
+    def test_full_team_route_join_cohort_uses_bounded_longitudinal_rows(self):
+        class Grid(object):
+            @staticmethod
+            def _ground(unused_x, unused_z, unused_hint):
+                return 0.0
+
+            @staticmethod
+            def segment_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def point_has_baked_hazard(*unused):
+                return False
+
+            @staticmethod
+            def dry_segment_clear(*unused):
+                return True
+
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = types.SimpleNamespace(grid=Grid(), bot_states={})
+        runtime.baked_graph = {
+            'bounds': (-500.0, -100.0, 500.0, 300.0)}
+        route = {'id': 'overflow', 'waypoints': (
+            (0.0, 0.0, False), (0.0, 200.0, False))}
+        runtime.states = {}
+        for index in range(15):
+            bot_id = 100 + index
+            runtime.states[bot_id] = {
+                'id': bot_id, 'team': 1, 'slot': (index * 7) % 15,
+                'x': -70.0 + index * 10.0,
+                'y': 0.0, 'z': float(index % 3), 'yaw': 0.0,
+                'half_length': 3.5, 'half_width': 1.7,
+                'route': route,
+            }
+        runtime._server_orders = dict((100 + index, {
+            'route_id': 'overflow', 'route_index': 1,
+            'route_join': True,
+        }) for index in range(15))
+        strategic = {
+            'route_id': 'overflow', 'route_index': 1,
+            'route_join': True, 'route_anchor': (0.0, 0.0, 0.0),
+        }
+
+        self.assertEqual(
+            (-10.0, -5.0, 0.0, 0.0, 5.0, 10.0),
+            self.module._route_lane_layout(6))
+        self.assertEqual(
+            (-10.0, -5.0, -5.0, 0.0, 5.0, 5.0, 10.0),
+            self.module._route_lane_layout(7))
+        runtime._route_lane_binding(
+            107, (1, 'overflow'), (0.0, 0.0, 200.0), strategic)
+        lateral_order = sorted(
+            runtime.states.values(), key=lambda state: -state['x'])
+        lanes = [state['_route_lane_desired'] for state in lateral_order]
+        self.assertEqual(sorted(lanes), lanes)
+        self.assertEqual([3, 3, 3, 3, 3],
+                         [lanes.count(offset)
+                          for offset in self.module.ROUTE_LANE_ORDER])
+        for offset in self.module.ROUTE_LANE_ORDER:
+            rows = [state['_route_lane_row_desired']
+                    for state in runtime.states.values()
+                    if state['_route_lane_desired'] == offset]
+            self.assertEqual(len(set(rows)), len(rows))
+            self.assertLessEqual(max(abs(value) for value in rows), 4.0)
+        for bot_id, bot_state in runtime.states.items():
+            position = (bot_state['x'], bot_state['y'], bot_state['z'])
+            goal, unused_identity = runtime._route_lane_goal(
+                bot_id, position, (0.0, 0.0, 200.0),
+                dict(strategic, route_anchor=position), 1.0, True)
+            self.assertLessEqual(
+                math.hypot(goal[0], goal[2] - 200.0) +
+                self.module.ai_driver.WAYPOINT_ARRIVAL_RADIUS,
+                self.module.ROUTE_JOIN_ARRIVAL_RADIUS + 1.0e-9)
+
+    def test_winter_himmelsdorf_spawn_cohorts_have_reachable_lane_goals(self):
+        graph = json.loads(
+            (PORT_ROOT / 'navgraphs' /
+             '86_himmelsdorf_winter.json').read_text())
+        runtime = self.module.BotRuntime(1)
+        runtime.navigator = self.module.TerrainNavigator(
+            lambda *unused: None, baked_graph=graph)
+        runtime.baked_graph = graph
+        routes = graph['routes']['1']
+        spawns = graph['spawn_formations']['1']
+        runtime.states = {}
+        # The report has no per-Bot route/profile rows. Partitioning the 15
+        # exact team-1 spawn poses into three capacity-five route cohorts is a
+        # deterministic geometry seam, not a claim about that random lineup.
+        for route_number, route in enumerate(routes):
+            for slot in range(route_number * 5, route_number * 5 + 5):
+                point = spawns[slot]
+                bot_id = slot + 1
+                runtime.states[bot_id] = {
+                    'id': bot_id, 'team': 1, 'slot': slot,
+                    'x': point[0], 'y': point[1], 'z': point[2],
+                    'yaw': point[3],
+                    'half_length': 3.5, 'half_width': 1.7,
+                    'route': route,
+                }
+                runtime._server_orders[bot_id] = {
+                    'route_id': route['id'], 'route_index': 1,
+                    'route_join': True,
+                }
+
+        offset_goals = 0
+        for route_number, route in enumerate(routes):
+            bot_ids = range(route_number * 5 + 1,
+                            route_number * 5 + 6)
+            waypoint = route['waypoints'][1]
+            goal_y = runtime.navigator.grid._ground(
+                waypoint[0], waypoint[1], 0.0)
+            goal = (waypoint[0], goal_y, waypoint[1])
+            first = runtime.states[bot_ids[0]]
+            first_position = (first['x'], first['y'], first['z'])
+            strategic = {
+                'combat_mode': 'route', 'route_id': route['id'],
+                'route_index': 1, 'route_join': True,
+                'route_anchor': first_position,
+            }
+            runtime._route_lane_binding(
+                bot_ids[0], (1, route['id']), goal, strategic)
+            for bot_id in bot_ids:
+                state = runtime.states[bot_id]
+                position = (state['x'], state['y'], state['z'])
+                lane_goal, unused_identity = runtime._route_lane_goal(
+                    bot_id, position, goal,
+                    dict(strategic, route_anchor=position),
+                    1.0, True)
+                offset_distance = math.hypot(
+                    lane_goal[0] - goal[0], lane_goal[2] - goal[2])
+                self.assertLessEqual(
+                    offset_distance +
+                    self.module.ai_driver.WAYPOINT_ARRIVAL_RADIUS,
+                    self.module.ROUTE_JOIN_ARRIVAL_RADIUS + 1.0e-9)
+                self.assertFalse(
+                    runtime.navigator.grid.point_has_baked_hazard(
+                        lane_goal,
+                        self.module.BAKED_FATAL_HAZARDS |
+                        self.module.BAKED_SHALLOW_WATER))
+                overflow = runtime._baked_boundary_overflow(
+                    state, lane_goal,
+                    math.atan2(
+                        state['_route_lane_forward'][0],
+                        state['_route_lane_forward'][1]))
+                self.assertFalse(any(value > 1.0e-6 for value in overflow))
+                path = runtime.navigator.grid.plan(
+                    position, lane_goal, max_expansions=20000, now=1.0,
+                    prefer_clearance=False)
+                self.assertTrue(path)
+                self.assertLessEqual(
+                    math.hypot(path[-1][0] - lane_goal[0],
+                               path[-1][2] - lane_goal[2]),
+                    self.module.ROUTE_JOIN_ARRIVAL_RADIUS)
+                offset_goals += int(offset_distance > 1.0e-6)
+        self.assertGreater(offset_goals, 0)
 
     def test_route_lane_collision_and_hull_bounds_narrow_without_oscillation(self):
         class Grid(object):

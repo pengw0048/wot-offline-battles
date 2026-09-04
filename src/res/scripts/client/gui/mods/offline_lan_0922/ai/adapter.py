@@ -52,13 +52,14 @@ class BotAdapter(object):
     def decide(self, state, direction_clear):
         """Return a deterministic, serializable command for one bot.
 
-        ``state`` needs ``id``, ``position``, ``yaw``, ``speed``, ``dt``,
-        ``now`` and optionally ``health``, ``max_health``, ``contacts`` and
-        ``neighbours``.  ``direction_clear(yaw)`` is the sole runtime probe.
+        ``state`` needs ``id``, ``slot``, ``position``, ``yaw``, ``speed``,
+        ``dt``, ``now`` and optionally ``health``, ``max_health``, ``contacts``
+        and ``neighbours``.  ``direction_clear(yaw)`` is the sole runtime probe.
         """
         state = state if isinstance(state, dict) else {}
         bot_id = int(state.get('id', 0))
         position = _position(state.get('position'))
+        speed = float(state['speed'])
         contacts = [_contact(item) for item in state.get('contacts', ())]
         contacts = [item for item in contacts if item is not None]
         team = self.director.agents[bot_id]['team']
@@ -72,6 +73,7 @@ class BotAdapter(object):
                 contact.get('speed', 0.0))
         strategic = self.director.order_for(
             bot_id, position, float(state.get('yaw', 0.0)),
+            speed,
             state.get('health', 1.0), state.get('max_health', 1.0), now)
         return self._drive_order(
             bot_id, state, position, strategic, direction_clear)
@@ -131,7 +133,8 @@ class BotAdapter(object):
             }
         else:
             local = self.driver.drive(
-                bot_id, position, float(state.get('yaw', 0.0)),
+                bot_id, int(state['slot']), position,
+                float(state.get('yaw', 0.0)),
                 float(state.get('speed', 0.0)), float(state.get('dt', 0.0)),
                 target, state.get('neighbours', ()), direction_clear,
                 velocity=state.get('velocity'),

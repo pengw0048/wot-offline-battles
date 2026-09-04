@@ -210,7 +210,7 @@ class SpawnDepartureTests(unittest.TestCase):
                 def drive(*args, **kwargs):
                     order = original_drive(*args, **kwargs)
                     bot_id = int(args[0])
-                    position = args[1]
+                    position = args[2]
                     goal = macro_goals.get(bot_id, position)
                     far_macro_goal = math.hypot(
                         float(goal[0]) - float(position[0]),
