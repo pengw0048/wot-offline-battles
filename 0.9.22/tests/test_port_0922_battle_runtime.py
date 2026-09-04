@@ -19557,6 +19557,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 modes.ARTY = 'arty'
             handler._AvatarInputHandler__ctrlModeName = mode
             self.assertTrue(battle._spg_aiming_view_active())
+            # Clear the previous verdict so the exemption has to re-assert
+            # the model on this update rather than inherit the last one.
+            record['spot_visible'] = False
             battle._update_spotting(10.0 + 0.1 * step)
             self.assertTrue(
                 record['spot_visible'],
