@@ -1314,6 +1314,60 @@ class BotRuntimeTests(unittest.TestCase):
                 sys.modules.pop(key, None)
         sys.modules.update(self._modules)
 
+    def test_runtime_owned_numeric_helpers_do_not_reparse_state(self):
+        state = {
+            'health': 500, 'alive': True, 'critical': {},
+            'combat_fire_elapsed': 0.25, 'combat_fire_timer': 0.5,
+            'stun_end_server_time_ms': 1250,
+            'x': 1.25, 'y': 2.5, 'z': -3.75,
+        }
+        original_number = self.module._number
+
+        def unexpected_number(*unused_args, **unused_kwargs):
+            raise AssertionError('trusted runtime state was reparsed')
+
+        self.module._number = unexpected_number
+        try:
+            self.assertEqual((1.25, 2.5, -3.75),
+                             self.module._position(state))
+            self.assertEqual(5.0, self.module._distance(
+                (0.0, 0.0, 0.0), (3.0, 0.0, 4.0)))
+            self.assertAlmostEqual(
+                -math.pi + 0.25,
+                self.module._angle_delta(math.pi + 0.25, 0.0))
+            self.assertEqual(
+                (1.0, 2.0, 3.0),
+                self.module._point({'x': 1.0, 'y': 2.0, 'z': 3.0}))
+            self.assertEqual(
+                (500, True, (), 0.25, 0.5, 1250),
+                self.module._combat_signature(state))
+            self.assertEqual({
+                'health': 500, 'alive': True, 'critical': {},
+                'combat_fire_elapsed': 0.25,
+                'combat_fire_timer': 0.5,
+                'stun_end_server_time_ms': 1250,
+            }, self.module._combat_record(state))
+        finally:
+            self.module._number = original_number
+
+    def test_server_order_points_are_canonicalized_at_admission(self):
+        runtime = self.module.BotRuntime(1)
+
+        self.assertTrue(runtime._apply_orders({
+            'bot_order_revision': 1,
+            'bot_orders': [{
+                'id': 11, 'move_position': {'x': '1.5'},
+                'aim_position': ('2.5', 3, 4.0),
+                'desired_range': '125.5', 'shell_index': '2',
+            }],
+        }))
+
+        admitted = runtime._server_orders[11]
+        self.assertEqual((1.5, 0.0, 0.0), admitted['move_position'])
+        self.assertEqual((2.5, 3.0, 4.0), admitted['aim_position'])
+        self.assertEqual(125.5, admitted['desired_range'])
+        self.assertEqual(2, admitted['shell_index'])
+
     def test_bot_physics_uses_plain_default_crew_factors(self):
         descriptor = _combat_descriptor()
         expected_factors = object()

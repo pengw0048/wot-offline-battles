@@ -982,6 +982,58 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertNotIn(
             'local_launch_pending', battle._projectile_meta[projectile_id])
 
+    def test_canonical_projectile_poses_do_not_reparse_numeric_fields(self):
+        battle, unused_bigworld = _battle()
+        module = sys.modules[BattleRuntime.__module__]
+        original_number = module._number
+
+        def unexpected_number(*unused_args, **unused_kwargs):
+            raise AssertionError('canonical projectile pose was reparsed')
+
+        module._number = unexpected_number
+        try:
+            first = battle._projectile_plain_pose(
+                (1.0, 2.0, 3.0), {
+                    'yaw': 0.1, 'pitch': 0.2, 'roll': 0.3,
+                    'turret_yaw': 0.4, 'gun_pitch': 0.5,
+                    'siege_state': 0,
+                })
+            second = battle._projectile_plain_pose(
+                (3.0, 4.0, 5.0), {
+                    'yaw': 0.3, 'pitch': 0.4, 'roll': 0.5,
+                    'turret_yaw': 0.6, 'gun_pitch': 0.7,
+                    'siege_state': 0,
+                })
+            battle._sample_projectile_positions(1.0, {'bot:11': first})
+            battle._sample_projectile_positions(2.0, {'bot:11': second})
+
+            middle = battle._projectile_historic_pose_uncached(
+                'bot:11', 1.5)
+
+            self.assertEqual((2.0, 3.0, 4.0),
+                             (middle['x'], middle['y'], middle['z']))
+            self.assertAlmostEqual(0.2, middle['yaw'])
+            self.assertGreater(
+                battle._projectile_pose_interval_travel(first, second),
+                0.0)
+        finally:
+            module._number = original_number
+
+    def test_projectile_pose_boundary_contains_malformed_network_numbers(self):
+        pose = BattleRuntime._projectile_boundary_pose(
+            ('bad', None, float('nan')), {
+                'yaw': 'bad', 'pitch': None, 'roll': float('inf'),
+                'aim_yaw': 'bad', 'turret_yaw': None,
+                'gun_pitch': float('-inf'),
+            })
+
+        self.assertEqual({
+            'x': 0.0, 'y': 0.0, 'z': 0.0,
+            'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
+            'turret_yaw': 0.0, 'gun_pitch': 0.0,
+            'siege_state': 0,
+        }, pose)
+
     def test_all_shooter_target_pairs_cap_destructibles_at_the_vehicle(self):
         for shooter_kind in ('player', 'bot'):
             for target_kind in ('player', 'bot'):

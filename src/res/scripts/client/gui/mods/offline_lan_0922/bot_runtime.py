@@ -244,8 +244,23 @@ def _number(value, default=0.0):
 
 
 def _position(state):
-    return (_number(state.get('x')), _number(state.get('y')),
-            _number(state.get('z')))
+    """Read a pose canonicalized by BotRuntime or the LAN boundary."""
+    return (state.get('x', 0.0), state.get('y', 0.0),
+            state.get('z', 0.0))
+
+
+def _boundary_point(value, fallback=(0.0, 0.0, 0.0)):
+    """Canonicalize one wire/native point before retaining it."""
+    if isinstance(value, dict):
+        return (_number(value.get('x'), fallback[0]),
+                _number(value.get('y'), fallback[1]),
+                _number(value.get('z'), fallback[2]))
+    try:
+        return (_number(value[0], fallback[0]),
+                _number(value[1], fallback[1]),
+                _number(value[2], fallback[2]))
+    except (TypeError, IndexError):
+        return fallback
 
 
 def _value(value, name, default=None):
@@ -320,8 +335,8 @@ def _water_sensor_level(state, descriptor, water_depth):
         return 0
     turret_offset, unused_carrying_point = _water_sensor_geometry(descriptor)
     turret_height = _vehicle_local_height(
-        turret_offset, _number(state.get('pitch')),
-        _number(state.get('roll')))
+        turret_offset, state.get('pitch', 0.0),
+        state.get('roll', 0.0))
     return 2 if depth > turret_height else 1
 
 
@@ -521,13 +536,13 @@ def _collision_shape(descriptor):
 
 
 def _distance(first, second):
-    dx = _number(first[0]) - _number(second[0])
-    dz = _number(first[2]) - _number(second[2])
+    dx = first[0] - second[0]
+    dz = first[2] - second[2]
     return math.sqrt(dx * dx + dz * dz)
 
 
 def _angle_delta(target, current):
-    value = _number(target) - _number(current)
+    value = target - current
     while value > math.pi:
         value -= math.pi * 2.0
     while value < -math.pi:
@@ -540,14 +555,13 @@ def _wrapped(value):
 
 
 def _point(value, fallback=(0.0, 0.0, 0.0)):
+    """Read a point already admitted into runtime-owned state."""
     if isinstance(value, dict):
-        return (_number(value.get('x'), fallback[0]),
-                _number(value.get('y'), fallback[1]),
-                _number(value.get('z'), fallback[2]))
+        return (value.get('x', fallback[0]),
+                value.get('y', fallback[1]),
+                value.get('z', fallback[2]))
     try:
-        return (_number(value[0], fallback[0]),
-                _number(value[1], fallback[1]),
-                _number(value[2], fallback[2]))
+        return (value[0], value[1], value[2])
     except (TypeError, IndexError):
         return fallback
 
@@ -751,25 +765,25 @@ def _canonical_critical(payload):
 
 def _combat_signature(state):
     return (
-        max(0, int(_number(state.get('health')))),
+        max(0, int(state.get('health', 0))),
         bool(state.get('alive', False)),
         _critical_signature(state.get('critical')),
-        round(_number(state.get('combat_fire_elapsed')), 6),
-        round(_number(state.get('combat_fire_timer')), 6),
-        max(0, int(_number(state.get('stun_end_server_time_ms')))))
+        round(state.get('combat_fire_elapsed', 0.0), 6),
+        round(state.get('combat_fire_timer', 0.0), 6),
+        max(0, int(state.get('stun_end_server_time_ms', 0))))
 
 
 def _combat_record(state):
     return {
-        'health': max(0, int(_number(state.get('health')))),
+        'health': max(0, int(state.get('health', 0))),
         'alive': bool(state.get('alive', False)),
         'critical': _canonical_critical(state.get('critical')),
         'combat_fire_elapsed': round(
-            _number(state.get('combat_fire_elapsed')), 6),
+            state.get('combat_fire_elapsed', 0.0), 6),
         'combat_fire_timer': round(
-            _number(state.get('combat_fire_timer')), 6),
+            state.get('combat_fire_timer', 0.0), 6),
         'stun_end_server_time_ms': max(
-            0, int(_number(state.get('stun_end_server_time_ms')))),
+            0, int(state.get('stun_end_server_time_ms', 0))),
     }
 
 
@@ -2397,7 +2411,7 @@ class BotRuntime(object):
                 continue
             self._prewarm_receipt_cursor = (index + 1) % len(states)
             position = _position(state)
-            yaw = _number(state.get('yaw'))
+            yaw = state['yaw']
             descriptor = self._descriptors.get(state['id'])
             # Presentation-only suspension is safe to sample at the baked
             # spawn pose before the first grounded simulation tick.  No pose,
@@ -2543,7 +2557,7 @@ class BotRuntime(object):
 
     def _advance_equipment_clock(self, step):
         """Advance cooldowns on simulation time, never wall-clock time."""
-        self._equipment_now += max(0.0, _number(step))
+        self._equipment_now += max(0.0, step)
         return self._equipment_now
 
     def _publish_equipment_state(self, state):
@@ -2679,7 +2693,7 @@ class BotRuntime(object):
             state['siege_transition_total_ms'] = 0
             return False
         remaining = max(
-            0.0, _number(state.get('_siege_time_left')) - float(step))
+            0.0, state.get('_siege_time_left', 0.0) - float(step))
         if remaining > 1.0e-9:
             state['_siege_time_left'] = remaining
             state['siege_time_left_ms'] = int(math.ceil(
@@ -2701,8 +2715,8 @@ class BotRuntime(object):
         destination = _point(
             command.get('move_position'), _position(state))
         long_travel = bool(
-            command.get('movement_intent', abs(_number(
-                command.get('throttle'))) > 0.05) and
+            command.get('movement_intent', abs(
+                command.get('throttle', 0.0)) > 0.05) and
             _distance(_position(state), destination) >
             SIEGE_LONG_TRAVEL_METRES)
         return legal_target and not long_travel
@@ -2735,7 +2749,7 @@ class BotRuntime(object):
         if same_transition_direction:
             state['_siege_intent_elapsed'] = 0.0
             return True
-        elapsed = _number(state.get('_siege_intent_elapsed')) + float(step)
+        elapsed = state.get('_siege_intent_elapsed', 0.0) + float(step)
         state['_siege_intent_elapsed'] = elapsed
         threshold = (SIEGE_ENABLE_DEBOUNCE_SECONDS if desired else
                      SIEGE_DISABLE_DEBOUNCE_SECONDS)
@@ -3663,9 +3677,9 @@ class BotRuntime(object):
     def _advance_bot_drowning(self, state, step):
         """Apply #1513 WaterSensor danger and its ten-second death clock."""
         if (not state.get('alive', False) or
-                _number(state.get('health')) <= 0.0 or step <= 0.0):
+                state.get('health', 0) <= 0.0 or step <= 0.0):
             return False
-        check = (_number(state.get('_drown_check')) + float(step))
+        check = state.get('_drown_check', 0.0) + float(step)
         state['_drown_check'] = check
         if check < BOT_DROWNING_PROBE_SECONDS:
             return False
@@ -3683,12 +3697,11 @@ class BotRuntime(object):
             state['_drowning'] = False
             return False
         state['_drowning'] = True
-        state['_drown_time'] = (
-            _number(state.get('_drown_time')) + elapsed)
+        state['_drown_time'] = state.get('_drown_time', 0.0) + elapsed
         if state['_drown_time'] <= BOT_DROWNING_SECONDS:
             return False
 
-        display_health = max(0, int(_number(state.get('health'))))
+        display_health = max(0, int(state.get('health', 0)))
         critical = _terminal_critical(state, descriptor, 'drowning')
         if critical is not None:
             state['critical'] = critical
@@ -3710,10 +3723,10 @@ class BotRuntime(object):
     def _advance_bot_overturn(self, state, step):
         """Apply #1513 overturn warning, input lock and terminal countdown."""
         if (not state.get('alive', False) or
-                _number(state.get('health')) <= 0.0 or step <= 0.0):
+                state.get('health', 0) <= 0.0 or step <= 0.0):
             return False
         level = vehicle_physics.overturn_level(
-            _number(state.get('pitch')), _number(state.get('roll')),
+            state.get('pitch', 0.0), state.get('roll', 0.0),
             BOT_OVERTURN_WARNING_COSINE, BOT_OVERTURN_DANGER_COSINE)
         if level == 0:
             state['_overturn_check'] = 0.0
@@ -3722,11 +3735,11 @@ class BotRuntime(object):
             state['_overturned'] = False
             return False
         state['_overturn_check'] = (
-            _number(state.get('_overturn_check')) + float(step))
+            state.get('_overturn_check', 0.0) + float(step))
         if (state['_overturn_check'] + 0.000001 <
                 BOT_OVERTURN_IGNORE_SECONDS):
             return False
-        if level != int(_number(state.get('_overturn_level'))):
+        if level != int(state.get('_overturn_level', 0)):
             state['_overturn_level'] = level
             state['_overturn_time'] = 0.0
         state['_overturned'] = level == 2
@@ -3738,7 +3751,7 @@ class BotRuntime(object):
         state['rotation_dir'] = 0
         self._turn_speeds[int(state['id'])] = 0.0
         state['_overturn_time'] = (
-            _number(state.get('_overturn_time')) + float(step))
+            state.get('_overturn_time', 0.0) + float(step))
         if (state['_overturn_time'] + 0.000001 <
                 BOT_OVERTURN_DEATH_SECONDS):
             return False
@@ -3875,8 +3888,19 @@ class BotRuntime(object):
             for name in ('aim_position', 'face_position', 'move_position',
                          'route_anchor'):
                 point = order.get(name)
-                if isinstance(point, dict):
-                    order[name] = _position(point)
+                if isinstance(point, (dict, list, tuple)):
+                    order[name] = _boundary_point(point)
+            for name in ('desired_range', 'fire_range',
+                         'throttle_override', 'hull_angle_degrees'):
+                if order.get(name) is not None:
+                    order[name] = _number(order[name])
+            for name in ('id', 'team', 'target_id', 'route_index',
+                         'shell_index', 'cover_id'):
+                if order.get(name) is not None:
+                    try:
+                        order[name] = int(order[name])
+                    except (TypeError, ValueError, OverflowError):
+                        return False
             accepted[bot_id] = order
         previous = self._server_orders
         changed_ids = set(previous).union(accepted)
@@ -4022,9 +4046,8 @@ class BotRuntime(object):
             unused_key, dynamic = _player_dynamic_spotting(
                 snapshot, target)
             profile = dict(snapshot['spotting'])
-            profile['vision_factor'] *= _number(dynamic.get('vision'), 1.0)
-            profile['camouflage_factor'] *= _number(
-                dynamic.get('camouflage'), 1.0)
+            profile['vision_factor'] *= dynamic.get('vision', 1.0)
+            profile['camouflage_factor'] *= dynamic.get('camouflage', 1.0)
             profile['invisibility_moving'] = tuple(
                 dynamic['invisibility_moving'])
             profile['invisibility_still'] = tuple(
@@ -4043,8 +4066,8 @@ class BotRuntime(object):
                 factors=_bot_default_crew_factors(descriptor))[
                     'repair_factor']
             passive = self._equipment_passives.get(int(bot_id), {})
-            cached *= 1.0 + max(0.0, _number(
-                passive.get('repairkitBonusValue'), 0.0))
+            cached *= 1.0 + max(
+                0.0, passive.get('repairkitBonusValue', 0.0))
             self._repair_factors[bot_id] = cached
         return cached
 
@@ -4069,12 +4092,12 @@ class BotRuntime(object):
             module_factor = device_damage.module_stat_factor(
                 devices, destroyed, descriptor, 'vision', yellow)
             damage_factor = device_damage.clamp_vision_factor(
-                _number(dynamic.get('vision'), 1.0) * module_factor)
+                dynamic.get('vision', 1.0) * module_factor)
             since = self._source_still.get(('human', player_id))
             binocular_active = bool(
                 profile['has_binoculars'] and since is not None and
                 loadout.still_device_active(
-                    _number(now) - since, profile['binocular_delay']))
+                    now - since, profile['binocular_delay']))
             return spotting.effective_view_range(
                 _value(turret, 'circularVisionRadius', 330.0),
                 misc_factor=(
@@ -4089,13 +4112,12 @@ class BotRuntime(object):
         bot_id = int(source.get('id', 0))
         cached = self._vision_ranges.get(bot_id)
         if cached is None:
-            value = _number(source.get('view_range'), 330.0)
+            value = source.get('view_range', 330.0)
         else:
             moving, still, delay = cached
             since = self._source_still.get(bot_id)
             if (delay is not None and since is not None and
-                    loadout.still_device_active(
-                        _number(now) - since, delay)):
+                    loadout.still_device_active(now - since, delay)):
                 value = still
             else:
                 value = moving
@@ -4112,20 +4134,20 @@ class BotRuntime(object):
         pair, so the stamp cannot go stale between two cache misses.
         """
         bot_id = int(state.get('id', 0))
-        if abs(_number(state.get('speed'))) > spotting.MOVING_SPEED_EPSILON:
+        if abs(state.get('speed', 0.0)) > spotting.MOVING_SPEED_EPSILON:
             self._source_still.pop(bot_id, None)
         elif bot_id not in self._source_still:
-            self._source_still[bot_id] = _number(now)
+            self._source_still[bot_id] = now
         return True
 
     def _note_human_source_stillness(self, source, now):
         """Track a human observer's stationary-device clock by owner id."""
         player_id = int(source.get('network_id', source.get('id', 0)))
         key = ('human', player_id)
-        if abs(_number(source.get('speed'))) > spotting.MOVING_SPEED_EPSILON:
+        if abs(source.get('speed', 0.0)) > spotting.MOVING_SPEED_EPSILON:
             self._source_still.pop(key, None)
         elif key not in self._source_still:
-            self._source_still[key] = _number(now)
+            self._source_still[key] = now
         return True
 
     def _target_still_seconds(self, key, moving, now):
@@ -4135,9 +4157,9 @@ class BotRuntime(object):
             return 0.0
         since = self._visibility_still.get(key)
         if since is None:
-            self._visibility_still[key] = _number(now)
+            self._visibility_still[key] = now
             return 0.0
-        return max(0.0, _number(now) - since)
+        return max(0.0, now - since)
 
     def _target_fired_recently(self, target, now):
         if target.get('fire_seq') is None:
@@ -4154,15 +4176,15 @@ class BotRuntime(object):
             self._visibility_fire[key] = (fire_seq, 0.0)
             return False, False, fire_seq
         if fire_seq > previous[0]:
-            deadline = _number(now) + spotting.SHOT_CAMOUFLAGE_SECONDS
+            deadline = now + spotting.SHOT_CAMOUFLAGE_SECONDS
             self._visibility_fire[key] = (fire_seq, deadline)
             return True, True, fire_seq
-        return _number(now) < previous[1], False, fire_seq
+        return now < previous[1], False, fire_seq
 
     def _target_detection_projection(
             self, target, target_id, now, tick_cache=None):
         """Project target-only camouflage inputs once per simulation slice."""
-        moving = (abs(_number(target.get('speed'))) >
+        moving = (abs(target.get('speed', 0.0)) >
                   spotting.MOVING_SPEED_EPSILON)
         identity = (target.get('kind'), int(target_id))
         profile_cache = (tick_cache.setdefault('profile', {})
@@ -4173,7 +4195,7 @@ class BotRuntime(object):
             profile_bundle = self._spotting_profile(target, tick_cache)
             if profile_cache is not None:
                 profile_cache[identity] = profile_bundle
-        token = (_number(now), moving, id(profile_bundle))
+        token = (now, moving, id(profile_bundle))
         cache = (tick_cache.setdefault('target', {})
                  if isinstance(tick_cache, dict) else None)
         cached = cache.get(identity) if cache is not None else None
@@ -4227,8 +4249,6 @@ class BotRuntime(object):
     def _update_shot_lane_debt_diagnostics(
             self, now, cycle_time, pending_pairs, cycle_due):
         """Observe the existing supplemental pass without scanning it again."""
-        now = _number(now)
-        cycle_time = _number(cycle_time)
         pending_pairs = max(0, int(pending_pairs))
         if self._shot_lane_cycle_time != cycle_time:
             self._shot_lane_cycle_time = cycle_time
@@ -4267,7 +4287,7 @@ class BotRuntime(object):
 
     def _update_visibility_debt_diagnostics(self, now):
         """Observe current queue debt without feeding any scheduling choice."""
-        self._visibility_diagnostic_now = _number(now)
+        self._visibility_diagnostic_now = now
         depth = len(self._visibility_waiting)
         self._visibility_queue_max_depth = max(
             self._visibility_queue_max_depth, depth)
@@ -4281,6 +4301,7 @@ class BotRuntime(object):
     def _begin_visibility_frame(self):
         """Open one production render-frame budget for static LOS work."""
         self._visibility_frame = {
+            'now': 0.0,
             'budget': MAX_VISIBILITY_PROBES_PER_FRAME,
             'order': [],
             'allowed': set(),
@@ -4331,7 +4352,7 @@ class BotRuntime(object):
         cached = self._decision_cache.get(state['id'])
         return not (
             cached is not None and cached[0] == cache_key and
-            _number(now) < cached[1])
+            now < cached[1])
 
     def _prepare_visibility_frame(self, players, now, include_humans):
         """Select a bounded, fair stale-pair cohort before native calls."""
@@ -4339,7 +4360,6 @@ class BotRuntime(object):
         if not isinstance(frame, dict) or frame.get('prepared'):
             return False
         frame['prepared'] = True
-        now = _number(now)
         frame['now'] = now
         live_bots = [state for state in self._ordered_states()
                      if state.get('alive', True)]
@@ -4382,7 +4402,7 @@ class BotRuntime(object):
                     cached is not None and cached[2] != fire_seq)
                 stale = bool(
                     new_pair or fire_edge or
-                    now - _number(cached[0]) >=
+                    now - cached[0] >=
                     VISIBILITY_SAMPLE_SECONDS)
                 valid[key] = stale
                 if not stale or not source_eligible:
@@ -4491,7 +4511,7 @@ class BotRuntime(object):
             frame['deferred'].add(key)
             self._visibility_scheduler_totals['deferred'] += 1
         self._visibility_deferred_since.setdefault(
-            key, _number(frame.get('now')))
+            key, frame.get('now', 0.0))
         return True
 
     def _visibility_probe_admitted(self, key):
@@ -4534,7 +4554,7 @@ class BotRuntime(object):
         self._visibility_waiting = waiting
         for key in waiting:
             self._visibility_deferred_since.setdefault(
-                key, _number(frame.get('now')))
+                key, frame.get('now', 0.0))
         self._update_visibility_debt_diagnostics(frame.get('now'))
         self._visibility_frame = None
         return True
@@ -4551,7 +4571,7 @@ class BotRuntime(object):
         ttl = VISIBILITY_SAMPLE_SECONDS
         if (not fire_changed and cached is not None and
                 cached[2] == fire_seq and
-                _number(now) - cached[0] < ttl):
+                now - cached[0] < ttl):
             return cached[1]
         source_position = (source_position if source_position is not None else
                            _position(source))
@@ -4612,7 +4632,7 @@ class BotRuntime(object):
                     foliage_bonus=foliage_bonus)
                 value = spotting.is_detected(
                     distance, view_range, camouflage, has_line_of_sight)
-        self._visibility_cache[key] = (_number(now), value, fire_seq)
+        self._visibility_cache[key] = (now, value, fire_seq)
         self._visibility_probe_completed(key)
         if len(self._visibility_cache) > 1024:
             oldest = sorted(self._visibility_cache.items(),
@@ -4636,14 +4656,14 @@ class BotRuntime(object):
             duration = spotting.SPOT_MEMORY_SECONDS
         duration = max(
             0.0, min(spotting.DESIGNATED_SPOT_MEMORY_SECONDS,
-                     _number(duration)))
-        deadline = _number(now) + duration
+                     duration))
+        deadline = now + duration
         self._spot_until[key] = max(
             float(self._spot_until.get(key, 0.0)), deadline)
         return True
 
     def _team_spot_time_left(self, key, now):
-        remaining = float(self._spot_until.get(key, 0.0)) - _number(now)
+        remaining = float(self._spot_until.get(key, 0.0)) - now
         if remaining <= 0.0:
             self._spot_until.pop(key, None)
             return 0.0
@@ -4668,7 +4688,7 @@ class BotRuntime(object):
                 if _player_spotting_perk(
                         snapshot, prior, 'radioman_lasteffort'):
                     self._human_vengeance_until[player_id] = (
-                        _number(now) + spotting.LAST_EFFORT_SECONDS)
+                        now + spotting.LAST_EFFORT_SECONDS)
             elif alive:
                 critical = raw.get('critical')
                 self._human_last_alive_critical[player_id] = dict(
@@ -4685,7 +4705,7 @@ class BotRuntime(object):
             self._source_still.pop(('human', player_id), None)
         for player_id, deadline in tuple(
                 self._human_vengeance_until.items()):
-            if _number(now) >= float(deadline):
+            if now >= float(deadline):
                 self._human_vengeance_until.pop(player_id, None)
                 self._human_direct_targets.pop(player_id, None)
         return True
@@ -4698,12 +4718,12 @@ class BotRuntime(object):
             return spotting.SPOT_MEMORY_SECONDS
         source_position = _position(source)
         target_position = target.get('position') or _position(target)
-        dx = _number(target_position[0]) - _number(source_position[0])
-        dz = _number(target_position[2]) - _number(source_position[2])
+        dx = target_position[0] - source_position[0]
+        dz = target_position[2] - source_position[2]
         if dx * dx + dz * dz <= 0.000001:
             return spotting.DESIGNATED_SPOT_MEMORY_SECONDS
         bearing = math.atan2(dx, dz)
-        gun_yaw = _number(source.get('aim_yaw'), source.get('yaw'))
+        gun_yaw = source.get('aim_yaw', source.get('yaw', 0.0))
         if abs(_angle_delta(bearing, gun_yaw)) <= math.radians(5.0) + 1e-9:
             return spotting.DESIGNATED_SPOT_MEMORY_SECONDS
         return spotting.SPOT_MEMORY_SECONDS
@@ -4802,7 +4822,7 @@ class BotRuntime(object):
                     return source_view_range[0]
 
                 direct_targets = set()
-            elif _number(now) < float(self._human_vengeance_until.get(
+            elif now < float(self._human_vengeance_until.get(
                     source['id'], 0.0)):
                 direct_targets = set(self._human_direct_targets.get(
                     source['id'], ()))
@@ -4836,11 +4856,11 @@ class BotRuntime(object):
                 team_visibility[key] = True
                 remembered = {
                     'position': _position(target),
-                    'x': _number(target.get('x')),
-                    'y': _number(target.get('y')),
-                    'z': _number(target.get('z')),
-                    'yaw': _number(target.get('yaw')),
-                    'speed': _number(target.get('speed')),
+                    'x': target.get('x', 0.0),
+                    'y': target.get('y', 0.0),
+                    'z': target.get('z', 0.0),
+                    'yaw': target.get('yaw', 0.0),
+                    'speed': target.get('speed', 0.0),
                 }
                 self._visible_target_poses[key] = remembered
                 entry[2].update(remembered)
@@ -4876,11 +4896,11 @@ class BotRuntime(object):
             if target['fresh_visible']:
                 remembered = {
                     'position': _position(target),
-                    'x': _number(target.get('x')),
-                    'y': _number(target.get('y')),
-                    'z': _number(target.get('z')),
-                    'yaw': _number(target.get('yaw')),
-                    'speed': _number(target.get('speed')),
+                    'x': target.get('x', 0.0),
+                    'y': target.get('y', 0.0),
+                    'z': target.get('z', 0.0),
+                    'yaw': target.get('yaw', 0.0),
+                    'speed': target.get('speed', 0.0),
                 }
                 self._visible_target_poses[key] = remembered
                 target.update(remembered)
@@ -5230,18 +5250,19 @@ class BotRuntime(object):
         for bot_id, raw in self.states.items():
             if bot_id == source.get('id'):
                 continue
-            speed = (_number(raw.get('speed'))
+            speed = (raw.get('speed', 0.0)
                      if raw.get('alive', True) else 0.0)
+            yaw = raw.get('yaw', 0.0)
             result.append({
                 'id': bot_id, 'position': _position(raw),
-                'team': int(_number(raw.get('team'))),
-                'yaw': _number(raw.get('yaw')),
+                'team': int(raw.get('team', 0)),
+                'yaw': yaw,
                 'velocity': (
-                    math.sin(_number(raw.get('yaw'))) * speed,
+                    math.sin(yaw) * speed,
                     0.0,
-                    math.cos(_number(raw.get('yaw'))) * speed),
-                'half_length': _number(raw.get('half_length'), 3.5),
-                'half_width': _number(raw.get('half_width'), 1.7),
+                    math.cos(yaw) * speed),
+                'half_length': raw.get('half_length', 3.5),
+                'half_width': raw.get('half_width', 1.7),
             })
         return result
 
@@ -5255,16 +5276,16 @@ class BotRuntime(object):
             body['position'] = _position(raw)
             bodies[raw['id']] = body
         for bot_id, raw in self.states.items():
-            yaw = _number(raw.get('yaw'))
-            speed = (_number(raw.get('speed'))
+            yaw = raw.get('yaw', 0.0)
+            speed = (raw.get('speed', 0.0)
                      if raw.get('alive', True) else 0.0)
             bodies[bot_id] = {
                 'id': bot_id, 'position': _position(raw), 'yaw': yaw,
-                'team': int(_number(raw.get('team'))),
+                'team': int(raw.get('team', 0)),
                 'velocity': (math.sin(yaw) * speed, 0.0,
                              math.cos(yaw) * speed),
-                'half_length': _number(raw.get('half_length'), 3.5),
-                'half_width': _number(raw.get('half_width'), 1.7),
+                'half_length': raw.get('half_length', 3.5),
+                'half_width': raw.get('half_width', 1.7),
             }
         return bodies, tank_collision.build_spatial_index(bodies)
 
@@ -5275,7 +5296,7 @@ class BotRuntime(object):
             if state is None:
                 return False
             if isinstance(position, dict):
-                point = _position(position)
+                point = _boundary_point(position)
             else:
                 point = (_number(position[0]), _number(position[1]),
                          _number(position[2]))
@@ -5330,18 +5351,18 @@ class BotRuntime(object):
         diary = self._flip_diary.get(bot_id)
         if diary is None:
             self._flip_diary[bot_id] = {
-                'dir': direction, 'changed': _number(now), 'logged': -10.0}
+                'dir': direction, 'changed': now, 'logged': -10.0}
             return False
         previous = diary['dir']
         if direction == previous:
             return False
-        elapsed = _number(now) - diary['changed']
+        elapsed = now - diary['changed']
         diary['dir'] = direction
-        diary['changed'] = _number(now)
+        diary['changed'] = now
         if (direction == 0 or previous == 0 or elapsed > 2.0 or
-                _number(now) - diary['logged'] < 1.0):
+                now - diary['logged'] < 1.0):
             return False
-        diary['logged'] = _number(now)
+        diary['logged'] = now
         verdict = 'none'
         if isinstance(motion_probe, dict):
             verdict = 'clear=%s collision=%s deferred=%s' % (
@@ -5351,7 +5372,7 @@ class BotRuntime(object):
         print('[BOT FLIP] id=%s reversed %+d->%+d after %.2fs at '
               '(%.1f,%.1f) path_clear=%s probe=%s' % (
                   bot_id, previous, direction, elapsed,
-                  _number(state.get('x')), _number(state.get('z')),
+                  state.get('x', 0.0), state.get('z', 0.0),
                   bool(path_clear), verdict))
         return True
 
@@ -5369,8 +5390,8 @@ class BotRuntime(object):
         camera = self._camera_position
         if camera is None:
             return 0
-        dx = _number(state.get('x')) - camera[0]
-        dz = _number(state.get('z')) - camera[2]
+        dx = state.get('x', 0.0) - camera[0]
+        dz = state.get('z', 0.0) - camera[2]
         distance_sq = dx * dx + dz * dz
         if distance_sq <= DETAIL_NEAR_METRES * DETAIL_NEAR_METRES:
             return 0
@@ -5415,9 +5436,9 @@ class BotRuntime(object):
             sine = math.sin(float(yaw))
             cosine = math.cos(float(yaw))
             end = (
-                _number(position[0]) + sine * distance,
-                _number(position[1]),
-                _number(position[2]) + cosine * distance,
+                position[0] + sine * distance,
+                position[1],
+                position[2] + cosine * distance,
             )
             hazard_mask = BAKED_FATAL_HAZARDS
             if not allow_shallow:
@@ -5443,17 +5464,17 @@ class BotRuntime(object):
                 (not allow_ungrounded and not state.get(
                     'grounded_once', False))):
             return False
-        yaw = _number(state.get('yaw'))
-        x = _number(state.get('x'))
-        z = _number(state.get('z'))
+        yaw = state['yaw']
+        x = state['x']
+        z = state['z']
         tier = self._detail_tier(state)
         travel = SLOPE_SAMPLE_METRES[tier]
         turn = SLOPE_SAMPLE_RADIANS[tier]
         marker = state.get('pose_sample')
         if (isinstance(marker, (list, tuple)) and len(marker) == 3 and
-                abs(x - _number(marker[0])) < travel and
-                abs(z - _number(marker[1])) < travel and
-                abs(yaw - _number(marker[2])) < turn):
+                abs(x - marker[0]) < travel and
+                abs(z - marker[1]) < travel and
+                abs(yaw - marker[2]) < turn):
             return False
 
         def probe(sample_x, sample_z, hint):
@@ -5464,15 +5485,14 @@ class BotRuntime(object):
             finally:
                 self._probe_finished(3, probe_started)
 
-        suspension_pitch = _number(state.get('suspension_pitch'))
-        terrain_pitch = _number(
-            state.get('terrain_pitch'),
-            _number(state.get('pitch')) - suspension_pitch)
+        suspension_pitch = state.get('suspension_pitch', 0.0)
+        terrain_pitch = state.get(
+            'terrain_pitch', state.get('pitch', 0.0) - suspension_pitch)
         pitch, roll = slope_pose(
-            probe, (x, _number(state.get('y')), z), yaw,
-            _number(state.get('half_length'), 3.5),
-            _number(state.get('half_width'), 1.7),
-            terrain_pitch, _number(state.get('roll')))
+            probe, (x, state['y'], z), yaw,
+            state.get('half_length', 3.5),
+            state.get('half_width', 1.7),
+            terrain_pitch, state.get('roll', 0.0))
         state['terrain_pitch'] = pitch
         state['pitch'] = pitch + suspension_pitch
         state['roll'] = roll
@@ -5556,12 +5576,12 @@ class BotRuntime(object):
 
     def _apply_bot_fall_damage(self, state, impact_speed):
         """Apply the shared landing law to one hidden-worker Bot."""
-        maximum = max(1, int(_number(
-            state.get('max_health'), state.get('health', 1))))
+        maximum = max(1, int(
+            state.get('max_health', state.get('health', 1))))
         damage = vehicle_physics.fall_damage(maximum, impact_speed)
         if damage <= 0:
             return 0
-        health = max(0, int(_number(state.get('health'), maximum)) - damage)
+        health = max(0, int(state.get('health', maximum)) - damage)
         state['health'] = health
         state['display_health'] = health
         state['alive'] = health > 0
@@ -5587,18 +5607,17 @@ class BotRuntime(object):
 
     def _apply_bot_landing_impact(self, state, vertical_speed):
         """Combine retained lateral velocity with the vertical impact."""
-        lateral_x = _number(state.get('air_lateral_x'))
-        lateral_z = _number(state.get('air_lateral_z'))
+        lateral_x = state.get('air_lateral_x', 0.0)
+        lateral_z = state.get('air_lateral_z', 0.0)
         lateral_speed = math.sqrt(
             lateral_x * lateral_x + lateral_z * lateral_z)
         if lateral_speed > 0.01:
             state['slide_speed'] = max(
-                _number(state.get('slide_speed')), lateral_speed)
+                state.get('slide_speed', 0.0), lateral_speed)
         state['air_lateral_x'] = 0.0
         state['air_lateral_z'] = 0.0
         impact_speed = math.sqrt(
-            _number(vertical_speed) * _number(vertical_speed) +
-            lateral_speed * lateral_speed)
+            vertical_speed * vertical_speed + lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
 
     def _update_vertical_motion(self, state, step, tick_pose=None,
@@ -5610,10 +5629,9 @@ class BotRuntime(object):
         # the bot down in one tick.
         ground = centre if centre is not None else highest
         if ground is not None:
-            speed = abs(_number(state.get('speed')))
+            speed = abs(state['speed'])
             snap_gap = vehicle_physics.ground_follow_gap(
-                _number(state.get('speed')),
-                _number(state.get('last_drive_pitch')), step)
+                state['speed'], state.get('last_drive_pitch', 0.0), step)
             max_climb = max(0.6, speed * step * 2.5)
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
@@ -5641,12 +5659,12 @@ class BotRuntime(object):
                 self._turn_speeds[state['id']] = 0.0
                 self._invalidate_realised_motion(
                     state['id'],
-                    (_number(state.get('yaw')) if attempted_yaw is None
+                    (state['yaw'] if attempted_yaw is None
                      else attempted_yaw))
                 return True
             elif (state['y'] <= ground or
                   (com_gap <= snap_gap and not state.get('airborne', False))):
-                impact_speed = (_number(state.get('vertical_speed'))
+                impact_speed = (state.get('vertical_speed', 0.0)
                                 if state.get('airborne', False) else 0.0)
                 if state['y'] < ground:
                     rise = ground - state['y']
@@ -5661,13 +5679,13 @@ class BotRuntime(object):
                     self._apply_bot_landing_impact(state, impact_speed)
             else:
                 if not state.get('airborne', False):
-                    pitch = _number(state.get('last_drive_pitch'))
+                    pitch = state.get('last_drive_pitch', 0.0)
                     state['vertical_speed'] = (
                         vehicle_physics.launch_vertical_speed(
-                            _number(state.get('speed')), pitch))
+                            state['speed'], pitch))
                 state['airborne'] = True
                 substeps = min(8, max(
-                    1, int(abs(_number(state.get('vertical_speed')) * step) /
+                    1, int(abs(state.get('vertical_speed', 0.0) * step) /
                            0.5) + 1))
                 sub_step = step / float(substeps)
                 for unused_step in range(substeps):
@@ -5686,8 +5704,8 @@ class BotRuntime(object):
             if not state.get('airborne', False):
                 state['vertical_speed'] = (
                     vehicle_physics.launch_vertical_speed(
-                        _number(state.get('speed')),
-                        _number(state.get('last_drive_pitch'))))
+                        state['speed'],
+                        state.get('last_drive_pitch', 0.0)))
             state['airborne'] = True
             state['vertical_speed'] -= vehicle_physics.GRAVITY * step
             state['y'] += state['vertical_speed'] * step
@@ -5736,15 +5754,14 @@ class BotRuntime(object):
             if len(bounds) != 4:
                 return None
             minimum_x, minimum_z, maximum_x, maximum_z = bounds
-            x = float(position[0])
-            z = float(position[2])
-            hull_yaw = float(yaw)
-            half_length = max(0.5, float(state.get('half_length', 3.5)))
-            half_width = max(0.3, float(state.get('half_width', 1.7)))
-            values = bounds + (x, z, hull_yaw, half_length, half_width)
+            x = position[0]
+            z = position[2]
+            hull_yaw = yaw
+            half_length = max(0.5, state.get('half_length', 3.5))
+            half_width = max(0.3, state.get('half_width', 1.7))
             if (minimum_x >= maximum_x or minimum_z >= maximum_z or
                     any(math.isnan(value) or math.isinf(value)
-                        for value in values)):
+                        for value in bounds)):
                 return None
         except (KeyError, TypeError, ValueError, IndexError, OverflowError):
             return None
@@ -5774,13 +5791,13 @@ class BotRuntime(object):
     def _route_lane_binding(self, bot_state, group_key):
         """Lease the least-used stable lane without moving existing peers."""
         if bot_state.get('_route_lane_group') == group_key:
-            return _number(bot_state.get('_route_lane_desired'))
+            return bot_state.get('_route_lane_desired', 0.0)
         counts = dict((offset, 0) for offset in ROUTE_LANE_OFFSETS)
         for peer in self.states.values():
             if (peer is bot_state or not peer.get('alive', True) or
                     peer.get('_route_lane_group') != group_key):
                 continue
-            offset = _number(peer.get('_route_lane_desired'))
+            offset = peer.get('_route_lane_desired', 0.0)
             if offset in counts:
                 counts[offset] += 1
         desired = min(
@@ -5799,8 +5816,8 @@ class BotRuntime(object):
         bot_state = self.states.get(int(bot_id))
         grid = getattr(self.navigator, 'grid', None)
         selected = tuple(selected)
-        dx = _number(selected[0]) - _number(position[0])
-        dz = _number(selected[2]) - _number(position[2])
+        dx = selected[0] - position[0]
+        dz = selected[2] - position[2]
         if (bot_state is None or grid is None or
                 math.hypot(dx, dz) < 0.25):
             return selected
@@ -5811,7 +5828,7 @@ class BotRuntime(object):
         )
         desired = self._route_lane_binding(bot_state, group_key)
         segment_key = group_key + (
-            int(_number(strategic.get('route_index'), 0)),)
+            int(strategic.get('route_index', 0)),)
         if bot_state.get('_route_lane_segment') != segment_key:
             bot_state['_route_lane_segment'] = segment_key
             bot_state['_route_lane_offset'] = desired
@@ -5826,13 +5843,13 @@ class BotRuntime(object):
 
         route_anchor = strategic.get('route_anchor')
         try:
-            anchor_x = _number(route_anchor[0])
-            anchor_z = _number(route_anchor[2])
+            anchor_x = route_anchor[0]
+            anchor_z = route_anchor[2]
         except (TypeError, IndexError, KeyError):
-            anchor_x = _number(_value(route_anchor, 'x', position[0]))
-            anchor_z = _number(_value(route_anchor, 'z', position[2]))
-        route_dx = _number(goal[0]) - anchor_x
-        route_dz = _number(goal[2]) - anchor_z
+            anchor_x = _value(route_anchor, 'x', position[0])
+            anchor_z = _value(route_anchor, 'z', position[2])
+        route_dx = goal[0] - anchor_x
+        route_dz = goal[2] - anchor_z
         route_length = math.hypot(route_dx, route_dz)
         if route_length < 0.25:
             route_dx, route_dz = dx, dz
@@ -5853,15 +5870,15 @@ class BotRuntime(object):
                 ground, segment_hazard, point_hazard, dry_segment)):
             return selected
         hazard_mask = BAKED_FATAL_HAZARDS | BAKED_SHALLOW_WATER
-        current_offset = _number(bot_state.get('_route_lane_offset'))
+        current_offset = bot_state.get('_route_lane_offset', 0.0)
         for offset in _route_lane_fallbacks(current_offset):
             if abs(offset) < 1.0e-9:
                 bot_state['_route_lane_offset'] = 0.0
                 return selected
-            candidate_x = _number(selected[0]) + lateral_x * offset
-            candidate_z = _number(selected[2]) + lateral_z * offset
-            candidate_dx = candidate_x - _number(position[0])
-            candidate_dz = candidate_z - _number(position[2])
+            candidate_x = selected[0] + lateral_x * offset
+            candidate_z = selected[2] + lateral_z * offset
+            candidate_dx = candidate_x - position[0]
+            candidate_dz = candidate_z - position[2]
             # A short local A* target can sit closer than the requested lane
             # offset. Never turn that proved forward step into a point behind
             # the hull or inside LocalDriver's arrival radius: either result
@@ -5871,7 +5888,7 @@ class BotRuntime(object):
                     dx * candidate_dx + dz * candidate_dz <= 1.0e-9):
                 continue
             candidate_y = ground(
-                candidate_x, candidate_z, _number(selected[1]))
+                candidate_x, candidate_z, selected[1])
             if candidate_y is None:
                 continue
             candidate = (candidate_x, candidate_y, candidate_z)
@@ -5904,7 +5921,7 @@ class BotRuntime(object):
         if self.navigator is None:
             state['navigation_stop_at_target'] = stop_at_goal
             return goal
-        route_index = int(_number(strategic.get('route_index'), 0))
+        route_index = int(strategic.get('route_index', 0))
         if mode == 'base_defense':
             path_key = (
                 'local', int(bot_id), 'base_defense',
@@ -5941,7 +5958,7 @@ class BotRuntime(object):
         cell_size = max(1.0, _number(getattr(grid, 'cell_size', 1.0), 1.0))
         lookahead_distance = max(
             cell_size * 2.0,
-            abs(_number(state.get('speed'))) *
+            abs(state.get('speed', 0.0)) *
             BAKED_MOTION_LOOKAHEAD_SECONDS)
         direct = getattr(grid, 'dry_segment_clear', None)
         now = state.get('now', 0.0)
@@ -5980,19 +5997,19 @@ class BotRuntime(object):
         for raw in players or ():
             if not isinstance(raw, dict) or raw.get('id') is None:
                 continue
-            yaw = _number(raw.get('yaw'))
+            yaw = raw.get('yaw', 0.0)
             alive = bool(raw.get('alive', True))
-            speed = _number(raw.get('speed')) if alive else 0.0
+            speed = raw.get('speed', 0.0) if alive else 0.0
             shape = self._player_collision_profile(raw)['shape']
             result.append({
                 'id': HUMAN_TARGET_ID_BASE + int(raw['id']),
                 'position': _position(raw),
-                'team': int(_number(raw.get('team'))), 'yaw': yaw,
+                'team': int(raw.get('team', 0)), 'yaw': yaw,
                 'alive': alive,
                 'velocity': (math.sin(yaw) * speed, 0.0,
                              math.cos(yaw) * speed),
-                'half_length': _number(shape[1]),
-                'half_width': _number(shape[0]),
+                'half_length': shape[1],
+                'half_width': shape[0],
             })
         return result
 
@@ -6455,8 +6472,8 @@ class BotRuntime(object):
                                      apply_correction=True):
         """Apply one resolver response through the canonical bot motion path."""
         delta_x, delta_z = result['delta_velocity']
-        yaw = _number(state.get('yaw'))
-        speed = _number(state.get('speed'))
+        yaw = state['yaw']
+        speed = state['speed']
         forward_impulse = (delta_x * math.sin(yaw) +
                            delta_z * math.cos(yaw))
         applied_forward = 0.0
@@ -6465,9 +6482,9 @@ class BotRuntime(object):
                                abs(forward_impulse) >= abs(speed)
                                else forward_impulse)
             state['speed'] = speed + applied_forward
-        push_x = (_number(state.get('push_x')) + delta_x -
+        push_x = (state.get('push_x', 0.0) + delta_x -
                   applied_forward * math.sin(yaw))
-        push_z = (_number(state.get('push_z')) + delta_z -
+        push_z = (state.get('push_z', 0.0) + delta_z -
                   applied_forward * math.cos(yaw))
         correction_x, correction_z = (result['correction'] if
                                       apply_correction else (0.0, 0.0))
@@ -6488,9 +6505,9 @@ class BotRuntime(object):
             # one axial endpoint and cannot recover that missing distance.
             relative_yaw = contact_yaw - yaw
             hull_support = (
-                max(0.5, _number(state.get('half_length'), 3.5)) *
+                max(0.5, state.get('half_length', 3.5)) *
                 abs(math.cos(relative_yaw)) +
-                max(0.3, _number(state.get('half_width'), 1.7)) *
+                max(0.3, state.get('half_width', 1.7)) *
                 abs(math.sin(relative_yaw)))
             separation_distance = max(
                 1.0, move_distance + hull_support)
@@ -6845,26 +6862,26 @@ class BotRuntime(object):
         tanks = []
         for state in self._ordered_states():
             alive = bool(state.get('alive', True))
-            yaw = _number(state.get('yaw'))
-            speed = _number(state.get('speed')) if alive else 0.0
+            yaw = state['yaw']
+            speed = state['speed'] if alive else 0.0
             tanks.append({
                 'id': int(state['id']), 'kind': 'bot',
                 'network_id': int(state['id']), 'alive': alive,
-                'team': int(_number(state.get('team'))),
+                'team': int(state.get('team', 0)),
                 'vehicle': str(state.get('vehicle') or ''),
-                'x': _number(state.get('x')), 'y': _number(state.get('y')),
-                'z': _number(state.get('z')), 'yaw': yaw,
-                'mass': _number(state.get('mass'), 25000.0),
+                'x': state['x'], 'y': state['y'],
+                'z': state['z'], 'yaw': yaw,
+                'mass': state.get('mass', 25000.0),
                 'shape': state.get('collision_shape'),
                 'ram_profile': state.get('ram_profile'),
                 'vx': (math.sin(yaw) * speed +
-                       _number(state.get('push_x'))),
-                'vy': _number(state.get(
-                    'ram_vy', state.get('vertical_speed'))),
+                       state.get('push_x', 0.0)),
+                'vy': state.get(
+                    'ram_vy', state.get('vertical_speed', 0.0)),
                 'vz': (math.cos(yaw) * speed +
-                       _number(state.get('push_z'))),
-                'pitch': _number(state.get('pitch')),
-                'roll': _number(state.get('roll')),
+                       state.get('push_z', 0.0)),
+                'pitch': state.get('pitch', 0.0),
+                'roll': state.get('roll', 0.0),
             })
         for raw in players or ():
             if not isinstance(raw, dict) or raw.get('id') is None:
@@ -6875,20 +6892,20 @@ class BotRuntime(object):
                 continue
             profile = self._player_collision_profile(raw)
             alive = bool(raw.get('alive', True))
-            yaw = _number(raw.get('yaw'))
-            speed = _number(raw.get('speed')) if alive else 0.0
+            yaw = raw.get('yaw', 0.0)
+            speed = raw.get('speed', 0.0) if alive else 0.0
             tanks.append({
                 'id': player_id, 'kind': 'player',
                 'network_id': int(raw['id']), 'alive': alive,
-                'team': int(_number(raw.get('team'))),
+                'team': int(raw.get('team', 0)),
                 'vehicle': str(raw.get('vehicle') or ''),
                 # The human client owns its own contact impulse; taking it
                 # here too would make an enemy pair shake.  A friendly bot is
                 # the exception: it owns the velocity response so the local
                 # player does not inherit the teammate's lateral momentum.
                 'impulse': False,
-                'x': _number(raw.get('x')), 'y': _number(raw.get('y')),
-                'z': _number(raw.get('z')), 'yaw': yaw,
+                'x': raw.get('x', 0.0), 'y': raw.get('y', 0.0),
+                'z': raw.get('z', 0.0), 'yaw': yaw,
                 'mass': profile['mass'], 'shape': profile['shape'],
                 'ram_profile': profile['ram_profile'],
                 'vx': math.sin(yaw) * speed,
@@ -6901,8 +6918,7 @@ class BotRuntime(object):
         for tank in tanks:
             shape = tank.get('shape') or tank_collision.DEFAULT_SHAPE
             radius = math.sqrt(
-                _number(shape[0]) * _number(shape[0]) +
-                _number(shape[1]) * _number(shape[1]))
+                shape[0] * shape[0] + shape[1] * shape[1])
             maximum_radius = max(maximum_radius, radius)
             collision_bodies[tank['id']] = {
                 'position': (tank['x'], tank['y'], tank['z'])}
@@ -6967,9 +6983,9 @@ class BotRuntime(object):
                 own, others, **resolve_kwargs)
             self._ram_cooldowns = result['cooldowns']
             current_ram_contacts.update(result['contacts'])
-            if (any(abs(_number(value)) > 0.0001
+            if (any(abs(value) > 0.0001
                     for value in result['delta_velocity']) or
-                    any(abs(_number(value)) > 0.0001
+                    any(abs(value) > 0.0001
                         for value in result['correction'])):
                 # Another hull owns this tank's lack of progress this tick.
                 contacted_bot_ids.add(int(state['id']))
@@ -6987,31 +7003,31 @@ class BotRuntime(object):
             return (0.0, 0.0, 0.0)
         raw = target.get('velocity')
         if isinstance(raw, (list, tuple)) and len(raw) >= 3:
-            return (_number(raw[0]), _number(raw[1]), _number(raw[2]))
-        yaw = _number(target.get('yaw'))
-        speed = _number(target.get('speed'))
+            return (raw[0], raw[1], raw[2])
+        yaw = target.get('yaw', 0.0)
+        speed = target.get('speed', 0.0)
         return (math.sin(yaw) * speed, 0.0, math.cos(yaw) * speed)
 
     @staticmethod
     def _exact_shot_direction(state, descriptor):
         """Return the current barrel ray in the stabilised world basis."""
         try:
-            yaw = _number(state.get('yaw'))
-            pitch = _number(state.get('pitch'))
-            roll = _number(state.get('roll'))
+            yaw = state.get('yaw', 0.0)
+            pitch = state.get('pitch', 0.0)
+            roll = state.get('roll', 0.0)
             if abs(pitch) <= 1.0e-12 and abs(roll) <= 1.0e-12:
                 flat_yaw = (
-                    _wrapped(yaw + _number(state.get('turret_yaw')))
+                    _wrapped(yaw + state.get('turret_yaw', 0.0))
                     if 'turret_yaw' in state else
-                    _number(state.get('aim_yaw'), yaw))
+                    state.get('aim_yaw', yaw))
                 return ai_driver.barrel_direction(
-                    flat_yaw, _number(state.get('gun_pitch')))
+                    flat_yaw, state.get('gun_pitch', 0.0))
             turret_yaw = (
-                _number(state.get('turret_yaw'))
+                state.get('turret_yaw', 0.0)
                 if 'turret_yaw' in state else
-                _angle_delta(_number(state.get('aim_yaw'), yaw), yaw))
+                _angle_delta(state.get('aim_yaw', yaw), yaw))
             local_direction = ai_driver.barrel_direction(
-                turret_yaw, _number(state.get('gun_pitch')))
+                turret_yaw, state.get('gun_pitch', 0.0))
             return shot_geometry.transform_vehicle_vector(
                 local_direction, yaw, pitch, roll)
         except (KeyError, TypeError, ValueError, OverflowError):
@@ -7055,8 +7071,8 @@ class BotRuntime(object):
     @staticmethod
     def _dispersal_base_direction(state, descriptor):
         """Override the legacy flat basis only when hull attitude requires it."""
-        if (abs(_number(state.get('pitch'))) <= 1.0e-12 and
-                abs(_number(state.get('roll'))) <= 1.0e-12):
+        if (abs(state.get('pitch', 0.0)) <= 1.0e-12 and
+                abs(state.get('roll', 0.0)) <= 1.0e-12):
             return None
         return BotRuntime._exact_shot_direction(state, descriptor)
 
@@ -7065,18 +7081,17 @@ class BotRuntime(object):
         try:
             return shot_geometry.world_direction_to_local_gun_angles(
                 ai_driver.barrel_direction(world_yaw, world_pitch),
-                _number(state.get('yaw')),
-                _number(state.get('pitch')),
-                _number(state.get('roll')))
+                state.get('yaw', 0.0),
+                state.get('pitch', 0.0),
+                state.get('roll', 0.0))
         except (TypeError, ValueError, OverflowError):
             return None
 
     @staticmethod
     def _terrain_pitch(state):
-        correction = _number(state.get('suspension_pitch'))
-        return _number(
-            state.get('terrain_pitch'),
-            _number(state.get('pitch')) - correction)
+        correction = state.get('suspension_pitch', 0.0)
+        return state.get(
+            'terrain_pitch', state.get('pitch', 0.0) - correction)
 
     @staticmethod
     def _static_gun_value(descriptor, name):
@@ -7108,7 +7123,7 @@ class BotRuntime(object):
         unused_devices, destroyed, unused_crew, unused_yellow = \
             _critical_parts(state)
         if moving is None:
-            moving = int(_number(state.get('movement_dir'))) != 0
+            moving = int(state.get('movement_dir', 0)) != 0
         if hull_aiming.static_yaw_locked(
                 static_yaw,
                 engine_destroyed='engineHealth' in destroyed,
@@ -7126,9 +7141,9 @@ class BotRuntime(object):
             cls, state, descriptor, direction, terrain_pitch, correction):
         try:
             local = shot_geometry.world_direction_to_local_gun_angles(
-                direction, _number(state.get('yaw')),
+                direction, state.get('yaw', 0.0),
                 terrain_pitch + correction,
-                _number(state.get('roll')))
+                state.get('roll', 0.0))
         except (TypeError, ValueError, OverflowError):
             return None
         limits = cls._effective_gun_pitch_limits(
@@ -7532,7 +7547,7 @@ class BotRuntime(object):
             if not isinstance(value, dict):
                 return None
             try:
-                aim = _point(value['aim_position'])
+                aim = _boundary_point(value['aim_position'])
                 yaw = float(value['yaw'])
                 pitch = float(value['pitch'])
                 flight_time = float(value['flight_time'])
@@ -7575,7 +7590,7 @@ class BotRuntime(object):
         fresh = bool(
             force or cached is None or cached[0] != signature or
             (self._refresh_control_this_step and
-             _number(now) + 1.0e-9 >= cached[1]))
+             now + 1.0e-9 >= cached[1]))
         if fresh:
             solution = self._ballistic_solution(
                 state, target, descriptor, shell_index, now)
@@ -7598,8 +7613,7 @@ class BotRuntime(object):
             # waypoint produces the reported 20-degree nose-down barrel.
             # Preserve the last safe world bearing and return to a neutral
             # horizontal rest without paying for an unused shot-origin solve.
-            desired_yaw = _number(
-                state.get('aim_yaw'), state.get('yaw'))
+            desired_yaw = state.get('aim_yaw', state.get('yaw', 0.0))
             world_pitch = 0.0
             horizontal = 0.0
         else:
@@ -7617,15 +7631,15 @@ class BotRuntime(object):
                     state, descriptor, state.get('shell_index', 0))
             if origin is None:
                 state['gun_aligned'] = False
-                return _number(state.get('aim_yaw')), 0.0
+                return state.get('aim_yaw', 0.0), 0.0
             dx = aim_position[0] - origin[0]
             dz = aim_position[2] - origin[2]
             horizontal = math.sqrt(dx * dx + dz * dz)
-            desired_yaw = (_number(ballistic_solution.get('yaw'))
+            desired_yaw = (ballistic_solution.get('yaw', 0.0)
                            if isinstance(ballistic_solution, dict) else
                            (math.atan2(dx, dz) if horizontal > 0.1
-                            else _number(state.get('yaw'))))
-            world_pitch = (_number(ballistic_solution.get('pitch'))
+                            else state.get('yaw', 0.0)))
+            world_pitch = (ballistic_solution.get('pitch', 0.0)
                            if isinstance(ballistic_solution, dict) else
                            -math.atan2(
                                (aim_position[1] + 1.0) - origin[1],
@@ -7649,12 +7663,11 @@ class BotRuntime(object):
                            if gun_state is not None else {})
         turret = _value(descriptor, 'turret', {}) or {}
         turret_speed = (_rotation_speed(turret, 0.5) *
-                        max(0.0, _number(
-                            modifier_bundle.get('crew_factor'), 1.0)) *
+                        max(0.0, modifier_bundle.get('crew_factor', 1.0)) *
                         _critical_factor(
                             state, descriptor, 'turret_speed'))
         turret_step = turret_speed * step
-        current_relative = _number(state.get('turret_yaw'))
+        current_relative = state.get('turret_yaw', 0.0)
         turret_difference = _angle_delta(desired_relative, current_relative)
         current_relative = _wrapped(
             current_relative + max(-turret_step,
@@ -7673,7 +7686,7 @@ class BotRuntime(object):
         pitch_limits = self._effective_gun_pitch_limits(
             state, descriptor, current_relative)
         if pitch_limits is None:
-            desired_pitch = _number(state.get('gun_pitch'))
+            desired_pitch = state.get('gun_pitch', 0.0)
         else:
             desired_pitch = max(
                 pitch_limits[0], min(pitch_limits[1], desired_pitch))
@@ -7681,10 +7694,9 @@ class BotRuntime(object):
         static_pitch = self._static_gun_value(descriptor, 'staticPitch')
         if pitch_limits is not None:
             state['gun_pitch'] = hull_aiming.gun_pitch_step(
-                _number(state.get('gun_pitch')), raw_pitch, static_pitch,
+                state.get('gun_pitch', 0.0), raw_pitch, static_pitch,
                 _rotation_speed(gun, 0.35) * max(
-                    0.0, _number(modifier_bundle.get(
-                        'gun_rotation_factor'), 1.0)),
+                    0.0, modifier_bundle.get('gun_rotation_factor', 1.0)),
                 step, turret_rotation_time, pitch_limits)
         state['desired_gun_pitch'] = desired_pitch
         world_angles = self._world_barrel_angles(state, descriptor)
@@ -8794,9 +8806,9 @@ class BotRuntime(object):
         if (not self.is_authority() or self.adapter is None or
                 self.finished):
             return []
-        elapsed_input = max(0.0, _number(dt))
+        elapsed_input = max(0.0, float(dt))
         self._accumulator += elapsed_input
-        now = _number(now)
+        now = float(now)
         navigator_begin = getattr(self.navigator, 'begin_frame', None)
         navigator_end = getattr(self.navigator, 'end_frame', None)
         if callable(navigator_begin):
@@ -8992,7 +9004,7 @@ class BotRuntime(object):
             # this Bot's ordinary decision/aim/fire work. Parse once only for
             # that stable portion of this authority tick.
             _cache_critical_parts_for_tick(state)
-            tick_siege_yaw = _number(state.get('yaw'))
+            tick_siege_yaw = state['yaw']
             siege_motion_locked = int(state.get(
                 'siege_state', siege_mechanics.DISABLED)) in (
                     siege_mechanics.SWITCHING_ON,
@@ -9014,7 +9026,7 @@ class BotRuntime(object):
             decision_due = bool(
                 refresh_control and
                 (not decision_cache_valid or
-                 _number(now) >= decision_cache[1]))
+                 now >= decision_cache[1]))
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -9046,7 +9058,7 @@ class BotRuntime(object):
                 advisory = self._planner_corridor_clear(
                     position, sample_yaw, state.get('speed', 0.0),
                     wet_escape=(baked_shallow_escape or
-                                _number(state.get('_water_depth'), -1.0) >
+                                state.get('_water_depth', -1.0) >
                                 BOT_WATER_AVOID_DEPTH),
                     allow_shallow=(callable(controlled_shallow) and
                                    controlled_shallow(
@@ -9081,7 +9093,7 @@ class BotRuntime(object):
                     'fire_allowed': False,
                     'shell_index': int(state.get('shell_index', 0)),
                     'throttle': 0.0, 'turn': 0.0,
-                    'target_yaw': _number(state.get('yaw')),
+                    'target_yaw': state['yaw'],
                     'recovery_mode': 'physical_hold',
                     'movement_intent': False,
                 }
@@ -9097,7 +9109,7 @@ class BotRuntime(object):
                 decision_step = step
                 if decision_cache is not None:
                     decision_step = max(
-                        step, _number(now) - decision_cache[2])
+                        step, now - decision_cache[2])
                 detail_tier = self._detail_tier(state)
                 decision_horizon = (
                     DECISION_SECONDS * DECISION_TIER_FACTOR[detail_tier])
@@ -9107,7 +9119,7 @@ class BotRuntime(object):
                     if isinstance(server_order, dict) else None)
                 physics_params = self._physics_params_for(state['id'])
                 if (physics_params is not None and
-                        abs(_number(state.get('speed'))) > 0.35 and
+                        abs(state['speed']) > 0.35 and
                         expected_mode not in ('route', 'advance')):
                     previous_command = (
                         decision_cache[3] if decision_cache is not None else {})
@@ -9116,7 +9128,7 @@ class BotRuntime(object):
                 decision_state = {
                     'id': state['id'], 'position': position,
                     'yaw': state['yaw'],
-                    'speed': abs(_number(state.get('speed'))),
+                    'speed': abs(state['speed']),
                     'dt': decision_step, 'now': now,
                     'health': state['health'],
                     'max_health': state['max_health'],
@@ -9124,12 +9136,10 @@ class BotRuntime(object):
                     'neighbours': self._neighbours_for(
                         state, neighbours, traffic_index, traffic_bodies),
                     'velocity': (
-                        math.sin(_number(state.get('yaw'))) *
-                        _number(state.get('speed')), 0.0,
-                        math.cos(_number(state.get('yaw'))) *
-                        _number(state.get('speed'))),
-                    'half_length': _number(state.get('half_length'), 3.5),
-                    'half_width': _number(state.get('half_width'), 1.7),
+                        math.sin(state['yaw']) * state['speed'], 0.0,
+                        math.cos(state['yaw']) * state['speed']),
+                    'half_length': state.get('half_length', 3.5),
+                    'half_width': state.get('half_width', 1.7),
                     'stopping_distance': stopping_distance,
                     'decision_horizon': decision_horizon,
                 }
@@ -9175,10 +9185,10 @@ class BotRuntime(object):
             # accelerate in visible pulses. Preserve the planner's last valid
             # command until terrain/world collision gives a completed veto.
             command['throttle'] = max(
-                -1.0, min(1.0, _number(command.get('throttle'))))
+                -1.0, min(1.0, command.get('throttle', 0.0)))
             if decision_due:
                 self._decision_cache[state['id']] = (
-                    cache_key, decision_deadline, _number(now), raw_command,
+                    cache_key, decision_deadline, now, raw_command,
                     contacts, targets)
             # Preserve the old refresh point: in copied-physics mode, a later
             # bot observes poses integrated by earlier bots in this same tick.
@@ -9222,11 +9232,11 @@ class BotRuntime(object):
                 if fresh_visible:
                     remembered = {
                         'position': _position(observed_target),
-                        'x': _number(observed_target.get('x')),
-                        'y': _number(observed_target.get('y')),
-                        'z': _number(observed_target.get('z')),
-                        'yaw': _number(observed_target.get('yaw')),
-                        'speed': _number(observed_target.get('speed')),
+                        'x': observed_target.get('x', 0.0),
+                        'y': observed_target.get('y', 0.0),
+                        'z': observed_target.get('z', 0.0),
+                        'yaw': observed_target.get('yaw', 0.0),
+                        'speed': observed_target.get('speed', 0.0),
                     }
                     self._visible_target_poses[key] = remembered
                     observed_target.update(remembered)
@@ -9317,17 +9327,17 @@ class BotRuntime(object):
                     command['throttle'] = 0.0
                     command['turn'] = 0.0
                     command['movement_intent'] = False
-            throttle = max(-1.0, min(1.0, _number(command['throttle'])))
-            turn = max(-1.0, min(1.0, _number(command.get('turn'))))
+            throttle = max(-1.0, min(1.0, command['throttle']))
+            turn = max(-1.0, min(1.0, command.get('turn', 0.0)))
             aim_fallback = (target.get('position') if target is not None
                             else _position(state))
             aim_position = _point(command.get('aim_position'), aim_fallback)
-            aim_dx = aim_position[0] - _number(state.get('x'))
-            aim_dz = aim_position[2] - _number(state.get('z'))
+            aim_dx = aim_position[0] - state['x']
+            aim_dz = aim_position[2] - state['z']
             aim_distance = math.sqrt(aim_dx * aim_dx + aim_dz * aim_dz)
             desired_aim_yaw = (
                 math.atan2(aim_dx, aim_dz) if aim_distance > 0.1
-                else _number(state.get('yaw')))
+                else state['yaw'])
             gun_yaw_limits = self._gun_yaw_limits.get(state['id'])
             if gun_yaw_limits is None:
                 gun_yaw_limits = ai_driver.gun_yaw_limits(descriptor)
@@ -9372,7 +9382,7 @@ class BotRuntime(object):
             travel_sign = -1.0 if (
                 throttle < 0.0 or
                 (abs(throttle) <= 0.01 and
-                 _number(state.get('speed')) < 0.0)) else 1.0
+                 state['speed'] < 0.0)) else 1.0
             travel_yaw = (state['yaw'] if travel_sign > 0.0
                           else state['yaw'] + math.pi)
             attempted_yaws[state['id']] = travel_yaw
@@ -9386,7 +9396,7 @@ class BotRuntime(object):
                     1.0)
                 reactive_horizon = max(
                     baked_cell_size,
-                    abs(_number(state.get('speed'))) *
+                    abs(state['speed']) *
                     BAKED_MOTION_LOOKAHEAD_SECONDS)
             else:
                 reactive_horizon = None
@@ -9416,7 +9426,7 @@ class BotRuntime(object):
             pose_frozen = False
             settled_motion = bool(
                 abs(throttle) <= 0.01 and abs(turn) <= 0.01 and
-                abs(_number(state.get('speed'))) <= 0.02 and
+                abs(state['speed']) <= 0.02 and
                 state.get('grounded_once', False) and
                 not state.get('airborne', False))
             motion_probe_reusable = bool(
@@ -9443,10 +9453,9 @@ class BotRuntime(object):
                 isinstance(cached_motion_result, dict) and
                 self._probe_is_clear(cached_motion_result) and
                 (abs(throttle) > 0.01 or
-                 abs(_number(state.get('speed'))) > 0.0001 or
+                 abs(state['speed']) > 0.0001 or
                  abs(turn) > 0.01 or
-                 abs(_number(self._turn_speeds.get(
-                     state['id'], 0.0))) > 0.01))
+                 abs(self._turn_speeds.get(state['id'], 0.0)) > 0.01))
             catchup_motion_hold = bool(
                 not refresh_control and not motion_probe_reusable and
                 not catchup_motion_reprobe)
@@ -9485,16 +9494,16 @@ class BotRuntime(object):
                         not motion_probe.get('deferred', False) and
                         abs(_number(motion_probe.get('slope'))) <= 0.01 and
                         (abs(throttle) > 0.01 or
-                         abs(_number(state.get('speed'))) > 0.0001) and
+                         abs(state['speed']) > 0.0001) and
                         abs(turn) <= 0.01 and
-                        abs(_number(self._turn_speeds.get(
-                            state['id'], 0.0))) <= 0.01 and
+                        abs(self._turn_speeds.get(state['id'], 0.0)) <=
+                        0.01 and
                         not state.get('airborne', False)):
                     motion_probe = dict(motion_probe)
-                    receipt_speed = abs(_number(state.get('speed')))
+                    receipt_speed = abs(state['speed'])
                     if (throttle < 0.0 or
                             (abs(throttle) <= 0.01 and
-                             _number(state.get('speed')) < 0.0)):
+                             state['speed'] < 0.0)):
                         # Preserve reverse intent even when the copied hull is
                         # starting from exactly zero. ``-0.0 < 0`` is false
                         # and would select the forward hull extent.
@@ -9559,16 +9568,17 @@ class BotRuntime(object):
                         'yaw': travel_yaw,
                         'maximum_distance': maximum_probe_distance,
                         'probe_distance': min(
-                            20.0 if abs(_number(
-                                state.get('speed'))) > 5.0 else 15.0,
-                            _number(maximum_probe_distance, float('inf'))),
+                            20.0 if abs(state['speed']) > 5.0 else 15.0,
+                            (maximum_probe_distance
+                             if maximum_probe_distance is not None
+                             else float('inf'))),
                         # The generic rays begin at the hull origin. Reserve
                         # its admitted collision half-length before catch-up
                         # slices consume the remainder of that clear corridor.
                         'probe_leading': max(
-                            0.5, _number(state.get('half_length'), 3.5)),
+                            0.5, state.get('half_length', 3.5)),
                         'deadline': (
-                            _number(now)
+                            now
                             if receipt_pending
                             else _motion_probe_deadline(
                                 now, state['id'],
@@ -9623,7 +9633,7 @@ class BotRuntime(object):
                                    motion_probe is None or
                                    exact_motion_owns_collision or
                                    (abs(throttle) <= 0.01 and
-                                    abs(_number(state.get('speed'))) <=
+                                    abs(state['speed']) <=
                                     0.0001) or
                                    state.get('airborne', False)) else
                           self._probe_is_clear(motion_probe))
@@ -9667,9 +9677,9 @@ class BotRuntime(object):
                 turn_speed = (0.0 if siege_motion_locked else
                     vehicle_physics.traverse_step(
                         params, self._turn_speeds.get(state['id'], 0.0),
-                        turn, _number(state.get('speed')), step,
+                        turn, state['speed'], step,
                         drive_intent=throttle))
-                old_hull_yaw = _number(state.get('yaw'))
+                old_hull_yaw = state['yaw']
                 candidate_hull_yaw = old_hull_yaw + turn_speed * step
                 while candidate_hull_yaw > math.pi:
                     candidate_hull_yaw -= math.pi * 2.0
@@ -9692,7 +9702,7 @@ class BotRuntime(object):
                 attempted_yaws[state['id']] = committed_travel_yaw
                 committed_wet_escape = bool(
                     baked_shallow_escape or
-                    _number(state.get('_water_depth'), -1.0) >
+                    state.get('_water_depth', -1.0) >
                     BOT_WATER_AVOID_DEPTH)
                 # The planner cone belongs to the candidate fan, where the
                 # sampled yaw is the intended heading. The committed hull yaw
@@ -9725,7 +9735,7 @@ class BotRuntime(object):
                     path_clear = False
                     throttle = 0.0
                     state['movement_dir'] = 0
-                previous_speed = _number(state.get('speed'))
+                previous_speed = state['speed']
                 speed = (0.0 if siege_motion_locked else
                     vehicle_physics.longitudinal_step(
                         params, previous_speed, throttle,
@@ -9750,8 +9760,7 @@ class BotRuntime(object):
                     state.pop('destructible_contact_speed', None)
                 motion_status = 'clear'
                 resolved_motion = False
-                contact_speed = _number(state.get(
-                    'destructible_contact_speed'), speed)
+                contact_speed = state.get('destructible_contact_speed', speed)
                 contact_v0 = speed
                 if (path_clear and not pose_frozen and
                         abs(speed) > 0.0001 and
@@ -9842,15 +9851,15 @@ class BotRuntime(object):
                            pending_intent is not None or
                            pending_reproof is not None))
             command['_ballistic_solution'] = ballistic_solution
-            previous_turret_yaw = _number(state.get('turret_yaw'))
+            previous_turret_yaw = state.get('turret_yaw', 0.0)
             unused_desired_yaw, unused_horizontal = self._update_gun_aim(
                 state, command, target, step)
             turret_speed = abs(_angle_delta(
-                _number(state.get('turret_yaw')), previous_turret_yaw)) / max(
-                    step, 1.0e-9)
+                state.get('turret_yaw', 0.0), previous_turret_yaw)) / max(
+                step, 1.0e-9)
             gun_state.tick_dispersion(
-                step, abs(_number(state.get('speed'))),
-                abs(_number(self._turn_speeds.get(state['id'], 0.0))),
+                step, abs(state['speed']),
+                abs(self._turn_speeds.get(state['id'], 0.0)),
                 turret_speed,
                 _critical_factor(state, descriptor, 'dispersion'),
                 _critical_factor(state, descriptor, 'aim_time'))
@@ -9862,7 +9871,7 @@ class BotRuntime(object):
                 state, gun_state, ammo_state, reload_factor, descriptor,
                 target, ballistic_solution, step, destroyed_devices,
                 step_start_time_us, step_end_time_us)
-            fire_range = max(0.0, _number(command.get('fire_range'), 0.0))
+            fire_range = max(0.0, command.get('fire_range', 0.0))
             target_distance = (_distance(_position(state), target['position'])
                                if target is not None else 0.0)
             in_range = (target is not None and target_distance > 1.0 and
@@ -9988,14 +9997,14 @@ class BotRuntime(object):
         if (shot_lane_refresh_due and refresh_shot_lanes and
                 shot_lanes_ready):
             self._next_shot_lane_refresh = (
-                _number(now) + SHOT_LANE_REFRESH_SECONDS)
+                now + SHOT_LANE_REFRESH_SECONDS)
         completed_affordances = ()
         if collect_observation:
             completed_affordances = tuple(self._cover_results)
             self._cover_results = []
         cover_jobs.sort(key=lambda value: value[0])
         if collect_cover_jobs:
-            self._next_cover_refresh = _number(now) + COVER_REFRESH_SECONDS
+            self._next_cover_refresh = now + COVER_REFRESH_SECONDS
         if collect_cover_jobs and cover_jobs:
             cursor = self._cover_cursor % len(cover_jobs)
             ordered = cover_jobs[cursor:] + cover_jobs[:cursor]
@@ -10005,7 +10014,7 @@ class BotRuntime(object):
                 _position(value) for value in self.states.values()
                 if value.get('alive') and value.get('team') == team])
                 for team in (1, 2))
-            window_start = _number(now)
+            window_start = now
             for index, value in enumerate(ordered[:count]):
                 bot_id, source, target, route = value
                 ready_at = window_start + (
@@ -10125,7 +10134,7 @@ class BotRuntime(object):
         outgoing.extend(self._pending_ram_reports)
         self._pending_ram_reports = []
         if collect_observation:
-            self._next_observation = _number(now) + OBSERVATION_SECONDS
+            self._next_observation = now + OBSERVATION_SECONDS
             outgoing.append({
                 'type': 'bot_observation',
                 'contacts': self._pack_observations(

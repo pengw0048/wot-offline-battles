@@ -567,6 +567,25 @@ def _valid_player_environment_contract(state, required=False):
     if 'input_processed_seq' in state:
         processed_sequence = _projectile_int_range(
             state.get('input_processed_seq'), 0, MAX_PROJECTILE_ID)
+    pose_bounds = (
+        ('x', PLAYER_INPUT_WORLD_BOUNDS[0]),
+        ('y', PLAYER_INPUT_WORLD_BOUNDS[1]),
+        ('z', PLAYER_INPUT_WORLD_BOUNDS[2]),
+        ('pitch', MAX_PLAYER_INPUT_ATTITUDE),
+        ('roll', MAX_PLAYER_INPUT_ATTITUDE),
+        ('gun_pitch', MAX_PLAYER_GUN_PITCH),
+        ('speed', MAX_PLAYER_INPUT_SPEED),
+        ('forward', 1.0), ('turn', 1.0),
+    )
+    for name, bound in pose_bounds:
+        if name not in state:
+            continue
+        value = _exact_finite_float(state.get(name))
+        if value is None or abs(value) > bound:
+            return False
+    for name in ('yaw', 'aim_yaw'):
+        if name in state and _exact_finite_float(state.get(name)) is None:
+            return False
     return bool(
         input_sequence is not None and landing_sequence is not None and
         processed_sequence is not None and
@@ -586,6 +605,46 @@ def _strict_mapping_list(value, limit=30):
             any(not isinstance(item, dict) for item in value)):
         return None
     return [dict(item) for item in value]
+
+
+_RUNTIME_VEHICLE_FLOAT_FIELDS = (
+    'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw', 'turret_yaw',
+    'gun_pitch', 'speed')
+_RUNTIME_VEHICLE_INT_FIELDS = (
+    'id', 'team', 'slot', 'health', 'max_health', 'fire_seq',
+    'shell_index', 'movement_dir', 'rotation_dir',
+    'stun_end_server_time_ms')
+
+
+def _canonical_runtime_vehicle_row(value):
+    """Canonicalize shared pose scalars once at the snapshot boundary."""
+    if not isinstance(value, dict):
+        return None
+    result = dict(value)
+    for name in _RUNTIME_VEHICLE_FLOAT_FIELDS:
+        if name not in result:
+            continue
+        parsed = _exact_finite_float(result.get(name))
+        if parsed is None:
+            return None
+        result[name] = parsed
+    for name in _RUNTIME_VEHICLE_INT_FIELDS:
+        if name not in result:
+            continue
+        parsed = _exact_int(result.get(name))
+        if parsed is None:
+            return None
+        result[name] = parsed
+    if 'velocity' in result:
+        velocity = result.get('velocity')
+        if not isinstance(velocity, (list, tuple)) or len(velocity) < 3:
+            return None
+        parsed_velocity = tuple(
+            _exact_finite_float(component) for component in velocity[:3])
+        if any(component is None for component in parsed_velocity):
+            return None
+        result['velocity'] = parsed_velocity
+    return result
 
 
 def _project_bot_state_impl(state, validate_equipment):
@@ -4444,6 +4503,15 @@ class LANClient(object):
                 if has_bot_state_time else None)
             projectiles = message.get('projectiles')
             players = _strict_mapping_list(message.get('players'), 64)
+            player_runtime_rows_valid = players is not None
+            if player_runtime_rows_valid:
+                canonical_players = [
+                    _canonical_runtime_vehicle_row(value)
+                    for value in players]
+                player_runtime_rows_valid = all(
+                    value is not None for value in canonical_players)
+                if player_runtime_rows_valid:
+                    players = canonical_players
             prepared_players = (
                 self._prepare_player_static_inputs(
                     players, allow_lean=True,
@@ -4456,6 +4524,14 @@ class LANClient(object):
             player_effective_params_valid = bool(
                 prepared_players is not None and prepared_players[2])
             bots = _strict_mapping_list(message.get('bots'), 30)
+            bot_runtime_rows_valid = bots is not None
+            if bot_runtime_rows_valid:
+                canonical_bots = [
+                    _canonical_runtime_vehicle_row(value) for value in bots]
+                bot_runtime_rows_valid = all(
+                    value is not None for value in canonical_bots)
+                if bot_runtime_rows_valid:
+                    bots = canonical_bots
             manifest = None
             if 'bot_manifest' in message:
                 manifest = _strict_mapping_list(
@@ -4577,12 +4653,16 @@ class LANClient(object):
                 invalid_reasons.append('bot_authority')
             if players is None:
                 invalid_reasons.append('players')
+            elif not player_runtime_rows_valid:
+                invalid_reasons.append('player_runtime_numbers')
             if not player_outfits_valid:
                 invalid_reasons.append('player_outfits')
             if not player_effective_params_valid:
                 invalid_reasons.append('player_effective_params')
             if bots is None:
                 invalid_reasons.append('bots')
+            elif not bot_runtime_rows_valid:
+                invalid_reasons.append('bot_runtime_numbers')
             if not player_critical_contract:
                 invalid_reasons.append('player_critical')
             if not player_equipment_contract:
@@ -4665,9 +4745,15 @@ class LANClient(object):
                 message = dict(message)
                 message.pop('timing', None)
             players = self._commit_player_static_inputs(prepared_players)
-            if players != message.get('players'):
+            if (players or bots or
+                    players != message.get('players') or
+                    bots != message.get('bots')):
+                # Keep an empty, already-canonical snapshot untouched.  There
+                # is no runtime row to replace, and accepted messages without
+                # normalization have historically retained their identity.
                 message = dict(message)
                 message['players'] = players
+                message['bots'] = bots
             if ('bot_manifest' not in message and
                     lean_manifest_valid):
                 message = dict(message)
