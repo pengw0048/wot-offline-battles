@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -1352,6 +1353,76 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             session._on_event('fire_intent_result', message)
 
         self.assertEqual([message], runtime.fire_intent_results)
+
+    def test_bigworld_poll_flushes_fire_intent_at_batch_tail(self):
+        scheduled = []
+
+        def callback(delay, function):
+            scheduled.append((delay, function))
+            return len(scheduled)
+
+        world = types.SimpleNamespace(callback=callback)
+        client = AuthorityWorkerLANClient(
+            '127.0.0.1', 28782, bigworld=world)
+        client.running = True
+        client.ready = True
+        client.phase = 'battle'
+        client.round_id = 7
+        client.authority_epoch = 4
+        client.bot_authority_id = WORKER_AUTHORITY_ID
+        runtime = _WorkerRuntime(client, world)
+        calls = []
+
+        def on_fire_intent(message):
+            calls.append((
+                'intent', threading.current_thread(), dict(message)))
+            return True
+
+        def on_fire_intent_result(message):
+            calls.append((
+                'result', threading.current_thread(), dict(message)))
+            return True
+
+        def flush_admitted_player_fire_intents():
+            calls.append(('flush', threading.current_thread(), None))
+            return True
+
+        runtime.on_fire_intent = on_fire_intent
+        runtime.on_fire_intent_result = on_fire_intent_result
+        runtime.flush_admitted_player_fire_intents = (
+            flush_admitted_player_fire_intents)
+        message = {
+            'type': 'fire_intent', 'round_id': 7,
+            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
+        }
+        result = {
+            'type': 'fire_intent_result', 'round_id': 7,
+            'player_id': 3, 'intent_seq': 4, 'accepted': False,
+            'reason': 'projectile_launch_rejected',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            session = WorkerSession(
+                {}, bigworld=world,
+                status_path=str(Path(directory) / 'status.json'))
+            session.client = client
+            session.runtime = runtime
+            session._active_round_id = 7
+            client.on_event = session._on_event
+            client.on_batch_drained = (
+                lambda source: session._on_batch_drained())
+
+            client._queue_message(message)
+            client._queue_message(result)
+            client._schedule_poll()
+            self.assertEqual(1, len(scheduled))
+            scheduled[0][1]()
+
+        self.assertEqual(['intent', 'result', 'flush'], [
+            call[0] for call in calls])
+        self.assertTrue(all(
+            threading.current_thread() is call[1] for call in calls))
+        self.assertEqual(message, calls[0][2])
+        self.assertEqual(result, calls[1][2])
 
     def test_worker_routes_player_destructible_contact_to_runtime(self):
         world = _DrawWorld()
