@@ -3025,6 +3025,29 @@ class OfflineCompatibilityTests(unittest.TestCase):
             return entity.filter.segmentMayHitEntity(
                 start_point, end_point, 1)
 
+        def get_collidable_entities(exceptIDs, startPoint, endPoint):
+            """Reproduce the recorded #1513 dynamic-collision producer.
+
+            ``ProjectileMover.getCollidableEntities`` reads
+            ``player.arena.vehicles``, resolves each id through
+            ``BigWorld.entity`` and keeps an entity only when it ``isStarted``
+            and passes ``segmentMayHitEntity``.  Draw visibility is never part
+            of that native guard, which is exactly the leak under test.
+            """
+            player = bigworld.player()
+            arena = getattr(player, 'arena', None)
+            collidable = []
+            for vehicle_id in getattr(arena, 'vehicles', None) or ():
+                if vehicle_id in exceptIDs:
+                    continue
+                entity = bigworld.entities.get(vehicle_id)
+                if entity is None or not getattr(entity, 'isStarted', False):
+                    continue
+                if not segment_may_hit_entity(entity, startPoint, endPoint):
+                    continue
+                collidable.append(entity)
+            return collidable
+
         def visible_vehicle_collision(
                 vehicle, matrix, start_point, end_point, math_module):
             vehicle.visible_collision_calls.append(
@@ -3137,7 +3160,8 @@ class OfflineCompatibilityTests(unittest.TestCase):
             offline_map_creator=_OfflineMapCreator(operations),
             player_events=player_events,
             projectile_mover_module=types.SimpleNamespace(
-                segmentMayHitEntity=segment_may_hit_entity),
+                segmentMayHitEntity=segment_may_hit_entity,
+                getCollidableEntities=get_collidable_entities),
             predefined_hosts=_Hosts(existing_hosts, host_failure),
             prb_loader=_PrbLoader(operations),
             remote_filter_type=remote_vehicle_module._RemoteFilter,
@@ -3425,6 +3449,78 @@ class OfflineCompatibilityTests(unittest.TestCase):
             original_collide, vehicle_type.__dict__['collideSegment'])
         self.assertIs(
             original_collide_ext, vehicle_type.__dict__['collideSegmentExt'])
+
+    def test_undrawn_lan_remotes_leave_stock_dynamic_collision(self):
+        """An unspotted enemy must not reach the stock gun marker.
+
+        Exact #1513 ``getCollidableEntities`` filters only on
+        ``arena.vehicles`` membership and ``isStarted``; retail relies on the
+        server AOI to drop an unspotted enemy from ``BigWorld.entity``.  A LAN
+        remote never leaves AOI, so the crosshair kept resolving a penetration
+        result against a tank the player cannot see.
+        """
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        bigworld = runtime.bigworld
+        vehicle_type = runtime.vehicle_module.Vehicle
+        original_query = runtime.projectile_mover_module.getCollidableEntities
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+
+        def _remote(entity_id, drawn):
+            vehicle = vehicle_type()
+            vehicle.isStarted = True
+            vehicle._offlineNativeRemote = True
+            vehicle._offlineNativeDrawVisible = drawn
+            vehicle.filter = mock.Mock()
+            vehicle.filter.segmentMayHitEntity.return_value = True
+            bigworld.entities[entity_id] = vehicle
+            return vehicle
+
+        spotted = _remote(51, True)
+        unspotted = _remote(52, False)
+        wreck = _remote(53, True)
+        wreck._spot_visible = False
+        stopped = _remote(54, True)
+        stopped.isStarted = False
+        stock = vehicle_type()
+        stock.isStarted = True
+        stock.filter = mock.Mock()
+        stock.filter.segmentMayHitEntity.return_value = True
+        bigworld.entities[55] = stock
+        skipped = _remote(56, True)
+
+        avatar = runtime.avatar_module.PlayerAvatar()
+        avatar.arena = types.SimpleNamespace(
+            vehicles={51: {}, 52: {}, 53: {}, 54: {}, 55: {}, 56: {}})
+        bigworld._player = avatar
+        start = _Vector3(0.0, 0.0, 0.0)
+        end = _Vector3(100.0, 0.0, 0.0)
+
+        query = runtime.projectile_mover_module.getCollidableEntities
+        self.assertIsNot(original_query, query)
+        # Outside a battle the wrapper stays out of the stock result.
+        self.assertIn(unspotted, query((), start, end))
+
+        compatibility.configure_battle()
+        collidable = query((56,), start, end)
+
+        self.assertIn(spotted, collidable)
+        # A drawn wreck still blocks a shot, so spotting alone is not enough.
+        self.assertIn(wreck, collidable)
+        self.assertIn(stock, collidable)
+        self.assertNotIn(unspotted, collidable)
+        self.assertNotIn(stopped, collidable)
+        self.assertNotIn(skipped, collidable)
+
+        # Revealing the same enemy restores it without reinstalling anything.
+        unspotted._offlineNativeDrawVisible = True
+        self.assertIn(unspotted, query((), start, end))
+
+        compatibility.fini()
+        self.assertIs(
+            original_query,
+            runtime.projectile_mover_module.getCollidableEntities)
 
     def test_offline_avatar_speed_boundary_uses_copied_pose_overlay(self):
         compatibility_module = _load_port_source('compat')

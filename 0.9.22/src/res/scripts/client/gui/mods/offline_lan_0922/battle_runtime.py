@@ -18976,11 +18976,14 @@ class BattleRuntime(object):
                 vehicle.targetCaps = [1] if visible and alive else []
             else:
                 vehicle.appearance.changeVisibility(draw_vehicle)
-            if draw_vehicle:
-                # A fire transition received while this enemy was hidden had
-                # no drawable compound. Reconcile it on the presentation edge,
-                # not on every unrelated state or pose update.
-                self._sync_fire_effect(vehicle)
+            # A fire transition received while this enemy was hidden had no
+            # drawable compound. Reconcile it on the presentation edge, not
+            # on every unrelated state or pose update.  The hide edge is the
+            # same boundary: exact #1513 ``changeVisibility`` never stops a
+            # node-bound effect, so a burning enemy that goes dark would keep
+            # drawing flame and smoke over its hidden compound.
+            self._sync_fire_effect(
+                vehicle, None if draw_vehicle else False)
             record['_spot_presentation_signature'] = signature
         self._sync_remote_visual_components(
             record, vehicle, marker_visible, visible)

@@ -42,6 +42,40 @@ def reset_pose_animation_writes():
     global _pose_object_allocations
     _pose_object_allocations = 0
 
+
+# One line per process: an absent attachment gate is a presentation gap, not
+# a reason to abort a round that is otherwise correctly hidden.
+_attachment_gate_reported = False
+
+
+def set_model_attachment_visibility(model, visible):
+    """Drive the second #1513 draw flag the stock visibility gate skips.
+
+    Exact #1513 ``CompoundAppearance.changeVisibility`` writes only
+    ``compoundModel.visible`` (plus stickers and crashed tracks).
+    ``ProjectileMover.add`` proves that this build keeps ``visible`` and
+    ``visibleAttachments`` as two independent model draw flags: stock hides
+    the projectile mesh with the first while the attached tracer effect stays
+    drawn through the second, and this port copies that same pair for its own
+    tracers.  Node-bound vehicle effects therefore survive the stock gate,
+    which is how a hidden tank can keep drawing ground dust and an effect
+    silhouette.  Mirror both flags for every remote presentation.
+    """
+    global _attachment_gate_reported
+    if model is None:
+        return False
+    if not hasattr(model, 'visibleAttachments'):
+        if not _attachment_gate_reported:
+            _attachment_gate_reported = True
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] compound model has no '
+                'visibleAttachments gate; hidden vehicle effects may still '
+                'draw\n')
+        return False
+    model.visibleAttachments = bool(visible)
+    return True
+
+
 from gui.mods.offline_lan_0922 import tank_collision
 
 try:
@@ -252,7 +286,10 @@ class _RemoteAppearance(object):
         """Expose the exact #1513 CompoundAppearance visibility boundary."""
         if self.compoundModel is None:
             raise RuntimeError('remote compound model is unavailable')
-        self.compoundModel.visible = bool(visible)
+        visible = bool(visible)
+        self.compoundModel.visible = visible
+        # Stock only writes ``visible``; its node-bound effects keep drawing.
+        set_model_attachment_visibility(self.compoundModel, visible)
         return True
 
     def showDamageFromShot(self, *unused_args, **unused_kwargs):

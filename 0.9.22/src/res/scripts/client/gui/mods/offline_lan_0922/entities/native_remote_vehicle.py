@@ -12,8 +12,9 @@ from __future__ import print_function
 
 import math
 
-from gui.mods.offline_lan_0922.entities.remote_vehicle import \
-    _RemoteShotPresenter, _blend_angle, _component_aim_angles
+from gui.mods.offline_lan_0922.entities.remote_vehicle import (
+    _RemoteShotPresenter, _blend_angle, _component_aim_angles,
+    set_model_attachment_visibility)
 
 
 _MINIMUM_KEYFRAME_SECONDS = 0.001
@@ -36,6 +37,11 @@ def set_draw_visibility(entity, visible):
     # shadow-only pass, which changeVisibility(True) cannot restore by itself.
     show(visible)
     change_visibility(visible)
+    # Neither of those two stock layers touches the model's attachment draw
+    # flag, so every node-bound effect (fire, smoke, exhaust, ground dust)
+    # keeps drawing over a hidden tank.  Gate the attachments too.
+    set_model_attachment_visibility(
+        getattr(appearance, 'compoundModel', None), visible)
     return True
 
 
@@ -103,6 +109,7 @@ class _NativeRemoteState(object):
         self.track_scroll = None
         self.track_mode = None
         self._track_feed = None
+        self._track_feed_hidden = False
         self.presentation_capabilities = {}
         self.presentation_errors = {}
 
@@ -639,6 +646,25 @@ class _NativeRemoteState(object):
             return False
         left = float(left)
         right = float(right)
+        # Retail owns no presentation writer for a vehicle the client cannot
+        # see: an unspotted or out-of-AOI entity is simply absent.  A LAN
+        # remote never leaves AOI, so this runtime is that writer and must
+        # stop driving belt speed and engine mode while the tank is hidden.
+        # Settle the belts once on the hide edge, then feed nothing.
+        hidden = not bool(getattr(entity, '_offlineNativeDrawVisible', True))
+        if hidden:
+            if self._track_feed_hidden:
+                return False
+            self._track_feed_hidden = True
+            left = 0.0
+            right = 0.0
+            self._track_feed = None
+        elif self._track_feed_hidden:
+            # The reveal must replay both the engine mode and the belt speed,
+            # so drop the dedupe caches that would otherwise swallow it.
+            self._track_feed_hidden = False
+            self._track_feed = None
+            self.track_mode = None
         flying = getattr(appearance, 'flyingInfoProvider', None)
         left_contact = not bool(getattr(
             flying, 'isLeftSideFlying', False))
@@ -671,7 +697,7 @@ class _NativeRemoteState(object):
             self._record_capability(
                 'engine_owned_track_motion', False,
                 'Appearance/filter ownership or movementInfo is unavailable')
-        if mode != self.track_mode:
+        if not hidden and mode != self.track_mode:
             appearance.changeEngineMode(mode, True)
             self.track_mode = mode
         # PyTrackScroll remains the safe belt/audio fallback when the exact

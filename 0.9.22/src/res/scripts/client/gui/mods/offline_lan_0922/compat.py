@@ -549,6 +549,8 @@ class OfflineCompatibility(object):
         self._gun_rotator_stabilised_code = None
         self._gun_rotator_predict_locked_target_code = None
         self._projectile_segment_may_hit_code = None
+        self._original_projectile_collidable_entities = None
+        self._projectile_collidable_entities_wrapper = None
         self._camera_acceleration_update_code = None
         self._arcade_oscillator_acceleration_code = None
         self._sniper_oscillator_acceleration_code = None
@@ -825,6 +827,14 @@ class OfflineCompatibility(object):
         if self._projectile_segment_may_hit_code is None:
             raise RuntimeError(
                 '#1513 projectile collision prefilter code is unavailable')
+        projectile_collidable_entities_original = getattr(
+            getattr(runtime, 'projectile_mover_module', None),
+            'getCollidableEntities', None)
+        if not callable(projectile_collidable_entities_original):
+            raise RuntimeError(
+                '#1513 projectile collidable-entity query is unavailable')
+        self._original_projectile_collidable_entities = \
+            projectile_collidable_entities_original
         if (acceleration_smoother_type is None or
                 arcade_camera_type is None or sniper_camera_type is None):
             raise RuntimeError('#1513 dynamic-camera motion ABI is unavailable')
@@ -1573,6 +1583,46 @@ class OfflineCompatibility(object):
             collisions.sort(key=lambda item: item.dist)
             return collisions
 
+        def undrawn_lan_remote(entity):
+            """Whether one entity is a LAN remote the client must not draw."""
+            read = compatibility._original_vehicle_getattribute
+            if read is None:
+                read = getattr
+            try:
+                if not bool(read(entity, '_offlineNativeRemote')):
+                    return False
+                return not bool(read(entity, '_offlineNativeDrawVisible'))
+            except (AttributeError, ReferenceError, TypeError):
+                return False
+
+        def projectile_collidable_entities(
+                exceptIDs, startPoint, endPoint):
+            """Hide an undrawn LAN remote from stock dynamic collision.
+
+            Exact #1513 ``getCollidableEntities`` keeps every
+            ``arena.vehicles`` entry whose ``BigWorld.entity`` is present and
+            ``isStarted``; retail relies on the server AOI to drop an
+            unspotted enemy from that facade entirely, which is why the stock
+            gun marker and its penetration indicator never resolve one.  A LAN
+            remote is client-created and never leaves AOI, so the same
+            exclusion has to be applied here or an unspotted tank still turns
+            the crosshair green and snaps the marker onto its hidden hull.
+
+            This is presentation only.  The hidden worker owns projectile
+            resolution and the runtime resolves its own hits through
+            ``RemoteVehicleFactory``, so blind fire that geometrically hits an
+            unspotted vehicle still damages it.
+            """
+            entities = compatibility._original_projectile_collidable_entities(
+                exceptIDs, startPoint, endPoint)
+            if not compatibility._battle_active or not entities:
+                return entities
+            drawn = [entity for entity in entities
+                     if not undrawn_lan_remote(entity)]
+            if len(drawn) == len(entities):
+                return entities
+            return drawn
+
         def vehicle_getattribute(vehicle, name):
             caller_code = None
             locked_target_code = \
@@ -2297,6 +2347,8 @@ class OfflineCompatibility(object):
         self._vehicle_set_gun_angles_wrapper = vehicle_set_gun_angles
         self._vehicle_collide_segment_wrapper = vehicle_collide_segment
         self._vehicle_collide_segment_ext_wrapper = vehicle_collide_segment_ext
+        self._projectile_collidable_entities_wrapper = (
+            projectile_collidable_entities)
         self._compound_getattribute_wrapper = compound_getattribute
         self._compound_deactivate_wrapper = compound_deactivate
         self._compound_models_refresh_wrapper = compound_models_refresh
@@ -2362,6 +2414,8 @@ class OfflineCompatibility(object):
                     vehicle_type.set_gunAnglesPacked = vehicle_set_gun_angles
                 vehicle_type.collideSegment = vehicle_collide_segment
                 vehicle_type.collideSegmentExt = vehicle_collide_segment_ext
+            runtime.projectile_mover_module.getCollidableEntities = (
+                projectile_collidable_entities)
             if compound_type is not None:
                 compound_type.__getattribute__ = compound_getattribute
                 if self._original_compound_deactivate is not None:
@@ -2593,6 +2647,15 @@ class OfflineCompatibility(object):
                 self._vehicle_collide_segment_ext_wrapper):
             vehicle_type.collideSegmentExt = (
                 self._original_vehicle_collide_segment_ext)
+        projectile_mover_module = getattr(
+            runtime, 'projectile_mover_module', None)
+        if (projectile_mover_module is not None and
+                self._original_projectile_collidable_entities is not None and
+                getattr(projectile_mover_module,
+                        'getCollidableEntities', None) is
+                self._projectile_collidable_entities_wrapper):
+            projectile_mover_module.getCollidableEntities = (
+                self._original_projectile_collidable_entities)
         if (compound_type is not None and
                 self._original_compound_models_refresh is not None and
                 compound_type.__dict__.get(
@@ -2639,6 +2702,8 @@ class OfflineCompatibility(object):
         self._original_vehicle_collide_segment_ext = None
         self._vehicle_collide_segment_wrapper = None
         self._vehicle_collide_segment_ext_wrapper = None
+        self._original_projectile_collidable_entities = None
+        self._projectile_collidable_entities_wrapper = None
         self._camera_acceleration_update_code = None
         self._arcade_oscillator_acceleration_code = None
         self._sniper_oscillator_acceleration_code = None
