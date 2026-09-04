@@ -1926,6 +1926,8 @@ class BotRuntime(object):
         self._burst_states = {}
         self._equipment_states = {}
         self._equipment_passives = {}
+        self._equipment_wire_cache = {}
+        self._equipment_wire_exposed_in_update = set()
         self._equipment_now = 0.0
         self._pending_launches = []
         self._pending_launch_keys = {}
@@ -2516,6 +2518,8 @@ class BotRuntime(object):
                 snapshots, contracts=contracts, now=self._equipment_now)
             self._equipment_states[bot_id] = existing
         states = self._equipment_states.get(bot_id, ())
+        self._equipment_wire_cache.pop(bot_id, None)
+        self._equipment_wire_exposed_in_update.discard(bot_id)
         self._equipment_passives[bot_id] = \
             equipment_mechanics.passive_effects(states)
         return states
@@ -2526,9 +2530,31 @@ class BotRuntime(object):
         return self._equipment_now
 
     def _publish_equipment_state(self, state):
-        states = self._equipment_states.get(int(state['id']), ())
-        state['equipment_states'] = [
-            equipment.snapshot(self._equipment_now) for equipment in states]
+        bot_id = int(state['id'])
+        states = self._equipment_states.get(bot_id, ())
+        marker = tuple(equipment.trusted_snapshot_edge(self._equipment_now)
+                       for equipment in states)
+        cached = self._equipment_wire_cache.get(bot_id)
+        if cached is not None and cached[0] == marker:
+            wire_states = cached[2]
+            if cached[1] != self._equipment_now:
+                if bot_id in self._equipment_wire_exposed_in_update:
+                    wire_states = [dict(wire_state)
+                                   for wire_state in wire_states]
+                    self._equipment_wire_exposed_in_update.discard(bot_id)
+                for equipment, wire_state in zip(states, wire_states):
+                    equipment.refresh_trusted_snapshot(
+                        wire_state, self._equipment_now)
+                self._equipment_wire_cache[bot_id] = (
+                    marker, self._equipment_now, wire_states)
+            state['equipment_states'] = wire_states
+            return False
+        wire_states = [equipment.trusted_snapshot(self._equipment_now)
+                       for equipment in states]
+        self._equipment_wire_cache[bot_id] = (
+            marker, self._equipment_now, wire_states)
+        self._equipment_wire_exposed_in_update.discard(bot_id)
+        state['equipment_states'] = wire_states
         return True
 
     def _observe_bot_stun(self, state, raw, server_time_ms):
@@ -2700,6 +2726,8 @@ class BotRuntime(object):
             self._burst_states = {}
             self._equipment_states = {}
             self._equipment_passives = {}
+            self._equipment_wire_cache = {}
+            self._equipment_wire_exposed_in_update = set()
             self._equipment_now = 0.0
             self._pending_launches = []
             self._pending_launch_keys = {}
@@ -8700,6 +8728,7 @@ class BotRuntime(object):
         """
         self._last_update_control_steps = 0
         self._last_update_max_control_step = 0.0
+        self._equipment_wire_exposed_in_update.clear()
         # Contact leases never cross render callbacks or round teardown. Any
         # entry below is produced by a physical slice in this update only.
         self._contact_lease_elapsed = {}
@@ -10014,6 +10043,8 @@ class BotRuntime(object):
             projected = lan_client.project_owned_bot_state(state)
             if projected is None:
                 raise RuntimeError('bot publication projection failed')
+            if 'equipment_states' in projected:
+                self._equipment_wire_exposed_in_update.add(int(state['id']))
             wire_states.append(projected)
         self._sample_time_us = step_end_time_us
         publication = {
