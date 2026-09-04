@@ -43,6 +43,7 @@ def reset_pose_animation_writes():
     _pose_object_allocations = 0
 
 from gui.mods.offline_lan_0922 import tank_collision
+from gui.mods.offline_lan_0922 import track_damage
 
 try:
     _STRING_TYPES = (basestring,)
@@ -68,8 +69,12 @@ _SegmentCollisionResultExt = namedtuple(
 # native BSP tuple's second value is a component-local surface normal, not a
 # triangle. Keeping it in a wrapper prevents a five-field value from reaching
 # stock gun-marker and ProjectileMover callers that require exactly four.
+# ``localPoint`` is the contact in the hit component's own local frame, which
+# the authoritative resolver needs to place a track hit on its chassis; the
+# native distance is measured along that same component-local ray, so the
+# point is a pure function of the collision and never a later pose.
 _VehicleCollisionEvidence = namedtuple(
-    'VehicleCollisionEvidence', ('collision', 'worldNormal'))
+    'VehicleCollisionEvidence', ('collision', 'worldNormal', 'localPoint'))
 
 
 class _AliveFlag(object):
@@ -1600,9 +1605,12 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
             continue
         start = chassis_start if component_index == 0 else body_start
         end = chassis_end if component_index == 0 else body_end
-        collisions = local_hit_test(
-            component_matrix.applyPoint(start),
-            component_matrix.applyPoint(end))
+        # The component-local ray the native hit test actually runs on. Every
+        # returned distance is measured along it, so the authoritative local
+        # contact below is a pure function of this ray and that distance.
+        component_start = component_matrix.applyPoint(start)
+        component_end = component_matrix.applyPoint(end)
+        collisions = local_hit_test(component_start, component_end)
         component_to_vehicle = None
         if include_world_normal:
             component_to_vehicle = math_module.Matrix(component_matrix)
@@ -1621,6 +1629,8 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
             result = _SegmentCollisionResultExt(
                 float(dist), float(angle_cos), material, component_name)
             if include_world_normal:
+                local_point = track_damage.local_contact_point(
+                    component_start, component_end, dist)
                 world_normal = None
                 if local_normal is not None:
                     vehicle_normal = component_to_vehicle.applyVector(
@@ -1635,7 +1645,8 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
                         world_normal.normalise()
                     else:
                         world_normal = None
-                result = _VehicleCollisionEvidence(result, world_normal)
+                result = _VehicleCollisionEvidence(
+                    result, world_normal, local_point)
             hits.append(result)
     if include_world_normal:
         hits.sort(key=lambda item: item.collision.dist)
