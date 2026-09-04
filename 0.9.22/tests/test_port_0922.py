@@ -3811,6 +3811,73 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertIn(('original_avatar_auto_aim', native), operations)
         compatibility.fini()
 
+    def test_native_remote_outline_never_locks_on_a_stock_unlock(self):
+        """Only an explicit lock input may promote the outline candidate.
+
+        A native remote Vehicle owns its own visual, so it has no
+        ``bw_entity``.  Stock #1513 calls ``autoAim(None)`` on several unlock
+        paths, including control-mode transitions; that call must never be
+        coerced into a lock on whatever the crosshair currently outlines.
+        """
+        compatibility_module = _load_port_source('compat')
+        runtime, operations = self._runtime()
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.configure_battle()
+        avatar = runtime.avatar_module.PlayerAvatar()
+        avatar.team = 1
+        avatar.cell = types.SimpleNamespace(autoAim=mock.Mock())
+        avatar.inputHandler = types.SimpleNamespace(
+            setAimingMode=mock.Mock())
+        avatar.gunRotator = types.SimpleNamespace(
+            clientMode=True, dispersionAngle=0.24)
+        avatar.vehicleTypeDescriptor = types.SimpleNamespace(
+            gun=types.SimpleNamespace(shotDispersionAngle=0.08))
+        avatar.onLockTarget = mock.Mock()
+        runtime.bigworld._player = avatar
+        outlined = runtime.vehicle_module.Vehicle()
+        outlined._offlineNativeRemote = True
+        outlined.id = 1000
+        outlined.publicInfo = {'team': 2}
+        outlined.isAlive = lambda: True
+        outlined._spot_visible = True
+        self.assertFalse(hasattr(outlined, 'bw_entity'))
+        runtime.bigworld.entities[1000] = outlined
+        runtime.bigworld.entity = runtime.bigworld.entities.get
+        compatibility.set_target_lock_candidate(outlined)
+        self.assertIsNone(runtime.bigworld.target())
+
+        # The stock unlock path keeps the crosshair candidate unlocked.
+        avatar.autoAim(None)
+        self.assertEqual(0, avatar._PlayerAvatar__autoAimVehID)
+        self.assertIn(('original_avatar_auto_aim', None), operations)
+        self.assertNotIn(('original_avatar_auto_aim', outlined), operations)
+        avatar.cell.autoAim.assert_not_called()
+
+        # The deliberate lock input still promotes the same candidate.
+        arcade = runtime.control_modes.ArcadeControlMode()
+        arcade.handleKeyEvent(True, 'lock-target', 0, None)
+        self.assertEqual(1000, avatar._PlayerAvatar__autoAimVehID)
+        self.assertIn(('original_avatar_auto_aim', outlined), operations)
+        avatar.cell.autoAim.assert_called_once_with(1000)
+
+        # A held lock still validates and still releases through stock.
+        self.assertFalse(compatibility.validate_target_lock(avatar))
+        self.assertTrue(compatibility.release_target_lock(avatar, 1000))
+        self.assertEqual(0, avatar._PlayerAvatar__autoAimVehID)
+
+        # Locking again and unlocking with the candidate still outlined must
+        # reach stock with None, not with the candidate.
+        arcade.handleKeyEvent(True, 'lock-target', 0, None)
+        self.assertEqual(1000, avatar._PlayerAvatar__autoAimVehID)
+        del operations[:]
+        avatar.autoAim(None)
+        self.assertEqual(0, avatar._PlayerAvatar__autoAimVehID)
+        self.assertEqual(
+            [('original_avatar_auto_aim', None)],
+            [item for item in operations
+             if item[0] == 'original_avatar_auto_aim'])
+        compatibility.fini()
+
     def test_remote_autoaim_unlocks_through_stock_when_target_is_lost(self):
         compatibility_module = _load_port_source('compat')
         runtime, operations = self._runtime()
