@@ -45,7 +45,8 @@ class _FakePhysics(object):
     created = []
 
     def __init__(self):
-        self.mass = 45000.0
+        self.__dict__['callbacks'] = {}
+        self.__dict__['initialised'] = False
         self.staticMode = True
         self.isFrozen = True
         self.movementSignals = 0
@@ -56,16 +57,24 @@ class _FakePhysics(object):
         self.position = [0.0, 10.0, 0.0]
         self.lastTickMatrix = _Matrix(*self.position)
         self.actualChassisTransform = _Matrix(*self.position)
-        self.callbacks = {}
         _FakePhysics.created.append(self)
 
     def __setattr__(self, name, value):
         if name.endswith('Cb') or name == 'onVehicleStatusChanged':
-            self.__dict__.setdefault('callbacks', {})[name] = value
+            self.__dict__['callbacks'][name] = value
             return
+        if name == 'lastTickMatrix' and hasattr(value, 'translation') and \
+                self.__dict__.get('initialised'):
+            # A retail-like pose setter: seeding through the matrix moves it.
+            self.__dict__['position'] = _xyz_list(value.translation)
+            self.__dict__['actualChassisTransform'] = _Matrix(*self.position)
         object.__setattr__(self, name, value)
 
     def __getattr__(self, name):
+        if name == 'mass':
+            if not self.__dict__.get('initialised'):
+                raise RuntimeError('simulated native crash: mass before init')
+            return 45000.0
         if name in ('forceApplied', 'torqueApplied'):
             return _Vector(0.0, 0.0, 0.0)
         if name.endswith('Cb'):
@@ -84,6 +93,9 @@ class _FakePhysics(object):
         if not args:
             raise TypeError('WGVehiclePhysics::configure: wrong arguments.')
 
+    def rollback(self, *args):
+        raise TypeError('WGVehiclePhysics::rollback: wrong arguments.')
+
     def setArenaBounds(self, low, high):
         self.bounds = (low, high)
 
@@ -92,8 +104,12 @@ class _FakePhysics(object):
             self.position[2] += 5.0 * dt
             self.distanceTraveled += 5.0 * dt
             self.speed = 5.0
-            self.lastTickMatrix = _Matrix(*self.position)
-            self.actualChassisTransform = _Matrix(*self.position)
+            self.__dict__['lastTickMatrix'] = _Matrix(*self.position)
+            self.__dict__['actualChassisTransform'] = _Matrix(*self.position)
+
+
+def _xyz_list(vector):
+    return [float(vector.x), float(vector.y), float(vector.z)]
 
 
 class _FakeSimulator(object):
@@ -119,11 +135,13 @@ class _FakeBody(object):
             raise TypeError('WGPhysicalBody::setup: wrong arguments')
 
 
-class _FakeFilter(object):
+class _FakeNativeFilter(object):
+    """Stock WGVehicleFilter stand-in; may or may not carry physics."""
+
     def __init__(self, physics):
         self._physics = physics
         self.inputs = []
-        self.bodyMatrix = _Matrix(*physics.position)
+        self.bodyMatrix = _Matrix(0.0, 10.0, 0.0)
 
     def getVehiclePhysics(self):
         return self._physics
@@ -132,24 +150,53 @@ class _FakeFilter(object):
         self.inputs.append((movement, rotation))
 
 
-class _FakeEntity(object):
-    def __init__(self, physics):
-        self.filter = _FakeFilter(physics)
+class _FakeNativeEntity(object):
+    def __init__(self, physics, position):
+        self.filter = _FakeNativeFilter(physics)
         self.typeDescriptor = object()
-        self.position = _Vector(*physics.position)
-        self.matrix = _Matrix(*physics.position)
+        self.position = _Vector(*position)
+        self.yaw = 0.3
+
+
+class _FakeCarrier(object):
+    def __init__(self, position):
+        self.filter = object()
+        self.position = _Vector(*position)
+        self.yaw = 0.3
+        self.typeDescriptor = object()
+
+
+class _FakeMath(object):
+    Matrix = _Matrix.__class__  # replaced below
+
+    class Vector3(_Vector):
+        pass
+
+
+class _MatrixFactory(object):
+    def __call__(self):
+        matrix = _Matrix(0.0, 0.0, 0.0)
+        matrix.setRotateYPR = lambda ypr: None
+        return matrix
+
+
+class _FakeMathModule(object):
+    def __init__(self):
+        self.Matrix = _MatrixFactory()
+        self.Vector3 = _Vector
 
 
 class _FakeHost(object):
     def __init__(self, bots, bigworld):
         self._bots = bots
         self._bigworld = bigworld
+        self._math = _FakeMathModule()
 
     def bigworld(self):
         return self._bigworld
 
     def math_module(self):
-        return None
+        return self._math
 
     def constants(self):
         return None
@@ -163,19 +210,18 @@ def _fake_physics_shared():
     module = types.ModuleType('physics_shared')
     module.IS_CLIENT = True
     module.NUM_SUBSTEPS = 2
+    module.NUM_ITERATIONS = 10
+    module.FRICTION_RATIO = 1.0
+
+    def initVehiclePhysicsServer(physics, descriptor):
+        physics.staticMode = False
+        physics.__dict__['initialised'] = True
 
     def initVehiclePhysicsClient(physics, descriptor):
-        physics.staticMode = False
-        physics.initialised = True
+        raise RuntimeError('client init should not be reached first')
+    module.initVehiclePhysicsServer = initVehiclePhysicsServer
     module.initVehiclePhysicsClient = initVehiclePhysicsClient
     return module
-
-
-def by_name_last_step(report, name):
-    for stage in report['stages']:
-        if stage['name'] == name:
-            return stage.get('last_step')
-    return None
 
 
 class NativePhysicsProbeTests(unittest.TestCase):
@@ -186,35 +232,44 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.clock = [1000.0]
         self.directory = tempfile.mkdtemp()
         self.simulator = _FakeSimulator()
-        bigworld = types.SimpleNamespace(
+        self.bigworld = types.SimpleNamespace(
             WGVehiclePhysics=_FakePhysics,
             WGDynamicsSimulator=lambda: self.simulator,
             WGPhysicalBody=_FakeBody)
-        self.bots = []
-        for index in range(3):
-            physics = _FakePhysics()
-            physics.position = [float(index * 10), 10.0, 0.0]
-            self.bots.append({'bot_id': 11 + index,
-                              'entity': _FakeEntity(physics)})
-        self.host = _FakeHost(self.bots, bigworld)
         sys.modules['physics_shared'] = _fake_physics_shared()
 
     def tearDown(self):
         sys.modules.pop('physics_shared', None)
 
-    def _probe(self, **config):
+    def _bots(self, retail):
+        bots = []
+        for index in range(3):
+            position = [float(index * 10), 10.0, 0.0]
+            physics = None
+            if retail:
+                physics = _FakePhysics()
+                physics.__dict__['initialised'] = True
+                physics.staticMode = False
+                physics.position = list(position)
+            bots.append({
+                'bot_id': 11 + index, 'engine_id': 100 + index,
+                'native': _FakeNativeEntity(physics, position),
+                'carrier': _FakeCarrier(position),
+                'descriptor': object(), 'position': position, 'yaw': 0.3})
+        return bots
+
+    def _probe(self, bots, **config):
         base = {'start_delay_seconds': 0.5, 'passive_seconds': 0.2,
                 'drive_seconds': 0.3, 'pair_seconds': 0.2,
-                'scale_frames': 5,
-                'opt_in_stages': ['construct_standalone', 'signatures'],
-                'fresh_attribute_reads': True}
+                'scale_frames': 5, 'scale_bodies': 3}
         base.update(config)
+        host = _FakeHost(bots, self.bigworld)
         return self.module.WorkerPhysicsProbe(
-            self.host, self.directory, config=base,
+            host, self.directory, config=base,
             writer=self.lines.append, clock=lambda: self.clock[0],
             perf_clock=lambda: self.clock[0])
 
-    def _run(self, probe, frames=200, dt=0.05):
+    def _run(self, probe, frames=300, dt=0.05):
         for _ in range(frames):
             if probe.done:
                 break
@@ -227,70 +282,92 @@ class NativePhysicsProbeTests(unittest.TestCase):
         with open(path, 'rb') as stream:
             return json.loads(stream.read().decode('utf-8'))
 
-    def test_all_stages_run_in_order_and_report_is_written(self):
-        probe = self._probe()
+    def test_default_stage_order_keeps_signatures_opt_in(self):
+        probe = self._probe(self._bots(retail=True))
+        self.assertEqual(
+            ['inventory', 'inspect_existing', 'construct_standalone',
+             'passive_drive', 'solve_one', 'solve_scale', 'solve_pair',
+             'restore'], probe._stages)
+        opted = self._probe(self._bots(retail=True),
+                            opt_in_stages=['signatures'])
+        self.assertEqual('signatures', opted._stages[-1])
+
+    def test_retail_bodies_are_preferred_and_driven(self):
+        bots = self._bots(retail=True)
+        probe = self._probe(bots, opt_in_stages=['signatures'])
         self._run(probe)
         self.assertTrue(probe.done)
         report = self._report()
-        names = [stage['name'] for stage in report['stages']]
-        self.assertEqual(list(self.module.STAGE_ORDER), names)
-        statuses = set(stage['status'] for stage in report['stages'])
-        self.assertEqual({'ok'}, statuses, report['stages'])
-        self.assertTrue(report['completed'])
-        joined = ''.join(self.lines)
-        self.assertIn('NPHYS stage=inventory begin', joined)
-        self.assertIn('NPHYS stage=solve_scale end status=ok', joined)
-        self.assertIn('NPHYS stage=construct_standalone step='
-                      'BigWorld.WGVehiclePhysics()', joined)
-        self.assertIn('NPHYS stage=solve_one step=simulator.update', joined)
-        self.assertIn('NPHYS done', joined)
-        self.assertEqual(
-            'physics.setArenaBounds',
-            by_name_last_step(report, 'construct_standalone'))
         by_name = dict((stage['name'], stage) for stage in report['stages'])
-        inventory = by_name['inventory']['data']
-        self.assertIn('WGDynamicsSimulator', inventory['bigworld_names'])
-        self.assertIn('initVehiclePhysicsClient',
-                      inventory['physics_shared']['functions'])
-        existing = by_name['inspect_existing']['data']
-        self.assertEqual(3, existing['bot_count'])
-        self.assertEqual('_FakePhysics', existing['entities'][0]['physics_type'])
-        self.assertIn('mass', existing['entities'][0]['physics_attributes'])
-        standalone = by_name['construct_standalone']['data']
         self.assertEqual(
-            'ok', standalone['init'][0]['result'], standalone['init'])
-        self.assertEqual('ok', standalone['setArenaBounds'])
-        signatures = by_name['signatures']['data']
-        self.assertIn('wrong arguments', signatures['physics']['configure'])
-        self.assertIn('TypeError', signatures['simulator']['update'])
-        self.assertEqual('<missing>', signatures['physics']['rollback'])
+            {'ok'}, set(stage['status'] for stage in report['stages']),
+            report['stages'])
+        self.assertEqual('retail', report['bodies_source'])
+        existing = by_name['inspect_existing']['data']['entities'][0]
+        self.assertEqual('_FakeNativeFilter', existing['native_filter_type'])
+        self.assertEqual('_FakePhysics', existing['retail_physics_type'])
+        self.assertEqual(45000.0, existing['physics_attributes']['mass'])
         solve_one = by_name['solve_one']['data']
+        self.assertEqual('retail', solve_one['source'])
         self.assertGreater(solve_one['moved_m'], 0.5)
-        self.assertGreater(solve_one['update_ms']['calls'], 3)
-        self.assertEqual(0, solve_one['stop']['movementSignals'])
+        self.assertEqual([1, 0], solve_one['input']['notifyInputKeysDown'])
         scale = by_name['solve_scale']['data']
         self.assertEqual(3, scale['body_count'])
         self.assertEqual(5, scale['update_ms']['calls'])
-        passive = by_name['passive_drive']['data']
-        self.assertEqual(0.0, passive['moved_m'])
-        self.assertEqual([1, 0], passive['input']['notifyInputKeysDown'])
-        self.assertEqual(
-            [11, 12, 13][:2], by_name['solve_pair']['data']['bot_ids'])
-        for bot in self.bots:
-            physics = bot['entity'].filter.getVehiclePhysics()
+        for bot in bots:
+            physics = bot['native'].filter.getVehiclePhysics()
             self.assertEqual(0, physics.movementSignals)
-            if bot['bot_id'] in (11, 12):
-                # Driven bodies end with an explicit zero input.
-                self.assertEqual((0, 0), bot['entity'].filter.inputs[-1])
-            else:
-                # Undriven bodies are never touched.
-                self.assertEqual([], bot['entity'].filter.inputs)
+        # construct_standalone never reads a fresh body before init.
+        construct = by_name['construct_standalone']['data']
+        self.assertTrue(construct['initialised'])
+        self.assertEqual('initVehiclePhysicsServer', construct['init'][0]['call'])
+        self.assertEqual(
+            45000.0, construct['physics_attributes_initialised']['mass'])
+        self.assertNotIn('physics_attributes_fresh', construct)
+        self.assertEqual('lastTickMatrix = Matrix', construct['seed']['result'])
+        joined = ''.join(self.lines)
+        self.assertIn('step=construct BigWorld.WGVehiclePhysics()', joined)
+        self.assertIn('step=construct physics_shared.initVehiclePhysicsServer',
+                      joined)
+        self.assertIn('stage=signatures end status=ok', joined)
+        signatures = by_name['signatures']['data']
+        self.assertIn('wrong arguments', signatures['physics']['rollback'])
+
+    def test_standalone_bodies_are_built_when_retail_bodies_are_absent(self):
+        bots = self._bots(retail=False)
+        probe = self._probe(bots)
+        self._run(probe)
+        self.assertTrue(probe.done)
+        report = self._report()
+        by_name = dict((stage['name'], stage) for stage in report['stages'])
+        self.assertEqual(
+            {'ok'}, set(stage['status'] for stage in report['stages']),
+            report['stages'])
+        self.assertEqual('standalone', report['bodies_source'])
+        existing = by_name['inspect_existing']['data']['entities'][0]
+        self.assertEqual('NoneType', existing['retail_physics_type'])
+        solve_one = by_name['solve_one']['data']
+        self.assertEqual('standalone', solve_one['source'])
+        self.assertEqual('standalone:11', solve_one['body'])
+        self.assertGreater(solve_one['moved_m'], 0.5)
+        self.assertNotIn('notifyInputKeysDown', solve_one['input'])
+        scale = by_name['solve_scale']['data']
+        self.assertEqual(3, scale['body_count'])
+        self.assertEqual(3, len(report['standalone_bodies']))
+        for body in report['standalone_bodies']:
+            self.assertTrue(body['initialised'])
+            self.assertEqual('_FakeNativeEntity', body['owner'])
+            self.assertEqual('lastTickMatrix = Matrix', body['seed']['result'])
+        self.assertEqual(
+            ['standalone:11', 'standalone:12'],
+            by_name['solve_pair']['data']['labels'])
+        self.assertEqual(2, report['simulator_settings']['numSubsteps'])
 
     def test_stage_exception_is_recorded_and_probe_continues(self):
         def broken(*unused):
             raise RuntimeError('simulator refused')
         self.simulator.update = broken
-        probe = self._probe()
+        probe = self._probe(self._bots(retail=True))
         self._run(probe)
         self.assertTrue(probe.done)
         report = self._report()
@@ -299,12 +376,10 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertIn('simulator refused', by_name['solve_one']['error'])
         self.assertEqual('ok', by_name['restore']['status'])
         self.assertEqual('ok', by_name['inventory']['status'])
-        for bot in self.bots:
-            self.assertEqual(
-                0, bot['entity'].filter.getVehiclePhysics().movementSignals)
 
-    def test_report_records_last_begun_stage_before_native_calls(self):
-        probe = self._probe(stages=['inventory', 'inspect_existing'])
+    def test_report_records_last_begun_stage_and_step(self):
+        probe = self._probe(self._bots(retail=True),
+                            stages=['inventory', 'inspect_existing'])
         probe.tick(True, 1, 0.05)
         self.clock[0] += 1.0
         probe.tick(True, 1, 0.05)
@@ -312,24 +387,13 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertEqual('inventory', report['last_begun'])
         self.assertEqual(['inventory', 'inspect_existing', 'restore'],
                          probe._stages)
-
-    def test_risky_stages_are_opt_in_and_ordered_last_by_default(self):
-        probe = self.module.WorkerPhysicsProbe(
-            self.host, self.directory, writer=self.lines.append,
-            clock=lambda: self.clock[0])
-        self.assertEqual(
-            ['inventory', 'inspect_existing', 'passive_drive', 'solve_one',
-             'solve_scale', 'solve_pair', 'restore'], probe._stages)
-        self.assertFalse(probe._config['fresh_attribute_reads'])
-        opted = self.module.WorkerPhysicsProbe(
-            self.host, self.directory, writer=self.lines.append,
-            clock=lambda: self.clock[0],
-            config={'opt_in_stages': ['construct_standalone']})
-        self.assertEqual('construct_standalone', opted._stages[-1])
-        self.assertNotIn('signatures', opted._stages)
+        self.clock[0] += 0.1
+        probe.tick(True, 1, 0.05)
+        self.assertIn('stage=inspect_existing step=bot:11 native.filter.speedInfo',
+                      ''.join(self.lines))
 
     def test_probe_waits_for_live_and_start_delay(self):
-        probe = self._probe(start_delay_seconds=5.0)
+        probe = self._probe(self._bots(retail=True), start_delay_seconds=5.0)
         probe.tick(False, 1, 0.05)
         self.clock[0] += 10.0
         probe.tick(False, 1, 0.05)

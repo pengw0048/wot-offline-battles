@@ -1,25 +1,30 @@
 """Staged, fail-closed probe of #1513's native vehicle physics surface.
 
-Diagnostic evidence only.  The hidden worker already owns one stock
-``Vehicle`` entity per Bot, and the pinned client's complete
-``Vehicle.__startWGPhysics`` still runs for each of them, so every Bot filter
-carries a ``WGVehiclePhysics`` created by retail code.  This probe inspects
-those objects, constructs standalone ``WGVehiclePhysics`` /
-``WGDynamicsSimulator`` / ``WGPhysicalBody`` instances, harvests method
-signatures from the binding's own argument errors, drives one Bot body through
-``movementSignals`` and an explicit ``WGDynamicsSimulator.update`` batch, and
-times a full-roster batch.
+Diagnostic evidence only.  Two Windows runs established the ground truth this
+version is built on:
 
-Each stage runs on its own render frame, logs ``NPHYS stage=<name> begin``
-before its first native call, and rewrites the JSON report after it finishes.
-A native crash therefore leaves the last ``begin`` line in ``python.log`` and
-every earlier stage's data on disk.  A Python exception is recorded and the
-probe moves to the next stage; nothing here may raise into the frame.
+* The Python carrier the runtime hands out for a Bot (``RemoteVehicle``) owns
+  a Python ``_RemoteFilter``; the native ``Vehicle`` entity behind it owns the
+  stock ``WGVehicleFilter``.  Whether that native filter carries a retail
+  ``WGVehiclePhysics`` is exactly what ``inspect_existing`` records.
+* Reading an attribute of a ``WGVehiclePhysics`` that ``physics_shared`` has
+  not initialised dereferences a NULL body (``mass`` getter,
+  ``WorldOfTanks.exe+0xb50ad0``).  Bodies are therefore initialised before the
+  first attribute read, and the pre-initialisation read is opt-in.
 
-The probe never calls ``WGVehicleFilter.setVehiclePhysics`` or
-``syncGunAngles`` (the documented #1513 crash class) and never touches human
-vehicles.  It changes no gameplay rule; it does move at most a few Bot bodies
-for a couple of seconds while a stage is active.
+Stages run one per render frame from ``start_delay_seconds`` after the battle
+goes live.  Every native call group is announced with
+``NPHYS stage=<name> step=<call>`` before it runs, and the JSON report is
+rewritten after each stage, so a native crash leaves the last step in
+``python.log`` and every earlier stage's data on disk.  A Python exception is
+recorded and the probe continues; nothing here may raise into the frame.
+
+Bodies used by the drive/solve stages are retail bodies when the native filter
+exposes them, otherwise standalone bodies the probe constructs and initialises
+through ``physics_shared`` from the Bot's own descriptor.  Standalone bodies
+have no presentation; their read-back matrices are the evidence.  The probe
+never calls ``WGVehicleFilter.setVehiclePhysics`` or ``syncGunAngles`` and
+never touches human vehicles.
 """
 
 from __future__ import print_function
@@ -29,6 +34,7 @@ import math
 import os
 import sys
 import time
+import weakref
 
 
 LOG_PREFIX = '[Offline LAN 0.9.22] NPHYS'
@@ -53,16 +59,22 @@ DEFAULT_CONFIG = {
     'passive_seconds': 1.0,
     'drive_seconds': 2.0,
     'scale_frames': 60,
+    'scale_bodies': 29,
     'pair_seconds': 2.0,
     'drive_all': False,
     'disable_lsprof': False,
     'opt_in_stages': [],
     'fresh_attribute_reads': False,
+    'allow_standalone_bodies': True,
+    # 'server' first: WGDynamicsSimulator is the retail server-style solver.
+    'init_order': ['initVehiclePhysicsServer', 'initVehiclePhysicsClient'],
+    # 'entity' installs weakref(native Vehicle) like retail; 'none' leaves it.
+    'owner_mode': 'entity',
 }
 
 # Attributes the exe's string table exposes on WGVehiclePhysics.  Every read
-# is individually guarded; a missing or write-only attribute is recorded as
-# such rather than treated as a failure.
+# is individually guarded and announced; a missing or write-only attribute is
+# recorded as such rather than treated as a failure.
 PHYSICS_READ_ATTRIBUTES = (
     'mass', 'centerOfMass', 'staticMode', 'isFrozen', 'isFrozenDuringFrame',
     'allowFreeze', 'movementSignals', 'cruiseSignals', 'handbrake',
@@ -106,33 +118,28 @@ BODY_ATTRIBUTES = (
     'staticCollisionSelfPoint', 'freezePosErrorEpsilon',
     'staticSceneFriction', 'isCollidingWithWorld', 'isCwwThresholdFactor')
 # Methods whose argument contract is harvested from the binding's own
-# TypeError text.  Only no-argument calls are made; a BigWorld binding checks
-# its argument tuple before touching native state.
+# TypeError text.  Only no-argument calls are made.  Methods that would act
+# with defaults are excluded here and tried explicitly by _seed_pose.
 PHYSICS_SIGNATURE_METHODS = (
-    'configure', 'rollback', 'setSignal', 'fireEngine', 'touchGround',
-    'getTouchedGround', 'getTouchedMatkind', 'getPointVelocity',
-    'getRollerPosition', 'getAggressiveImpacts', 'applyImpulseToCoM',
-    'setHullAimingAnglesDelta', 'setArenaBounds', 'enableTurretCollision',
-    'addDamperSpring', 'setDamperSpringsLength', 'removeAllDamperSprings',
-    'subscribeBeforeSimulation', 'subscribeAfterSimulation',
-    'removeAllSubscriptions')
+    'configure', 'rollback', 'setSignal', 'getTouchedGround',
+    'getTouchedMatkind', 'getPointVelocity', 'getRollerPosition',
+    'getAggressiveImpacts', 'applyImpulseToCoM', 'setHullAimingAnglesDelta',
+    'setArenaBounds', 'enableTurretCollision', 'addDamperSpring',
+    'setDamperSpringsLength', 'subscribeBeforeSimulation',
+    'subscribeAfterSimulation')
 SIMULATOR_SIGNATURE_METHODS = ('update', 'setUseSseSolver')
 BODY_SIGNATURE_METHODS = (
     'setup', 'addShape', 'addBoxShape', 'setCoreSegment',
-    'getProjectionArea', 'removeShapes')
+    'getProjectionArea')
 FILTER_READ_ATTRIBUTES = (
-    'speedInfo', 'bodyMatrix', 'vehicleWidth', 'maxMove', 'maxRotate',
-    'allowStrafe', 'strafeSpeed', 'allowStop', 'vehicleCollisionMargin',
-    'isStrafing')
+    'speedInfo', 'bodyMatrix', 'groundPlacingMatrix', 'vehicleWidth',
+    'maxMove', 'maxRotate', 'allowStrafe', 'strafeSpeed', 'allowStop',
+    'vehicleCollisionMargin', 'isStrafing')
 STAGE_ORDER = (
-    'inventory', 'inspect_existing', 'passive_drive', 'solve_one',
-    'solve_scale', 'solve_pair', 'restore', 'construct_standalone',
+    'inventory', 'inspect_existing', 'construct_standalone',
+    'passive_drive', 'solve_one', 'solve_scale', 'solve_pair', 'restore',
     'signatures')
-# Stages that are skipped unless worker_diagnostics.json opts in.  The first
-# Windows run died with EXCEPTION_ACCESS_VIOLATION (read @ 0x638) inside
-# construct_standalone, so anything that touches a body the retail client did
-# not configure is opt-in until the crash address has been attributed.
-OPT_IN_STAGES = ('construct_standalone', 'signatures')
+OPT_IN_STAGES = ('signatures',)
 
 
 def load_config(config_dir):
@@ -158,6 +165,13 @@ def _type_name(value):
         return type(value).__name__
     except Exception:
         return '<unknown>'
+
+
+def _xyz(value):
+    try:
+        return [float(value.x), float(value.y), float(value.z)]
+    except Exception:
+        return [float(value[0]), float(value[1]), float(value[2])]
 
 
 def _plain(value, depth=0):
@@ -199,13 +213,6 @@ def _plain(value, depth=0):
     return '%s:%s' % (_type_name(value), repr(value)[:120])
 
 
-def _xyz(value):
-    try:
-        return [float(value.x), float(value.y), float(value.z)]
-    except Exception:
-        return [float(value[0]), float(value[1]), float(value[2])]
-
-
 def _matrix_translation(matrix, math_module=None):
     """Return the translation of a matrix or matrix provider, or None."""
     if matrix is None:
@@ -230,38 +237,28 @@ def _distance(first, second):
     return math.sqrt(sum((a - b) * (a - b) for a, b in zip(first, second)))
 
 
-def _read_attributes(target, names):
-    result = {}
-    for name in names:
-        try:
-            result[name] = _plain(getattr(target, name))
-        except AttributeError as error:
-            result[name] = '<attribute error: %s>' % str(error)[:120]
-        except Exception as error:
-            result[name] = '<%s: %s>' % (_type_name(error), str(error)[:120])
-    return result
+def _read_attribute(target, name):
+    try:
+        return _plain(getattr(target, name))
+    except AttributeError as error:
+        return '<attribute error: %s>' % str(error)[:120]
+    except Exception as error:
+        return '<%s: %s>' % (_type_name(error), str(error)[:120])
 
 
-def _harvest_signatures(target, names):
-    """Call each method with no arguments and keep the binding's complaint."""
-    result = {}
-    for name in names:
-        method = getattr(target, name, None)
-        if method is None:
-            result[name] = '<missing>'
-            continue
-        if not callable(method):
-            result[name] = '<not callable: %s>' % _type_name(method)
-            continue
-        try:
-            value = method()
-        except TypeError as error:
-            result[name] = 'TypeError: %s' % str(error)[:200]
-        except Exception as error:
-            result[name] = '%s: %s' % (_type_name(error), str(error)[:200])
-        else:
-            result[name] = 'returned %s' % json.dumps(_plain(value))[:200]
-    return result
+def _call_no_args(target, name):
+    method = getattr(target, name, None)
+    if method is None:
+        return '<missing>'
+    if not callable(method):
+        return '<not callable: %s>' % _type_name(method)
+    try:
+        value = method()
+    except TypeError as error:
+        return 'TypeError: %s' % str(error)[:200]
+    except Exception as error:
+        return '%s: %s' % (_type_name(error), str(error)[:200])
+    return 'returned %s' % json.dumps(_plain(value))[:200]
 
 
 def _function_signature(function):
@@ -298,11 +295,13 @@ class WorkerPhysicsProbe(object):
         self._stage_index = 0
         self._stage_state = None
         self._report = {
-            'schema': 1, 'diagnostic': 'native_physics_probe',
+            'schema': 2, 'diagnostic': 'native_physics_probe',
             'config': dict(self._config), 'stages': [], 'last_begun': None}
         self._current = None
         self._simulator = None
         self._standalone = {}
+        self._bodies = []          # acquired body records for drive/solve
+        self._bodies_source = None
         self._driven = []
         self._callback_events = []
         stages = self._config.get('stages')
@@ -327,7 +326,6 @@ class WorkerPhysicsProbe(object):
         try:
             return self._tick(bool(battle_live), round_id, float(frame_dt))
         except Exception as error:
-            # The stage machine itself failed.  Record, restore, stop.
             self._log('machine failure error=%r' % (error,))
             try:
                 self._stage_restore(0.0)
@@ -393,6 +391,7 @@ class WorkerPhysicsProbe(object):
         self._done = True
         self._report['completed'] = True
         self._report['callback_events'] = self._callback_events[:200]
+        self._report['bodies_source'] = self._bodies_source
         self._write_report()
         self._log('done report=%s' % self._report_path())
 
@@ -437,39 +436,47 @@ class WorkerPhysicsProbe(object):
             entries = entries[:int(limit)]
         return entries
 
-    def _physics_of(self, entity):
-        vehicle_filter = getattr(entity, 'filter', None)
+    @staticmethod
+    def _retail_physics(bot):
+        """Return (filter, physics) of the native entity's stock filter."""
+        native = bot.get('native')
+        vehicle_filter = getattr(native, 'filter', None)
         getter = getattr(vehicle_filter, 'getVehiclePhysics', None)
         if not callable(getter):
             return vehicle_filter, None
         return vehicle_filter, getter()
 
-    def _pose_snapshot(self, entity, physics):
-        math_module = self._math()
+    def _read_attributes(self, target, names, label):
         result = {}
-        try:
-            result['entity_position'] = _xyz(entity.position)
-        except Exception:
-            result['entity_position'] = None
-        result['entity_matrix'] = _matrix_translation(
-            getattr(entity, 'matrix', None), math_module)
-        vehicle_filter = getattr(entity, 'filter', None)
-        result['filter_body'] = _matrix_translation(
-            getattr(vehicle_filter, 'bodyMatrix', None), math_module)
-        if physics is not None:
-            for name in PHYSICS_MATRIX_ATTRIBUTES:
-                try:
-                    result[name] = _matrix_translation(
-                        getattr(physics, name), math_module)
-                except Exception as error:
-                    result[name] = '<%s>' % str(error)[:80]
-            for name in ('speed', 'isFrozen', 'movementSignals',
-                         'gotTracksContact', 'groundType',
-                         'distanceTraveled'):
-                try:
-                    result[name] = _plain(getattr(physics, name))
-                except Exception:
-                    result[name] = None
+        for name in names:
+            self._step('%s.%s' % (label, name))
+            result[name] = _read_attribute(target, name)
+        return result
+
+    def _pose_snapshot(self, body):
+        math_module = self._math()
+        physics = body['physics']
+        result = {}
+        bot = body.get('bot') or {}
+        result['bot_position'] = bot.get('position')
+        native = bot.get('native')
+        if native is not None:
+            try:
+                result['native_position'] = _xyz(native.position)
+            except Exception:
+                result['native_position'] = None
+            vehicle_filter = getattr(native, 'filter', None)
+            result['filter_body'] = _matrix_translation(
+                getattr(vehicle_filter, 'bodyMatrix', None), math_module)
+        for name in PHYSICS_MATRIX_ATTRIBUTES:
+            try:
+                result[name] = _matrix_translation(
+                    getattr(physics, name), math_module)
+            except Exception as error:
+                result[name] = '<%s>' % str(error)[:80]
+        for name in ('speed', 'isFrozen', 'movementSignals',
+                     'gotTracksContact', 'groundType', 'distanceTraveled'):
+            result[name] = _read_attribute(physics, name)
         return result
 
     def _install_callbacks(self, physics, label):
@@ -490,49 +497,239 @@ class WorkerPhysicsProbe(object):
                 pass
         return installed
 
-    def _set_signals(self, entity, physics, signals, movement, rotation):
+    def _set_signals(self, body, signals, movement, rotation):
+        physics = body['physics']
         detail = {}
         try:
             physics.movementSignals = int(signals)
-            detail['movementSignals'] = _plain(physics.movementSignals)
+            detail['movementSignals'] = _read_attribute(
+                physics, 'movementSignals')
         except Exception as error:
             detail['movementSignals'] = '<%s>' % str(error)[:80]
         if signals:
             try:
                 physics.isFrozen = False
-                detail['isFrozen'] = _plain(physics.isFrozen)
+                detail['isFrozen'] = _read_attribute(physics, 'isFrozen')
             except Exception as error:
                 detail['isFrozen'] = '<%s>' % str(error)[:80]
-        vehicle_filter = getattr(entity, 'filter', None)
-        notify = getattr(vehicle_filter, 'notifyInputKeysDown', None)
-        if callable(notify):
-            try:
-                notify(int(movement), int(rotation))
-                detail['notifyInputKeysDown'] = [int(movement), int(rotation)]
-            except Exception as error:
-                detail['notifyInputKeysDown'] = '<%s>' % str(error)[:80]
+        if body.get('source') == 'retail':
+            native = (body.get('bot') or {}).get('native')
+            notify = getattr(getattr(native, 'filter', None),
+                             'notifyInputKeysDown', None)
+            if callable(notify):
+                try:
+                    notify(int(movement), int(rotation))
+                    detail['notifyInputKeysDown'] = [
+                        int(movement), int(rotation)]
+                except Exception as error:
+                    detail['notifyInputKeysDown'] = '<%s>' % str(error)[:80]
         return detail
 
     def _simulator_for_stage(self):
         if self._simulator is None:
-            self._simulator = self._bigworld().WGDynamicsSimulator()
+            self._step('BigWorld.WGDynamicsSimulator()')
+            simulator = self._bigworld().WGDynamicsSimulator()
+            self._configure_simulator(simulator)
+            self._simulator = simulator
         return self._simulator
+
+    def _configure_simulator(self, simulator):
+        """Apply physics_shared's solver constants like the retail server."""
+        try:
+            import physics_shared
+        except Exception:
+            return
+        settings = (
+            ('numSubsteps', 'NUM_SUBSTEPS', int),
+            ('numIterations', 'NUM_ITERATIONS', int),
+            ('frictionRatio', 'FRICTION_RATIO', float),
+            ('restitution', 'RESTITUTION', float),
+            ('allowedPenetration', 'ALLOWED_PENETRATION', float),
+            ('midSolvingIterations', 'MID_SOLVING_ITERATIONS', int),
+        )
+        applied = {}
+        for attribute, constant, cast in settings:
+            value = getattr(physics_shared, constant, None)
+            if value is None:
+                continue
+            self._step('simulator.%s = %r' % (attribute, value))
+            try:
+                setattr(simulator, attribute, cast(value))
+                applied[attribute] = _read_attribute(simulator, attribute)
+            except Exception as error:
+                applied[attribute] = '<%s>' % str(error)[:80]
+        self._report['simulator_settings'] = applied
 
     def _timed_update(self, simulator, dt, physics_list):
         started = self._perf()
         simulator.update(float(dt), list(physics_list), [])
         return (self._perf() - started) * 1000.0
 
+    # ------------------------------------------------------- body acquisition
+    def _construct_body(self, bot, label):
+        """Construct, initialise and pose one standalone body; never raise."""
+        record = {'label': label, 'source': 'standalone', 'bot': bot,
+                  'physics': None, 'init': [], 'seed': None, 'owner': None}
+        bigworld = self._bigworld()
+        self._step('%s BigWorld.WGVehiclePhysics()' % label)
+        physics = bigworld.WGVehiclePhysics()
+        record['physics'] = physics
+        descriptor = bot.get('descriptor')
+        if descriptor is None:
+            record['init'].append({'call': '-', 'result': '<no descriptor>'})
+            return record
+        try:
+            import physics_shared
+        except Exception as error:
+            record['init'].append({
+                'call': 'import physics_shared', 'result': str(error)[:120]})
+            return record
+        initialised = False
+        for name in self._config.get('init_order') or ():
+            function = getattr(physics_shared, name, None)
+            if function is None:
+                record['init'].append({'call': name, 'result': '<missing>'})
+                continue
+            self._step('%s physics_shared.%s' % (label, name))
+            try:
+                function(physics, descriptor)
+            except Exception as error:
+                record['init'].append({
+                    'call': name,
+                    'result': '%s: %s' % (_type_name(error), str(error)[:200])})
+                continue
+            record['init'].append({'call': name, 'result': 'ok'})
+            initialised = True
+            break
+        record['initialised'] = initialised
+        if not initialised:
+            return record
+        self._step('%s physics.setArenaBounds' % label)
+        try:
+            physics.setArenaBounds((-10000, -10000), (10000, 10000))
+            record['setArenaBounds'] = 'ok'
+        except Exception as error:
+            record['setArenaBounds'] = '%s: %s' % (_type_name(error), str(error))
+        for name, value in (('staticMode', False), ('movementSignals', 0)):
+            self._step('%s physics.%s = %r' % (label, name, value))
+            try:
+                setattr(physics, name, value)
+            except Exception as error:
+                record['%s_set' % name] = '<%s>' % str(error)[:80]
+        owner_mode = self._config.get('owner_mode', 'entity')
+        target = bot.get('native') or bot.get('carrier')
+        if owner_mode == 'entity' and target is not None:
+            self._step('%s physics.owner = weakref(entity)' % label)
+            try:
+                physics.owner = weakref.ref(target)
+                record['owner'] = _type_name(target)
+            except Exception as error:
+                record['owner'] = '<%s>' % str(error)[:80]
+        self._step('%s install callbacks' % label)
+        record['callbacks'] = self._install_callbacks(physics, label)
+        record['seed'] = self._seed_pose(physics, bot, label)
+        return record
+
+    def _seed_pose(self, physics, bot, label):
+        """Try the plausible pose setters; report which one moved the body."""
+        position = bot.get('position')
+        yaw = float(bot.get('yaw') or 0.0)
+        math_module = self._math()
+        attempts = []
+        if position is None or math_module is None:
+            return {'attempts': attempts, 'result': '<no pose or Math>'}
+        try:
+            matrix = math_module.Matrix()
+            matrix.setRotateYPR((yaw, 0.0, 0.0))
+            matrix.translation = math_module.Vector3(*position)
+            vector = math_module.Vector3(*position)
+        except Exception as error:
+            return {'attempts': attempts,
+                    'result': '<matrix build failed: %s>' % str(error)[:80]}
+        candidates = (
+            ('lastTickMatrix = Matrix', lambda: setattr(
+                physics, 'lastTickMatrix', matrix)),
+            ('rollback(Matrix)', lambda: physics.rollback(matrix)),
+            ('configure(Matrix)', lambda: physics.configure(matrix)),
+            ('rollback(Vector3, yaw)', lambda: physics.rollback(vector, yaw)),
+            ('configure(Vector3, yaw)', lambda: physics.configure(
+                vector, yaw)),
+        )
+        for name, call in candidates:
+            self._step('%s seed %s' % (label, name))
+            try:
+                call()
+            except Exception as error:
+                attempts.append({'call': name, 'result': '%s: %s' % (
+                    _type_name(error), str(error)[:160])})
+                continue
+            self._step('%s seed readback' % label)
+            readback = None
+            for attribute in PHYSICS_MATRIX_ATTRIBUTES:
+                try:
+                    readback = _matrix_translation(
+                        getattr(physics, attribute), math_module)
+                except Exception:
+                    readback = None
+                if readback is not None:
+                    break
+            distance = _distance(readback, position)
+            attempts.append({'call': name, 'result': 'ok',
+                             'readback': readback, 'distance_m': distance})
+            if distance is not None and distance < 5.0:
+                return {'attempts': attempts, 'result': name,
+                        'readback': readback}
+        return {'attempts': attempts, 'result': '<no setter moved the body>'}
+
+    def _acquire_bodies(self, count):
+        """Retail bodies when the native filter has them, else standalone."""
+        needed = int(count)
+        if len(self._bodies) >= needed:
+            return self._bodies[:needed]
+        bots = self._bots()
+        if self._bodies_source is None:
+            retail = []
+            for bot in bots:
+                self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
+                unused_filter, physics = self._retail_physics(bot)
+                if physics is not None:
+                    retail.append({'label': 'bot:%s' % bot['bot_id'],
+                                   'source': 'retail', 'bot': bot,
+                                   'physics': physics})
+            if retail:
+                self._bodies_source = 'retail'
+                self._bodies = retail
+                return self._bodies[:needed]
+            if not self._config.get('allow_standalone_bodies', True):
+                self._bodies_source = 'none'
+                return []
+            self._bodies_source = 'standalone'
+        if self._bodies_source == 'standalone':
+            used = set(id(record['bot']) for record in self._bodies)
+            for bot in bots:
+                if len(self._bodies) >= needed:
+                    break
+                if id(bot) in used:
+                    continue
+                label = 'standalone:%s' % bot['bot_id']
+                record = self._construct_body(bot, label)
+                self._report.setdefault('standalone_bodies', []).append({
+                    'label': label, 'init': record.get('init'),
+                    'initialised': record.get('initialised'),
+                    'owner': record.get('owner'), 'seed': record.get('seed'),
+                    'setArenaBounds': record.get('setArenaBounds')})
+                if record.get('initialised'):
+                    self._bodies.append(record)
+        return self._bodies[:needed]
+
     # ---------------------------------------------------------------- stages
     def _stage_inventory(self, frame_dt):
         data = self._current['data']
         bigworld = self._bigworld()
-        names = sorted(
+        data['bigworld_names'] = sorted(
             name for name in dir(bigworld)
             if 'WG' in name or 'Physic' in name or 'Dynamic' in name or
             'Filter' in name)
-        data['bigworld_names'] = names
-        data['movement_flags'] = None
         try:
             constants = self._host.constants()
             flags = getattr(constants, 'VEHICLE_MOVEMENT_FLAGS', None)
@@ -554,12 +751,9 @@ class WorkerPhysicsProbe(object):
             value = getattr(physics_shared, name)
             if isinstance(value, (bool, int, float)):
                 constants[name] = value
-                continue
-            if callable(value) and not isinstance(value, type):
+            elif callable(value) and not isinstance(value, type):
                 functions[name] = _function_signature(
                     getattr(value, '__func__', value))
-            elif isinstance(value, (bool, int, float)):
-                constants[name] = value
             elif isinstance(value, dict) and len(value) <= 64:
                 constants[name] = sorted(str(key) for key in value)[:64]
         data['physics_shared'] = {
@@ -570,344 +764,279 @@ class WorkerPhysicsProbe(object):
         data = self._current['data']
         entries = []
         for bot in self._bots(self._config.get('inspect_entities', 3)):
-            entity = bot['entity']
-            self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
-            vehicle_filter, physics = self._physics_of(entity)
+            native = bot.get('native')
+            carrier = bot.get('carrier')
             entry = {
                 'bot_id': bot['bot_id'],
-                'entity_type': _type_name(entity),
-                'filter_type': _type_name(vehicle_filter),
+                'position': bot.get('position'), 'yaw': bot.get('yaw'),
+                'carrier_type': _type_name(carrier),
+                'carrier_filter_type': _type_name(
+                    getattr(carrier, 'filter', None)),
+                'native_type': _type_name(native),
+                'native_filter_type': _type_name(
+                    getattr(native, 'filter', None)),
+                'descriptor_type': _type_name(bot.get('descriptor')),
             }
-            self._step('bot:%s filter attributes' % bot['bot_id'])
-            entry['filter_attributes'] = _read_attributes(
-                vehicle_filter, FILTER_READ_ATTRIBUTES)
-            entry['physics_type'] = _type_name(physics)
-            if physics is not None:
-                entry['physics_dir'] = sorted(
-                    name for name in dir(physics) if not name.startswith('__'))
-                entry['physics_attributes'] = {}
-                for name in PHYSICS_READ_ATTRIBUTES:
-                    self._step('bot:%s physics.%s' % (bot['bot_id'], name))
-                    entry['physics_attributes'].update(
-                        _read_attributes(physics, (name,)))
-                self._step('bot:%s pose snapshot' % bot['bot_id'])
-                entry['pose'] = self._pose_snapshot(entity, physics)
+            if native is not None:
+                vehicle_filter = getattr(native, 'filter', None)
+                entry['native_filter_attributes'] = self._read_attributes(
+                    vehicle_filter, FILTER_READ_ATTRIBUTES,
+                    'bot:%s native.filter' % bot['bot_id'])
+                self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
+                unused_filter, physics = self._retail_physics(bot)
+                entry['retail_physics_type'] = _type_name(physics)
+                if physics is not None:
+                    entry['physics_dir'] = sorted(
+                        name for name in dir(physics)
+                        if not name.startswith('__'))
+                    entry['physics_attributes'] = self._read_attributes(
+                        physics, PHYSICS_READ_ATTRIBUTES,
+                        'bot:%s retail physics' % bot['bot_id'])
             entries.append(entry)
         data['entities'] = entries
         data['bot_count'] = len(self._bots())
         return True
 
     def _stage_construct_standalone(self, frame_dt):
+        """Build and initialise one throwaway body; read it only afterwards."""
         data = self._current['data']
         bigworld = self._bigworld()
-        self._step('BigWorld.WGVehiclePhysics()')
-        physics = bigworld.WGVehiclePhysics()
-        self._standalone['physics'] = physics
+        bots = self._bots(1)
+        if not bots:
+            data['result'] = '<no ready bot>'
+            return True
+        record = self._construct_body(bots[0], 'construct')
+        self._standalone['physics'] = record['physics']
+        data['init'] = record['init']
+        data['initialised'] = record.get('initialised')
+        data['owner'] = record.get('owner')
+        data['setArenaBounds'] = record.get('setArenaBounds')
+        data['seed'] = record.get('seed')
+        physics = record['physics']
         data['physics_dir'] = sorted(
             name for name in dir(physics) if not name.startswith('__'))
-        if self._config.get('fresh_attribute_reads'):
-            # Reading an unconfigured body is exactly where the first Windows
-            # run died; keep it opt-in and one attribute per logged step.
-            data['physics_attributes_fresh'] = {}
-            for name in PHYSICS_READ_ATTRIBUTES:
-                self._step('fresh physics.%s' % name)
-                data['physics_attributes_fresh'].update(
-                    _read_attributes(physics, (name,)))
-        self._step('BigWorld.WGDynamicsSimulator()')
+        if record.get('initialised'):
+            data['physics_attributes_initialised'] = self._read_attributes(
+                physics, PHYSICS_READ_ATTRIBUTES, 'initialised physics')
+        elif self._config.get('fresh_attribute_reads'):
+            data['physics_attributes_fresh'] = self._read_attributes(
+                physics, PHYSICS_READ_ATTRIBUTES, 'fresh physics')
         simulator = self._simulator_for_stage()
         data['simulator_dir'] = sorted(
             name for name in dir(simulator) if not name.startswith('__'))
-        self._step('simulator attributes')
-        data['simulator_attributes'] = _read_attributes(
-            simulator, SIMULATOR_ATTRIBUTES)
+        data['simulator_attributes'] = self._read_attributes(
+            simulator, SIMULATOR_ATTRIBUTES, 'simulator')
         self._step('BigWorld.WGPhysicalBody()')
         body = bigworld.WGPhysicalBody()
         self._standalone['body'] = body
         data['body_dir'] = sorted(
             name for name in dir(body) if not name.startswith('__'))
-        self._step('body attributes')
-        data['body_attributes'] = _read_attributes(body, BODY_ATTRIBUTES)
-        # Initialise the standalone body exactly as the retail client does for
-        # its own vehicle: through physics_shared, on a real descriptor.
-        bots = self._bots(1)
-        if not bots:
-            data['init'] = '<no ready bot descriptor>'
-            return True
-        descriptor = getattr(bots[0]['entity'], 'typeDescriptor', None)
-        attempts = []
-        try:
-            import physics_shared
-        except Exception as error:
-            data['init'] = '<physics_shared import failed: %s>' % str(error)
-            return True
-        candidates = (
-            ('initVehiclePhysicsClient', (physics, descriptor)),
-            ('initVehiclePhysics', (physics, descriptor)),
-            ('initVehiclePhysics', (physics, descriptor, None, True)),
-        )
-        for name, args in candidates:
-            function = getattr(physics_shared, name, None)
-            if function is None:
-                attempts.append({'call': name, 'result': '<missing>'})
-                continue
-            self._step('physics_shared.%s/%d' % (name, len(args)))
-            try:
-                function(*args)
-            except Exception as error:
-                attempts.append({
-                    'call': '%s/%d' % (name, len(args)),
-                    'result': '%s: %s' % (_type_name(error), str(error)[:200])})
-                continue
-            attempts.append({'call': '%s/%d' % (name, len(args)),
-                             'result': 'ok'})
-            break
-        data['init'] = attempts
-        initialised = any(item['result'] == 'ok' for item in attempts)
-        data['physics_attributes_initialised'] = {}
-        if initialised:
-            for name in PHYSICS_READ_ATTRIBUTES:
-                self._step('initialised physics.%s' % name)
-                data['physics_attributes_initialised'].update(
-                    _read_attributes(physics, (name,)))
-        self._step('physics.setArenaBounds')
-        try:
-            physics.setArenaBounds((-10000, -10000), (10000, 10000))
-            data['setArenaBounds'] = 'ok'
-        except Exception as error:
-            data['setArenaBounds'] = '%s: %s' % (_type_name(error), str(error))
+        data['body_attributes'] = self._read_attributes(
+            body, BODY_ATTRIBUTES, 'body')
         return True
 
     def _stage_signatures(self, frame_dt):
         data = self._current['data']
         physics = self._standalone.get('physics')
         if physics is None:
-            self._step('BigWorld.WGVehiclePhysics()')
-            physics = self._bigworld().WGVehiclePhysics()
-            self._standalone['physics'] = physics
+            data['result'] = '<no initialised standalone body>'
+            return True
         data['physics'] = {}
         for name in PHYSICS_SIGNATURE_METHODS:
             self._step('physics.%s()' % name)
-            data['physics'].update(_harvest_signatures(physics, (name,)))
+            data['physics'][name] = _call_no_args(physics, name)
         simulator = self._simulator_for_stage()
         data['simulator'] = {}
         for name in SIMULATOR_SIGNATURE_METHODS:
             self._step('simulator.%s()' % name)
-            data['simulator'].update(_harvest_signatures(simulator, (name,)))
+            data['simulator'][name] = _call_no_args(simulator, name)
         body = self._standalone.get('body')
-        if body is None:
-            self._step('BigWorld.WGPhysicalBody()')
-            body = self._bigworld().WGPhysicalBody()
-            self._standalone['body'] = body
-        data['body'] = {}
-        for name in BODY_SIGNATURE_METHODS:
-            self._step('body.%s()' % name)
-            data['body'].update(_harvest_signatures(body, (name,)))
+        if body is not None:
+            data['body'] = {}
+            for name in BODY_SIGNATURE_METHODS:
+                self._step('body.%s()' % name)
+                data['body'][name] = _call_no_args(body, name)
         return True
 
-    def _drive_target(self, index):
-        bots = self._bots()
-        if len(bots) <= index:
-            return None, None, None
-        bot = bots[index]
-        vehicle_filter, physics = self._physics_of(bot['entity'])
-        return bot, vehicle_filter, physics
-
     def _stage_passive_drive(self, frame_dt):
-        """Signals and filter input only; nobody calls the simulator."""
+        """Signals only; nobody calls the simulator.  Does anything move?"""
         data = self._current['data']
         state = self._stage_state
-        bot, unused_filter, physics = self._drive_target(0)
-        if physics is None:
-            data['result'] = '<bot 0 has no physics>'
-            return True
-        if 'start' not in state:
-            data['bot_id'] = bot['bot_id']
-            self._step('bot:%s install callbacks' % bot['bot_id'])
-            data['callbacks_installed'] = self._install_callbacks(
-                physics, 'bot:%s' % bot['bot_id'])
-            self._step('bot:%s pose snapshot' % bot['bot_id'])
-            data['before'] = self._pose_snapshot(bot['entity'], physics)
-            self._step('bot:%s movementSignals/notifyInputKeysDown' %
-                       bot['bot_id'])
-            data['input'] = self._set_signals(
-                bot['entity'], physics, MOVE_FORWARD_SIGNAL, 1, 0)
+        if 'body' not in state:
+            bodies = self._acquire_bodies(1)
+            if not bodies:
+                data['result'] = '<no body available>'
+                return True
+            body = bodies[0]
+            state['body'] = body
+            data['body'] = body['label']
+            data['source'] = body['source']
+            data['before'] = self._pose_snapshot(body)
+            self._step('%s movementSignals' % body['label'])
+            data['input'] = self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
             state['start'] = self._clock()
-            self._driven.append(bot['bot_id'])
+            self._driven.append(body)
             return False
         if self._clock() - state['start'] < float(
                 self._config['passive_seconds']):
             return False
-        data['after'] = self._pose_snapshot(bot['entity'], physics)
+        body = state['body']
+        data['after'] = self._pose_snapshot(body)
         data['moved_m'] = _distance(
-            (data['before'] or {}).get('lastTickMatrix'),
-            (data['after'] or {}).get('lastTickMatrix'))
-        data['entity_moved_m'] = _distance(
-            (data['before'] or {}).get('entity_position'),
-            (data['after'] or {}).get('entity_position'))
-        data['stop'] = self._set_signals(bot['entity'], physics, 0, 0, 0)
+            data['before'].get('lastTickMatrix'),
+            data['after'].get('lastTickMatrix'))
+        data['stop'] = self._set_signals(body, 0, 0, 0)
         return True
 
     def _stage_solve_one(self, frame_dt):
-        """Drive Bot 0 forward through an explicit simulator batch."""
+        """Drive one body forward through an explicit simulator batch."""
         data = self._current['data']
         state = self._stage_state
-        bot, unused_filter, physics = self._drive_target(0)
-        if physics is None:
-            data['result'] = '<bot 0 has no physics>'
-            return True
-        if 'start' not in state:
-            self._step('BigWorld.WGDynamicsSimulator()')
+        if 'body' not in state:
+            bodies = self._acquire_bodies(1)
+            if not bodies:
+                data['result'] = '<no body available>'
+                return True
+            body = bodies[0]
+            state['body'] = body
+            data['body'] = body['label']
+            data['source'] = body['source']
             self._simulator_for_stage()
-            data['bot_id'] = bot['bot_id']
-            data['before'] = self._pose_snapshot(bot['entity'], physics)
-            self._step('bot:%s movementSignals/notifyInputKeysDown' %
-                       bot['bot_id'])
-            data['input'] = self._set_signals(
-                bot['entity'], physics, MOVE_FORWARD_SIGNAL, 1, 0)
+            data['before'] = self._pose_snapshot(body)
+            self._step('%s movementSignals' % body['label'])
+            data['input'] = self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
             state['start'] = self._clock()
             state['updates'] = []
             state['samples'] = []
-            self._driven.append(bot['bot_id'])
+            self._driven.append(body)
             return False
+        body = state['body']
         simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
         if not state['updates']:
-            self._step('simulator.update(dt, [bot:%s], [])' % bot['bot_id'])
-        state['updates'].append(self._timed_update(simulator, dt, [physics]))
+            self._step('simulator.update(dt, [%s], [])' % body['label'])
+        state['updates'].append(
+            self._timed_update(simulator, dt, [body['physics']]))
         if len(state['samples']) < 12:
-            state['samples'].append(
-                self._pose_snapshot(bot['entity'], physics))
+            state['samples'].append(self._pose_snapshot(body))
         if self._clock() - state['start'] < float(
                 self._config['drive_seconds']):
             return False
-        data['after'] = self._pose_snapshot(bot['entity'], physics)
+        data['after'] = self._pose_snapshot(body)
         updates = state['updates']
         data['update_ms'] = {
-            'calls': len(updates),
-            'min': min(updates) if updates else None,
-            'avg': (sum(updates) / len(updates)) if updates else None,
-            'max': max(updates) if updates else None,
-        }
+            'calls': len(updates), 'min': min(updates),
+            'avg': sum(updates) / len(updates), 'max': max(updates)}
         data['samples'] = state['samples']
         data['moved_m'] = _distance(
-            (data['before'] or {}).get('lastTickMatrix'),
-            (data['after'] or {}).get('lastTickMatrix'))
-        data['entity_moved_m'] = _distance(
-            (data['before'] or {}).get('entity_position'),
-            (data['after'] or {}).get('entity_position'))
-        data['stop'] = self._set_signals(bot['entity'], physics, 0, 0, 0)
-        try:
-            data['touched_ground'] = _plain(physics.getTouchedGround())
-        except Exception as error:
-            data['touched_ground'] = '<%s>' % str(error)[:80]
-        try:
-            data['aggressive_impacts'] = _plain(physics.getAggressiveImpacts())
-        except Exception as error:
-            data['aggressive_impacts'] = '<%s>' % str(error)[:80]
+            data['before'].get('lastTickMatrix'),
+            data['after'].get('lastTickMatrix'))
+        data['stop'] = self._set_signals(body, 0, 0, 0)
+        physics = body['physics']
+        for name in ('getTouchedGround', 'getAggressiveImpacts'):
+            self._step('%s %s()' % (body['label'], name))
+            data[name] = _call_no_args(physics, name)
         return True
 
     def _stage_solve_scale(self, frame_dt):
-        """Time one batch update over every ready Bot body, no drive."""
+        """Time one batch update over as many bodies as we can acquire."""
         data = self._current['data']
         state = self._stage_state
         if 'bodies' not in state:
-            bodies = []
-            ids = []
-            for bot in self._bots():
-                unused_filter, physics = self._physics_of(bot['entity'])
-                if physics is not None:
-                    bodies.append(physics)
-                    ids.append(bot['bot_id'])
-                    if self._config.get('drive_all'):
-                        self._set_signals(
-                            bot['entity'], physics, MOVE_FORWARD_SIGNAL, 1, 0)
-                        self._driven.append(bot['bot_id'])
+            bodies = self._acquire_bodies(
+                int(self._config.get('scale_bodies', 29)))
             state['bodies'] = bodies
-            state['ids'] = ids
             state['updates'] = []
             data['body_count'] = len(bodies)
-            data['bot_ids'] = ids
+            data['source'] = self._bodies_source
+            data['labels'] = [body['label'] for body in bodies]
             if not bodies:
-                data['result'] = '<no physics bodies>'
+                data['result'] = '<no bodies>'
                 return True
+            if self._config.get('drive_all'):
+                for body in bodies:
+                    self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
+                    self._driven.append(body)
+            self._simulator_for_stage()
             return False
         simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
         if not state['updates']:
             self._step('simulator.update(dt, %d bodies, [])' %
                        len(state['bodies']))
-        state['updates'].append(
-            self._timed_update(simulator, dt, state['bodies']))
+        state['updates'].append(self._timed_update(
+            simulator, dt, [body['physics'] for body in state['bodies']]))
         if len(state['updates']) < int(self._config['scale_frames']):
             return False
         updates = sorted(state['updates'])
         count = len(updates)
         data['update_ms'] = {
-            'calls': count, 'min': updates[0],
-            'p50': updates[count // 2], 'p95': updates[int(count * 0.95)],
-            'max': updates[-1], 'avg': sum(updates) / count,
-        }
+            'calls': count, 'min': updates[0], 'p50': updates[count // 2],
+            'p95': updates[int(count * 0.95)], 'max': updates[-1],
+            'avg': sum(updates) / count}
         data['per_body_avg_ms'] = (
             data['update_ms']['avg'] / max(1, data['body_count']))
+        data['final_poses'] = [
+            self._pose_snapshot(body) for body in state['bodies'][:4]]
         return True
 
     def _stage_solve_pair(self, frame_dt):
-        """Drive Bots 0 and 1 toward each other for contact callbacks."""
+        """Drive two bodies toward each other for contact callbacks."""
         data = self._current['data']
         state = self._stage_state
-        first, unused_a, physics_a = self._drive_target(0)
-        second, unused_b, physics_b = self._drive_target(1)
-        if physics_a is None or physics_b is None:
-            data['result'] = '<fewer than two physics bodies>'
-            return True
-        simulator = self._simulator_for_stage()
-        if 'start' not in state:
-            data['bot_ids'] = [first['bot_id'], second['bot_id']]
-            data['before'] = [
-                self._pose_snapshot(first['entity'], physics_a),
-                self._pose_snapshot(second['entity'], physics_b)]
-            self._install_callbacks(physics_b, 'bot:%s' % second['bot_id'])
-            data['input'] = [
-                self._set_signals(
-                    first['entity'], physics_a, MOVE_FORWARD_SIGNAL, 1, 0),
-                self._set_signals(
-                    second['entity'], physics_b, MOVE_FORWARD_SIGNAL, 1, 0)]
+        if 'bodies' not in state:
+            bodies = self._acquire_bodies(2)
+            if len(bodies) < 2:
+                data['result'] = '<fewer than two bodies>'
+                return True
+            first, second = bodies[0], bodies[1]
+            state['bodies'] = (first, second)
+            data['labels'] = [first['label'], second['label']]
+            data['before'] = [self._pose_snapshot(first),
+                              self._pose_snapshot(second)]
             data['events_before'] = len(self._callback_events)
+            self._simulator_for_stage()
+            self._step('pair movementSignals')
+            data['input'] = [
+                self._set_signals(first, MOVE_FORWARD_SIGNAL, 1, 0),
+                self._set_signals(second, MOVE_FORWARD_SIGNAL, 1, 0)]
             state['start'] = self._clock()
-            self._driven.extend([first['bot_id'], second['bot_id']])
+            state['stepped'] = False
+            self._driven.extend([first, second])
             return False
+        first, second = state['bodies']
+        simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
-        if 'stepped' not in state:
+        if not state['stepped']:
             state['stepped'] = True
-            self._step('simulator.update(dt, [bot:%s, bot:%s], [])' % (
-                first['bot_id'], second['bot_id']))
-        self._timed_update(simulator, dt, [physics_a, physics_b])
+            self._step('simulator.update(dt, [%s, %s], [])' % (
+                first['label'], second['label']))
+        self._timed_update(simulator, dt, [first['physics'],
+                                            second['physics']])
         if self._clock() - state['start'] < float(
                 self._config['pair_seconds']):
             return False
-        data['after'] = [
-            self._pose_snapshot(first['entity'], physics_a),
-            self._pose_snapshot(second['entity'], physics_b)]
+        data['after'] = [self._pose_snapshot(first),
+                         self._pose_snapshot(second)]
         data['events_after'] = len(self._callback_events)
-        data['stop'] = [
-            self._set_signals(first['entity'], physics_a, 0, 0, 0),
-            self._set_signals(second['entity'], physics_b, 0, 0, 0)]
+        data['stop'] = [self._set_signals(first, 0, 0, 0),
+                        self._set_signals(second, 0, 0, 0)]
         return True
 
     def _stage_restore(self, frame_dt):
         """Zero every signal this probe set.  Never raises."""
         data = self._current['data'] if self._current else {}
         restored = []
-        for bot in self._bots():
-            if bot['bot_id'] not in self._driven:
+        seen = set()
+        for body in self._driven:
+            if id(body) in seen:
                 continue
+            seen.add(id(body))
             try:
-                unused_filter, physics = self._physics_of(bot['entity'])
-                if physics is not None:
-                    self._set_signals(bot['entity'], physics, 0, 0, 0)
-                restored.append(bot['bot_id'])
+                self._set_signals(body, 0, 0, 0)
+                restored.append(body['label'])
             except Exception as error:
-                restored.append('%s:<%s>' % (bot['bot_id'], str(error)[:60]))
+                restored.append('%s:<%s>' % (body['label'], str(error)[:60]))
         data['restored'] = restored
         self._driven = []
         return True
@@ -928,8 +1057,23 @@ class _RuntimeHost(object):
     def constants(self):
         return getattr(self._runtime._runtime, 'constants', None)
 
+    def _native_entity(self, engine_id):
+        """Resolve the native Vehicle past the stock AOI facade if possible."""
+        binding = getattr(self._runtime, '_binding', None)
+        resolver = getattr(binding, '_authority_entity_or_fail', None)
+        if callable(resolver):
+            try:
+                return resolver(engine_id)
+            except Exception:
+                pass
+        try:
+            return self.bigworld().entity(engine_id)
+        except Exception:
+            return None
+
     def bot_entities(self):
         runtime = self._runtime
+        factory = getattr(runtime, '_remote_factory', None)
         result = []
         for key, record in sorted(runtime._records.items()):
             if (not isinstance(key, str) or not key.startswith('bot:') or
@@ -937,16 +1081,42 @@ class _RuntimeHost(object):
                     record.get('tombstone')):
                 continue
             try:
-                entity = runtime._server_entity(record.get('engine_id'))
-            except Exception:
-                entity = None
-            if entity is None or getattr(entity, 'filter', None) is None:
-                continue
-            try:
                 bot_id = int(key.split(':', 1)[1])
-            except ValueError:
+                engine_id = int(record.get('engine_id'))
+            except (TypeError, ValueError):
                 continue
-            result.append({'bot_id': bot_id, 'entity': entity})
+            carrier = None
+            try:
+                carrier = factory.get(engine_id) if factory is not None else None
+            except Exception:
+                carrier = None
+            native = self._native_entity(engine_id)
+            if native is carrier:
+                native = None
+            if native is None and carrier is None:
+                continue
+            descriptor = getattr(native, 'typeDescriptor', None)
+            if descriptor is None:
+                descriptor = getattr(carrier, 'typeDescriptor', None)
+            position = None
+            yaw = None
+            for source in (carrier, native):
+                if source is None:
+                    continue
+                try:
+                    position = _xyz(source.position)
+                except Exception:
+                    position = None
+                if position is not None:
+                    try:
+                        yaw = float(getattr(source, 'yaw'))
+                    except Exception:
+                        yaw = 0.0
+                    break
+            result.append({
+                'bot_id': bot_id, 'engine_id': engine_id,
+                'native': native, 'carrier': carrier,
+                'descriptor': descriptor, 'position': position, 'yaw': yaw})
         return result
 
 
