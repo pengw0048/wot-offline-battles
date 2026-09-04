@@ -1104,7 +1104,12 @@ also forwards to `CrashedTracksController.receiveShotImpulse`, which is
 `return None` in this build. `model_assembler.createSwingingAnimator` calls
 `setupShotSwinging(hull.swinging.sensitivityToImpulse)`, and
 `vehicle_assembler._assembleSwinging` installs the animator as the HULL node's
-provider while `CompoundAppearance.__linkCompound` keeps the compound root on
+provider. That assembly runs from `__assembleNonDamagedOnly` for every vehicle
+that starts a non-damaged visual, alongside `createWheelsAnimator`,
+`assembleSuspensionIfNeed`/`assembleLeveredSuspensionIfNeed` and
+`assembleSuspensionController`, so it is not limited to the player's tank and
+the port checks both suspension variants. The animator's provider role keeps it
+live while `CompoundAppearance.__linkCompound` keeps the compound root on
 the entity matrix; this port's pose-provider swap therefore leaves the animator
 in the transform chain, and its `worldMatrix` rebind supplies the same input
 retail passes. Disassembly of the exact executable shows the native animator
