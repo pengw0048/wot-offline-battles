@@ -744,6 +744,58 @@ class ProjectileWireTests(unittest.TestCase):
                     [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
                     [-100.0, 20.0, 0.0], 0.75, proposal))
 
+    def test_potential_damage_survives_the_terminal_normalizer(self):
+        client = self.active_worker_client()
+        direct = self.effect('player', 8)
+        direct['potential_damage'] = 480
+
+        self.assertTrue(client.send_projectile_resolve(
+            4, 'player:7:1', 150, 'impact', 180,
+            [11.0, 2.0, 3.0], direct, []))
+        message = wire_copy(client._outbound_queue[-1][1])
+        # The normalizer rebuilds the effect from a fixed key set, so the
+        # armour roll only reaches the server if it is copied explicitly.
+        self.assertEqual(480, message['direct']['potential_damage'])
+        self.assertEqual(120, message['direct']['damage'])
+
+        for invalid in (True, 1.0, -1, 5001, '480', None):
+            with self.subTest(potential_damage=invalid):
+                self.assertFalse(client.send_projectile_resolve(
+                    4, 'player:7:2', 0, 'impact', 10,
+                    [0.0, 0.0, 0.0],
+                    dict(direct, potential_damage=invalid), []))
+
+        # Splash rolls a different quantity and the server excludes it from
+        # blocked damage, so a splash proposal must never carry a roll.
+        splash = self.effect('bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))
+        splash['potential_damage'] = 480
+        self.assertFalse(client.send_projectile_resolve(
+            4, 'player:7:3', 0, 'impact', 10,
+            [0.0, 0.0, 0.0], self.effect('player', 8), [splash]))
+
+    def test_first_ricochet_wire_keeps_the_blocked_damage_roll(self):
+        client = self.active_worker_client()
+        direct = self.effect('bot', 17, 11.0)
+        direct['damage'] = 0
+        direct['shot_result'] = 0
+        direct['potential_damage'] = 5000
+
+        self.assertTrue(client.send_projectile_ricochet(
+            4, 'player:7:1', 150, 180,
+            [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
+            [-100.0, 20.0, 0.0], 0.75, direct))
+        message = wire_copy(client._outbound_queue[-1][1])
+        self.assertEqual(5000, message['direct']['potential_damage'])
+        self.assertEqual(0, message['direct']['damage'])
+
+        for invalid in (True, -1, 5001, 1.0):
+            with self.subTest(potential_damage=invalid):
+                self.assertFalse(client.send_projectile_ricochet(
+                    4, 'player:7:2', 150, 180,
+                    [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
+                    [-100.0, 20.0, 0.0], 0.75,
+                    dict(direct, potential_damage=invalid)))
+
     def test_optional_terminal_field_is_omitted_without_server_support(self):
         client = self.active_worker_client()
         client.server_capabilities = [

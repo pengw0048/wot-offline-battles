@@ -393,6 +393,53 @@ class PostBattleContractTests(unittest.TestCase):
                             'goldReplay', 'crystalReplay'):
             self.assertTrue(vehicle_fields[replay_name])
 
+    def test_blocked_damage_reaches_the_native_result_and_dossier(self):
+        state = BattleState(map_name='01_karelia', team_size=1)
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        first = Player(1, _Socket(), ('127.0.0.1', 1), name='Alice',
+                       vehicle='ussr:R11_MS-1', team=1,
+                       account_key='a' * 32)
+        second = Player(2, _Socket(), ('127.0.0.1', 2), name='Bob',
+                        vehicle='germany:G04_PzVI_Tiger_I', team=2,
+                        account_key='b' * 32)
+        state.players = {1: first, 2: second}
+        state._freeze_round_participants((first, second))
+        # One enemy shot that the armour stopped, as the projectile ledger
+        # records it on the vehicle that bounced it.
+        state._statistics_row('player', 2)['damage_blocked'] = 420
+
+        self.assertTrue(state._finish_battle(1, 'team_eliminated'))
+
+        receipt = _latest_receipt(state, second.account_key)
+        self.assertEqual(420, receipt['stats']['damage_blocked'])
+        rows = dict(((row['actor_kind'], row['actor_id']), row)
+                    for row in receipt['public_results'])
+        self.assertEqual(
+            420, rows['player', 2]['stats']['damage_blocked'])
+
+        packers = _Packers()
+        original_vehicle = postbattle_store._vehicle_type_compact_descr
+        original_arena = postbattle_store._arena_type_id
+        try:
+            postbattle_store._vehicle_type_compact_descr = lambda unused: 50001
+            postbattle_store._arena_type_id = lambda unused: 70001
+            postbattle_store.pack_battle_result(
+                receipt, packers=packers,
+                replay_types=(_Replay, _ReplayConnector))
+        finally:
+            postbattle_store._vehicle_type_compact_descr = original_vehicle
+            postbattle_store._arena_type_id = original_arena
+        vehicle_fields = dict(packers.calls)['VEH_FULL_RESULTS']
+        self.assertEqual(420, vehicle_fields['damageBlockedByArmor'])
+
+        store = postbattle_store.PostBattleStore(path=None)
+        receipt['account_key'] = store.account_key
+        self.assertTrue(store.accept(receipt))
+        self.assertEqual(
+            420, store.progress()['vehicles'][
+                receipt['vehicle']]['damageBlockedByArmor'])
+
     def test_native_vehicle_details_keep_each_enemy_interaction(self):
         receipt = _receipt()
         enemy_stats = dict((name, 0) for name in receipt['stats'])

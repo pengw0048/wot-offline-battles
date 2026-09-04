@@ -18,6 +18,7 @@ from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory
 from gui.mods.offline_lan_0922.projectile_manager import InFlightProjectiles
 from gui.mods.offline_lan_0922 import combat_rules, critical_damage
+from gui.mods.offline_lan_0922 import lan_client
 
 
 class _Vector(object):
@@ -4146,6 +4147,144 @@ class BattleProjectileTests(unittest.TestCase):
             cone.call_args.args[2][index] for index in range(3)))
         self.assertGreater(cone.call_args.args[3].length, 0.0)
         self.assertTrue(cone.call_args.kwargs['deadeye'])
+
+    def test_direct_effect_publishes_the_exact_damage_roll(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        meta = battle._projectile_wire_meta(_event())
+        collision = types.SimpleNamespace(
+            dist=10.0, hitAngleCos=1.0, matInfo=object(), compName='hull')
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [collision],
+            'query': (_Vector((0.0, 1.0, 0.0)),
+                      _Vector((12.0, 1.0, 0.0))),
+            'impact': (10.0, 1.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        # The armour ledger needs the one roll the damage law consumed,
+        # truncated exactly as the law truncates it, for every verdict. A
+        # ricochet forces damage to zero afterwards and still owes the full
+        # roll, because that is the damage the armour actually stopped. A
+        # broad vehicle hit with no resolved armour contact remains terminal,
+        # but cannot claim that armour stopped its roll.
+        for contact, result, damage, potential in (
+                ({'result': 0}, 0, 0, 312),
+                ({'result': 1}, 1, 0, 312),
+                ({'result': 2}, 2, 312, 312),
+                (None, 1, 0, None)):
+            with self.subTest(contact=contact):
+                with mock.patch.object(
+                        combat_rules, 'resolve_armor_contact',
+                        return_value=contact), \
+                        mock.patch.object(
+                            combat_rules, 'he_nominal_armor',
+                            return_value=100.0), \
+                        mock.patch.object(
+                            combat_rules.random, 'uniform',
+                            return_value=312.7) as uniform, \
+                        mock.patch.object(
+                            critical_damage, 'propose_direct',
+                            side_effect=lambda unused_target,
+                            unused_collisions, unused_start, unused_end,
+                            rolled, unused_shell, unused_attacker,
+                            **unused_kwargs: (rolled, None, None)):
+                    effect = battle._projectile_direct_effect(
+                        meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                        terminal)
+
+                self.assertEqual(result, effect['shot_result'])
+                self.assertEqual(damage, effect['damage'])
+                if potential is None:
+                    self.assertNotIn('potential_damage', effect)
+                else:
+                    self.assertEqual(potential, effect['potential_damage'])
+                self.assertEqual(
+                    (390.0 * 0.75, 390.0 * 1.25), uniform.call_args.args)
+
+    def test_overlay_edited_shell_saturates_instead_of_losing_the_shot(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        meta = battle._projectile_wire_meta(_event())
+        collision = types.SimpleNamespace(
+            dist=10.0, hitAngleCos=1.0, matInfo=object(), compName='hull')
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [collision],
+            'query': (_Vector((0.0, 1.0, 0.0)),
+                      _Vector((12.0, 1.0, 0.0))),
+            'impact': (10.0, 1.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact',
+                return_value={'result': 0}), \
+                mock.patch.object(
+                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                mock.patch.object(
+                    combat_rules.random, 'uniform', return_value=9000.0):
+            effect = battle._projectile_direct_effect(
+                meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                terminal)
+
+        # The launcher's vehicle overlay can raise shell damage without an
+        # upper bound.  Saturating the statistic keeps the bounce on the
+        # wire; an unclamped roll would fail the validator and lose the
+        # whole terminal along with its reload and ammunition bookkeeping.
+        self.assertEqual(5000, effect['potential_damage'])
+        self.assertIsNotNone(lan_client._strict_projectile_effect(effect))
+
+    def test_splash_effect_carries_no_potential_damage(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True,
+            collideSegmentExt=mock.Mock(return_value=()))
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        event = _event()
+        event['source_shot']['shell'].update({
+            'kind': 'HIGH_EXPLOSIVE', 'explosionRadius': 20.0})
+        event['is_he'] = True
+        event['splash_radius'] = 20.0
+        meta = battle._projectile_wire_meta(event)
+
+        with mock.patch.object(
+                combat_rules, 'he_splash_damage', return_value=90), \
+                mock.patch.object(
+                    critical_damage, 'propose_explosion',
+                    return_value=(90, None, None)):
+            effects = battle._projectile_splash_effects(
+                meta, (9.0, 1.0, 0.0), 'player:7')
+
+        # Splash rolls its own distance-attenuated quantity and the server
+        # excludes splash from blocked damage, so it publishes no roll.
+        self.assertEqual(1, len(effects))
+        self.assertEqual(90, effects[0]['damage'])
+        self.assertNotIn('potential_damage', effects[0])
 
 
 if __name__ == '__main__':

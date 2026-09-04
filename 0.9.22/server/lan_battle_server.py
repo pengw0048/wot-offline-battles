@@ -7088,6 +7088,8 @@ class BattleState:
         if (not isinstance(raw, dict) or set(raw) - allowed or
                 not required.issubset(raw)):
             raise ValueError("invalid effect shape")
+        if splash and "potential_damage" in raw:
+            raise ValueError("splash effect cannot carry potential damage")
         target_kind = raw.get("target_kind")
         if target_kind not in ("player", "bot"):
             raise ValueError("invalid target kind")
@@ -7312,10 +7314,14 @@ class BattleState:
                 direct_fields = {
                     "target_kind", "target_id", "damage", "shot_result",
                     "x", "y", "z"}
+                # A bounce is the archetypal blocked-damage contact, so the
+                # harmless direct effect keeps the worker's potential-damage
+                # roll along with its decal identity.  Critical, stun and
+                # splash tokens stay forbidden on a continuing shell.
+                direct_optional = {"damage_sticker", "potential_damage"}
                 if (not isinstance(raw_direct, dict) or
-                        set(raw_direct) not in (
-                            direct_fields,
-                            direct_fields | {"damage_sticker"})):
+                        not direct_fields.issubset(raw_direct) or
+                        set(raw_direct) - (direct_fields | direct_optional)):
                     raise ValueError(
                         "ricochet direct effect has optional terminal fields")
                 direct = self._normalize_projectile_effect(
