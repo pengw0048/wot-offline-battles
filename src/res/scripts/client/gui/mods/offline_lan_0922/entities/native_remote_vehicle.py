@@ -887,12 +887,11 @@ class NativeRemoteVehicleFactory(object):
                                velocity, gravity, max_distance, attacker_id,
                                projectile_id=None, reference_position=None,
                                reference_velocity=None,
-                               is_ricochet=False, visual_start=None):
+                               is_ricochet=False):
         return self._shot_presenter.play_canonical(
             descriptor, shell_index, origin, velocity, gravity,
             max_distance, attacker_id, projectile_id,
-            reference_position, reference_velocity, is_ricochet,
-            visual_start)
+            reference_position, reference_velocity, is_ricochet)
 
     def admit_projectile_visual(self, attacker_id, projectile_id, now=None):
         """Reserve one bounded cosmetic slot for a canonical projectile."""

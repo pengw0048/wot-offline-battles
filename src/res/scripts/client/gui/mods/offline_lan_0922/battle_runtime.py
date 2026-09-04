@@ -31,8 +31,7 @@ from gui.mods.offline_lan_0922.entities.bigworld_binding import \
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
-    PROJECTILE_VISUAL_START_MAX_DIFF, RemoteVehicleFactory,
-    _collide_vehicle_evidence_at_matrix,
+    RemoteVehicleFactory, _collide_vehicle_evidence_at_matrix,
     _component_aim_angles, _pose_components, collide_vehicle_at_matrix,
     encode_damage_sticker, pose_animation_writes,
     reset_pose_animation_writes)
@@ -1180,7 +1179,6 @@ def _load_runtime():
     import nations
     from Avatar import ClientVisibilityFlags
     from OfflineMapCreator import g_offlineMapCreator
-    from AvatarInputHandler import cameras
     from AvatarInputHandler import aih_constants
     from AvatarInputHandler import gun_marker_ctrl
     from helpers import EffectMaterialCalculation
@@ -1205,7 +1203,6 @@ def _load_runtime():
     runtime.area_destructibles = AreaDestructibles
     runtime.aih_constants = aih_constants
     runtime.avatar_input_handler = AvatarInputHandler
-    runtime.cameras = cameras
     runtime.gun_marker_ctrl = gun_marker_ctrl
     runtime.app_loader = g_appLoader
     runtime.arena_cache = ArenaType.g_cache
@@ -7415,26 +7412,10 @@ class BattleRuntime(object):
         # Missing native entities remain queued for the ordinary frame path.
         started = _PROFILE_CLOCK()
         try:
-            now = self._clock()
-            pending_before = set(
-                pending.get('projectile_id') for pending in
-                self._player_fire_launch_pending.values())
-            changed = self._advance_player_fire_authority(
-                0.0, now,
+            return self._advance_player_fire_authority(
+                0.0, self._clock(),
                 intent_keys=tuple(self._player_fire_intents),
                 defer_missing_player=True)
-            # A click-time launch may already be older than this poll because
-            # its frozen client trigger clock crossed the LAN first.  Advance
-            # a newly preinstalled projectile here so its first canonical
-            # cursor does not wait for the next, possibly late, Bot frame.
-            # The normal collision budget and terminal barriers still apply.
-            if (self._projectiles is not None and any(
-                    pending.get('projectile_id') not in pending_before and
-                    self._projectiles.contains(pending.get('projectile_id'))
-                    for pending in
-                    self._player_fire_launch_pending.values())):
-                self._advance_projectiles(now, force_progress=True)
-            return changed
         finally:
             # PERF subtracts this mod-owned callback work from the engine's
             # outside time and reports it through the existing off-frame lane.
@@ -9735,44 +9716,6 @@ class BattleRuntime(object):
         finally:
             extras['shoot'] = original
 
-    def _projectile_visual_start(self, entity, normalized):
-        """Return #1513's current on-screen HP_gunFire visual start."""
-        if (entity is None or not bool(getattr(entity, 'isStarted', False)) or
-                not isinstance(normalized, dict) or
-                normalized.get('ricochet_count') != 0 or
-                self._projectile_visual_age(normalized) > 0.0):
-            return None
-        cameras = getattr(self._runtime, 'cameras', None)
-        is_point_on_screen = getattr(cameras, 'isPointOnScreen', None)
-        if not callable(is_point_on_screen):
-            return None
-        try:
-            appearance = entity.appearance
-            compound = appearance.compoundModel
-            node = compound.node('HP_gunFire')
-            matrix = self._runtime.math.Matrix(node)
-            native_point = matrix.translation
-            point = tuple(float(native_point[index]) for index in range(3))
-            if any(math.isnan(value) or math.isinf(value)
-                   for value in point):
-                return None
-            if not bool(is_point_on_screen(native_point)):
-                return None
-            reference = tuple(float(value) for value in
-                              normalized['segment_origin'])
-            offset_sq = sum((point[index] - reference[index]) ** 2
-                            for index in range(3))
-            if offset_sq > PROJECTILE_VISUAL_START_MAX_DIFF ** 2:
-                # Mirror ProjectileMover.add here as well as in the final
-                # presenter so the frontier bridge records the start point
-                # the native-compatible presenter will actually accept.
-                return None
-            return point
-        except Exception:
-            # The stock visual start is optional. A changing compound or
-            # camera must fall back to the immutable canonical launch point.
-            return None
-
     def _show_shot(self, event, update_state=True):
         key = self._event_entity_key(event, 'attacker')
         if key is None:
@@ -9823,10 +9766,7 @@ class BattleRuntime(object):
                 velocity = event.get('velocity')
                 gravity = _number(event.get('gravity'))
                 if normalized is not None:
-                    visual_start = self._projectile_visual_start(
-                        entity, normalized)
-                    self._ensure_projectile_visual(
-                        normalized, self._clock(), visual_start=visual_start)
+                    self._ensure_projectile_visual(normalized, self._clock())
                     visual = self._projectile_visual_meta.get(
                         normalized['projectile_id'])
                     visual_admitted = bool(
@@ -10875,8 +10815,7 @@ class BattleRuntime(object):
             return False
         return True
 
-    def _ensure_projectile_visual(self, normalized, now,
-                                  visual_start=None):
+    def _ensure_projectile_visual(self, normalized, now):
         """Create one tracer and monotonically extend its confirmed frontier."""
         if self._worker_mode:
             return False
@@ -10926,12 +10865,6 @@ class BattleRuntime(object):
                         float(existing_visual.get(
                             'display_elapsed', 0.0)) * 1000.0,
                         max(0.0, wall - timeline['trigger']) * 1000.0))
-            if (existing_visual.get('active', False) and
-                    existing_visual.get('first_frontier_pending', False)):
-                if existing_visual['confirmed_elapsed'] <= 0.0:
-                    return True
-                return self._catch_up_first_projectile_frontier(
-                    projectile_id, existing_visual, now)
             if (existing_visual.get('active', False) or
                     not existing_visual.get('admitted', True) or
                     not existing_visual.get('launch_retryable', False)):
@@ -10955,21 +10888,6 @@ class BattleRuntime(object):
                 'last_frame': float(now),
                 'active': False,
                 'launch_retryable': True,
-                'first_frontier_pending': bool(
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0),
-                'visual_start': (
-                    tuple(visual_start) if
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0 and
-                    visual_start is not None else None),
-                'first_frontier_min_distance_sq': (
-                    sum((float(visual_start[index]) -
-                         float(normalized['segment_origin'][index])) ** 2
-                        for index in range(3)) if
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0 and
-                    visual_start is not None else 0.0),
             }
             self._projectile_visual_meta[projectile_id] = visual
             record = self._records.get('%s:%s' % (
@@ -10989,17 +10907,10 @@ class BattleRuntime(object):
             visual['display_elapsed'] = display_elapsed
             visual['last_frame'] = float(now)
             attacker_id = int(visual['attacker_id'])
-            if display_elapsed > 0.0:
-                # A failed zero-age creation owns no native tracer. Retry at
-                # the confirmed trajectory pose instead of a stale muzzle.
-                visual['first_frontier_pending'] = False
-                visual['visual_start'] = None
-                visual['first_frontier_min_distance_sq'] = 0.0
 
         admitted = bool(visual.get('admitted', True))
-        if not admitted:
-            return False
-        if not self._optional_feature_enabled('projectile visual launch'):
+        if not admitted or not self._optional_feature_enabled(
+                'projectile visual launch'):
             return False
         reference_origin = trajectory_position(
             normalized['segment_origin'], normalized['segment_velocity'],
@@ -11018,77 +10929,13 @@ class BattleRuntime(object):
                     normalized['checked_distance']),
                 attacker_id, projectile_id, reference_origin,
                 reference_velocity,
-                is_ricochet=bool(normalized['ricochet_count']),
-                visual_start=visual.get('visual_start')))
+                is_ricochet=bool(normalized['ricochet_count'])))
             visual['launch_retryable'] = not visual['active']
             return visual['active']
         except Exception as error:
             self._warn_optional_failure(
                 'projectile visual launch', error)
             return False
-
-    def _catch_up_first_projectile_frontier(self, projectile_id, visual,
-                                             now):
-        """Move a muzzle-started tracer once its safe cursor clears the bridge."""
-        if (not visual.get('active', False) or
-                not visual.get('first_frontier_pending', False)):
-            return bool(visual.get('active', False))
-        confirmed_elapsed = max(
-            0.0, float(visual.get('confirmed_elapsed', 0.0)))
-        if confirmed_elapsed <= 0.0:
-            visual['last_frame'] = max(
-                float(visual.get('last_frame', now)), float(now))
-            return True
-        callback = getattr(
-            self._remote_factory, 'update_projectile_visual', None)
-        if (not callable(callback) or not self._optional_feature_enabled(
-                'projectile visual update')):
-            return True
-        position, velocity = self._projectile_visual_pose(
-            visual, confirmed_elapsed)
-        origin = visual['origin']
-        confirmed_distance_sq = sum(
-            (float(position[index]) - float(origin[index])) ** 2
-            for index in range(3))
-        if (confirmed_distance_sq + 1.0e-9 < float(visual.get(
-                'first_frontier_min_distance_sq', 0.0))):
-            # A very fast tank and a very early worker receipt can put the
-            # first safe cursor behind the current-muzzle bridge. Keep the
-            # tracer at that muzzle until the canonical path is at least as
-            # far from the stale launch origin; never visibly snap back to it.
-            visual['last_frame'] = max(
-                float(visual.get('last_frame', now)), float(now))
-            return True
-        try:
-            visible = bool(callback(
-                projectile_id, position, velocity=velocity))
-        except Exception as error:
-            self._warn_optional_failure(
-                'projectile visual update', error)
-            visible = False
-        if not visible:
-            visual['active'] = False
-            visual['launch_retryable'] = False
-            return False
-        visual['display_elapsed'] = confirmed_elapsed
-        visual['last_frame'] = float(now)
-        visual['first_frontier_pending'] = False
-        visual['visual_start'] = None
-        visual['first_frontier_min_distance_sq'] = 0.0
-        timeline = self._fire_timeline.get(str(projectile_id))
-        if (timeline is not None and timeline.get('shown') is not None and
-                not timeline.get('moving_logged', False)):
-            timeline['moving_logged'] = True
-            wall = _PROFILE_CLOCK()
-            sys.stdout.write(
-                '[Offline LAN 0.9.22] FIRE TRACER MOVING '
-                'projectile=%s since_trigger_ms=%.0f '
-                'since_shown_ms=%.0f confirmed_ms=%.0f\n' % (
-                    projectile_id,
-                    max(0.0, wall - timeline['trigger']) * 1000.0,
-                    max(0.0, wall - timeline['shown']) * 1000.0,
-                    confirmed_elapsed * 1000.0))
-        return True
 
     @staticmethod
     def _projectile_visual_pose(visual, elapsed=None):
@@ -11124,12 +10971,6 @@ class BattleRuntime(object):
                     not visual.get('admitted', True)):
                 continue
             previous_frame = float(visual.get('last_frame', frame))
-            if visual.get('first_frontier_pending', False):
-                if self._catch_up_first_projectile_frontier(
-                        projectile_id, visual, frame):
-                    advanced = advanced or not visual.get(
-                        'first_frontier_pending', False)
-                continue
             dt = max(0.0, frame - previous_frame)
             visual['last_frame'] = max(previous_frame, frame)
             previous_elapsed = max(
@@ -11794,8 +11635,7 @@ class BattleRuntime(object):
             key=lambda key: order[key])
         return tuple((key, records[key]) for key in ordered)
 
-    def _advance_projectiles(self, now, force_progress=False):
-        """Advance collision cursors and optionally publish an extra barrier."""
+    def _advance_projectiles(self, now):
         self._projectile_perf = {}
         self._projectile_scan_count = 0
         self._projectile_candidate_count = 0
@@ -11851,21 +11691,22 @@ class BattleRuntime(object):
         }
         self._prune_projectile_position_history()
         self._projectile_target_positions = current
-        if force_progress or now >= self._next_projectile_progress_time:
-            if now >= self._next_projectile_progress_time:
-                # Advance the deadline along the fixed cadence grid instead of
-                # restarting a whole interval from this frame.  A late worker
-                # frame otherwise pushes every following publication out by
-                # its own overshoot.  A forced fire-edge publication before
-                # this deadline deliberately leaves that grid unchanged.
-                if self._next_projectile_progress_time <= 0.0:
-                    self._next_projectile_progress_time = float(now)
-                overshoot = max(
-                    0.0, float(now) - self._next_projectile_progress_time)
-                intervals = int(math.floor(
-                    (overshoot + 1e-9) / PROJECTILE_PROGRESS_SECONDS)) + 1
-                self._next_projectile_progress_time += (
-                    intervals * PROJECTILE_PROGRESS_SECONDS)
+        if now >= self._next_projectile_progress_time:
+            # Advance the deadline along the fixed cadence grid instead of
+            # restarting a whole interval from this frame.  A late worker
+            # frame otherwise pushes every following publication out by its
+            # own overshoot, so the confirmed cursor that gates tracer
+            # advancement and terminal submission degrades with worker frame
+            # time rather than staying at the intended rate.  Missed
+            # intervals are skipped, never replayed as a burst.
+            if self._next_projectile_progress_time <= 0.0:
+                self._next_projectile_progress_time = float(now)
+            overshoot = max(
+                0.0, float(now) - self._next_projectile_progress_time)
+            intervals = int(math.floor(
+                (overshoot + 1e-9) / PROJECTILE_PROGRESS_SECONDS)) + 1
+            self._next_projectile_progress_time += (
+                intervals * PROJECTILE_PROGRESS_SECONDS)
             self._publish_projectile_progress()
         return advanced
 
