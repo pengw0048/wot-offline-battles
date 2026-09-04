@@ -2202,8 +2202,9 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertLess(min(pose['x'] for pose in observed), 6.0)
         self.assertGreater(max(pose['x'] for pose in observed), 14.0)
 
-    def test_excessive_angular_target_sweep_fails_closed(self):
+    def test_excessive_angular_target_sweep_widens_the_sampled_angle(self):
         battle, unused_bigworld = _battle()
+        module = sys.modules[BattleRuntime.__module__]
         self.assertTrue(battle._accept_projectile_event(_event()))
         source = battle._server_entity(41)
         target = types.SimpleNamespace(
@@ -2224,6 +2225,64 @@ class BattleProjectileTests(unittest.TestCase):
             'player:7': source_pose, 'bot:8': target_start})
         battle._sample_projectile_positions(0.05, {
             'player:7': source_pose, 'bot:8': target_end})
+        observed = []
+
+        def collide(unused_record, unused_target, unused_start, unused_end,
+                    pose=None):
+            observed.append(dict(pose))
+            return (), ()
+
+        battle._projectile_vehicle_collisions = collide
+        battle._resolve_shot_scene = mock.Mock(return_value={
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+            'world_distance': 99999.0,
+            'stopped_by_destructible': False,
+        })
+
+        fractions = battle._projectile_pose_sweep_fractions(
+            'bot:8', 0.0, 0.05)
+        result = battle._projectile_chord(
+            battle._projectiles.get('player:7:1'),
+            (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.05)
+
+        # A rotation faster than one degree per sample widens the sampled
+        # angle; it never retires an admitted shot.
+        self.assertIsNone(result)
+        self.assertIsNotNone(fractions)
+        self.assertEqual(
+            module.PROJECTILE_POSE_MAX_SWEEP_STEPS, len(fractions) - 1)
+        self.assertEqual((0.0, 1.0), (fractions[0], fractions[-1]))
+        self.assertEqual(
+            module.PROJECTILE_POSE_MAX_SWEEP_STEPS, len(observed))
+        for index, pose in enumerate(observed):
+            self.assertAlmostEqual(
+                math.radians(17.0 * (index + 0.5) / 16.0), pose['yaw'])
+        self.assertNotIn('projectile_collision_pose_boundary', record)
+        self.assertNotIn(
+            'terminal_failure_boundary',
+            battle._projectile_meta['player:7:1'])
+
+    def test_missing_target_pose_retires_with_history_boundary(self):
+        battle, unused_bigworld = _battle()
+        self.assertTrue(battle._accept_projectile_event(_event()))
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=42, isStarted=True, position=_Vector((5.0, 1.0, 0.0)))
+        record = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._records['bot:8'] = record
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 42 else None)
+        source_pose = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        target_start = battle._projectile_plain_pose((5.0, 1.0, 0.0))
+        battle._projectile_position_history = []
+        battle._sample_projectile_positions(0.0, {
+            'player:7': source_pose, 'bot:8': target_start})
+        # The chord window is covered, but this live target has no pose in
+        # the closing sample: the only remaining fail-closed path.
+        battle._sample_projectile_positions(0.05, {'player:7': source_pose})
         battle._projectile_vehicle_collisions = mock.Mock()
 
         result = battle._projectile_chord(
@@ -2233,8 +2292,12 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(
             {'reason': 'callback_error', 'fraction': 0.0}, result)
         self.assertEqual(
-            'angular_sweep_limit_exceeded',
+            'historic_pose_unavailable',
             record['projectile_collision_pose_boundary'])
+        self.assertEqual(
+            'historic_pose_unavailable',
+            battle._projectile_meta['player:7:1'][
+                'terminal_failure_boundary'])
         battle._projectile_vehicle_collisions.assert_not_called()
 
     def test_chord_before_pose_history_coverage_fails_closed(self):
@@ -2243,10 +2306,11 @@ class BattleProjectileTests(unittest.TestCase):
         source = battle._server_entity(41)
         target = types.SimpleNamespace(id=42, isStarted=True)
         state = battle._projectiles.get('player:7:1')
-        battle._records['bot:8'] = {
+        record = {
             'engine_id': 42, 'network_id': 8, 'kind': 'bot',
             'local': False, 'ready': True,
             'state': {'health': 100, 'alive': True}}
+        battle._records['bot:8'] = record
         battle._server_entity = lambda entity_id: (
             source if entity_id == 41 else
             target if entity_id == 42 else None)
@@ -2256,6 +2320,9 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(
             {'reason': 'callback_error', 'fraction': 0.0}, result)
+        self.assertEqual(
+            'historic_pose_unavailable',
+            record['projectile_collision_pose_boundary'])
 
     def test_pending_record_without_pose_history_does_not_retire_projectile(
             self):

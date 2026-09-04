@@ -13425,6 +13425,112 @@ class BattleRuntimeContractTests(unittest.TestCase):
     def test_battle_frame_requests_the_next_render_frame(self):
         self.assertEqual(0.0, FRAME_SECONDS)
 
+    def _live_frame_battle(self, runtime):
+        """One battle-live runtime whose frame reaches the guarded pulls."""
+        battle = BattleRuntime(runtime)
+        battle.client = types.SimpleNamespace()
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._last_frame_time = 0.98
+        battle._avatar = runtime.bigworld.avatar
+        battle._frame_diagnostics = None
+        battle._flush_pending_bot_create = mock.Mock()
+        battle._flush_pending_entities = mock.Mock()
+        battle._drain_event_journal = mock.Mock()
+        battle._maybe_send_battle_ready = mock.Mock()
+        battle._tick_critical_states = mock.Mock()
+        battle._tick_drowning = mock.Mock()
+        battle._tick_overturn = mock.Mock()
+        battle._drive_local = mock.Mock()
+        battle._update_spotting = mock.Mock()
+        battle._schedule = mock.Mock()
+        battle._fail = mock.Mock()
+        return battle
+
+    def test_a_failing_spotting_pull_is_retried_not_retired(self):
+        """Spotting is pulled every frame, so one failure must not blind the round."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._update_spotting = mock.Mock(
+            side_effect=RuntimeError('vision query failed'))
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        # disable=False: the boundary is retried on the next frame instead of
+        # being retired for the round.
+        self.assertEqual(2, battle._update_spotting.call_count)
+        self.assertIn('spotting', log.getvalue())
+        self.assertIn('degraded for this round', log.getvalue())
+
+    def test_a_failing_bot_pose_pull_is_retried_not_retired(self):
+        """A transient pose failure must not freeze every Bot for the round."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        presentation_states = mock.Mock(
+            side_effect=RuntimeError('authority pose pull failed'))
+        battle._bots = types.SimpleNamespace(
+            presentation_states=presentation_states,
+            is_authority=lambda: False,
+            update=mock.Mock(return_value=()))
+        battle._advance_artillery_arcs = mock.Mock()
+        battle._authority_players = mock.Mock(return_value=())
+        battle._enqueue_bot_message = mock.Mock(return_value=True)
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        self.assertEqual(2, presentation_states.call_count)
+        self.assertIn('bot pose presentation', log.getvalue())
+
+    def test_a_failing_target_lock_validation_does_not_end_the_round(self):
+        """Releasing a stale stock lock is presentation hygiene, not authority."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        runtime.compatibility.validate_target_lock = mock.Mock(
+            side_effect=RuntimeError('auto aim read failed'))
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        self.assertEqual(
+            2, runtime.compatibility.validate_target_lock.call_count)
+        self.assertIn('target lock validation', log.getvalue())
+
+    def test_local_driving_failure_still_ends_the_round(self):
+        """Authority steps stay loud.
+
+        A frozen local player with no reported error is worse than a clean
+        round failure, so _drive_local must never be moved behind
+        _run_optional_feature.
+        """
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        error = RuntimeError('local control step failed')
+        battle._drive_local = mock.Mock(side_effect=error)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            battle._frame()
+
+        battle._fail.assert_called_once_with(error)
+        battle._schedule.assert_not_called()
+
     def test_optional_frame_failures_disable_features_not_the_round(self):
         runtime = _runtime()
         runtime.bigworld.now = 1.0
