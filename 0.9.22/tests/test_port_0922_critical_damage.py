@@ -1648,6 +1648,38 @@ class TrackWheelDamageTests(unittest.TestCase):
             self.assertEqual(0, vehicle.devices_hp[side])
             self.assertIn(side, vehicle._destroyed_devices)
 
+    def test_t1_hmc_overlapping_end_zones_keep_the_armor_channel(self):
+        # Both exact T1 HMC chassis have the same short carrying extent and
+        # driving-wheel radii, with 40/50 HP tracks respectively.  A synthetic
+        # low-device shell distinguishes the normalized wheel law from the old
+        # device-damage fallback and from an accidental bulk-divided middle.
+        shell = {'damage': (100.0, 10.0), 'kind': 'ARMOR_PIERCING',
+                 'caliber': 75.0}
+        geometry = {
+            'topRightCarryingPoint': (1.0, 0.76849),
+            'drivingWheelsSizes': (0.35 * 2.2, 0.464022994 * 2.2),
+        }
+        chassis = (
+            ('Chassis_A107_T1_HMC', 40),
+            ('Chassis_A107_T1_HMC_2', 50),
+        )
+        for chassis_name, track_hp in chassis:
+            for local_z in (0.2, 0.0):
+                vehicle = self._vehicle(
+                    name=chassis_name,
+                    maxHealth=track_hp,
+                    maxRegenHealth=max(1, track_hp - 10),
+                    **geometry)
+                vehicle.typeDescriptor.name = 'usa:A107_T1_HMC'
+                vehicle.typeDescriptor.type.name = 'usa:A107_T1_HMC'
+                self._apply(
+                    vehicle,
+                    [_track_hit('leftTrackHealth', local_z)], shell=shell)
+                self.assertEqual(
+                    0, vehicle.devices_hp['leftTrackHealth'])
+                self.assertIn(
+                    'leftTrackHealth', vehicle._destroyed_devices)
+
     def test_a_middle_track_hit_is_reduced_by_the_chassis_bulk_factor(self):
         for side in ('leftTrackHealth', 'rightTrackHealth'):
             vehicle = self._vehicle()
@@ -1810,8 +1842,6 @@ class TrackWheelDamageTests(unittest.TestCase):
              {'topRightCarryingPoint': None}, {}, None),
             ('inverted carrying extent',
              {'topRightCarryingPoint': (1.5, -2.0)}, {}, None),
-            ('overlapping wheel zones',
-             {'drivingWheelsSizes': (2.0, 2.02)}, {}, None),
             ('wrong component', {}, {}, 'vehicleHull'),
         )
         for label, chassis_overrides, hit_overrides, component in cases:

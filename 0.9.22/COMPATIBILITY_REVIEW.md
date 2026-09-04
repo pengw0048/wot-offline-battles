@@ -1094,9 +1094,12 @@ cached. That raw read is unproved on #1513: if it fails, the one middle track
 hit keeps the previous device-damage result and writes one bounded diagnostic
 instead of guessing a divisor. HE direct hits and splash stay on the previous
 device-damage law, because no reviewed evidence covers the wheel zones for a
-blast. Both shipped `usa:A107_T1_HMC` chassis make the endpoint zones overlap,
-so that vehicle deliberately uses the same safe fallback rather than an
-invented split.
+blast. Both shipped `usa:A107_T1_HMC` chassis are shorter than their combined
+configured endpoint zones. Those two widths are reduced by the same factor to
+fill the carrying span, preserving their front/rear ratio and leaving no
+ordinary middle run instead of returning that valid geometry to the previous
+device-damage law. This proportional split remains part of the documented
+product convention, not a recovered native server equation.
 
 The stock debug controller reads `BigWorld.statPing()` and
 `statLagDetected()`, which report the unavailable retail transport in this

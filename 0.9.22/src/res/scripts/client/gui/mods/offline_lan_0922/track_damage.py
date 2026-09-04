@@ -166,7 +166,10 @@ def wheel_zone_bounds(chassis):
     ``front_bound`` is the lowest Z still inside the leading wheel and
     ``rear_bound`` the highest Z still inside the rearmost wheel.  None means
     the descriptor cannot describe a driving-wheel zone, and the caller must
-    not then declare every track point a driving wheel.
+    not then declare every track point a driving wheel.  On a short chassis
+    whose configured end zones meet or overlap, both widths are reduced by the
+    same factor until they fill the carrying span.  The returned bounds are
+    then the same split point and there is no ordinary middle run.
     """
     half_length = _finite_positive(
         _component(_descriptor_value(chassis, 'topRightCarryingPoint'), 1))
@@ -175,11 +178,20 @@ def wheel_zone_bounds(chassis):
     rear = _finite_positive(_component(sizes, 1))
     if half_length is None or front is None or rear is None:
         return None
-    if front + rear >= 2.0 * half_length:
-        # The endpoint convention is ambiguous when the two zones meet or
-        # overlap. This occurs on both shipped T1 HMC chassis, so preserve the
-        # previous device-damage behaviour instead of guessing a boundary.
-        return None
+    largest = max(half_length, front, rear)
+    scaled_half = half_length / largest
+    scaled_front = front / largest
+    scaled_rear = rear / largest
+    scaled_total = scaled_front + scaled_rear
+    if scaled_total >= 2.0 * scaled_half:
+        # Both shipped T1 HMC chassis are shorter than the combined configured
+        # end zones.  Preserve the front/rear width ratio while compressing the
+        # pair into the available span.  This avoids an order-dependent
+        # overlap and, unlike the old fallback, keeps a valid direct track hit
+        # on the same material-selected damage channel as every other chassis.
+        split = half_length * (
+            (scaled_rear - scaled_front) / scaled_total)
+        return (split, split)
     return (half_length - front, rear - half_length)
 
 

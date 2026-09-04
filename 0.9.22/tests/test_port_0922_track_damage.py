@@ -50,6 +50,13 @@ T110E4_HALF_LENGTH = 2.00908
 T110E4_FRONT_WHEEL = 0.329521 * 2.2
 T110E4_REAR_WHEEL = 0.3375 * 2.2
 
+# Exact #1513 A107_T1_HMC data. Both selectable chassis publish the same
+# carrying extent and driving-wheel radii.
+T1_HMC_HALF_LENGTH = 0.76849
+T1_HMC_FRONT_WHEEL = 0.35 * 2.2
+T1_HMC_REAR_WHEEL = 0.464022994 * 2.2
+T1_HMC_SPLIT = 0.107645031289
+
 
 def _t110e4_chassis(**overrides):
     values = {
@@ -175,15 +182,45 @@ class WheelZoneGeometryTests(unittest.TestCase):
             track_damage.ZONE_REAR,
             track_damage.classify_zone(-T110E4_HALF_LENGTH - 0.2, bounds))
 
-    def test_exact_t1_hmc_overlapping_end_zones_use_safe_fallback(self):
+    def test_exact_t1_hmc_overlapping_end_zones_share_the_track_span(self):
         chassis = {
-            'topRightCarryingPoint': _Vector2(1.0, 0.76849),
-            'drivingWheelsSizes': (0.35 * 2.2, 0.464022994 * 2.2),
+            'topRightCarryingPoint': _Vector2(1.0, T1_HMC_HALF_LENGTH),
+            'drivingWheelsSizes': (
+                T1_HMC_FRONT_WHEEL, T1_HMC_REAR_WHEEL),
         }
 
-        self.assertIsNone(track_damage.wheel_zone_bounds(chassis))
+        bounds = track_damage.wheel_zone_bounds(chassis)
+        self.assertAlmostEqual(T1_HMC_SPLIT, bounds[0], places=9)
+        self.assertAlmostEqual(T1_HMC_SPLIT, bounds[1], places=9)
+        self.assertEqual(
+            track_damage.ZONE_FRONT,
+            track_damage.classify_zone(T1_HMC_SPLIT, bounds))
+        self.assertEqual(
+            track_damage.ZONE_FRONT,
+            track_damage.classify_zone(T1_HMC_SPLIT + 1.0e-6, bounds))
+        self.assertEqual(
+            track_damage.ZONE_REAR,
+            track_damage.classify_zone(T1_HMC_SPLIT - 1.0e-6, bounds))
+        self.assertEqual(
+            track_damage.ZONE_REAR,
+            track_damage.classify_zone(0.0, bounds))
 
-    def test_impossible_geometry_is_rejected_instead_of_guessed(self):
+    def test_large_finite_overlaps_do_not_overflow_the_split(self):
+        cases = (
+            (1.0e308, 1.0e308, 1.0e308),
+            (1.0, 1.0e308, 1.0e308),
+        )
+        for half_length, front, rear in cases:
+            bounds = track_damage.wheel_zone_bounds({
+                'topRightCarryingPoint': _Vector2(1.0, half_length),
+                'drivingWheelsSizes': (front, rear),
+            })
+            self.assertEqual((0.0, 0.0), bounds)
+            self.assertEqual(
+                track_damage.ZONE_FRONT,
+                track_damage.classify_zone(0.0, bounds))
+
+    def test_missing_or_invalid_geometry_is_rejected_instead_of_guessed(self):
         cases = [
             {'topRightCarryingPoint': None},
             {'topRightCarryingPoint': _Vector2(1.5, 0.0)},
@@ -195,9 +232,6 @@ class WheelZoneGeometryTests(unittest.TestCase):
             {'drivingWheelsSizes': (0.0, 0.7)},
             {'drivingWheelsSizes': (0.7, -0.7)},
             {'drivingWheelsSizes': (float('nan'), 0.7)},
-            # Zones that meet or overlap would make the whole track a wheel.
-            {'drivingWheelsSizes': (2.0, 2.02)},
-            {'drivingWheelsSizes': (2.00908, 2.00908)},
         ]
         for overrides in cases:
             self.assertIsNone(
