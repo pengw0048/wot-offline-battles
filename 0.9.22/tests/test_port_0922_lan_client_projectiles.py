@@ -274,29 +274,30 @@ class ProjectileWireTests(unittest.TestCase):
         client._send = lambda unused_message: False
 
         self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, []))
         self.assertEqual(0, client._fire_intent_seq)
 
         client._send = lambda unused_message: True
         self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, []))
         self.assertEqual(1, client._fire_intent_seq)
 
     def test_visible_fire_intent_requires_input_and_sequences_monotonically(self):
         client = self.active_client()
 
         self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, []))
         self.assertTrue(self.send_player_input(client))
         self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, []))
         self.assertTrue(self.send_player_input(client, shell_index=1))
         self.assertEqual(2, client.send_fire_intent(
-            1, [1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 0.02))
+            1, [1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 0.02, []))
         message = wire_copy(client._outbound_queue[-1][1])
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
+            'presentation_ledger',
         }, set(message))
         self.assertEqual('fire_intent', message['type'])
         self.assertEqual(2, message['intent_seq'])
@@ -567,6 +568,7 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
+            'presentation_ledger',
         }, set(message))
 
     def test_progress_shape_is_exact_and_duplicate_ids_fail_closed(self):

@@ -29,7 +29,7 @@ DESTRUCTIBLE_CATALOG_V5_CAPABILITY = 'destructible_catalog_v5'
 LEAN_SNAPSHOT_MANIFEST_CAPABILITY = 'lean_snapshot_manifest_v1'
 RAM_CONTACT_LEDGER_CAPABILITY = 'ram_contact_ledger_v2'
 HUMAN_RAM_TIMELINE_CAPABILITY = 'human_ram_timeline_v1'
-PLAYER_FIRE_INTENT_CAPABILITY = 'player_fire_intent_v4'
+PLAYER_FIRE_INTENT_CAPABILITY = 'player_fire_intent_v5'
 PLAYER_ENVIRONMENT_CAPABILITY = 'player_environment_v2'
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 SIMULATION_WORKER_CAPABILITY = 'simulation_worker_v1'
@@ -73,6 +73,15 @@ MAX_PROJECTILE_DISTANCE = 10000.0
 MAX_PROJECTILE_TIME_MS = 20000
 MAX_PROJECTILE_SPLASH_RADIUS = 100.0
 MAX_PLAYER_DISPERSION_ANGLE = 0.5
+# Bot identities are 1..30, so one entry per live Bot is the exact
+# upper bound of a trigger-edge presentation ledger.
+MAX_PRESENTATION_LEDGER_ENTRIES = 30
+# A displayed Bot trails authority by 60-90 ms normally and by 160-200 ms
+# after a worker stall.  One second is the wire bound the server enforces; a
+# record further behind than that is not evidence of a normal presentation.
+MAX_PRESENTATION_LAG_US = 1000000
+PRESENTATION_LEDGER_FIELDS = frozenset((
+    'bot_id', 'bot_state_revision', 'presentation_time_us'))
 MAX_PLAYER_CLIP_SIZE = 255
 MAX_PLAYER_RELOAD_SECONDS = 3600.0
 # The exact ordered-input wire contract enforced by the bundled LAN
@@ -925,6 +934,40 @@ def _strict_bot_launch_pose(value):
     if any(angle is None for angle in angles):
         return None
     return position + angles
+
+
+def _strict_presentation_ledger(value):
+    """Freeze what delayed Bot poses one shooter displayed at its trigger.
+
+    Each entry names the exact wire revision and motion-clock sample time a
+    ``SnapshotSync`` record was interpolated at.  The authority reconstructs
+    that timeline itself; this ledger never carries a pose or a verdict.
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    if len(value) > MAX_PRESENTATION_LEDGER_ENTRIES:
+        return None
+    result = []
+    seen = set()
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) != PRESENTATION_LEDGER_FIELDS:
+            return None
+        bot_id = _projectile_int_range(raw.get('bot_id'), 1, 30)
+        revision = _projectile_int_range(
+            raw.get('bot_state_revision'), 0, 2147483647)
+        presentation_time_us = _projectile_int_range(
+            raw.get('presentation_time_us'), 0, MAX_MOTION_TIME_US)
+        if (bot_id is None or revision is None or
+                presentation_time_us is None or bot_id in seen):
+            return None
+        seen.add(bot_id)
+        result.append({
+            'bot_id': bot_id,
+            'bot_state_revision': revision,
+            'presentation_time_us': presentation_time_us,
+        })
+    result.sort(key=lambda entry: entry['bot_id'])
+    return result
 
 
 def _strict_launch_velocity(value):
@@ -2339,7 +2382,8 @@ class LANClient(object):
                   aim_yaw=None, gun_pitch=None, velocity=None, gravity=None,
                   max_distance=None, max_time_ms=None, is_he=False,
                   splash_radius=0.0, penetration_factor=1.0,
-                  source_shot=None, dispersion_angle=0.0):
+                  source_shot=None, dispersion_angle=0.0,
+                  presentation_ledger=()):
         """Compatibility wrapper that submits only a player trigger intent."""
         parsed_velocity = _strict_launch_velocity(velocity)
         if parsed_velocity is None:
@@ -2349,10 +2393,10 @@ class LANClient(object):
         return self.send_fire_intent(
             shell_index, position,
             [component / speed for component in parsed_velocity],
-            dispersion_angle)
+            dispersion_angle, presentation_ledger)
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle):
+                         dispersion_angle, presentation_ledger):
         """Queue one ordered trigger input without damage or ballistics."""
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
@@ -2365,11 +2409,13 @@ class LANClient(object):
         parsed_direction = _strict_vector3(shot_direction, 1.0)
         parsed_dispersion = _projectile_float_range(
             dispersion_angle, 0.0, MAX_PLAYER_DISPERSION_ANGLE)
+        parsed_ledger = _strict_presentation_ledger(presentation_ledger)
         direction_length = (math.sqrt(sum(
             component * component for component in parsed_direction))
             if parsed_direction is not None else 0.0)
         if (parsed_shell is None or parsed_origin is None or
                 parsed_direction is None or parsed_dispersion is None or
+                parsed_ledger is None or
                 direction_length <= 0.000001):
             return None
         parsed_direction = [
@@ -2383,6 +2429,7 @@ class LANClient(object):
                 'shot_origin': parsed_origin,
                 'shot_direction': parsed_direction,
                 'dispersion_angle': parsed_dispersion,
+                'presentation_ledger': parsed_ledger,
             }
             if not self._send(message):
                 return None
