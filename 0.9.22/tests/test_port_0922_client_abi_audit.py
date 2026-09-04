@@ -72,6 +72,27 @@ def _unknown_projectile_explosion_fixture():
 
 
 class ClientAbiProjectileAuditTests(unittest.TestCase):
+    def test_initial_enemy_shadow_gate_is_pinned(self):
+        vehicle = AUDIT.EXPECTED_ABI['scripts/client/Vehicle.pyc']
+        appearance = AUDIT.EXPECTED_ABI[
+            'scripts/client/vehicle_systems/CompoundAppearance.pyc']
+        self.assertEqual(('self', 'show'), vehicle['Vehicle.show'])
+        self.assertEqual(
+            ('self', 'visibilityMask'),
+            appearance['CompoundAppearance.changeDrawPassVisibility'])
+
+        vehicle_names = AUDIT.EXPECTED_CODE_NAMES[
+            'scripts/client/Vehicle.pyc']['Vehicle.show']
+        self.assertTrue({
+            'DrawAll', 'ShadowPassBit', 'changeDrawPassVisibility',
+        }.issubset(vehicle_names))
+        draw_names = AUDIT.EXPECTED_CODE_NAMES[
+            'scripts/client/vehicle_systems/CompoundAppearance.pyc'][
+                'CompoundAppearance.changeDrawPassVisibility']
+        self.assertTrue({
+            'ColorPassBit', 'visible', 'skipColorPass',
+        }.issubset(draw_names))
+
     def test_spg_aiming_control_modes_are_pinned(self):
         modes = AUDIT.EXPECTED_CLASS_CONSTANTS[
             'scripts/client/AvatarInputHandler/aih_constants.pyc'][

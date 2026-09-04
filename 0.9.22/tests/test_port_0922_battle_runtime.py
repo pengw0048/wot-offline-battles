@@ -257,10 +257,21 @@ class _TrackScroll(object):
 class _Model(object):
     _SUPPORTED_ATTRIBUTES = frozenset((
         'matrix', 'visible', 'node_bindings', 'fashions'))
+    # ``ProjectileMover.add`` proves #1513 keeps the mesh and the attachment
+    # draw flags apart on its projectile model. Static package inspection
+    # cannot prove whether the native vehicle compound exposes the second one,
+    # so both shapes are modelled.
+    _ATTACHMENT_GATE_ATTRIBUTE = 'visibleAttachments'
 
-    def __init__(self):
+    def __init__(self, attachment_gate=True):
+        supported = set(self._SUPPORTED_ATTRIBUTES)
+        if attachment_gate:
+            supported.add(self._ATTACHMENT_GATE_ATTRIBUTE)
+        object.__setattr__(self, '_supported', frozenset(supported))
         self.matrix = None
         self.visible = True
+        if attachment_gate:
+            self.visibleAttachments = True
         self.node_bindings = []
         self.fashions = None
 
@@ -268,7 +279,7 @@ class _Model(object):
         self.fashions = fashions
 
     def __setattr__(self, name, value):
-        if name not in self._SUPPORTED_ATTRIBUTES:
+        if name not in self._supported:
             raise AttributeError(
                 'PyCompoundModel has no %s attribute' % name)
         object.__setattr__(self, name, value)
@@ -2312,6 +2323,10 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(0.0, overlay['turn_speed'])
         self.assertEqual(0.0, detailed_engine.vehicleSpeedLink())
         self.assertEqual(0.0, detailed_engine.rotationSpeedLink())
+        # Belt speed and engine mode are presentation, so the runtime only
+        # feeds them while this remote is drawn.  The hidden feed has its own
+        # coverage in test_hidden_native_remote_stops_its_track_presentation.
+        vehicle._offlineNativeDrawVisible = True
         self.assertTrue(vehicle.update_tracks(
             2.0, 3.0, (ENGINE_MODE_RUNNING, 1)))
         self.assertTrue(vehicle.update_tracks(
@@ -2426,6 +2441,74 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         self.assertFalse(vehicle.update_tracks(
             1.0, 1.5, (ENGINE_MODE_RUNNING, 1)))
         self.assertEqual([(1.0, 1.5), (1.0, 1.5)], vehicle.track_scrolls)
+        self.assertTrue(factory.destroy(vehicle_id))
+
+    def test_hidden_native_remote_stops_its_track_presentation(self):
+        """The runtime must not drive a tank the player cannot see.
+
+        Retail owns no presentation writer for an entity outside the client's
+        AOI: it is simply absent.  A LAN remote never leaves AOI, so this
+        runtime is that writer and kept feeding belt speed and engine mode
+        into a hidden tank, which is motion the ground-effect and belt layers
+        can still act on.
+        """
+        runtime = _runtime()
+        holder = {}
+        binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            _VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=lambda entity_id:
+            holder['factory'].get(entity_id))
+        factory = NativeRemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7,
+            binding=binding, compatibility=runtime.compatibility)
+        holder['factory'] = factory
+        properties = binding.properties_from_compact_descr(
+            'ussr:R11_MS-1', 2, 'Native remote')
+
+        vehicle_id = factory.create(
+            _Descriptor(), properties, _Vector(), (0.0, 0.0, 0.0))
+        pending = runtime.bigworld.pending_entities[vehicle_id]
+        pending.filter.movementInfo = object()
+        pending.filter.setTracksSpeed = mock.Mock()
+        pending.appearance.filter = pending.filter
+        pending.appearance.flyingInfoProvider = types.SimpleNamespace(
+            isLeftSideFlying=False, isRightSideFlying=False)
+        runtime.bigworld.enter_pending_vehicle(vehicle_id)
+        self.assertTrue(factory.is_ready(vehicle_id))
+        vehicle = factory.get(vehicle_id)
+        moving = (ENGINE_MODE_RUNNING, 1)
+
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual([(2.0, 3.0)], vehicle.track_scrolls)
+        self.assertEqual([moving], vehicle.engine_modes)
+
+        # Losing the draw pass settles the belts exactly once.
+        vehicle._offlineNativeDrawVisible = False
+        self.assertTrue(vehicle.update_tracks(4.0, 5.0, moving))
+        self.assertEqual([(2.0, 3.0), (0.0, 0.0)], vehicle.track_scrolls)
+        self.assertEqual(mock.call(0.0, True, 0.0, True),
+                         vehicle.filter.setTracksSpeed.call_args)
+        self.assertEqual([moving], vehicle.engine_modes)
+
+        # Every later hidden feed is dropped, including a changed mode.
+        self.assertFalse(vehicle.update_tracks(6.0, 7.0, moving))
+        self.assertFalse(vehicle.update_tracks(
+            0.0, 0.0, (ENGINE_MODE_IDLE, 0)))
+        self.assertEqual([(2.0, 3.0), (0.0, 0.0)], vehicle.track_scrolls)
+        self.assertEqual(2, vehicle.filter.setTracksSpeed.call_count)
+        self.assertEqual([moving], vehicle.engine_modes)
+
+        # The reveal replays both the engine mode and the belt speed even
+        # though the dedupe caches would otherwise have swallowed them.
+        vehicle._offlineNativeDrawVisible = True
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual([(2.0, 3.0), (0.0, 0.0), (2.0, 3.0)],
+                         vehicle.track_scrolls)
+        self.assertEqual(mock.call(2.0, True, 3.0, True),
+                         vehicle.filter.setTracksSpeed.call_args)
+        self.assertEqual([moving, moving], vehicle.engine_modes)
         self.assertTrue(factory.destroy(vehicle_id))
 
     def test_guest_native_vehicle_uses_one_stable_pose_matrix(self):
@@ -4648,6 +4731,66 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             self.assertTrue(battle._set_record_spot_visibility(
                 record, True, True))
             self.assertTrue(fire.isRunningFor(vehicle))
+
+        factory.destroy_all()
+
+    def test_a_burning_bot_stops_drawing_when_it_stops_being_spotted(self):
+        """A hidden compound must take its node-bound effects with it.
+
+        Exact #1513 ``CompoundAppearance.changeVisibility`` writes only
+        ``compoundModel.visible``, ``showStickers`` and the crashed-track
+        controller.  The running fire extra lives on ``appearance.boundEffects``
+        and the model's attachment draw flag is a second, independent gate, so
+        an unspotted burning tank kept drawing flame, smoke and every other
+        attached effect over an otherwise hidden hull.
+        """
+        runtime = _runtime()
+        log = []
+        fire = _FireExtra(log)
+        descriptor = _Descriptor()
+        descriptor.extrasDict = {'fire': fire}
+        descriptor.extras = {22: fire}
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        vehicle_id = factory.create(descriptor, {
+            'publicInfo': {'team': 2, 'name': 'Bot'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(), (0.0, 0.0, 0.0))
+        vehicle = factory.get(vehicle_id)
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        battle._remote_factory = factory
+        record = {
+            'engine_id': vehicle_id, 'local': False, 'ready': True,
+            'presentation': True, 'native_remote': False,
+            'visual_started': True, 'spot_visible': True,
+            'spot_marker_visible': True,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+        battle._records = {'bot:11': record}
+
+        with mock.patch.dict(sys.modules, _bound_effects_modules(log)):
+            vehicle.is_on_fire = True
+            self.assertTrue(battle._set_record_spot_visibility(
+                record, True, True))
+            self.assertTrue(fire.isRunningFor(vehicle))
+            self.assertTrue(vehicle.model.visible)
+            self.assertTrue(vehicle.model.visibleAttachments)
+
+            self.assertFalse(battle._set_record_spot_visibility(
+                record, False, False))
+
+            self.assertFalse(fire.isRunningFor(vehicle))
+            self.assertFalse(vehicle.model.visible)
+            self.assertFalse(vehicle.model.visibleAttachments)
+
+            # The authority keeps burning it while hidden, so the reveal edge
+            # has to restore both the compound and its effects.
+            self.assertTrue(battle._set_record_spot_visibility(
+                record, True, True))
+            self.assertTrue(fire.isRunningFor(vehicle))
+            self.assertTrue(vehicle.model.visible)
+            self.assertTrue(vehicle.model.visibleAttachments)
 
         factory.destroy_all()
 
@@ -17352,6 +17495,160 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(enemy.model.visible)
         self.assertEqual([False, True], enemy.shows)
         self.assertEqual([False, True], enemy.visibility_changes)
+
+    def test_native_spot_gate_closes_the_model_attachment_pass(self):
+        """A hidden native remote must stop drawing its attached effects.
+
+        Recorded #1513 ``CompoundAppearance.changeVisibility`` touches
+        ``compoundModel.visible``, ``showStickers`` and the crashed-track
+        controller only.  Recorded ``ProjectileMover.add`` proves this build
+        keeps ``visible`` and ``visibleAttachments`` as two independent draw
+        flags, and this port already relies on that split for its own tracer.
+        Node-bound vehicle effects therefore survived the spotting gate.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        enemy = _Vehicle(
+            1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), {'health': 500})
+        enemy.engineMode = (ENGINE_MODE_RUNNING, 1)
+        enemy.update_tracks = mock.Mock(return_value=True)
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: enemy if entity_id == 1000 else None)
+        record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'native_remote': True, 'visual_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+
+        self.assertTrue(battle._set_record_spot_visibility(
+            record, True, True))
+        self.assertTrue(enemy.model.visible)
+        self.assertTrue(enemy.model.visibleAttachments)
+        record['_remote_track_pending'] = False
+        record['_remote_track_state_signature'] = (8.0, True, 0.0)
+
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+
+        self.assertFalse(enemy.draw_pass_visible)
+        self.assertFalse(enemy.model.visible)
+        self.assertFalse(enemy.model.visibleAttachments)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertFalse(record['_remote_track_pending'])
+        self.assertEqual(
+            (8.0, True, 0.0),
+            record['_remote_track_state_signature'])
+
+        # Repeated dark snapshots at the same pose must not retry the
+        # successful hide-edge native feed at the 20 Hz track cadence.
+        pose = {
+            'x': 100.0, 'y': 0.0, 'z': 0.0,
+            'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
+            'aim_yaw': 0.0, 'gun_pitch': 0.0}
+        record['_remote_pose_signature'] = (
+            100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        record['track_pose_sample'] = (battle._clock(), 0.0)
+        battle._apply_record_pose(record, pose)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+
+        # A changed authority speed while dark updates only the dedupe
+        # identity. It must not restart belt/dust presentation.
+        record['state']['speed'] = 9.0
+        battle._apply_record_pose(record, pose)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertEqual(
+            (9.0, True, 0.0),
+            record['_remote_track_state_signature'])
+
+        self.assertTrue(battle._set_record_spot_visibility(
+            record, True, True))
+        self.assertTrue(enemy.model.visibleAttachments)
+        self.assertTrue(record['_remote_track_pending'])
+        self.assertNotIn('_remote_track_state_signature', record)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+
+        # A failed hide-edge settle remains explicitly retryable.
+        enemy.update_tracks.return_value = False
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+        self.assertTrue(record['_remote_track_pending'])
+        self.assertEqual(2, enemy.update_tracks.call_count)
+
+    def test_native_spot_gate_survives_a_build_without_attachment_flag(self):
+        """A missing attachment flag is a presentation gap, not a round abort.
+
+        Only a plain #1513 ``PyModel`` is proved to expose
+        ``visibleAttachments``; static package inspection cannot establish
+        whether the native vehicle compound does.  The spotting gate must
+        still close the compound and keep the round running either way.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        enemy = _Vehicle(
+            1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), {'health': 500})
+        enemy.model = _Model(attachment_gate=False)
+        enemy.appearance.compoundModel = enemy.model
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: enemy if entity_id == 1000 else None)
+        record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'native_remote': True, 'visual_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+
+        self.assertFalse(enemy.draw_pass_visible)
+        self.assertFalse(enemy.model.visible)
+        self.assertFalse(hasattr(enemy.model, 'visibleAttachments'))
+
+    def test_native_spot_gate_survives_a_read_only_attachment_flag(self):
+        """A readable but unwritable native flag is the same bounded gap."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        enemy = _Vehicle(
+            1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), {'health': 500})
+
+        class ReadOnlyAttachmentModel(object):
+            visible = True
+
+            @property
+            def visibleAttachments(self):
+                return True
+
+        enemy.model = ReadOnlyAttachmentModel()
+        enemy.appearance.compoundModel = enemy.model
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: enemy if entity_id == 1000 else None)
+        record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'native_remote': True, 'visual_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+
+        self.assertFalse(enemy.draw_pass_visible)
+        self.assertFalse(enemy.model.visible)
+        self.assertTrue(enemy.model.visibleAttachments)
 
     def test_native_reverse_sample_preserves_yaw_component_order(self):
         runtime = _runtime()

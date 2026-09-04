@@ -989,6 +989,37 @@ memory uses the historical 5--10 second rule's guaranteed ten-second
 disappearance bound. Enemy
 compound models and their stock marker/minimap visuals cross one visibility
 boundary, so an unspotted vehicle cannot remain visible in only one UI layer.
+
+That single boundary was not sufficient. Windows playtesting reported a green
+penetration indicator, ground dust and a visible silhouette for an unspotted
+enemy, and two further stock surfaces explain it. Exact #1513 bytecode confirms
+that `ProjectileMover.getCollidableEntities` filters `arena.vehicles` only by
+`BigWorld.entity` presence, `isStarted` and `segmentMayHitEntity`. It also
+confirms that the trajectory and SPG hit-marker modules retain directly
+imported copies of that query, while their copies still resolve the canonical
+segment prefilter at call time. Retail relies on the server AOI to remove an
+unspotted enemy from the facade; a client-created LAN remote never leaves it,
+so the port gates both the canonical query and prefilter for an undrawn remote.
+This is a visible-client presentation rule only: hidden-worker projectile
+collision enumerates the runtime records and calls each target directly, so a
+geometric blind hit still resolves and damages the target.
+
+Exact #1513 bytecode also confirms that `Vehicle.show(False)` selects
+`ShadowPassBit`, rather than fully hiding the compound. The initial enemy gate
+therefore follows the stock `startVisual` call with
+`CompoundAppearance.changeVisibility(False)`; that method writes
+`compoundModel.visible`, `showStickers` and the crashed-track controller.
+`ProjectileMover.add` independently sets `visible` and `visibleAttachments` on
+its projectile model, while the fire extra attaches through
+`appearance.boundEffects`. The port mirrors the attachment flag when the
+native compound exposes it as writable, stops the fire extra on the hide edge,
+settles native belt speed immediately, and stops feeding later belt/engine
+presentation while hidden. Static package inspection does not prove that
+`PyCompoundModel` inherits the plain model's `visibleAttachments` property or
+identify the native dust emitter, so those two surfaces still require exact
+Windows runtime acceptance; the runtime logs once when the attachment gate is
+absent or read-only.
+
 Authority Bot snapshots also retain the 0.8.2 no-rewind rule: the client that
 integrates a Bot never reapplies its older server echo pose, while other
 clients continue to interpolate those canonical snapshots.

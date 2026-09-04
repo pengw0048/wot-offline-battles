@@ -17510,6 +17510,18 @@ class BattleRuntime(object):
         # presentation/audio state owned exclusively by the visible client.
         if self._worker_mode or self._remote_factory is None:
             return False
+        vehicle = self._remote_factory.get(record['engine_id'])
+        if vehicle is None:
+            return False
+        if (record.get('native_remote') and
+                not bool(getattr(
+                    vehicle, '_offlineNativeDrawVisible', True)) and
+                not record.get('_remote_track_pending')):
+            # A successful hide-edge zero feed is already terminal.  Keep
+            # accepting hidden state changes for dedupe bookkeeping without
+            # waking the native belt/dust writer again; reveal clears the
+            # signature and forces one real authoritative replay.
+            return True
         if turn_override is not None:
             # Guest poses arrive once per rendered frame, while the stock
             # PyTrackScroll controller itself advances at 20 Hz.  Carry the
@@ -17529,9 +17541,6 @@ class BattleRuntime(object):
             record['_remote_track_next_update'] = (
                 float(next_update) +
                 periods * REMOTE_TRACK_PRESENTATION_SECONDS)
-        vehicle = self._remote_factory.get(record['engine_id'])
-        if vehicle is None:
-            return False
         alive = bool(state.get('alive', True)) and int(
             state.get('health', 1) or 0) > 0
         speed = _number(state.get('speed'))
@@ -19245,13 +19254,35 @@ class BattleRuntime(object):
                 vehicle._offlineNativeDrawVisible = draw_vehicle
                 set_draw_visibility(vehicle, draw_vehicle)
                 vehicle.targetCaps = [1] if visible and alive else []
+                # Closing the draw pass is itself the track-presentation
+                # edge. Waiting for another pose update is insufficient:
+                # unchanged speed/yaw is deduplicated and could leave the
+                # last native belt/dust feed running for the whole dark
+                # interval. Settle it now, then force the first reveal-side
+                # pose to replay the authoritative speed and engine mode.
+                if not draw_vehicle:
+                    stop_tracks = getattr(vehicle, 'update_tracks', None)
+                    tracks_stopped = False
+                    if callable(stop_tracks):
+                        tracks_stopped = self._run_optional_feature(
+                            'remote track animation', stop_tracks,
+                            (0.0, 0.0, getattr(
+                                vehicle, 'engineMode',
+                                (ENGINE_MODE_IDLE, 0))))
+                    record['_remote_track_pending'] = not tracks_stopped
+                else:
+                    record['_remote_track_pending'] = True
+                    record.pop('_remote_track_state_signature', None)
             else:
                 vehicle.appearance.changeVisibility(draw_vehicle)
-            if draw_vehicle:
-                # A fire transition received while this enemy was hidden had
-                # no drawable compound. Reconcile it on the presentation edge,
-                # not on every unrelated state or pose update.
-                self._sync_fire_effect(vehicle)
+            # A fire transition received while this enemy was hidden had no
+            # drawable compound. Reconcile it on the presentation edge, not
+            # on every unrelated state or pose update.  The hide edge is the
+            # same boundary: exact #1513 ``changeVisibility`` never stops a
+            # node-bound effect, so a burning enemy that goes dark would keep
+            # drawing flame and smoke over its hidden compound.
+            self._sync_fire_effect(
+                vehicle, None if draw_vehicle else False)
             record['_spot_presentation_signature'] = signature
         self._sync_remote_visual_components(
             record, vehicle, marker_visible, visible)
