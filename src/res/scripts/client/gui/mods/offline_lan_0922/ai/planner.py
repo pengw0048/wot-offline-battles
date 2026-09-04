@@ -1100,7 +1100,7 @@ class BattleDirector(object):
 		agent['target_id'] = best.get('id') if best is not None else None
 		return best
 
-	def _route_position(self, agent, position, now, hull_yaw=None):
+	def _route_position(self, agent, position, now, speed, hull_yaw=None):
 		route = agent.get('route')
 		if route is None:
 			enemy_base = self.bases.get(2 if agent['team'] == 1 else 1)
@@ -1126,10 +1126,12 @@ class BattleDirector(object):
 					position[1], float(waypoints[nearest][1]))) < 30.0):
 				nearest += 1
 			# A deployed formation can be closer to a connector that it has already
-			# passed than to the next lane point. Joining that connector makes every
-			# hull turn back toward its own flag before it may leave spawn. Only skip
-			# a genuinely rear-facing point and preserve lateral lane openings.
-			if hull_yaw is not None:
+			# passed than to the next lane point. Once a hull is moving forward its
+			# yaw proves the current travel direction, so skip only a genuinely
+			# rear-facing connector and preserve lateral lane openings. A parked
+			# hull's yaw is merely its parking orientation, and negative speed is a
+			# temporary reverse recovery; neither may discard the authored egress.
+			if hull_yaw is not None and _number(speed) > 0.5:
 				while nearest + 1 < len(waypoints):
 					waypoint = waypoints[nearest]
 					bearing = math.atan2(
@@ -1211,13 +1213,15 @@ class BattleDirector(object):
 		angle = 12.0 + agent['personality']['caution'] * 18.0
 		return -angle if (agent['seed'] & 1) == 0 else angle
 
-	def order_for(self, bot_id, position, hull_yaw, health, max_health, now):
+	def order_for(self, bot_id, position, hull_yaw, speed, health, max_health,
+	              now):
 		agent = self.agents[int(bot_id)]
 		agent['position'] = tuple(position)
 		agent['health_fraction'] = (
 			_number(health, 1.0) / max(_number(max_health, 1.0), 1.0))
 		contact = self._choose_contact(agent, position, hull_yaw, now)
-		route_position = self._route_position(agent, position, now, hull_yaw)
+		route_position = self._route_position(
+			agent, position, now, speed, hull_yaw)
 		profile = agent['profile']
 		personality = agent['personality']
 		order = {

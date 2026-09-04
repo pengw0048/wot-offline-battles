@@ -252,13 +252,37 @@ class BotAiPortTests(unittest.TestCase):
         adapter = BotAdapter('01_karelia', 7)
         adapter.register(1, 1, descriptor)
         order = adapter.decide({
-            'id': 1, 'position': (0, 0, 0), 'yaw': 0, 'speed': 0,
+            'id': 1, 'slot': 0, 'position': (0, 0, 0),
+            'yaw': 0, 'speed': 0,
             'dt': 0.05, 'now': 1, 'health': 100, 'max_health': 100,
             'contacts': (), 'neighbours': (),
         }, lambda yaw: True)
         self.assertEqual(1, order['bot_id'])
         self.assertIn('throttle', order)
         self.assertIsInstance(order['move_position'], tuple)
+
+    def test_adapter_passes_signed_speed_to_the_route_planner(self):
+        descriptor = {'type': {'name': 'MS-1', 'tags': ('mediumTank',)},
+                      'physics': {'speedLimits': (18.0,)}, 'hull': {},
+                      'turret': {}, 'gun': {'shots': ()}}
+        adapter = BotAdapter('01_karelia', 7)
+        adapter.register(1, 1, descriptor)
+        observed = []
+        original_order_for = adapter.director.order_for
+
+        def order_for(*args, **kwargs):
+            observed.append(args[3])
+            return original_order_for(*args, **kwargs)
+
+        adapter.director.order_for = order_for
+        adapter.decide({
+            'id': 1, 'slot': 0, 'position': (0, 0, 0),
+            'yaw': 0, 'speed': -3.5,
+            'dt': 0.05, 'now': 1, 'health': 100, 'max_health': 100,
+            'contacts': (), 'neighbours': (),
+        }, lambda unused_yaw: True)
+
+        self.assertEqual([-3.5], observed)
 
     def test_vehicle_profile_reads_native_1513_components_as_attributes(self):
         descriptor = _StrictNoLegacyStuff(
@@ -428,7 +452,8 @@ class BotAiPortTests(unittest.TestCase):
         adapter = BotAdapter('01_karelia', 7)
         adapter.register(1, 1, descriptor)
         order = adapter.decide_with_order({
-            'id': 1, 'position': (0.0, 0.0, 0.0), 'yaw': 0.0,
+            'id': 1, 'slot': 0,
+            'position': (0.0, 0.0, 0.0), 'yaw': 0.0,
             'speed': 0.0, 'dt': 0.05, 'now': 1.0,
             'neighbours': (),
         }, {
@@ -457,7 +482,8 @@ class BotAiPortTests(unittest.TestCase):
         adapter.register(1, 1, descriptor)
 
         order = adapter.decide_with_order({
-            'id': 1, 'position': (0.0, 0.0, 0.0), 'yaw': 0.25,
+            'id': 1, 'slot': 0,
+            'position': (0.0, 0.0, 0.0), 'yaw': 0.25,
             'speed': 0.0, 'dt': 0.05, 'now': 1.0,
             'neighbours': (),
         }, {
@@ -499,7 +525,7 @@ class BotAiPortTests(unittest.TestCase):
                 1, 402, 2, target, 1000, 1000,
                 'heavyTank', True, now)
             order = director.order_for(
-                401, position, 0.0, 1000, 1000, now)
+                401, position, 0.0, 0.0, 1000, 1000, now)
             modes.add(order['combat_mode'])
             throttle_values.add(order['throttle_override'])
 
@@ -519,7 +545,7 @@ class BotAiPortTests(unittest.TestCase):
             'SPG', True, 1.0, shootable_by_ids=(401,))
 
         order = director.order_for(
-            401, (0.0, 0.0, 0.0), 0.0, 1000, 1000, 1.0)
+            401, (0.0, 0.0, 0.0), 0.0, 0.0, 1000, 1000, 1.0)
 
         self.assertEqual(403, order['target_id'])
 
@@ -535,7 +561,7 @@ class BotAiPortTests(unittest.TestCase):
             'SPG', False, 1.0, shootable_by_ids=(401,))
 
         order = director.order_for(
-            401, (0.0, 0.0, 0.0), 0.0, 1000, 1000, 1.0)
+            401, (0.0, 0.0, 0.0), 0.0, 0.0, 1000, 1000, 1.0)
 
         self.assertEqual(402, order['target_id'])
 
@@ -1144,7 +1170,7 @@ class BotAiPortTests(unittest.TestCase):
             if position[0] < 22.0 and mode in ('safe_local', 'reactive'):
                 near_bank_fallbacks.add(mode)
             command = driver.drive(
-                9, tuple(position), yaw[0], 0.0, 0.1, target, (),
+                9, 0, tuple(position), yaw[0], 0.0, 0.1, target, (),
                 direction_clear)
             yaw[0] = float(command['target_yaw'])
             throttle = float(command['throttle'])
@@ -1427,40 +1453,50 @@ class BotAiPortTests(unittest.TestCase):
         agent['route_started'] = True
         agent['waypoint_index'] = 1
 
-        target = director._route_position(agent, (0.0, 0.0, -20.0), 3.0)
+        target = director._route_position(
+            agent, (0.0, 0.0, -20.0), 3.0, 0.0)
 
         self.assertEqual((0.0, 0.0, 80.0), target)
         self.assertEqual(2, agent['waypoint_index'])
 
-    def test_spawn_skips_rear_connector_and_anchors_navigation_at_hull(self):
-        director = BattleDirector('07_lakeville', 'forward-join')
+    def test_only_a_forward_moving_spawn_skips_its_rear_connector(self):
         descriptor = {
             'type': {'name': 'medium', 'tags': ('mediumTank',)},
             'physics': {'speedLimits': (18.0,)}, 'hull': {},
             'turret': {}, 'gun': {'shots': ()}}
-        agent = director.register(
-            93, 1, descriptor, 'Forward join bot')
-        agent['route'] = {
-            'waypoints': (
-                (0.0, -40.0, False),
-                (0.0, -65.0, False),
-                (40.0, 40.0, False),
-            )}
-        agent['route_started'] = False
+        cases = (
+            (0.0, (0.0, 0.0, -65.0), 1),
+            (-2.0, (0.0, 0.0, -65.0), 1),
+            (2.0, (40.0, 0.0, 40.0), 2),
+        )
+        for speed, expected, waypoint_index in cases:
+            director = BattleDirector('07_lakeville', 'forward-join')
+            agent = director.register(
+                93, 1, descriptor, 'Forward join bot')
+            agent['route'] = {
+                'waypoints': (
+                    (0.0, -40.0, False),
+                    (0.0, -65.0, False),
+                    (40.0, 40.0, False),
+                )}
+            agent['route_started'] = False
 
-        order = director.order_for(
-            93, (0.0, 0.0, -20.0), 0.0, 1000, 1000, 0.0)
+            order = director.order_for(
+                93, (0.0, 0.0, -20.0), 0.0, speed,
+                1000, 1000, 0.0)
 
-        self.assertEqual((40.0, 0.0, 40.0), order['move_position'])
-        self.assertEqual(2, agent['waypoint_index'])
-        self.assertEqual((0.0, 0.0, -20.0), order['route_anchor'])
-        self.assertTrue(order['route_join'])
+            with self.subTest(speed=speed):
+                self.assertEqual(expected, order['move_position'])
+                self.assertEqual(waypoint_index, agent['waypoint_index'])
+                self.assertEqual(
+                    (0.0, 0.0, -20.0), order['route_anchor'])
+                self.assertTrue(order['route_join'])
 
     def test_normal_route_turn_keeps_full_throttle(self):
         driver = LocalDriver()
         target_yaw = 0.9
         order = driver.drive(
-            2, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+            2, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
             (math.sin(target_yaw) * 50.0, 0.0,
              math.cos(target_yaw) * 50.0),
             (), lambda unused_angle: True)
@@ -1480,7 +1516,7 @@ class BotAiPortTests(unittest.TestCase):
         }
 
         order = driver.drive(
-            133, (0.0, 0.0, 0.0), 0.0, 8.0, 0.1,
+            133, 0, (0.0, 0.0, 0.0), 0.0, 8.0, 0.1,
             (0.0, 0.0, 50.0), (neighbour,),
             lambda unused_yaw: True,
             velocity=(0.0, 0.0, 8.0),
@@ -1508,7 +1544,7 @@ class BotAiPortTests(unittest.TestCase):
             neighbour['position'], 0.0, 3.7, 1.9))
 
         order = driver.drive(
-            134, position, 0.0, 0.0, 0.1,
+            134, 0, position, 0.0, 0.0, 0.1,
             (50.0, 0.0, 0.0), (neighbour,),
             lambda unused_yaw: True,
             half_length=3.5, half_width=1.7)
@@ -1535,7 +1571,7 @@ class BotAiPortTests(unittest.TestCase):
             neighbour['position'], 0.0, 3.7, 1.9))
 
         order = driver.drive(
-            135, position, 0.0, 0.0, 0.1,
+            135, 0, position, 0.0, 0.0, 0.1,
             (50.0, 0.0, 0.0), (neighbour,),
             lambda unused_yaw: True,
             half_length=3.5, half_width=1.7)
@@ -1547,14 +1583,14 @@ class BotAiPortTests(unittest.TestCase):
         driver = LocalDriver()
         target = (0.0, 0.0, 10.0)
         driver.drive(
-            137, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
+            137, 0, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
             target, (), lambda unused_yaw: True)
 
         held = driver.drive(
-            137, (1.0, 0.0, 1.0), 0.0, 4.0, 0.1,
+            137, 0, (1.0, 0.0, 1.0), 0.0, 4.0, 0.1,
             target, (), lambda unused_yaw: True)
         refreshed = driver.drive(
-            137, (1.0, 0.0, 2.0), 0.0, 4.0, 0.3,
+            137, 0, (1.0, 0.0, 2.0), 0.0, 4.0, 0.3,
             target, (), lambda unused_yaw: True)
 
         self.assertEqual('drive', held['recovery_mode'])
@@ -1568,13 +1604,13 @@ class BotAiPortTests(unittest.TestCase):
                      'half_length': 3.5, 'half_width': 1.5}
         target = (0.0, 0.0, 8.0)
         first = driver.drive(
-            138, (0.0, 0.0, 0.0), 0.0, 1.0, 0.1,
+            138, 0, (0.0, 0.0, 0.0), 0.0, 1.0, 0.1,
             target, (neighbour,), lambda unused_yaw: True,
             half_length=3.5, half_width=1.5)
         # The other hull moves away before the former 1.2-second lease ends.
         neighbour['position'] = (10.0, 0.0, 0.0)
         released = driver.drive(
-            138, (0.0, 0.0, 0.1), 0.0, 1.0, 0.1,
+            138, 0, (0.0, 0.0, 0.1), 0.0, 1.0, 0.1,
             target, (neighbour,), lambda unused_yaw: True,
             half_length=3.5, half_width=1.5)
 
@@ -1585,7 +1621,7 @@ class BotAiPortTests(unittest.TestCase):
     def test_separation_behind_hull_turns_before_driving_into_overlap(self):
         driver = LocalDriver()
         order = driver.drive(
-            139, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+            139, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
             (50.0, 0.0, 0.0), ({
                 'position': (0.0, 0.0, 6.0), 'yaw': 0.0,
                 'half_length': 3.5, 'half_width': 1.7,
@@ -1600,10 +1636,10 @@ class BotAiPortTests(unittest.TestCase):
         driver = LocalDriver()
         target = (50.0, 0.0, 0.0)
         first = driver.drive(
-            140, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
+            140, 0, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
             target, (), lambda unused_yaw: True)
         second = driver.drive(
-            140, (0.0, 0.0, 3.0), 0.0, 4.0, 0.1,
+            140, 0, (0.0, 0.0, 3.0), 0.0, 4.0, 0.1,
             target, (), lambda unused_yaw: True)
 
         self.assertEqual(1.0, first['throttle'])
@@ -1613,7 +1649,7 @@ class BotAiPortTests(unittest.TestCase):
 
     def test_failed_yaw_cache_uses_circular_buckets(self):
         driver = LocalDriver()
-        state = driver._state(136, (0.0, 0.0, 0.0))
+        state = driver._state(136, 0, (0.0, 0.0, 0.0))
         turn = math.pi * 2.0
         for yaw in (-math.pi, -2.70, -0.51, 0.13, 1.73,
                     math.pi - 0.11):
@@ -1658,7 +1694,7 @@ class BotAiPortTests(unittest.TestCase):
         driver = LocalDriver()
 
         driver.drive(
-            3, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0,
+            3, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
 
         state = driver.states[3]
@@ -1674,7 +1710,7 @@ class BotAiPortTests(unittest.TestCase):
         throttles = set()
         for unused in range(150):
             order = driver.drive(
-                7, (0.0, 0.0, 0.0), yaw, 0.0, 1.0 / 30.0,
+                7, 0, (0.0, 0.0, 0.0), yaw, 0.0, 1.0 / 30.0,
                 (0.0, 0.0, -50.0), (), lambda unused_yaw: True)
             modes.add(order['recovery_mode'])
             throttles.add(order['throttle'])
@@ -1695,7 +1731,7 @@ class BotAiPortTests(unittest.TestCase):
             target = (math.sin(target_yaw) * 50.0, 0.0,
                       math.cos(target_yaw) * 50.0)
             order = driver.drive(
-                70, (0.0, 0.0, 0.0), yaw, 0.0, 1.0 / 30.0,
+                70, 0, (0.0, 0.0, 0.0), yaw, 0.0, 1.0 / 30.0,
                 target, (), lambda unused_yaw: True)
             if order['recovery_mode'] in ('reverse_turn', 'pivot_recovery'):
                 recovery = order
@@ -1708,12 +1744,12 @@ class BotAiPortTests(unittest.TestCase):
     def test_terminal_target_coasts_inside_copied_stopping_distance(self):
         driver = LocalDriver()
         terminal = driver.drive(
-            71, (0.0, 0.0, 0.0), 0.0, 14.0, 0.15,
+            71, 0, (0.0, 0.0, 0.0), 0.0, 14.0, 0.15,
             (0.0, 0.0, 8.0), (), lambda unused_yaw: True,
             stopping_distance=6.0, stop_at_target=True,
             decision_horizon=0.15)
         corridor = driver.drive(
-            72, (0.0, 0.0, 0.0), 0.0, 14.0, 0.15,
+            72, 1, (0.0, 0.0, 0.0), 0.0, 14.0, 0.15,
             (0.0, 0.0, 8.0), (), lambda unused_yaw: True,
             stopping_distance=6.0, stop_at_target=False,
             decision_horizon=0.15)
@@ -1738,7 +1774,7 @@ class BotAiPortTests(unittest.TestCase):
             float(corner[1]) - float(first[1]))
 
         order = driver.drive(
-            121, (corner[0], 0.0, corner[1]), incoming_yaw, 0.0, 0.1,
+            121, 0, (corner[0], 0.0, corner[1]), incoming_yaw, 0.0, 0.1,
             (target[0], 0.0, target[1]),
             (), lambda unused_yaw: True)
 
@@ -1751,7 +1787,7 @@ class BotAiPortTests(unittest.TestCase):
         modes = set()
         for unused in range(150):
             order = driver.drive(
-                8, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                8, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
                 (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
             modes.add(order['recovery_mode'])
 
@@ -1762,11 +1798,156 @@ class BotAiPortTests(unittest.TestCase):
         modes = set()
         for unused in range(150):
             order = driver.drive(
-                82, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                82, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
                 (0.0, 0.0, 2.0), (), lambda unused_yaw: True)
             modes.add(order['recovery_mode'])
 
         self.assertTrue(modes & set(('reverse_turn', 'pivot_recovery')))
+
+    def test_canonical_team_slots_have_uniform_timing_and_split_ties(self):
+        """Recovery timing and side depend on explicit slots, not network ids."""
+        driver = LocalDriver()
+
+        def recovery_profile(bot_id, team_slot):
+            state = driver._state(bot_id, team_slot, (0.0, 0.0, 0.0))
+            state['stuck_time'] = 10.0
+            order = driver.drive(
+                bot_id, team_slot, (0.0, 0.0, 0.0),
+                0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+                lambda unused_yaw: True)
+            side = 1 if order['target_yaw'] > 0.0 else -1
+            return state['recovery_timing_phase'], side
+
+        team_one = [recovery_profile(slot + 1, slot)
+                    for slot in range(15)]
+        team_two = [recovery_profile(slot + 16, slot)
+                    for slot in range(15)]
+
+        # Both formations use the same team-local law. The threshold offsets
+        # cover all fifteen uniform buckets, while an actual planner callback
+        # may still coalesce multiple crossings at its own cadence.
+        self.assertEqual(team_one, team_two)
+        phases = [phase for phase, unused in team_one]
+        self.assertEqual(
+            [(bucket + 0.5) / 15.0 for bucket in range(15)],
+            sorted(phases))
+        sides = [side for unused, side in team_one]
+        self.assertEqual({-1, 1}, set(sides))
+        self.assertEqual([8, 7], [sides.count(-1), sides.count(1)])
+
+    def test_recovery_prefers_clear_pivot_arc_and_latches_the_episode(self):
+        right_front = {
+            'position': (4.0, 0.0, 4.0), 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+        }
+        left_front = dict(right_front, position=(-4.0, 0.0, 4.0))
+
+        def force(bot_id, team_slot, neighbour):
+            driver = LocalDriver()
+            driver.drive(
+                bot_id, team_slot, (0.0, 0.0, 0.0),
+                0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+                lambda unused_yaw: True)
+            driver.states[bot_id]['stuck_time'] = 10.0
+            order = driver.drive(
+                bot_id, team_slot, (0.0, 0.0, 0.0),
+                0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (neighbour,),
+                lambda unused_yaw: True)
+            return driver, order
+
+        # Slot one would choose positive on a tie, so a negative result proves
+        # that the occupied right arc loses to geometry rather than identity.
+        driver, first = force(201, 1, right_front)
+        self.assertLess(first['target_yaw'], 0.0)
+        self.assertEqual('reverse_turn', first['recovery_mode'])
+
+        # Changing the snapshot to the opposite obstruction cannot make an
+        # active recovery wag left/right. The chosen side belongs to the edge.
+        latched = driver.drive(
+            201, 1, (0.0, 0.0, 0.0),
+            0.0, 0.0, 0.05, (0.0, 0.0, 50.0), (left_front,),
+            lambda unused_yaw: True)
+        self.assertLess(latched['target_yaw'], 0.0)
+        self.assertEqual(first['target_yaw'], latched['target_yaw'])
+
+        # Mirroring the physical obstruction mirrors the selected escape even
+        # when slot zero's parity fallback points the other way.
+        unused_driver, mirrored = force(202, 0, left_front)
+        self.assertGreater(mirrored['target_yaw'], 0.0)
+
+    def test_recovery_geometry_is_independent_of_neighbour_order(self):
+        driver = LocalDriver()
+        state = driver._state(205, 1, (0.0, 0.0, 0.0))
+        right_front = {
+            'position': (4.0, 0.0, 4.0), 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+        }
+        far_left = {
+            'position': (-20.0, 0.0, 15.0), 'yaw': 0.0,
+            'half_length': 3.5, 'half_width': 1.7,
+        }
+
+        first = driver._select_recovery_side(
+            state, (0.0, 0.0, 0.0), 0.0,
+            (right_front, far_left), 3.5, 1.7)
+        reordered = driver._select_recovery_side(
+            state, (0.0, 0.0, 0.0), 0.0,
+            (far_left, right_front), 3.5, 1.7)
+
+        self.assertEqual(-1.0, first)
+        self.assertEqual(first, reordered)
+
+    def test_recovery_entry_is_not_skipped_by_a_large_elapsed_step(self):
+        driver = LocalDriver()
+        order = driver.drive(
+            206, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, 10.0, (0.0, 0.0, 50.0), (),
+            lambda unused_yaw: True)
+        state = driver.states[206]
+
+        self.assertIn(order['recovery_mode'],
+                      ('reverse_turn', 'pivot_recovery'))
+        self.assertEqual(-1.0, state['recovery_side'])
+        self.assertEqual(0, state['recovery_count'])
+
+    def test_tied_recovery_side_flips_only_between_episodes(self):
+        driver = LocalDriver()
+        driver.drive(
+            203, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+            lambda unused_yaw: True)
+        state = driver.states[203]
+        state['stuck_time'] = 10.0
+        first = driver.drive(
+            203, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+            lambda unused_yaw: True)
+
+        driver.drive(
+            203, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, state['recovery_time'],
+            (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
+        self.assertEqual(1, state['recovery_count'])
+        state['stuck_time'] = 10.0
+        second = driver.drive(
+            203, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+            lambda unused_yaw: True)
+
+        self.assertLess(first['target_yaw'] * second['target_yaw'], 0.0)
+
+    def test_driver_rejects_a_changed_team_slot(self):
+        driver = LocalDriver()
+        driver.drive(
+            204, 0, (0.0, 0.0, 0.0),
+            0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+            lambda unused_yaw: True)
+
+        with self.assertRaisesRegex(ValueError, 'slot changed'):
+            driver.drive(
+                204, 1, (0.0, 0.0, 0.0),
+                0.0, 0.0, 0.0, (0.0, 0.0, 50.0), (),
+                lambda unused_yaw: True)
 
     def test_traffic_lease_uses_explicit_time_not_decision_steps(self):
         """An external lease producer must supply its physical interval.
@@ -1777,7 +1958,7 @@ class BotAiPortTests(unittest.TestCase):
         """
         driver = LocalDriver()
         driver.drive(
-            41, (0.0, 0.0, 0.0), 0.0, 0.0, 0.15,
+            41, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.15,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
         state = driver.states[41]
         self.assertAlmostEqual(0.15, state['last_step'])
@@ -1802,7 +1983,7 @@ class BotAiPortTests(unittest.TestCase):
         modes = set()
         for unused in range(150):
             order = driver.drive(
-                9, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                9, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
                 (0.0, 0.0, 50.0), behind, lambda unused_yaw: True)
             modes.add(order['recovery_mode'])
 
@@ -1838,7 +2019,7 @@ class BotAiPortTests(unittest.TestCase):
         modes = set()
         for unused in range(150):
             order = driver.drive(
-                10, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                10, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
                 (0.0, 0.0, 50.0), far, lambda unused_yaw: True)
             modes.add(order['recovery_mode'])
 
@@ -1849,7 +2030,7 @@ class BotAiPortTests(unittest.TestCase):
         order = None
         for unused in range(10):
             order = driver.drive(
-                130, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+                130, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
                 (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
             driver.wait_for_traffic(130)
 
@@ -1863,7 +2044,7 @@ class BotAiPortTests(unittest.TestCase):
         recovery = None
         for unused in range(80):
             order = driver.drive(
-                131, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+                131, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
                 (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
             if order['recovery_mode'] in (
                     'reverse_turn', 'pivot_recovery'):
@@ -1879,15 +2060,15 @@ class BotAiPortTests(unittest.TestCase):
         driver = LocalDriver()
         for unused in range(10):
             driver.drive(
-                132, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+                132, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
                 (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
             driver.wait_for_traffic(132)
 
         driver.drive(
-            132, (1.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+            132, 0, (1.0, 0.0, 0.0), 0.0, 2.0, 0.1,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
         order = driver.drive(
-            132, (1.2, 0.0, 0.0), 0.0, 2.0, 0.1,
+            132, 0, (1.2, 0.0, 0.0), 0.0, 2.0, 0.1,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
         driver.wait_for_traffic(132)
 
@@ -1902,11 +2083,11 @@ class BotAiPortTests(unittest.TestCase):
             return abs(yaw) > 0.20
 
         first = driver.drive(
-            81, (0.0, 0.0, 0.0), 0.0, 3.0, 0.05,
+            81, 0, (0.0, 0.0, 0.0), 0.0, 3.0, 0.05,
             (0.0, 0.0, 50.0), (), clear)
         shifted_yaw = 1.30
         second = driver.drive(
-            81, (0.0, 0.0, 0.1), 0.1, 3.0, 0.05,
+            81, 0, (0.0, 0.0, 0.1), 0.1, 3.0, 0.05,
             (math.sin(shifted_yaw) * 50.0, 0.0,
              math.cos(shifted_yaw) * 50.0), (), clear)
 
@@ -1917,15 +2098,15 @@ class BotAiPortTests(unittest.TestCase):
     def test_repeated_obstacle_failures_widen_on_one_side(self):
         driver = LocalDriver(failure_ttl=5.0)
         first = driver.drive(
-            17, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+            17, 0, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
         driver.remember_failure(17, first['target_yaw'], ttl=5.0)
         second = driver.drive(
-            17, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+            17, 0, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
         driver.remember_failure(17, second['target_yaw'], ttl=5.0)
         third = driver.drive(
-            17, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+            17, 0, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
             (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
 
         self.assertEqual('avoid', second['recovery_mode'])
@@ -1937,14 +2118,14 @@ class BotAiPortTests(unittest.TestCase):
     def test_adjacent_bots_choose_opposite_initial_escape_sides(self):
         driver = LocalDriver(failure_ttl=5.0)
         escaped = []
-        for bot_id in (20, 21):
+        for team_slot, bot_id in enumerate((20, 21)):
             straight = driver.drive(
-                bot_id, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+                bot_id, team_slot, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
                 (0.0, 0.0, 50.0), (), lambda unused_yaw: True)
             driver.remember_failure(
                 bot_id, straight['target_yaw'], ttl=5.0)
             escaped.append(driver.drive(
-                bot_id, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
+                bot_id, team_slot, (0.0, 0.0, 0.0), 0.0, 2.0, 0.1,
                 (0.0, 0.0, 50.0), (),
                 lambda unused_yaw: True)['target_yaw'])
 
@@ -1953,10 +2134,10 @@ class BotAiPortTests(unittest.TestCase):
     def test_uphill_route_turn_aligns_before_drive_torque(self):
         driver = LocalDriver()
         uphill = driver.drive(
-            120, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+            120, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
             (20.0, 6.0, 20.0), (), lambda unused_yaw: True)
         flat = driver.drive(
-            121, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+            121, 1, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
             (20.0, 0.0, 20.0), (), lambda unused_yaw: True)
 
         self.assertEqual(0.0, uphill['throttle'])

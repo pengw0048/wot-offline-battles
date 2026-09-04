@@ -185,8 +185,14 @@ BOT_OVERTURN_DEATH_REASON = 7
 
 # Route groups lease these lateral lanes without moving an existing member.
 # A safety rejection may narrow a lane toward zero for one macro route leg,
-# but never crosses sides or upgrades again inside that leg.
+# but never crosses sides or upgrades again inside that leg.  The server owns
+# macro-route progress and accepts a waypoint at 13 metres.  Leave the local
+# driver's final 1.5-metre arrival tolerance inside that contract instead of
+# allowing an offset target to park just outside the server gate.
 ROUTE_LANE_OFFSETS = (0.0, 5.0, -5.0, 10.0, -10.0)
+ROUTE_LANE_ORDER = (-10.0, -5.0, 0.0, 5.0, 10.0)
+ROUTE_JOIN_ARRIVAL_RADIUS = 13.0
+ROUTE_JOIN_ROW_LIMIT = 4.0
 
 
 def _route_lane_fallbacks(offset):
@@ -201,6 +207,60 @@ def _route_lane_fallbacks(offset):
     if offset < 0.0:
         return (-5.0, 0.0)
     return (0.0,)
+
+
+def _route_lane_layout(count):
+    """Return centred, monotonically ordered lanes for one cohort."""
+    count = max(1, int(count))
+    if count == 1:
+        return (0.0,)
+    if count == 2:
+        return (-5.0, 5.0)
+    if count == 3:
+        return (-5.0, 0.0, 5.0)
+    if count == 4:
+        return (-10.0, -5.0, 5.0, 10.0)
+    if count == 5:
+        return ROUTE_LANE_ORDER
+    # Quantise equal-width rank bins across all five lanes. Centred samples
+    # keep six and seven symmetric while a full 15-Bot team divides 3/3/3/3/3
+    # instead of overloading the inner lanes.
+    return tuple(
+        ROUTE_LANE_ORDER[
+            ((2 * index + 1) * len(ROUTE_LANE_ORDER)) // (2 * count)]
+        for index in range(count))
+
+
+def _route_row_layout(count):
+    """Return bounded convoy rows, reusing them deterministically if needed."""
+    count = max(1, int(count))
+    if count == 1:
+        return (0.0,)
+    row_count = min(5, count)
+    rows = tuple(
+        -ROUTE_JOIN_ROW_LIMIT +
+        (2.0 * ROUTE_JOIN_ROW_LIMIT * index / float(row_count - 1))
+        for index in range(row_count))
+    if count == row_count:
+        return rows
+    # Keep unexpected oversized test/input cohorts deterministic too. More
+    # lateral spread would violate the server's arrival circle, so stable row
+    # reuse is safer than silently widening the gate.
+    result = []
+    for index in range(count):
+        row_index = int(round(
+            index * float(row_count - 1) / float(count - 1)))
+        result.append(rows[row_index])
+    return tuple(result)
+
+
+def _route_row_fallbacks(offset):
+    """Narrow a longitudinal join row toward the authored waypoint."""
+    offset = float(offset)
+    if abs(offset) < 1.0e-9:
+        return (0.0,)
+    middle = offset * 0.5
+    return (offset, middle, 0.0)
 
 
 def _cache_deadline(now, entity_id, interval, salt=0, stagger=False):
@@ -3782,6 +3842,20 @@ class BotRuntime(object):
             if _server_order_signature(previous.get(bot_id)) !=
             _server_order_signature(accepted.get(bot_id)))
         for bot_id in changed_ids:
+            previous_route_id = (previous.get(bot_id) or {}).get('route_id')
+            accepted_route_id = (accepted.get(bot_id) or {}).get('route_id')
+            if previous_route_id != accepted_route_id:
+                lane_state = self.states.get(bot_id)
+                if lane_state is not None:
+                    for name in (
+                            '_route_lane_group', '_route_lane_gate',
+                            '_route_lane_origin',
+                            '_route_lane_desired',
+                            '_route_lane_row_desired',
+                            '_route_lane_forward', '_route_lane_segment',
+                            '_route_lane_offset', '_route_lane_row',
+                            '_route_lane_goal'):
+                        lane_state.pop(name, None)
             self._server_order_tokens[bot_id] = (
                 int(self._server_order_tokens.get(bot_id, 0)) + 1)
             self._decision_cache.pop(bot_id, None)
@@ -5664,31 +5738,419 @@ class BotRuntime(object):
         return all(after[index] <= before[index] + 1.0e-6
                    for index in range(4))
 
-    def _route_lane_binding(self, bot_state, group_key):
-        """Lease the least-used stable lane without moving existing peers."""
-        if bot_state.get('_route_lane_group') == group_key:
-            return _number(bot_state.get('_route_lane_desired'))
-        counts = dict((offset, 0) for offset in ROUTE_LANE_OFFSETS)
-        for peer in self.states.values():
-            if (peer is bot_state or not peer.get('alive', True) or
-                    peer.get('_route_lane_group') != group_key):
+    def _route_lane_cohort(self, bot_id, group_key, gate_key):
+        """Return one authoritative live route-gate cohort.
+
+        A route may have several spawn connectors.  The server publishes a
+        complete atomic order snapshot, so production peers are grouped by
+        their initial route index as well as the persistent team/route lease.
+        An already-bound peer retains its original gate identity after it
+        advances; this keeps a late rebalance from moving existing leases.
+        """
+        bot_id = int(bot_id)
+        team, route_id = group_key
+        result = []
+        for peer_id in sorted(self.states):
+            peer = self.states[peer_id]
+            if (not peer.get('alive', True) or
+                    int(peer.get('team', 0)) != int(team)):
                 continue
-            offset = _number(peer.get('_route_lane_desired'))
-            if offset in counts:
-                counts[offset] += 1
-        desired = min(
-            ROUTE_LANE_OFFSETS,
-            key=lambda offset: (counts[offset],
-                                ROUTE_LANE_OFFSETS.index(offset)))
-        bot_state['_route_lane_group'] = group_key
-        bot_state['_route_lane_desired'] = desired
-        bot_state.pop('_route_lane_segment', None)
-        bot_state.pop('_route_lane_offset', None)
-        return desired
+            peer_route_id = None
+            peer_gate = None
+            previous_group = peer.get('_route_lane_group')
+            previous_gate = peer.get('_route_lane_gate')
+            if previous_group == group_key and isinstance(
+                    previous_gate, tuple) and len(previous_gate) == 2:
+                peer_route_id = previous_group[1]
+                peer_gate = (
+                    int(_number(previous_gate[0])), bool(previous_gate[1]))
+            else:
+                # A current server order is the strategic authority.  The
+                # route retained on the local agent is only a conservative
+                # seam before any complete order snapshot exists.
+                order = self._server_orders.get(int(peer_id))
+                if isinstance(order, dict):
+                    peer_route_id = order.get('route_id')
+                    if (order.get('route_index') is not None and
+                            'route_join' in order):
+                        peer_gate = (
+                            int(_number(order.get('route_index'))),
+                            bool(order.get('route_join')))
+                elif self._server_orders:
+                    # Production snapshots are complete and replaced
+                    # atomically.  Never guess a missing peer into a known
+                    # gate from its older local route.
+                    continue
+
+            if peer_route_id is None and not self._server_orders:
+                route = peer.get('route') or {}
+                peer_route_id = (
+                    route.get('id') if isinstance(route, dict) else None)
+                if (peer.get('route_index') is not None and
+                        peer.get('route_join') is not None):
+                    peer_gate = (
+                        int(_number(peer.get('route_index'))),
+                        bool(peer.get('route_join')))
+                elif int(peer_id) == bot_id:
+                    peer_gate = gate_key
+            if (str(peer_route_id) != route_id or peer_gate != gate_key):
+                continue
+            result.append(peer)
+        bot_state = self.states.get(bot_id)
+        if bot_state is not None and bot_state not in result:
+            result.append(bot_state)
+        return sorted(result, key=lambda peer: (
+            int(peer.get('slot', 0)), int(peer.get('id', 0))))
+
+    @staticmethod
+    def _route_waypoint_xz(raw):
+        if isinstance(raw, dict):
+            return (_number(raw.get('x')), _number(raw.get('z')))
+        try:
+            return (_number(raw[0]), _number(raw[1]))
+        except (TypeError, IndexError):
+            return None
+
+    def _route_lane_forward(self, bot_state, goal, strategic):
+        """Resolve one authored direction shared by the complete cohort."""
+        route = bot_state.get('route') or {}
+        strategic_route_id = str(strategic.get('route_id', 'direct'))
+        local_route_id = (route.get('id')
+                          if isinstance(route, dict) else None)
+        waypoints = ()
+        if (local_route_id is not None and
+                str(local_route_id) == strategic_route_id):
+            waypoints = route.get('waypoints', ()) or ()
+        route_index = int(_number(strategic.get('route_index'), 0))
+        if waypoints:
+            if route_index > 0 and route_index < len(waypoints):
+                first = self._route_waypoint_xz(waypoints[route_index - 1])
+                second = self._route_waypoint_xz(waypoints[route_index])
+            elif len(waypoints) > 1:
+                first = self._route_waypoint_xz(waypoints[0])
+                second = self._route_waypoint_xz(waypoints[1])
+            else:
+                first = None
+                second = None
+            if first is not None and second is not None:
+                dx = second[0] - first[0]
+                dz = second[1] - first[1]
+                length = math.hypot(dx, dz)
+                if length >= 0.25:
+                    return (dx / length, dz / length)
+        anchor = strategic.get('route_anchor')
+        try:
+            anchor_x = _number(anchor[0])
+            anchor_z = _number(anchor[2])
+        except (TypeError, IndexError, KeyError):
+            anchor_x = _number(_value(anchor, 'x', bot_state.get('x')))
+            anchor_z = _number(_value(anchor, 'z', bot_state.get('z')))
+        dx = _number(goal[0]) - anchor_x
+        dz = _number(goal[2]) - anchor_z
+        length = math.hypot(dx, dz)
+        if length < 0.25:
+            yaw = _number(bot_state.get('yaw'))
+            return (math.sin(yaw), math.cos(yaw))
+        return (dx / length, dz / length)
+
+    def _route_lane_binding(self, bot_id, group_key, goal, strategic):
+        """Bind one spawn-gate cohort by lateral projection, once and stably."""
+        bot_id = int(bot_id)
+        bot_state = self.states.get(bot_id)
+        if bot_state is None:
+            return (0.0, 0.0)
+        order = self._server_orders.get(bot_id)
+        if (isinstance(order, dict) and
+                str(order.get('route_id')) == group_key[1] and
+                order.get('route_index') is not None and
+                'route_join' in order):
+            gate_key = (
+                int(_number(order.get('route_index'))),
+                bool(order.get('route_join')))
+        else:
+            gate_key = (
+                int(_number(strategic.get('route_index'), 0)),
+                bool(strategic.get('route_join')))
+        if bot_state.get('_route_lane_group') == group_key:
+            # Normal non-join progress keeps the spawn lease and lets the
+            # current macro leg derive its own direction.  A fresh join on a
+            # different authoritative gate is different: preserve the leased
+            # lane/row, but rotate this Bot's private join goal to the new
+            # segment without reassigning any peer.
+            if (gate_key[1] and
+                    bot_state.get('_route_lane_gate') != gate_key):
+                bot_state['_route_lane_gate'] = gate_key
+                bot_state['_route_lane_forward'] = self._route_lane_forward(
+                    bot_state, goal, strategic)
+                for name in (
+                        '_route_lane_segment', '_route_lane_offset',
+                        '_route_lane_row', '_route_lane_goal'):
+                    bot_state.pop(name, None)
+            return (
+                _number(bot_state.get('_route_lane_desired')),
+                _number(bot_state.get('_route_lane_row_desired')),
+            )
+        cohort = self._route_lane_cohort(bot_id, group_key, gate_key)
+        if not cohort:
+            return (0.0, 0.0)
+        for peer in cohort:
+            if (peer.get('_route_lane_group') != group_key or
+                    peer.get('_route_lane_gate') != gate_key or
+                    peer.get('_route_lane_origin') is None):
+                peer['_route_lane_origin'] = _position(peer)
+        forward_x, forward_z = self._route_lane_forward(
+            bot_state, goal, strategic)
+        lateral_x = -forward_z
+        lateral_z = forward_x
+        lateral_order = sorted(cohort, key=lambda peer: (
+            _number(peer['_route_lane_origin'][0]) * lateral_x +
+            _number(peer['_route_lane_origin'][2]) * lateral_z,
+            int(peer.get('slot', 0)), int(peer.get('id', 0))))
+        count = len(lateral_order)
+        assignments = {}
+        lane_members = {}
+        layout = _route_lane_layout(count)
+        for index, peer in enumerate(lateral_order):
+            lane_members.setdefault(layout[index], []).append(peer)
+        for lane in ROUTE_LANE_ORDER:
+            members = lane_members.get(lane, ())
+            members = sorted(members, key=lambda peer: (
+                _number(peer['_route_lane_origin'][0]) * forward_x +
+                _number(peer['_route_lane_origin'][2]) * forward_z,
+                int(peer.get('slot', 0)), int(peer.get('id', 0))))
+            rows = _route_row_layout(len(members)) if members else ()
+            for index, peer in enumerate(members):
+                assignments[int(peer.get('id', 0))] = (lane, rows[index])
+        bound = [peer for peer in cohort
+                 if (peer.get('_route_lane_group') == group_key and
+                     peer.get('_route_lane_gate') == gate_key)]
+        if bound:
+            occupied = set((
+                _number(peer.get('_route_lane_desired')),
+                _number(peer.get('_route_lane_row_desired')),
+            ) for peer in bound)
+            row_choices = (-4.0, -2.0, 0.0, 2.0, 4.0)
+            for peer in lateral_order:
+                if peer.get('_route_lane_group') == group_key:
+                    continue
+                peer_id = int(peer.get('id', 0))
+                expected_lane, expected_row = assignments.get(
+                    peer_id, (0.0, 0.0))
+                occupied_lanes = set(value[0] for value in occupied)
+                available = [
+                    (lane, 0.0) for lane in ROUTE_LANE_ORDER
+                    if lane not in occupied_lanes]
+                if available:
+                    desired = min(available, key=lambda value: (
+                        (value[0] - expected_lane) ** 2 +
+                        (value[1] - expected_row) ** 2,
+                        abs(value[0] - expected_lane),
+                        abs(value[1] - expected_row),
+                        ROUTE_LANE_ORDER.index(value[0]),
+                        row_choices.index(value[1])))
+                else:
+                    reused = [
+                        (lane, row) for lane in ROUTE_LANE_ORDER
+                        for row in row_choices
+                        if (lane, row) not in occupied]
+                    if reused:
+                        # A distinct tuple can still overlap another hull: a
+                        # two-metre row delta is worse than the bounded four
+                        # metres available at the same lane. Maximise the
+                        # nearest occupied-pair separation first, then stay as
+                        # close as possible to the full-cohort geometry.
+                        desired = min(reused, key=lambda value: (
+                            -min((value[0] - used[0]) ** 2 +
+                                 (value[1] - used[1]) ** 2
+                                 for used in occupied),
+                            (value[0] - expected_lane) ** 2 +
+                            (value[1] - expected_row) ** 2,
+                            abs(value[0] - expected_lane),
+                            abs(value[1] - expected_row),
+                            ROUTE_LANE_ORDER.index(value[0]),
+                            row_choices.index(value[1])))
+                    else:
+                        # The supported team-local roster cannot exhaust all
+                        # 25 bounded pairs. Keep a deterministic centre
+                        # fallback for malformed state without widening.
+                        desired = (0.0, 0.0)
+                assignments[peer_id] = desired
+                occupied.add(desired)
+        for peer in cohort:
+            if peer.get('_route_lane_group') == group_key:
+                continue
+            desired, row = assignments.get(
+                int(peer.get('id', 0)), (0.0, 0.0))
+            peer['_route_lane_group'] = group_key
+            peer['_route_lane_gate'] = gate_key
+            peer['_route_lane_desired'] = desired
+            peer['_route_lane_row_desired'] = row
+            peer['_route_lane_forward'] = (forward_x, forward_z)
+            peer.pop('_route_lane_segment', None)
+            peer.pop('_route_lane_offset', None)
+            peer.pop('_route_lane_row', None)
+            peer.pop('_route_lane_goal', None)
+        return (
+            _number(bot_state.get('_route_lane_desired')),
+            _number(bot_state.get('_route_lane_row_desired')),
+        )
+
+    def _route_lane_leg_forward(
+            self, bot_state, position, goal, strategic, joining):
+        if joining:
+            stored = bot_state.get('_route_lane_forward')
+            try:
+                forward_x = _number(stored[0])
+                forward_z = _number(stored[1])
+                length = math.hypot(forward_x, forward_z)
+                if length >= 0.25:
+                    return (forward_x / length, forward_z / length)
+            except (TypeError, IndexError):
+                pass
+        anchor = strategic.get('route_anchor')
+        try:
+            anchor_x = _number(anchor[0])
+            anchor_z = _number(anchor[2])
+        except (TypeError, IndexError, KeyError):
+            anchor_x = _number(_value(anchor, 'x', position[0]))
+            anchor_z = _number(_value(anchor, 'z', position[2]))
+        forward_x = _number(goal[0]) - anchor_x
+        forward_z = _number(goal[2]) - anchor_z
+        length = math.hypot(forward_x, forward_z)
+        if length < 0.25:
+            forward_x = _number(goal[0]) - _number(position[0])
+            forward_z = _number(goal[2]) - _number(position[2])
+            length = math.hypot(forward_x, forward_z)
+        if length < 0.25:
+            return None
+        return (forward_x / length, forward_z / length)
+
+    def _safe_route_lane_goal(
+            self, bot_state, goal, forward, lateral, row, now):
+        """Validate one offset macro goal before it enters navigation A*."""
+        if abs(lateral) < 1.0e-9 and abs(row) < 1.0e-9:
+            return tuple(goal)
+        grid = getattr(self.navigator, 'grid', None)
+        ground = getattr(grid, '_ground', None)
+        segment_hazard = getattr(grid, 'segment_has_baked_hazard', None)
+        point_hazard = getattr(grid, 'point_has_baked_hazard', None)
+        dry_segment = getattr(grid, 'dry_segment_clear', None)
+        if not all(callable(value) for value in (
+                ground, segment_hazard, point_hazard, dry_segment)):
+            return None
+        forward_x, forward_z = forward
+        lateral_x = -forward_z
+        lateral_z = forward_x
+        candidate_x = (_number(goal[0]) + lateral_x * lateral +
+                       forward_x * row)
+        candidate_z = (_number(goal[2]) + lateral_z * lateral +
+                       forward_z * row)
+        offset_distance = math.hypot(
+            candidate_x - _number(goal[0]),
+            candidate_z - _number(goal[2]))
+        if (offset_distance + ai_driver.WAYPOINT_ARRIVAL_RADIUS >
+                ROUTE_JOIN_ARRIVAL_RADIUS + 1.0e-9):
+            return None
+        candidate_y = ground(candidate_x, candidate_z, _number(goal[1]))
+        if candidate_y is None:
+            return None
+        candidate = (candidate_x, candidate_y, candidate_z)
+        hazard_mask = BAKED_FATAL_HAZARDS | BAKED_SHALLOW_WATER
+        try:
+            # An authored ford remains centred.  Offset endpoints and the
+            # short cross-lane chord around a dry macro gate must both remain
+            # outside fatal and shallow cells; A* then proves the complete
+            # spawn-to-offset route rather than inheriting this local chord.
+            if (point_hazard(goal, hazard_mask) or
+                    point_hazard(candidate, hazard_mask) or
+                    segment_hazard(goal, candidate, hazard_mask) or
+                    not dry_segment(goal, candidate, now)):
+                return None
+        except Exception:
+            return None
+        travel_yaw = math.atan2(forward_x, forward_z)
+        overflow = self._baked_boundary_overflow(
+            bot_state, candidate, travel_yaw)
+        if (overflow is None or
+                any(value > 1.0e-6 for value in overflow)):
+            return None
+        return candidate
+
+    def _route_lane_goal(
+            self, bot_id, position, goal, strategic, now, joining):
+        """Return a stable safe macro lane goal for navigation to prove."""
+        bot_id = int(bot_id)
+        bot_state = self.states.get(bot_id)
+        if bot_state is None:
+            return (tuple(goal), (0, 0))
+        group_key = (
+            int(bot_state.get('team', 0)),
+            str(strategic.get('route_id', 'direct')),
+        )
+        desired, desired_row = self._route_lane_binding(
+            bot_id, group_key, goal, strategic)
+        route_index = int(_number(strategic.get('route_index'), 0))
+        segment_key = group_key + (route_index, bool(joining))
+        if bot_state.get('_route_lane_segment') != segment_key:
+            bot_state['_route_lane_segment'] = segment_key
+            bot_state['_route_lane_offset'] = desired
+            bot_state['_route_lane_row'] = desired_row if joining else 0.0
+            bot_state.pop('_route_lane_goal', None)
+        forward = self._route_lane_leg_forward(
+            bot_state, position, goal, strategic, joining)
+        if forward is None:
+            bot_state['_route_lane_offset'] = 0.0
+            bot_state['_route_lane_row'] = 0.0
+            bot_state['_route_lane_goal'] = tuple(goal)
+            return (tuple(goal), (0, 0))
+
+        current_offset = _number(bot_state.get('_route_lane_offset'))
+        current_row = _number(bot_state.get('_route_lane_row'))
+        reject_current = False
+        navigator_states = getattr(self.navigator, 'bot_states', {})
+        navigator_state = (
+            navigator_states.get(bot_id, {})
+            if isinstance(navigator_states, dict) else {})
+        planned_goal = navigator_state.get('planned_goal')
+        previous_goal = bot_state.get('_route_lane_goal')
+        try:
+            reject_current = bool(
+                navigator_state.get('navigation_status') == 'blocked' and
+                previous_goal is not None and planned_goal is not None and
+                _distance(previous_goal, planned_goal) < 0.25)
+        except (TypeError, IndexError):
+            reject_current = False
+
+        first = True
+        seen = set()
+        for row in _route_row_fallbacks(current_row):
+            for offset in _route_lane_fallbacks(current_offset):
+                identity = (round(offset, 6), round(row, 6))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if reject_current and first:
+                    first = False
+                    continue
+                first = False
+                candidate = self._safe_route_lane_goal(
+                    bot_state, goal, forward, offset, row, now)
+                if candidate is None:
+                    continue
+                bot_state['_route_lane_offset'] = offset
+                bot_state['_route_lane_row'] = row
+                bot_state['_route_lane_goal'] = candidate
+                return (candidate, (
+                    int(round(offset * 1000.0)),
+                    int(round(row * 1000.0))))
+        bot_state['_route_lane_offset'] = 0.0
+        bot_state['_route_lane_row'] = 0.0
+        bot_state['_route_lane_goal'] = tuple(goal)
+        return (tuple(goal), (0, 0))
 
     def _route_lane_target(
             self, bot_id, position, goal, selected, strategic, now):
-        """Offset one proved shared-route target through a stable safe lane."""
+        """Offset one proved non-join route target through its stable lane."""
         bot_state = self.states.get(int(bot_id))
         grid = getattr(self.navigator, 'grid', None)
         selected = tuple(selected)
@@ -5702,7 +6164,8 @@ class BotRuntime(object):
             int(bot_state.get('team', 0)),
             str(strategic.get('route_id', 'direct')),
         )
-        desired = self._route_lane_binding(bot_state, group_key)
+        desired, unused_row = self._route_lane_binding(
+            bot_id, group_key, goal, strategic)
         segment_key = group_key + (
             int(_number(strategic.get('route_index'), 0)),)
         if bot_state.get('_route_lane_segment') != segment_key:
@@ -5732,7 +6195,6 @@ class BotRuntime(object):
             route_length = math.hypot(route_dx, route_dz)
         if route_length < 0.25:
             return selected
-        # Positive offsets are left of the authored route direction.
         lateral_x = -route_dz / route_length
         lateral_z = route_dx / route_length
 
@@ -5755,10 +6217,6 @@ class BotRuntime(object):
             candidate_z = _number(selected[2]) + lateral_z * offset
             candidate_dx = candidate_x - _number(position[0])
             candidate_dz = candidate_z - _number(position[2])
-            # A short local A* target can sit closer than the requested lane
-            # offset. Never turn that proved forward step into a point behind
-            # the hull or inside LocalDriver's arrival radius: either result
-            # would convert a distant macro route into a persistent nav_wait.
             if (math.hypot(candidate_dx, candidate_dz) <=
                     ai_driver.WAYPOINT_ARRIVAL_RADIUS + 1.0e-9 or
                     dx * candidate_dx + dz * candidate_dz <= 1.0e-9):
@@ -5797,6 +6255,8 @@ class BotRuntime(object):
         if self.navigator is None:
             state['navigation_stop_at_target'] = stop_at_goal
             return goal
+        grid = getattr(self.navigator, 'grid', None)
+        now = state.get('now', 0.0)
         route_index = int(_number(strategic.get('route_index'), 0))
         if mode == 'base_defense':
             path_key = (
@@ -5806,16 +6266,21 @@ class BotRuntime(object):
         elif mode in ('route', 'advance', 'hold'):
             anchor = (strategic.get('route_anchor')
                       if bool(strategic.get('route_join')) else None)
+            lane_identity = (0, 0)
+            if mode in ('route', 'advance') and anchor is not None:
+                goal, lane_identity = self._route_lane_goal(
+                    bot_id, position, goal, strategic, now,
+                    True)
             if anchor is not None:
-                # A route's first shared path used to be cached from whichever
-                # spawn slot requested it first. Every following tank then
-                # converged onto that one hull's egress line. Keep the strategic
-                # destination shared, but join it from each real slot through a
-                # bot-scoped terrain path. Later route segments remain shared.
+                # Lane offsets are macro goals, never post-A* translations of
+                # a locally proved point.  Each offset route remains private so
+                # neither its spawn anchor nor its narrowed goal can leak into
+                # another hull's cached path.
                 path_key = (
                     'route_join', int(bot_id),
                     int(self.states[bot_id].get('team', 0)),
-                    strategic.get('route_id', 'direct'), route_index)
+                    strategic.get('route_id', 'direct'), route_index,
+                    lane_identity[0], lane_identity[1])
             else:
                 path_key = (
                     'route', int(self.states[bot_id].get('team', 0)),
@@ -5830,14 +6295,12 @@ class BotRuntime(object):
         # teammate repeatedly change the selected waypoint and produced visible
         # drive/stop cycles, especially for slow heavy tanks.
         avoid = None
-        grid = getattr(self.navigator, 'grid', None)
         cell_size = max(1.0, _number(getattr(grid, 'cell_size', 1.0), 1.0))
         lookahead_distance = max(
             cell_size * 2.0,
             abs(_number(state.get('speed'))) *
             BAKED_MOTION_LOOKAHEAD_SECONDS)
         direct = getattr(grid, 'dry_segment_clear', None)
-        now = state.get('now', 0.0)
         direct_close = _distance(position, goal) <= 15.0
         bot_edges_penalized = getattr(
             self.navigator, 'bot_segment_penalized', None)
@@ -5864,8 +6327,7 @@ class BotRuntime(object):
              (callable(terminal) and terminal(bot_id))))
         if mode in ('route', 'advance') and anchor is None:
             target = self._route_lane_target(
-                bot_id, position, goal, target, strategic,
-                now)
+                bot_id, position, goal, target, strategic, now)
         return target
 
     def _player_neighbours(self, players):
@@ -9003,9 +9465,15 @@ class BotRuntime(object):
                     stopping_distance = self._cached_traffic_stopping_distance(
                         state, previous_command, physics_params)
                 decision_state = {
-                    'id': state['id'], 'position': position,
+                    'id': state['id'],
+                    'slot': int(state.get('slot', 0)),
+                    'position': position,
                     'yaw': state['yaw'],
-                    'speed': abs(_number(state.get('speed'))),
+                    # Connector selection distinguishes parked/forward motion
+                    # from a deliberate reverse.  Preserve the authoritative
+                    # sign here; LocalDriver applies abs only where magnitude
+                    # is the physical quantity being consumed.
+                    'speed': _number(state.get('speed')),
                     'dt': decision_step, 'now': now,
                     'health': state['health'],
                     'max_health': state['max_health'],

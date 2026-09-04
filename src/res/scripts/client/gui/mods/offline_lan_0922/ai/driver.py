@@ -15,6 +15,13 @@ TRAFFIC_WAIT_LEASE_SECONDS = 1.5
 FIRST_CANDIDATE_OFFSET = 0.42
 # Fifteen-degree circular buckets centre both the +/-pi seam and cardinal yaws.
 FAILED_YAW_BUCKET_COUNT = 24
+# Bot slots are team-local and the LAN roster has exactly fifteen per team.
+BOT_TEAM_SLOT_COUNT = 15
+# Seven is coprime with fifteen, so consecutive formation slots visit every
+# timing bucket without clustering adjacent tanks at one end of the window.
+RECOVERY_TIMING_STRIDE = 7
+RECOVERY_YAW_OFFSET = 0.85
+RECOVERY_SWEEP_FRACTIONS = (0.25, 0.50, 0.75, 1.0)
 
 
 def _angle_delta(target, current):
@@ -37,13 +44,22 @@ def _distance(first, second):
 	return math.sqrt(dx * dx + dz * dz)
 
 
-def _identity_phase(bot_id):
-	"""Stable 0..1 value without Python's randomized string hash."""
-	text = str(bot_id)
-	value = 0
-	for char in text:
-		value = (value * 33 + ord(char)) & 0x7fffffff
-	return float(value % 997) / 997.0
+def _team_slot(value):
+	"""Return one explicit stable team-local formation slot."""
+	try:
+		slot = int(value)
+	except (TypeError, ValueError, OverflowError):
+		raise ValueError('bot team slot is invalid')
+	if slot < 0 or slot >= BOT_TEAM_SLOT_COUNT:
+		raise ValueError('bot team slot is outside 0..14')
+	return slot
+
+
+def _recovery_timing_phase(team_slot):
+	"""Uniform per-team recovery timing independent of steering side."""
+	slot = _team_slot(team_slot)
+	bucket = (slot * RECOVERY_TIMING_STRIDE) % BOT_TEAM_SLOT_COUNT
+	return (float(bucket) + 0.5) / float(BOT_TEAM_SLOT_COUNT)
 
 
 def _component_value(component, name, default=None):
@@ -115,7 +131,7 @@ def barrel_direction(yaw, pitch):
 
 
 class LocalDriver(object):
-	"""Stateful local steering, keyed only by bot id.
+	"""Stateful local steering keyed by bot id and a stable team-local slot.
 
 	``direction_clear(absolute_yaw)`` must return whether a short vehicle-length
 	segment in that direction is drivable.  It may raise; a failed probe is
@@ -173,22 +189,25 @@ class LocalDriver(object):
 		if state['traffic_wait_time'] <= TRAFFIC_WAIT_LEASE_SECONDS:
 			state['stuck_time'] = 0.0
 			state['recovery_time'] = 0.0
+			state['recovery_side'] = 0.0
 		return True
 
-	def _state(self, bot_id, position):
+	def _state(self, bot_id, team_slot, position):
+		team_slot = _team_slot(team_slot)
 		state = self.states.get(bot_id)
 		if state is None:
-			phase = _identity_phase(bot_id)
 			state = {
+				'team_slot': team_slot,
 				'last_position': (float(position[0]), float(position[2])),
 				'stuck_time': 0.0,
 				'recovery_time': 0.0,
 				'recovery_count': 0,
+				'recovery_side': 0.0,
 				'steering_yaw': None,
 				'steering_reason': 'route',
 				'steering_age': 999.0,
 				'plan_age': 999.0,
-				'phase': phase,
+				'recovery_timing_phase': _recovery_timing_phase(team_slot),
 				'clock': 0.0,
 				'failed_yaws': {},
 				'escape_side': 0.0,
@@ -201,7 +220,13 @@ class LocalDriver(object):
 				'braking_target': None,
 			}
 			self.states[bot_id] = state
+		elif state['team_slot'] != team_slot:
+			raise ValueError('bot team slot changed during battle')
 		return state
+
+	def _fallback_recovery_side(self, state):
+		parity = int(state['team_slot']) + int(state['recovery_count'])
+		return 1.0 if parity & 1 else -1.0
 
 	def _yaw_key(self, yaw):
 		turn = math.pi * 2.0
@@ -228,10 +253,10 @@ class LocalDriver(object):
 		if abs(offset) >= 0.10:
 			side = 1.0 if offset > 0.0 else -1.0
 		else:
-			# Adjacent ids choose opposite initial sides, then keep that side while
-			# widening the escape angle. This avoids left/right grinding at a broad
-			# obstacle without turning the finite failure TTL into a permanent bias.
-			side = 1.0 if (int(state['phase'] * 997.0 + 0.5) & 1) else -1.0
+			# Adjacent formation slots choose opposite initial sides, then keep it
+			# while widening the escape angle. This avoids left/right grinding at a
+			# broad obstacle without making a finite failure TTL a permanent bias.
+			side = self._fallback_recovery_side(state)
 		state['escape_side'] = side
 		state['escape_side_until'] = (
 			state['clock'] + min(2.0, max(0.8, ttl)))
@@ -459,6 +484,58 @@ class LocalDriver(object):
 				continue
 		return False
 
+	def _recovery_occupancy(self, position, yaw, direction, neighbours,
+			half_length, half_width):
+		"""Count occupied sampled poses in one in-place recovery turn."""
+		occupied = 0
+		for neighbour in neighbours or ():
+			other = self._neighbour_position(neighbour)
+			if other is None:
+				continue
+			try:
+				if abs(float(other[1]) - float(position[1])) > 5.0:
+					continue
+			except Exception:
+				pass
+			other_yaw = 0.0
+			other_length = half_length
+			other_width = half_width
+			if isinstance(neighbour, dict):
+				try:
+					other_yaw = float(neighbour.get('yaw', 0.0) or 0.0)
+					other_length = float(
+						neighbour.get('half_length', half_length) or half_length)
+					other_width = float(
+						neighbour.get('half_width', half_width) or half_width)
+				except (TypeError, ValueError, OverflowError):
+					continue
+			for fraction in RECOVERY_SWEEP_FRACTIONS:
+				candidate_yaw = (
+					float(yaw) + float(direction) *
+					RECOVERY_YAW_OFFSET * fraction)
+				try:
+					if self._obb_overlap(
+							position, candidate_yaw,
+							half_length, half_width,
+							other, other_yaw, other_length, other_width):
+						occupied += 1
+				except Exception:
+					continue
+		return occupied
+
+	def _select_recovery_side(self, state, position, yaw, neighbours,
+			half_length, half_width):
+		"""Prefer the less occupied pivot arc, then use stable slot parity."""
+		negative = self._recovery_occupancy(
+			position, yaw, -1.0, neighbours, half_length, half_width)
+		positive = self._recovery_occupancy(
+			position, yaw, 1.0, neighbours, half_length, half_width)
+		if negative < positive:
+			return -1.0
+		if positive < negative:
+			return 1.0
+		return self._fallback_recovery_side(state)
+
 	def _choose_yaw(self, state, desired_yaw, current_yaw, position, speed,
 			velocity, neighbours, direction_clear, half_length, half_width):
 		separation = self._separation_yaw(
@@ -489,18 +566,21 @@ class LocalDriver(object):
 				return candidate
 		return None
 
-	def drive(self, bot_id, position, yaw, speed, dt, target, neighbours,
-			direction_clear, velocity=None, half_length=3.5, half_width=1.7,
+	def drive(self, bot_id, team_slot, position, yaw, speed, dt, target,
+			neighbours, direction_clear, velocity=None,
+			half_length=3.5, half_width=1.7,
 			movement_intent=True, stopping_distance=None,
 			stop_at_target=True, decision_horizon=0.0):
 		"""Return ``throttle``, ``turn``, ``target_yaw`` and ``recovery_mode``.
 
+		``team_slot`` is the explicit stable 0..14 formation slot. It must not be
+		inferred from a network entity id because those numbering schemes differ.
 		All timing uses the complete supplied interval.  The authority caller
 		already advances vehicle physics in bounded substeps; throwing away the
 		planner's remaining wall time would leave recovery and route leases
 		permanently behind after every slow callback.
 		"""
-		state = self._state(bot_id, position)
+		state = self._state(bot_id, team_slot, position)
 		step = max(0.0, float(dt))
 		if not state.pop('traffic_waiting', False):
 			state['traffic_wait_time'] = 0.0
@@ -527,6 +607,7 @@ class LocalDriver(object):
 			# reinterpret that commanded hold as a stuck tank 1.8 seconds later.
 			state['stuck_time'] = 0.0
 			state['recovery_time'] = 0.0
+			state['recovery_side'] = 0.0
 			state['steering_yaw'] = None
 			state['braking_target'] = None
 			return {
@@ -545,6 +626,7 @@ class LocalDriver(object):
 			# is zero and previously produced full throttle until the next order tick.
 			state['stuck_time'] = 0.0
 			state['recovery_time'] = 0.0
+			state['recovery_side'] = 0.0
 			state['steering_yaw'] = None
 			state['last_position'] = (
 				float(position[0]), float(position[2]))
@@ -570,26 +652,37 @@ class LocalDriver(object):
 		else:
 			state['stuck_time'] += step
 
-		threshold = self.stuck_seconds + state['phase'] * 0.42
+		timing_phase = state['recovery_timing_phase']
+		threshold = self.stuck_seconds + timing_phase * 0.42
 		if state['recovery_time'] > 0.0:
 			state['recovery_time'] = max(0.0, state['recovery_time'] - step)
 			if state['recovery_time'] == 0.0:
 				state['recovery_count'] += 1
+				state['recovery_side'] = 0.0
 				state['stuck_time'] = 0.0
 		else:
 			if state['stuck_time'] >= threshold:
 				if state.get('last_clear_yaw') is not None:
 					state['failed_yaws'][self._yaw_key(state['last_clear_yaw'])] = (
 						state['clock'] + self.failure_ttl)
-				state['recovery_time'] = self.recovery_seconds + state['phase'] * 0.28
+				state['recovery_time'] = (
+					self.recovery_seconds + timing_phase * 0.28)
+				state['recovery_side'] = self._select_recovery_side(
+					state, position, yaw, neighbours,
+					own_half_length, own_half_width)
 
 		if state['recovery_time'] > 0.0:
-			# Alternate the turn direction each recovery so a bot does not grind a
-			# wall forever.  Phase makes adjacent ids leave a traffic jam apart. Never
-			# reverse blindly: at a cliff or shoreline the space behind the hull can be
-			# the unsafe side that caused the stall in the first place.
-			direction = 1.0 if ((state['recovery_count'] + int(state['phase'] * 10)) % 2) else -1.0
-			recovery_yaw = float(yaw) + direction * 0.85
+			# Keep one side for the whole episode. Geometry separates an asymmetric
+			# local jam; team-local slot parity breaks an exact tie without coupling
+			# steering to the timing phase. Never reverse blindly: at a cliff or
+			# shoreline the space behind can be the unsafe side that caused the stall.
+			direction = state.get('recovery_side', 0.0)
+			if direction not in (-1.0, 1.0):
+				direction = self._select_recovery_side(
+					state, position, yaw, neighbours,
+					own_half_length, own_half_width)
+				state['recovery_side'] = direction
+			recovery_yaw = float(yaw) + direction * RECOVERY_YAW_OFFSET
 			if (not self._clear(direction_clear, float(yaw) + math.pi) or
 					self._reverse_blocked_by_vehicle(
 						position, yaw, neighbours,

@@ -209,9 +209,10 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             self.assertGreater(selected[2], current[2])
             driver = LocalDriver()
             aligning = driver.drive(
-                7, current, 0.0, 0.0, 0.1, selected, [], lambda yaw: True)
+                7, 0, current, 0.0, 0.0, 0.1,
+                selected, [], lambda yaw: True)
             aligned = driver.drive(
-                7, current, aligning['target_yaw'], 0.0, 0.1,
+                7, 0, current, aligning['target_yaw'], 0.0, 0.1,
                 selected, [], lambda yaw: True)
             self.assertEqual(0.0, aligning['throttle'])
             self.assertGreater(aligned['throttle'], 0.0)
