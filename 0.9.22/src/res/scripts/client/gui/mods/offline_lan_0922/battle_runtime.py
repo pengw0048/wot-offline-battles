@@ -11902,8 +11902,12 @@ class BattleRuntime(object):
             # The armour ledger needs the roll the damage law already made,
             # before armour and modules reduced it.  Splash carries no roll:
             # its own law rolls a different quantity and the server excludes
-            # splash from blocked damage.
-            effect['potential_damage'] = max(0, int(potential_damage))
+            # splash from blocked damage.  An overlay-edited shell can roll
+            # past 5000, the exact ceiling the wire validator and the battle
+            # server enforce, so saturate the statistic instead of letting
+            # the validator drop the whole terminal.
+            effect['potential_damage'] = max(
+                0, min(5000, int(potential_damage)))
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
