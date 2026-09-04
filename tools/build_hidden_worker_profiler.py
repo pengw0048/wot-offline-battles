@@ -124,6 +124,25 @@ between pressing fire, seeing the muzzle flash and seeing the shell move can be
 read directly. Timing and counters are aggregated; the profiler itself does not
 emit one log line per Bot operation.
 
+This build also runs the staged native vehicle physics probe in the hidden
+worker, starting 8 s after the battle goes live: it inventories the exe's
+WGVehiclePhysics / WGDynamicsSimulator / WGPhysicalBody Python surface and
+physics_shared, reads the retail physics object every Bot Vehicle already owns,
+constructs and initialises a standalone body, harvests method signatures from
+the binding's own argument errors, drives Bot 0 forward for two seconds through
+movementSignals and an explicit WGDynamicsSimulator.update batch, times one
+batch over every Bot body, drives Bots 0 and 1 for contact callbacks, then zeroes
+every signal it set. Each stage logs an NPHYS begin/end line and rewrites
+offline-worker-native-physics-probe-round<N>.json next to
+authority_worker_status.json, so a native crash still leaves the earlier
+stages on disk (collect the dump the launcher wrote). Expect one or two Bots to
+move oddly for a few seconds while the probe runs; that is the experiment, not a
+gameplay change. To skip stages or disable either diagnostic, create
+mods\configs\offline_lan_0922\worker_diagnostics.json, for example
+{{"native_physics_probe": {{"enabled": false}}}} or
+{{"native_physics_probe": {{"stages": ["inventory", "inspect_existing"],
+"disable_lsprof": true}}}}.
+
 Install
 -------
 

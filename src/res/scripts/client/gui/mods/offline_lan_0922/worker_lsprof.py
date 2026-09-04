@@ -13,6 +13,7 @@ and is reported once; it never propagates into the frame that called it.
 
 from __future__ import print_function
 
+import json
 import marshal
 import os
 import sys
@@ -310,6 +311,39 @@ class DisabledProfiler(object):
         return False
 
 
+def load_windows(output_dir, default=DEFAULT_WINDOWS):
+    """Read optional ``worker_diagnostics.json`` overrides; never raise."""
+    path = os.path.join(output_dir, 'worker_diagnostics.json')
+    try:
+        with open(path, 'rb') as stream:
+            payload = json.loads(stream.read().decode('utf-8'))
+    except Exception:
+        return tuple(default)
+    if not isinstance(payload, dict):
+        return tuple(default)
+    probe = payload.get('native_physics_probe')
+    if isinstance(probe, dict) and probe.get('disable_lsprof'):
+        return ()
+    section = payload.get('lsprof')
+    if not isinstance(section, dict):
+        return tuple(default)
+    if section.get('enabled') is False:
+        return ()
+    windows = section.get('windows')
+    if not isinstance(windows, list):
+        return tuple(default)
+    result = []
+    for entry in windows:
+        try:
+            start, duration = float(entry[0]), float(entry[1])
+        except (TypeError, ValueError, IndexError):
+            return tuple(default)
+        if start < 0.0 or duration <= 0.0:
+            return tuple(default)
+        result.append((start, duration))
+    return tuple(result)
+
+
 def create_for_worker(output_dir=None, writer=None):
     """Build the worker profiler, or a no-op when the runtime lacks support."""
     writer = writer or sys.stdout.write
@@ -318,7 +352,12 @@ def create_for_worker(output_dir=None, writer=None):
             from gui.mods.offline_lan_0922 import config as port_config
             output_dir = os.path.dirname(port_config.CONFIG_PATH)
         import _lsprof  # noqa: F401  (proves the builtin exists)
-        return WorkerProfiler(output_dir, writer=writer)
+        windows = load_windows(output_dir)
+        if not windows:
+            writer('%s windows disabled by worker_diagnostics.json\n' %
+                   LOG_PREFIX)
+            return DisabledProfiler()
+        return WorkerProfiler(output_dir, windows=windows, writer=writer)
     except Exception as error:
         try:
             writer('%s unavailable: %r\n' % (LOG_PREFIX, error))

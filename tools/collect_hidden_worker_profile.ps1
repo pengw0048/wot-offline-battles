@@ -351,11 +351,15 @@ try {
     $lsprofCount = 0
     if ([System.IO.Directory]::Exists($lsprofRoot)) {
         foreach ($pattern in @("offline-worker-lsprof-*.txt",
-                               "offline-worker-lsprof-*.pstats")) {
+                               "offline-worker-lsprof-*.pstats",
+                               "offline-worker-native-physics-probe-*.json",
+                               "worker_diagnostics.json")) {
             foreach ($lsprofPath in [System.IO.Directory]::GetFiles(
                     $lsprofRoot, $pattern)) {
                 $lsprofName = [System.IO.Path]::GetFileName($lsprofPath)
-                if ($lsprofName -notmatch "^offline-worker-lsprof-round[0-9A-Za-z_-]+-w[0-9]+\.(txt|pstats)$") {
+                if ($lsprofName -notmatch "^offline-worker-lsprof-round[0-9A-Za-z_-]+-w[0-9]+\.(txt|pstats)$" -and
+                        $lsprofName -notmatch "^offline-worker-native-physics-probe-round[0-9A-Za-z_-]+\.json$" -and
+                        $lsprofName -ne "worker_diagnostics.json") {
                     continue
                 }
                 Copy-Evidence $lsprofPath $lsprofName $included $missing $captureRoot
@@ -444,7 +448,8 @@ try {
             "hidden-worker.log PERF and slow-frame lines with native-query and Python phase summaries",
             "hidden-worker.log LSPROF platform/begin/end lines and FIRE INTENT RECEIVED / FIRE LAUNCH / FIRE COMMIT timestamps",
             "visible-client.log FIRE TRIGGER / FIRE SHOWN / FIRE CURSOR / FIRE TRACER MOVING timestamps",
-            "offline-worker-lsprof-round*-w*.txt function-level _lsprof reports (and .pstats for offline analysis)"
+            "offline-worker-lsprof-round*-w*.txt function-level _lsprof reports (and .pstats for offline analysis)",
+            "offline-worker-native-physics-probe-round*.json staged WGVehiclePhysics/WGDynamicsSimulator probe results; hidden-worker.log NPHYS stage begin/end lines"
         )
         gpuRule = "PID-scoped Windows GPU Engine counters only; unavailable is not estimated"
     }

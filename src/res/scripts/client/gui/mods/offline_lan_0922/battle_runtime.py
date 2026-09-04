@@ -44,6 +44,7 @@ from gui.mods.offline_lan_0922.projectile_runtime import (
     projectile_range_distance, trajectory_position)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
+from gui.mods.offline_lan_0922 import native_physics_probe
 from gui.mods.offline_lan_0922 import worker_lsprof
 from gui.mods.offline_lan_0922 import (
     ballistics, combat_rules, critical_damage, descriptor_donation,
@@ -1484,6 +1485,7 @@ class BattleRuntime(object):
         self._authority_aim_writes = 0
         self._authority_aim_skips = 0
         self._worker_lsprof = None
+        self._native_physics_probe = None
         self._frame_diagnostics = (
             _FrameDiagnostics(
                 initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS)
@@ -13786,6 +13788,16 @@ class BattleRuntime(object):
         dt = rule_dt
         tick_dt = rule_dt
         self._last_frame_time = now
+        if self._worker_mode:
+            probe = self._native_physics_probe
+            if probe is None:
+                probe = native_physics_probe.create_for_worker(self)
+                self._native_physics_probe = probe
+            if not probe.done:
+                probe.tick(
+                    self._battle_live,
+                    (self._start_message or {}).get('round_id'),
+                    rule_dt)
         # Direction probes may recast through proved soft OBBs, but those
         # native queries share one hard frame budget across all 29 Bots.
         self._soft_static_recast_budget[0] = BOT_SOFT_RECAST_BUDGET
