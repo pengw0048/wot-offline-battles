@@ -364,6 +364,73 @@ def passive_effects(equipments):
     return result
 
 
+def _validated_snapshot_state(snapshot, contract):
+    """Validate one mutable equipment row against one canonical contract."""
+    if (not isinstance(snapshot, dict) or
+            set(snapshot) != set(EQUIPMENT_SNAPSHOT_FIELDS)):
+        raise ValueError('equipment wire snapshot is incomplete')
+    raw_uses = snapshot.get('usesLeft')
+    uses_left = _integer(raw_uses, -2)
+    reuse_count = _integer(contract.get('reuseCount'), 0)
+    maximum = -1 if reuse_count < 0 else reuse_count + 1
+    if (isinstance(raw_uses, bool) or
+            (maximum < 0 and uses_left != -1) or
+            (maximum >= 0 and not 0 <= uses_left <= maximum)):
+        raise ValueError('equipment wire quantity is invalid')
+    raw_cooldown = snapshot.get('cooldownTimeLeft')
+    cooldown = _number(raw_cooldown, -1.0)
+    cooldown_limit = max(
+        0.0, _number(contract.get('cooldownSeconds'), 0.0))
+    if (isinstance(raw_cooldown, bool) or cooldown < 0.0 or
+            cooldown > cooldown_limit + 1.0e-6):
+        raise ValueError('equipment wire cooldown is invalid')
+    active = snapshot.get('active')
+    if (not isinstance(active, bool) or
+            (active and contract.get('kind') != 'rpm_limiter')):
+        raise ValueError('equipment wire active state is invalid')
+
+    pending = []
+    for name in ('autoPendingElapsed', 'aiPendingElapsed'):
+        value = snapshot.get(name)
+        if value is None:
+            pending.append(None)
+            continue
+        if isinstance(value, bool):
+            raise ValueError('equipment wire pending clock is invalid')
+        value = _number(value, -1.0)
+        if value < 0.0 or value > 3600.0:
+            raise ValueError('equipment wire pending clock is invalid')
+        pending.append(value)
+    if (pending[0] is not None and
+            not contract.get('autoactivate', False)):
+        raise ValueError('equipment wire auto clock is invalid')
+    if (pending[1] is not None and
+            contract.get('kind') not in ('repairkit', 'medkit')):
+        raise ValueError('equipment wire AI clock is invalid')
+    if uses_left == 0 and any(value is not None for value in pending):
+        raise ValueError('exhausted equipment has a pending activation')
+    return uses_left, cooldown, active, pending
+
+
+def canonical_bot_equipment_states(snapshots):
+    """Return one validated Bot ledger without constructing mutable state."""
+    contracts = bot_consumable_contracts(None, snapshot=snapshots)
+    if len(snapshots) != len(contracts):
+        raise ValueError('equipment snapshot count changed')
+    result = []
+    for contract, snapshot in zip(contracts, snapshots):
+        uses_left, cooldown, active, pending = _validated_snapshot_state(
+            snapshot, contract)
+        result.append((contract, uses_left, cooldown, active, tuple(pending)))
+    return tuple(result)
+
+
+def validate_bot_equipment_states(snapshots):
+    """Validate one complete Bot ledger without constructing throwaway state."""
+    canonical_bot_equipment_states(snapshots)
+    return True
+
+
 def effect_policy(equipment, critical=None, selected=None,
                   requested_active=None, active=False, stunned=False):
     """Return the exact battle mutation requested by one valid activation."""
@@ -535,46 +602,8 @@ class EquipmentState(object):
         contract = _validate_contract(snapshot.get('equipment'))
         if contract != self.contract:
             raise ValueError('equipment wire contract changed')
-        raw_uses = snapshot.get('usesLeft')
-        uses_left = _integer(raw_uses, -2)
-        reuse_count = _integer(self.contract.get('reuseCount'), 0)
-        maximum = -1 if reuse_count < 0 else reuse_count + 1
-        if (isinstance(raw_uses, bool) or
-                (maximum < 0 and uses_left != -1) or
-                (maximum >= 0 and not 0 <= uses_left <= maximum)):
-            raise ValueError('equipment wire quantity is invalid')
-        raw_cooldown = snapshot.get('cooldownTimeLeft')
-        cooldown = _number(raw_cooldown, -1.0)
-        cooldown_limit = max(
-            0.0, _number(self.contract.get('cooldownSeconds'), 0.0))
-        if (isinstance(raw_cooldown, bool) or cooldown < 0.0 or
-                cooldown > cooldown_limit + 1.0e-6):
-            raise ValueError('equipment wire cooldown is invalid')
-        active = snapshot.get('active')
-        if (not isinstance(active, bool) or
-                (active and self.contract.get('kind') != 'rpm_limiter')):
-            raise ValueError('equipment wire active state is invalid')
-
-        pending = []
-        for name in ('autoPendingElapsed', 'aiPendingElapsed'):
-            value = snapshot.get(name)
-            if value is None:
-                pending.append(None)
-                continue
-            if isinstance(value, bool):
-                raise ValueError('equipment wire pending clock is invalid')
-            value = _number(value, -1.0)
-            if value < 0.0 or value > 3600.0:
-                raise ValueError('equipment wire pending clock is invalid')
-            pending.append(value)
-        if (pending[0] is not None and
-                not self.contract.get('autoactivate', False)):
-            raise ValueError('equipment wire auto clock is invalid')
-        if (pending[1] is not None and
-                self.contract.get('kind') not in ('repairkit', 'medkit')):
-            raise ValueError('equipment wire AI clock is invalid')
-        if uses_left == 0 and any(value is not None for value in pending):
-            raise ValueError('exhausted equipment has a pending activation')
+        uses_left, cooldown, active, pending = _validated_snapshot_state(
+            snapshot, self.contract)
 
         now = max(0.0, _number(now, 0.0))
         self.uses_left = uses_left

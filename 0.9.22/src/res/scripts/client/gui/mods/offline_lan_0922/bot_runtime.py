@@ -90,6 +90,22 @@ MAX_SHOT_LANE_PAIRS_PER_FRAME = 64
 # so a slow hidden worker carries the fair scan across one-second boundaries
 # instead of catching up in one render callback.
 MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME = 16
+
+# Contacts are observer-specific because visibility and remembered pose differ,
+# but the target mechanics they start from are not.  Copy only the fields that
+# visibility, planning, ballistics and observation serialisation consume.  In
+# particular, do not clone a complete Bot authority state for every enemy
+# observer pair.
+_TARGET_DYNAMIC_FIELDS = (
+    'team', 'alive', 'health', 'max_health',
+    'x', 'y', 'z', 'yaw', 'speed', 'velocity', 'fire_seq', 'critical',
+)
+_HUMAN_TARGET_STATIC_FIELDS = (
+    'vehicle', 'vehicle_compact_descr', 'effective_params',
+)
+_BOT_TARGET_STATIC_FIELDS = (
+    'profile', 'class_tag', 'armor',
+)
 # The server never assigns a visible target beyond 560 metres. Keep a
 # conservative 25-metre broad-phase margin for the advisory roster scan; the
 # selected target's independent 0.20-second final-fire check does not use this
@@ -1904,6 +1920,7 @@ class BotRuntime(object):
         self._friendly_repositions = {}
         self._shot_los_cache = {}
         self._shot_los_deadlines = {}
+        self._reset_shot_lane_work()
         self._reset_shot_lane_diagnostics()
         self._physics_params = {}
         self._repair_factors = {}
@@ -2676,6 +2693,7 @@ class BotRuntime(object):
             self._friendly_repositions = {}
             self._shot_los_cache = {}
             self._shot_los_deadlines = {}
+            self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._physics_params = {}
             self._repair_factors = {}
@@ -2768,6 +2786,7 @@ class BotRuntime(object):
             self._visibility_still = {}
             self._shot_los_cache = {}
             self._shot_los_deadlines = {}
+            self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._decision_cache = {}
             self._motion_probe_cache = {}
@@ -4080,6 +4099,15 @@ class BotRuntime(object):
         except (TypeError, ValueError, OverflowError):
             return None
 
+    def _reset_shot_lane_work(self):
+        """Discard supplemental identities at one authority boundary."""
+        self._shot_lane_work_cycle = None
+        self._shot_lane_work = []
+        self._shot_lane_work_set = set()
+        self._shot_lane_work_cursor = 0
+        self._shot_lane_enqueued_targets = set()
+        self._shot_lane_source_signature = ()
+
     def _reset_shot_lane_diagnostics(self):
         """Reset pull-only supplemental lane debt at authority boundaries."""
         self._shot_lane_pending_pairs = 0
@@ -4574,11 +4602,29 @@ class BotRuntime(object):
             return spotting.DESIGNATED_SPOT_MEMORY_SECONDS
         return spotting.SPOT_MEMORY_SECONDS
 
-    def _human_observation_target(self, raw):
-        target = dict(raw)
-        player_id = int(raw.get('network_id', raw.get('id', 0)))
+    @staticmethod
+    def _target_template_cache(tick_cache):
+        if not isinstance(tick_cache, dict):
+            return None
+        return tick_cache.setdefault('target_templates', {})
+
+    @staticmethod
+    def _copy_target_fields(raw, names):
+        return dict((name, raw[name]) for name in names if name in raw)
+
+    def _human_observation_target(
+            self, raw, tick_cache=None, player_id=None):
+        if player_id is None:
+            player_id = raw.get('network_id', raw.get('id', 0))
+        player_id = int(player_id)
         if player_id <= 0:
             raise ValueError('human observation identity is invalid')
+        cache = self._target_template_cache(tick_cache)
+        key = ('human', player_id)
+        if cache is not None and key in cache:
+            return cache[key]
+        target = self._copy_target_fields(
+            raw, _TARGET_DYNAMIC_FIELDS + _HUMAN_TARGET_STATIC_FIELDS)
         target['kind'] = 'human'
         target['network_id'] = player_id
         target['id'] = self._human_planner_id(player_id)
@@ -4586,15 +4632,28 @@ class BotRuntime(object):
         vehicle_profile = self._player_vehicle_profile(raw)
         target['class_tag'] = vehicle_profile['class_tag']
         target['armor'] = vehicle_profile['armor']
+        if cache is not None:
+            cache[key] = target
         return target
 
-    @staticmethod
-    def _bot_observation_target(bot_id, raw):
-        target = dict(raw)
+    def _bot_observation_target(
+            self, bot_id, raw, tick_cache=None, processed_bot_ids=None):
+        bot_id = int(bot_id)
+        phase = bool(
+            processed_bot_ids is not None and
+            bot_id in processed_bot_ids)
+        cache = self._target_template_cache(tick_cache)
+        key = ('bot', bot_id, phase)
+        if cache is not None and key in cache:
+            return cache[key]
+        target = self._copy_target_fields(
+            raw, _TARGET_DYNAMIC_FIELDS + _BOT_TARGET_STATIC_FIELDS)
         target['kind'] = 'bot'
-        target['network_id'] = int(bot_id)
-        target['id'] = int(bot_id)
+        target['network_id'] = bot_id
+        target['id'] = bot_id
         target['position'] = _position(raw)
+        if cache is not None:
+            cache[key] = target
         return target
 
     def _append_human_observations(
@@ -4602,12 +4661,12 @@ class BotRuntime(object):
             visibility_tick=None):
         """Merge trusted human direct observers into the contact batch."""
         human_targets = [
-            self._human_observation_target(raw)
+            self._human_observation_target(raw, visibility_tick)
             for raw in players or ()
             if (isinstance(raw, dict) and raw.get('id') is not None and
                 raw.get('alive', True))]
         bot_targets = [
-            self._bot_observation_target(bot_id, raw)
+            self._bot_observation_target(bot_id, raw, visibility_tick)
             for bot_id, raw in self.states.items()
             if raw.get('alive', True)]
         targets = human_targets + bot_targets
@@ -4623,6 +4682,8 @@ class BotRuntime(object):
             if source_team not in (1, 2) or source['id'] <= 0:
                 raise ValueError('human observer identity is invalid')
             alive = bool(source.get('alive', True))
+            source_position = None
+            resolve_source_view_range = None
             if alive:
                 self._note_human_source_stillness(source, now)
                 source_position = _position(source)
@@ -4635,14 +4696,6 @@ class BotRuntime(object):
                     return source_view_range[0]
 
                 direct_targets = set()
-                for target in targets:
-                    if int(target.get('team', 0)) == source_team:
-                        continue
-                    if self._visible(
-                            source, target, now, visibility_tick,
-                            source_position, resolve_source_view_range):
-                        direct_targets.add(self._observer_target_key(target))
-                self._human_direct_targets[source['id']] = direct_targets
             elif _number(now) < float(self._human_vengeance_until.get(
                     source['id'], 0.0)):
                 direct_targets = set(self._human_direct_targets.get(
@@ -4656,7 +4709,14 @@ class BotRuntime(object):
                     continue
                 target_key = self._observer_target_key(target)
                 key = (source_team, target_key[0], target_key[1])
-                direct_visible = target_key in direct_targets
+                if alive:
+                    direct_visible = self._visible(
+                        source, target, now, visibility_tick,
+                        source_position, resolve_source_view_range)
+                    if direct_visible:
+                        direct_targets.add(target_key)
+                else:
+                    direct_visible = target_key in direct_targets
                 entry = aggregate.get(key)
                 if entry is None:
                     # visible, firing lanes, target, human and bot observers
@@ -4683,10 +4743,12 @@ class BotRuntime(object):
                     duration = self._designated_spot_duration(
                         source, target, snapshot)
                 self._renew_team_spot(key, now, duration)
+            if alive:
+                self._human_direct_targets[source['id']] = direct_targets
         return True
 
     def _contacts_for(self, source, players, now, team_spotted=None,
-                      visibility_tick=None):
+                      visibility_tick=None, processed_bot_ids=None):
         contacts = []
         lookup = {}
         source_team = int(source.get('team', 0))
@@ -4757,15 +4819,9 @@ class BotRuntime(object):
                     not raw.get('alive', True) or
                     int(raw.get('team', 0)) == source_team):
                 continue
-            target = dict(raw)
-            target['kind'] = 'human'
-            target['network_id'] = int(raw['id'])
-            planner_id = self._human_planner_id(raw['id'])
-            target['id'] = planner_id
-            target['position'] = _position(raw)
-            vehicle_profile = self._player_vehicle_profile(raw)
-            target['class_tag'] = vehicle_profile['class_tag']
-            target['armor'] = vehicle_profile['armor']
+            target = dict(self._human_observation_target(
+                raw, visibility_tick, raw['id']))
+            planner_id = target['id']
             (target['visible'], target['direct_visible'],
              target['fresh_visible']) = visible_to_team(target)
             if retain_team_known_pose(target):
@@ -4775,10 +4831,8 @@ class BotRuntime(object):
             if (bot_id == source.get('id') or not raw.get('alive', True) or
                     int(raw.get('team', 0)) == source_team):
                 continue
-            target = dict(raw)
-            target['kind'] = 'bot'
-            target['network_id'] = int(bot_id)
-            target['position'] = _position(raw)
+            target = dict(self._bot_observation_target(
+                bot_id, raw, visibility_tick, processed_bot_ids))
             (target['visible'], target['direct_visible'],
              target['fresh_visible']) = visible_to_team(target)
             if retain_team_known_pose(target):
@@ -7549,6 +7603,261 @@ class BotRuntime(object):
         return (float(bucket) / SHOT_LANE_PHASES) * \
             SHOT_LANE_REFRESH_SECONDS
 
+    def _queue_shot_lane_identity(self, key, cycle_time):
+        if (self._shot_los_deadlines.get(key) == cycle_time or
+                key in self._shot_lane_work_set):
+            return False
+        self._shot_lane_work.append(key)
+        self._shot_lane_work_set.add(key)
+        return True
+
+    def _prepare_shot_lane_work(self, cycle_time, team_visibility):
+        """Add identities once per target/cycle, never full target records."""
+        cycle_time = _number(cycle_time)
+        if self._shot_lane_work_cycle != cycle_time:
+            self._reset_shot_lane_work()
+            self._shot_lane_work_cycle = cycle_time
+
+        live_sources = dict((team, []) for team in (1, 2))
+        for state in self._ordered_states():
+            team = int(state.get('team', 0))
+            if state.get('alive', True) and team in live_sources:
+                live_sources[team].append(int(state['id']))
+        source_signature = tuple(
+            (team, tuple(live_sources[team])) for team in (1, 2))
+        if source_signature != self._shot_lane_source_signature:
+            self._shot_lane_source_signature = source_signature
+            for target_key in sorted(self._shot_lane_enqueued_targets):
+                team, kind, target_id = target_key
+                for source_id in live_sources.get(team, ()):
+                    self._queue_shot_lane_identity(
+                        (source_id, kind, target_id), cycle_time)
+
+        for target_key in sorted(
+                key for key, visible in team_visibility.items() if visible):
+            if target_key in self._shot_lane_enqueued_targets:
+                continue
+            team, kind, target_id = target_key
+            if team not in live_sources or kind not in ('bot', 'human'):
+                continue
+            self._shot_lane_enqueued_targets.add(target_key)
+            for source_id in live_sources[team]:
+                self._queue_shot_lane_identity(
+                    (source_id, kind, int(target_id)), cycle_time)
+        return True
+
+    def _shot_lane_live_records(
+            self, key, live_players, visibility_tick, processed_bot_ids,
+            source_cache, target_cache):
+        source_id, target_kind, target_id = key
+        source = self.states.get(int(source_id))
+        if (not isinstance(source, dict) or
+                not source.get('alive', True)):
+            return None, None, None
+        source_team = int(source.get('team', 0))
+        target_key = (source_team, target_kind, int(target_id))
+        if source_id not in source_cache:
+            source_cache[source_id] = _copy_runtime_state(source)
+        if target_kind == 'bot':
+            raw = self.states.get(int(target_id))
+            if not isinstance(raw, dict):
+                return None, None, target_key
+            target_team = int(raw.get('team', 0))
+            if (not raw.get('alive', True) or
+                    target_team == source_team):
+                return None, None, target_key
+            cache_key = ('bot', int(target_id))
+            if cache_key not in target_cache:
+                target_cache[cache_key] = self._bot_observation_target(
+                    target_id, raw, visibility_tick, processed_bot_ids)
+        elif target_kind == 'human':
+            raw = live_players.get(int(target_id))
+            if not isinstance(raw, dict):
+                return None, None, target_key
+            target_team = int(raw.get('team', 0))
+            if (not raw.get('alive', True) or
+                    target_team == source_team):
+                return None, None, target_key
+            cache_key = ('human', int(target_id))
+            if cache_key not in target_cache:
+                target_cache[cache_key] = self._human_observation_target(
+                    raw, visibility_tick, target_id)
+        else:
+            return None, None, target_key
+        return (source_cache[source_id], target_cache[cache_key],
+                target_key)
+
+    def _service_shot_lane_work(
+            self, now, cycle_time, team_visibility, players,
+            visibility_tick, processed_bot_ids, selected_priorities,
+            probe_budget):
+        """Service bounded current-pose jobs from one persistent identity set."""
+        self._prepare_shot_lane_work(cycle_time, team_visibility)
+        if not self._shot_lane_work_set:
+            return 0
+        now = _number(now)
+        cycle_time = _number(cycle_time)
+        window_start = cycle_time - SHOT_LANE_REFRESH_SECONDS
+        live_players = dict(
+            (int(raw['id']), raw) for raw in players or ()
+            if (isinstance(raw, dict) and raw.get('id') is not None and
+                raw.get('alive', True)))
+        source_cache = {}
+        target_cache = {}
+        attempted = set()
+        materialized = [0]
+        maximum_jobs = max(0, int(probe_budget[0]))
+
+        def attempt(key):
+            if key in attempted or key not in self._shot_lane_work_set:
+                return False
+            attempted.add(key)
+            if self._shot_los_deadlines.get(key) == cycle_time:
+                self._shot_lane_work_set.discard(key)
+                return False
+            source = self.states.get(int(key[0]))
+            if (not isinstance(source, dict) or
+                    not source.get('alive', True)):
+                self._shot_lane_work_set.discard(key)
+                return False
+            source_team = int(source.get('team', 0))
+            if key[1] == 'bot':
+                raw_target = self.states.get(int(key[2]))
+            elif key[1] == 'human':
+                raw_target = live_players.get(int(key[2]))
+            else:
+                raw_target = None
+            if (not isinstance(raw_target, dict) or
+                    not raw_target.get('alive', True) or
+                    int(raw_target.get('team', 0)) == source_team):
+                self._shot_lane_work_set.discard(key)
+                return False
+            target_key = (source_team, key[1], int(key[2]))
+            if not team_visibility.get(target_key, False):
+                return False
+            cached = self._shot_los_cache.get(key)
+            if cached is not None and cached[0] > window_start + 1e-9:
+                self._shot_los_deadlines[key] = cycle_time
+                self._shot_lane_completed_pairs += 1
+                self._shot_lane_work_set.discard(key)
+                return False
+            deadline = window_start + self._shot_los_phase(key)
+            if now + 1e-9 < deadline:
+                return False
+            if materialized[0] >= maximum_jobs:
+                return False
+            source, target, target_key = self._shot_lane_live_records(
+                key, live_players, visibility_tick, processed_bot_ids,
+                source_cache, target_cache)
+            if source is None or target is None:
+                self._shot_lane_work_set.discard(key)
+                return False
+            if not team_visibility.get(target_key, False):
+                return False
+            if self._shot_los_key(source, target) != key:
+                self._shot_lane_work_set.discard(key)
+                return False
+            # Count identities resolved at service time separately from the
+            # native budget. A distant pure-data rejection is still one
+            # bounded job even though it consumes no collision ray.
+            materialized[0] += 1
+            self._refresh_shot_clear(
+                source, target, now, cycle_time, probe_budget,
+                lane_key=key, distance_cache=[None])
+            if self._shot_los_deadlines.get(key) == cycle_time:
+                self._shot_lane_work_set.discard(key)
+            return True
+
+        selected = sorted(
+            (priority, key) for key, priority in selected_priorities.items()
+            if key in self._shot_lane_work_set)
+        for unused_priority, key in selected:
+            if materialized[0] >= maximum_jobs:
+                break
+            attempt(key)
+
+        work = self._shot_lane_work
+        if work:
+            start = self._shot_lane_work_cursor % len(work)
+            checked = 0
+            while checked < len(work) and materialized[0] < maximum_jobs:
+                index = (start + checked) % len(work)
+                attempt(work[index])
+                checked += 1
+            self._shot_lane_work_cursor = (start + checked) % len(work)
+        if (len(self._shot_lane_work) >
+                max(64, len(self._shot_lane_work_set) * 2)):
+            self._shot_lane_work = [
+                key for key in self._shot_lane_work
+                if key in self._shot_lane_work_set]
+            if self._shot_lane_work:
+                self._shot_lane_work_cursor %= len(self._shot_lane_work)
+            else:
+                self._shot_lane_work_cursor = 0
+
+        service_budget_exhausted = materialized[0] >= maximum_jobs
+        pending = 0
+        budget_deferred = 0
+        for key in self._shot_lane_work_set:
+            source = self.states.get(int(key[0]))
+            if (not isinstance(source, dict) or
+                    not source.get('alive', True)):
+                continue
+            source_team = int(source.get('team', 0))
+            if key[1] == 'bot':
+                raw_target = self.states.get(int(key[2]))
+            elif key[1] == 'human':
+                raw_target = live_players.get(int(key[2]))
+            else:
+                raw_target = None
+            if (not isinstance(raw_target, dict) or
+                    not raw_target.get('alive', True) or
+                    int(raw_target.get('team', 0)) == source_team):
+                continue
+            target_key = (source_team, key[1], int(key[2]))
+            if not team_visibility.get(target_key, False):
+                continue
+            pending += 1
+            if (not service_budget_exhausted or key in attempted or
+                    now + 1e-9 <
+                    window_start + self._shot_los_phase(key)):
+                continue
+            cached = self._shot_los_cache.get(key)
+            if cached is not None and cached[0] > window_start + 1e-9:
+                continue
+            profile = source.get('profile')
+            profile = profile if isinstance(profile, dict) else {}
+            query_distance = (
+                SPG_SHOT_LANE_QUERY_DISTANCE
+                if str(profile.get('class_tag') or '') == 'SPG'
+                else SHOT_LANE_QUERY_DISTANCE)
+            if _distance(_position(source), _position(raw_target)) <= \
+                    query_distance:
+                budget_deferred += 1
+        self._shot_lane_budget_deferred_attempts += budget_deferred
+        return pending
+
+    def _merge_observation_shot_lanes(
+            self, aggregate, team_visibility, now):
+        """Project fresh cached lane receipts without rebuilding every pair."""
+        maximum_age = (
+            SHOT_LANE_REFRESH_SECONDS + self._control_seconds + 1e-9)
+        for lane_key, sample in self._shot_los_cache.items():
+            source_id, target_kind, target_id = lane_key
+            source = self.states.get(int(source_id))
+            if (not isinstance(source, dict) or
+                    not source.get('alive', True) or
+                    not sample[1] or _number(now) - sample[0] > maximum_age):
+                continue
+            key = (int(source.get('team', 0)),
+                   target_kind, int(target_id))
+            if not team_visibility.get(key, False):
+                continue
+            entry = aggregate.get(key)
+            if entry is not None:
+                entry[1].add(int(source_id))
+        return True
+
     def _shot_clear(self, source, target, now, force=False,
                     probe_budget=None, lane_key=None, distance_cache=None):
         """Probe a current static firing lane independently from team spotting."""
@@ -7628,10 +7937,10 @@ class BotRuntime(object):
     def _pack_observations(self, aggregate, now):
         """Serialise one lightweight record per canonical team target.
 
-        Lane checks remain in the per-bot loop so their cache and native-probe
-        side effects keep the same order. The tactical lane cache is advisory
-        and refreshes independently; the last target snapshot and visibility
-        OR remain complete on every latency-sensitive observation.
+        The persistent supplemental queue merges only current, fresh lane
+        receipts before this step. The tactical cache remains advisory and
+        refreshes independently; the last target snapshot and visibility OR
+        remain complete on every latency-sensitive observation.
         """
         packed = []
         for key in sorted(aggregate):
@@ -8527,7 +8836,7 @@ class BotRuntime(object):
         traffic_bodies = None
         traffic_index = None
         observation_entries = {}
-        observation_pairs = []
+        selected_lane_priorities = {}
         team_visibility = {}
         # Source-independent camouflage projections are exact for this bounded
         # simulation slice. Share them across all observers, but never across
@@ -8669,7 +8978,8 @@ class BotRuntime(object):
                 targets = {}
             else:
                 contacts, targets = self._contacts_for(
-                    state, players, now, team_visibility, visibility_tick)
+                    state, players, now, team_visibility, visibility_tick,
+                    processed_bot_ids)
                 if traffic_bodies is None:
                     traffic_bodies, traffic_index = self._traffic_snapshot(
                         neighbours)
@@ -8765,24 +9075,27 @@ class BotRuntime(object):
             # the first live bot instead of rebuilding the map for every bot.
             if live_players is None:
                 live_players = self._index_live_players(players)
-            refresh_all_targets = bool(
-                collect_observation or refresh_shot_lanes or
-                collect_cover_jobs)
-            active_contacts = (
-                contacts if (collect_observation or refresh_shot_lanes)
-                else ())
+            if refresh_shot_lanes and not collect_observation:
+                # The persistent lane queue needs only the team target keys.
+                # Reusing cached observer flags here avoids materialising and
+                # sorting a complete current-pose record for every pair.
+                for cached_target in contacts:
+                    if cached_target.get('fresh_visible'):
+                        key = (int(state.get('team', 0)),
+                               cached_target.get('kind'),
+                               int(cached_target.get('network_id', 0)))
+                        team_visibility[key] = True
+            refresh_all_targets = bool(collect_observation)
+            active_contacts = contacts if collect_observation else ()
             live_targets = None
             if refresh_all_targets:
                 live_targets = self._refresh_target_poses(
                     targets, live_players=live_players,
                     probe_targets=live_probe_targets,
                     processed_bot_ids=processed_bot_ids)
-            lane_source = (_copy_runtime_state(state)
-                           if active_contacts else None)
             for cached_target in active_contacts:
                 observed_target = live_targets.get(
                     cached_target.get('id'), cached_target)
-                lane_key = self._shot_los_key(state, observed_target)
                 key = (int(state.get('team', 0)),
                        observed_target.get('kind'),
                        int(observed_target.get('network_id', 0)))
@@ -8815,14 +9128,6 @@ class BotRuntime(object):
                     entry[2] = observed_target
                     if direct_visible:
                         entry[4].add(int(state['id']))
-                selected_lane = (
-                    cached_target.get('id') == command.get('target_id'))
-                lane_priority = (
-                    0 if selected_lane and command.get('fire_allowed') else
-                    (1 if selected_lane else 2))
-                observation_pairs.append((
-                    lane_priority, lane_source, observed_target, lane_key,
-                    key, [None]))
             target_id = command.get('target_id')
             if target_id in (targets or {}):
                 # Aim/fire gating retains the observer-specific spotting flag.
@@ -8830,6 +9135,12 @@ class BotRuntime(object):
                     target_id, targets[target_id], live_players)
             else:
                 target = None
+            if target is not None:
+                selected_key = (
+                    int(state['id']), target.get('kind'),
+                    int(target.get('network_id', target.get('id', 0))))
+                selected_lane_priorities[selected_key] = (
+                    0 if command.get('fire_allowed') else 1)
             command = _overlay_live_target_pose(command, target, position)
             state['target_kind'] = (
                 target.get('kind') if target is not None else None)
@@ -9545,43 +9856,20 @@ class BotRuntime(object):
                                    command.get('move_position', position)))
             _clear_critical_parts_tick_cache(state)
             processed_bot_ids.add(int(state['id']))
-        # A static firing lane is only meaningful after at least one member of
-        # the observing team has spotted the target.  The server ignores the
-        # shooter set for an unspotted contact, so probing all 14x15 enemy
-        # pairs in that state spent hundreds of render-thread collision rays
-        # without changing a decision.  Aggregate radio spotting first, then
-        # prove every shooter lane for only those team-visible targets.  The
-        # selected target's independent final-fire gate below remains live.
-        observation_pairs.sort(key=lambda value: value[0])
-        for (unused_lane_priority, lane_source, observed_target, lane_key,
-             key, lane_distance) in observation_pairs:
-            if not team_visibility.get(key, False):
-                continue
-            if refresh_shot_lanes:
-                if (self._shot_los_deadlines.get(lane_key) !=
-                        shot_lane_refresh_time):
-                    self._refresh_shot_clear(
-                        lane_source, observed_target, now,
-                        shot_lane_refresh_time,
-                        supplemental_shot_lane_budget,
-                        lane_key=lane_key,
-                        distance_cache=lane_distance)
-                if (self._shot_los_deadlines.get(lane_key) !=
-                        shot_lane_refresh_time):
-                    shot_lanes_ready = False
-                    shot_lane_pending_pairs += 1
-            if collect_observation:
-                # Report the latest bounded tactical sample without waiting
-                # for the current one-second roster refresh. Missing or old
-                # samples mean "not shootable"; the independent 0.20-second
-                # final-fire gate remains the only launch authorization.
-                lane_sample = self._shot_los_cache.get(lane_key)
-                if (lane_sample is not None and
-                        now - lane_sample[0] <=
-                        SHOT_LANE_REFRESH_SECONDS +
-                        self._control_seconds + 1e-9 and lane_sample[1]):
-                    observation_entries[key][1].add(
-                        int(lane_source['id']))
+        # A static firing lane is useful only while the team has a current
+        # direct spot. Keep one queue of compact identities across callbacks;
+        # resolve at most the bounded service cohort against current poses.
+        # Missing advisory samples remain "not shootable", and the selected
+        # target still passes its independent final-fire check above.
+        if refresh_shot_lanes:
+            shot_lane_pending_pairs = self._service_shot_lane_work(
+                now, shot_lane_refresh_time, team_visibility, players,
+                visibility_tick, processed_bot_ids,
+                selected_lane_priorities, supplemental_shot_lane_budget)
+            shot_lanes_ready = shot_lane_pending_pairs <= 0
+        if collect_observation:
+            self._merge_observation_shot_lanes(
+                observation_entries, team_visibility, now)
         if refresh_shot_lanes:
             self._update_shot_lane_debt_diagnostics(
                 now, shot_lane_refresh_time, shot_lane_pending_pairs,
@@ -9707,7 +9995,7 @@ class BotRuntime(object):
             if burst_state is not None:
                 burst_state.publish(state)
             self._publish_equipment_state(state)
-            projected = lan_client.project_bot_state(state)
+            projected = lan_client.project_owned_bot_state(state)
             if projected is None:
                 raise RuntimeError('bot publication projection failed')
             wire_states.append(projected)

@@ -4,19 +4,23 @@
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
 	_try_destroy_solid_hit, _vehicle_hull_bbox,
-	horizontal_collision_filter)
+	horizontal_collision_filter, prepare_horizontal_collision_filter)
 
 
 _MAX_DRIVABLE_GRADIENT = 1.28
 _MAX_DESCENDING_GRADIENT = 1.75
 _MIN_DRIVABLE_HEIGHT_CHANGE = 0.15
 _WORLD_SOFT_RECAST_BUDGET = 4
+_UNPREPARED_COLLISION_FILTER = object()
 
 
-def _collide_horizontal(spaceID, start, end):
+def _collide_horizontal(spaceID, start, end,
+		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""Raycast while hiding only exact destructibles already marked broken."""
 	import BigWorld
-	broken_filter = horizontal_collision_filter(start, end)
+	broken_filter = collision_filter
+	if broken_filter is _UNPREPARED_COLLISION_FILTER:
+		broken_filter = horizontal_collision_filter(start, end)
 	if broken_filter is None:
 		return BigWorld.wg_collideSegment(spaceID, start, end, 128)
 	return BigWorld.wg_collideSegment(
@@ -94,13 +98,15 @@ def _ground_profile(spaceID, Math, pos, sx, sz, sin_y, cos_y, direction,
 
 
 def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
-		target_length, maximum_gradient=_MAX_DRIVABLE_GRADIENT):
+		target_length, maximum_gradient=_MAX_DRIVABLE_GRADIENT,
+		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""A drivable lower slope must not hide an independent wall above it."""
 	import BigWorld
 	for height in (1.1, 1.6):
 		start = Math.Vector3(x1, pos.y + height, z1)
 		end = Math.Vector3(x2, pos.y + height, z2)
-		collision = _collide_horizontal(spaceID, start, end)
+		collision = _collide_horizontal(
+			spaceID, start, end, collision_filter)
 		if collision is None:
 			continue
 		if ((collision[0] - start).length < target_length and
@@ -109,7 +115,8 @@ def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
 	return False
 
 
-def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td):
+def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td,
+		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""Admit only a clear ray or a bounded chain of proved light props.
 
 	#1513 keeps a destroyed fragile/module skin solid until its hide callback.
@@ -120,7 +127,8 @@ def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td):
 	or an over-budget chain remains solid.
 	"""
 	import BigWorld
-	recast = _collide_horizontal(spaceID, segment_start, segment_end)
+	recast = _collide_horizontal(
+		spaceID, segment_start, segment_end, collision_filter)
 	if recast is None:
 		return True
 	return _catalog_soft_static_path(
@@ -130,7 +138,8 @@ def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td):
 
 def _destroy_and_recast(spaceID, segment_start, segment_end, collision,
 		yaw, vel, td, crush_state=None, allow_kinetic=False,
-		kinetic_speed=None, commit_enabled=True):
+		kinetic_speed=None, commit_enabled=True,
+		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	if crush_state is not None and crush_state[0]:
 		# Another hull lane already obtained native authority for this copied-pose
 		# step.  Classify this lane read-only so the delayed skin cannot cause a
@@ -184,7 +193,8 @@ def _destroy_and_recast(spaceID, segment_start, segment_end, collision,
 	if crush_state is not None:
 		crush_state[0] = True
 	cleared = _solid_contact_cleared(
-		spaceID, segment_start, segment_end, vel, td)
+		spaceID, segment_start, segment_end, vel, td,
+		collision_filter)
 	_diagnostic_static_recast_1513(cleared)
 	return cleared is True
 
@@ -314,6 +324,13 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				lane_segments.append((
 					x1, z1, x2, z2, target_len,
 					x1, z1, motion_sin, motion_cos, 1.0, target_len))
+		minimum_x = min(min(lane[0], lane[2]) for lane in lane_segments)
+		maximum_x = max(max(lane[0], lane[2]) for lane in lane_segments)
+		minimum_z = min(min(lane[1], lane[3]) for lane in lane_segments)
+		maximum_z = max(max(lane[1], lane[3]) for lane in lane_segments)
+		_sweep_filter = prepare_horizontal_collision_filter(
+			Math.Vector3(minimum_x, pos.y + 0.6, minimum_z),
+			Math.Vector3(maximum_x, pos.y + 1.6, maximum_z))
 		_crush_state = [False]
 		_kinetic_contact = False
 
@@ -324,7 +341,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
 			start_bot = Math.Vector3(x1, pos.y + 0.6, z1)
 			end_bot = Math.Vector3(x2, pos.y + 0.6, z2)
-			col_bot = _collide_horizontal(spaceID, start_bot, end_bot)
+			col_bot = _collide_horizontal(
+				spaceID, start_bot, end_bot, _sweep_filter)
 			
 			if col_bot is not None:
 				d_bot = (col_bot[0] - start_bot).length
@@ -360,7 +378,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 							_drivable_surface(col_bot, _gradient_limit)):
 						if _raised_ray_has_wall(
 								spaceID, Math, pos, x1, z1, x2, z2,
-								target_len, _gradient_limit):
+								target_len, _gradient_limit,
+								_sweep_filter):
 							return 'hard' if return_status else True
 						continue
 					# Treat every occupied hull height as independent evidence.  The
@@ -374,7 +393,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 						_ray_start = Math.Vector3(x1, pos.y + _height, z1)
 						_ray_end = Math.Vector3(x2, pos.y + _height, z2)
 						_ray_hit = _collide_horizontal(
-							spaceID, _ray_start, _ray_end)
+							spaceID, _ray_start, _ray_end,
+							_sweep_filter)
 						if _ray_hit is None:
 							continue
 						_ray_distance = (_ray_hit[0] - _ray_start).length
@@ -387,9 +407,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 							spaceID, _ray_start, _ray_end, _ray_hit,
 							yaw, vel, td, _crush_state, allow_kinetic,
 							kinetic_speed)
-						_resolved = (_destroy_and_recast(*_resolve_args)
-							if commit_enabled else
-							_destroy_and_recast(*(_resolve_args + (False,))))
+						_resolved = _destroy_and_recast(*(
+							_resolve_args + (commit_enabled, _sweep_filter)))
 						if _resolved == 'kinetic':
 							_kinetic_contact = True
 						elif _resolved is not True:
@@ -403,7 +422,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					_ray_start = Math.Vector3(x1, pos.y + _height, z1)
 					_ray_end = Math.Vector3(x2, pos.y + _height, z2)
 					_ray_hit = _collide_horizontal(
-						spaceID, _ray_start, _ray_end)
+							spaceID, _ray_start, _ray_end,
+							_sweep_filter)
 					if _ray_hit is None:
 						continue
 					_ray_distance = (_ray_hit[0] - _ray_start).length
@@ -416,9 +436,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 						spaceID, _ray_start, _ray_end, _ray_hit,
 						yaw, vel, td, _crush_state, allow_kinetic,
 						kinetic_speed)
-					_resolved = (_destroy_and_recast(*_resolve_args)
-						if commit_enabled else
-						_destroy_and_recast(*(_resolve_args + (False,))))
+					_resolved = _destroy_and_recast(*(
+						_resolve_args + (commit_enabled, _sweep_filter)))
 					if _resolved == 'kinetic':
 						_kinetic_contact = True
 					elif _resolved is not True:

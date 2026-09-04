@@ -213,6 +213,14 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                      'g_offh_destr_isolation_log_capped',
                      'g_offh_destr_diagnostics',
                      'g_offh_destr_diag_last_static',
+                     'g_offh_destr_spatial_revision',
+                     'g_offh_destr_spatial_global_generation',
+                     'g_offh_destr_spatial_cell_generations',
+                     'g_offh_destr_spatial_chunk_generations',
+                     'g_offh_destr_spatial_mutation_batch',
+                     'g_offh_destr_empty_contact_receipts',
+                     'g_offh_destr_empty_proximity_receipts',
+                     'g_offh_destr_receipt_stats',
                      'g_offh_destr_runtime_space'):
             destructibles_sensor.__dict__.pop(name, None)
         destructibles_authority.reset()
@@ -5179,6 +5187,11 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual('registered_falling',
                          destructibles_sensor.g_offh_tree_state['chunks'][22][
                              'slot_diagnostics'][1]['result'])
+        # Both instance footprints and the completed chunk registry become
+        # visible as one synchronous spatial mutation, not N+1 global flushes.
+        self.assertEqual(
+            1, destructibles_sensor.registry_counts()[
+                'receipt_spatial_invalidations'])
 
     def test_native_count_registers_unnamed_slots_beside_named_trees(self):
         tree = 'content/Trees/tree/normal/lod0/tree.model'
@@ -7466,10 +7479,15 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertTrue(destructibles_sensor.note_destroyed(
             'tree', 22, 37, None, 5.0))
 
-        ground_filter = destructibles_sensor.ground_collision_filter(
-            80.0, 80.0)
-        horizontal_filter = destructibles_sensor.horizontal_collision_filter(
-            _Vector(-50.0, 0.6, -50.0), _Vector(50.0, 0.6, 50.0))
+        with mock.patch.object(
+                destructibles_sensor, '_get_destr_authority',
+                side_effect=AssertionError('tree filter queried catalog authority')):
+            ground_filter = destructibles_sensor.ground_collision_filter(
+                80.0, 80.0)
+            horizontal_filter = (
+                destructibles_sensor.horizontal_collision_filter(
+                    _Vector(-50.0, 0.6, -50.0),
+                    _Vector(50.0, 0.6, 50.0)))
 
         self.assertIsNotNone(ground_filter)
         self.assertIsNotNone(horizontal_filter)
@@ -7478,6 +7496,22 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             self.assertTrue(collision_filter(75, 0, 38, 22))
             self.assertTrue(collision_filter(75, 0, 37, 23))
             self.assertTrue(collision_filter(75, 0, None, None))
+
+    def test_prepared_horizontal_filter_observes_same_sweep_destruction(self):
+        destroyed = set()
+        authority = self._ground_filter_fixture(destroyed)
+
+        with mock.patch.object(
+                destructibles_sensor, '_get_destr_authority',
+                return_value=authority):
+            collision_filter = (
+                destructibles_sensor.prepare_horizontal_collision_filter(
+                    _Vector(-2.0, 0.6, -1.0),
+                    _Vector(2.0, 1.6, 10.0)))
+            self.assertTrue(collision_filter(75, 0, 37, 22))
+            destroyed.add((37, None))
+            self.assertFalse(collision_filter(75, 0, 37, 22))
+            self.assertTrue(collision_filter(75, 0, 38, 22))
 
     def test_stationary_multi_module_structure_crushes_each_module(self):
         detail, authority, unused_descriptor = (
@@ -8662,6 +8696,20 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertIs(installed, destructibles_sensor._destructible_catalog)
         self.assertNotIn('g_offh_destr_instances', destructibles_sensor.__dict__)
 
+    def test_runtime_reset_drops_an_unfinished_spatial_batch(self):
+        destructibles_sensor._begin_spatial_mutation_batch_1513()
+        destructibles_sensor._bump_spatial_revision_1513(
+            bin_keys=((0, 0),))
+
+        destructibles_sensor._clear_runtime_registry()
+
+        self.assertNotIn(
+            'g_offh_destr_spatial_mutation_batch',
+            destructibles_sensor.__dict__)
+        self.assertNotIn(
+            'g_offh_destr_spatial_cell_generations',
+            destructibles_sensor.__dict__)
+
     def _empty_catalog_scan_fixture(self, streamed=True):
         destructibles_sensor.set_catalog(_catalog({
             'known.model': {
@@ -8792,7 +8840,7 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(1, counts['receipt_proximity_invalidated'])
         self.assertEqual(1, counts['receipt_proximity_entries'])
 
-    def test_empty_swept_cell_receipt_invalidates_on_spatial_index_change(self):
+    def test_empty_swept_cell_receipt_survives_unrelated_spatial_change(self):
         (unused_manager, mapper, area, bigworld, math_module,
          descriptor) = self._empty_catalog_scan_fixture()
 
@@ -8811,12 +8859,68 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             destructibles_sensor._index_catalog_instance_1513(
                 destructibles_sensor.g_offh_destr_contact_bins,
                 (22, 7), instance)
+            destructibles_sensor._bump_spatial_revision_1513(
+                chunk_ids=(99,))
             destructibles_sensor._fell_trees_near(
                 1, _Vector(), 0.0, 6.0, descriptor)
 
-        # The second call uses one current-chunk validation. Adding any exact
-        # footprint invalidates all older negative spatial receipts.
+        # Registering a footprint over 100 metres away cannot enter either
+        # exact 8 m envelope covered by this receipt. Both later calls need
+        # only the current-chunk validation instead of another 3x3 mapping.
+        self.assertEqual(13, mapper.call_count)
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(2, counts['receipt_proximity_hits'])
+        self.assertEqual(1, counts['receipt_proximity_misses'])
+        self.assertEqual(0, counts['receipt_proximity_invalidated'])
+
+    def test_empty_swept_cell_receipt_invalidates_on_own_chunk_change(self):
+        (unused_manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._bump_spatial_revision_1513(
+                chunk_ids=(22,))
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
         self.assertEqual(23, mapper.call_count)
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_proximity_hits'])
+        self.assertEqual(1, counts['receipt_proximity_invalidated'])
+
+    def test_empty_swept_cell_receipt_invalidates_on_local_spatial_change(self):
+        (unused_manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+
+        with mock.patch.dict(
+                sys.modules, {'AreaDestructibles': area,
+                              'BigWorld': bigworld, 'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+            instance = {
+                'boxes': (((0.0, 0.0, 3.8),
+                           ((0.25, 0.0, 0.0), (0.0, 0.5, 0.0),
+                            (0.0, 0.0, 0.25)), None),),
+            }
+            destructibles_sensor._index_catalog_instance_1513(
+                destructibles_sensor.g_offh_destr_contact_bins,
+                (22, 7), instance)
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+
+        self.assertEqual(23, mapper.call_count)
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_proximity_hits'])
+        self.assertEqual(2, counts['receipt_proximity_misses'])
+        self.assertEqual(1, counts['receipt_proximity_invalidated'])
 
     def test_empty_swept_cell_receipt_is_not_used_while_a_column_moves(self):
         (unused_manager, mapper, area, bigworld, math_module,
@@ -8858,6 +8962,31 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(1, counts['receipt_contact_stores'])
         self.assertEqual(1, counts['receipt_contact_entries'])
 
+    def test_spatial_batch_publishes_partial_index_once_on_exception(self):
+        destructibles_sensor.xrange = range
+        contact_bins = {}
+
+        def interrupted_registration():
+            for item_index, x in enumerate((4.0, 20.0, 36.0)):
+                instance = {
+                    'boxes': (((x, 0.0, 4.0),
+                               ((0.5, 0.0, 0.0), (0.0, 1.0, 0.0),
+                                (0.0, 0.0, 0.5)), None),),
+                }
+                destructibles_sensor._index_catalog_instance_1513(
+                    contact_bins, (22, item_index), instance)
+            raise RuntimeError('interrupted chunk registration')
+
+        operation = destructibles_sensor._batched_spatial_mutations_1513(
+            interrupted_registration)
+        with self.assertRaisesRegex(RuntimeError, 'interrupted chunk'):
+            operation()
+
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_spatial_invalidations'])
+        self.assertEqual(3, len(
+            destructibles_sensor.g_offh_destr_spatial_cell_generations))
+
     def test_empty_catalog_hull_receipt_expires_outside_swept_cell_envelope(self):
         (unused_manager, unused_mapper, unused_area, unused_bigworld,
          unused_math, descriptor) = self._empty_catalog_scan_fixture()
@@ -8873,6 +9002,30 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                 _Vector(6.0, 0.0, 0.0), 0.0, 6.0, descriptor, 0.04))
 
         self.assertEqual(2, bins.call_count)
+
+    def test_empty_catalog_hull_receipt_survives_unrelated_cell_change(self):
+        (unused_manager, unused_mapper, unused_area, unused_bigworld,
+         unused_math, descriptor) = self._empty_catalog_scan_fixture()
+        destructibles_sensor.g_offh_destr_instances = {}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+        self.assertFalse(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 6.0, descriptor, 0.04))
+        instance = {
+            'boxes': (((100.0, 0.0, 100.0),
+                       ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                        (0.0, 0.0, 1.0)), None),),
+        }
+        destructibles_sensor.g_offh_destr_instances[(22, 7)] = instance
+        destructibles_sensor._index_catalog_instance_1513(
+            destructibles_sensor.g_offh_destr_contact_bins,
+            (22, 7), instance)
+
+        self.assertFalse(destructibles_sensor._catalog_hull_contact(
+            _Vector(), 0.0, 6.0, descriptor, 0.04))
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_contact_hits'])
+        self.assertEqual(1, counts['receipt_contact_misses'])
+        self.assertEqual(0, counts['receipt_contact_invalidated'])
 
     def test_new_exact_contact_invalidates_empty_catalog_hull_receipt(self):
         (unused_manager, unused_mapper, unused_area, unused_bigworld,

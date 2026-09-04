@@ -17040,6 +17040,7 @@ class BattleRuntime(object):
             record['_authority_presentation_lifecycle'] = lifecycle
             record.pop('_authority_pose_signature', None)
             record.pop('_authority_aim_signature', None)
+            record.pop('_authority_projectile_pose_cache', None)
             self._bot_pose_times.pop(bot_id, None)
             self._bot_yaw_rates.pop(bot_id, None)
         return lifecycle
@@ -17050,6 +17051,7 @@ class BattleRuntime(object):
             record.pop('_authority_presentation_lifecycle', None)
             record.pop('_authority_pose_signature', None)
             record.pop('_authority_aim_signature', None)
+            record.pop('_authority_projectile_pose_cache', None)
 
     def _apply_authority_bot_poses(self, states):
         """Present copied 0.8.2 bot poses through the remote filter."""
@@ -17092,8 +17094,9 @@ class BattleRuntime(object):
                 self._destructibles._fell_trees_near(
                     self._avatar.spaceID, position, yaw,
                     _number(state.get('speed')), descriptor)
-            rotation = _engine_rotation(
-                yaw, _number(state.get('pitch')), _number(state.get('roll')))
+            pitch = _number(state.get('pitch'))
+            roll = _number(state.get('roll'))
+            rotation = _engine_rotation(yaw, pitch, roll)
             relax_time = self._bot_pose_relax(
                 state, (tuple(position), rotation), now)
             speed = _number(state.get('speed'))
@@ -17149,11 +17152,27 @@ class BattleRuntime(object):
                     engine_id, yaw, aim_yaw, gun_pitch)
                 record['_authority_aim_signature'] = aim_signature
                 self._authority_aim_writes += 1
-            record['projectile_collision_pose'] = \
-                self._projectile_plain_pose((x, y, z), state)
-            self._run_optional_feature(
-                'bot track animation', self._update_bot_tracks,
-                (record, state, now))
+            turret_yaw = _number(
+                state.get('turret_yaw'), _angle_delta(yaw, aim_yaw))
+            projectile_pose_signature = (
+                lifecycle, x, y, z, yaw, pitch, roll, turret_yaw,
+                gun_pitch, int(state.get('siege_state', 0) or 0))
+            projectile_pose_cache = record.get(
+                '_authority_projectile_pose_cache')
+            if (not isinstance(projectile_pose_cache, tuple) or
+                    len(projectile_pose_cache) != 2 or
+                    projectile_pose_cache[0] != projectile_pose_signature or
+                    record.get('projectile_collision_pose') is not
+                    projectile_pose_cache[1]):
+                projectile_pose = self._projectile_plain_pose(
+                    (x, y, z), state)
+                record['projectile_collision_pose'] = projectile_pose
+                record['_authority_projectile_pose_cache'] = (
+                    projectile_pose_signature, projectile_pose)
+            if not self._worker_mode:
+                self._run_optional_feature(
+                    'bot track animation', self._update_bot_tracks,
+                    (record, state, now))
             applied = True
         return applied
 
