@@ -128,12 +128,6 @@ TARGET_SELECTION_FOV_DEGREES = 1.0
 TARGET_DESELECTION_FOV_DEGREES = 80.0
 TARGET_MAX_DISTANCE = 710.0
 TARGET_OUTLINE_SECONDS = 0.05
-# Bot tree/column enumeration is a proximity sensor, not presentation work.
-# The sensor looks 6 m ahead plus the admitted hull extent, while copied bot
-# speed is capped at 35 m/s.  Recheck within 0.10 s or 3 m of realised travel,
-# whichever comes first, so no moving hull can skip the contact volume.
-BOT_DESTRUCTIBLE_SECONDS = 0.10
-BOT_DESTRUCTIBLE_TRAVEL_METRES = 3.0
 BOT_SOFT_RECAST_BUDGET = 24
 # A turning rectangle does not share the fixed-orientation swept volume used
 # by longitudinal motion.  Cover each angular interval with the exact local
@@ -1512,7 +1506,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
@@ -1800,7 +1793,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
@@ -3092,6 +3084,9 @@ class BattleRuntime(object):
                 ram_contact_probe=self._bot_ram_contact_armor,
                 bot_equipment_resolver=(
                     self._default_bot_equipment_contracts),
+                destructible_body_scan=(
+                    self._scan_bot_destructible_body
+                    if self._worker_mode else None),
                 baked_graph=self._navigation_graph,
                 # Keep the mature 0.8.2 authority model: the copied physics
                 # integrator owns bot poses and the engine interpolates those
@@ -8007,7 +8002,6 @@ class BattleRuntime(object):
             'grounded_bots': len(self._grounded_bot_ids),
             'bot_assignments': len(self._bot_vehicle_assignments),
             'bot_fire_seen': len(self._bot_fire_seen),
-            'bot_destr_samples': len(self._bot_destructible_samples),
         }
         try:
             counts['projectiles'] = len(self._projectiles)
@@ -8036,7 +8030,6 @@ class BattleRuntime(object):
         ('last_snapshot', '_last_snapshot'),
         ('start_message', '_start_message'),
         ('health', '_last_health'),
-        ('bot_destr_samples', '_bot_destructible_samples'),
         ('spawn_planner', '_spawn_planner'),
         ('projectiles', '_projectiles'),
         ('projectile_meta', '_projectile_meta'),
@@ -13998,6 +13991,8 @@ class BattleRuntime(object):
                         None if self._worker_mode else self._local_position)
                 control_sample_before = getattr(
                     self._bots, '_sample_time_us', None)
+                # The worker's injected body sensor runs inside this update,
+                # once at the final pose after all catch-up slices.
                 outgoing_messages = self._bots.update(
                     rule_dt, now, players=players)
                 if self._worker_mode:
@@ -14054,10 +14049,9 @@ class BattleRuntime(object):
                 # MatrixAnimation interpolates between changed poses; exact
                 # duplicate render pulls do not require native rewrites.
                 if self._worker_mode:
-                    # The worker also commits native destructible queries and
-                    # canonical projectile collision poses here. Keep those
-                    # failures loud before Bot state publication or projectile
-                    # advancement can make the frame irreversible.
+                    # Keep native pose presentation failures loud before Bot
+                    # state publication or projectile advancement can make the
+                    # frame irreversible.
                     presented = self._present_authority_bot_poses(
                         presentation_states, now)
                 else:
@@ -17624,35 +17618,24 @@ class BattleRuntime(object):
                 (self._clock(),))
         return False
 
-    def _bot_destructible_scan_due(self, state, now):
-        """Rate-limit proximity enumeration without skipping hull travel."""
-        bot_id = int(state['id'])
-        position = (state.get('x', 0.0), state.get('y', 0.0),
-                    state.get('z', 0.0))
-        previous = self._bot_destructible_samples.get(bot_id)
-        if previous is not None:
-            deadline, sampled_position = previous
-            # A stopped Bot may be waiting for a blank native slot/catalog OBB
-            # to stream.  Keep a low-frequency phase even without hull travel;
-            # registration is read-only for type1/type2 catalog objects.
-            if (float(now) < float(deadline) and
-                    _distance_2d(position, sampled_position) <
-                    BOT_DESTRUCTIBLE_TRAVEL_METRES):
-                return False
-            interval = (0.50 if abs(state.get('speed', 0.0)) < 1.0
-                        else BOT_DESTRUCTIBLE_SECONDS)
-            deadline = float(now) + interval
-        else:
-            # Schedule the first enumeration instead of making all 29 bots
-            # scan on the materialisation frame.  The 6 m forward sensor and
-            # 3 m travel trigger keep the hull inside its contact volume while
-            # this phase elapses.  The +1 caps the largest phase at 0.10 s.
-            phase = (((abs(bot_id) * 17 + 5 * 11) % 29) + 1) / 29.0
-            deadline = float(now) + BOT_DESTRUCTIBLE_SECONDS * phase
-            self._bot_destructible_samples[bot_id] = (
-                deadline, position)
+    def _scan_bot_destructible_body(self, bot_id, position, yaw, speed):
+        """Resolve a ready authority body for one control-cadenced scan."""
+        if self._destructibles is None:
             return False
-        self._bot_destructible_samples[bot_id] = (deadline, position)
+        record = self._records.get('bot:%s' % int(bot_id))
+        if record is None or not record.get('ready'):
+            return False
+        entity = self._server_entity(int(record['engine_id']))
+        if entity is None:
+            raise RuntimeError(
+                'authority bot destructible entity is unavailable')
+        descriptor = getattr(entity, 'typeDescriptor', None)
+        if descriptor is None:
+            raise RuntimeError(
+                'authority bot destructible descriptor is unavailable')
+        self._destructibles._fell_trees_near(
+            self._avatar.spaceID, self._vector(position), yaw, speed,
+            descriptor)
         return True
 
     def _bot_pose_relax(self, state, pose, now):
@@ -17745,19 +17728,6 @@ class BattleRuntime(object):
             position = self._vector((
                 x, y, z))
             yaw = state.get('yaw', 0.0)
-            if (self._worker_mode and self._destructibles is not None and
-                    self._bot_destructible_scan_due(state, now)):
-                entity = self._server_entity(engine_id)
-                if entity is None:
-                    raise RuntimeError(
-                        'authority bot presentation entity is unavailable')
-                descriptor = getattr(entity, 'typeDescriptor', None)
-                if descriptor is None:
-                    raise RuntimeError(
-                        'authority bot destructible descriptor is unavailable')
-                self._destructibles._fell_trees_near(
-                    self._avatar.spaceID, position, yaw,
-                    state.get('speed', 0.0), descriptor)
             pitch = state.get('pitch', 0.0)
             roll = state.get('roll', 0.0)
             rotation = _engine_rotation(yaw, pitch, roll)
@@ -21451,7 +21421,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None

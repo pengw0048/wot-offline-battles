@@ -39,6 +39,10 @@ OBSERVATION_SECONDS = 0.40
 # while burst edges below retain their exact due timestamps.
 PUBLICATION_SECONDS = 1.0 / 30.0
 WORKER_CONTROL_SECONDS = 0.10
+# Tree and column proximity enumeration is useful only for a translating hull.
+# Preserve the former low-speed classification while keeping this native body
+# sensor on the worker's existing control cadence.
+DESTRUCTIBLE_SCAN_MIN_SPEED = 1.0
 # Keep copied physics inside the mature 200 ms variable-step bound. A slow
 # render callback may need several such slices, but only its first slice may
 # refresh planner control work. Later slices keep applying the last valid
@@ -1828,7 +1832,8 @@ class BotRuntime(object):
                  motion_resolver=None, motion_report=None,
                  world_receipt_probe=None, probe_timing_seconds=0.0,
                  water_depth_probe=None, ram_contact_probe=None,
-                 bot_equipment_resolver=None, control_seconds=None):
+                 bot_equipment_resolver=None,
+                 destructible_body_scan=None, control_seconds=None):
         self.local_player_id = local_player_id
         self.descriptor_resolver = descriptor_resolver or (lambda unused: {})
         self.player_descriptor_resolver = player_descriptor_resolver
@@ -1904,6 +1909,9 @@ class BotRuntime(object):
         self.bot_equipment_resolver = (
             bot_equipment_resolver if callable(bot_equipment_resolver) else
             (lambda: ()))
+        self.destructible_body_scan = (
+            destructible_body_scan
+            if callable(destructible_body_scan) else None)
         self._fixed_control = control_seconds is not None
         self._control_seconds = max(
             0.001, _number(control_seconds, PUBLICATION_SECONDS))
@@ -8881,6 +8889,7 @@ class BotRuntime(object):
                 # Deliver once per render callback, after every bounded
                 # physical slice has contributed only its own contact time.
                 self._apply_traffic_wait_lease()
+                self._scan_moving_destructible_bodies()
             finally:
                 if visibility_frame_open:
                     self._finish_visibility_frame()
@@ -8898,6 +8907,22 @@ class BotRuntime(object):
                 raise RuntimeError('bot source sample exceeds its batch horizon')
             message['source_batch_horizon_us'] = source_batch_horizon_us
         return outgoing
+
+    def _scan_moving_destructible_bodies(self):
+        """Scan each moving hull once at its final control-callback pose."""
+        scan = self.destructible_body_scan
+        if scan is None:
+            return False
+        scanned = False
+        for state in self._ordered_states():
+            if (not state['alive'] or state['health'] <= 0.0 or
+                    abs(state['speed']) < DESTRUCTIBLE_SCAN_MIN_SPEED):
+                continue
+            scan(
+                state['id'], (state['x'], state['y'], state['z']),
+                state['yaw'], state['speed'])
+            scanned = True
+        return scanned
 
     def _run_update_once(self, frame_step, now, players, neighbours,
                          refresh_control, publish_step=True):

@@ -4966,6 +4966,83 @@ class BotRuntimeTests(unittest.TestCase):
             self.assertAlmostEqual(
                 expected, snapshot[2]['cooldownTimeLeft'])
 
+    def test_destructible_body_scan_uses_final_catchup_pose_once(self):
+        scans = []
+        runtime = self.module.BotRuntime(
+            1, destructible_body_scan=lambda *values: scans.append(values),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.authority_id = 1
+        runtime.adapter = object()
+        runtime.states = {
+            31: {'id': 31, 'slot': 2, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 5.0, 'y': 2.0, 'z': 10.0,
+                 'yaw': 0.25, 'speed': 4.0},
+            11: {'id': 11, 'slot': 0, 'team': 2, 'alive': True,
+                 'health': 500, 'x': -5.0, 'y': 1.0, 'z': 20.0,
+                 'yaw': -0.5, 'speed': -2.0},
+        }
+        slices = []
+
+        def integrate(step, *unused):
+            slices.append(step)
+            for state in runtime.states.values():
+                state['z'] += state['speed'] * step
+            return []
+
+        runtime._run_update_once = integrate
+
+        self.assertEqual([], runtime.update(0.09, 1.09))
+        self.assertEqual([], scans)
+        self.assertEqual([], runtime.update(0.41, 1.50))
+
+        self.assertEqual(3, len(slices))
+        self.assertAlmostEqual(0.5, sum(slices))
+        self.assertTrue(all(
+            step <= self.module.MAX_CONTROL_ELAPSED_SECONDS + 1.0e-9
+            for step in slices))
+        self.assertEqual([11, 31], [values[0] for values in scans])
+        self.assertEqual(2, len(scans))
+        self.assertEqual((-5.0, 1.0), scans[0][1][:2])
+        self.assertAlmostEqual(19.0, scans[0][1][2])
+        self.assertEqual(-0.5, scans[0][2])
+        self.assertEqual(-2.0, scans[0][3])
+        self.assertEqual((5.0, 2.0), scans[1][1][:2])
+        self.assertAlmostEqual(12.0, scans[1][1][2])
+
+    def test_destructible_body_scan_skips_dead_and_low_speed_bots(self):
+        scans = []
+        runtime = self.module.BotRuntime(
+            1, destructible_body_scan=lambda *values: scans.append(values),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.authority_id = 1
+        runtime.adapter = object()
+        runtime.states = {
+            14: {'id': 14, 'slot': 1, 'team': 2, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': -2.0},
+            13: {'id': 13, 'slot': 0, 'team': 2, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 1.0},
+            12: {'id': 12, 'slot': 3, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 0.99},
+            11: {'id': 11, 'slot': 2, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 0.0},
+            16: {'id': 16, 'slot': 5, 'team': 1, 'alive': True,
+                 'health': 0, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 8.0},
+            15: {'id': 15, 'slot': 4, 'team': 1, 'alive': False,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 8.0},
+        }
+        runtime._run_update_once = lambda *unused: []
+
+        self.assertEqual([], runtime.update(
+            self.module.WORKER_CONTROL_SECONDS, 1.0))
+
+        self.assertEqual([13, 14], [values[0] for values in scans])
+
     def test_publication_edge_revision_is_monotonic_across_reverted_edges(self):
         continuous = set((
             'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw',
