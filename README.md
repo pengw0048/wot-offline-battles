@@ -69,6 +69,9 @@ whose profile changed after it started must be restarted first.
   shared contacts to route, take cover, pick targets and choose ammunition,
   including SPG arcs. Navigation and foliage data ship for all 41 supported
   standard-battle maps.
+- Automatically generated Bot lineups contain no self-propelled artillery.
+  Player vehicles and manually assigned Bot lineups remain unrestricted;
+  tank destroyers are not artillery and remain in the automatic pool.
 - Live combat statistics, a damage log with assists, hit and critical-damage
   messages, target outlines, vehicle fires, wrecks, and a consumables panel
   that counts down each cooldown.

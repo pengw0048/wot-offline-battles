@@ -20,6 +20,7 @@ import windows_server  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_blacklist  # noqa: E402
 from gui.mods.offline_lan_0922 import descriptor_donation  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_configuration  # noqa: E402
+from gui.mods.offline_lan_0922.ai import planner as bot_planner  # noqa: E402
 from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime  # noqa: E402
 
 
@@ -48,6 +49,109 @@ def _descriptor(name):
 
 
 class BotLineupIntegrationTests(unittest.TestCase):
+    def test_default_bot_lineup_has_no_artillery_and_keeps_tank_destroyers(self):
+        artillery = {'name': 'ussr:artillery', 'tags': ('SPG',)}
+        destroyer = {'name': 'ussr:destroyer', 'tags': ('AT-SPG',)}
+
+        selected = bot_planner.select_bot_lineup(
+            [artillery, destroyer], 15)
+
+        self.assertEqual(15, len(selected))
+        self.assertEqual({'ussr:destroyer'},
+                         {row['name'] for row in selected})
+
+    def test_zero_artillery_cap_replaces_a_mirrored_human_artillery_slot(self):
+        artillery = {'name': 'ussr:artillery', 'tags': ('SPG',)}
+        destroyer = {'name': 'ussr:destroyer', 'tags': ('AT-SPG',)}
+
+        selected = bot_planner.select_bot_lineup(
+            [artillery], 15, spg_limit=0,
+            fallback_candidates=[artillery, destroyer])
+
+        self.assertEqual([destroyer] * 15, selected)
+
+    def test_automatic_rosters_have_zero_artillery_without_removing_humans(self):
+        entries = {}
+        for level in range(1, 11):
+            for class_tag in bot_planner.MATCH_CLASSES:
+                entries[len(entries)] = types.SimpleNamespace(
+                    name='ussr:%s_%d' % (class_tag, level), level=level,
+                    tags=(class_tag,))
+        by_name = {entry.name: entry for entry in entries.values()}
+        runtime = types.SimpleNamespace(
+            nations=types.SimpleNamespace(
+                AVAILABLE_NAMES=('all',), INDICES={'all': 0}),
+            vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
+                getList=lambda unused_nation_id: entries)))
+        bots = [
+            {'id': team * 100 + slot, 'team': team, 'slot': slot}
+            for team in (1, 2) for slot in range(1 if team == 1 else 0, 15)
+        ]
+        for level in range(1, 11):
+            for mode in bot_planner.BOT_TIER_MODES:
+                for human_class in ('SPG', 'heavyTank'):
+                    player_name = 'ussr:%s_%d' % (human_class, level)
+                    descriptor = types.SimpleNamespace(type=by_name[player_name])
+                    assignments = []
+                    for worker_mode in (False, True):
+                        battle = BattleRuntime.__new__(BattleRuntime)
+                        battle._runtime = runtime
+                        battle._worker_mode = worker_mode
+                        battle._config = {'vehicle': player_name}
+                        battle._start_message = {
+                            'round_id': 17, 'map': '01_karelia',
+                            'players': [{'id': 1, 'team': 1, 'slot': 0,
+                                         'vehicle': player_name}],
+                            'bots': bots, 'bot_tier_mode': mode,
+                        }
+                        battle.client = types.SimpleNamespace(team=1, player_id=1)
+                        battle._resolve_descriptor = lambda unused: descriptor
+
+                        self.assertTrue(battle._prepare_bot_vehicle_assignments(
+                            descriptor), (level, mode, human_class, worker_mode))
+
+                        selected = battle._bot_vehicle_assignments
+                        self.assertEqual(29, len(selected))
+                        self.assertFalse(any('SPG' in by_name[name].tags
+                                             for name in selected.values()),
+                                         (level, mode, human_class, worker_mode))
+                        self.assertEqual((human_class,), descriptor.type.tags)
+                        assignments.append(selected)
+                    self.assertEqual(assignments[0], assignments[1])
+
+    def test_explicit_artillery_override_is_preserved(self):
+        entries = {
+            1: types.SimpleNamespace(name='ussr:regular', level=8,
+                                     tags=('mediumTank',)),
+            2: types.SimpleNamespace(name='ussr:artillery', level=8,
+                                     tags=('SPG',)),
+        }
+        descriptor = types.SimpleNamespace(type=entries[1])
+        battle = BattleRuntime.__new__(BattleRuntime)
+        battle._runtime = types.SimpleNamespace(
+            nations=types.SimpleNamespace(
+                AVAILABLE_NAMES=('all',), INDICES={'all': 0}),
+            vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
+                getList=lambda unused_nation_id: entries)))
+        battle._worker_mode = True
+        battle._config = {'vehicle': 'ussr:regular'}
+        battle._start_message = {
+            'round_id': 17, 'map': '01_karelia', 'bot_tier_mode': 'same',
+            'players': [{'id': 1, 'team': 1, 'slot': 0,
+                         'vehicle': 'ussr:regular'}],
+            'bots': [{'id': 11, 'team': 1, 'slot': 1},
+                     {'id': 21, 'team': 2, 'slot': 0}],
+            'bot_lineup': [{'team': 2, 'slot': 0,
+                           'vehicle': 'ussr:artillery'}],
+        }
+        battle.client = types.SimpleNamespace(team=1, player_id=1)
+        battle._resolve_descriptor = lambda unused: descriptor
+
+        self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
+
+        self.assertEqual({(1, 1): 'ussr:regular', (2, 0): 'ussr:artillery'},
+                         battle._bot_vehicle_assignments)
+
     def _ui_saved_assignment(self):
         store, profile_name = bot_lineup_profiles.create(
             bot_lineup_profiles.empty_store(), "Exact duel")

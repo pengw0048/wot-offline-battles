@@ -4356,9 +4356,12 @@ class BattleRuntime(object):
                 team_bots = bots_by_team[team]
                 picked = bot_planner.remaining_match_template(
                     template, humans_by_team[team])
-                if len(picked) < len(team_bots):
-                    picked = bot_planner.select_bot_lineup(
-                        picked or candidates, len(team_bots), 1, candidates)
+                # Apply the bot-only quota after removing human slots. A human
+                # SPG must not force mirrored artillery onto the opposing bots.
+                # Explicit lineup overrides below retain the host's choices.
+                picked = bot_planner.select_bot_lineup(
+                    picked or candidates, len(team_bots), spg_limit=0,
+                    fallback_candidates=candidates)
                 picked = list(picked[:len(team_bots)])
                 lineup_random.shuffle(picked)
                 picked.sort(key=self._vehicle_class_order)
