@@ -146,10 +146,9 @@ class LocalDriver(object):
 	barrel_direction = staticmethod(barrel_direction)
 
 	def __init__(self, stuck_seconds=1.8, recovery_seconds=0.85,
-			separation_radius=12.0, failure_ttl=2.0):
+			failure_ttl=2.0):
 		self.stuck_seconds = max(0.4, float(stuck_seconds))
 		self.recovery_seconds = max(0.25, float(recovery_seconds))
-		self.separation_radius = max(2.0, float(separation_radius))
 		self.failure_ttl = max(0.25, float(failure_ttl))
 		self.states = {}
 
@@ -289,74 +288,11 @@ class LocalDriver(object):
 			return neighbour.get('position') or neighbour.get('pos')
 		return neighbour
 
-	def _separation_yaw(self, position, current_yaw, neighbours,
-			half_length, half_width):
-		"""Return an escape heading only for hulls that already overlap.
-
-		The simultaneous contact solver handles impending collisions. Treating
-		every tank inside a broad radius as an emergency made harmless side-by-side
-		traffic continually override the route and reconsider its steering.
-		"""
-		push_x = 0.0
-		push_z = 0.0
-		for neighbour in neighbours or ():
-			other = self._neighbour_position(neighbour)
-			if other is None:
-				continue
-			try:
-				if _distance(position, other) > 20.0:
-					continue
-			except Exception:
-				continue
-			try:
-				if abs(float(other[1]) - float(position[1])) > 5.0:
-					continue
-			except Exception:
-				pass
-			try:
-				dx = float(position[0]) - float(other[0])
-				dz = float(position[2]) - float(other[2])
-				dist = math.sqrt(dx * dx + dz * dz)
-			except Exception:
-				continue
-			if dist < 0.05 or dist >= self.separation_radius:
-				continue
-			other_yaw = 0.0
-			other_length = half_length
-			other_width = half_width
-			if isinstance(neighbour, dict):
-				other_yaw = float(neighbour.get('yaw', 0.0) or 0.0)
-				other_length = float(neighbour.get('half_length', half_length) or half_length)
-				other_width = float(neighbour.get('half_width', half_width) or half_width)
-			# Existing overlap belongs to the physical hull pose. The route heading
-			# is only a future steering candidate and cannot rotate that pose early.
-			if not self._obb_overlap(
-					position, current_yaw, half_length + 0.20, half_width + 0.20,
-					other, other_yaw, other_length + 0.20, other_width + 0.20):
-				continue
-			weight = max(0.15, (self.separation_radius - dist) / self.separation_radius)
-			push_x += dx / dist * weight
-			push_z += dz / dist * weight
-		if abs(push_x) + abs(push_z) < 0.001:
-			return None
-		return math.atan2(push_x, push_z)
-
 	def _clear(self, direction_clear, yaw):
 		try:
 			return bool(direction_clear(yaw))
 		except Exception:
 			return False
-
-	def _velocity(self, value):
-		if value is None:
-			return (0.0, 0.0)
-		try:
-			return (float(value[0]), float(value[2]))
-		except Exception:
-			try:
-				return (float(value[0]), float(value[1]))
-			except Exception:
-				return (0.0, 0.0)
 
 	def _obb_overlap(self, first, first_yaw, first_length, first_width,
 				 second, second_yaw, second_length, second_width):
@@ -379,65 +315,6 @@ class LocalDriver(object):
 			            abs(side_b[0] * axis[0] + side_b[1] * axis[1]) * second_width)
 			if distance > radius_a + radius_b:
 				return False
-		return True
-
-	def _prediction_clear(self, position, candidate_yaw, speed, velocity,
-				neighbours, half_length, half_width):
-		"""Reject a locally clear ray if its next 1.2s overlaps another OBB."""
-		own_speed = max(0.0, abs(float(speed)))
-		# At walking pace there is not enough velocity for an OBB extrapolation
-		# to be useful.  In a dense line-up it instead predicts every neighbour's
-		# acceleration against a nearly stationary hull and vetoes all exits.
-		# Separation steering and the physical tank resolver remain active; resume
-		# predictive collision avoidance once the bot has actually got moving.
-		if own_speed < 1.25:
-			return True
-		desired_vx = math.sin(candidate_yaw) * own_speed
-		desired_vz = math.cos(candidate_yaw) * own_speed
-		actual_vx, actual_vz = self._velocity(velocity)
-		# Tanks cannot instantaneously rotate their velocity vector.  Blend the
-		# observed velocity into the short prediction whenever the caller has it.
-		if abs(actual_vx) + abs(actual_vz) > 0.05:
-			own_vx = actual_vx * 0.45 + desired_vx * 0.55
-			own_vz = actual_vz * 0.45 + desired_vz * 0.55
-		else:
-			own_vx = desired_vx
-			own_vz = desired_vz
-		for neighbour in neighbours or ():
-			other = self._neighbour_position(neighbour)
-			if other is None:
-				continue
-			try:
-				if abs(float(other[1]) - float(position[1])) > 5.0:
-					continue
-			except Exception:
-				pass
-			other_yaw = 0.0
-			other_velocity = None
-			other_length = half_length
-			other_width = half_width
-			if isinstance(neighbour, dict):
-				other_yaw = float(neighbour.get('yaw', 0.0) or 0.0)
-				other_velocity = neighbour.get('velocity') or neighbour.get('vel')
-				other_length = float(neighbour.get('half_length', half_length) or half_length)
-				other_width = float(neighbour.get('half_width', half_width) or half_width)
-			other_vx, other_vz = self._velocity(other_velocity)
-			# Spawn formations can place two hull boxes slightly inside each other.
-			# Treating that existing overlap as a future collision rejects every
-			# steering candidate, so all bots stop and enter the recovery turn loop.
-			# Separation steering already handles this case; predictive vetoes resume
-			# as soon as the hulls have moved apart.
-			if self._obb_overlap(position, candidate_yaw, half_length, half_width,
-					other, other_yaw, other_length, other_width):
-				continue
-			for horizon in (0.35, 0.75, 1.20):
-				own = (float(position[0]) + own_vx * horizon, 0.0,
-				       float(position[2]) + own_vz * horizon)
-				predicted = (float(other[0]) + other_vx * horizon, 0.0,
-				             float(other[2]) + other_vz * horizon)
-				if self._obb_overlap(own, candidate_yaw, half_length, half_width,
-						predicted, other_yaw, other_length, other_width):
-					return False
 		return True
 
 	def _reverse_blocked_by_vehicle(self, position, yaw, neighbours,
@@ -537,10 +414,9 @@ class LocalDriver(object):
 			return 1.0
 		return self._fallback_recovery_side(state)
 
-	def _choose_yaw(self, state, desired_yaw, current_yaw, position, speed,
-			velocity, neighbours, direction_clear, half_length, half_width):
-		separation = self._separation_yaw(
-			position, current_yaw, neighbours, half_length, half_width)
+	def _choose_yaw(self, state, desired_yaw, direction_clear):
+		# Teammate proximity never replaces the route with a repulsion heading.
+		# Crossing priority is coordinated separately; real contact owns overlap.
 		candidates = []
 		for offset in self._CANDIDATE_OFFSETS:
 			candidate = desired_yaw + offset
@@ -551,10 +427,6 @@ class LocalDriver(object):
 				# Continue around the selected side before testing the mirror branch.
 				# The finite penalty still permits the other side when this fan is spent.
 				score += 1.25
-			if separation is not None:
-				# When bodies overlap, separation outranks route alignment; otherwise
-				# two tanks can choose the same narrow opening forever.
-				score = score * 0.30 + abs(_angle_delta(candidate, separation))
 			candidates.append((score, candidate))
 		candidates.sort(key=lambda item: item[0])
 		# Probe in score order and return the first fully viable direction. Most
@@ -563,7 +435,7 @@ class LocalDriver(object):
 			if self._clear(direction_clear, candidate):
 				state['steering_reason'] = (
 					'route' if abs(_angle_delta(candidate, desired_yaw)) <= 0.05
-					else ('separation' if separation is not None else 'obstacle'))
+					else 'obstacle')
 				return candidate
 		return None
 
@@ -722,20 +594,14 @@ class LocalDriver(object):
 		# The reason belongs to the original selection: motion past a nearby goal
 		# must not promote a held route heading into a fresh avoidance lease.
 		hold_seconds = 0.35 if steering_reason == 'route' else 1.20
-		separation_active = bool(
-			steering_reason != 'separation' or
-			self._separation_yaw(position, yaw, neighbours,
-				own_half_length, own_half_width) is not None)
 		if (old_yaw is not None and state['plan_age'] < hold_seconds and
-				separation_active and
 				abs(_angle_delta(desired_yaw, old_yaw)) < 2.15 and
 				self._failure_penalty(state, old_yaw) <= 0.0 and
 				self._clear(direction_clear, old_yaw)):
 			chosen_yaw = old_yaw
 		if chosen_yaw is None:
 			chosen_yaw = self._choose_yaw(
-				state, desired_yaw, yaw, position, speed, velocity, neighbours,
-				direction_clear, own_half_length, own_half_width)
+				state, desired_yaw, direction_clear)
 			state['plan_age'] = 0.0
 		if chosen_yaw is None:
 			# No forward ray is usable.  Start a timed recovery on the next tick

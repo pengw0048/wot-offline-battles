@@ -223,17 +223,20 @@ class SpawnDepartureTests(unittest.TestCase):
                     return order
 
                 runtime.adapter.driver.drive = drive
-                original_traffic = runtime._traffic_throttle
+                original_traffic = runtime._traffic_coordinator.adjust
 
-                def traffic_throttle(
-                        source, command, neighbours, physics_params=None):
-                    throttle, waiting = original_traffic(
-                        source, command, neighbours, physics_params)
+                def traffic_adjust(bot_id, source, command, neighbours,
+                                   clock, direction_clear):
+                    adjusted = original_traffic(
+                        bot_id, source, command, neighbours, clock,
+                        direction_clear)
                     monitor.record(
-                        'traffic', int(source['id']), waiting, now[0])
-                    return throttle, waiting
+                        'traffic', bot_id,
+                        adjusted.get('traffic_mode') in (
+                            'yield', 'head_on_blocked'), now[0])
+                    return adjusted
 
-                runtime._traffic_throttle = traffic_throttle
+                runtime._traffic_coordinator.adjust = traffic_adjust
 
                 for frame in range(1, fps * 30 + 1):
                     now[0] = frame / float(fps)

@@ -4580,8 +4580,31 @@ class BattleRuntime(object):
                    for index in range(4))
 
     def _direction_probe(self, position, yaw, speed=0.0,
-                         descriptor=None, maximum_distance=None):
-        """Copy the 0.8.2 dual-height, three-lane hull corridor probe."""
+                         descriptor=None, maximum_distance=None,
+                         corridor_half_width=None):
+        """Probe the admitted chassis corridor at two heights and distances."""
+        if corridor_half_width is None:
+            # Passive contact callers have no active-drive descriptor. They
+            # supply the chassis projection across their displacement; ordinary
+            # drive probes use the same admitted body as tank contact physics.
+            try:
+                corridor_half_width = (
+                    self._collision_shape(descriptor)[0]
+                    if descriptor is not None else 2.2)
+            except (AttributeError, IndexError, TypeError, ValueError,
+                    RuntimeError):
+                return {'clear': False, 'collision': True,
+                        'water': False, 'slope': 0.0}
+        try:
+            corridor_half_width = float(corridor_half_width)
+        except (TypeError, ValueError):
+            return {'clear': False, 'collision': True,
+                    'water': False, 'slope': 0.0}
+        if (corridor_half_width <= 0.0 or
+                corridor_half_width != corridor_half_width or
+                abs(corridor_half_width) == float('inf')):
+            return {'clear': False, 'collision': True,
+                    'water': False, 'slope': 0.0}
         x, y, z = _xyz(position)
         current_water = self._water_depth((x, y, z))
         wet_escape = current_water > BOT_WATER_AVOID_DEPTH
@@ -4654,7 +4677,7 @@ class BattleRuntime(object):
             if delta > run * 0.48 or delta < -run * 0.38:
                 return {'clear': False, 'collision': False,
                         'water': False, 'slope': slope}
-            for offset in (-2.2, 0.0, 2.2):
+            for offset in (-corridor_half_width, 0.0, corridor_half_width):
                 ray_start = self._vector((
                     x + lateral_x * offset, y + height,
                     z + lateral_z * offset))
