@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
     'pair_seconds': 2.0,
     'drive_all': False,
     'disable_lsprof': False,
+    'opt_in_stages': [],
+    'fresh_attribute_reads': False,
 }
 
 # Attributes the exe's string table exposes on WGVehiclePhysics.  Every read
@@ -123,8 +125,14 @@ FILTER_READ_ATTRIBUTES = (
     'allowStrafe', 'strafeSpeed', 'allowStop', 'vehicleCollisionMargin',
     'isStrafing')
 STAGE_ORDER = (
-    'inventory', 'inspect_existing', 'construct_standalone', 'signatures',
-    'passive_drive', 'solve_one', 'solve_scale', 'solve_pair', 'restore')
+    'inventory', 'inspect_existing', 'passive_drive', 'solve_one',
+    'solve_scale', 'solve_pair', 'restore', 'construct_standalone',
+    'signatures')
+# Stages that are skipped unless worker_diagnostics.json opts in.  The first
+# Windows run died with EXCEPTION_ACCESS_VIOLATION (read @ 0x638) inside
+# construct_standalone, so anything that touches a body the retail client did
+# not configure is opt-in until the crash address has been attributed.
+OPT_IN_STAGES = ('construct_standalone', 'signatures')
 
 
 def load_config(config_dir):
@@ -298,12 +306,14 @@ class WorkerPhysicsProbe(object):
         self._driven = []
         self._callback_events = []
         stages = self._config.get('stages')
+        opted = set(self._config.get('opt_in_stages') or ())
         if stages == 'all' or not stages:
-            self._stages = list(STAGE_ORDER)
+            self._stages = [name for name in STAGE_ORDER
+                            if name not in OPT_IN_STAGES or name in opted]
         else:
             self._stages = [name for name in STAGE_ORDER if name in stages]
-            if 'restore' not in self._stages:
-                self._stages.append('restore')
+        if 'restore' not in self._stages:
+            self._stages.append('restore')
 
     # ------------------------------------------------------------------ frame
     @property
@@ -392,6 +402,13 @@ class WorkerPhysicsProbe(object):
             self._writer('%s %s\n' % (LOG_PREFIX, text))
         except Exception:
             pass
+
+    def _step(self, text):
+        """Announce the next native call so a crash names it in python.log."""
+        name = self._current['name'] if self._current else '-'
+        self._log('stage=%s step=%s' % (name, text))
+        if self._current is not None:
+            self._current['last_step'] = text
 
     def _report_path(self):
         return os.path.join(self._output_dir, '%s-round%s.json' % (
@@ -554,20 +571,26 @@ class WorkerPhysicsProbe(object):
         entries = []
         for bot in self._bots(self._config.get('inspect_entities', 3)):
             entity = bot['entity']
+            self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
             vehicle_filter, physics = self._physics_of(entity)
             entry = {
                 'bot_id': bot['bot_id'],
                 'entity_type': _type_name(entity),
                 'filter_type': _type_name(vehicle_filter),
-                'filter_attributes': _read_attributes(
-                    vehicle_filter, FILTER_READ_ATTRIBUTES),
-                'physics_type': _type_name(physics),
             }
+            self._step('bot:%s filter attributes' % bot['bot_id'])
+            entry['filter_attributes'] = _read_attributes(
+                vehicle_filter, FILTER_READ_ATTRIBUTES)
+            entry['physics_type'] = _type_name(physics)
             if physics is not None:
                 entry['physics_dir'] = sorted(
                     name for name in dir(physics) if not name.startswith('__'))
-                entry['physics_attributes'] = _read_attributes(
-                    physics, PHYSICS_READ_ATTRIBUTES)
+                entry['physics_attributes'] = {}
+                for name in PHYSICS_READ_ATTRIBUTES:
+                    self._step('bot:%s physics.%s' % (bot['bot_id'], name))
+                    entry['physics_attributes'].update(
+                        _read_attributes(physics, (name,)))
+                self._step('bot:%s pose snapshot' % bot['bot_id'])
                 entry['pose'] = self._pose_snapshot(entity, physics)
             entries.append(entry)
         data['entities'] = entries
@@ -577,21 +600,32 @@ class WorkerPhysicsProbe(object):
     def _stage_construct_standalone(self, frame_dt):
         data = self._current['data']
         bigworld = self._bigworld()
+        self._step('BigWorld.WGVehiclePhysics()')
         physics = bigworld.WGVehiclePhysics()
         self._standalone['physics'] = physics
         data['physics_dir'] = sorted(
             name for name in dir(physics) if not name.startswith('__'))
-        data['physics_attributes_fresh'] = _read_attributes(
-            physics, PHYSICS_READ_ATTRIBUTES)
+        if self._config.get('fresh_attribute_reads'):
+            # Reading an unconfigured body is exactly where the first Windows
+            # run died; keep it opt-in and one attribute per logged step.
+            data['physics_attributes_fresh'] = {}
+            for name in PHYSICS_READ_ATTRIBUTES:
+                self._step('fresh physics.%s' % name)
+                data['physics_attributes_fresh'].update(
+                    _read_attributes(physics, (name,)))
+        self._step('BigWorld.WGDynamicsSimulator()')
         simulator = self._simulator_for_stage()
         data['simulator_dir'] = sorted(
             name for name in dir(simulator) if not name.startswith('__'))
+        self._step('simulator attributes')
         data['simulator_attributes'] = _read_attributes(
             simulator, SIMULATOR_ATTRIBUTES)
+        self._step('BigWorld.WGPhysicalBody()')
         body = bigworld.WGPhysicalBody()
         self._standalone['body'] = body
         data['body_dir'] = sorted(
             name for name in dir(body) if not name.startswith('__'))
+        self._step('body attributes')
         data['body_attributes'] = _read_attributes(body, BODY_ATTRIBUTES)
         # Initialise the standalone body exactly as the retail client does for
         # its own vehicle: through physics_shared, on a real descriptor.
@@ -616,6 +650,7 @@ class WorkerPhysicsProbe(object):
             if function is None:
                 attempts.append({'call': name, 'result': '<missing>'})
                 continue
+            self._step('physics_shared.%s/%d' % (name, len(args)))
             try:
                 function(*args)
             except Exception as error:
@@ -627,8 +662,14 @@ class WorkerPhysicsProbe(object):
                              'result': 'ok'})
             break
         data['init'] = attempts
-        data['physics_attributes_initialised'] = _read_attributes(
-            physics, PHYSICS_READ_ATTRIBUTES)
+        initialised = any(item['result'] == 'ok' for item in attempts)
+        data['physics_attributes_initialised'] = {}
+        if initialised:
+            for name in PHYSICS_READ_ATTRIBUTES:
+                self._step('initialised physics.%s' % name)
+                data['physics_attributes_initialised'].update(
+                    _read_attributes(physics, (name,)))
+        self._step('physics.setArenaBounds')
         try:
             physics.setArenaBounds((-10000, -10000), (10000, 10000))
             data['setArenaBounds'] = 'ok'
@@ -640,22 +681,27 @@ class WorkerPhysicsProbe(object):
         data = self._current['data']
         physics = self._standalone.get('physics')
         if physics is None:
+            self._step('BigWorld.WGVehiclePhysics()')
             physics = self._bigworld().WGVehiclePhysics()
             self._standalone['physics'] = physics
-        data['physics'] = _harvest_signatures(
-            physics, PHYSICS_SIGNATURE_METHODS)
-        data['simulator'] = _harvest_signatures(
-            self._simulator_for_stage(), SIMULATOR_SIGNATURE_METHODS)
+        data['physics'] = {}
+        for name in PHYSICS_SIGNATURE_METHODS:
+            self._step('physics.%s()' % name)
+            data['physics'].update(_harvest_signatures(physics, (name,)))
+        simulator = self._simulator_for_stage()
+        data['simulator'] = {}
+        for name in SIMULATOR_SIGNATURE_METHODS:
+            self._step('simulator.%s()' % name)
+            data['simulator'].update(_harvest_signatures(simulator, (name,)))
         body = self._standalone.get('body')
         if body is None:
+            self._step('BigWorld.WGPhysicalBody()')
             body = self._bigworld().WGPhysicalBody()
             self._standalone['body'] = body
-        data['body'] = _harvest_signatures(body, BODY_SIGNATURE_METHODS)
-        bots = self._bots(1)
-        if bots:
-            vehicle_filter, unused = self._physics_of(bots[0]['entity'])
-            data['filter'] = _harvest_signatures(
-                vehicle_filter, ('notifyInputKeysDown', 'getVehiclePhysics'))
+        data['body'] = {}
+        for name in BODY_SIGNATURE_METHODS:
+            self._step('body.%s()' % name)
+            data['body'].update(_harvest_signatures(body, (name,)))
         return True
 
     def _drive_target(self, index):
@@ -676,9 +722,13 @@ class WorkerPhysicsProbe(object):
             return True
         if 'start' not in state:
             data['bot_id'] = bot['bot_id']
+            self._step('bot:%s install callbacks' % bot['bot_id'])
             data['callbacks_installed'] = self._install_callbacks(
                 physics, 'bot:%s' % bot['bot_id'])
+            self._step('bot:%s pose snapshot' % bot['bot_id'])
             data['before'] = self._pose_snapshot(bot['entity'], physics)
+            self._step('bot:%s movementSignals/notifyInputKeysDown' %
+                       bot['bot_id'])
             data['input'] = self._set_signals(
                 bot['entity'], physics, MOVE_FORWARD_SIGNAL, 1, 0)
             state['start'] = self._clock()
@@ -705,10 +755,13 @@ class WorkerPhysicsProbe(object):
         if physics is None:
             data['result'] = '<bot 0 has no physics>'
             return True
-        simulator = self._simulator_for_stage()
         if 'start' not in state:
+            self._step('BigWorld.WGDynamicsSimulator()')
+            self._simulator_for_stage()
             data['bot_id'] = bot['bot_id']
             data['before'] = self._pose_snapshot(bot['entity'], physics)
+            self._step('bot:%s movementSignals/notifyInputKeysDown' %
+                       bot['bot_id'])
             data['input'] = self._set_signals(
                 bot['entity'], physics, MOVE_FORWARD_SIGNAL, 1, 0)
             state['start'] = self._clock()
@@ -716,7 +769,10 @@ class WorkerPhysicsProbe(object):
             state['samples'] = []
             self._driven.append(bot['bot_id'])
             return False
+        simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
+        if not state['updates']:
+            self._step('simulator.update(dt, [bot:%s], [])' % bot['bot_id'])
         state['updates'].append(self._timed_update(simulator, dt, [physics]))
         if len(state['samples']) < 12:
             state['samples'].append(
@@ -777,6 +833,9 @@ class WorkerPhysicsProbe(object):
             return False
         simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
+        if not state['updates']:
+            self._step('simulator.update(dt, %d bodies, [])' %
+                       len(state['bodies']))
         state['updates'].append(
             self._timed_update(simulator, dt, state['bodies']))
         if len(state['updates']) < int(self._config['scale_frames']):
@@ -818,6 +877,10 @@ class WorkerPhysicsProbe(object):
             self._driven.extend([first['bot_id'], second['bot_id']])
             return False
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
+        if 'stepped' not in state:
+            state['stepped'] = True
+            self._step('simulator.update(dt, [bot:%s, bot:%s], [])' % (
+                first['bot_id'], second['bot_id']))
         self._timed_update(simulator, dt, [physics_a, physics_b])
         if self._clock() - state['start'] < float(
                 self._config['pair_seconds']):

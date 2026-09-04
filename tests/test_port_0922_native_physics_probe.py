@@ -171,6 +171,13 @@ def _fake_physics_shared():
     return module
 
 
+def by_name_last_step(report, name):
+    for stage in report['stages']:
+        if stage['name'] == name:
+            return stage.get('last_step')
+    return None
+
+
 class NativePhysicsProbeTests(unittest.TestCase):
     def setUp(self):
         self.module = _load('native_physics_probe')
@@ -198,7 +205,9 @@ class NativePhysicsProbeTests(unittest.TestCase):
     def _probe(self, **config):
         base = {'start_delay_seconds': 0.5, 'passive_seconds': 0.2,
                 'drive_seconds': 0.3, 'pair_seconds': 0.2,
-                'scale_frames': 5}
+                'scale_frames': 5,
+                'opt_in_stages': ['construct_standalone', 'signatures'],
+                'fresh_attribute_reads': True}
         base.update(config)
         return self.module.WorkerPhysicsProbe(
             self.host, self.directory, config=base,
@@ -231,7 +240,13 @@ class NativePhysicsProbeTests(unittest.TestCase):
         joined = ''.join(self.lines)
         self.assertIn('NPHYS stage=inventory begin', joined)
         self.assertIn('NPHYS stage=solve_scale end status=ok', joined)
+        self.assertIn('NPHYS stage=construct_standalone step='
+                      'BigWorld.WGVehiclePhysics()', joined)
+        self.assertIn('NPHYS stage=solve_one step=simulator.update', joined)
         self.assertIn('NPHYS done', joined)
+        self.assertEqual(
+            'physics.setArenaBounds',
+            by_name_last_step(report, 'construct_standalone'))
         by_name = dict((stage['name'], stage) for stage in report['stages'])
         inventory = by_name['inventory']['data']
         self.assertIn('WGDynamicsSimulator', inventory['bigworld_names'])
@@ -297,6 +312,21 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertEqual('inventory', report['last_begun'])
         self.assertEqual(['inventory', 'inspect_existing', 'restore'],
                          probe._stages)
+
+    def test_risky_stages_are_opt_in_and_ordered_last_by_default(self):
+        probe = self.module.WorkerPhysicsProbe(
+            self.host, self.directory, writer=self.lines.append,
+            clock=lambda: self.clock[0])
+        self.assertEqual(
+            ['inventory', 'inspect_existing', 'passive_drive', 'solve_one',
+             'solve_scale', 'solve_pair', 'restore'], probe._stages)
+        self.assertFalse(probe._config['fresh_attribute_reads'])
+        opted = self.module.WorkerPhysicsProbe(
+            self.host, self.directory, writer=self.lines.append,
+            clock=lambda: self.clock[0],
+            config={'opt_in_stages': ['construct_standalone']})
+        self.assertEqual('construct_standalone', opted._stages[-1])
+        self.assertNotIn('signatures', opted._stages)
 
     def test_probe_waits_for_live_and_start_delay(self):
         probe = self._probe(start_delay_seconds=5.0)
