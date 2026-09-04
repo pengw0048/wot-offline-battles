@@ -21917,6 +21917,53 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             12345678901234567890, direct['damage_sticker'])
 
+    def test_worker_player_gun_reuses_unchanged_effective_params_source(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle._projectile_is_authority = lambda: True
+        entity = _Vehicle(
+            11, _Descriptor(), _Vector(50.0, 0.0, 50.0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        effective = _effective_params_snapshot(ammo=[[101, 40]])
+        state = {'effective_params': effective}
+        battle._records = {'player:2': {
+            'engine_id': 11, 'network_id': 2, 'kind': 'player',
+            'local': False, 'ready': True, 'tombstone': False,
+            'state': state,
+        }}
+
+        with mock.patch.object(
+                battle_runtime_module.effective_params, 'canonical',
+                wraps=battle_runtime_module.effective_params.canonical
+        ) as canonical:
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.0))
+            gun = battle._player_authority_guns[2]
+            self.assertIs(effective, gun._effective_params_source)
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.1))
+            self.assertEqual(1, canonical.call_count)
+
+            equal_source = copy.deepcopy(effective)
+            state['effective_params'] = equal_source
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.2))
+            self.assertEqual(2, canonical.call_count)
+            self.assertIs(equal_source, gun._effective_params_source)
+
+            changed = copy.deepcopy(effective)
+            changed['physics']['mass'] += 1.0
+            state['effective_params'] = changed
+            self.assertRaises(
+                RuntimeError, battle._advance_player_fire_authority,
+                0.1, 10.3)
+
+        battle._records = {}
+        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.4))
+        self.assertNotIn(2, battle._player_authority_guns)
+
     def test_worker_launch_uses_visible_trigger_ray_not_model_node(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

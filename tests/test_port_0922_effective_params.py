@@ -617,16 +617,34 @@ class EffectiveParamsContractTests(unittest.TestCase):
         client = LANClient(
             '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
             effective_params=effective_params())
-        full = client._remember_player_outfits([{
-            'id': 1, 'outfits': {},
-            'effective_params': effective_params(),
-        }])
-        lean = client._remember_player_outfits([{'id': 1}])
+        with mock.patch.object(
+                contract, 'canonical', wraps=contract.canonical) as canonical:
+            full = client._remember_player_outfits([{
+                'id': 1, 'outfits': {},
+                'effective_params': effective_params(),
+            }])
+            equal_full = client._remember_player_outfits([{
+                'id': 1, 'outfits': {},
+                'effective_params': effective_params(),
+            }])
+            lean = client._remember_player_outfits([{'id': 1}])
+            self.assertEqual(1, canonical.call_count)
+
+            changed = effective_params()
+            changed['physics']['mass'] += 1.0
+            changed_full = client._remember_player_outfits([{
+                'id': 1, 'outfits': {}, 'effective_params': changed,
+            }])
+            self.assertEqual(2, canonical.call_count)
 
         self.assertEqual(full[0]['effective_params'],
                          lean[0]['effective_params'])
+        self.assertIs(full[0]['effective_params'],
+                      lean[0]['effective_params'])
+        self.assertIs(full[0]['effective_params'],
+                      equal_full[0]['effective_params'])
         self.assertIsNot(full[0]['effective_params'],
-                         lean[0]['effective_params'])
+                         changed_full[0]['effective_params'])
 
 
 if __name__ == '__main__':

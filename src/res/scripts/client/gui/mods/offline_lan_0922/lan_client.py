@@ -1521,6 +1521,43 @@ def _canonical_effective_params(value):
     return effective_params_wire.canonical(value)
 
 
+def _same_canonical_source(left, right):
+    """Compare JSON values without equating bools, integers and floats."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return (isinstance(left, bool) and isinstance(right, bool) and
+                left == right)
+    if (isinstance(left, integer_types) or
+            isinstance(right, integer_types)):
+        return (isinstance(left, integer_types) and
+                isinstance(right, integer_types) and left == right)
+    if isinstance(left, float) or isinstance(right, float):
+        return isinstance(left, float) and isinstance(right, float) and \
+            left == right
+    if isinstance(left, string_types) or isinstance(right, string_types):
+        return (isinstance(left, string_types) and
+                isinstance(right, string_types) and left == right)
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, dict) or isinstance(right, dict):
+        if (not isinstance(left, dict) or not isinstance(right, dict) or
+                len(left) != len(right)):
+            return False
+        for key, value in left.items():
+            # Canonical JSON object keys are strings.  A non-string source
+            # must cross its normalizer even if Python would consider that
+            # key equal to a cached numeric lookalike.
+            if (not isinstance(key, string_types) or key not in right or
+                    not _same_canonical_source(value, right[key])):
+                return False
+        return True
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        if type(left) is not type(right) or len(left) != len(right):
+            return False
+        return all(_same_canonical_source(left_value, right_value)
+                   for left_value, right_value in zip(left, right))
+    return type(left) is type(right) and left == right
+
+
 def _load_bigworld():
     import BigWorld
     return BigWorld
@@ -1545,7 +1582,9 @@ class LANClient(object):
         self.effective_params = _canonical_effective_params(effective_params)
         self.requested_team = _team_choice(requested_team)
         self._published_player_outfits = {}
+        self._published_player_outfit_sources = {}
         self._published_player_effective_params = {}
+        self._published_player_effective_param_sources = {}
         self.on_event = on_event
         self.bigworld = bigworld
         self.sock = None
@@ -1860,44 +1899,120 @@ class LANClient(object):
                 self.team = team
             if slot is not None and 0 <= slot < 15:
                 self.slot = slot
-            outfits = _canonical_wire_outfits(entry.get('outfits'))
+            # Roster and battle-start rows have already crossed the static
+            # player-input boundary.  Preserve those canonical objects rather
+            # than decoding the same outfits and effective parameters again.
+            outfits = entry.get('outfits')
             if outfits is not None:
                 self.outfits = outfits
             compact = _canonical_vehicle_compact_descr(
                 entry.get('vehicle_compact_descr'))
             if compact is not None:
                 self.vehicle_compact_descr = compact
-            params = _canonical_effective_params(
-                entry.get('effective_params'))
+            params = entry.get('effective_params')
             if params is not None:
                 self.effective_params = params
             return
 
-    def _remember_player_outfits(self, players):
-        """Canonicalize static player inputs and inherit lean snapshots."""
+    def _prepare_player_static_inputs(
+            self, players, allow_lean=False, trusted_prepared=None):
+        """Stage canonical static player inputs without mutating the cache."""
         result = []
+        outfit_updates = {}
+        effective_param_updates = {}
+        trusted_outfits = (
+            trusted_prepared[3] if trusted_prepared is not None else {})
+        trusted_effective_params = (
+            trusted_prepared[4] if trusted_prepared is not None else {})
+        outfits_valid = True
+        effective_params_valid = True
         for raw in players or ():
             entry = dict(raw)
             player_id = _exact_int(entry.get('id'))
             if 'outfits' in entry:
-                outfits = _canonical_wire_outfits(entry.get('outfits'))
+                source = entry.get('outfits')
+                if player_id in outfit_updates:
+                    cached_source = outfit_updates[player_id]
+                    outfits = outfit_updates[player_id]
+                elif player_id in trusted_outfits:
+                    cached_source = trusted_outfits[player_id]
+                    outfits = trusted_outfits[player_id]
+                else:
+                    cached_source = \
+                        self._published_player_outfit_sources.get(player_id)
+                    outfits = self._published_player_outfits.get(player_id)
+                if (not _same_canonical_source(cached_source, source) or
+                        outfits is None):
+                    outfits = _canonical_wire_outfits(source)
                 if outfits is not None and player_id is not None:
-                    self._published_player_outfits[player_id] = outfits
+                    outfit_updates[player_id] = outfits
                     entry['outfits'] = outfits
+                elif outfits is None:
+                    outfits_valid = False
+            elif player_id in outfit_updates:
+                entry['outfits'] = outfit_updates[player_id]
             elif player_id in self._published_player_outfits:
-                entry['outfits'] = dict(
-                    self._published_player_outfits[player_id])
+                entry['outfits'] = \
+                    self._published_player_outfits[player_id]
             if 'effective_params' in entry:
-                params = _canonical_effective_params(
-                    entry.get('effective_params'))
+                source = entry.get('effective_params')
+                if player_id in effective_param_updates:
+                    cached_source = effective_param_updates[player_id]
+                    params = effective_param_updates[player_id]
+                elif player_id in trusted_effective_params:
+                    cached_source = trusted_effective_params[player_id]
+                    params = trusted_effective_params[player_id]
+                else:
+                    cached_source = \
+                        self._published_player_effective_param_sources.get(
+                            player_id)
+                    params = self._published_player_effective_params.get(
+                        player_id)
+                if (not _same_canonical_source(cached_source, source) or
+                        params is None):
+                    params = _canonical_effective_params(source)
                 if params is not None and player_id is not None:
-                    self._published_player_effective_params[player_id] = params
+                    effective_param_updates[player_id] = params
                     entry['effective_params'] = params
+                elif params is None:
+                    effective_params_valid = False
+            elif player_id in effective_param_updates:
+                entry['effective_params'] = \
+                    effective_param_updates[player_id]
+                if not allow_lean:
+                    effective_params_valid = False
             elif player_id in self._published_player_effective_params:
-                entry['effective_params'] = _canonical_effective_params(
-                    self._published_player_effective_params[player_id])
+                entry['effective_params'] = \
+                    self._published_player_effective_params[player_id]
+                if not allow_lean:
+                    effective_params_valid = False
+            else:
+                effective_params_valid = False
             result.append(entry)
-        return result
+        return (
+            result, outfits_valid, effective_params_valid,
+            outfit_updates, effective_param_updates)
+
+    def _commit_player_static_inputs(self, prepared):
+        """Publish one fully accepted static-input staging result."""
+        players, unused_outfits_valid, unused_params_valid, \
+            outfit_updates, effective_param_updates = prepared
+        del unused_outfits_valid, unused_params_valid
+        for player_id, outfits in outfit_updates.items():
+            # The canonical object is the detached comparison baseline and
+            # the value inherited by later lean snapshots.
+            self._published_player_outfit_sources[player_id] = outfits
+            self._published_player_outfits[player_id] = outfits
+        for player_id, params in effective_param_updates.items():
+            self._published_player_effective_param_sources[
+                player_id] = params
+            self._published_player_effective_params[player_id] = params
+        return players
+
+    def _remember_player_outfits(self, players):
+        """Canonicalize static player inputs and inherit lean snapshots."""
+        return self._commit_player_static_inputs(
+            self._prepare_player_static_inputs(players, allow_lean=True))
 
     def is_room_host(self):
         return (self.ready and self.phase == 'waiting' and
@@ -3798,7 +3913,7 @@ class LANClient(object):
             return None
         return round_id
 
-    def _handle_message(self, message):
+    def _handle_message(self, message, trusted_player_static=None):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
@@ -3955,7 +4070,10 @@ class LANClient(object):
             self.effective_params = effective_params
             self._published_player_effective_params[player_id] = \
                 effective_params
+            self._published_player_effective_param_sources[player_id] = \
+                effective_params
             self._published_player_outfits[player_id] = dict(outfits)
+            self._published_player_outfit_sources[player_id] = dict(outfits)
             self.map_name = map_name
             self.map_pool = self._map_names(message.get('map_pool'))
             self.spawn = dict(spawn)
@@ -3991,6 +4109,12 @@ class LANClient(object):
             phase = _safe_text(message.get('phase'), '')
             map_name = _safe_text(message.get('map'), '')
             players = _strict_mapping_list(message.get('players'), 64)
+            prepared_players = (
+                self._prepare_player_static_inputs(
+                    players, trusted_prepared=trusted_player_static)
+                if players is not None else None)
+            if prepared_players is not None:
+                players = prepared_players[0]
             host_player_id = _exact_int(message.get('host_player_id'))
             authority_epoch = _projectile_int_range(
                 message.get('authority_epoch'), 0, MAX_PROJECTILE_ID)
@@ -4005,13 +4129,10 @@ class LANClient(object):
                     message.get('server_time_ms'), 0, MAX_PROJECTILE_ID)
             player_ids = set(_exact_int(value.get('id'))
                              for value in players or ())
-            player_outfits_valid = all(
-                _canonical_wire_outfits(value.get('outfits')) is not None
-                for value in players or ())
-            player_effective_params_valid = all(
-                _canonical_effective_params(
-                    value.get('effective_params')) is not None
-                for value in players or ())
+            player_outfits_valid = bool(
+                prepared_players is not None and prepared_players[1])
+            player_effective_params_valid = bool(
+                prepared_players is not None and prepared_players[2])
             player_siege_contract = all(
                 _valid_player_siege_contract(value)
                 for value in players or ())
@@ -4069,7 +4190,7 @@ class LANClient(object):
             maps = self._map_names(message.get('map_pool'))
             if maps:
                 self.map_pool = maps
-            players = self._remember_player_outfits(players)
+            players = self._commit_player_static_inputs(prepared_players)
             self.roster = players
             self.team_sizes = team_sizes
             self.bot_tier_mode = bot_tier_mode
@@ -4123,13 +4244,16 @@ class LANClient(object):
             map_name = _safe_text(message.get('map'), '')
             phase = _safe_text(message.get('phase'), '')
             players = _strict_mapping_list(message.get('players'), 64)
-            player_outfits_valid = all(
-                _canonical_wire_outfits(value.get('outfits')) is not None
-                for value in players or ())
-            player_effective_params_valid = all(
-                _canonical_effective_params(
-                    value.get('effective_params')) is not None
-                for value in players or ())
+            prepared_players = (
+                self._prepare_player_static_inputs(
+                    players, trusted_prepared=trusted_player_static)
+                if players is not None else None)
+            if prepared_players is not None:
+                players = prepared_players[0]
+            player_outfits_valid = bool(
+                prepared_players is not None and prepared_players[1])
+            player_effective_params_valid = bool(
+                prepared_players is not None and prepared_players[2])
             player_siege_contract = all(
                 _valid_player_siege_contract(value)
                 for value in players or ())
@@ -4187,7 +4311,7 @@ class LANClient(object):
             self.map_name = map_name
             self.round_id = round_id
             self.state_revision = state_revision
-            players = self._remember_player_outfits(players)
+            players = self._commit_player_static_inputs(prepared_players)
             self.roster = players
             self.team_sizes = team_sizes
             self._adopt_published_vehicle(players)
@@ -4319,17 +4443,17 @@ class LANClient(object):
                 if has_bot_state_time else None)
             projectiles = message.get('projectiles')
             players = _strict_mapping_list(message.get('players'), 64)
-            player_outfits_valid = all(
-                ('outfits' not in value or
-                 _canonical_wire_outfits(value.get('outfits')) is not None)
-                for value in players or ())
-            player_effective_params_valid = all(
-                (_canonical_effective_params(
-                    value.get('effective_params')) is not None
-                 if 'effective_params' in value else
-                 _exact_int(value.get('id')) in
-                 self._published_player_effective_params)
-                for value in players or ())
+            prepared_players = (
+                self._prepare_player_static_inputs(
+                    players, allow_lean=True,
+                    trusted_prepared=trusted_player_static)
+                if players is not None else None)
+            if prepared_players is not None:
+                players = prepared_players[0]
+            player_outfits_valid = bool(
+                prepared_players is not None and prepared_players[1])
+            player_effective_params_valid = bool(
+                prepared_players is not None and prepared_players[2])
             bots = _strict_mapping_list(message.get('bots'), 30)
             manifest = None
             if 'bot_manifest' in message:
@@ -4539,7 +4663,7 @@ class LANClient(object):
                     return
                 message = dict(message)
                 message.pop('timing', None)
-            players = self._remember_player_outfits(players)
+            players = self._commit_player_static_inputs(prepared_players)
             if players != message.get('players'):
                 message = dict(message)
                 message['players'] = players

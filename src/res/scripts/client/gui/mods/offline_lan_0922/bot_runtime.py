@@ -311,7 +311,7 @@ def _water_sensor_level(state, descriptor, water_depth):
     return 2 if depth > turret_height else 1
 
 
-def _player_effective_params(raw):
+def _player_effective_params(raw, visibility_tick=None):
     """Return the immutable client-derived player mechanics snapshot.
 
     A hidden worker does not own the human's mounted crew, equipment,
@@ -322,9 +322,25 @@ def _player_effective_params(raw):
     """
     if not isinstance(raw, dict):
         raise ValueError('player effective parameters row is invalid')
-    snapshot = effective_params.canonical(raw.get('effective_params'))
+    source = raw.get('effective_params')
+    player_id = raw.get('network_id', raw.get('id'))
+    cache = None
+    if isinstance(visibility_tick, dict) and player_id is not None:
+        try:
+            key = (int(player_id), id(source))
+        except (TypeError, ValueError, OverflowError):
+            key = None
+        if key is not None:
+            cache = visibility_tick.setdefault(
+                'player_effective_params', {})
+            cached = cache.get(key)
+            if cached is not None and cached[0] is source:
+                return cached[1]
+    snapshot = effective_params.canonical(source)
     if snapshot is None:
         raise ValueError('player effective parameters are missing or invalid')
+    if cache is not None:
+        cache[key] = (source, snapshot)
     return snapshot
 
 
@@ -3894,12 +3910,12 @@ class BotRuntime(object):
             'validated spawn resolver is missing for team %s slot %s' %
             (team, slot))
 
-    def _spotting_profile(self, target):
+    def _spotting_profile(self, target, tick_cache=None):
         kind = target.get('kind')
         target_id = target.get('network_id', target.get('id', 0))
         dynamic_key = None
         if kind != 'bot':
-            snapshot = _player_effective_params(target)
+            snapshot = _player_effective_params(target, tick_cache)
             dynamic_key, unused_row = _player_dynamic_spotting(
                 snapshot, target)
         key = ((kind, int(target_id)) if kind == 'bot' else
@@ -3913,8 +3929,9 @@ class BotRuntime(object):
             cached = (_base_invisibility(descriptor, profile),
                       _shot_invisibility_factor(descriptor), profile)
         else:
-            vehicle_profile = self._player_vehicle_profile(target)
-            snapshot = _player_effective_params(target)
+            vehicle_profile = self._player_vehicle_profile(
+                target, tick_cache)
+            snapshot = _player_effective_params(target, tick_cache)
             unused_key, dynamic = _player_dynamic_spotting(
                 snapshot, target)
             profile = dict(snapshot['spotting'])
@@ -3950,13 +3967,14 @@ class BotRuntime(object):
         self._vision_ranges[int(bot_id)] = (moving, still, delay)
         return moving
 
-    def _source_view_range(self, source, now):
+    def _source_view_range(self, source, now, tick_cache=None):
         """Return one trusted observer's live #1513 view range."""
         if source.get('kind') == 'human':
             player_id = int(source.get('network_id', source.get('id', 0)))
-            snapshot = _player_effective_params(source)
+            snapshot = _player_effective_params(source, tick_cache)
             profile = snapshot['spotting']
-            descriptor = self._player_vehicle_profile(source)['descriptor']
+            descriptor = self._player_vehicle_profile(
+                source, tick_cache)['descriptor']
             turret = _value(descriptor, 'turret', {}) or {}
             misc = _value(descriptor, 'miscAttrs', {}) or {}
             unused_key, dynamic = _player_dynamic_spotting(snapshot, source)
@@ -4065,7 +4083,7 @@ class BotRuntime(object):
         profile_bundle = (profile_cache.get(identity)
                           if profile_cache is not None else None)
         if profile_bundle is None:
-            profile_bundle = self._spotting_profile(target)
+            profile_bundle = self._spotting_profile(target, tick_cache)
             if profile_cache is not None:
                 profile_cache[identity] = profile_bundle
         token = (_number(now), moving, id(profile_bundle))
@@ -4465,7 +4483,7 @@ class BotRuntime(object):
                 return False
             view_range = (view_range_resolver()
                           if callable(view_range_resolver) else
-                          self._source_view_range(source, now))
+                          self._source_view_range(source, now, tick_cache))
             (base_pair, shot_factor, profile, moving,
              additive, multiplier) = self._target_detection_projection(
                  target, target_id, now, tick_cache)
@@ -4544,7 +4562,8 @@ class BotRuntime(object):
             return 0.0
         return min(spotting.DESIGNATED_SPOT_MEMORY_SECONDS, remaining)
 
-    def _track_human_observer_lifecycle(self, players, now):
+    def _track_human_observer_lifecycle(
+            self, players, now, visibility_tick=None):
         """Open Last Effort only on one observed alive-to-dead edge."""
         present = set()
         for raw in players or ():
@@ -4555,7 +4574,7 @@ class BotRuntime(object):
             alive = bool(raw.get('alive', True))
             previous = self._human_observer_alive.get(player_id)
             if previous is True and not alive:
-                snapshot = _player_effective_params(raw)
+                snapshot = _player_effective_params(raw, visibility_tick)
                 prior = {
                     'critical': self._human_last_alive_critical.get(
                         player_id, {})}
@@ -4629,7 +4648,7 @@ class BotRuntime(object):
         target['network_id'] = player_id
         target['id'] = self._human_planner_id(player_id)
         target['position'] = _position(raw)
-        vehicle_profile = self._player_vehicle_profile(raw)
+        vehicle_profile = self._player_vehicle_profile(raw, tick_cache)
         target['class_tag'] = vehicle_profile['class_tag']
         target['armor'] = vehicle_profile['armor']
         if cache is not None:
@@ -4692,7 +4711,7 @@ class BotRuntime(object):
                 def resolve_source_view_range():
                     if source_view_range[0] is None:
                         source_view_range[0] = self._source_view_range(
-                            source, now)
+                            source, now, visibility_tick)
                     return source_view_range[0]
 
                 direct_targets = set()
@@ -4703,7 +4722,7 @@ class BotRuntime(object):
             else:
                 direct_targets = set()
 
-            snapshot = _player_effective_params(source)
+            snapshot = _player_effective_params(source, visibility_tick)
             for target in targets:
                 if int(target.get('team', 0)) == source_team:
                     continue
@@ -4760,7 +4779,8 @@ class BotRuntime(object):
 
         def resolve_source_view_range():
             if source_view_range[0] is None:
-                source_view_range[0] = self._source_view_range(source, now)
+                source_view_range[0] = self._source_view_range(
+                    source, now, visibility_tick)
             return source_view_range[0]
 
         def retain_team_known_pose(target):
@@ -6182,7 +6202,7 @@ class BotRuntime(object):
             limited <= 0.01 and
             own_speed > TRAFFIC_DIRECTION_SPEED_EPSILON))
 
-    def _player_vehicle_profile(self, raw):
+    def _player_vehicle_profile(self, raw, visibility_tick=None):
         vehicle_name = raw.get('vehicle')
         compact = raw.get('vehicle_compact_descr') or ''
         player_id = raw.get('network_id', raw.get('id'))
@@ -6194,7 +6214,7 @@ class BotRuntime(object):
         cached = self._player_vehicle_profiles.get(cache_key)
         if cached is not None:
             return cached
-        snapshot = _player_effective_params(raw)
+        snapshot = _player_effective_params(raw, visibility_tick)
         descriptor = {}
         tactical = {}
         try:
@@ -8801,7 +8821,11 @@ class BotRuntime(object):
         self._advance_probe_timing(now)
         self._advance_equipment_clock(frame_step)
         players = list(players or [])
-        self._track_human_observer_lifecycle(players, now)
+        # Canonical player mechanics are immutable within this bounded slice.
+        # Keep their source objects alive so every observer shares one result.
+        visibility_tick = {}
+        self._track_human_observer_lifecycle(
+            players, now, visibility_tick)
         live_players = None
         live_probe_targets = {}
         processed_bot_ids = set()
@@ -8841,7 +8865,6 @@ class BotRuntime(object):
         # Source-independent camouflage projections are exact for this bounded
         # simulation slice. Share them across all observers, but never across
         # slices where motion or equipment state may change.
-        visibility_tick = {}
         self._prepare_visibility_frame(
             players, now, collect_observation or refresh_shot_lanes)
         if collect_observation or refresh_shot_lanes:

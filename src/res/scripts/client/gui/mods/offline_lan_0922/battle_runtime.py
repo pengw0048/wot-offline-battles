@@ -18711,14 +18711,14 @@ class BattleRuntime(object):
                 continue
             live_players.add(player_id)
             state = record.get('state') or {}
-            effective = effective_params.canonical(
-                state.get('effective_params'))
-            if effective is None:
-                raise RuntimeError(
-                    'worker player effective parameters are unavailable')
+            effective_source = state.get('effective_params')
             descriptor = entity.typeDescriptor
             gun = self._player_authority_guns.get(player_id)
             if gun is None:
+                effective = effective_params.canonical(effective_source)
+                if effective is None:
+                    raise RuntimeError(
+                        'worker player effective parameters are unavailable')
                 ammo_layout = {}
                 for row in effective['ammo']:
                     if not isinstance(row, (list, tuple)) or len(row) != 2:
@@ -18729,11 +18729,18 @@ class BattleRuntime(object):
                     descriptor, effective['loadout'])
                 gun.bind_client_contract(effective['gun'], ammo_layout)
                 gun._effective_params = effective
+                gun._effective_params_source = effective_source
                 self._player_authority_guns[player_id] = gun
-            else:
+            elif getattr(gun, '_effective_params_source', None) \
+                    is not effective_source:
+                effective = effective_params.canonical(effective_source)
+                if effective is None:
+                    raise RuntimeError(
+                        'worker player effective parameters are unavailable')
                 if getattr(gun, '_effective_params', None) != effective:
                     raise RuntimeError(
                         'worker player effective parameters changed in battle')
+                gun._effective_params_source = effective_source
         if target_player_ids is None:
             for player_id in tuple(self._player_authority_guns):
                 if player_id not in live_players:

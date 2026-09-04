@@ -940,25 +940,82 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(1, client.max_health)
         self.assertEqual(WORKER_AUTHORITY_ID, client.player_id)
 
+        snapshot_human = dict(human)
+        snapshot_human.pop('outfits')
+        snapshot_human.pop('effective_params')
         snapshot = {
             'type': 'snapshot', 'protocol': PROTOCOL_VERSION,
             'round_id': 1, 'server_tick': 0, 'server_time_ms': 12,
             'authority_epoch': 0, 'projectile_revision': 0,
             'bot_state_revision': 0,
             'bot_authority_id': WORKER_AUTHORITY_ID,
-            'bot_manifest': [], 'players': [dict(human)], 'bots': [],
+            'bot_manifest': [], 'players': [snapshot_human], 'bots': [],
             'projectiles': [],
         }
-        client._handle_message(snapshot)
+        with mock.patch.object(
+                lan_client_module.effective_params_wire, 'canonical',
+                wraps=lan_client_module.effective_params_wire.canonical
+        ) as canonical:
+            client._handle_message(snapshot)
+            self.assertEqual(0, canonical.call_count)
+
+            full_snapshot = dict(snapshot)
+            full_snapshot['server_tick'] = 1
+            full_snapshot['server_time_ms'] = 13
+            full_human = dict(human)
+            full_human['effective_params'] = effective_params()
+            full_snapshot['players'] = [full_human]
+            client._handle_message(full_snapshot)
+            self.assertEqual(0, canonical.call_count)
+
+            changed_snapshot = dict(full_snapshot)
+            changed_snapshot['server_tick'] = 2
+            changed_snapshot['server_time_ms'] = 14
+            changed_human = dict(human)
+            changed_params = effective_params()
+            changed_params['physics']['mass'] += 1.0
+            changed_human['effective_params'] = changed_params
+            changed_snapshot['players'] = [changed_human]
+            client._handle_message(changed_snapshot)
+            self.assertEqual(1, canonical.call_count)
 
         self.assertEqual('snapshot', events[-1][0])
         self.assertEqual([1, WORKER_AUTHORITY_ID], [
             value['id'] for value in client.last_snapshot['players']])
+        self.assertEqual(
+            changed_params['physics']['mass'],
+            client._published_player_effective_params[1][
+                'physics']['mass'])
         snapshot_dummy = client.last_snapshot['players'][-1]
         self.assertEqual('germany:G54_E-50', snapshot_dummy['vehicle'])
         self.assertEqual(1, snapshot_dummy['health'])
         self.assertEqual(1, snapshot_dummy['max_health'])
+        self.assertIs(
+            client._published_player_effective_params[WORKER_AUTHORITY_ID],
+            snapshot_dummy['effective_params'])
         self.assertIsNone(client.last_error)
+
+    def test_worker_full_snapshot_cache_hit_requires_exact_scalar_types(self):
+        client = AuthorityWorkerLANClient('127.0.0.1', 28782)
+        client.running = True
+        cached = lan_client_module._canonical_effective_params(
+            effective_params())
+        client._published_player_effective_params[1] = cached
+        client._published_player_effective_param_sources[1] = cached
+        player = _human()
+        malformed = effective_params()
+        malformed['version'] = 1.0
+        player['effective_params'] = malformed
+
+        client._handle_message({
+            'type': 'snapshot',
+            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'players': [player],
+        })
+
+        self.assertFalse(client.running)
+        self.assertEqual(
+            'worker player descriptor is unavailable', client.last_error)
 
     def test_battle_ready_carries_no_dummy_or_participant_identity(self):
         client = AuthorityWorkerLANClient('127.0.0.1', 28782)

@@ -12190,6 +12190,34 @@ class BotRuntimeTests(unittest.TestCase):
                              cached_runtime._visibility_cache)
         self.assertEqual(calls[1], calls[0])
 
+    def test_player_effective_params_are_canonicalized_once_per_tick_source(self):
+        first = _admit_player({'id': 2})
+        second = copy.deepcopy(first)
+        tick_cache = {}
+        calls = []
+        original = self.module.effective_params.canonical
+
+        def canonical(value):
+            calls.append(value)
+            return original(value)
+
+        self.module.effective_params.canonical = canonical
+        try:
+            first_result = self.module._player_effective_params(
+                first, tick_cache)
+            repeated = self.module._player_effective_params(
+                first, tick_cache)
+            second_result = self.module._player_effective_params(
+                second, tick_cache)
+            next_tick = self.module._player_effective_params(first, {})
+        finally:
+            self.module.effective_params.canonical = original
+
+        self.assertIs(first_result, repeated)
+        self.assertEqual(first_result, second_result)
+        self.assertEqual(first_result, next_tick)
+        self.assertEqual(3, len(calls))
+
     def test_contacts_compute_source_view_range_once_per_decision(self):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),

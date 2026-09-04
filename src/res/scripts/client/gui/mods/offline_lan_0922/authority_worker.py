@@ -28,7 +28,6 @@ from gui.mods.offline_lan_0922.lan_client import (
     WORKER_AUTHORITY_ID, LANClient,
     _BOT_STATE_WIRE_FIELDS,
     _canonical_effective_params, _canonical_vehicle_compact_descr,
-    _canonical_wire_outfits,
     _exact_int, _project_human_ram_armors, _projectile_int_range, _safe_text,
     _strict_capabilities, _strict_mapping_list)
 
@@ -426,6 +425,11 @@ class AuthorityWorkerLANClient(LANClient):
         phase = _safe_text(message.get('phase'), '', 16)
         map_name = _safe_text(message.get('map'), '', 80)
         players = _strict_mapping_list(message.get('players'), 64)
+        prepared_players = (
+            self._prepare_player_static_inputs(players)
+            if players is not None else None)
+        if prepared_players is not None:
+            players = prepared_players[0]
         host_player_id = _exact_int(message.get('host_player_id'))
         authority_id = _authority_id(message.get('bot_authority_id'))
         authority_epoch = _projectile_int_range(
@@ -434,17 +438,14 @@ class AuthorityWorkerLANClient(LANClient):
             message.get('server_time_ms'), 0, MAX_PROJECTILE_ID)
         player_ids = set(
             _exact_int(value.get('id')) for value in players or ())
-        outfits_valid = all(
-            _canonical_wire_outfits(value.get('outfits')) is not None
-            for value in players or ())
+        outfits_valid = bool(
+            prepared_players is not None and prepared_players[1])
         compacts_valid = all(
             _canonical_vehicle_compact_descr(
                 value.get('vehicle_compact_descr')) is not None
             for value in players or ())
-        effective_params_valid = all(
-            _canonical_effective_params(
-                value.get('effective_params')) is not None
-            for value in players or ())
+        effective_params_valid = bool(
+            prepared_players is not None and prepared_players[2])
         if (
                 protocol is None or protocol <= 0 or
                 round_id is None or round_id < 0 or
@@ -488,7 +489,7 @@ class AuthorityWorkerLANClient(LANClient):
         maps = self._map_names(message.get('map_pool'))
         if maps:
             self.map_pool = maps
-        self.roster = self._remember_player_outfits(players)
+        self.roster = self._commit_player_static_inputs(prepared_players)
         self.host_player_id = host_player_id
         self.bot_authority_id = authority_id
         self.authority_epoch = authority_epoch
@@ -504,7 +505,7 @@ class AuthorityWorkerLANClient(LANClient):
         self._notify('roster', message)
         return True
 
-    def _dummy_player(self, players):
+    def _dummy_player(self, players, trusted_player_static=None):
         if self._worker_avatar is not None:
             return dict(self._worker_avatar)
         source = None
@@ -517,6 +518,17 @@ class AuthorityWorkerLANClient(LANClient):
                 break
         if source is None:
             raise ValueError('worker round has no real player descriptor')
+        source_id = _exact_int(source.get('id'))
+        params = self._published_player_effective_params.get(source_id)
+        source_params = source.get('effective_params')
+        if source_params is not None and source_params is not params:
+            trusted_params = (
+                trusted_player_static[4].get(source_id)
+                if trusted_player_static is not None else None)
+            params = (source_params if trusted_params is source_params else
+                      _canonical_effective_params(source_params))
+        if params is None:
+            raise ValueError('worker round has no effective parameters')
         dummy = {
             'id': WORKER_AUTHORITY_ID,
             'name': 'SimulationWorker',
@@ -545,10 +557,16 @@ class AuthorityWorkerLANClient(LANClient):
             'equipment_intent_result': dict(
                 source.get('equipment_intent_result') or {}),
             'outfits': {},
-            'effective_params': _canonical_effective_params(
-                source['effective_params']),
+            'effective_params': params,
         }
         self._worker_avatar = dummy
+        self._published_player_outfits[WORKER_AUTHORITY_ID] = \
+            dummy['outfits']
+        self._published_player_outfit_sources[WORKER_AUTHORITY_ID] = \
+            dummy['outfits']
+        self._published_player_effective_params[WORKER_AUTHORITY_ID] = params
+        self._published_player_effective_param_sources[
+            WORKER_AUTHORITY_ID] = params
         self.vehicle = dummy['vehicle']
         self.max_health = 1
         self.team = dummy['team']
@@ -557,15 +575,23 @@ class AuthorityWorkerLANClient(LANClient):
             'yaw': dummy['yaw']}
         return dict(dummy)
 
-    def _project_runtime_message(self, message):
+    def _project_runtime_message(
+            self, message, trusted_player_static=None):
         projected = dict(message)
         players = _strict_mapping_list(message.get('players'), 63)
         if players is None:
             return None
         try:
-            dummy = self._dummy_player(players)
+            dummy = self._dummy_player(
+                players, trusted_player_static=trusted_player_static)
         except (TypeError, ValueError, OverflowError):
             return None
+        if projected.get('type') == 'snapshot':
+            # The carrier's static fields were validated when it was built.
+            # Let the base client restore the exact cached objects just as it
+            # does for lean real-player rows.
+            dummy.pop('outfits', None)
+            dummy.pop('effective_params', None)
         projected['players'] = list(players) + [dummy]
         if projected.get('type') == 'battle_start':
             projected['spawn'] = dict(self.spawn)
@@ -609,8 +635,7 @@ class AuthorityWorkerLANClient(LANClient):
         if not isinstance(player, dict):
             return None
         player_id = _exact_int(player.get('id'))
-        params = _canonical_effective_params(
-            self._published_player_effective_params.get(player_id))
+        params = self._published_player_effective_params.get(player_id)
         if player_id is None or player_id <= 0 or params is None:
             return None
         projected = dict(message)
@@ -623,6 +648,7 @@ class AuthorityWorkerLANClient(LANClient):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
+        trusted_player_static = None
         if kind == 'welcome':
             self._handle_worker_welcome(message)
             return
@@ -638,13 +664,14 @@ class AuthorityWorkerLANClient(LANClient):
         if kind in ('battle_start', 'snapshot'):
             real_players = _strict_mapping_list(
                 message.get('players'), 63)
-            effective_params_valid = all(
-                (_canonical_effective_params(
-                    value.get('effective_params')) is not None
-                 if 'effective_params' in value else
-                 _exact_int(value.get('id')) in
-                 self._published_player_effective_params)
-                for value in real_players or ())
+            prepared_players = (
+                self._prepare_player_static_inputs(
+                    real_players, allow_lean=(kind == 'snapshot'))
+                if real_players is not None else None)
+            if prepared_players is not None:
+                real_players = prepared_players[0]
+            effective_params_valid = bool(
+                prepared_players is not None and prepared_players[2])
             if (real_players is None or not effective_params_valid or any(
                     _canonical_vehicle_compact_descr(
                         value.get('vehicle_compact_descr')) is None
@@ -652,6 +679,9 @@ class AuthorityWorkerLANClient(LANClient):
                 self._invalid_worker_message(
                     'worker player descriptor is unavailable')
                 return
+            message = dict(message)
+            message['players'] = real_players
+            trusted_player_static = prepared_players
         if kind == 'battle_start':
             message = self._refresh_stale_battle_start(message)
             if message is None:
@@ -665,13 +695,15 @@ class AuthorityWorkerLANClient(LANClient):
                     'worker player effective parameters are unavailable')
                 return
         if kind in ('battle_start', 'snapshot'):
-            projected = self._project_runtime_message(message)
+            projected = self._project_runtime_message(
+                message, trusted_player_static=trusted_player_static)
             if projected is None:
                 self._invalid_worker_message(
                     'worker runtime projection is unavailable')
                 return
             message = projected
-        LANClient._handle_message(self, message)
+        LANClient._handle_message(
+            self, message, trusted_player_static=trusted_player_static)
 
 
 class _WorldDrawLease(object):
