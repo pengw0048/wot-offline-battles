@@ -464,6 +464,9 @@ EXPECTED_ABI = {
         'PlayerAvatar.autoAim': ('self', 'target'),
         'PlayerAvatar.targetFocus': ('self', 'entity'),
         'PlayerAvatar.targetBlur': ('self', 'prevEntity'),
+        'PlayerAvatar.showTracer': (
+            'self', 'shooterID', 'shotID', 'isRicochet', 'effectsIndex',
+            'refStartPoint', 'velocity', 'gravity', 'maxShotDist'),
         'PlayerAvatar.shoot': ('self', 'isRepeat'),
         'PlayerAvatar.__isOwnVehicleSwitchingSiegeMode': ('self',),
         'PlayerAvatar.cancelWaitingForShot': ('self',),
@@ -534,6 +537,9 @@ EXPECTED_ABI = {
         '_Targeting.getTargetEntity': ('self',),
         '_Targeting.enable': ('self', 'flag'),
         '_Targeting.onRecreateDevice': ('self',),
+    },
+    'scripts/client/AvatarInputHandler/cameras.pyc': {
+        'isPointOnScreen': ('point',),
     },
     'scripts/client/AvatarInputHandler/commands/siege_mode_control.pyc': {
         'SiegeModeControl.handleKeyEvent': (
@@ -945,6 +951,7 @@ EXPECTED_CODE_LITERALS = {
     'scripts/client/Avatar.pyc': {
         'PlayerAvatar.__onSetOwnVehicleAuxPhysicsData': (
             'syncStabilisedYPR',),
+        'PlayerAvatar.showTracer': ('HP_gunFire',),
     },
     'scripts/client/gui/Scaleform/daapi/view/battle/shared/markers2d/'
     'plugins.pyc': {
@@ -1154,6 +1161,10 @@ EXPECTED_CODE_NAMES = {
             'setTargetInFocus', 'removeEdge', 'target',
             'TriggersManager', 'g_manager', 'deactivateTrigger',
             'TRIGGER_TYPE', 'AIM_AT_VEHICLE'),
+        'PlayerAvatar.showTracer': (
+            'BigWorld', 'entity', 'isStarted', 'Math', 'Matrix',
+            'cameras', 'isPointOnScreen', 'appearance', 'compoundModel',
+            'node', 'translation', '_PlayerAvatar__projectileMover', 'add'),
         'PlayerAvatar.shoot': (
             'base', 'vehicle_shoot', '_PlayerAvatar__startWaitingForShot',
             '_PlayerAvatar__isOwnVehicleSwitchingSiegeMode'),
@@ -1354,9 +1365,10 @@ EXPECTED_CODE_NAMES = {
     },
     'scripts/client/ProjectileMover.pyc': {
         'ProjectileMover.add': (
-            'salvo', 'addProjectile', '_ProjectileMover__ballistics', 'BigWorld',
-            'Model', 'player', 'addModel', 'addMotor', 'visible',
-            'visibleAttachments', 'attachTo', 'FlockManager',
+            'distTo', '_ProjectileMover__START_POINT_MAX_DIFF',
+            'salvo', 'addProjectile', '_ProjectileMover__ballistics',
+            'BigWorld', 'Model', 'player', 'addModel', 'addMotor',
+            'visible', 'visibleAttachments', 'attachTo', 'FlockManager',
             'getManager', 'onProjectile'),
         'ProjectileMover.explode': (
             'TriggersManager', 'g_manager', 'fireTrigger', 'TRIGGER_TYPE',
@@ -1957,6 +1969,7 @@ EXPECTED_CLASS_CONSTANTS = {
     },
     'scripts/client/ProjectileMover.pyc': {
         'ProjectileMover': {
+            '_ProjectileMover__START_POINT_MAX_DIFF': 20,
             '_ProjectileMover__PROJECTILE_TIME_AFTER_DEATH': 2.0,
         },
     },
@@ -2152,6 +2165,41 @@ EXPECTED_ORDERED_INSTRUCTION_PATTERNS = {
             )),
     },
     'scripts/client/Avatar.pyc': {
+        'PlayerAvatar.showTracer': (
+            'visible non-ricochet uses the current on-screen muzzle', 10, (
+                ('LOAD_FAST', 'value', 'refStartPoint'),
+                ('STORE_FAST', 'value', 'startPoint'),
+                ('LOAD_FAST', 'value', 'isRicochet'),
+                ('UNARY_NOT', None, None),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'shooter'),
+                ('LOAD_CONST', 'value', None),
+                ('COMPARE_OP', 'argument', 9),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'shooter'),
+                ('LOAD_ATTR', 'value', 'isStarted'),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_GLOBAL', 'value', 'Math'),
+                ('LOAD_ATTR', 'value', 'Matrix'),
+                ('LOAD_FAST', 'value', 'shooter'),
+                ('LOAD_ATTR', 'value', 'appearance'),
+                ('LOAD_ATTR', 'value', 'compoundModel'),
+                ('LOAD_ATTR', 'value', 'node'),
+                ('LOAD_CONST', 'value', 'HP_gunFire'),
+                ('CALL_FUNCTION', 'argument', 1),
+                ('CALL_FUNCTION', 'argument', 1),
+                ('STORE_FAST', 'value', 'gunMatrix'),
+                ('LOAD_FAST', 'value', 'gunMatrix'),
+                ('LOAD_ATTR', 'value', 'translation'),
+                ('STORE_FAST', 'value', 'gunFirePos'),
+                ('LOAD_GLOBAL', 'value', 'cameras'),
+                ('LOAD_ATTR', 'value', 'isPointOnScreen'),
+                ('LOAD_FAST', 'value', 'gunFirePos'),
+                ('CALL_FUNCTION', 'argument', 1),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'gunFirePos'),
+                ('STORE_FAST', 'value', 'startPoint'),
+            )),
         'PlayerAvatar.handleVehicleCollidedVehicle': (
             'vehicle collision uses full relative Vector3 speed', 5, (
                 ('LOAD_CONST', 'value', 0.2),
@@ -2166,6 +2214,22 @@ EXPECTED_ORDERED_INSTRUCTION_PATTERNS = {
                 ('BINARY_SUBTRACT', None, None),
                 ('LOAD_ATTR', 'value', 'length'),
                 ('STORE_FAST', 'value', 'vehSpeedSum'),
+            )),
+    },
+    'scripts/client/ProjectileMover.pyc': {
+        'ProjectileMover.add': (
+            'visual start falls back to the reference beyond 20 metres', 2, (
+                ('LOAD_FAST', 'value', 'startPoint'),
+                ('LOAD_ATTR', 'value', 'distTo'),
+                ('LOAD_FAST', 'value', 'refStartPoint'),
+                ('CALL_FUNCTION', 'argument', 1),
+                ('LOAD_GLOBAL', 'value', 'ProjectileMover'),
+                ('LOAD_ATTR', 'value',
+                 '_ProjectileMover__START_POINT_MAX_DIFF'),
+                ('COMPARE_OP', 'argument', 4),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'refStartPoint'),
+                ('STORE_FAST', 'value', 'startPoint'),
             )),
     },
     'scripts/client/AreaDestructibles.pyc': {
