@@ -1,15 +1,11 @@
 # These law ports intentionally preserve source whitespace because the
 # executable provenance audit compares their copied 0.8.2 blocks exactly.
-0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/combat_rules.py -whitespace
-0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/destructibles_authority.py -whitespace
-0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/destructibles_sensor.py -whitespace
-0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/vehicle_physics.py -whitespace
-0.9.22/src/res/scripts/client/gui/mods/offline_lan_0922/world_collision.py -whitespace
+src/res/scripts/client/gui/mods/offline_lan_0922/combat_rules.py -whitespace
+src/res/scripts/client/gui/mods/offline_lan_0922/destructibles_authority.py -whitespace
+src/res/scripts/client/gui/mods/offline_lan_0922/destructibles_sensor.py -whitespace
+src/res/scripts/client/gui/mods/offline_lan_0922/vehicle_physics.py -whitespace
+src/res/scripts/client/gui/mods/offline_lan_0922/world_collision.py -whitespace
 
 # Navigation manifests hash the exact LF-normalized JSON payload.  Prevent a
 # Windows checkout from rewriting the final newline before PyInstaller embeds it.
-0.8.2/scripts/client/gui/mods/offhangar/navgraphs/*.json -text
-
-# The 0.8.2 client sources keep the CRLF endings the legacy client shipped, so
-# a carriage return at the end of a line is not trailing whitespace there.
-0.8.2/scripts/**/*.py whitespace=cr-at-eol
+navgraphs/*.json -text

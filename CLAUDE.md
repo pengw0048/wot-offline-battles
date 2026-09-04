@@ -3,9 +3,7 @@
 This file is the single source of truth for repository-wide agent guidance.
 `AGENTS.md` is a symlink to this file so tools that discover either filename
 receive the same instructions. Do not duplicate or independently edit the
-symlink target. Read this file before changing the repository. When working
-under a client version, also read its version-local guide before investigating
-or editing that implementation: `0.8.2/CLAUDE.md` or `0.9.22/CLAUDE.md`.
+symlink target. Read this file before investigating or changing the repository.
 
 ## Working with Peng
 
@@ -61,23 +59,19 @@ Do not use destructive Git commands to clean up work that you did not create.
 Generated `__pycache__`, `.pyc`, `.pyo`, logs, and release output should not be
 committed; remove only exact generated targets after verifying what they are.
 
-## Keep the two client lines separate
+## Supported target and repository layout
 
-- `0.8.2/` targets its own client and Python 2.6 runtime. Its code, package,
-  tests, and native-physics boundary are version-local. Follow
-  `0.8.2/CLAUDE.md` for its legacy-runtime, collision, streaming, and package
-  workflow.
-- `0.9.22/` targets only Chinese HD client `0.9.22.0.1 #1513`, x86, with an
-  embedded Python 2.7 runtime. Follow `0.9.22/CLAUDE.md` for its exact-client
-  workflow.
-- Do not transplant PYC files, private names, entity schemas, native offsets,
-  map parsers, or lifecycle assumptions across versions. Reuse gameplay law
-  only after proving the target adapter.
-- `ports/0.9.22` is a retired path. The live port is the top-level `0.9.22/`
-  directory.
-- Current desktop-launcher releases contain only 0.9.22. Keep 0.8.2 and Map
-  Studio as separate work and separate artifacts unless Peng explicitly
-  changes that packaging decision.
+- The only supported client is Chinese HD `0.9.22.0.1 #1513`, 32-bit x86,
+  with an embedded CPython 2.7.7 runtime.
+- The live implementation is at the repository root: `src/`, `server/`,
+  `tests/`, `tools/`, `navgraphs/`, `foliage/`, and `destructibles/`. Paths
+  such as `0.8.2/`, `0.9.22/`, and `ports/0.9.22/` are retired and must not be
+  restored.
+- The launcher, server, tests, and package build support only this exact client.
+  Do not add compatibility machinery for another client without an explicit
+  product decision from Peng.
+- Historical references to 0.8.2 describe provenance of retained gameplay
+  laws, not a supported runtime, package, source tree, or protocol peer.
 
 ## Evidence ladder
 
@@ -101,7 +95,89 @@ For example, a Python unit test can prove that a native call is made with the
 reviewed arguments. It cannot prove that the native implementation renders,
 owns memory safely, or feels identical to retail.
 
-## Current 0.9.22 operating model
+## Exact-client investigation and Python boundary
+
+Use an environment variable rather than embedding a developer path:
+
+```bash
+export WOT_0922_CLIENT=/path/to/World_of_Tanks_0.09.22.00.01_CH_1513_HD
+export PYTHONDONTWRITEBYTECODE=1
+python3 tools/inspect_client.py "$WOT_0922_CLIENT"
+```
+
+The pinned compatible build/audit interpreter is CPython 2.7.18. It reads the
+same Python 2.7 PYC format, but it is not the embedded 2.7.7 game runtime. On
+Peng's Mac, resolve it through pyenv when available:
+
+```bash
+PY27="$(PYENV_VERSION=2.7.18 pyenv which python2.7)"
+"$PY27" --version
+```
+
+- Run `tools/inspect_client.py` before drawing conclusions from a client. It
+  checks the regional build, x86 executable, mod paths, representative PYC
+  magic, entity definitions, required assets, and reviewed native method table.
+  Public source or a differently numbered regional build is a lead, not #1513
+  contract evidence.
+- Read the exact Python client modules from `res/packages/scripts.pkg` with a
+  Python 2.7 interpreter. Its PYC code object begins after the eight-byte
+  header. Inspect the producer and every direct consumer, including call and
+  unpack widths, guards, cleanup, and private-name ownership. A decompiler is
+  orientation, not the contract.
+- A packed XML field is not runtime truth until the exact #1513 reader assigns
+  or forwards it and a runtime consumer uses it. `tools/packed_xml.py` is a
+  library parser, not a client-data inspector by itself.
+- Native symbols prove only that an exposed name exists. They do not prove
+  units, ownership, callback timing, memory safety, or C++ behavior. Use exact
+  Windows runtime evidence, and collect a dump for native crashes.
+- For a new BigWorld dependency, verify the exact archive member, signature,
+  return/sentinel/exception shape, producer-consumer schema, lifecycle guards,
+  asynchronous completion, ownership, idempotence, failure behavior, and
+  teardown order. Encode stable contracts in focused ABI/lifecycle audits.
+- Test fakes must reproduce the native guards relevant to the bug. A fake that
+  always succeeds can hide an initialization-order failure.
+
+Client code below `src/res/scripts/client/` must parse and run on Python 2.7.
+Avoid annotations, f-strings, keyword-only arguments, `pathlib`, ordered-dict
+dependence, and implicit text/bytes assumptions. Compile it without writing
+adjacent bytecode:
+
+```bash
+"$PY27" - <<'PY'
+from __future__ import print_function
+import os
+
+root = 'src/res/scripts/client'
+paths = sorted(os.path.join(base, name)
+               for base, unused_dirs, files in os.walk(root)
+               for name in files if name.endswith('.py'))
+for path in paths:
+    compile(open(path, 'rb').read(), path, 'exec')
+print('CPython 2.7 source compile passed: %d files' % len(paths))
+PY
+```
+
+The server and tests use Python 3. Keep protocol payloads plain JSON so neither
+runtime depends on the other's object model. Run resource bakers into a
+temporary output and diff it before replacing tracked catalogs.
+
+## BigWorld lifecycle and ownership
+
+- Account, lobby, space load, entity `onEnterWorld`, Avatar promotion, arena
+  period, GUI readiness, and teardown order are part of the ABI and may
+  overwrite earlier state.
+- A native creation call may synchronously re-enter Python. Install identity
+  tokens and minimum callback-visible state before making it.
+- Apply a native fix at the last stable owner, then prove no later stock
+  callback resets it. Keep adapters narrow, reversible, and fenced by current
+  entity and round identity.
+- Do not fabricate a physical result when a descriptor, native node, collision
+  body, or resource is missing. Contain the operation, publish its terminal
+  outcome, and preserve coherent shared state.
+- Every scheduled callback must validate battle, round, and entity identity.
+  Cleanup must be harmless after partial startup and safe to call twice.
+
+## Current operating model
 
 - Every room has one mandatory hidden native worker. The only simulation path
   is `visible client -> LAN server -> hidden worker -> LAN server -> replicas`.
@@ -188,6 +264,20 @@ owns memory safely, or feels identical to retail.
   canonical event. Do not stop or rewind the tank while waiting. Real walls
   and unidentified objects must continue to block.
 
+### Performance investigations
+
+- Start from captured `PERF` stage timing and a reproducible scene. Separate
+  render-frame time, networking, Bot update/publication, presentation, native
+  queries, and projectile terminal work.
+- Measure feedback loops, queue age, retries, reuse, and fairness. A low frame
+  rate can shrink a per-frame probe budget, defer motion receipts, and make
+  traffic progressively worse.
+- Prefer removing unread state, reusing geometrically valid receipts,
+  distributing bounded work fairly, and reducing redundant candidates before
+  changing cadence or safety budgets.
+- Do not reduce projectile or collision safety to improve a microbenchmark.
+  Exact Windows frame pacing is the performance acceptance boundary.
+
 ## Canonical documentation
 
 Keep the documentation small. These files have owners; do not duplicate them:
@@ -195,10 +285,8 @@ Keep the documentation small. These files have owners; do not duplicate them:
 - Root `CLAUDE.md`: repository-wide agent guidance; `AGENTS.md` only links to
   it.
 - Root `README.md`: what the project is, how a player runs it, how to build it.
-- `0.8.2/CLAUDE.md` and `0.9.22/CLAUDE.md`: version-local technical guidance
-  that supplements this file without redefining repository-wide policy.
-- `0.9.22/INSTALL.txt`: what the 0.9.22 package contains and how to play.
-- `0.9.22/COMPATIBILITY_REVIEW.md`: exact-client interfaces and lifecycle
+- Root `INSTALL.txt`: what the client package contains and how to play.
+- Root `COMPATIBILITY_REVIEW.md`: exact-client interfaces and lifecycle
   evidence for the #1513 port.
 - `launcher/LAUNCHER_README.txt`: the text shipped inside the launcher
   download, including the bundled-runtime licenses.

@@ -92,16 +92,6 @@ class GameRootTest(unittest.TestCase):
         self._write("version.xml", "<version> v.0.9.22.1 #1513 </version>")
         self.assertEqual(core.PORT_0_9_22, core.detect_port(self.root))
 
-    def test_installed_mod_does_not_identify_a_client_without_version_xml(self):
-        self._write(os.path.join(
-            "res_mods", "0.8.2", "scripts", "client", "gui", "mods",
-            "offhangar", "__init__.py"))
-        self.assertIsNone(core.read_client_version(self.root))
-        self.assertIsNone(core.detect_port(self.root))
-        status = core.inspect_game_root(self.root)
-        self.assertIsNone(status["client"])
-        self.assertFalse(status["mod_installed"])
-
     def test_unsupported_client_reports_no_port(self):
         self._write("version.xml", "<version> v.1.0.0 #1 </version>")
         self._write(
@@ -131,14 +121,7 @@ class GameRootTest(unittest.TestCase):
         os.makedirs(os.path.join(self.root, "mods", "0.9.22.0.1"))
         self.assertIsNone(core.installed_port(self.root))
 
-    def test_0_8_2_is_not_a_supported_client(self):
-        self._write("version.xml", "<version> v.0.8.2 #100 </version>")
-        status = core.inspect_game_root(self.root)
-        self.assertFalse(status["has_executable"])
-        self.assertFalse(status["mod_installed"])
-        self.assertIsNone(status["client"])
-
-    def test_an_old_0_8_2_install_marker_does_not_restore_support(self):
+    def test_0_8_2_and_its_old_install_marker_are_not_supported(self):
         self._write("version.xml", "<version> v.0.8.2 #100 </version>")
         self._write(core.GAME_EXECUTABLE)
         self._write(os.path.join(
@@ -223,13 +206,6 @@ class SessionPlanTest(unittest.TestCase):
                     self._status(), core.MODE_JOIN, "10.0.0.5",
                     preferred_team=value)
 
-    def test_0_8_2_session_is_refused(self):
-        with self.assertRaisesRegex(
-                core.LauncherError, "not supported"):
-            core.plan_session(
-                self._status(client=core.PORT_0_8_2, version="0.8.2"),
-                core.MODE_SINGLE)
-
     def test_a_missing_executable_stops_the_session(self):
         self.assertRaises(core.LauncherError, core.plan_session,
                           self._status(has_executable=False), core.MODE_SINGLE)
@@ -260,29 +236,6 @@ class SettingsFileTest(unittest.TestCase):
     def _read(self, relative_path):
         with open(os.path.join(self.root, relative_path), "rb") as stream:
             return json.load(stream)
-
-    def test_0_8_2_join_enables_network_mode_and_keeps_other_keys(self):
-        path = os.path.join(self.root, "offhangar_user", "config.json")
-        os.makedirs(os.path.dirname(path))
-        with open(path, "w") as stream:
-            json.dump({"bots_per_team": 7, "network_mode": False}, stream)
-        core.write_settings(self.root, core.PORT_0_8_2, core.MODE_JOIN,
-                            "10.0.0.5", 1234, "Peng")
-        config = self._read(os.path.join("offhangar_user", "config.json"))
-        self.assertEqual(config["bots_per_team"], 7)
-        self.assertTrue(config["network_mode"])
-        self.assertEqual(config["network_server_host"], "10.0.0.5")
-        self.assertEqual(config["network_server_port"], 1234)
-        self.assertEqual(config["network_map_name"], "server_random")
-        self.assertEqual(config["nickname"], "Peng")
-
-    def test_0_8_2_single_player_still_plays_against_the_server(self):
-        core.write_settings(self.root, core.PORT_0_8_2, core.MODE_SINGLE,
-                            core.LOCAL_HOST, core.DEFAULT_SERVER_PORT)
-        config = self._read(os.path.join("offhangar_user", "config.json"))
-        self.assertTrue(config["network_mode"])
-        self.assertEqual(config["network_server_host"], core.LOCAL_HOST)
-        self.assertNotIn("nickname", config)
 
     def test_0_9_22_writes_the_user_owned_endpoint(self):
         written = core.write_settings(self.root, core.PORT_0_9_22,
@@ -586,17 +539,12 @@ class ServerPayloadTest(unittest.TestCase):
             os.path.join(os.path.dirname(core.__file__), "server.log"),
             core.server_log_path(frozen=False))
 
-    def test_repository_layout_resolves_both_servers(self):
-        base = core.server_root()
-        self.assertTrue(os.path.isfile(core.server_script(core.PORT_0_8_2,
-                                                          base)))
-        self.assertTrue(os.path.isfile(core.server_script(core.PORT_0_9_22,
-                                                          base)))
-
-    def test_0_8_2_server_receives_bind_arguments(self):
-        argv = core.server_argv(core.PORT_0_8_2, "/payload")
-        self.assertEqual(argv[1:], ["--host", core.LISTEN_HOST, "--port",
-                                    str(core.DEFAULT_SERVER_PORT)])
+    def test_repository_layout_resolves_the_server(self):
+        script = core.server_script(core.PORT_0_9_22)
+        self.assertTrue(os.path.isfile(script))
+        self.assertEqual(
+            os.path.join(core.repository_root(), "server", "windows_server.py"),
+            script)
 
     def test_0_9_22_server_binds_without_arguments(self):
         argv = core.server_argv(core.PORT_0_9_22, "/payload")
@@ -604,9 +552,9 @@ class ServerPayloadTest(unittest.TestCase):
 
     def test_frozen_command_reruns_the_launcher_executable(self):
         command = core.server_child_command(
-            core.PORT_0_8_2, executable="C:\\launcher.exe", frozen=True)
+            core.PORT_0_9_22, executable="C:\\launcher.exe", frozen=True)
         self.assertEqual(command, ["C:\\launcher.exe", core.SERVE_FLAG,
-                                   core.PORT_0_8_2])
+                                   core.PORT_0_9_22])
 
     def test_source_command_passes_the_launcher_script(self):
         command = core.server_child_command(
@@ -617,15 +565,11 @@ class ServerPayloadTest(unittest.TestCase):
                                    core.SERVE_FLAG, core.PORT_0_9_22])
 
     def test_server_environment_keeps_only_live_server_inputs(self):
-        environment = core.server_environment(core.PORT_0_8_2, "/game", {})
-        self.assertTrue(environment[core.NAVGRAPH_DIR_ENV].endswith("navgraphs"))
-        self.assertIn("/game", environment[core.NAVGRAPH_DIR_ENV])
         environment = core.server_environment(core.PORT_0_9_22, "/game", {})
         self.assertEqual(
             str(core.DEFAULT_TEAM_SIZE),
             environment[core.SERVER_TEAM_SIZE_ENV_0922])
         self.assertEqual("[]", environment[core.SERVER_BOT_LINEUP_ENV_0922])
-        self.assertNotIn(core.NAVGRAPH_DIR_ENV, environment)
 
     def test_server_and_clients_receive_the_bundled_diagnostic_identity(self):
         identity = {
@@ -747,7 +691,7 @@ class ServerPayloadTest(unittest.TestCase):
 
     def test_missing_payload_reports_a_launcher_error(self):
         self.assertRaises(core.LauncherError, core.run_server_payload,
-                          core.PORT_0_8_2, tempfile.mkdtemp())
+                          core.PORT_0_9_22, tempfile.mkdtemp())
 
 
 class ClientInstallTest(unittest.TestCase):
@@ -780,22 +724,6 @@ class ClientInstallTest(unittest.TestCase):
             for member, content in members.items():
                 archive.writestr(member, content)
         return path
-
-    def _stage_0_8_2(self, content="new"):
-        members = {
-            "res_mods/0.8.2/scripts/client/CameraNode.pyc": content,
-            "res_mods/0.8.2/scripts/client/gui/mods/mod_offhangar.py": content,
-            "res_mods/0.8.2/gui/maps/icons/offhangar/pixel.dds": content,
-        }
-        records = []
-        data_root = (
-            "res_mods/0.8.2/scripts/client/gui/mods/offhangar/navgraphs")
-        for index in range(33):
-            filename = "map-%02d.json" % index
-            records.append({"file": filename})
-            members["%s/%s" % (data_root, filename)] = content
-        members["%s/manifest.json" % data_root] = json.dumps({"maps": records})
-        return self._archive("0.8.2", members)
 
     def _stage_0_9_22(self, content="new", build_identity="test-build-a"):
         members = {
@@ -840,31 +768,6 @@ class ClientInstallTest(unittest.TestCase):
         with open(path, "wb") as stream:
             stream.write(preferences_overlay.packed_xml.write_packed_xml(
                 engine_config))
-
-    def test_0_8_2_install_replaces_the_whole_mod_directory(self):
-        self._stage_0_8_2()
-        self._write(self.game, "res_mods/0.8.2/leftover.txt", "stale")
-        actions = core.install_client_mod(self.game, core.PORT_0_8_2,
-                                          self.payload)
-        self.assertFalse(os.path.exists(
-            os.path.join(self.game, "res_mods", "0.8.2", "leftover.txt")))
-        self.assertEqual("new", self._read(
-            "res_mods/0.8.2/scripts/client/gui/mods/mod_offhangar.py"))
-        self.assertTrue(any("Replaced the old" in action
-                            for action in actions))
-
-    def test_0_8_2_install_carries_the_loader_bytecode(self):
-        self._stage_0_8_2()
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        self.assertTrue(os.path.isfile(os.path.join(
-            self.game, "res_mods", "0.8.2", "scripts", "client",
-            "CameraNode.pyc")))
-
-    def test_0_8_2_install_keeps_the_user_directory(self):
-        self._stage_0_8_2()
-        self._write(self.game, "offhangar_user/config.json", "mine")
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        self.assertEqual("mine", self._read("offhangar_user/config.json"))
 
     def test_0_9_22_install_replaces_old_packages_and_data(self):
         self._stage_0_9_22()
@@ -1176,17 +1079,6 @@ class ClientInstallTest(unittest.TestCase):
             self.assertEqual("saved-" + name,
                              self._read(state_root + name))
 
-    def test_the_same_package_is_not_installed_twice(self):
-        self._stage_0_8_2()
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        self._write(self.game, "res_mods/0.8.2/leftover.txt", "kept")
-
-        actions = core.install_client_mod(self.game, core.PORT_0_8_2,
-                                          self.payload)
-
-        self.assertEqual(["The 0.8.2 mod is already up to date."], actions)
-        self.assertEqual("kept", self._read("res_mods/0.8.2/leftover.txt"))
-
     def test_same_semantic_version_with_a_new_build_identity_reinstalls(self):
         package = (
             "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod")
@@ -1241,20 +1133,6 @@ class ClientInstallTest(unittest.TestCase):
 
         actions = core.install_client_mod(
             self.game, core.PORT_0_9_22, self.payload)
-
-        self.assertTrue(os.path.isfile(map_path))
-        self.assertNotIn("already up to date", " ".join(actions))
-
-    def test_a_missing_0_8_2_navgraph_forces_a_reinstall(self):
-        self._stage_0_8_2()
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        map_path = os.path.join(
-            self.game, "res_mods", "0.8.2", "scripts", "client", "gui",
-            "mods", "offhangar", "navgraphs", "map-17.json")
-        os.unlink(map_path)
-
-        actions = core.install_client_mod(
-            self.game, core.PORT_0_8_2, self.payload)
 
         self.assertTrue(os.path.isfile(map_path))
         self.assertNotIn("already up to date", " ".join(actions))
@@ -1339,58 +1217,36 @@ class ClientInstallTest(unittest.TestCase):
         self.assertIn("build identity is unavailable", " ".join(actions))
         self.assertIn("Install decision: reinstall", " ".join(actions))
 
-    def test_an_0_8_2_archive_missing_a_navgraph_is_rejected(self):
-        archive_path = self._stage_0_8_2()
-        missing = (
-            "res_mods/0.8.2/scripts/client/gui/mods/offhangar/navgraphs/"
-            "map-17.json")
-        with zipfile.ZipFile(archive_path, "r") as archive:
-            members = {name: archive.read(name)
-                       for name in archive.namelist() if name != missing}
-        self._archive(core.PORT_0_8_2, members)
-
-        self.assertRaises(core.LauncherError, core.install_client_mod,
-                          self.game, core.PORT_0_8_2, self.payload)
-
-    def test_a_new_package_replaces_the_installed_one(self):
-        self._stage_0_8_2()
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        self._stage_0_8_2(content="newer")
-
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-
-        self.assertEqual("newer", self._read(
-            "res_mods/0.8.2/scripts/client/gui/mods/mod_offhangar.py"))
-
     def test_a_forced_install_ignores_the_marker(self):
-        self._stage_0_8_2()
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload)
-        self._write(self.game, "res_mods/0.8.2/leftover.txt", "stale")
+        self._stage_0_9_22()
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
+        stale = "mods/configs/offline_lan_0922/navgraphs/stale.json"
+        self._write(self.game, stale, "stale")
 
-        core.install_client_mod(self.game, core.PORT_0_8_2, self.payload,
+        core.install_client_mod(self.game, core.PORT_0_9_22, self.payload,
                                 force=True)
 
-        self.assertFalse(os.path.exists(
-            os.path.join(self.game, "res_mods", "0.8.2", "leftover.txt")))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.game, *stale.split("/"))))
 
     def test_a_launcher_without_mod_files_reports_it(self):
         self.assertRaises(core.LauncherError, core.install_client_mod,
-                          self.game, core.PORT_0_8_2, self.payload)
+                          self.game, core.PORT_0_9_22, self.payload)
 
     def test_a_member_outside_the_game_folder_is_refused(self):
-        self._archive("0.8.2", {"../escape.txt": "no"})
+        self._archive(core.PORT_0_9_22, {"../escape.txt": "no"})
         self.assertRaises(core.LauncherError, core.install_client_mod,
-                          self.game, core.PORT_0_8_2, self.payload)
+                          self.game, core.PORT_0_9_22, self.payload)
 
     def test_an_unexpected_payload_file_type_is_refused(self):
-        archive_path = self._stage_0_8_2()
+        archive_path = self._stage_0_9_22()
         with zipfile.ZipFile(archive_path, "r") as archive:
             members = {name: archive.read(name)
                        for name in archive.namelist()}
-        members["res_mods/0.8.2/scripts/client/development.exe"] = "no"
-        self._archive(core.PORT_0_8_2, members)
+        members["mods/configs/offline_lan_0922/development.py"] = "no"
+        self._archive(core.PORT_0_9_22, members)
         self.assertRaises(core.LauncherError, core.install_client_mod,
-                          self.game, core.PORT_0_8_2, self.payload)
+                          self.game, core.PORT_0_9_22, self.payload)
 
     def test_an_unrelated_0_9_22_mod_is_not_installed_from_the_payload(self):
         archive_path = self._stage_0_9_22()
@@ -1403,44 +1259,44 @@ class ClientInstallTest(unittest.TestCase):
                           self.game, core.PORT_0_9_22, self.payload)
 
     def test_an_invalid_archive_does_not_remove_the_previous_mod(self):
-        self._archive("0.8.2", {
-            "res_mods/0.8.2/scripts/client/CameraNode.pyc": "new",
-            "../escape.txt": "no",
-        })
-        self._write(self.game, "res_mods/0.8.2/previous.txt", "previous")
+        self._archive(core.PORT_0_9_22, {"../escape.txt": "no"})
+        previous = (
+            "mods/0.9.22.0.1/org.peng.offline_lan_0922_old.wotmod")
+        self._write(self.game, previous, "previous")
 
         self.assertRaises(core.LauncherError, core.install_client_mod,
-                          self.game, core.PORT_0_8_2, self.payload)
+                          self.game, core.PORT_0_9_22, self.payload)
 
-        self.assertEqual("previous",
-                         self._read("res_mods/0.8.2/previous.txt"))
+        self.assertEqual("previous", self._read(previous))
 
     def test_a_failed_atomic_swap_restores_the_previous_mod(self):
-        self._stage_0_8_2()
-        self._write(self.game, "res_mods/0.8.2/previous.txt", "previous")
+        self._stage_0_9_22()
+        previous = (
+            "mods/configs/offline_lan_0922/navgraphs/previous.txt")
+        self._write(self.game, previous, "previous")
         original_replace = os.replace
 
         def replace(source, target):
             normalized = source.replace("\\", "/")
             if ("/.wot-offline-install-" in normalized and
-                    "/new/res_mods/0.8.2" in normalized):
+                    "/new/mods/configs/offline_lan_0922/navgraphs" in
+                    normalized):
                 raise OSError("synthetic install failure")
             return original_replace(source, target)
 
         with mock.patch("core.os.replace", side_effect=replace):
             self.assertRaises(core.LauncherError, core.install_client_mod,
-                              self.game, core.PORT_0_8_2, self.payload)
+                              self.game, core.PORT_0_9_22, self.payload)
 
-        self.assertEqual("previous",
-                         self._read("res_mods/0.8.2/previous.txt"))
+        self.assertEqual("previous", self._read(previous))
 
     def test_an_unwritable_game_folder_reports_a_permission_remedy(self):
-        self._stage_0_8_2()
+        self._stage_0_9_22()
         with mock.patch("tempfile.mkdtemp",
                         side_effect=PermissionError("access denied")):
             with self.assertRaises(core.LauncherError) as caught:
                 core.install_client_mod(
-                    self.game, core.PORT_0_8_2, self.payload)
+                    self.game, core.PORT_0_9_22, self.payload)
         self.assertIn("not writable", str(caught.exception))
         self.assertIn("permission", str(caught.exception))
 
@@ -1451,21 +1307,6 @@ class PayloadStagingTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, os.path.dirname(self.root), True)
         self.written = stage_payload.stage(self.root, include_clients=False)
         self.target = os.path.join(self.root, stage_payload.SERVER_DIR)
-
-    @staticmethod
-    def _write_0_8_2_navgraphs(source):
-        data_root = os.path.join(
-            source, "0.8.2", "scripts", "client", "gui", "mods",
-            "offhangar", "navgraphs")
-        os.makedirs(data_root)
-        records = []
-        for index in range(33):
-            filename = "map-%02d.json" % index
-            records.append({"file": filename})
-            with open(os.path.join(data_root, filename), "w") as stream:
-                stream.write("{}")
-        with open(os.path.join(data_root, "manifest.json"), "w") as stream:
-            json.dump({"maps": records}, stream)
 
     @staticmethod
     def _write_0_9_22_data(overlay):
@@ -1504,19 +1345,15 @@ class PayloadStagingTest(unittest.TestCase):
             self.assertTrue(
                 os.path.isfile(core.server_script(port_version, self.target)),
                 port_version)
-        self.assertFalse(os.path.exists(os.path.join(self.target, "0.8.2")))
 
-    def test_windows_distribution_guard_rejects_legacy_and_map_studio_paths(self):
+    def test_windows_distribution_guard_rejects_map_studio_paths(self):
         script_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "build_launcher.ps1")
         with open(script_path, "r", encoding="utf-8") as stream:
             script = stream.read()
 
-        self.assertIn('$PathSegments -contains "0.8.2"', script)
         self.assertIn('"mapstudio"', script)
-        self.assertIn(
-            "0.8.2 and Map Studio must remain outside the launcher "
-            "distribution", script)
+        self.assertIn("Map Studio", script)
 
     def test_windows_distribution_does_not_bundle_procdump(self):
         launcher_root = os.path.dirname(os.path.dirname(__file__))
@@ -1555,14 +1392,9 @@ class PayloadStagingTest(unittest.TestCase):
     def test_client_staging_carries_only_the_0_9_22_mod(self):
         source = os.path.join(tempfile.mkdtemp(), "repo")
         self.addCleanup(shutil.rmtree, os.path.dirname(source), True)
-        overlay = os.path.join(source, "0.9.22", "dist",
+        overlay = os.path.join(source, "dist",
                                "WoT-0.9.22-LAN-Client-abc1234")
         relative_paths = [
-            os.path.join("0.8.2", "scripts", "client", "a.py"),
-            os.path.join("0.8.2", "scripts", "client", "CameraNode.pyc"),
-            os.path.join("0.8.2", "scripts", "client", "gui", "mods",
-                         "mod_offhangar.py"),
-            os.path.join("0.8.2", "gui", "maps", "a.dds"),
             os.path.join(overlay, "mods", "0.9.22.0.1",
                          "org.peng.offline_lan_0922_0.6.1.wotmod"),
             os.path.join(overlay, "mods", "configs", "offline_lan_0922",
@@ -1585,7 +1417,6 @@ class PayloadStagingTest(unittest.TestCase):
                 "semanticVersion": "0.6.1",
                 "buildIdentity": "test-staging",
             }, stream)
-        self._write_0_8_2_navgraphs(source)
         self._write_0_9_22_data(overlay)
         target = os.path.join(source, "staged")
         stage_payload.stage_clients(target, source)
@@ -1613,13 +1444,11 @@ class PayloadStagingTest(unittest.TestCase):
             self.assertFalse(any(
                 "mapstudio" in name.replace("_", "").lower()
                 for name in names))
-        self.assertFalse(os.path.exists(os.path.join(target, "0.8.2.zip")))
+        self.assertEqual(["0.9.22.zip"], sorted(os.listdir(target)))
 
     def test_client_staging_without_a_built_package_reports_it(self):
         source = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, source, True)
-        os.makedirs(os.path.join(source, "0.8.2", "scripts"))
-        os.makedirs(os.path.join(source, "0.8.2", "gui"))
         self.assertRaises(ValueError, stage_payload.stage_clients,
                           os.path.join(source, "staged"), source)
 
@@ -1633,19 +1462,13 @@ class PayloadStagingTest(unittest.TestCase):
     def test_staging_excludes_development_junk(self):
         source = os.path.join(tempfile.mkdtemp(), "repo")
         self.addCleanup(shutil.rmtree, os.path.dirname(source), True)
-        overlay = os.path.join(source, "0.9.22", "dist",
+        overlay = os.path.join(source, "dist",
                                "WoT-0.9.22-LAN-Client-abc1234")
-        paths = {
-            "0.8.2/scripts/client/CameraNode.pyc": "x",
-            "0.8.2/scripts/client/gui/mods/mod_offhangar.py": "x",
-            "0.8.2/scripts/client/debug.log": "secret",
-            "0.8.2/gui/maps/a.dds": "x",
-        }
+        paths = {}
         for prefix in stage_payload.SKIPPED_CLIENT_PREFIXES:
-            paths[
-                "0.8.2/scripts/client/gui/mods/offhangar/%shelper.py" %
-                prefix
-            ] = "secret"
+            paths[os.path.join(
+                overlay, "mods", "configs", "offline_lan_0922",
+                "%shelper.json" % prefix)] = "secret"
         paths[os.path.join(
             overlay, "mods/0.9.22.0.1",
             "org.peng.offline_lan_0922_0.6.1.wotmod")] = "x"
@@ -1670,7 +1493,6 @@ class PayloadStagingTest(unittest.TestCase):
                 os.makedirs(os.path.dirname(path))
             with open(path, "w") as stream:
                 stream.write(content)
-        self._write_0_8_2_navgraphs(source)
         self._write_0_9_22_data(overlay)
 
         target = os.path.join(source, "staged")
@@ -1693,7 +1515,7 @@ class PayloadStagingTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, source, True)
         for suffix in ("aaaaaaa", "bbbbbbb"):
             os.makedirs(os.path.join(
-                source, "0.9.22", "dist",
+                source, "dist",
                 "WoT-0.9.22-LAN-Client-" + suffix))
         self.assertRaises(ValueError, stage_payload.client_source,
                           "0.9.22", source)
@@ -1922,15 +1744,9 @@ class ListenerTest(unittest.TestCase):
                         pass
             return values
 
-        server082 = constants(os.path.join(
-            stage_payload.repository_root(), "0.8.2", "lan_battle_server.py"))
         server0922 = constants(os.path.join(
-            stage_payload.repository_root(), "0.9.22", "server",
+            stage_payload.repository_root(), "server",
             "lan_battle_server.py"))
-        self.assertEqual(server082["PROTOCOL_VERSION"],
-                         core._SERVER_PROBES[core.PORT_0_8_2]["protocol"])
-        self.assertEqual(server082["CLIENT_BUILD"],
-                         core._SERVER_PROBES[core.PORT_0_8_2]["client_build"])
         self.assertEqual(server0922["PROTOCOL_VERSION"],
                          core._SERVER_PROBES[core.PORT_0_9_22]["protocol"])
         self.assertEqual(server0922["CLIENT_BUILD_0922"],
@@ -2204,13 +2020,13 @@ class KnownFolderTest(unittest.TestCase):
     def test_discovery_finds_a_game_beside_the_common_roots(self):
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root, True)
-        for name in ("World_of_Tanks_0.8.2", "Some Other Game"):
+        for name in ("World_of_Tanks_Custom", "Some Other Game"):
             os.makedirs(os.path.join(root, name))
-        with open(os.path.join(root, "World_of_Tanks_0.8.2",
+        with open(os.path.join(root, "World_of_Tanks_Custom",
                                core.GAME_EXECUTABLE), "w") as stream:
             stream.write("")
         self.assertEqual(
-            [os.path.join(root, "World_of_Tanks_0.8.2")],
+            [os.path.join(root, "World_of_Tanks_Custom")],
             core.discover_game_folders(roots=(root,)))
 
     def test_discovery_accepts_a_root_that_is_the_game(self):
@@ -2226,10 +2042,10 @@ class KnownFolderTest(unittest.TestCase):
 
     def test_remembered_folders_come_before_discovered_ones(self):
         folders = core.known_folders(
-            {"folders": ["/games/wot082"]},
-            discovered=["/games/wot0922", "/games/wot082"])
-        self.assertEqual([os.path.normpath("/games/wot082"),
-                          os.path.normpath("/games/wot0922")], folders)
+            {"folders": ["/games/remembered"]},
+            discovered=["/games/discovered", "/games/remembered"])
+        self.assertEqual([os.path.normpath("/games/remembered"),
+                          os.path.normpath("/games/discovered")], folders)
 
 
 class LauncherSettingsTest(unittest.TestCase):

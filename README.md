@@ -1,12 +1,7 @@
 # World of Tanks Offline Battles
 
-Play standard battles with bots in two legacy Windows clients, alone or with
-friends on a LAN:
-
-| Port | Supported client |
-| --- | --- |
-| [`0.8.2`](0.8.2/) | World of Tanks 0.8.2 |
-| [`0.9.22`](0.9.22/) | Chinese HD client 0.9.22.0.1 #1513 |
+Play standard battles with bots in the Chinese HD Windows client
+`0.9.22.0.1 #1513`, alone or with friends on a LAN.
 
 You supply your own client. The client still provides the maps, vehicles,
 rendering, HUD and physics. This repository provides the client mod, the bot
@@ -20,7 +15,7 @@ and battle logic, a small LAN server and a launcher.
    removes any older mod files and installs the matching mod.
 3. Select a mode:
    - **Single player**: you play alone against bots. The launcher runs the
-     server for you; every battle is a server battle in both clients.
+     server for you; every battle uses the same LAN authority path.
    - **Host a LAN battle**: other players join this PC. The launcher starts the
      server and prints the address to give them.
    - **Join a LAN battle**: type the host's address, for example
@@ -72,14 +67,14 @@ whose profile changed after it started must be restarted first.
   sight and last-known positions.
 - Bots that use map geometry, terrain, water, firing lanes, team strength and
   shared contacts to route, take cover, pick targets and choose ammunition,
-  including SPG arcs. Navigation and foliage data ship for all 33 supported
-  0.8.2 maps and all 41 supported 0.9.22 maps.
+  including SPG arcs. Navigation and foliage data ship for all 41 supported
+  standard-battle maps.
 - Live combat statistics, a damage log with assists, hit and critical-damage
   messages, target outlines, vehicle fires, wrecks, and a consumables panel
   that counts down each cooldown.
 - A LAN match is one shared battle: lineups, countdown, orders, projectiles,
   health, critical damage, destructibles, capture and results stay
-  synchronized, and the match survives the loss of the current bot controller.
+  synchronized through the room's mandatory hidden simulation worker.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,
@@ -87,26 +82,28 @@ physics and frame pacing can only be judged in the Windows client.
 
 ## Build it yourself
 
+The `Build Windows launcher` GitHub Actions workflow builds the server, client
+package and x64 launcher together and publishes the complete ZIP as one
+artifact. For a local build, use this order from the repository root:
+
 ```bash
-# 0.8.2 client package
-python3 0.8.2/tools/package_native_experiment.py --output-dir dist --version 1.8.60
-# 0.9.22 client package, with CPython 2.7
-python2.7 0.9.22/build_wotmod.py
-# Windows launcher, after the 0.9.22 package exists
+# Windows server, with x64 Python 3.11 and the pinned packager
+python -m pip install -r server/requirements-windows-build.txt
+pwsh -NoProfile -File server/build_windows_server.ps1
+# Client package, with CPython 2.7
+python2.7 build_wotmod.py
+# Windows launcher, after the client package exists
 pwsh -NoProfile -File launcher/build_launcher.ps1
 ```
 
-The launcher carries both LAN servers and both client mods. It writes the
-server address into the file each port already reads at startup, installs the
-mod, starts the game and stops the server when the game closes.
-The `Build Windows launcher` GitHub Actions workflow can also be run manually;
-it publishes the complete Windows launcher ZIP as one artifact.
+The launcher carries the matching LAN server and client mod. It writes the
+server address into the client configuration, installs the mod, starts the
+game and stops the server when the game closes.
 
 Tests:
 
 ```bash
-cd 0.8.2 && python3 -m unittest discover -s tests
-python3 -m unittest discover -s 0.9.22/tests
+python3 -m unittest discover -s tests
 cd launcher && python3 -m unittest discover -s tests
 ```
 

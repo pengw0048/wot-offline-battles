@@ -391,8 +391,8 @@ class WindowTest(unittest.TestCase):
             wot_launcher.COLLECT_CRASH_REPORTS_SETTING))
         self.assertTrue(settings.get(wot_launcher.PROCDUMP_CONSENT_SETTING))
 
-    def test_crash_collection_control_is_only_enabled_for_0_9_22(self):
-        self._game("0.8.2", "")
+    def test_crash_collection_control_is_only_enabled_for_the_supported_client(self):
+        self._game("1.0.0", "")
         self.assertEqual(
             "disabled", self.window.crash_report_check.cget("state"))
         self.assertEqual(
@@ -815,8 +815,8 @@ class WindowTest(unittest.TestCase):
              "profile_cleanup"], order)
         self.assertIsNone(self.window._room_vehicle_overlay_root)
 
-    def test_0_8_2_folder_cannot_start_a_server(self):
-        self._game("0.8.2", "335")
+    def test_an_unsupported_folder_cannot_start_a_server(self):
+        self._game("1.0.0", "1")
         self.window.mode.set(core.MODE_JOIN)
         self.window._refresh_mode()
         with mock.patch.object(self.window, "_start_server") as start_server:
@@ -825,11 +825,11 @@ class WindowTest(unittest.TestCase):
         start_server.assert_not_called()
         self.assertIn("supported game folder", self._log_text())
 
-    def test_hidden_server_entry_rejects_0_8_2(self):
+    def test_hidden_server_entry_rejects_an_unsupported_client(self):
         with mock.patch("builtins.print") as output:
             self.assertEqual(
                 2, wot_launcher._serve(
-                    [core.SERVE_FLAG, core.PORT_0_8_2]))
+                    [core.SERVE_FLAG, "1.0.0"]))
 
         self.assertIn("Unsupported client version", output.call_args.args[0])
 
@@ -947,8 +947,8 @@ class WindowTest(unittest.TestCase):
         self.window._browse()
         self.assertEqual([], self.window._folders)
 
-    def test_maintenance_buttons_are_only_enabled_for_0_9_22(self):
-        self._game("0.8.2", "335")
+    def test_maintenance_buttons_are_only_enabled_for_the_supported_client(self):
+        self._game("1.0.0", "1")
         self.assertEqual("disabled",
                          self.window.repair_button.cget("state"))
         self.assertEqual("disabled",
@@ -1437,10 +1437,10 @@ class WindowTest(unittest.TestCase):
         create_report.assert_not_called()
         offer.assert_not_called()
 
-    def test_crash_collection_is_limited_to_the_0_9_22_client(self):
+    def test_crash_collection_is_limited_to_the_supported_client(self):
         set_roles, create_report, offer, unused_report = (
             self._run_join_session_with_crash_result(
-                True, client=core.PORT_0_8_2))
+                True, client="unsupported"))
 
         set_roles.assert_not_called()
         create_report.assert_not_called()

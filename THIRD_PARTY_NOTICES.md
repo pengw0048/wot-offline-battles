@@ -2,13 +2,14 @@
 
 ## Project lineage
 
-Parts of the World of Tanks 0.8.2 compatibility layer are based on
+Some mechanics retained in the current #1513 implementation were originally
+derived from the World of Tanks 0.8.2 reconstruction in
 [`SigmaTel71/mod_offhangar_legacy`](https://github.com/SigmaTel71/mod_offhangar_legacy)
 at commit `312534823dab535457f8578d9eae6cf3c549944e`, licensed under the GNU
 General Public License version 3. That project identifies its own work as a
 port of Renat "IzeBerg" Illiev's `mod_offhangar` v1.0.0.0.
 
-The initial 0.8.2 source snapshot also followed files published in
+The historical source snapshot also followed files published in
 [`PseudoJoker-1/WoT-0.8.2-offline-Battles`](https://github.com/PseudoJoker-1/WoT-0.8.2-offline-Battles).
 That repository did not declare a software license when this notice was
 prepared. The GPL-3.0 license in this repository covers the GPL-derived work
@@ -26,8 +27,7 @@ Software License 1.0. The license text is included at
 
 ## Compiled-space tooling
 
-The build-time decoder under
-`0.9.22/tools/vendor/wot_space_bin_utils` comes from
+The build-time decoder under `tools/vendor/wot_space_bin_utils` comes from
 [`SkepticalFox/wot-space.bin-utils`](https://bitbucket.org/SkepticalFox/wot-space.bin-utils/)
 and is distributed under the WTFPL version 2. Its license text is retained in
 that vendored directory.

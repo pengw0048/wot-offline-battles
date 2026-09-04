@@ -17,7 +17,6 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 
-PORT_0_8_2 = "0.8.2"
 PORT_0_9_22 = "0.9.22"
 SUPPORTED_PORTS = (PORT_0_9_22,)
 
@@ -31,9 +30,7 @@ DEFAULT_PREFERRED_TEAM = 0
 MIN_TEAM_SIZE = 1
 MAX_TEAM_SIZE = 15
 LOCAL_HOST = "127.0.0.1"
-LISTEN_HOST = "0.0.0.0"
 GAME_EXECUTABLE = "WorldOfTanks.exe"
-NAVGRAPH_DIR_ENV = "WOT_OFFLINE_NAVGRAPH_DIR"
 # The client can close its first process and start another one while it
 # starts up. The launcher waits this long after the last one before it
 # stops the LAN server.
@@ -56,16 +53,8 @@ _SEMANTIC_VERSION_PATTERN = re.compile(
     r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$")
 _BUILD_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
-_MOD_MARKERS = {
-    PORT_0_8_2: os.path.join(
-        "res_mods", "0.8.2", "scripts", "client", "gui", "mods", "offhangar"),
-    PORT_0_9_22: os.path.join(
-        "mods", "0.9.22.0.1", "org.peng.offline_lan_0922*.wotmod"),
-}
-
-_NAVGRAPH_RELATIVE_DIR = os.path.join(
-    "res_mods", "0.8.2", "scripts", "client", "gui", "mods", "offhangar",
-    "navgraphs")
+_MOD_MARKER_0_9_22 = os.path.join(
+    "mods", "0.9.22.0.1", "org.peng.offline_lan_0922*.wotmod")
 
 SERVER_TEAM_SIZE_ENV_0922 = "WOT_0922_TEAM_SIZE"
 SERVER_TEAM1_SIZE_ENV_0922 = "WOT_0922_TEAM1_SIZE"
@@ -109,24 +98,11 @@ _CLIENT_RUNTIME_FILES_0_9_22 = (
     "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
 )
 
-_SERVER_ENTRIES = {
-    PORT_0_8_2: (os.path.join("0.8.2"), "lan_battle_server.py"),
-    PORT_0_9_22: (os.path.join("0.9.22", "server"), "windows_server.py"),
-}
-
-_SERVER_ARGUMENTS = {
-    PORT_0_8_2: ("--host", LISTEN_HOST, "--port", str(DEFAULT_SERVER_PORT)),
-    PORT_0_9_22: (),
-}
+_BUNDLED_SERVER_ENTRY_0_9_22 = os.path.join(
+    "0.9.22", "server", "windows_server.py")
+_SOURCE_SERVER_ENTRY_0_9_22 = os.path.join("server", "windows_server.py")
 
 _SERVER_PROBES = {
-    PORT_0_8_2: {
-        "protocol": 8,
-        "client_build": "1.8.60-native-experimental-20260815",
-        "vehicle": "ussr:MS-1",
-        "capabilities": None,
-        "server_capabilities": None,
-    },
     PORT_0_9_22: {
         "protocol": 5,
         "client_build": "wot-0.9.22.0.1-cn-1513",
@@ -150,8 +126,6 @@ LISTENER_OCCUPIED = "occupied"
 
 _DATASETS_0_9_22 = ("navgraphs", "foliage", "destructibles")
 _DATA_INVENTORIES = {
-    PORT_0_8_2: ((
-        "res_mods/0.8.2/scripts/client/gui/mods/offhangar/navgraphs", 33),),
     PORT_0_9_22: tuple((
         "mods/configs/offline_lan_0922/%s" % dataset, 41)
         for dataset in _DATASETS_0_9_22),
@@ -220,12 +194,11 @@ def launcher_log_path():
 
 def visible_client_command(game_root, port_version, paired_worker=False):
     """Build the visible client command for one supported port."""
-    if port_version == PORT_0_9_22:
-        argument = (PAIRED_PLAYER_ARGUMENT_0922 if paired_worker
-                    else PLAYER_ARGUMENT_0922)
-        return [worker_starter_executable(game_root), argument]
-    command = [game_executable(game_root)]
-    return command
+    if port_version != PORT_0_9_22:
+        raise LauncherError("This client version is not supported.")
+    argument = (PAIRED_PLAYER_ARGUMENT_0922 if paired_worker
+                else PLAYER_ARGUMENT_0922)
+    return [worker_starter_executable(game_root), argument]
 
 
 def visible_client_environment(port_version, host=LOCAL_HOST,
@@ -317,12 +290,9 @@ def port_for_version(version, build=None):
 
 def installed_port(game_root):
     """Return the port whose client mod is installed in this game folder."""
-    for port_version, marker in _MOD_MARKERS.items():
-        path = os.path.join(game_root, marker)
-        if ((port_version == PORT_0_9_22 and
-             any(os.path.isfile(candidate) for candidate in glob.glob(path))) or
-                (port_version != PORT_0_9_22 and os.path.isdir(path))):
-            return port_version
+    marker = os.path.join(game_root, _MOD_MARKER_0_9_22)
+    if any(os.path.isfile(candidate) for candidate in glob.glob(marker)):
+        return PORT_0_9_22
     return None
 
 
@@ -369,7 +339,7 @@ def plan_session(status, mode, join_text="", team_size=DEFAULT_TEAM_SIZE,
     effective_team_size = DEFAULT_TEAM_SIZE
     effective_team1_size = DEFAULT_TEAM_SIZE
     effective_team2_size = DEFAULT_TEAM_SIZE
-    if port_version == PORT_0_9_22 and mode != MODE_JOIN:
+    if mode != MODE_JOIN:
         effective_team1_size = parse_team_size(
             team_size if team1_size is None else team1_size)
         effective_team2_size = parse_team_size(
@@ -378,9 +348,6 @@ def plan_session(status, mode, join_text="", team_size=DEFAULT_TEAM_SIZE,
             effective_team1_size, effective_team2_size)
     effective_preferred_team = parse_preferred_team(preferred_team)
     profile_name = str(vehicle_profile or "").strip() or None
-    if profile_name is not None and port_version != PORT_0_9_22:
-        raise LauncherError(
-            "Modified vehicle profiles are limited to the 0.9.22 client.")
     return {
         "client": port_version,
         "mode": mode,
@@ -457,8 +424,8 @@ def endpoint_for_mode(mode, join_text="", default_port=DEFAULT_SERVER_PORT):
 def server_required(unused_port_version, mode):
     """Report whether the launcher must run a server for this mode.
 
-    Both clients play every battle against the LAN server, including a single
-    player, so only joining somebody else's room needs no local server.
+    Every battle uses the LAN server, including a single-player battle, so only
+    joining somebody else's room needs no local server.
     """
     return mode != MODE_JOIN
 
@@ -503,19 +470,6 @@ def _read_json(path):
     return value if isinstance(value, dict) else None
 
 
-def write_0_8_2_settings(game_root, mode, host, port, name=None):
-    path = os.path.join(game_root, "offhangar_user", "config.json")
-    config = _read_json(path) or {}
-    config["network_mode"] = True
-    config["network_server_host"] = host
-    config["network_server_port"] = int(port)
-    config["network_map_name"] = "server_random"
-    if name:
-        config["nickname"] = name
-    _write_json(path, config, indent=4)
-    return [path]
-
-
 def write_0_9_22_settings(game_root, mode, host, port, name=None):
     config_dir = os.path.join(game_root, "mods", "configs", "offline_lan_0922")
     endpoint_path = os.path.join(config_dir, "server_endpoint.json")
@@ -536,8 +490,6 @@ def write_0_9_22_settings(game_root, mode, host, port, name=None):
 
 
 def write_settings(game_root, port_version, mode, host, port, name=None):
-    if port_version == PORT_0_8_2:
-        return write_0_8_2_settings(game_root, mode, host, port, name)
     if port_version == PORT_0_9_22:
         return write_0_9_22_settings(game_root, mode, host, port, name)
     raise LauncherError("This game folder is not a supported client.")
@@ -559,7 +511,6 @@ INSTALL_MARKER_NAME = "launcher_install.json"
 # Where each port keeps the files the launcher must not delete, and the
 # marker that records which package is installed.
 _USER_DIRS = {
-    PORT_0_8_2: "offhangar_user",
     PORT_0_9_22: "mods/configs/offline_lan_0922",
 }
 
@@ -576,21 +527,6 @@ _MUTABLE_STATE_0_9_22 = (
 # are absent.  The replacement roots keep stale baked data out of a new server
 # run without touching the user's endpoint, account state, or configuration.
 _CLIENT_INSTALL = {
-    PORT_0_8_2: {
-        "replace": ("res_mods/0.8.2",),
-        "prune": (),
-        "keep": (),
-        "allowed": ("res_mods/0.8.2/",),
-        "suffixes": (".dds", ".json", ".png", ".py", ".pyc", ".pyd"),
-        "required": (
-            "res_mods/0.8.2/scripts/client/CameraNode.pyc",
-            "res_mods/0.8.2/scripts/client/gui/mods/mod_offhangar.py",
-            "res_mods/0.8.2/scripts/client/gui/mods/offhangar/"
-            "navgraphs/manifest.json",
-        ),
-        "owned_files": (),
-        "package_pattern": None,
-    },
     PORT_0_9_22: {
         "replace": tuple(
             "mods/configs/offline_lan_0922/%s" % name
@@ -1086,15 +1022,14 @@ def _validate_archive(archive, game_root, port_version, layout):
     if inventory is None:
         raise LauncherError(
             "The bundled %s baked data is incomplete." % port_version)
-    if port_version == PORT_0_9_22:
-        owned_files = set(layout["owned_files"])
-        if BUILD_IDENTITY_RELATIVE_PATH_0922 not in names:
-            owned_files.discard(BUILD_IDENTITY_RELATIVE_PATH_0922)
-        expected = (inventory | set(layout["keep"]) | set(packages) |
-                    owned_files)
-        if names != expected:
-            raise LauncherError(
-                "The bundled 0.9.22 mod contains unexpected files.")
+    owned_files = set(layout["owned_files"])
+    if BUILD_IDENTITY_RELATIVE_PATH_0922 not in names:
+        owned_files.discard(BUILD_IDENTITY_RELATIVE_PATH_0922)
+    expected = (inventory | set(layout["keep"]) | set(packages) |
+                owned_files)
+    if names != expected:
+        raise LauncherError(
+            "The bundled 0.9.22 mod contains unexpected files.")
     bad_member = archive.testzip()
     if bad_member is not None:
         raise LauncherError(
@@ -1258,41 +1193,35 @@ def install_client_mod(game_root, port_version, base_dir=None, force=False):
             (port_version, error))
     payload_identity = bundled_payload_identity(port_version, base_dir)
     installed_identity = installed_payload_identity(game_root, port_version)
-    identity_actions = []
-    if port_version == PORT_0_9_22:
-        identity_actions.extend((
-            "Bundled 0.9.22 payload: %s." %
-            payload_identity_text(payload_identity),
-            "Installed 0.9.22 payload before installation: %s." %
-            payload_identity_text(installed_identity),
-        ))
-        if payload_identity is None:
-            identity_actions.append(
-                "The bundled diagnostic build identity is unavailable; "
-                "installation will continue and will not be treated as "
-                "current on the next launch.")
+    identity_actions = [
+        "Bundled 0.9.22 payload: %s." %
+        payload_identity_text(payload_identity),
+        "Installed 0.9.22 payload before installation: %s." %
+        payload_identity_text(installed_identity),
+    ]
+    if payload_identity is None:
+        identity_actions.append(
+            "The bundled diagnostic build identity is unavailable; "
+            "installation will continue and will not be treated as "
+            "current on the next launch.")
     identity_current = (
-        port_version != PORT_0_9_22 or
-        (payload_identity is not None and
-         installed_identity == payload_identity))
+        payload_identity is not None and
+        installed_identity == payload_identity)
     if (not force and installed_release(game_root, port_version) == release
             and identity_current
             and _installation_complete(game_root, port_version, layout)):
-        if port_version == PORT_0_9_22:
-            identity_actions.append(
-                "Install decision: keep the installed 0.9.22 payload; "
-                "the build identity and package-owned files are current.")
-            return identity_actions
-        return ["The %s mod is already up to date." % port_version]
-    if port_version == PORT_0_9_22:
-        if force:
-            decision = "forced reinstall"
-        elif installed_port(game_root) == port_version:
-            decision = "reinstall"
-        else:
-            decision = "install"
         identity_actions.append(
-            "Install decision: %s the bundled 0.9.22 payload." % decision)
+            "Install decision: keep the installed 0.9.22 payload; "
+            "the build identity and package-owned files are current.")
+        return identity_actions
+    if force:
+        decision = "forced reinstall"
+    elif installed_port(game_root) == port_version:
+        decision = "reinstall"
+    else:
+        decision = "install"
+    identity_actions.append(
+        "Install decision: %s the bundled 0.9.22 payload." % decision)
     transaction_root = None
     preserve_transaction = False
     try:
@@ -1332,11 +1261,10 @@ def install_client_mod(game_root, port_version, base_dir=None, force=False):
         except (IOError, OSError):
             actions.append(
                 "The mod was installed, but its update marker could not be saved.")
-        if port_version == PORT_0_9_22:
-            actions.append(
-                "Installed 0.9.22 payload after installation: %s." %
-                payload_identity_text(installed_payload_identity(
-                    game_root, port_version)))
+        actions.append(
+            "Installed 0.9.22 payload after installation: %s." %
+            payload_identity_text(installed_payload_identity(
+                game_root, port_version)))
         return actions
     except LauncherError as error:
         preserve_transaction = bool(getattr(
@@ -1585,19 +1513,19 @@ def reset_0_9_22_state(game_root, base_dir=None, is_running=None):
 
 
 def server_script(port_version, base_dir=None):
-    entry = _SERVER_ENTRIES.get(port_version)
-    if entry is None:
+    if port_version != PORT_0_9_22:
         return None
-    directory, script = entry
-    directory = os.path.join(server_root(base_dir), directory)
-    return os.path.join(directory, script)
+    if base_dir is None and not getattr(sys, "_MEIPASS", None):
+        return os.path.join(repository_root(), _SOURCE_SERVER_ENTRY_0_9_22)
+    return os.path.join(
+        server_root(base_dir), _BUNDLED_SERVER_ENTRY_0_9_22)
 
 
 def server_argv(port_version, base_dir=None):
     script = server_script(port_version, base_dir)
     if script is None:
         return None
-    return [script] + list(_SERVER_ARGUMENTS[port_version])
+    return [script]
 
 
 def server_environment(port_version, game_root, environment=None,
@@ -1605,10 +1533,7 @@ def server_environment(port_version, game_root, environment=None,
                        team1_size=None, team2_size=None, bot_lineup=None):
     """Build the endpoint and roster environment for one LAN server."""
     environment = dict(os.environ if environment is None else environment)
-    if port_version == PORT_0_8_2:
-        environment[NAVGRAPH_DIR_ENV] = os.path.join(
-            game_root, _NAVGRAPH_RELATIVE_DIR)
-    elif port_version == PORT_0_9_22:
+    if port_version == PORT_0_9_22:
         _apply_payload_identity_environment(
             environment, bundled_payload_identity(port_version))
         team1_size = parse_team_size(
@@ -1728,9 +1653,8 @@ def probe_server_protocol(port_version, host, port, timeout=1.5, connect=None):
             "vehicle": contract["vehicle"],
             "max_health": 1,
         }
-        if port_version == PORT_0_9_22:
-            hello["role"] = "probe"
-            hello["vehicle_compact_descr"] = "AA=="
+        hello["role"] = "probe"
+        hello["vehicle_compact_descr"] = "AA=="
         if contract["capabilities"] is not None:
             hello["capabilities"] = list(contract["capabilities"])
         connection.sendall(

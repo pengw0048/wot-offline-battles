@@ -31,7 +31,7 @@ except ImportError:
     # adds this same tools directory to PyInstaller's analysis path.
     _TOOLS_ROOT = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "0.9.22", "tools")
+        "tools")
     if _TOOLS_ROOT not in sys.path:
         sys.path.insert(0, _TOOLS_ROOT)
     import packed_xml

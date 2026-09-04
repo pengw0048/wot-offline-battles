@@ -1,20 +1,18 @@
 .DS_Store
 __pycache__/
 *.py[cod]
-!0.8.2/scripts/client/CameraNode.pyc
-!0.8.2/scripts/client/OfflineEntity.pyc
-!0.9.22/native/offline_instance_guard_native.pyd
+!native/offline_instance_guard_native.pyd
 
 # Runtime state belongs beside the user's game installation, not in source.
 offhangar_user/
 **/mods/configs/offline_lan_0922/server_endpoint.json
-0.9.22/server/unacked_battle_receipts-*.json
+server/unacked_battle_receipts-*.json
 python.log
 *.log
 .DS_Store
 
-# Generated 0.9.22 mod packages are CI/local build artifacts.
-0.9.22/dist/
+# Generated client packages are CI/local build artifacts.
+/dist/
 launcher/build/
 launcher/dist/
 deliverables/

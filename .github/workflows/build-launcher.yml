@@ -19,16 +19,16 @@ jobs:
       - name: Install pinned Windows server packager
         run: >-
           python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
+          -r server/requirements-windows-build.txt
       - name: Build Windows LAN server for the manual client overlay
         shell: pwsh
         run: >-
           pwsh -NoProfile -File
-          0.9.22/server/build_windows_server.ps1
+          server/build_windows_server.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: launcher-manual-server-input
-          path: 0.9.22/dist/server/WoT-0.9.22-LAN-Server.exe
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -49,21 +49,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: launcher-manual-server-input
-          path: 0.9.22/dist/server
+          path: dist/server
       - name: Build Python 2.7 0.9.22 client package
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
           -e WOT_OFFLINE_BUILD_IDENTITY="github-${{ github.run_id }}-${{ github.run_attempt }}"
-          -w /work/0.9.22 python:2.7.18
+          -w /work python:2.7.18
           python build_wotmod.py
       - name: Validate 0.9.22 client package
         run: >-
-          python 0.9.22/tools/validate_wotmod.py
-          0.9.22/dist/org.peng.offline_lan_0922_*.wotmod
+          python tools/validate_wotmod.py
+          dist/org.peng.offline_lan_0922_*.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: launcher-build-input
-          path: 0.9.22/dist/*
+          path: dist/*
           if-no-files-found: error
           retention-days: 1
 
@@ -80,11 +80,11 @@ jobs:
       - name: Install pinned Windows packager
         run: >-
           python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
+          -r server/requirements-windows-build.txt
       - uses: actions/download-artifact@v4
         with:
           name: launcher-build-input
-          path: 0.9.22/dist
+          path: dist
       - name: Test launcher on Windows
         working-directory: launcher
         env:

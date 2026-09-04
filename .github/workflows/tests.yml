@@ -20,53 +20,35 @@ jobs:
           python-version: "3.11"
       - name: Install pinned test dependencies
         run: python -m pip install Pillow==12.3.0
-      - name: Run 0.8.2 and shared test suite
-        working-directory: 0.8.2
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Run 0.9.22 port test suite
+      - name: Run client test suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
-          python -m unittest discover -s 0.9.22/tests
+          python -m unittest discover -s tests
           -p "test_*.py" -v
       - name: Run launcher test suite
         working-directory: launcher
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Check Python 2.6 client syntax
-        run: |
-          docker run --rm --entrypoint /bin/sh -v "$PWD:/work:ro" zinainfra/python26 -c '
-            cp -R /work/0.8.2/scripts /tmp/scripts
-            for source in $(find /tmp/scripts/client/gui/mods -name "*.py" -type f); do
-              python2.6 -m py_compile "$source" || exit 1
-            done
-          '
-      - name: Audit 0.8.2 replacement package
-        run: >-
-          python 0.8.2/tools/package_native_experiment.py
-          --output-dir "$RUNNER_TEMP/wot-082"
-          --version 1.8.60
       - uses: actions/download-artifact@v4
         with:
           name: wot-0.9.22-lan-server-windows
-          path: 0.9.22/dist
+          path: dist
       - name: Build Python 2.7 0.9.22 LAN client
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
           -e WOT_OFFLINE_BUILD_IDENTITY="github-${{ github.run_id }}-${{ github.run_attempt }}"
-          -w /work/0.9.22 python:2.7.18
+          -w /work python:2.7.18
           python build_wotmod.py
       - name: Validate 0.9.22 wotmod package
         run: >-
-          python 0.9.22/tools/validate_wotmod.py
-          0.9.22/dist/org.peng.offline_lan_0922_*.wotmod
+          python tools/validate_wotmod.py
+          dist/org.peng.offline_lan_0922_*.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: wot-0.9.22-lan-client
-          path: 0.9.22/dist/*
+          path: dist/*
           if-no-files-found: error
 
   windows-server:
@@ -80,17 +62,17 @@ jobs:
       - name: Install pinned Windows server packager
         run: >-
           python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
+          -r server/requirements-windows-build.txt
       - name: Build zero-configuration Windows LAN server
         shell: pwsh
         run: >-
           pwsh -NoProfile -File
-          0.9.22/server/build_windows_server.ps1
+          server/build_windows_server.ps1
       - name: Verify x64 executable, fixed listener, and protocol welcome
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $serverRoot = Join-Path $PWD "0.9.22\dist\server"
+          $serverRoot = Join-Path $PWD "dist\server"
           $serverExe = Join-Path $serverRoot "WoT-0.9.22-LAN-Server.exe"
           $stdout = Join-Path $env:RUNNER_TEMP "wot-server.stdout.log"
           $stderr = Join-Path $env:RUNNER_TEMP "wot-server.stderr.log"
@@ -242,15 +224,15 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Force `
-            -Path 0.9.22/dist/server/WoT-0.9.22-LAN-Server.exe,0.9.22/dist/server/README.txt `
-            -DestinationPath 0.9.22/dist/WoT-0.9.22-LAN-Server-Windows.zip
+            -Path dist/server/WoT-0.9.22-LAN-Server.exe,dist/server/README.txt `
+            -DestinationPath dist/WoT-0.9.22-LAN-Server-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: wot-0.9.22-lan-server-windows
           path: |
-            0.9.22/dist/WoT-0.9.22-LAN-Server-Windows.zip
-            0.9.22/dist/server/WoT-0.9.22-LAN-Server.exe
-            0.9.22/dist/server/README.txt
+            dist/WoT-0.9.22-LAN-Server-Windows.zip
+            dist/server/WoT-0.9.22-LAN-Server.exe
+            dist/server/README.txt
           if-no-files-found: error
 
   windows-launcher:
@@ -265,12 +247,12 @@ jobs:
       - name: Install pinned Windows packager
         run: >-
           python -m pip install
-          -r 0.9.22/server/requirements-windows-build.txt
+          -r server/requirements-windows-build.txt
       - name: Take the built 0.9.22 client package
         uses: actions/download-artifact@v4
         with:
           name: wot-0.9.22-lan-client
-          path: 0.9.22/dist
+          path: dist
       - name: Build the desktop launcher
         shell: pwsh
         run: pwsh -NoProfile -File launcher/build_launcher.ps1

@@ -55,7 +55,7 @@ def client_source(port_version, source_root=None):
     if port_version != "0.9.22":
         raise ValueError("unsupported client port: %s" % port_version)
     overlays = sorted(glob.glob(os.path.join(
-        source_root, "0.9.22", "dist", CLIENT_0922_OVERLAY)))
+        source_root, "dist", CLIENT_0922_OVERLAY)))
     overlays = [path for path in overlays if os.path.isdir(path)]
     if not overlays:
         return None
@@ -72,8 +72,7 @@ def _copy_file(source, target):
     shutil.copy2(source, target)
 
 
-# Stale bytecode, retired one-off tools, and local caches stay out.
-SKIPPED_CLIENT_FILES = ("mod_offhangar.pyc",)
+# Retired one-off tools and local caches stay out.
 SKIPPED_CLIENT_PREFIXES = (
     "bw_", "dis_", "fix_", "inject_", "patch_", "remove_", "test_",
 )
@@ -87,8 +86,6 @@ def _copy_tree(source, target, keep_bytecode=False, suffixes=None):
             if name != "__pycache__" and not name.startswith(".") and
             not os.path.islink(os.path.join(directory, name)))
         for name in sorted(names):
-            if name in SKIPPED_CLIENT_FILES:
-                continue
             if name.endswith(".pyc") and not keep_bytecode:
                 continue
             if name.startswith(".") or (suffixes is not None and
@@ -109,16 +106,14 @@ def stage_servers(target_root, source_root=None):
     written = []
     for port_version, relative_paths in PAYLOAD_FILES.items():
         for relative_path in relative_paths:
-            source = os.path.join(source_root, port_version,
-                                  *relative_path.split("/"))
+            source = os.path.join(source_root, *relative_path.split("/"))
             target = os.path.join(target_root, port_version,
                                   *relative_path.split("/"))
             _copy_file(source, target)
             written.append(target)
     for port_version, relative_dirs in PAYLOAD_TREES.items():
         for relative_dir in relative_dirs:
-            source = os.path.join(source_root, port_version,
-                                  *relative_dir.split("/"))
+            source = os.path.join(source_root, *relative_dir.split("/"))
             target = os.path.join(target_root, port_version,
                                   *relative_dir.split("/"))
             written.extend(_copy_tree(source, target, suffixes=(".py",)))
@@ -154,8 +149,7 @@ def stage_clients(target_root, source_root=None, client_0922=None):
                         if name != "__pycache__" and not name.startswith(".")
                         and not os.path.islink(os.path.join(directory, name)))
                     for name in sorted(names):
-                        if (name in SKIPPED_CLIENT_FILES or
-                                name.startswith(SKIPPED_CLIENT_PREFIXES) or
+                        if (name.startswith(SKIPPED_CLIENT_PREFIXES) or
                                 name.startswith(".") or
                                 not name.lower().endswith(
                                     CLIENT_FILE_SUFFIXES[port_version])):

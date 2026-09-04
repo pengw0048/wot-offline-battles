@@ -1746,7 +1746,7 @@ class VehicleOverlayTest(unittest.TestCase):
             os.path.dirname(os.path.dirname(__file__)), "build_launcher.ps1")
         with open(script, "r", encoding="utf-8") as stream:
             content = stream.read()
-        self.assertIn('0.9.22\\tools', content)
+        self.assertIn('RepoRoot "tools"', content)
         self.assertIn('--paths', content)
         self.assertIn('--hidden-import packed_xml', content)
         self.assertIn('Launcher build dependency is missing', content)
