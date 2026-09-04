@@ -1066,10 +1066,11 @@ def _strict_projectile_effect(value):
     stun_fields = frozenset(('stun_end_server_time_ms',))
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
     damage_sticker_fields = frozenset(('damage_sticker',))
+    potential_fields = frozenset(('potential_damage',))
     keys = set(value)
     if not required.issubset(keys) or not keys.issubset(
             required | critical_fields | stun_fields | target_pose_fields |
-            damage_sticker_fields):
+            damage_sticker_fields | potential_fields):
         return None
     kind = value.get('target_kind')
     target_id = _projectile_int_range(
@@ -1086,16 +1087,19 @@ def _strict_projectile_effect(value):
     has_stun = 'stun_end_server_time_ms' in value
     has_target_pose = bool(keys & target_pose_fields)
     has_damage_sticker = 'damage_sticker' in value
+    has_potential_damage = 'potential_damage' in value
     expected = (required |
                 (critical_fields if has_critical else frozenset()) |
                 (stun_fields if has_stun else frozenset()) |
                 (target_pose_fields if has_target_pose else frozenset()) |
                 (damage_sticker_fields if has_damage_sticker else
-                 frozenset()))
+                 frozenset()) |
+                (potential_fields if has_potential_damage else frozenset()))
     if (kind not in ('player', 'bot') or target_id is None or
             damage is None or shot_result is None or
             any(component is None for component in position) or
             (has_target_pose and has_damage_sticker) or
+            (has_target_pose and has_potential_damage) or
             keys != expected):
         return None
     result = {
@@ -1140,6 +1144,14 @@ def _strict_projectile_effect(value):
         if damage_sticker is None:
             return None
         result['damage_sticker'] = damage_sticker
+    if has_potential_damage:
+        # The armour ledger's un-reduced roll shares the damage bound the
+        # server enforces; a splash proposal never carries one.
+        potential_damage = _projectile_int_range(
+            value.get('potential_damage'), 0, 5000)
+        if potential_damage is None:
+            return None
+        result['potential_damage'] = potential_damage
     if has_target_pose:
         target_position = []
         for axis in ('x', 'y', 'z'):
@@ -2853,6 +2865,10 @@ class LANClient(object):
         direct_fields = {
             'target_kind', 'target_id', 'damage', 'shot_result',
             'x', 'y', 'z'}
+        # A bounce is the archetypal blocked-damage contact, so a continuing
+        # shell still publishes its potential-damage roll and decal identity.
+        # Critical, stun and splash tokens stay forbidden on this wire.
+        direct_optional = {'damage_sticker', 'potential_damage'}
         if (parsed_epoch is None or parsed_epoch != _exact_int(
                 self.authority_epoch) or parsed_projectile_id is None or
                 parsed_base is None or parsed_time is None or
@@ -2863,8 +2879,8 @@ class LANClient(object):
                 parsed_factor is None or parsed_direct is None or
                 parsed_direct['damage'] != 0 or
                 parsed_direct['shot_result'] != 0 or
-                set(parsed_direct) not in (
-                    direct_fields, direct_fields | {'damage_sticker'})):
+                not direct_fields.issubset(parsed_direct) or
+                set(parsed_direct) - (direct_fields | direct_optional)):
             return False
         if math.sqrt(sum(
                 (parsed_origin[index] - parsed_impact[index]) ** 2
