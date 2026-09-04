@@ -13493,6 +13493,37 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(2, presentation_states.call_count)
         self.assertIn('bot pose presentation', log.getvalue())
 
+    def test_worker_bot_pose_failure_stops_state_and_projectile_commit(self):
+        """Worker collision poses must fail before irreversible frame work."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._worker_mode = True
+        error = RuntimeError('authority collision pose failed')
+        presentation_states = mock.Mock(side_effect=error)
+        update = mock.Mock(return_value=({'type': 'bot_state'},))
+        battle._bots = types.SimpleNamespace(
+            presentation_states=presentation_states,
+            is_authority=lambda: True,
+            update=update)
+        battle._advance_player_fire_authority = mock.Mock()
+        battle._publish_player_environment = mock.Mock()
+        battle._advance_artillery_arcs = mock.Mock()
+        battle._authority_players = mock.Mock(return_value=())
+        battle._resolve_player_destructible_contacts = mock.Mock()
+        battle._record_worker_control_diagnostics = mock.Mock()
+        battle._enqueue_bot_message = mock.Mock(return_value=True)
+        battle._advance_projectiles = mock.Mock()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            battle._frame()
+
+        update.assert_called_once()
+        battle._fail.assert_called_once_with(error)
+        battle._enqueue_bot_message.assert_not_called()
+        battle._advance_projectiles.assert_not_called()
+        battle._schedule.assert_not_called()
+
     def test_a_failing_target_lock_validation_does_not_end_the_round(self):
         """Releasing a stale stock lock is presentation hygiene, not authority."""
         runtime = _runtime()
