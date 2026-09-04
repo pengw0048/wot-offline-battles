@@ -648,6 +648,7 @@ def _shot_ballistics(descriptor, shell_index):
 
 
 _CRITICAL_PARTS_TICK_CACHE = '_critical_parts_tick_cache'
+_GUN_PITCH_LIMIT_CACHE = '_gun_pitch_limit_cache'
 
 
 def _parse_critical_parts(critical):
@@ -690,9 +691,10 @@ def _clear_critical_parts_tick_cache(state):
 
 
 def _copy_runtime_state(state):
-    """Copy authority state without the private one-tick parse cache."""
+    """Copy authority state without private runtime-only caches."""
     copied = dict(state)
     copied.pop(_CRITICAL_PARTS_TICK_CACHE, None)
+    copied.pop(_GUN_PITCH_LIMIT_CACHE, None)
     return copied
 
 
@@ -2479,6 +2481,8 @@ class BotRuntime(object):
         self._descriptors[bot_id] = descriptor
         if previous is descriptor:
             return False
+        if state is not None:
+            state.pop(_GUN_PITCH_LIMIT_CACHE, None)
         self._physics_params[bot_id] = _bot_physics_params(descriptor)
         self._gun_yaw_limits[bot_id] = ai_driver.gun_yaw_limits(descriptor)
         gun_state = self._gun_states.get(bot_id)
@@ -7111,7 +7115,13 @@ class BotRuntime(object):
                 siege_state=int(state.get(
                     'siege_state', siege_mechanics.DISABLED))):
             return static_pitch, static_pitch
-        return _gun_pitch_limits(descriptor, turret_yaw)
+        cached = state.get(_GUN_PITCH_LIMIT_CACHE)
+        if (isinstance(cached, tuple) and len(cached) == 3 and
+                cached[0] is descriptor and cached[1] == turret_yaw):
+            return cached[2]
+        result = _gun_pitch_limits(descriptor, turret_yaw)
+        state[_GUN_PITCH_LIMIT_CACHE] = (descriptor, turret_yaw, result)
+        return result
 
     def _effective_gun_yaw_limits(self, state, descriptor, moving=None):
         normal = self._gun_yaw_limits.get(state['id'])

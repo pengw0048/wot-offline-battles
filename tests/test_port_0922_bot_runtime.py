@@ -1402,6 +1402,60 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertIs(descriptor, physics_calls[0][0])
         self.assertIs(expected_factors, physics_calls[0][1])
 
+    def test_gun_pitch_limits_cache_only_exact_descriptor_and_yaw(self):
+        descriptor = _combat_descriptor()
+        descriptor.gun.pitchLimits = {
+            'minPitch': (
+                (0.0, -0.1), (1.0, -0.3),
+                (2.0 * math.pi, -0.1)),
+            'maxPitch': (
+                (0.0, 0.1), (1.0, 0.2),
+                (2.0 * math.pi, 0.1)),
+        }
+        replacement = _combat_descriptor()
+        replacement.gun.pitchLimits = descriptor.gun.pitchLimits
+        state = {
+            'id': 11, 'critical': {}, 'siege_state': 0,
+            '_overturned': False,
+        }
+        first_yaw = 0.25
+        adjacent_yaw = first_yaw + 0.0001
+        expected_first = self.module.gun_pitch_limits.calc_pitch_limits(
+            first_yaw, descriptor.gun.pitchLimits)
+        expected_adjacent = self.module.gun_pitch_limits.calc_pitch_limits(
+            adjacent_yaw, descriptor.gun.pitchLimits)
+        original_calc = self.module.gun_pitch_limits.calc_pitch_limits
+        calls = []
+
+        def counted_calc(yaw, limits):
+            calls.append((yaw, limits))
+            return original_calc(yaw, limits)
+
+        self.module.gun_pitch_limits.calc_pitch_limits = counted_calc
+        try:
+            first = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, first_yaw)
+            repeated = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, first_yaw)
+            adjacent = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, adjacent_yaw)
+            replaced = self.runtime._effective_gun_pitch_limits(
+                state, replacement, adjacent_yaw)
+        finally:
+            self.module.gun_pitch_limits.calc_pitch_limits = original_calc
+
+        self.assertEqual(expected_first, first)
+        self.assertIs(first, repeated)
+        self.assertEqual(expected_adjacent, adjacent)
+        self.assertNotEqual(first, adjacent)
+        self.assertEqual(expected_adjacent, replaced)
+        self.assertEqual(
+            [first_yaw, adjacent_yaw, adjacent_yaw],
+            [call[0] for call in calls])
+        key = self.module._GUN_PITCH_LIMIT_CACHE
+        self.assertIn(key, state)
+        self.assertNotIn(key, self.module._copy_runtime_state(state))
+
     def test_every_bot_consumer_rejects_missing_default_crew_factors(self):
         descriptor = _combat_descriptor()
         original_factors = self.module.loadout.attribute_factors
