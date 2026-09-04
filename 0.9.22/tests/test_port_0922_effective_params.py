@@ -1,3 +1,4 @@
+import copy
 import math
 from pathlib import Path
 import sys
@@ -52,6 +53,40 @@ def _hello(params=None):
     }
 
 
+def _crew_skill(name, level=100.0, active=True, enabled=True):
+    return {
+        'name': name,
+        'level': float(level),
+        'active': bool(active),
+        'enabled': bool(enabled),
+    }
+
+
+def _snapshot_with_members(members):
+    source = effective_params()
+    row = source['crew']['dynamic_spotting']['states']['0:0']
+    source['crew'] = {
+        'members': copy.deepcopy(members),
+        'dynamic_spotting': {
+            'crew': [member['instance'] for member in members],
+            'states': dict(
+                ('%d:%d' % (mask, fire), copy.deepcopy(row))
+                for mask in range(1 << len(members))
+                for fire in (0, 1)),
+        },
+    }
+    source['critical']['crew_roster'] = [
+        member['instance'] for member in members]
+    source['skills'] = contract.skill_summary(source)
+    source['loadout']['has_sixth_sense'] = \
+        source['skills']['sixth_sense']
+    for shot in source['gun']['shots']:
+        shot['source_shot']['deadeye'] = source['skills']['deadeye']
+    source['ramming']['ramming_bonus'] = 0.0015 * \
+        contract.living_skill_level(source, 'driver_rammingmaster')
+    return source
+
+
 class EffectiveParamsContractTests(unittest.TestCase):
     def test_dynamic_spotting_ratios_use_native_factor_pairs(self):
         healthy = {
@@ -71,6 +106,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
 
     def test_garage_builder_uses_exact_client_final_value_providers(self):
         expected = effective_params()
+        expected['ramming']['ramming_bonus'] = 0.15
         descriptor = types.SimpleNamespace()
         descriptor.gun = types.SimpleNamespace(
             invisibilityFactorAtShot=0.4, clip=(2, 1.0), shots=tuple(
@@ -89,13 +125,25 @@ class EffectiveParamsContractTests(unittest.TestCase):
             'maxHealth': 100.0, 'maxRegenHealth': 50.0}
         descriptor.miscAttrs = {}
         descriptor.type = types.SimpleNamespace(
-            crewRoles=(('commander',),))
-        crew = [types.SimpleNamespace(skills=[
-            types.SimpleNamespace(
-                name='gunner_sniper', isActive=True, level=100.0),
-            types.SimpleNamespace(
-                name='loader_intuition', isActive=True, level=100.0),
-        ])]
+            crewRoles=(
+                ('commander',), ('gunner',), ('driver',),
+                ('loader', 'radioman')))
+
+        def skill(name):
+            return types.SimpleNamespace(
+                name=name, isActive=True, isEnable=True, level=100.0)
+
+        crew = [
+            types.SimpleNamespace(skills=[
+                skill('commander_sixthsense'),
+                skill('commander_expert'), skill('repair')]),
+            types.SimpleNamespace(skills=[
+                skill('gunner_sniper'), skill('gunner_rancorous')]),
+            types.SimpleNamespace(skills=[skill('driver_rammingmaster')]),
+            types.SimpleNamespace(skills=[
+                skill('loader_intuition'),
+                skill('radioman_lasteffort')]),
+        ]
         equipment_descriptor = types.SimpleNamespace(
             name='ration', id=(0, 9), compactDescr=1009,
             reuseCount=-1, cooldownSeconds=0.0,
@@ -147,7 +195,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
                     return_value=0.0), \
                 mock.patch(
                     'gui.mods.offline_lan_0922.loadout.ramming_bonus',
-                    return_value=0.0), \
+                    return_value=0.15), \
                 mock.patch(
                     'gui.mods.offline_lan_0922.vehicle_physics.derive_params',
                     return_value=expected['physics']) as derive_params, \
@@ -157,37 +205,57 @@ class EffectiveParamsContractTests(unittest.TestCase):
                     return_value=expected['ramming']):
             result = lan_session._selected_vehicle_effective_params()
 
-        self.assertEqual(5, attribute_factors.call_count)
+        self.assertEqual(33, attribute_factors.call_count)
         self.assertTrue(all(
             call.args[0] is descriptor
             for call in attribute_factors.call_args_list))
         dynamic_calls = attribute_factors.call_args_list[1:]
+        self.assertEqual(32, len(dynamic_calls))
         self.assertEqual(
-            [(True,), (True,), (False,), (False,)],
-            [tuple(call.kwargs['activity_flags'])
-             for call in dynamic_calls])
+            (True, True, True, True),
+            tuple(dynamic_calls[0].kwargs['activity_flags']))
         self.assertEqual(
-            [False, True, False, True],
-            [call.kwargs['is_fire'] for call in dynamic_calls])
+            (False, False, False, False),
+            tuple(dynamic_calls[-1].kwargs['activity_flags']))
+        self.assertFalse(dynamic_calls[0].kwargs['is_fire'])
+        self.assertTrue(dynamic_calls[-1].kwargs['is_fire'])
         derive_params.assert_called_once_with(descriptor, factors)
-        self.assertEqual(5, descriptor.computeBaseInvisibility.call_count)
+        self.assertEqual(33, descriptor.computeBaseInvisibility.call_count)
         descriptor.computeBaseInvisibility.assert_any_call(0.57, 7)
         self.assertEqual([[1, 20], [2, 10]], result['ammo'])
         self.assertEqual(0.2, result['camouflage']['base_moving'])
         self.assertEqual(0.4, result['camouflage']['shot_factor'])
         self.assertTrue(result['skills']['deadeye'])
         self.assertEqual(1, result['skills']['intuition_chances'])
+        self.assertTrue(result['skills']['sixth_sense'])
+        self.assertTrue(result['skills']['expert'])
+        self.assertTrue(result['skills']['controlled_impact'])
+        self.assertTrue(result['skills']['designated_target'])
+        self.assertTrue(result['skills']['last_effort'])
+        self.assertTrue(result['loadout']['has_sixth_sense'])
         self.assertEqual(2, result['gun']['clip_size'])
         self.assertEqual([1, 2], [
             shot['compact_descr'] for shot in result['gun']['shots']])
         self.assertTrue(all(
             shot['source_shot']['deadeye']
             for shot in result['gun']['shots']))
-        self.assertEqual(['commander'],
+        self.assertEqual(
+            ['commander', 'gunner1', 'driver', 'loader1'],
                          result['crew']['dynamic_spotting']['crew'])
         self.assertEqual(
-            {'0:0', '0:1', '1:0', '1:1'},
+            set('%d:%d' % (mask, fire)
+                for mask in range(16) for fire in (0, 1)),
             set(result['crew']['dynamic_spotting']['states']))
+        self.assertEqual(
+            ['loader', 'radioman'], result['crew']['members'][3]['roles'])
+        self.assertEqual(
+            ['loader_intuition', 'radioman_lasteffort'],
+            [skill['name']
+             for skill in result['crew']['members'][3]['skills']])
+        self.assertEqual(
+            ['commander_expert', 'commander_sixthsense', 'repair'],
+            [skill['name']
+             for skill in result['crew']['members'][0]['skills']])
 
     def test_complete_snapshot_is_canonical_and_detached(self):
         source = effective_params()
@@ -200,6 +268,120 @@ class EffectiveParamsContractTests(unittest.TestCase):
                          result['physics']['terrainResist'])
         source['loadout']['reload_factor'] = 99.0
         self.assertEqual(0.96, result['loadout']['reload_factor'])
+
+    def test_all_discrete_perks_keep_their_physical_carriers(self):
+        source = _snapshot_with_members([{
+            'instance': 'commander', 'roles': ['commander'],
+            'skills': [
+                _crew_skill('commander_sixthsense'),
+                _crew_skill('commander_expert'),
+            ],
+        }, {
+            'instance': 'gunner1', 'roles': ['gunner'],
+            'skills': [
+                _crew_skill('gunner_sniper'),
+                _crew_skill('gunner_rancorous'),
+            ],
+        }, {
+            'instance': 'driver', 'roles': ['driver'],
+            'skills': [_crew_skill('driver_rammingmaster')],
+        }, {
+            'instance': 'loader1',
+            'roles': ['loader', 'radioman'],
+            'skills': [
+                _crew_skill('loader_intuition'),
+                _crew_skill('radioman_lasteffort'),
+            ],
+        }])
+
+        result = contract.canonical(source)
+
+        self.assertIsNotNone(result)
+        self.assertEqual({
+            'sixth_sense': True,
+            'expert': True,
+            'deadeye': True,
+            'intuition_chances': 1,
+            'controlled_impact': True,
+            'designated_target': True,
+            'last_effort': True,
+        }, result['skills'])
+        self.assertEqual(
+            ('loader1',), contract.living_skill_carriers(
+                result, 'loader_intuition'))
+        source['crew']['members'][3]['skills'][0]['enabled'] = False
+        self.assertTrue(
+            result['crew']['members'][3]['skills'][0]['enabled'])
+
+    def test_crew_skill_schema_rejects_missing_state_and_wrong_role(self):
+        valid_member = {
+            'instance': 'loader1', 'roles': ['loader', 'radioman'],
+            'skills': [_crew_skill('loader_intuition')],
+        }
+        for field in ('name', 'level', 'active', 'enabled'):
+            source = _snapshot_with_members([valid_member])
+            del source['crew']['members'][0]['skills'][0][field]
+            self.assertIsNone(contract.canonical(source), field)
+
+        wrong_role = _snapshot_with_members([{
+            'instance': 'gunner1', 'roles': ['gunner'],
+            'skills': [_crew_skill('loader_intuition')],
+        }])
+        self.assertIsNone(contract.canonical(wrong_role))
+
+        with self.assertRaises(ValueError):
+            lan_session._project_crew_skill(types.SimpleNamespace(
+                name='repair', level=100.0, isActive=True))
+
+    def test_inactive_disabled_and_partial_perks_have_no_carrier(self):
+        source = _snapshot_with_members([{
+            'instance': 'loader1', 'roles': ['loader'],
+            'skills': [
+                _crew_skill('loader_intuition', active=False)],
+        }, {
+            'instance': 'loader2', 'roles': ['loader'],
+            'skills': [
+                _crew_skill('loader_intuition', enabled=False)],
+        }, {
+            'instance': 'loader', 'roles': ['loader'],
+            'skills': [_crew_skill('loader_intuition', level=99.0)],
+        }])
+
+        result = contract.canonical(source)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(0, result['skills']['intuition_chances'])
+        self.assertEqual(
+            (), contract.living_skill_carriers(
+                result, 'loader_intuition'))
+
+    def test_two_loaders_follow_ko_and_medkit_crew_state(self):
+        source = _snapshot_with_members([{
+            'instance': 'loader1', 'roles': ['loader'],
+            'skills': [_crew_skill('loader_intuition')],
+        }, {
+            'instance': 'loader2', 'roles': ['loader'],
+            'skills': [_crew_skill('loader_intuition')],
+        }])
+        result = contract.canonical(source)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(2, result['skills']['intuition_chances'])
+        self.assertEqual(
+            ('loader1', 'loader2'), contract.living_skill_carriers(
+                result, 'loader_intuition'))
+        self.assertEqual(
+            ('loader2',), contract.living_skill_carriers(
+                result, 'loader_intuition', {'crew_ko': ['loader1']}))
+        self.assertEqual(
+            0, contract.living_skill_count(
+                result, 'loader_intuition', ['loader1', 'loader2']))
+        self.assertEqual(
+            2, contract.living_skill_count(
+                result, 'loader_intuition', {'crew_ko': []}))
+        with self.assertRaises(ValueError):
+            contract.living_skill_count(
+                result, 'loader_intuition', ['radioman'])
 
     def test_snapshot_preserves_large_finite_module_values(self):
         source = effective_params()

@@ -13,7 +13,7 @@ from gui.mods.offline_lan_0922.prebaked_navigation import mod_dir
 
 
 FORMAT_NAME = 'offline-lan-0922-foliage'
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 try:
 	_INTEGER_TYPES = (int, long)

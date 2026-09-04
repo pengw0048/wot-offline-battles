@@ -64,16 +64,35 @@ _SPOTTING_KEYS = frozenset(
 _RAMMING_KEYS = frozenset(('spall_coefficient', 'ramming_bonus'))
 _CAMOUFLAGE_KEYS = frozenset(
     ('camouflage_id', 'base_moving', 'base_still', 'shot_factor'))
-_SKILL_KEYS = frozenset(('deadeye', 'intuition_chances'))
+_SKILL_KEYS = frozenset((
+    'sixth_sense', 'expert', 'deadeye', 'intuition_chances',
+    'controlled_impact', 'designated_target', 'last_effort'))
 _CREW_KEYS = frozenset(('members', 'dynamic_spotting'))
 _CREW_MEMBER_KEYS = frozenset(('instance', 'roles', 'skills'))
-_CREW_SKILL_KEYS = frozenset(('name', 'active', 'level'))
+_CREW_SKILL_KEYS = frozenset(
+    ('name', 'level', 'active', 'enabled'))
 _DYNAMIC_SPOTTING_KEYS = frozenset(('crew', 'states'))
 _DYNAMIC_SPOTTING_ROW_KEYS = frozenset((
     'vision', 'signal', 'camouflage', 'base_moving', 'base_still',
     'invisibility_moving', 'invisibility_still'))
-_PROJECTED_SPOTTING_PERKS = frozenset((
-    'gunner_rancorous', 'radioman_lasteffort'))
+DISCRETE_SKILL_ROLES = {
+    'commander_sixthsense': 'commander',
+    'commander_expert': 'commander',
+    'gunner_sniper': 'gunner',
+    'loader_intuition': 'loader',
+    'driver_rammingmaster': 'driver',
+    'gunner_rancorous': 'gunner',
+    'radioman_lasteffort': 'radioman',
+}
+MAX_PROJECTED_SKILLS_PER_MEMBER = 32
+_SKILL_SUMMARY_NAMES = (
+    ('sixth_sense', 'commander_sixthsense'),
+    ('expert', 'commander_expert'),
+    ('deadeye', 'gunner_sniper'),
+    ('controlled_impact', 'driver_rammingmaster'),
+    ('designated_target', 'gunner_rancorous'),
+    ('last_effort', 'radioman_lasteffort'),
+)
 _GUN_KEYS = frozenset(('clip_size', 'shots'))
 _GUN_SHOT_KEYS = frozenset(('compact_descr', 'source_shot'))
 _SOURCE_SHOT_KEYS = frozenset((
@@ -154,6 +173,30 @@ def _tuple(value, size, minimum, maximum):
 
 def _mapping(value, keys):
     return isinstance(value, dict) and set(value) == keys
+
+
+def _valid_skill_name(value):
+    if not isinstance(value, string_types) or not 1 <= len(value) <= 64:
+        return False
+    try:
+        name = str(value)
+    except Exception:
+        return False
+    allowed = 'abcdefghijklmnopqrstuvwxyz0123456789_'
+    return name == name.lower() and all(
+        character in allowed for character in name)
+
+
+def skill_required_role(name):
+    """Return a role encoded by an exact or role-prefixed skill name."""
+    name = str(name).lower()
+    exact = DISCRETE_SKILL_ROLES.get(name)
+    if exact is not None:
+        return exact
+    prefix = name.split('_', 1)[0]
+    if prefix in ('commander', 'driver', 'gunner', 'loader', 'radioman'):
+        return prefix
+    return None
 
 
 def _canonical_loadout(value):
@@ -285,11 +328,19 @@ def _canonical_camouflage(value):
 def _canonical_skills(value):
     if not _mapping(value, _SKILL_KEYS):
         return None
-    deadeye = _bool(value.get('deadeye'))
+    result = {}
+    for name in (
+            'sixth_sense', 'expert', 'deadeye', 'controlled_impact',
+            'designated_target', 'last_effort'):
+        flag = _bool(value.get(name))
+        if flag is None:
+            return None
+        result[name] = flag
     intuition = _exact_int(value.get('intuition_chances'), 0, 16)
-    if deadeye is None or intuition is None:
+    if intuition is None:
         return None
-    return {'deadeye': deadeye, 'intuition_chances': intuition}
+    result['intuition_chances'] = intuition
+    return result
 
 
 def _canonical_source_shot(value):
@@ -471,7 +522,7 @@ def _canonical_critical(value):
 
 
 def _canonical_crew(value):
-    """Validate the owner's physical crew and exact native spotting states."""
+    """Validate physical slots, discrete perks and native spotting states."""
     if not _mapping(value, _CREW_KEYS):
         return None
     raw_members = value.get('members')
@@ -494,7 +545,8 @@ def _canonical_crew(value):
                 instance in instances or
                 not isinstance(roles, (list, tuple)) or
                 not 1 <= len(roles) <= len(allowed_roles) or
-                not isinstance(skills, (list, tuple)) or len(skills) > 2):
+                not isinstance(skills, (list, tuple)) or
+                len(skills) > MAX_PROJECTED_SKILLS_PER_MEMBER):
             return None
         canonical_roles = []
         for role in roles:
@@ -502,6 +554,9 @@ def _canonical_crew(value):
                     role not in allowed_roles or role in canonical_roles):
                 return None
             canonical_roles.append(str(role))
+        base_instance = str(instance).rstrip('0123456789')
+        if base_instance not in canonical_roles:
+            return None
         canonical_skills = []
         skill_names = set()
         for skill in skills:
@@ -509,14 +564,19 @@ def _canonical_crew(value):
                 return None
             name = skill.get('name')
             active = _bool(skill.get('active'))
+            enabled = _bool(skill.get('enabled'))
             level = _number(skill.get('level'), 0.0, 100.0)
-            if (not isinstance(name, string_types) or
-                    name not in _PROJECTED_SPOTTING_PERKS or
-                    name in skill_names or active is None or level is None):
+            required_role = (skill_required_role(name)
+                             if _valid_skill_name(name) else None)
+            if (not _valid_skill_name(name) or name in skill_names or
+                    active is None or enabled is None or level is None or
+                    required_role is not None and
+                    required_role not in canonical_roles):
                 return None
             skill_names.add(name)
             canonical_skills.append({
-                'name': str(name), 'active': active, 'level': level})
+                'name': str(name), 'level': level,
+                'active': active, 'enabled': enabled})
         canonical_skills.sort(key=lambda entry: entry['name'])
         instances.append(str(instance))
         members.append({
@@ -564,6 +624,95 @@ def _canonical_crew(value):
     }
 
 
+def _crew_projection(value):
+    if not isinstance(value, dict):
+        raise ValueError('crew skill snapshot is invalid')
+    crew = value.get('crew') if 'crew' in value else value
+    if not isinstance(crew, dict) or not isinstance(crew.get('members'), list):
+        raise ValueError('crew skill snapshot is invalid')
+    return crew
+
+
+def _knocked_out_instances(crew, crew_ko):
+    if isinstance(crew_ko, dict):
+        crew_ko = crew_ko.get('crew_ko', ())
+    if not isinstance(crew_ko, (list, tuple, set, frozenset)):
+        raise ValueError('critical crew state is invalid')
+    roster = set(str(member['instance']) for member in crew['members'])
+    knocked_out = set(str(instance) for instance in crew_ko)
+    if knocked_out.difference(roster):
+        raise ValueError('critical crew state is outside its snapshot')
+    return knocked_out
+
+
+def living_skill_states(value, wanted, crew_ko=()):
+    """Return completed skill states whose physical carriers are conscious.
+
+    The round snapshot owns immutable skill affiliation.  ``crew_ko`` owns
+    current health; a medkit is represented by the repaired instance leaving
+    that current set.  No role-wide substitution is inferred when one of two
+    loaders is knocked out.
+    """
+    wanted = str(wanted).lower()
+    if not _valid_skill_name(wanted):
+        raise ValueError('invalid crew skill name')
+    crew = _crew_projection(value)
+    knocked_out = _knocked_out_instances(crew, crew_ko)
+    result = []
+    for member in crew['members']:
+        if str(member['instance']) in knocked_out:
+            continue
+        for skill in member['skills']:
+            if (skill['name'] == wanted and skill['active'] is True and
+                    skill['enabled'] is True and skill['level'] >= 100.0):
+                result.append({
+                    'instance': str(member['instance']),
+                    'roles': list(member['roles']),
+                    'level': float(skill['level']),
+                })
+    return result
+
+
+def living_skill_carriers(value, wanted, crew_ko=()):
+    """Return physical instance names for conscious completed carriers."""
+    return tuple(state['instance'] for state in
+                 living_skill_states(value, wanted, crew_ko))
+
+
+def living_skill_count(value, wanted, crew_ko=()):
+    """Count conscious completed carriers of one discrete perk."""
+    return len(living_skill_states(value, wanted, crew_ko))
+
+
+def living_skill_level(value, wanted, crew_ko=()):
+    """Return the highest active and enabled level on a conscious carrier."""
+    wanted = str(wanted).lower()
+    if not _valid_skill_name(wanted):
+        raise ValueError('invalid crew skill name')
+    crew = _crew_projection(value)
+    knocked_out = _knocked_out_instances(crew, crew_ko)
+    result = 0.0
+    for member in crew['members']:
+        if str(member['instance']) in knocked_out:
+            continue
+        for skill in member['skills']:
+            if (skill['name'] == wanted and skill['active'] is True and
+                    skill['enabled'] is True):
+                result = max(result, float(skill['level']))
+    return result
+
+
+def skill_summary(value, crew_ko=()):
+    """Derive convenience flags from authoritative physical carriers."""
+    result = {}
+    for summary_name, skill_name in _SKILL_SUMMARY_NAMES:
+        result[summary_name] = bool(
+            living_skill_count(value, skill_name, crew_ko))
+    result['intuition_chances'] = living_skill_count(
+        value, 'loader_intuition', crew_ko)
+    return result
+
+
 def canonical(value):
     """Return a detached canonical snapshot, or ``None`` when invalid."""
     if (not isinstance(value, dict) or
@@ -595,6 +744,19 @@ def canonical(value):
     if (critical is not None and critical.get('crew_roster') is not None and
             critical.get('crew_roster') !=
             crew['dynamic_spotting']['crew']):
+        return None
+    try:
+        expected_skills = skill_summary(crew)
+        controlled_impact_level = living_skill_level(
+            crew, 'driver_rammingmaster')
+    except (KeyError, TypeError, ValueError):
+        return None
+    if skills != expected_skills:
+        return None
+    if loadout['has_sixth_sense'] != skills['sixth_sense']:
+        return None
+    expected_ramming_bonus = controlled_impact_level * 0.0015
+    if abs(ramming['ramming_bonus'] - expected_ramming_bonus) > 0.0000001:
         return None
     if any(shot['source_shot']['deadeye'] != skills['deadeye']
            for shot in gun['shots']):

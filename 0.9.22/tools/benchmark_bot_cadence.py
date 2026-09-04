@@ -18,6 +18,7 @@ TEST_ROOT = PORT_ROOT / 'tests'
 sys.path.insert(0, str(TEST_ROOT))
 
 import test_port_0922_bot_runtime as fixtures
+from effective_params_fixture import bot_default_crew_factors
 
 
 def _command():
@@ -34,6 +35,7 @@ def _command():
 
 def _runtime(visible=True, control_seconds=None):
     module = fixtures._load()
+    module.loadout.attribute_factors = bot_default_crew_factors
     command = _command()
     equipment_contracts = fixtures._bot_equipment_contracts(module)
     runtime = module.BotRuntime(

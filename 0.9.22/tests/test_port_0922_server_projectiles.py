@@ -92,7 +92,7 @@ def _update_player_input(state, player_id, **changes):
     player = state.players[player_id]
     message = {
         'type': 'input', 'round_id': state.round_id,
-        'input_seq': player.input_seq + 1,
+        'input_seq': player.input_processed_seq + 1,
         'pose_time_us': state._logical_motion_time_us(),
         'forward': 0.0, 'turn': 0.0, 'speed': 0.0,
         'aim_yaw': player.aim_yaw, 'gun_pitch': player.gun_pitch,
@@ -174,7 +174,7 @@ def _launch_authority(state, message, before_launch=None):
     if 'fire_intent_seq' not in message:
         player_id = int(message['shooter_id'])
         player = state.players[player_id]
-        input_seq = player.input_seq + 1
+        input_seq = player.input_processed_seq + 1
         self_time = state._logical_motion_time_us()
         if not state.update_input(player_id, {
                 'type': 'input', 'round_id': state.round_id,
@@ -314,7 +314,9 @@ def _player_ram_contact(seq=1, **changes):
 def _player_destructible_contact(seq=1, **changes):
     contact = {
         'seq': seq, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
-        'speed': 5.0, 'dt': 0.03, 'token': [[7, 3, None]],
+        'speed': 5.0, 'dt': 0.03,
+        'end_x': 0.0, 'end_y': 0.0, 'end_z': 0.15, 'end_yaw': 0.0,
+        'token': [[7, 3, None]],
     }
     contact.update(changes)
     return contact
@@ -491,19 +493,25 @@ class ServerProjectileLedgerTests(unittest.TestCase):
     def test_modern_input_whitelist_rejects_before_state_advances(self):
         state = _state(players=1)
         player = state.players[1]
-        base = {
-            'type': 'input', 'round_id': state.round_id,
-            'input_seq': 1,
-            'pose_time_us': state._logical_motion_time_us(),
-            'forward': 0.75, 'turn': -0.25, 'speed': 0.0,
-            'aim_yaw': 0.2, 'gun_pitch': 0.05,
-            'x': player.x, 'y': player.y, 'z': player.z,
-            'yaw': player.yaw, 'pitch': player.pitch,
-            'roll': player.roll, 'fire_seq': 0,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint': _gun_checkpoint(),
-        }
+
+
+        def frame(**changes):
+            message = {
+                'type': 'input', 'round_id': state.round_id,
+                'input_seq': player.input_processed_seq + 1,
+                'pose_time_us': state._logical_motion_time_us(),
+                'forward': 0.75, 'turn': -0.25, 'speed': 0.0,
+                'aim_yaw': 0.2, 'gun_pitch': 0.05,
+                'x': player.x, 'y': player.y, 'z': player.z,
+                'yaw': player.yaw, 'pitch': player.pitch,
+                'roll': player.roll, 'fire_seq': 0,
+                'shell_index': 0, 'next_shell_index': 0,
+                'shell_change_pending': False,
+                'gun_checkpoint': _gun_checkpoint(),
+            }
+            message.update(changes)
+            return json.loads(json.dumps(message))
+
         before = (
             player.input_seq, dict(player.input_fingerprints),
             player.gun_checkpoint_seq, dict(player.gun_checkpoint),
@@ -515,26 +523,34 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             ('reported_health', 0),
             ('automatic_equipment_response', {'equipment_id': 21}),
             ('destructible_verdict', {'destroyed': True}),
+            ('type', 'equipment_intent'),
         )
-        for field, value in forbidden:
+        for index, (field, value) in enumerate(forbidden):
             with self.subTest(field=field):
-                message = json.loads(json.dumps(base))
-                message[field] = value
-                self.assertFalse(state.update_input(1, message))
+                rejected_seq = player.input_processed_seq + 1
+                self.assertFalse(
+                    state.update_input(1, frame(**{field: value})))
+                # No applied state, and no gun checkpoint, from a frame that
+                # never passed the whitelist.
                 self.assertEqual(before, (
                     player.input_seq, dict(player.input_fingerprints),
                     player.gun_checkpoint_seq, dict(player.gun_checkpoint),
                     player.forward, player.turn, player.health, player.alive,
                 ))
+                # The terminal frontier still advances so the next legal frame
+                # is not stuck behind this rejected sequence forever.
+                self.assertEqual(index + 1, player.input_processed_seq)
+                self.assertEqual(
+                    'rejected',
+                    player.input_decisions[rejected_seq]['outcome'])
+                self.assertNotIn(rejected_seq, player.gun_checkpoints)
 
-        wrong_type = json.loads(json.dumps(base))
-        wrong_type['type'] = 'equipment_intent'
-        self.assertFalse(state.update_input(1, wrong_type))
-        self.assertEqual(0, player.input_seq)
-        self.assertTrue(state.update_input(1, base))
-        self.assertEqual((1, 1, 0.75, -0.25), (
+        recovered_seq = player.input_processed_seq + 1
+        self.assertTrue(state.update_input(1, frame()))
+        self.assertEqual((recovered_seq, recovered_seq, 0.75, -0.25), (
             player.input_seq, player.gun_checkpoint_seq,
             player.forward, player.turn))
+        self.assertEqual(recovered_seq, player.input_processed_seq)
 
     def test_modern_input_folds_inactive_player_frame_as_noop(self):
         for condition in ('waiting', 'loading', 'finished',
@@ -651,6 +667,193 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             destructible_contacts=[bad_destructible]))
         self.assertEqual(2, player.input_seq)
         self.assertEqual(1.0, player.forward)
+
+    def test_pure_pivot_destructible_contact_binds_and_relays_swept_pose(self):
+        state = _state(players=1)
+        player = state.players[1]
+        relayed = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            relayed.append(dict(message)) or True)
+        contact = _player_destructible_contact(
+            speed=0.0, end_z=0.0, end_yaw=0.2)
+
+        self.assertTrue(_update_player_input(
+            state, 1, forward=0.0, turn=1.0, speed=0.0,
+            destructible_contacts=[contact]))
+
+        self.assertEqual([1], list(player.destructible_contacts))
+        admitted = player.destructible_contacts[1]
+        self.assertEqual((0.0, 0.2), (
+            admitted['speed'], admitted['end_yaw']))
+        self.assertEqual(0.0, admitted['forward'])
+        self.assertEqual('player_destructible_contact', relayed[0]['type'])
+        self.assertEqual(0.2, relayed[0]['player']
+                         ['destructible_contacts'][0]['end_yaw'])
+
+    def test_lateral_destructible_contact_does_not_require_forward_speed(self):
+        state = _state(players=1)
+        player = state.players[1]
+        relayed = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            relayed.append(dict(message)) or True)
+        contact = _player_destructible_contact(
+            speed=5.0, end_x=0.15, end_z=0.0)
+
+        self.assertTrue(_update_player_input(
+            state, 1, forward=1.0, speed=20.0,
+            destructible_contacts=[contact]))
+
+        self.assertEqual([1], list(player.destructible_contacts))
+        self.assertEqual('player_destructible_contact', relayed[0]['type'])
+        admitted = relayed[0]['player']['destructible_contacts'][0]
+        self.assertEqual((0.15, 0.0, 5.0), (
+            admitted['end_x'], admitted['end_z'], admitted['speed']))
+
+    def test_destructible_contact_batch_admits_bounded_window(self):
+        state = _state(players=1)
+        player = state.players[1]
+        relayed = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            relayed.append(dict(message)) or True)
+        contacts = [
+            _player_destructible_contact(
+                seq=seq, token=[[7, seq + 10, None]])
+            for seq in range(1, 17)]
+
+        self.assertTrue(_update_player_input(
+            state, 1, destructible_contacts=contacts))
+
+        self.assertEqual(16, player.destructible_contact_seq)
+        self.assertEqual(list(range(1, 17)), list(
+            player.destructible_contacts))
+        self.assertEqual(16, len(relayed))
+        self.assertEqual(
+            list(range(1, 17)),
+            [message['player']['destructible_contacts'][0]['seq']
+             for message in relayed])
+
+    def test_destructible_results_advance_independently_out_of_order(self):
+        state = _state(players=1)
+        player = state.players[1]
+        contacts = [
+            _player_destructible_contact(
+                seq=seq, token=[[7, seq + 10, None]])
+            for seq in range(1, 4)]
+        self.assertTrue(_update_player_input(
+            state, 1, destructible_contacts=contacts))
+        for seq in range(1, 4):
+            state.destructibles[('tree', 7, seq + 10, None)] = {
+                'destructible_kind': 'tree', 'chunk_id': 7,
+                'item_index': seq + 10, 'mat_kind': None,
+            }
+
+        def accept(seq):
+            return state.report_player_destructible_contact_result(
+                SIMULATION_WORKER_AUTHORITY_ID, {
+                    'type': 'player_destructible_contact_result',
+                    'round_id': state.round_id,
+                    'player_id': 1, 'contact_seq': seq,
+                    'accepted': True, 'token': [[7, seq + 10, None]],
+                })
+
+        self.assertTrue(accept(2))
+        self.assertEqual([1, 3], list(player.destructible_contacts))
+        self.assertEqual(0, player.destructible_contact_resolved_seq)
+        self.assertEqual([2], list(
+            player.destructible_contact_resolutions))
+        public = state._public_player(player)
+        self.assertEqual([2], public[
+            'destructible_contact_resolved_seqs'])
+
+        self.assertTrue(_update_player_input(
+            state, 1, destructible_contacts=[
+                _player_destructible_contact(
+                    seq=4, token=[[7, 14, None]])]))
+        self.assertEqual([1, 3, 4], list(player.destructible_contacts))
+
+        self.assertTrue(accept(1))
+        self.assertEqual([3, 4], list(player.destructible_contacts))
+        self.assertEqual(2, player.destructible_contact_resolved_seq)
+        self.assertFalse(player.destructible_contact_resolutions)
+        self.assertNotIn(
+            'destructible_contact_resolved_seqs',
+            state._public_player(player))
+
+    def test_destructible_admission_stays_inside_selective_ack_window(self):
+        state = _state(players=1)
+        player = state.players[1]
+        player.destructible_contact_seq = 64
+        player.destructible_contacts[1] = _player_destructible_contact(seq=1)
+        for seq in range(2, 65):
+            player.destructible_contact_resolutions[seq] = True
+
+        self.assertTrue(_update_player_input(
+            state, 1, destructible_contacts=[
+                _player_destructible_contact(
+                    seq=65, token=[[7, 65, None]])]))
+
+        self.assertEqual(64, player.destructible_contact_seq)
+        self.assertNotIn(65, player.destructible_contacts)
+        public = state._public_player(player)
+        self.assertEqual(
+            list(range(2, 65)),
+            public['destructible_contact_resolved_seqs'])
+
+    def test_destructible_swept_pose_rejects_impossible_motion_locally(self):
+        cases = (
+            {'speed': 0.0, 'end_z': 1.0, 'end_yaw': 0.0},
+            {'speed': 0.0, 'end_z': 0.0, 'end_yaw': 0.5},
+            {'speed': 0.0, 'end_z': 0.0, 'end_yaw': 0.0},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                state = _state(players=1)
+                player = state.players[1]
+                self.assertTrue(_update_player_input(
+                    state, 1, destructible_contacts=[
+                        _player_destructible_contact(**changes)]))
+                self.assertEqual((1, 1), (
+                    player.destructible_contact_seq,
+                    player.destructible_contact_resolved_seq))
+                self.assertIn(1, player.destructible_contact_rejections)
+                self.assertFalse(player.destructible_contacts)
+
+    def test_destructible_contact_token_accepts_64_identities_only(self):
+        token = [[7, item_index, None] for item_index in range(64)]
+        accepted = BattleState._validated_player_destructible_contact(
+            _player_destructible_contact(token=token))
+
+        self.assertIsNotNone(accepted)
+        self.assertEqual(64, len(accepted['token']))
+        self.assertEqual(
+            64, len(BattleState._destructible_contact_result_token(token)))
+        self.assertIsNone(
+            BattleState._validated_player_destructible_contact(
+                _player_destructible_contact(
+                    token=token + [[7, 64, None]])))
+        self.assertIsNone(BattleState._destructible_contact_result_token(
+            token + [[7, 64, None]]))
+
+    def test_worker_result_accepts_canonical_tree_contact(self):
+        state = _state(players=1)
+        player = state.players[1]
+        player.destructible_contact_seq = 1
+        player.destructible_contacts[1] = _player_destructible_contact()
+        state.destructibles[('tree', 7, 3, None)] = {
+            'destructible_kind': 'tree', 'chunk_id': 7,
+            'item_index': 3, 'mat_kind': None,
+        }
+
+        self.assertTrue(state.report_player_destructible_contact_result(
+            SIMULATION_WORKER_AUTHORITY_ID, {
+                'type': 'player_destructible_contact_result',
+                'round_id': state.round_id,
+                'player_id': 1, 'contact_seq': 1,
+                'accepted': True, 'token': [[7, 3, None]],
+            }))
+
+        self.assertEqual(1, player.destructible_contact_resolved_seq)
+        self.assertFalse(player.destructible_contacts)
 
     def test_player_environment_skips_overtaken_rows_and_keeps_live_rows(self):
         state = _state(players=2)

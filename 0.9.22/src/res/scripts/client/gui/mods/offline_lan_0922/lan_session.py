@@ -143,32 +143,6 @@ def _field(value, name, default=None):
     return getattr(value, name, default)
 
 
-def _crew_has_finished_skill(crew, wanted):
-    """Return whether the mounted garage crew owns one completed perk."""
-    wanted = str(wanted).lower()
-    for entry in (crew or ()):
-        member = (entry[1] if isinstance(entry, tuple) and len(entry) == 2
-                  else entry)
-        if member is None:
-            continue
-        skills = getattr(member, 'skills', None)
-        if skills is None:
-            skills = getattr(
-                getattr(member, 'descriptor', None), 'skills', ())
-        for skill in (skills or ()):
-            if str(getattr(skill, 'name', skill)).lower() != wanted:
-                continue
-            if not bool(getattr(skill, 'isActive', True)):
-                continue
-            try:
-                level = float(getattr(skill, 'level', 100.0))
-            except (TypeError, ValueError):
-                level = 0.0
-            if level >= 100.0:
-                return True
-    return False
-
-
 def _ordered_crew_members(crew):
     members = list(crew or ())
     if members and all(isinstance(member, tuple) and len(member) == 2
@@ -178,24 +152,13 @@ def _ordered_crew_members(crew):
     return tuple(members)
 
 
-def _project_spotting_skill(skill):
-    name = str(_field(skill, 'name', '') or '').lower()
-    if name not in ('gunner_rancorous', 'radioman_lasteffort'):
-        return None
-    active = _field(skill, 'isActive', True)
-    if callable(active):
-        active = active()
-    try:
-        level = float(_field(
-            skill, 'level', _field(skill, 'progress', 100.0)))
-    except (TypeError, ValueError, OverflowError):
-        raise ValueError('a mounted crew skill level is invalid')
-    if math.isnan(level) or math.isinf(level):
-        raise ValueError('a mounted crew skill level is invalid')
-    return {
-        'name': name, 'active': bool(active),
-        'level': max(0.0, min(100.0, level)),
-    }
+def _project_crew_skill(skill):
+    from gui.mods.offline_lan_0922 import loadout
+
+    projected = loadout.project_skill_state(skill)
+    if projected is None:
+        raise ValueError('a mounted crew skill state is invalid')
+    return projected
 
 
 def _selected_vehicle_effective_params():
@@ -245,6 +208,10 @@ def _selected_vehicle_effective_params():
     crew_skills = loadout.crew_skill_names(crew) if crew else None
     loadout_values = loadout.modifiers(
         descriptor, equipments, crew_skills, factors=factors)
+    # Discrete perks require exact mounted-role eligibility and completion.
+    # The name-only fallback bundle cannot prove either condition.
+    loadout_values['has_sixth_sense'] = bool(
+        loadout.finished_skill_count(crew, 'commander_sixthsense'))
     spotting_values = loadout.spotting_profile(
         descriptor, crew or None,
         level_increase=loadout.crew_level_increase(
@@ -280,7 +247,7 @@ def _selected_vehicle_effective_params():
         raise ValueError('the exact client camouflage values are invalid')
     gun = _field(descriptor, 'gun', {})
     shot_factor = float(_field(gun, 'invisibilityFactorAtShot', 1.0))
-    deadeye = _crew_has_finished_skill(crew, 'gunner_sniper')
+    deadeye = bool(loadout.finished_skill_count(crew, 'gunner_sniper'))
     try:
         clip_size = int(_field(gun, 'clip')[0])
     except (IndexError, TypeError, ValueError):
@@ -319,9 +286,14 @@ def _selected_vehicle_effective_params():
             raw_skills = _field(_field(member, 'descriptor', {}), 'skills', ())
         projected_skills = []
         for skill in raw_skills or ():
-            projected = _project_spotting_skill(skill)
-            if projected is not None:
-                projected_skills.append(projected)
+            projected = _project_crew_skill(skill)
+            required_role = effective_params.skill_required_role(
+                projected['name'])
+            if (required_role is not None and
+                    required_role not in member_roles):
+                raise ValueError(
+                    'a mounted crew skill does not match its slot roles')
+            projected_skills.append(projected)
         projected_skills.sort(key=lambda entry: entry['name'])
         projected_members.append({
             'instance': roster[index],
@@ -376,6 +348,7 @@ def _selected_vehicle_effective_params():
             'states': dynamic_states,
         },
     }
+    healthy_skills = effective_params.skill_summary(crew_projection)
     if effective_params._canonical_equipment(equipment_contracts) is None:
         raise ValueError('the selected vehicle equipment projection is invalid')
     if effective_params._canonical_critical(critical_profile) is None:
@@ -393,10 +366,7 @@ def _selected_vehicle_effective_params():
             'base_still': float(base_invisibility[1]),
             'shot_factor': shot_factor,
         },
-        'skills': {
-            'deadeye': deadeye,
-            'intuition_chances': loadout.intuition_chances(crew),
-        },
+        'skills': healthy_skills,
         'crew': crew_projection,
         'gun': {
             'clip_size': clip_size,
@@ -641,6 +611,10 @@ class LANSession(object):
                     self._postbattle_result_retry_attempted.discard(arena)
                     if archived:
                         self._archived_result_replayed = True
+                        # The native 1501 ACK already made this a historical
+                        # result.  Rehydrate the process-local cache without
+                        # publishing the same service message again.
+                        self._notified_results.add(arena)
                     self._completed_results.add(arena)
                     # #1513 BattleResultsCache accepts one request at a time.
                     # Its callback runs after releasing that wait gate, so

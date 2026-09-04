@@ -14,6 +14,7 @@ sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import BattleState  # noqa: E402
 from server_bot_ai import BotPlanner  # noqa: E402
+from effective_params_fixture import bot_default_crew_factors  # noqa: E402
 
 
 def _load_bot_runtime():
@@ -81,6 +82,13 @@ class BotAmmunitionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.runtime_module = _load_bot_runtime()
+        cls._attribute_factors = cls.runtime_module.loadout.attribute_factors
+        cls.runtime_module.loadout.attribute_factors = \
+            bot_default_crew_factors
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.runtime_module.loadout.attribute_factors = cls._attribute_factors
 
     def test_real_capacity_uses_fixed_three_two_one_inventory(self):
         ammo = self.runtime_module._BotAmmoState(

@@ -28,6 +28,13 @@ try:
 except NameError:
     _INTEGER_TYPES = (int,)
 
+try:
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _STRING_TYPES = (str,)
+
+_MISSING = object()
+
 # VehicleDescrCrew._processSkills: factor = 0.57 + 0.43 * (level / 100).
 CREW_FACTOR_BASE = 0.57
 CREW_FACTOR_SLOPE = 0.0043
@@ -561,6 +568,53 @@ def _number(value, default=0.0):
     return value
 
 
+def _skill_flag(skill, name):
+    """Read one required GUI skill flag, or ``None`` when unproved."""
+    value = getattr(skill, name, _MISSING)
+    if value is _MISSING:
+        return None
+    if callable(value):
+        try:
+            value = value()
+        except Exception:
+            return None
+    if not isinstance(value, bool):
+        return None
+    return value
+
+
+def project_skill_state(skill):
+    """Project one mounted skill without inventing activation defaults.
+
+    ``TankmanSkill.isActive`` owns proficiency/perk activation and
+    ``TankmanSkill.isEnable`` owns eligibility for the member's current
+    physical role.  A missing or malformed property cannot prove that the
+    skill works in battle, so callers must treat ``None`` as fail-closed.
+    """
+    name = getattr(skill, 'name', _MISSING)
+    level = getattr(skill, 'level', _MISSING)
+    active = _skill_flag(skill, 'isActive')
+    enabled = _skill_flag(skill, 'isEnable')
+    if (name is _MISSING or level is _MISSING or active is None or
+            enabled is None or not isinstance(name, _STRING_TYPES)):
+        return None
+    try:
+        level = float(level)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(level) or math.isinf(level) or not 0.0 <= level <= 100.0:
+        return None
+    name = str(name).lower()
+    if not name:
+        return None
+    return {
+        'name': name,
+        'level': level,
+        'active': active,
+        'enabled': enabled,
+    }
+
+
 def _skill_level(member, wanted):
     """Return one crew member's level in a named skill, 0.0 when absent."""
     skills = getattr(member, 'skills', None)
@@ -569,10 +623,39 @@ def _skill_level(member, wanted):
     for skill in (skills or ()):
         if _name_of(skill) != wanted:
             continue
-        if not bool(getattr(skill, 'isActive', True)):
+        # ``TankmanSkill.isActive`` owns proficiency/perk activation, while
+        # ``isEnable`` owns combined-role eligibility on the mounted vehicle.
+        # Both must agree: a saved loader perk on a crewman who does not occupy
+        # a loader-capable seat must not affect this vehicle.
+        active = _skill_flag(skill, 'isActive')
+        enabled = _skill_flag(skill, 'isEnable')
+        if active is False or enabled is False:
             return 0.0
         return max(0.0, _number(getattr(skill, 'level', 100.0), 100.0))
     return 0.0
+
+
+def finished_skill_count(crew, wanted):
+    """Count mounted crewmen with one strictly proved completed perk."""
+    wanted = str(wanted).lower()
+    count = 0
+    for member in (crew or ()):
+        if isinstance(member, tuple) and len(member) == 2:
+            member = member[1]
+        if member is None:
+            continue
+        skills = getattr(member, 'skills', None)
+        if skills is None:
+            skills = getattr(
+                getattr(member, 'descriptor', None), 'skills', None)
+        for skill in (skills or ()):
+            state = project_skill_state(skill)
+            if (state is not None and state['name'] == wanted and
+                    state['active'] and state['enabled'] and
+                    state['level'] >= 100.0):
+                count += 1
+                break
+    return count
 
 
 def ramming_bonus(crew):
@@ -589,7 +672,16 @@ def ramming_bonus(crew):
             member = member[1]
         if member is None:
             continue
-        level = max(level, _skill_level(member, 'driver_rammingmaster'))
+        skills = getattr(member, 'skills', None)
+        if skills is None:
+            skills = getattr(
+                getattr(member, 'descriptor', None), 'skills', None)
+        for skill in (skills or ()):
+            state = project_skill_state(skill)
+            if (state is not None and
+                    state['name'] == 'driver_rammingmaster' and
+                    state['active'] and state['enabled']):
+                level = max(level, state['level'])
     return min(100.0, level) * 0.0015
 
 
@@ -599,15 +691,7 @@ def intuition_chances(crew):
     #1513 makes it a perk, so it only counts at full proficiency, and the skill
     text says two loaders stack.
     """
-    count = 0
-    for member in (crew or ()):
-        if isinstance(member, tuple) and len(member) == 2:
-            member = member[1]
-        if member is None:
-            continue
-        if _skill_level(member, _INTUITION_SKILL) >= 100.0:
-            count += 1
-    return count
+    return finished_skill_count(crew, _INTUITION_SKILL)
 
 
 def crew_level_increase(descriptor, equipments=(), crew_skills=None):

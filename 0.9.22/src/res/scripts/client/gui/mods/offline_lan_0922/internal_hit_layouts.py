@@ -220,20 +220,14 @@ def _compiled_profile(vehicle_name):
 	profile = _layout_profiles.PROFILES.get(key)
 	if profile is not None:
 		return key, profile
-	# #1513 names include a national catalog prefix (for example
-	# ``ussr:R11_MS-1``), while the adopted 0.8.2 profile is keyed as
-	# ``ussr:MS-1``.  Only try the suffix when the prefix really contains a
-	# digit, and only accept an exact compiled key; newer vehicles therefore
-	# still fail closed instead of being matched heuristically.
-	parts = str(vehicle_name or '').split(':', 1)
-	if len(parts) == 2 and '_' in parts[1]:
-		prefix, suffix = parts[1].split('_', 1)
-		if (any(character.isdigit() for character in prefix) and
-				any(character.isalpha() for character in prefix)):
-			alias = (key[0], _normal_name(suffix))
-			profile = _layout_profiles.PROFILES.get(alias)
-			if profile is not None:
-				return alias, profile
+	# The retained geometry was authored for 0.8.2 names.  Resolve renamed
+	# #1513 vehicles only through the reviewed full-name table: suffix matching
+	# can attach an old profile to an unrelated vehicle which reused the name.
+	alias = getattr(_layout_profiles, 'PROFILE_ALIASES_0922', {}).get(key)
+	if alias is not None:
+		profile = _layout_profiles.PROFILES.get(alias)
+		if profile is not None:
+			return alias, profile
 	return key, None
 
 

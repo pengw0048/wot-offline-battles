@@ -40,7 +40,7 @@ import navigation_graph_schema
 
 
 FORMAT_NAME = 'offline-lan-0922-destructible-catalog'
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 GAME_VERSION = '0.9.22.0.1-cn-1513'
 DECODER_VERSION = '0.9.22.0.1'
@@ -232,12 +232,47 @@ def _item_scale(transform):
 def native_wires(compiled, bsmi_count):
     """Map referenced scene rows to native ``(chunk_id, item_index)`` wires.
 
-    WGDE table "1" rows are (chunk_id, global_item_begin, item_count) and
-    must partition table "2" from zero.  Every table "2" row occupies one
-    native item slot spanning an inclusive reference range in table "3";
-    ref_begin > ref_end is a valid empty slot that still advances the pinned
-    #1513 streamed item index.  A table "3" reference selects an SpTr row
-    when bit 0x80000000 is set and a BSMI row otherwise.
+    Exact pinned #1513 enumeration contract, one rule per WGDE row class:
+
+    * Table "1" rows are ``(chunk_id, global_item_begin, item_count)``.  Sorted
+      by ``global_item_begin`` they must partition table "2" from zero, and no
+      chunk id may repeat.  File order is not significant, and the native item
+      index restarts at zero inside every chunk, so a streamed chunk produces
+      the same wires as the same chunk loaded at battle start.
+    * Table "2" rows are inclusive reference ranges ``[ref_begin, ref_end]``
+      into table "3" and must partition it from zero.  ``ref_end ==
+      ref_begin - 1`` is an authored empty row that references no scene
+      instance.
+    * An empty table "2" row does NOT consume a streamed native item index.
+      The provider enumerates only rows that reference at least one scene
+      instance, so the native item index of a row is the number of non-empty
+      rows before it inside its chunk.
+    * A table "3" reference selects an SpTr row when bit ``0x80000000`` is set
+      and a BSMI row otherwise.  Both classes are scene instances and consume
+      the same item index space: a SpeedTree row advances the index exactly
+      like a BSMI row.
+    * Several references in one row share one native item; that is how the
+      separate BSMO module rows of a structure collapse to one identity.  A
+      single reference may never appear in two rows.
+    * An ignored BSMO entry type (a type-2/type-3 authored effect) is still a
+      referenced scene instance, so its row consumes an item index even though
+      ``bake_compiled_map`` never makes it crushable.
+
+    The empty-row rule is the one class that pinned resource data alone cannot
+    settle, because a compiled empty row is indistinguishable from a row the
+    provider skipped.  It is fixed by exact live #1513 evidence: three separate
+    reports recovered a live destructible matrix whose quantized locator
+    signature is unique in the baked catalog, and in every case the live item
+    index equalled the non-empty-row count and not the table-2 position:
+
+    * ``11_murovanka`` chunk 32124 ``gaf001_WoodFence`` live item 7;
+    * ``18_cliff`` chunk 32893 ``bld704_shed`` live item 6;
+    * ``34_redshire`` chunk 33148 ``env422_WallLamp`` live item 58.
+
+    Counting the empty rows shifted exactly those three slots to 8, 7 and 59.
+    Empty rows exist in only six standard maps, and every reported live wire
+    mismatch came from three of those six; the other 35 maps are unaffected by
+    this rule and reported no wire mismatch.
     """
     wgde = compiled.sections['WGDE']._data
     table1 = wgde.get('1')
@@ -258,15 +293,11 @@ def native_wires(compiled, bsmi_count):
         item_cursor += count
     if item_cursor != len(table2):
         raise ValueError('WGDE chunk item ranges do not cover the item table')
-    item_wires = [None] * len(table2)
-    for begin, count, chunk_id in chunk_ranges:
-        for position in range(begin, begin + count):
-            item_wires[position] = (chunk_id, position - begin)
-    row_wires = {}
-    wire_rows = {}
-    speedtree_wires = {}
+    # Resolve every reference span before assigning wires so that "empty row"
+    # has exactly one definition for both the index and the reference walk.
+    spans = []
     ref_cursor = 0
-    for position, (ref_begin, ref_end) in enumerate(table2):
+    for ref_begin, ref_end in table2:
         ref_begin = int(ref_begin)
         ref_end = int(ref_end)
         if ref_begin != ref_cursor:
@@ -274,7 +305,27 @@ def native_wires(compiled, bsmi_count):
         if ref_begin > ref_end:
             if ref_end != ref_cursor - 1:
                 raise ValueError('WGDE empty item span is invalid')
+            spans.append(None)
             continue
+        spans.append((ref_begin, ref_end))
+        ref_cursor = ref_end + 1
+    if ref_cursor != len(table3):
+        raise ValueError('WGDE item spans do not cover the reference table')
+    item_wires = [None] * len(table2)
+    for begin, count, chunk_id in chunk_ranges:
+        native_index = 0
+        for position in range(begin, begin + count):
+            if spans[position] is None:
+                continue
+            item_wires[position] = (chunk_id, native_index)
+            native_index += 1
+    row_wires = {}
+    wire_rows = {}
+    speedtree_wires = {}
+    for position, span in enumerate(spans):
+        if span is None:
+            continue
+        ref_begin, ref_end = span
         wire = item_wires[position]
         rows = set()
         for ref_index in range(ref_begin, ref_end + 1):
@@ -291,9 +342,6 @@ def native_wires(compiled, bsmi_count):
                 rows.add(ref)
         if rows:
             wire_rows[wire] = frozenset(rows)
-        ref_cursor = ref_end + 1
-    if ref_cursor != len(table3):
-        raise ValueError('WGDE item spans do not cover the reference table')
     return row_wires, wire_rows, speedtree_wires
 
 

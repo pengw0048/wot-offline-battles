@@ -292,16 +292,21 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     components = getattr(vehicle_type, attribute)
                     if any(item.compactDescr == compact_descr
                            for item in components):
+                        previous = getattr(descriptor, mounted)
                         setattr(descriptor, mounted,
                                 find(components, compact_descr))
-                        return
+                        return (previous.compactDescr,)
                 # #1513 ends installComponent in ``assert False`` for a turret.
                 raise AssertionError(compact_descr)
 
             def install_turret(turret_cd, gun_cd, position_index=0):
+                previous_turret = descriptor.turret
+                previous_gun = descriptor.gun
                 turret = find(vehicle_type.turrets[position_index], turret_cd)
                 descriptor.gun = find(turret.guns, gun_cd)
                 descriptor.turret = turret
+                return [previous_turret.compactDescr,
+                        previous_gun.compactDescr]
 
             descriptor.installComponent = install_component
             descriptor.installTurret = install_turret
@@ -959,14 +964,17 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
 
 class TopModuleRuleTests(unittest.TestCase):
-    """The top module is the highest level, not the last list entry."""
+    """Top fittings reproduce the exact #1513 comparison sequence."""
 
     def setUp(self):
         self.bootstrap = BootstrapLifecycleTests._load(self)[0]
 
     @staticmethod
-    def _part(name, level):
-        return types.SimpleNamespace(name=name, level=level)
+    def _part(name, level, compact_descr=0, price=0, **values):
+        fields = dict(name=name, userString=name, level=level,
+                      compactDescr=compact_descr, price=price)
+        fields.update(values)
+        return types.SimpleNamespace(**fields)
 
     def test_a_low_tier_howitzer_listed_last_is_not_the_top_gun(self):
         # usa:A63_M46_Patton lists _105mm_SPH_M4_L23 (level 5) after the
@@ -984,6 +992,246 @@ class TopModuleRuleTests(unittest.TestCase):
         parts = [self._part('stock', 5), self._part('later', 5)]
 
         self.assertEqual('later', self.bootstrap._top_component(parts).name)
+
+    def test_unique_highest_level_wins_before_research_cost(self):
+        lower = self._part('lower', 4, 101)
+        highest = self._part('highest', 5, 102)
+        vehicle_type = types.SimpleNamespace(
+            unlocksDescrs=((99999, lower.compactDescr),
+                           (1, highest.compactDescr)))
+
+        selected = self.bootstrap._top_component(
+            (lower, highest), vehicle_type, 'engine')
+
+        self.assertIs(highest, selected)
+
+    def test_a_level_tie_compares_research_cost_across_every_candidate(self):
+        lower = self._part('lower-but-expensive', 4, 101)
+        tied_a = self._part('tied-a', 5, 102)
+        tied_b = self._part('tied-b', 5, 103)
+        vehicle_type = types.SimpleNamespace(
+            unlocksDescrs=((99999, lower.compactDescr),
+                           (100, tied_a.compactDescr),
+                           (200, tied_b.compactDescr)))
+
+        selected = self.bootstrap._top_component(
+            (lower, tied_a, tied_b), vehicle_type, 'engine')
+
+        self.assertIs(lower, selected)
+
+    def test_research_cost_rule_covers_all_known_affected_vehicles(self):
+        # Each pair has the same maximum level.  The old list-order rule chose
+        # ``wrong``; #1513 TopModulesChecker chooses ``expected``.  The costs
+        # are synthetic and exercise the observed ordering, not package data.
+        cases = (
+            ('ussr:R40_T-54', 'gun', '_100mm_D-10T2S', 59300,
+             '_100mm_D54_obr_45', 59300),
+            ('germany:G08_Pz38t', 'gun', '_47mm_PaK_38t_L43', 130,
+             '_20mm_Flak_38_L112', 160),
+            ('germany:G10_PzIII_AusfJ', 'gun', '_75mm_KwK_37_L24', 800,
+             '_50mm_KwK_39_L60', 1350),
+            ('germany:G86_VK2001DB', 'gun', '_75mm_KwK_37_L24', 800,
+             '_50mm_KwK_39_L60', 1350),
+            ('usa:A02_M2_lt', 'gun', '_37mm_M-5', 90,
+             '_20mm_Hispano_Suiza_Birgikt_gun', 140),
+            ('usa:A57_M8A1', 'gun', '_75mm_AT_Gun_M7_L50', 2250,
+             '_57mm_Gun_M1_L50', 2350),
+            ('usa:A46_T3', 'gun',
+             'Ordnance_QF_2pdr_AT_Gun_Mk.X', 500,
+             '_75mm_Howitzer_M1A1', 660),
+            ('china:Ch05_T34_2', 'gun', '_100mm_59-100T', 18000,
+             '_122-mm_37-122JT', 19000),
+            ('france:F12_Hotchkiss_H35', 'gun', '_37mm_SA38', 75,
+             '_25mm_Canon_Raccourci_Mle.1934', 150),
+            ('france:F02_D1', 'gun', '_47mm_SA34', 95,
+             '_25mm_Canon_Raccourci_Mle.1934', 150),
+            ('france:F50_FCM36_20t', 'gun', '_37mm_SA38', 75,
+             '_25mm_Canon_Raccourci_Mle.1934', 150),
+            ('france:F49_RenaultR35', 'gun', '_37mm_SA38', 75,
+             '_25mm_Canon_Raccourci_Mle.1934', 150),
+            ('uk:GB07_Matilda', 'gun', 'QF_2pdr_Littlejohn', 1800,
+             '_76mm_Howitzer_MkI', 2100),
+            ('uk:GB15_Stuart_I', 'gun', '_2pdr_Gun_Mk_IX', 300,
+             '_37mm_M-6_L53', 350),
+            ('uk:GB11_Caernarvon', 'engine',
+             'Rolls_Royse_Meteor_M120', 27000,
+             'Rolls_Royse_Meteor_MkIVC', 31000),
+            ('uk:GB60_Covenanter', 'gun', '_40mm_Bofors_MkI', 1200,
+             '_76mm_Howitzer_MkI', 2100),
+            ('japan:J09_Chi_He', 'gun', '_57mm_Gun_Shin', 2000,
+             '_75mm_Gun_Type_99', 2200),
+            ('sweden:S04_Lago_I', 'gun', '_75mm_kan_m_41_strv', 2050,
+             '_57mm_pvkan_m_43', 3750),
+        )
+        for index, (vehicle_name, kind, wrong_name, wrong_cost,
+                    expected_name, expected_cost) in enumerate(cases):
+            expected = self._part(
+                expected_name, 5, 1000 + index * 2, price=100)
+            wrong = self._part(
+                wrong_name, 5, 1001 + index * 2, price=100)
+            vehicle_type = types.SimpleNamespace(
+                name=vehicle_name,
+                unlocksDescrs=((expected_cost, expected.compactDescr),
+                               (wrong_cost, wrong.compactDescr)))
+
+            with self.subTest(vehicle=vehicle_name):
+                selected = self.bootstrap._top_component(
+                    (expected, wrong), vehicle_type, kind)
+                self.assertEqual(expected_name, selected.name)
+
+    def test_no_research_cost_uses_the_module_valuable_parameter(self):
+        stronger = self._part('stronger', 5, 101, power=700)
+        later = self._part('later', 5, 102, power=650)
+        vehicle_type = types.SimpleNamespace(unlocksDescrs=())
+
+        selected = self.bootstrap._top_component(
+            (stronger, later), vehicle_type, 'engine')
+
+        self.assertIs(stronger, selected)
+
+    def test_gun_valuable_parameter_uses_exact_clip_and_burst_dpm(self):
+        shell = types.SimpleNamespace(damage=(100, 75))
+        shot = types.SimpleNamespace(shell=shell)
+        burst = self._part(
+            'burst', 5, 101, id=(0, 1), shots=(shot,),
+            reloadTime=10.0, clip=(6, 2.0), burst=(3, 0.5))
+        later = self._part(
+            'later', 5, 102, id=(0, 2), shots=(shot,),
+            reloadTime=10.0, clip=(1, 0.0), burst=(1, 0.0))
+        vehicle_type = types.SimpleNamespace(unlocksDescrs=(), turrets=())
+        vehicle = types.SimpleNamespace(
+            type=vehicle_type,
+            turret=types.SimpleNamespace(guns=(burst, later)))
+
+        selected = self.bootstrap._top_component(
+            (burst, later), vehicle_type, 'gun', vehicle)
+
+        self.assertIs(burst, selected)
+
+    def test_rejected_research_candidate_is_excluded_and_reselected(self):
+        fallback = self._part('fallback', 5, 101, power=600)
+        rejected = self._part('rejected', 5, 102, power=700)
+        vehicle_type = types.SimpleNamespace(
+            unlocksDescrs=((200, fallback.compactDescr),
+                           (300, rejected.compactDescr)))
+        checked = []
+
+        def may_install(component):
+            checked.append(component.name)
+            return (component is not rejected, 'incompatible')
+
+        selected = self.bootstrap._top_component(
+            (fallback, rejected), vehicle_type, 'engine', None,
+            may_install)
+
+        self.assertIs(fallback, selected)
+        self.assertEqual(['rejected', 'fallback'], checked)
+
+    def test_install_top_modules_reselects_a_compatible_component(self):
+        fallback = self._part('fallback', 4, 101, maxLoad=30)
+        rejected = self._part('rejected', 5, 102, maxLoad=40)
+        vehicle_type = types.SimpleNamespace(
+            chassis=(fallback, rejected), turrets=(), engines=(), radios=(),
+            fuelTanks=(), unlocksDescrs=())
+        descriptor = types.SimpleNamespace(type=vehicle_type,
+                                           chassis=fallback)
+        checked = []
+
+        def may_install(compact_descr, position=0):
+            checked.append(compact_descr)
+            return (compact_descr != rejected.compactDescr, 'too heavy')
+
+        def install(compact_descr, position=0):
+            previous = descriptor.chassis
+            descriptor.chassis = next(
+                part for part in vehicle_type.chassis
+                if part.compactDescr == compact_descr)
+            return (previous.compactDescr,)
+
+        descriptor.mayInstallComponent = may_install
+        descriptor.installComponent = install
+
+        self.bootstrap._install_top_modules(descriptor)
+
+        self.assertIs(fallback, descriptor.chassis)
+        self.assertEqual([rejected.compactDescr, fallback.compactDescr],
+                         checked)
+
+    def test_install_component_fails_closed_when_mount_did_not_change(self):
+        selected = self._part('selected', 5, 102, maxLoad=40)
+        mounted = self._part('mounted', 1, 101, maxLoad=20)
+        vehicle_type = types.SimpleNamespace(
+            chassis=(selected,), turrets=(), engines=(), radios=(),
+            fuelTanks=(), unlocksDescrs=())
+        descriptor = types.SimpleNamespace(
+            type=vehicle_type, chassis=mounted,
+            mayInstallComponent=lambda compact_descr, position=0: (True, None),
+            installComponent=lambda compact_descr, position=0: (
+                mounted.compactDescr,))
+
+        with self.assertRaisesRegex(ValueError, 'top chassis'):
+            self.bootstrap._install_top_modules(descriptor)
+
+    def test_install_component_fails_closed_when_every_candidate_is_rejected(self):
+        selected = self._part('selected', 5, 102, maxLoad=40)
+        mounted = self._part('mounted', 1, 101, maxLoad=20)
+        vehicle_type = types.SimpleNamespace(
+            chassis=(selected,), turrets=(), engines=(), radios=(),
+            fuelTanks=(), unlocksDescrs=())
+        descriptor = types.SimpleNamespace(
+            type=vehicle_type, chassis=mounted,
+            mayInstallComponent=lambda compact_descr, position=0: (
+                False, 'too heavy'),
+            installComponent=mock.Mock())
+
+        with self.assertRaisesRegex(ValueError, 'no installable top chassis'):
+            self.bootstrap._install_top_modules(descriptor)
+
+        descriptor.installComponent.assert_not_called()
+
+    def test_install_turret_fails_closed_when_mount_did_not_change(self):
+        gun = self._part('gun', 5, 202, shots=())
+        turret = self._part('turret', 5, 201, guns=(gun,),
+                            primaryArmor=(100, 80, 80))
+        mounted_gun = self._part('mounted-gun', 1, 212, shots=())
+        mounted_turret = self._part(
+            'mounted-turret', 1, 211, guns=(mounted_gun,),
+            primaryArmor=(20, 20, 20))
+        vehicle_type = types.SimpleNamespace(
+            chassis=(), turrets=((turret,),), engines=(), radios=(),
+            fuelTanks=(), unlocksDescrs=())
+        descriptor = types.SimpleNamespace(
+            type=vehicle_type, turret=mounted_turret, gun=mounted_gun,
+            mayInstallTurret=lambda turret_cd, gun_cd, position=0: (
+                True, None),
+            installTurret=lambda turret_cd, gun_cd, position=0: [
+                mounted_turret.compactDescr, mounted_gun.compactDescr])
+
+        with self.assertRaisesRegex(ValueError, 'top turret'):
+            self.bootstrap._install_top_modules(descriptor)
+
+    def test_install_turret_fails_closed_when_every_pair_is_rejected(self):
+        gun = self._part('gun', 5, 202, shots=())
+        turret = self._part('turret', 5, 201, guns=(gun,),
+                            primaryArmor=(100, 80, 80))
+        mounted_gun = self._part('mounted-gun', 1, 212, shots=())
+        mounted_turret = self._part(
+            'mounted-turret', 1, 211, guns=(mounted_gun,),
+            primaryArmor=(20, 20, 20))
+        vehicle_type = types.SimpleNamespace(
+            chassis=(), turrets=((turret,),), engines=(), radios=(),
+            fuelTanks=(), unlocksDescrs=())
+        descriptor = types.SimpleNamespace(
+            type=vehicle_type, turret=mounted_turret, gun=mounted_gun,
+            mayInstallTurret=lambda turret_cd, gun_cd, position=0: (
+                False, 'need gun'),
+            installTurret=mock.Mock())
+
+        with self.assertRaisesRegex(
+                ValueError, 'no installable top turret/gun'):
+            self.bootstrap._install_top_modules(descriptor)
+
+        descriptor.installTurret.assert_not_called()
 
     def test_a_single_entry_keeps_the_retail_fitting(self):
         parts = [self._part('only', 1)]
