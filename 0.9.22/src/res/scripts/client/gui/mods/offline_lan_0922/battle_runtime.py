@@ -12193,11 +12193,14 @@ class BattleRuntime(object):
                     collision_evidence))
         critical = self._critical_with_crew_roster(
             critical_target, critical)
+        potential_damage = None
+        if contact is not None:
+            potential_damage = int(damage_rolls[0]) if damage_rolls else 0
         return self._projectile_effect(
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
             damage_sticker=damage_sticker,
-            potential_damage=(int(damage_rolls[0]) if damage_rolls else 0))
+            potential_damage=potential_damage)
 
     def _projectile_splash_effects(self, meta, impact, direct_key):
         source = self._projectile_source_entity(meta)

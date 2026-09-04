@@ -7088,6 +7088,8 @@ class BattleState:
         if (not isinstance(raw, dict) or set(raw) - allowed or
                 not required.issubset(raw)):
             raise ValueError("invalid effect shape")
+        if splash and "potential_damage" in raw:
+            raise ValueError("splash effect cannot carry potential damage")
         target_kind = raw.get("target_kind")
         if target_kind not in ("player", "bot"):
             raise ValueError("invalid target kind")

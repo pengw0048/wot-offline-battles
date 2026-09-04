@@ -2925,7 +2925,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                                     potential_damage=390),
                      splash=[_effect(
                          target_id=4, damage=0, shot_result=1,
-                         potential_damage=390,
                          target_pose=(30.0, 1.0, 0.0))])))
 
         self.assertEqual(
@@ -2937,6 +2936,24 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                       if event.get('kind') == 'hit' and event.get('splash')]
         self.assertEqual([0], [
             event['blocked_damage'] for event in splash_hit])
+
+    def test_splash_rejects_a_direct_contact_damage_roll(self):
+        state = _state(players=3)
+        self.assertTrue(_launch_authority(state, _launch(
+            is_he=True, splash_radius=20.0)))
+        record = state.projectiles['1:p:1:1']
+
+        self.assertFalse(state.resolve_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _resolve('1:p:1:1', direct=None, splash=[_effect(
+                target_id=3, damage=0, shot_result=1,
+                potential_damage=390,
+                target_pose=(30.0, 1.0, 0.0))])))
+
+        self.assertEqual(1000, state.players[3].health)
+        self.assertEqual(
+            0, state._statistics_row('player', 3)['damage_blocked'])
+        self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
 
     def test_ricochet_keeps_wire_and_order_boundaries(self):
         mutations = (

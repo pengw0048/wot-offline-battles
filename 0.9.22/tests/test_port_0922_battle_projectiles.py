@@ -4174,12 +4174,18 @@ class BattleProjectileTests(unittest.TestCase):
         # The armour ledger needs the one roll the damage law consumed,
         # truncated exactly as the law truncates it, for every verdict. A
         # ricochet forces damage to zero afterwards and still owes the full
-        # roll, because that is the damage the armour actually stopped.
-        for result, damage in ((0, 0), (1, 0), (2, 312)):
-            with self.subTest(shot_result=result):
+        # roll, because that is the damage the armour actually stopped. A
+        # broad vehicle hit with no resolved armour contact remains terminal,
+        # but cannot claim that armour stopped its roll.
+        for contact, result, damage, potential in (
+                ({'result': 0}, 0, 0, 312),
+                ({'result': 1}, 1, 0, 312),
+                ({'result': 2}, 2, 312, 312),
+                (None, 1, 0, None)):
+            with self.subTest(contact=contact):
                 with mock.patch.object(
                         combat_rules, 'resolve_armor_contact',
-                        return_value={'result': result}), \
+                        return_value=contact), \
                         mock.patch.object(
                             combat_rules, 'he_nominal_armor',
                             return_value=100.0), \
@@ -4198,7 +4204,10 @@ class BattleProjectileTests(unittest.TestCase):
 
                 self.assertEqual(result, effect['shot_result'])
                 self.assertEqual(damage, effect['damage'])
-                self.assertEqual(312, effect['potential_damage'])
+                if potential is None:
+                    self.assertNotIn('potential_damage', effect)
+                else:
+                    self.assertEqual(potential, effect['potential_damage'])
                 self.assertEqual(
                     (390.0 * 0.75, 390.0 * 1.25), uniform.call_args.args)
 
