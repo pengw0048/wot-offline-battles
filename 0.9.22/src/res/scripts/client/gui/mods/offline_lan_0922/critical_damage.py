@@ -12,6 +12,7 @@ import math
 import random
 
 from gui.mods.offline_lan_0922 import device_damage as _device_damage
+from gui.mods.offline_lan_0922 import track_damage as _track_damage
 
 
 def _descriptor_value(value, name, default=None):
@@ -763,9 +764,107 @@ def _refresh_mobility_flags(mock):
 	mock.is_turret_locked = ('turretRotatorHealth' in s)
 
 
+def _vehicle_identity(td):
+	'''Short "vehicle/chassis" label used only by bounded diagnostics.'''
+	name = _descriptor_value(td, 'name')
+	if name is None:
+		name = _descriptor_value(_descriptor_value(td, 'type'), 'name')
+	chassis = _descriptor_value(_descriptor_value(td, 'chassis'), 'name')
+	return '%s/%s' % (name, chassis)
+
+
+def _track_contact_point(contacts, component, distance):
+	'''Return the component-local contact recorded for one native hit.
+
+	The match is exact rather than heuristic: a hit's local point is a pure
+	function of its component-local ray and its native distance, so two
+	collisions sharing a component and a distance necessarily share one point.
+	Duplicate material identities, equal-distance boxes and an extended trace
+	(same origin, longer end) therefore cannot attach the wrong contact.'''
+	for record in contacts or ():
+		try:
+			record_component, record_distance, point = record
+		except (TypeError, ValueError):
+			continue
+		if str(record_component) != str(component):
+			continue
+		try:
+			if abs(float(record_distance) - float(distance)) > 1.0e-6:
+				continue
+		except (TypeError, ValueError, OverflowError):
+			continue
+		return point
+	return None
+
+
+def _track_hp_loss(td, name, material, component, distance, contacts,
+		channel_roll, device_loss, shell):
+	'''Return (hp_loss, decision) for one solid direct hit on a track.
+
+	The live material's damageKind selects the shell damage channel - normal
+	#1513 track materials carry nonzero armour, so vehicles.py resolves their
+	"auto" kind to armour damage, index 0.  The chassis-local contact then
+	selects the zone: the leading and rearmost driving wheels take the full
+	roll, the ordinary middle run takes roll / bulkHealthFactor.
+
+	Any missing, malformed or impossible input keeps the previous
+	device-damage result for that one hit, reports at most one bounded
+	diagnostic, and never raises.'''
+	identity = _vehicle_identity(td)
+	if str(component) != _track_damage.TRACK_COMPONENT_NAME:
+		_track_damage.report(
+			('component', identity, str(component)),
+			'component=%s is not the chassis collision model; '
+			'keeping device damage (vehicle=%s)' % (component, identity))
+		return device_loss, None
+	# Resolve every non-random input before drawing a roll, so a fallback can
+	# never consume a shell-damage draw the old law would not have made.
+	bounds = _track_damage.wheel_zone_bounds(_descriptor_value(td, 'chassis'))
+	point = _track_contact_point(contacts, component, distance)
+	if bounds is None or point is None:
+		_track_damage.report(
+			('geometry', identity, name),
+			'driving-wheel geometry unavailable: vehicle=%s device=%s '
+			'bounds=%s contact=%s; keeping device damage'
+			% (identity, name, bounds, point is not None))
+		return device_loss, None
+	zone = _track_damage.classify_zone(
+		point[_track_damage.FORWARD_AXIS], bounds)
+	factor = None
+	if zone == _track_damage.ZONE_MIDDLE:
+		factor = _track_damage.bulk_health_factor(td)
+	scale = _track_damage.zone_damage_scale(zone, factor)
+	if scale is None:
+		_track_damage.report(
+			('scale', identity, name, zone),
+			'track zone scale unavailable: vehicle=%s device=%s zone=%s '
+			'bulk=%s; keeping device damage'
+			% (identity, name, zone, factor))
+		return device_loss, None
+	index = _track_damage.material_damage_index(material)
+	if index is None:
+		_track_damage.report(
+			('damagekind', identity, name),
+			'material damageKind unavailable: vehicle=%s device=%s; '
+			'keeping device damage' % (identity, name))
+		return device_loss, None
+	rolled = channel_roll(index)
+	if rolled is None:
+		_track_damage.report(
+			('channel', identity, name, index),
+			'shell damage channel %d unavailable: vehicle=%s device=%s; '
+			'keeping device damage' % (index, identity, name))
+		return device_loss, None
+	return rolled * scale, {
+		'identity': identity, 'zone': zone,
+		'local_z': point[_track_damage.FORWARD_AXIS],
+		'bounds': bounds, 'index': index, 'factor': factor,
+		'base': _device_damage.shell_damage_base(shell, index)}
+
+
 def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 		attacker_id, penetrated=None, by_explosion=False, internal_hits=None,
-		distance_filters=True, deadeye=False):
+		distance_filters=True, deadeye=False, collision_contacts=None):
 	'''Roll module and crew crits for one strike.
 
 	penetrated: True the shell got through, False it did not, None unknown (the
@@ -782,7 +881,12 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 	ray; an empty tuple explicitly means the cone crossed no internal target.
 	distance_filters is disabled for that cone because its distances start at the
 	burst, while native collision distances start at the external trace origin.
-	deadeye adds the official three percentage points only to AP/APCR/HEAT.'''
+	deadeye adds the official three percentage points only to AP/APCR/HEAT.
+
+	collision_contacts: private (component, distance, local_point) evidence for
+	this exact strike, produced beside the native collisions themselves. Only
+	the track zone law reads it; without it a track hit keeps the previous
+	device-damage behaviour.'''
 	import BigWorld, Math, random
 	from gui.mods.offline_lan_0922 import device_damage as _device_damage
 	try:
@@ -800,8 +904,21 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 	if getattr(target_mock, 'devices_hp', None) is None:
 		target_mock.devices_hp = {}
 	_critical_devices = _dev_critical_set(target_mock)
-	# 0.8.2 shells carry damage as (armor, devices); there is no 'deviceDamage' key.
-	_shell_dmg = _device_damage.module_damage_roll(_shell)
+	# Shells carry damage as (armor, devices); there is no 'deviceDamage' key.
+	# One roll per damage channel per strike: every ordinary device keeps
+	# sharing the single devices roll it has always shared, while a track
+	# material whose damageKind selects armour draws that channel once. The
+	# resolved hull damage is never reused as a track roll - a pure track hit
+	# legitimately deals zero hull damage but still needs a full track roll.
+	_channel_rolls = {}
+
+	def _channel_roll(index):
+		if index not in _channel_rolls:
+			_channel_rolls[index] = _device_damage.module_damage_roll(
+				_shell, index)
+		return _channel_rolls[index]
+
+	_shell_dmg = _channel_roll(_track_damage.DEVICE_DAMAGE_INDEX)
 	if _shell_dmg is None:
 		_shell_dmg = dmg
 	_shell_kind = str(_descriptor_value(_shell, 'kind', '') or '')
@@ -967,14 +1084,41 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 			max_hp = _device_damage.device_max_hp(td, _name)
 			if max_hp is None:
 				max_hp = 100
+			# Update 6.4 split the track into leading/rearmost driving wheels
+			# and an ordinary middle run. Solid direct hits only: HE direct and
+			# splash stay on the previous device-damage law until the same
+			# evidence covers them.
+			_loss = _shell_dmg
+			_track_decision = None
+			if _name in _track_damage.TRACK_DEVICE_NAMES and not by_explosion:
+				_loss, _track_decision = _track_hp_loss(
+					td, _name, h_mat, h_comp, h_dist, collision_contacts,
+					_channel_roll, _shell_dmg, _shell)
 			_record_proposal_device_damage(
-				target_mock, _name, _shell_dmg, max_hp)
+				target_mock, _name, _loss, max_hp)
 			previous_hp = target_mock.devices_hp.get(_name, max_hp)
-			current_hp = previous_hp - _shell_dmg
+			current_hp = previous_hp - _loss
 			# Clamp at 0 so auto-repair does not have to climb out of a deficit.
 			if current_hp < 0:
 				current_hp = 0
 			target_mock.devices_hp[_name] = current_hp
+			if _track_decision is not None:
+				# Bounded to one line per target, side and zone, so a Windows
+				# check can read all three zones without per-shot spam.
+				_track_damage.report(
+					('zone', getattr(target_mock, 'id', '?'), _name,
+						_track_decision['zone']),
+					'zone target=%s vehicle=%s device=%s z=%.3f '
+					'front>=%.3f rear<=%.3f zone=%s damageKind=%d base=%s '
+					'bulk=%s loss=%.1f hp=%.1f->%.1f' % (
+						getattr(target_mock, 'id', '?'),
+						_track_decision['identity'], _name,
+						_track_decision['local_z'],
+						_track_decision['bounds'][0],
+						_track_decision['bounds'][1],
+						_track_decision['zone'], _track_decision['index'],
+						_track_decision['base'], _track_decision['factor'],
+						_loss, previous_hp, current_hp))
 			_destroyed_devices = _dev_destroyed_set(target_mock)
 			if current_hp <= 0:
 				_destroyed_devices.add(_name)
@@ -1219,7 +1363,7 @@ def _damage_delta(before, after, descriptor, operations=None):
 def apply_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
                  shell, attacker_id, penetrated=None, by_explosion=False,
                  deadeye=False, _internal_hits=None,
-                 _distance_filters=True):
+                 _distance_filters=True, collision_contacts=None):
     """Run the copied 0.8.2 crit loop and return its authoritative delta."""
     if getattr(vehicle, 'devices_hp', None) is None:
         vehicle.devices_hp = {}
@@ -1236,7 +1380,8 @@ def apply_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
         vehicle, collisions, start_pos, end_pos, hull_damage, shell,
         attacker_id, penetrated, by_explosion,
         internal_hits=_internal_hits,
-        distance_filters=_distance_filters, deadeye=deadeye)
+        distance_filters=_distance_filters, deadeye=deadeye,
+        collision_contacts=collision_contacts)
     after = _state(vehicle)
     return damage, _payload(
         before, after, getattr(vehicle, 'typeDescriptor', None),
@@ -1303,7 +1448,7 @@ class _CriticalProposalVehicle(object):
 
 def propose_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
                    shell, attacker_id, penetrated=None, by_explosion=False,
-                   deadeye=False, with_delta=False):
+                   deadeye=False, with_delta=False, collision_contacts=None):
     """Return a critical-hit proposal without mutating the live Vehicle."""
     if vehicle is None:
         raise ValueError('critical proposal requires a vehicle')
@@ -1311,7 +1456,8 @@ def propose_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
     before = _state(shadow)
     damage, payload = apply_direct(
         shadow, collisions, start_pos, end_pos, hull_damage, shell,
-        attacker_id, penetrated, by_explosion, deadeye)
+        attacker_id, penetrated, by_explosion, deadeye,
+        collision_contacts=collision_contacts)
     if with_delta:
         after = _state(shadow)
         delta = _damage_delta(

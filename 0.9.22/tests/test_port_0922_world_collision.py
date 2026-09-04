@@ -410,6 +410,34 @@ class WorldCollisionTests(unittest.TestCase):
         self.assertEqual(1, bigworld.wg_collideSegment.call_count)
         self.assertEqual(5, len(bigworld.wg_collideSegment.call_args[0]))
 
+    def test_empty_prepared_filter_still_recasts_first_lane_fail_closed(self):
+        start = _Vector(0.0, 0.6, 0.0)
+        end = _Vector(0.0, 0.6, 10.0)
+        normal = _Vector(0.0, 0.0, -1.0)
+        collision = (_Vector(0.0, 0.6, 3.5), normal, 75)
+        backing = (_Vector(0.0, 0.6, 4.8), normal, 1)
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = mock.Mock(return_value=backing)
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': bigworld, 'Math': math_module}), \
+                mock.patch.object(
+                    world_collision, '_try_destroy_solid_hit',
+                    return_value=True), \
+                mock.patch.object(
+                    world_collision, '_catalog_soft_static_path',
+                    return_value=False) as classify:
+            cleared = world_collision._destroy_and_recast(
+                1, start, end, collision, 0.0, 20.0, object(),
+                collision_filter=None)
+
+        self.assertFalse(cleared)
+        self.assertEqual(2, classify.call_count)
+        self.assertEqual(1, bigworld.wg_collideSegment.call_count)
+        self.assertEqual(4, len(bigworld.wg_collideSegment.call_args[0]))
+
     def test_pending_hide_skin_cannot_skip_wall_one_centimetre_behind(self):
         (cleared, collide, authority, unused_destroy,
          unused_note, unused_publish) = self._run_pending_recast(
@@ -566,6 +594,38 @@ class WorldCollisionTests(unittest.TestCase):
 
         self.assertFalse(blocked)
         self.assertTrue(horizontal_calls)
+
+    def test_clear_final_sweep_prepares_one_filter_for_all_nine_rays(self):
+        collision_filter = lambda *unused: True
+        horizontal_calls = []
+
+        def collide(unused_space, start, end, unused_mask,
+                    supplied_filter=None):
+            horizontal_calls.append((start, end, supplied_filter))
+            return None
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.8, -0.8, -3.4),
+                    (1.8, 1.0, 3.4), None))))
+
+        with mock.patch.object(
+                world_collision, 'prepare_horizontal_collision_filter',
+                return_value=collision_filter) as prepare:
+            blocked = world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+                descriptor, False, 0.04)
+
+        self.assertFalse(blocked)
+        prepare.assert_called_once()
+        self.assertEqual(9, len(horizontal_calls))
+        self.assertTrue(all(value[2] is collision_filter
+                            for value in horizontal_calls))
 
     def test_sideways_motion_sweeps_hull_width_across_front_back_lanes(self):
         horizontal_calls = []
@@ -1110,7 +1170,8 @@ class WorldCollisionTests(unittest.TestCase):
 
         def resolve(unused_space, start, unused_end, unused_hit,
                     unused_yaw, unused_vel, unused_td, unused_state,
-                    unused_allow_kinetic, unused_kinetic_speed):
+                    unused_allow_kinetic, unused_kinetic_speed,
+                    unused_commit_enabled, unused_collision_filter):
             return abs(start.y - 0.6) < 0.01
 
         with mock.patch.object(

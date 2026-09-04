@@ -488,23 +488,32 @@ def has_hp_pool(td, name):
     return _raw_hp(td, name)[0] is not None
 
 
-def module_damage_roll(shell):
-    """Devices-damage of a shell, rolled +/-25%. Reads shell['damage'][1] (the
-    correct 0.8.2 field); tolerates a flat 'deviceDamage' too. None if unknown."""
+def shell_damage_base(shell, index=1):
+    """Un-rolled shell damage for one channel of the exact ``(armor, devices)``
+    tuple: index 0 is armour damage, index 1 is devices damage. Tolerates a flat
+    legacy 'deviceDamage' on the devices channel. None if unknown.
+
+    A live material's ``damageKind`` selects the channel, so this helper must
+    stay index-driven; it must not assume every module reads devices damage."""
+    damage = _descriptor_value(shell, 'damage')
     dmg = None
-    if hasattr(shell, 'get'):
-        d = shell.get('damage')
-        if d is not None:
-            try:
-                dmg = d[1]
-            except (TypeError, IndexError):
-                dmg = None
-        if dmg is None:
-            dd = shell.get('deviceDamage')
-            if isinstance(dd, (tuple, list)):
-                dmg = dd[0] if dd else None
-            elif dd is not None:
-                dmg = dd
+    if damage is not None:
+        try:
+            dmg = damage[index]
+        except (TypeError, IndexError, KeyError):
+            dmg = None
+    if dmg is None and index == 1:
+        legacy = _descriptor_value(shell, 'deviceDamage')
+        if isinstance(legacy, (tuple, list)):
+            dmg = legacy[0] if legacy else None
+        elif legacy is not None:
+            dmg = legacy
+    return dmg
+
+
+def module_damage_roll(shell, index=1):
+    """One channel of a shell's damage, rolled +/-25%. None if unknown."""
+    dmg = shell_damage_base(shell, index)
     if dmg is None:
         return None
     lo = dmg * (1.0 - DAMAGE_RANDOMIZATION)

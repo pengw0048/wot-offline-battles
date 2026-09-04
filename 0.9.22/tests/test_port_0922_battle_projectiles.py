@@ -217,6 +217,40 @@ def _battle(now=0.0):
     return battle, bigworld
 
 
+
+class _TrackMaterial(object):
+    """A #1513 track MaterialInfo: nonzero armour, so damageKind resolves 0."""
+
+    def __init__(self, name):
+        self.extra = types.SimpleNamespace(name=name)
+        self.armor = 20.0
+        self.vehicleDamageFactor = 0.0
+        self.damageKind = 0
+        self.chanceToHitByProjectile = 1.0
+        self.chanceToHitByExplosion = 1.0
+
+
+def _track_target_descriptor():
+    """Exact A83_T110E4 chassis geometry, health pool and bulk factor."""
+    health = {'maxHealth': 100, 'maxRegenHealth': 50}
+    return types.SimpleNamespace(
+        name='usa:A83_T110E4',
+        chassis={
+            'name': 'Chassis_T110E4',
+            'maxHealth': 250, 'maxRegenHealth': 190,
+            'bulkHealthFactor': 3.0,
+            'topRightCarryingPoint': (1.51097, 2.00908),
+            'drivingWheelsSizes': (0.329521 * 2.2, 0.3375 * 2.2)},
+        engine=dict(health, fireStartingChance=0.0),
+        hull={'ammoBayHealth': dict(health)},
+        fuelTank=dict(health), radio=dict(health), gun=dict(health),
+        turret={'turretRotatorHealth': dict(health),
+                'surveyingDeviceHealth': dict(health)},
+        miscAttrs={},
+        type=types.SimpleNamespace(name='usa:A83_T110E4', mode=0,
+                                   crewRoles=(('commander',), ('driver',))))
+
+
 def _event():
     return {
         'kind': 'shot', 'attacker': 7,
@@ -2451,8 +2485,9 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertLess(min(pose['x'] for pose in observed), 6.0)
         self.assertGreater(max(pose['x'] for pose in observed), 14.0)
 
-    def test_excessive_angular_target_sweep_fails_closed(self):
+    def test_excessive_angular_target_sweep_widens_the_sampled_angle(self):
         battle, unused_bigworld = _battle()
+        module = sys.modules[BattleRuntime.__module__]
         self.assertTrue(battle._accept_projectile_event(_event()))
         source = battle._server_entity(41)
         target = types.SimpleNamespace(
@@ -2473,6 +2508,64 @@ class BattleProjectileTests(unittest.TestCase):
             'player:7': source_pose, 'bot:8': target_start})
         battle._sample_projectile_positions(0.05, {
             'player:7': source_pose, 'bot:8': target_end})
+        observed = []
+
+        def collide(unused_record, unused_target, unused_start, unused_end,
+                    pose=None):
+            observed.append(dict(pose))
+            return (), ()
+
+        battle._projectile_vehicle_collisions = collide
+        battle._resolve_shot_scene = mock.Mock(return_value={
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+            'world_distance': 99999.0,
+            'stopped_by_destructible': False,
+        })
+
+        fractions = battle._projectile_pose_sweep_fractions(
+            'bot:8', 0.0, 0.05)
+        result = battle._projectile_chord(
+            battle._projectiles.get('player:7:1'),
+            (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.05)
+
+        # A rotation faster than one degree per sample widens the sampled
+        # angle; it never retires an admitted shot.
+        self.assertIsNone(result)
+        self.assertIsNotNone(fractions)
+        self.assertEqual(
+            module.PROJECTILE_POSE_MAX_SWEEP_STEPS, len(fractions) - 1)
+        self.assertEqual((0.0, 1.0), (fractions[0], fractions[-1]))
+        self.assertEqual(
+            module.PROJECTILE_POSE_MAX_SWEEP_STEPS, len(observed))
+        for index, pose in enumerate(observed):
+            self.assertAlmostEqual(
+                math.radians(17.0 * (index + 0.5) / 16.0), pose['yaw'])
+        self.assertNotIn('projectile_collision_pose_boundary', record)
+        self.assertNotIn(
+            'terminal_failure_boundary',
+            battle._projectile_meta['player:7:1'])
+
+    def test_missing_target_pose_retires_with_history_boundary(self):
+        battle, unused_bigworld = _battle()
+        self.assertTrue(battle._accept_projectile_event(_event()))
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=42, isStarted=True, position=_Vector((5.0, 1.0, 0.0)))
+        record = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._records['bot:8'] = record
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 42 else None)
+        source_pose = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        target_start = battle._projectile_plain_pose((5.0, 1.0, 0.0))
+        battle._projectile_position_history = []
+        battle._sample_projectile_positions(0.0, {
+            'player:7': source_pose, 'bot:8': target_start})
+        # The chord window is covered, but this live target has no pose in
+        # the closing sample: the only remaining fail-closed path.
+        battle._sample_projectile_positions(0.05, {'player:7': source_pose})
         battle._projectile_vehicle_collisions = mock.Mock()
 
         result = battle._projectile_chord(
@@ -2482,8 +2575,12 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(
             {'reason': 'callback_error', 'fraction': 0.0}, result)
         self.assertEqual(
-            'angular_sweep_limit_exceeded',
+            'historic_pose_unavailable',
             record['projectile_collision_pose_boundary'])
+        self.assertEqual(
+            'historic_pose_unavailable',
+            battle._projectile_meta['player:7:1'][
+                'terminal_failure_boundary'])
         battle._projectile_vehicle_collisions.assert_not_called()
 
     def test_chord_before_pose_history_coverage_fails_closed(self):
@@ -2492,10 +2589,11 @@ class BattleProjectileTests(unittest.TestCase):
         source = battle._server_entity(41)
         target = types.SimpleNamespace(id=42, isStarted=True)
         state = battle._projectiles.get('player:7:1')
-        battle._records['bot:8'] = {
+        record = {
             'engine_id': 42, 'network_id': 8, 'kind': 'bot',
             'local': False, 'ready': True,
             'state': {'health': 100, 'alive': True}}
+        battle._records['bot:8'] = record
         battle._server_entity = lambda entity_id: (
             source if entity_id == 41 else
             target if entity_id == 42 else None)
@@ -2505,6 +2603,9 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(
             {'reason': 'callback_error', 'fraction': 0.0}, result)
+        self.assertEqual(
+            'historic_pose_unavailable',
+            record['projectile_collision_pose_boundary'])
 
     def test_pending_record_without_pose_history_does_not_retire_projectile(
             self):
@@ -3715,6 +3816,206 @@ class BattleProjectileTests(unittest.TestCase):
             10.8, target.collideSegmentExt.call_args.args[1].x)
         self.assertEqual(2, len(critical.call_args.args[1]))
         self.assertAlmostEqual(10.8, critical.call_args.args[3].x)
+
+    def test_direct_effect_forwards_frozen_local_contacts_to_the_crit_law(
+            self):
+        # The track zone law needs the chassis-local contact of the exact
+        # collision this strike resolved against, never a later live pose.
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        meta = battle._projectile_wire_meta(_event())
+        collision = types.SimpleNamespace(
+            dist=10.0, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        pointless = types.SimpleNamespace(
+            collision=types.SimpleNamespace(
+                dist=11.0, hitAngleCos=1.0, matInfo=object(),
+                compName='vehicleHull'),
+            worldNormal=None, localPoint=None)
+        evidence = types.SimpleNamespace(
+            collision=collision, worldNormal=None,
+            localPoint=(0.1, -0.4, 1.5))
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [collision],
+            'collision_evidence': [evidence, pointless],
+            'query': (_Vector((0.0, 1.0, 0.0)),
+                      _Vector((12.0, 1.0, 0.0))),
+            'impact': (10.0, 1.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact',
+                return_value={'result': 2}), \
+                mock.patch.object(
+                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                mock.patch.object(
+                    combat_rules, 'damage', return_value=390), \
+                mock.patch.object(
+                    critical_damage, 'propose_direct',
+                    return_value=(390, None, None)) as critical:
+            battle._projectile_direct_effect(
+                meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                terminal)
+
+        # Evidence with no recorded point is dropped rather than guessed.
+        self.assertEqual(
+            (('vehicleChassis', 10.0, (0.1, -0.4, 1.5)),),
+            critical.call_args.kwargs['collision_contacts'])
+
+    def test_extended_trace_replaces_the_local_contacts_it_supersedes(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        first = types.SimpleNamespace(
+            dist=9.80, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        inside = types.SimpleNamespace(
+            dist=10.79, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True,
+            collideSegmentExt=mock.Mock())
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        stale = types.SimpleNamespace(
+            collision=first, worldNormal=None, localPoint=(0.0, 0.0, -9.0))
+        extended = (
+            types.SimpleNamespace(
+                collision=first, worldNormal=None,
+                localPoint=(0.0, 0.0, 1.1)),
+            types.SimpleNamespace(
+                collision=inside, worldNormal=None,
+                localPoint=(0.0, 0.0, 2.09)))
+        battle._projectile_vehicle_collisions = mock.Mock(
+            return_value=((first, inside), extended))
+        event = _event()
+        event['source_shot']['shell']['caliber'] = 100.0
+        meta = battle._projectile_wire_meta(event)
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [first],
+            'collision_evidence': [stale],
+            'query': (_Vector(), _Vector((10.0, 0.0, 0.0))),
+            'impact': (9.8, 0.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact',
+                return_value={'result': 2}), \
+                mock.patch.object(
+                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                mock.patch.object(
+                    combat_rules, 'damage', return_value=390), \
+                mock.patch.object(
+                    critical_damage, 'propose_direct',
+                    return_value=(390, None, None)) as critical:
+            battle._projectile_direct_effect(
+                meta, {'start': (0.0, 0.0, 0.0), 'distance': 9.8},
+                terminal)
+
+        self.assertEqual(
+            (('vehicleChassis', 9.8, (0.0, 0.0, 1.1)),
+             ('vehicleChassis', 10.79, (0.0, 0.0, 2.09))),
+            critical.call_args.kwargs['collision_contacts'])
+
+    def test_player_and_bot_shots_reach_one_track_damage_result(self):
+        # Both shooter kinds resolve here on the hidden worker, so the same
+        # frozen collision evidence must produce the same track HP loss.
+        losses = []
+        for shooter_kind, shooter_id, attacker in (
+                ('player', 7, 41), ('bot', 9, 41)):
+            battle, unused_bigworld = _battle()
+            source = battle._server_entity(41)
+            target = types.SimpleNamespace(
+                id=55, isStarted=True,
+                typeDescriptor=_track_target_descriptor(),
+                position=_Vector((10.0, 0.0, 0.0)), matrix=object(),
+                isAlive=lambda: True, health=1000,
+                devices_hp={}, _destroyed_devices=set(), _crew_ko=set(),
+                is_on_fire=False, getComponents=lambda: ())
+            battle._records['bot:17'] = {
+                'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+                'local': False, 'ready': True,
+                'state': {'health': 1000, 'alive': True,
+                          'combat_base_revision': 0, 'combat_ack_seq': 0}}
+            battle._records['%s:%s' % (shooter_kind, shooter_id)] = {
+                'engine_id': 41, 'network_id': shooter_id,
+                'kind': shooter_kind, 'local': False, 'ready': True,
+                'state': {'health': 100, 'alive': True}}
+            battle._server_entity = lambda entity_id: (
+                source if entity_id == 41 else
+                target if entity_id == 55 else None)
+            event = _event()
+            event['shooter_kind'] = shooter_kind
+            event['shooter_id'] = shooter_id
+            event['projectile_id'] = '%s:%s:1' % (shooter_kind, shooter_id)
+            if shooter_kind == 'bot':
+                # A Bot launch carries no player fire-intent sequence.
+                event.pop('fire_intent_seq')
+                event.pop('fire_input_seq')
+            meta = battle._projectile_wire_meta(event)
+            self.assertIsNotNone(meta)
+            collision = types.SimpleNamespace(
+                dist=10.0, hitAngleCos=1.0,
+                matInfo=_TrackMaterial('leftTrackHealth'),
+                compName='vehicleChassis')
+            terminal = {
+                'target_key': 'bot:17', 'collisions': [collision],
+                'collision_evidence': [types.SimpleNamespace(
+                    collision=collision, worldNormal=None,
+                    localPoint=(0.0, 0.0, 0.0))],
+                'query': (_Vector((0.0, 1.0, 0.0)),
+                          _Vector((12.0, 1.0, 0.0))),
+                'impact': (10.0, 1.0, 0.0),
+                'piercing_loss': 0.0, 'penetration_factor': 1.0,
+            }
+
+            crit_bigworld = types.ModuleType('BigWorld')
+            crit_bigworld.player = lambda: types.SimpleNamespace(
+                playerVehicleID=999,
+                arena=types.SimpleNamespace(
+                    onVehicleKilled=lambda *unused: None))
+            crit_bigworld.time = lambda: 12.0
+            with mock.patch.dict(sys.modules, {
+                        'BigWorld': crit_bigworld,
+                        'Math': types.ModuleType('Math')}), \
+                    mock.patch.object(
+                        combat_rules, 'resolve_armor_contact',
+                        return_value={'result': 2}), \
+                    mock.patch.object(
+                        combat_rules, 'he_nominal_armor',
+                        return_value=100.0), \
+                    mock.patch.object(
+                        combat_rules, 'damage', return_value=0), \
+                    mock.patch('random.uniform',
+                               side_effect=lambda low, high: low), \
+                    mock.patch('random.random', return_value=0.0):
+                effect = battle._projectile_direct_effect(
+                    meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                    terminal)
+
+            self.assertEqual(attacker, source.id)
+            losses.append(effect['critical_delta']['devices'])
+
+        # 390 armour damage rolled at its low bound is 292.5, divided by the
+        # chassis bulkHealthFactor 3.0 for a middle-of-track hit.
+        self.assertEqual(losses[0], losses[1])
+        self.assertEqual(
+            [{'name': 'leftTrackHealth', 'hp_loss': 97.5}], losses[0])
 
     def test_direct_hit_uses_same_frozen_target_for_armor_and_modules(self):
         battle, unused_bigworld = _battle()

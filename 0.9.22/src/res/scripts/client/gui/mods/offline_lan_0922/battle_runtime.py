@@ -51,7 +51,7 @@ from gui.mods.offline_lan_0922 import (
     lan_client as lan_protocol,
     loadout as loadout_law, prebaked_destructibles, prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
-    tank_collision,
+    tank_collision, track_damage,
     vehicle_blacklist, vehicle_configuration, vehicle_physics,
     world_collision)
 
@@ -2598,12 +2598,19 @@ class BattleRuntime(object):
         return True
 
     def _run_optional_feature(self, feature, callback, args=(),
-                              on_error=None):
-        """Run one presentation boundary without widening frame failure."""
+                              on_error=None, disable=True, kwargs=None):
+        """Run one presentation boundary without widening frame failure.
+
+        ``disable`` retires the feature for the round, which suits a boundary
+        whose native resources cannot be trusted again once it has failed.
+        Pass ``disable=False`` for a per-frame presentation pull that must be
+        retried: retiring bot poses or spotting for a whole round turns one
+        transient native failure into frozen Bots or permanent blindness.
+        """
         if not self._optional_feature_enabled(feature):
             return False
         try:
-            return callback(*args)
+            return callback(*args, **(kwargs or {}))
         except Exception as error:
             if callable(on_error):
                 try:
@@ -2612,7 +2619,7 @@ class BattleRuntime(object):
                     error = RuntimeError(
                         '%s; disable cleanup failed: %s' % (
                             error, cleanup_error))
-            self._warn_optional_failure(feature, error)
+            self._warn_optional_failure(feature, error, disable=disable)
             return False
 
     def _disable_standard_space_visibility(self):
@@ -3100,6 +3107,7 @@ class BattleRuntime(object):
             # Sampled here, not before BotRuntime exists: the bot, navigator
             # and planner structures are most of what this port holds.
             reset_pose_animation_writes()
+            track_damage.reset_diagnostics()
             self._report_memory('battle_start')
             provider = getattr(self._avatar, 'guiSessionProvider', None)
             vehicle_view_state = getattr(
@@ -11415,13 +11423,20 @@ class BattleRuntime(object):
                     int(first.get('siege_state', 0)) !=
                     int(second.get('siege_state', 0))):
                 siege_boundaries.add(interval_end)
-        angular_steps = max(1, int(math.ceil(
-            total_travel / PROJECTILE_POSE_MAX_ANGLE_STEP - 1.0e-12)))
-        if angular_steps > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+        # A composed rotation faster than the nominal one-degree sample is a
+        # precision limit, not a missing pose: the native query budget stays
+        # fixed at PROJECTILE_POSE_MAX_SWEEP_STEPS segments and the sampled
+        # angle widens. Discarding the whole projectile here retired an
+        # admitted shot with no damage and no feedback whenever a target
+        # crossed a coarse authority pose step, which is a swallowed shell.
+        divisions = max(
+            1, PROJECTILE_POSE_MAX_SWEEP_STEPS - len(siege_boundaries))
+        angle_step = PROJECTILE_POSE_MAX_ANGLE_STEP
+        if total_travel > angle_step * divisions:
+            angle_step = total_travel / divisions
         absolute_boundaries = set(siege_boundaries)
         if total_travel > 1.0e-12:
-            threshold = PROJECTILE_POSE_MAX_ANGLE_STEP
+            threshold = angle_step
             travelled = 0.0
             for interval_start, interval_end, travel in intervals:
                 if travel <= 1.0e-12:
@@ -11433,7 +11448,7 @@ class BattleRuntime(object):
                     absolute_boundaries.add(
                         interval_start +
                         (interval_end - interval_start) * ratio)
-                    threshold += PROJECTILE_POSE_MAX_ANGLE_STEP
+                    threshold += angle_step
                 travelled += travel
         fractions = [0.0]
         for absolute in sorted(absolute_boundaries):
@@ -11442,7 +11457,12 @@ class BattleRuntime(object):
                 fractions.append(fraction)
         fractions.append(1.0)
         if len(fractions) - 1 > PROJECTILE_POSE_MAX_SWEEP_STEPS:
-            return None
+            # Rounding can still leave one extra boundary. Keep the exact
+            # query budget rather than turning it into a lost projectile.
+            interior = sorted(set(fractions[1:-1]))
+            fractions = ([0.0] +
+                         interior[:PROJECTILE_POSE_MAX_SWEEP_STEPS - 1] +
+                         [1.0])
         return tuple(fractions)
 
     def _projectile_frozen_target(self, target, pose):
@@ -11699,10 +11719,12 @@ class BattleRuntime(object):
             sweep_fractions = self._projectile_pose_sweep_fractions(
                 key, pose_start, pose_end)
             if sweep_fractions is None:
+                # The angular budget no longer discards a shot; only a pose
+                # this history cannot supply reaches here.
                 record['projectile_collision_pose_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 meta['terminal_failure_boundary'] = \
-                    'angular_sweep_limit_exceeded'
+                    'historic_pose_unavailable'
                 return {'reason': 'callback_error', 'fraction': 0.0}
             candidate_segments = []
             for segment_index in range(len(sweep_fractions) - 1):
@@ -11895,6 +11917,31 @@ class BattleRuntime(object):
         direction.normalise()
         return (limited, query_start,
                 query_start + direction.scale(trace_distance))
+
+    @staticmethod
+    def _collision_contacts(evidence):
+        """Reduce private collision evidence to plain local-contact records.
+
+        The critical-damage law never receives the private evidence object
+        itself, only ``(component, distance, local_point)`` for the exact
+        collisions this strike resolved against.  The local point is the one
+        the native hit test produced at the frozen collision pose, so a later
+        live pose can never reach the track zone classifier.
+        """
+        contacts = []
+        for item in evidence or ():
+            collision = getattr(item, 'collision', None)
+            point = getattr(item, 'localPoint', None)
+            if collision is None or point is None:
+                continue
+            try:
+                contacts.append((
+                    str(collision.compName), float(collision.dist),
+                    (float(point[0]), float(point[1]), float(point[2]))))
+            except (AttributeError, TypeError, ValueError,
+                    IndexError, KeyError, OverflowError):
+                continue
+        return tuple(contacts)
 
     def _projectile_source_descriptor(self, meta):
         descriptor = meta.get('source_descriptor')
@@ -12109,7 +12156,9 @@ class BattleRuntime(object):
             damage, critical, critical_delta = critical_damage.propose_direct(
                 critical_target, layers, trace_start, trace_end, damage,
                 legacy_shell, attacker_id, penetrated=int(result) == 2,
-                deadeye=deadeye, with_delta=True)
+                deadeye=deadeye, with_delta=True,
+                collision_contacts=self._collision_contacts(
+                    collision_evidence))
         critical = self._critical_with_crew_roster(
             critical_target, critical)
         return self._projectile_effect(
@@ -13589,9 +13638,12 @@ class BattleRuntime(object):
                 # control scheduler consumes elapsed time. RemoteVehicle's
                 # MatrixAnimation interpolates between changed poses; exact
                 # duplicate render pulls do not require native rewrites.
-                states = presentation_states(now)
-                bot_count = len(states)
-                self._apply_authority_bot_poses(states)
+                presented = self._run_optional_feature(
+                    'bot pose presentation',
+                    self._present_authority_bot_poses,
+                    (presentation_states, now), disable=False)
+                if presented:
+                    bot_count = presented[0]
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['bot_present'] = max(0.0, next_boundary - boundary)
@@ -13618,12 +13670,16 @@ class BattleRuntime(object):
                 boundary = next_boundary
             if not self._worker_mode:
                 if self._battle_live:
-                    self._update_spotting(now)
+                    self._run_optional_feature(
+                        'spotting', self._update_spotting, (now,),
+                        disable=False)
                 elif self._prebattle_deadline is not None:
                     # The minimap view circle is live during the countdown, but
                     # enemy spotting and its LAN report stay behind the battle
                     # gate.  This also lets still devices arm before 00:00.
-                    self._update_spotting(now, hud_only=True)
+                    self._run_optional_feature(
+                        'spotting', self._update_spotting, (now,),
+                        disable=False, kwargs={'hud_only': True})
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['spot'] = max(0.0, next_boundary - boundary)
@@ -13635,9 +13691,13 @@ class BattleRuntime(object):
                 if not callable(validate_lock):
                     raise RuntimeError(
                         '#1513 target-lock lifecycle boundary is unavailable')
-                validate_lock(self._avatar)
+                self._run_optional_feature(
+                    'target lock validation', validate_lock, (self._avatar,),
+                    disable=False)
             self._worker_probe_bot_count = bot_count
-            self._advance_authority_worker_probe()
+            self._run_optional_feature(
+                'authority worker probe',
+                self._advance_authority_worker_probe)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['lock'] = max(0.0, next_boundary - boundary)
@@ -17210,6 +17270,7 @@ class BattleRuntime(object):
             record['_authority_presentation_lifecycle'] = lifecycle
             record.pop('_authority_pose_signature', None)
             record.pop('_authority_aim_signature', None)
+            record.pop('_authority_projectile_pose_cache', None)
             self._bot_pose_times.pop(bot_id, None)
             self._bot_yaw_rates.pop(bot_id, None)
         return lifecycle
@@ -17220,6 +17281,18 @@ class BattleRuntime(object):
             record.pop('_authority_presentation_lifecycle', None)
             record.pop('_authority_pose_signature', None)
             record.pop('_authority_aim_signature', None)
+            record.pop('_authority_projectile_pose_cache', None)
+
+    def _present_authority_bot_poses(self, presentation_states, now):
+        """Pull and apply one accepted authority pose set.
+
+        Returned as a one-tuple so a zero-Bot frame stays distinguishable
+        from the ``False`` that ``_run_optional_feature`` reports when the
+        boundary failed or is retired.
+        """
+        states = presentation_states(now)
+        self._apply_authority_bot_poses(states)
+        return (len(states),)
 
     def _apply_authority_bot_poses(self, states):
         """Present copied 0.8.2 bot poses through the remote filter."""
@@ -17262,8 +17335,9 @@ class BattleRuntime(object):
                 self._destructibles._fell_trees_near(
                     self._avatar.spaceID, position, yaw,
                     _number(state.get('speed')), descriptor)
-            rotation = _engine_rotation(
-                yaw, _number(state.get('pitch')), _number(state.get('roll')))
+            pitch = _number(state.get('pitch'))
+            roll = _number(state.get('roll'))
+            rotation = _engine_rotation(yaw, pitch, roll)
             relax_time = self._bot_pose_relax(
                 state, (tuple(position), rotation), now)
             speed = _number(state.get('speed'))
@@ -17319,11 +17393,27 @@ class BattleRuntime(object):
                     engine_id, yaw, aim_yaw, gun_pitch)
                 record['_authority_aim_signature'] = aim_signature
                 self._authority_aim_writes += 1
-            record['projectile_collision_pose'] = \
-                self._projectile_plain_pose((x, y, z), state)
-            self._run_optional_feature(
-                'bot track animation', self._update_bot_tracks,
-                (record, state, now))
+            turret_yaw = _number(
+                state.get('turret_yaw'), _angle_delta(yaw, aim_yaw))
+            projectile_pose_signature = (
+                lifecycle, x, y, z, yaw, pitch, roll, turret_yaw,
+                gun_pitch, int(state.get('siege_state', 0) or 0))
+            projectile_pose_cache = record.get(
+                '_authority_projectile_pose_cache')
+            if (not isinstance(projectile_pose_cache, tuple) or
+                    len(projectile_pose_cache) != 2 or
+                    projectile_pose_cache[0] != projectile_pose_signature or
+                    record.get('projectile_collision_pose') is not
+                    projectile_pose_cache[1]):
+                projectile_pose = self._projectile_plain_pose(
+                    (x, y, z), state)
+                record['projectile_collision_pose'] = projectile_pose
+                record['_authority_projectile_pose_cache'] = (
+                    projectile_pose_signature, projectile_pose)
+            if not self._worker_mode:
+                self._run_optional_feature(
+                    'bot track animation', self._update_bot_tracks,
+                    (record, state, now))
             applied = True
         return applied
 

@@ -242,6 +242,29 @@ class EquipmentStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'contract changed'):
             state.restore(snapshot, 1.0)
 
+    def test_bot_wire_validator_reuses_one_canonical_parse(self):
+        contracts = [equipment_mechanics.project_equipment(value)
+                     for value in _defaults()]
+        states = [equipment_mechanics.EquipmentState(contract)
+                  for contract in contracts]
+        snapshots = [state.snapshot(0.0) for state in states]
+
+        canonical = equipment_mechanics.canonical_bot_equipment_states(
+            snapshots)
+
+        self.assertEqual(tuple(contracts), tuple(
+            row[0] for row in canonical))
+        self.assertEqual((-1, -1, -1), tuple(
+            row[1] for row in canonical))
+        self.assertTrue(
+            equipment_mechanics.validate_bot_equipment_states(snapshots))
+
+        malformed = [dict(snapshot) for snapshot in snapshots]
+        malformed[1] = dict(malformed[1])
+        malformed[1]['cooldownTimeLeft'] = 91.0
+        with self.assertRaisesRegex(ValueError, 'cooldown'):
+            equipment_mechanics.canonical_bot_equipment_states(malformed)
+
     def test_fuel_food_extinguisher_and_active_rpm_have_distinct_effects(self):
         extinguisher = equipment_mechanics.project_equipment(_defaults()[0])
         food = equipment_mechanics.project_equipment(_equipment(
