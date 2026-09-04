@@ -256,14 +256,6 @@ class AuthorityWorkerLANClient(LANClient):
         self.spawn = {
             'x': 0.0, 'y': WORKER_DUMMY_Y, 'z': 0.0, 'yaw': 0.0}
         self._worker_avatar = None
-        self.on_batch_drained = None
-
-    def _poll(self):
-        """Drain one wire batch before running worker-only urgent work."""
-        LANClient._poll(self)
-        callback = self.on_batch_drained
-        if callable(callback):
-            callback(self)
 
     def is_bot_authority(self):
         """Only the dedicated worker identity may own bot simulation."""
@@ -760,7 +752,6 @@ class WorkerSession(object):
         self._probe_sample = None
         self._process_sample_time = None
         self._process_cpu_seconds = None
-        self._urgent_player_fire = False
 
     def _ensure_runtime_boundaries(self):
         if self._bigworld is None:
@@ -795,21 +786,10 @@ class WorkerSession(object):
                     # LAN poll callback and leave a connected zombie worker.
                     self._worker_failure(error)
 
-        client = self._client_factory(
+        self.client = self._client_factory(
             self._config.get('host', '127.0.0.1'),
             self._config.get('port', 28782), on_event=on_event,
             bigworld=self._bigworld)
-
-        def on_batch_drained(source_client):
-            if (not self._stopped and generation == self._generation and
-                    self.client is source_client):
-                try:
-                    self._on_batch_drained()
-                except Exception as error:
-                    self._worker_failure(error)
-
-        client.on_batch_drained = on_batch_drained
-        self.client = client
         self.state = 'connecting'
         try:
             if not self.client.start():
@@ -1065,7 +1045,6 @@ class WorkerSession(object):
         # a later stop can therefore retry instead of abandoning a live map.
         if self.runtime is runtime:
             self.runtime = None
-        self._urgent_player_fire = False
         self._active_round_id = None
         self._last_progress_frame = 0
         self._next_progress_time = 0.0
@@ -1111,7 +1090,6 @@ class WorkerSession(object):
         if client is not None:
             try:
                 client.on_event = None
-                client.on_batch_drained = None
                 client.stop()
             except Exception as cleanup_error:
                 cleanup_failed = True
@@ -1192,8 +1170,7 @@ class WorkerSession(object):
             elif kind == 'battle_live':
                 self.runtime.on_battle_live(message)
             elif kind == 'fire_intent':
-                if self.runtime.on_fire_intent(message):
-                    self._urgent_player_fire = True
+                self.runtime.on_fire_intent(message)
             elif kind == 'player_destructible_contact':
                 self.runtime.on_player_destructible_contact(message)
             elif kind == 'fire_intent_result':
@@ -1207,24 +1184,6 @@ class WorkerSession(object):
             self._worker_failure(RuntimeError(
                 message.get('message') or 'worker transport lost'))
         self._write_status()
-
-    def _on_batch_drained(self):
-        """Resolve admitted player fire after this wire batch is coherent."""
-        if not self._urgent_player_fire:
-            return False
-        self._urgent_player_fire = False
-        runtime = self.runtime
-        client = self.client
-        if (runtime is None or client is None or
-                not client.is_bot_authority() or
-                self._active_round_id is None):
-            return False
-        flush = getattr(
-            runtime, 'flush_admitted_player_fire_intents', None)
-        if not callable(flush):
-            raise RuntimeError(
-                'worker player-fire fast path is unavailable')
-        return bool(flush())
 
     def _write_status(self, force=False):
         now = time.time()
@@ -1520,7 +1479,6 @@ class WorkerSession(object):
             if client is not None:
                 try:
                     client.on_event = None
-                    client.on_batch_drained = None
                     client.stop()
                 except Exception as error:
                     if cleanup_error is None:
@@ -1529,7 +1487,6 @@ class WorkerSession(object):
                     if self.client is client:
                         self.client = None
         self._active_round_id = None
-        self._urgent_player_fire = False
         self._pending_start = None
         self._pending_start_deadline = None
         self._last_progress_frame = 0

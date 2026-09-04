@@ -7380,26 +7380,6 @@ class BattleRuntime(object):
         self._player_fire_intents[key] = frozen
         return True
 
-    def flush_admitted_player_fire_intents(self):
-        """Resolve a drained LAN batch before the next full Bot frame."""
-        if not self._battle_live or not self._player_fire_intents:
-            return False
-        # WorkerSession calls this at the tail of AuthorityWorkerLANClient's
-        # BigWorld-thread poll.  Every snapshot/event already received in the
-        # same batch is therefore applied before shot-relevant state is read.
-        # Missing native entities remain queued for the ordinary frame path.
-        started = _PROFILE_CLOCK()
-        try:
-            return self._advance_player_fire_authority(
-                0.0, self._clock(),
-                intent_keys=tuple(self._player_fire_intents),
-                defer_missing_player=True)
-        finally:
-            # PERF subtracts this mod-owned callback work from the engine's
-            # outside time and reports it through the existing off-frame lane.
-            self._offframe_seconds += max(
-                0.0, _PROFILE_CLOCK() - started)
-
     def on_player_destructible_contact(self, message):
         """Resolve one server-admitted player hull contact immediately."""
         if not self._worker_mode or self.state != 'running':
@@ -18227,22 +18207,10 @@ class BattleRuntime(object):
         gun._client_checkpoint_seq = input_seq
         return gun.can_fire(True)
 
-    def _advance_player_fire_authority(
-            self, dt, now, intent_keys=None, defer_missing_player=False):
+    def _advance_player_fire_authority(self, dt, now):
         """Resolve visible triggers from their input-bound client gun edge."""
         if not self._worker_mode or not self._projectile_is_authority():
             return False
-        if intent_keys is None:
-            pending_intents = tuple(self._player_fire_intents.items())
-            target_player_ids = None
-        else:
-            pending_intents = tuple(
-                (key, self._player_fire_intents[key])
-                for key in tuple(intent_keys)
-                if key in self._player_fire_intents)
-            target_player_ids = set(
-                int(intent['player_id'])
-                for unused_key, intent in pending_intents)
         live_players = set()
         for record in tuple(self._records.values()):
             if record.get('kind') != 'player':
@@ -18250,9 +18218,6 @@ class BattleRuntime(object):
             try:
                 player_id = int(record.get('network_id'))
             except (TypeError, ValueError, OverflowError):
-                continue
-            if (target_player_ids is not None and
-                    player_id not in target_player_ids):
                 continue
             if player_id <= 0 or record.get('tombstone'):
                 continue
@@ -18285,17 +18250,15 @@ class BattleRuntime(object):
                 if getattr(gun, '_effective_params', None) != effective:
                     raise RuntimeError(
                         'worker player effective parameters changed in battle')
-        if target_player_ids is None:
-            for player_id in tuple(self._player_authority_guns):
-                if player_id not in live_players:
-                    self._player_authority_guns.pop(player_id, None)
-        for key, intent in pending_intents:
+        for player_id in tuple(self._player_authority_guns):
+            if player_id not in live_players:
+                self._player_authority_guns.pop(player_id, None)
+
+        for key, intent in tuple(self._player_fire_intents.items()):
             player_id = int(intent['player_id'])
             if player_id in self._player_fire_launch_pending:
                 continue
             record = self._records.get('player:%s' % player_id)
-            if record is None and defer_missing_player:
-                continue
             if record is None or record.get('tombstone'):
                 self._reject_player_fire_intent(key, 'player_unavailable')
                 continue
