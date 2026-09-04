@@ -34,43 +34,63 @@ class _Vector(object):
 
 
 class _Matrix(object):
-    def __init__(self, x, y, z):
+    def __init__(self, x, y, z, yaw=0.0):
         self.translation = _Vector(x, y, z)
-        self.yaw = 0.0
+        self.yaw = yaw
 
 
 class _FakePhysics(object):
     """Mimic the exe's WGVehiclePhysics Python surface closely enough."""
 
     created = []
+    reject_configure = False
+    # When set, the solver ignores the seeded lastTickMatrix (body stays at
+    # the origin) until actualChassisTransform is written.
+    ignore_last_tick_matrix = False
 
     def __init__(self):
         self.__dict__['callbacks'] = {}
         self.__dict__['initialised'] = False
+        self.__dict__['subscribers'] = {'before': [], 'after': []}
+        self.__dict__['coast'] = 0
         self.staticMode = True
         self.isFrozen = True
         self.movementSignals = 0
         self.speed = 0.0
+        self.yaw = 0.3
         self.gotTracksContact = True
         self.groundType = 1
         self.distanceTraveled = 0.0
-        self.position = [0.0, 10.0, 0.0]
-        self.lastTickMatrix = _Matrix(*self.position)
-        self.actualChassisTransform = _Matrix(*self.position)
+        self.position = ([0.0, 0.0, 0.0] if _FakePhysics.ignore_last_tick_matrix
+                         else [0.0, 10.0, 0.0])
+        self._refresh()
         _FakePhysics.created.append(self)
+
+    def _refresh(self):
+        matrix = _Matrix(self.position[0], self.position[1], self.position[2],
+                         self.yaw)
+        self.__dict__['lastTickMatrix'] = matrix
+        self.__dict__['actualChassisTransform'] = matrix
+        self.__dict__['stabilisedMatrixWithLatency'] = matrix
 
     def __setattr__(self, name, value):
         if name.endswith('Cb') or name == 'onVehicleStatusChanged':
             self.__dict__['callbacks'][name] = value
             return
-        if name == 'lastTickMatrix' and hasattr(value, 'translation') and \
-                self.__dict__.get('initialised'):
-            # A retail-like pose setter: seeding through the matrix moves it.
-            self.__dict__['position'] = _xyz_list(value.translation)
-            self.__dict__['actualChassisTransform'] = _Matrix(*self.position)
+        if name in ('lastTickMatrix', 'actualChassisTransform',
+                    'stabilisedMatrixWithLatency') and hasattr(
+                        value, 'translation') and self.__dict__.get('initialised'):
+            honoured = (name == 'actualChassisTransform'
+                        if _FakePhysics.ignore_last_tick_matrix
+                        else name == 'lastTickMatrix')
+            if honoured:
+                self.__dict__['position'] = _xyz_list(value.translation)
+                self.__dict__['yaw'] = float(getattr(value, 'yaw', 0.0))
+                self._refresh()
+                return
+            object.__setattr__(self, name, value)
+            return
         object.__setattr__(self, name, value)
-
-    reject_configure = False
 
     def __getattr__(self, name):
         if name in ('mass', 'hullCOMZ'):
@@ -86,11 +106,24 @@ class _FakePhysics(object):
                 % name)
         raise AttributeError(name)
 
-    def getTouchedGround(self):
-        return True
+    def getTouchedGround(self, index):
+        return index == 0
+
+    def getTouchedMatkind(self, index):
+        return 6
 
     def getAggressiveImpacts(self):
         return []
+
+    def subscribeBeforeSimulation(self, callback):
+        self.__dict__['subscribers']['before'].append(callback)
+
+    def subscribeAfterSimulation(self, callback):
+        self.__dict__['subscribers']['after'].append(callback)
+
+    def applyImpulseToCoM(self, impulse):
+        self.__dict__['coast'] = 4
+        self.speed = 3.0
 
     def configure(self, *args):
         if len(args) != 1 or not isinstance(args[0], dict):
@@ -108,12 +141,32 @@ class _FakePhysics(object):
         self.bounds = (low, high)
 
     def advance(self, dt):
-        if self.movementSignals & 1 and not self.isFrozen:
-            self.position[2] += 5.0 * dt
-            self.distanceTraveled += 5.0 * dt
+        for callback in self.__dict__['subscribers']['before']:
+            callback()
+        signals = self.movementSignals
+        if self.staticMode:
+            signals = 0
+        import math
+        forward = (math.sin(self.yaw), math.cos(self.yaw))
+        if signals & 1:
             self.speed = 5.0
-            self.__dict__['lastTickMatrix'] = _Matrix(*self.position)
-            self.__dict__['actualChassisTransform'] = _Matrix(*self.position)
+        elif signals & 2:
+            self.speed = -3.0
+        elif self.__dict__['coast'] > 0:
+            self.__dict__['coast'] -= 1
+        else:
+            self.speed = 0.0
+        self.position[0] += forward[0] * self.speed * dt
+        self.position[2] += forward[1] * self.speed * dt
+        self.distanceTraveled += abs(self.speed) * dt
+        if signals & 4:
+            self.yaw += 0.5 * dt
+        if signals & 8:
+            self.yaw -= 0.5 * dt
+        self.isFrozen = (signals == 0 and self.speed == 0.0)
+        self._refresh()
+        for callback in self.__dict__['subscribers']['after']:
+            callback()
 
 
 def _xyz_list(vector):
@@ -218,7 +271,7 @@ class _FakeMath(object):
 class _MatrixFactory(object):
     def __call__(self):
         matrix = _Matrix(0.0, 0.0, 0.0)
-        matrix.setRotateYPR = lambda ypr: None
+        matrix.setRotateYPR = lambda ypr: setattr(matrix, 'yaw', float(ypr[0]))
         return matrix
 
 
@@ -242,6 +295,10 @@ class _FakeHost(object):
 
     def constants(self):
         return None
+
+    def factory_info(self):
+        return {'factory_type': 'FakeFactory', 'native_entities': False,
+                'native_remote_vehicles_config': False, 'worker_mode': True}
 
     def bot_entities(self):
         return list(self._bots)
@@ -290,6 +347,10 @@ class NativePhysicsProbeTests(unittest.TestCase):
     def setUp(self):
         self.module = _load('native_physics_probe')
         _FakePhysics.created = []
+        _FakePhysics.ignore_last_tick_matrix = False
+        self.player = _FakeEntity()
+        self.player.arenaTypeID = (5 << 16) | 7
+        self.player.spaceID = 3
         self.lines = []
         self.clock = [1000.0]
         self.directory = tempfile.mkdtemp()
@@ -301,7 +362,9 @@ class NativePhysicsProbeTests(unittest.TestCase):
             WGDynamicsSimulator=lambda: self.simulator,
             WGPhysicalBody=_FakeBody,
             Entity=_FakeEntity,
-            player=lambda: types.SimpleNamespace(arenaTypeID=(5 << 16) | 7),
+            player=lambda: self.player,
+            wg_collideSegment=lambda space, top, bottom, flags: (
+                _Vector(top.x, top.y - 20.5, top.z), None, None),
             wg_setupPhysicsParam=lambda name, value: self.physics_params.append(
                 (name, value)))
         self.physics_shared = _fake_physics_shared()
@@ -330,8 +393,10 @@ class NativePhysicsProbeTests(unittest.TestCase):
 
     def _probe(self, bots, **config):
         base = {'start_delay_seconds': 0.5, 'passive_seconds': 0.2,
-                'drive_seconds': 0.3, 'pair_seconds': 0.2,
-                'scale_frames': 5, 'scale_bodies': 3}
+                'drive_seconds': 0.3, 'rotate_seconds': 0.2,
+                'reverse_seconds': 0.2, 'settle_seconds': 0.2,
+                'pair_seconds': 0.2, 'scale_frames': 5, 'scale_bodies': 3,
+                'impulse_frames': 3}
         base.update(config)
         host = _FakeHost(bots, self.bigworld)
         return self.module.WorkerPhysicsProbe(
@@ -356,8 +421,8 @@ class NativePhysicsProbeTests(unittest.TestCase):
         probe = self._probe(self._bots(retail=True))
         self.assertEqual(
             ['inventory', 'inspect_existing', 'construct_standalone',
-             'passive_drive', 'solve_one', 'solve_scale', 'solve_pair',
-             'restore'], probe._stages)
+             'passive_drive', 'solve_one', 'solve_pair', 'solve_scale',
+             'extras', 'restore'], probe._stages)
         opted = self._probe(self._bots(retail=True),
                             opt_in_stages=['signatures'])
         self.assertEqual('signatures', opted._stages[-1])
@@ -382,13 +447,29 @@ class NativePhysicsProbeTests(unittest.TestCase):
         solve_one = by_name['solve_one']['data']
         self.assertEqual('retail', solve_one['source'])
         self.assertGreater(solve_one['moved_m'], 0.5)
-        self.assertEqual([1, 0], solve_one['input']['notifyInputKeysDown'])
+        self.assertEqual(
+            [1, 0], solve_one['segments'][0]['input']['notifyInputKeysDown'])
         scale = by_name['solve_scale']['data']
         self.assertEqual(3, scale['body_count'])
-        self.assertEqual(5, scale['update_ms']['calls'])
+        self.assertEqual(['idle', 'static', 'driving'],
+                         [phase['name'] for phase in scale['phases']])
+        self.assertEqual(5, scale['phases'][0]['update_ms']['calls'])
         for bot in bots:
             physics = bot['native'].filter.getVehiclePhysics()
             self.assertEqual(0, physics.movementSignals)
+            self.assertFalse(physics.staticMode)
+        throwaway = construct_throwaway = by_name['construct_standalone']['data']['throwaway']
+        self.assertEqual('ok', throwaway['owner=weakref(player)'])
+        self.assertEqual('ok', throwaway['owner=None'])
+        self.assertEqual('returned true', throwaway['getTouchedGround(0,)'])
+        self.assertEqual('returned 6', throwaway['getTouchedMatkind(1,)'])
+        self.assertEqual('returned null', throwaway['subscribeBeforeSimulation'])
+        self.assertEqual('ok', throwaway['actualChassisTransform']['set'])
+        self.assertEqual('ok', throwaway['staticMode=False']['set'])
+        self.assertEqual('returned null', throwaway['applyImpulseToCoM'])
+        joined_steps = ''.join(self.lines)
+        self.assertIn('step=throwaway owner = weakref(BigWorld.player())', joined_steps)
+        self.assertIn('step=throwaway owner = None', joined_steps)
         # construct_standalone never reads a fresh body before init.
         construct = by_name['construct_standalone']['data']
         self.assertTrue(construct['initialised'])
@@ -544,10 +625,54 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertEqual('standalone', solve_one['source'])
         self.assertEqual('standalone:11', solve_one['body'])
         self.assertGreater(solve_one['moved_m'], 0.5)
-        self.assertNotIn('notifyInputKeysDown', solve_one['input'])
+        self.assertEqual('lastTickMatrix = Matrix', solve_one['pose_method'])
+        self.assertFalse(solve_one['pose_lost'])
+        self.assertEqual(1, len(solve_one['pose_attempts']))
+        segments = solve_one['segments']
+        self.assertEqual(['forward', 'rotate_left', 'backward', 'stop'],
+                         [segment['name'] for segment in segments])
+        self.assertNotIn('notifyInputKeysDown', segments[0]['input'])
+        self.assertEqual(5.0, segments[0]['max_speed'])
+        self.assertGreater(segments[0]['moved_m'], 0.5)
+        self.assertGreater(segments[1]['yaw_delta'], 0.0)
+        self.assertEqual(3.0, segments[2]['max_speed'])
+        self.assertGreater(segments[3]['frozen_frames'], 0)
+        self.assertEqual(0.5, segments[0]['samples'][0]['h'])
+        self.assertEqual(0.5, segments[0]['min_height'])
+        self.assertEqual(0.5, solve_one['before']['height'])
+        self.assertGreater(
+            report['subscriptions']['standalone:11']['before'], 0)
+        self.assertEqual(
+            report['subscriptions']['standalone:11']['before'],
+            report['subscriptions']['standalone:11']['after'])
+        pair = by_name['solve_pair']['data']
+        self.assertTrue(pair['pair_seed']['ok'])
+        self.assertEqual('lastTickMatrix = Matrix', pair['pair_seed']['method'])
+        self.assertEqual('ok', pair['pair_seed']['apply'])
+        self.assertLess(pair['min_distance_m'], 20.0)
+        self.assertGreater(len(pair['samples']), 1)
+        self.assertEqual({}, by_name['solve_pair']['callbacks'])
         scale = by_name['solve_scale']['data']
         self.assertEqual(3, scale['body_count'])
+        self.assertEqual(['idle', 'static', 'driving'],
+                         [phase['name'] for phase in scale['phases']])
+        for phase in scale['phases']:
+            self.assertEqual(5, phase['update_ms']['calls'])
+            self.assertEqual(2, len(phase['sample_poses']))
+        self.assertEqual(3, len(scale['final_poses'][0]['lastTickMatrix']))
+        self.assertEqual(0.5, scale['final_poses'][0]['height'])
+        extras = by_name['extras']['data']
+        self.assertEqual('returned true', extras['getTouchedGround(0,)'])
+        self.assertEqual('returned null', extras['impulse'])
+        self.assertEqual(45000.0 * 5.0, extras['impulse_magnitude'])
+        self.assertEqual(3, len(extras['samples']))
+        self.assertGreater(extras['moved_m'], 0.0)
         self.assertEqual(3, len(report['standalone_bodies']))
+        existing = by_name['inspect_existing']['data']
+        self.assertEqual(False, existing['entities'][0]['carrier_is_entity'])
+        self.assertIn('_FakeCarrier', existing['entities'][0]['carrier_mro'])
+        self.assertEqual('FakeFactory', existing['factory']['factory_type'])
+        self.assertEqual('_FakeEntity', existing['player_type'])
         for index, body in enumerate(report['standalone_bodies']):
             self.assertTrue(body['initialised'])
             self.assertEqual('detailed', body['init_mode'])
@@ -566,6 +691,31 @@ class NativePhysicsProbeTests(unittest.TestCase):
             ['standalone:11', 'standalone:12'],
             by_name['solve_pair']['data']['labels'])
         self.assertEqual(2, report['simulator_settings']['numSubsteps'])
+
+    def test_pose_fallback_when_solver_ignores_last_tick_matrix(self):
+        _FakePhysics.ignore_last_tick_matrix = True
+        bots = self._bots(retail=False)
+        probe = self._probe(bots, stages=['solve_one', 'solve_pair'])
+        self._run(probe)
+        report = self._report()
+        by_name = dict((stage['name'], stage) for stage in report['stages'])
+        solve_one = by_name['solve_one']['data']
+        self.assertEqual('actualChassisTransform = Matrix',
+                         solve_one['pose_method'])
+        self.assertFalse(solve_one['pose_lost'])
+        methods = [attempt['method'] for attempt in solve_one['pose_attempts']]
+        self.assertEqual(['lastTickMatrix = Matrix',
+                          'actualChassisTransform = Matrix',
+                          'actualChassisTransform = Matrix'], methods)
+        self.assertEqual([0.0, 0.0, 0.0],
+                         solve_one['pose_attempts'][0]['after_update']['lastTickMatrix'])
+        self.assertGreater(solve_one['moved_m'], 0.5)
+        pair = by_name['solve_pair']['data']
+        self.assertEqual('actualChassisTransform = Matrix',
+                         pair['pair_seed']['method'])
+        self.assertTrue(pair['pair_seed']['ok'])
+        self.assertIn('step=standalone:11 pose actualChassisTransform = Matrix',
+                      ''.join(self.lines))
 
     def test_plain_carrier_never_becomes_owner(self):
         bots = self._bots(retail=False)

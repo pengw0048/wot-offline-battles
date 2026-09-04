@@ -133,12 +133,21 @@ standalone bodies from the Bots' own descriptors with the retail server recipe
 (physics_shared.configurePhysics over g_defaultTankXPhysicsCfg, engine
 smplEnginePower and the vehicle speed limits from the client descriptor) and
 checks the native WGVehiclePhysics.configure(cfg) return value before reading a
-single attribute. It then drives one body forward for two seconds through
-movementSignals and an explicit WGDynamicsSimulator.update batch, times one
-batch over up to 29 bodies, drives two bodies for contact callbacks, and zeroes
-every signal it set. Standalone bodies have no presentation, so nothing visible
-moves and only their read-back matrices are evidence. The report records the
-exact cfg handed to configure(), its return value, and every attribute write.
+single attribute. On a body that is never simulated it then tests the pose,
+handbrake, cruise and staticMode setters, the simulation subscriptions, the
+ground queries, an impulse, and whether the owner setter accepts the worker's
+own avatar. Then, through explicit four-argument WGDynamicsSimulator.update
+batches: body A is stepped once to see whether the solver honours the seeded
+pose (falling back through the other pose setters if not), driven forward,
+rotated, reversed and stopped with per-frame position, height above ground,
+speed, yaw and freeze samples; body B is re-seeded 20 m ahead of A facing it and
+both drive into each other for contact callbacks; up to 29 bodies are batched
+idle, in staticMode and all driving for cost; finally A receives an impulse and
+the ground queries. Every signal and staticMode is zeroed afterwards. Play at
+least 60 s after the battle goes live. Standalone bodies have no presentation,
+so nothing visible moves and only their read-back matrices are evidence. The
+report records the exact cfg handed to configure(), its return value, every
+attribute write, and per-stage callback counts with their first arguments.
 Every native call is announced with an NPHYS step line and each
 stage rewrites offline-worker-native-physics-probe-round<N>.json next to
 authority_worker_status.json, so a native crash still leaves the earlier

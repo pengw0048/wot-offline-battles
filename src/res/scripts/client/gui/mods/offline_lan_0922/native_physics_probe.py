@@ -78,12 +78,27 @@ DEFAULT_CONFIG = {
     'start_delay_seconds': 8.0,
     'stages': 'all',
     'inspect_entities': 3,
-    'passive_seconds': 1.0,
-    'drive_seconds': 2.0,
+    'passive_seconds': 0.5,
+    # solve_one drive segments on body A: forward, rotate left, backward,
+    # stop (freeze check).
+    'drive_seconds': 3.0,
+    'rotate_seconds': 1.5,
+    'reverse_seconds': 1.5,
+    'settle_seconds': 2.0,
+    # solve_scale: three phases (idle / staticMode / all driving) of this
+    # many batch updates each, over up to scale_bodies bodies.
     'scale_frames': 60,
     'scale_bodies': 29,
-    'pair_seconds': 2.0,
-    'drive_all': False,
+    # solve_pair: body B is re-seeded pair_gap_m ahead of body A, facing it.
+    'pair_seconds': 3.0,
+    'pair_gap_m': 20.0,
+    # extras: applyImpulseToCoM(Vector3(0, 0, mass * impulse_scale)) on A.
+    'impulse_scale': 5.0,
+    'impulse_frames': 10,
+    # Throwaway-body acceptance tests (setters/methods on a body that is
+    # never simulated) and the owner self-test with BigWorld.player().
+    'throwaway_tests': True,
+    'owner_self_test': True,
     'disable_lsprof': False,
     'opt_in_stages': [],
     'fresh_attribute_reads': False,
@@ -195,8 +210,18 @@ FILTER_READ_ATTRIBUTES = (
     'vehicleCollisionMargin', 'isStrafing')
 STAGE_ORDER = (
     'inventory', 'inspect_existing', 'construct_standalone',
-    'passive_drive', 'solve_one', 'solve_scale', 'solve_pair', 'restore',
-    'signatures')
+    'passive_drive', 'solve_one', 'solve_pair', 'solve_scale', 'extras',
+    'restore', 'signatures')
+# Pose setters tried, in order, when the solver ignores the seeded
+# lastTickMatrix (decided by where body A is after its first update).
+POSE_METHODS = (
+    'lastTickMatrix = Matrix',
+    'actualChassisTransform = Matrix',
+    'stabilisedMatrixWithLatency = Matrix',
+    'staticMode toggle + lastTickMatrix',
+    'configure(cfg) again',
+)
+CALLBACK_EVENT_CAP = 400
 OPT_IN_STAGES = ('signatures',)
 
 
@@ -287,6 +312,39 @@ def _matrix_translation(matrix, math_module=None):
         return _xyz(translation)
     except Exception:
         return None
+
+
+def _matrix_yaw(matrix):
+    try:
+        return float(matrix.yaw)
+    except Exception:
+        return None
+
+
+def _finite_xyz(value):
+    if not value or len(value) != 3:
+        return False
+    for item in value:
+        try:
+            item = float(item)
+        except (TypeError, ValueError):
+            return False
+        if math.isnan(item) or math.isinf(item):
+            return False
+    return True
+
+
+def _call_with(target, name, args):
+    method = getattr(target, name, None)
+    if method is None:
+        return '<missing>'
+    if not callable(method):
+        return '<not callable: %s>' % _type_name(method)
+    try:
+        value = method(*args)
+    except Exception as error:
+        return '%s: %s' % (_type_name(error), str(error)[:200])
+    return 'returned %s' % json.dumps(_plain(value))[:200]
 
 
 def _distance(first, second):
@@ -445,6 +503,9 @@ class WorkerPhysicsProbe(object):
         self._driven = []
         self._callback_events = []
         self._common_conf = None
+        self._space_id = None
+        self._pose_method = None      # adopted by solve_one, reused later
+        self._subscriptions = {}      # label -> {'before': n, 'after': n}
         stages = self._config.get('stages')
         opted = set(self._config.get('opt_in_stages') or ())
         if stages == 'all' or not stages:
@@ -500,7 +561,8 @@ class WorkerPhysicsProbe(object):
         if self._current is None:
             self._current = {
                 'name': name, 'status': 'running', 'frames': 0,
-                'begun_at': now, 'data': {}, 'error': None}
+                'begun_at': now, 'data': {}, 'error': None,
+                'events_at_begin': len(self._callback_events)}
             self._report['stages'].append(self._current)
             self._report['last_begun'] = name
             self._stage_state = {}
@@ -521,6 +583,8 @@ class WorkerPhysicsProbe(object):
                 self._current['status'] = 'ok'
             self._current['wall_ms'] = (
                 self._clock() - self._current['begun_at']) * 1000.0
+            self._current['callbacks'] = self._callback_summary(
+                self._current.get('events_at_begin', 0))
             self._log('stage=%s end status=%s frames=%d' % (
                 name, self._current['status'], self._current['frames']))
             self._current = None
@@ -531,7 +595,9 @@ class WorkerPhysicsProbe(object):
     def _finish(self):
         self._done = True
         self._report['completed'] = True
-        self._report['callback_events'] = self._callback_events[:200]
+        self._report['callback_events'] = self._callback_events[:CALLBACK_EVENT_CAP]
+        self._report['callbacks_total'] = self._callback_summary(0)
+        self._report['subscriptions'] = self._subscriptions
         self._report['bodies_source'] = self._bodies_source
         self._write_report()
         self._log('done report=%s' % self._report_path())
@@ -611,21 +677,120 @@ class WorkerPhysicsProbe(object):
                 getattr(vehicle_filter, 'bodyMatrix', None), math_module)
         for name in PHYSICS_MATRIX_ATTRIBUTES:
             try:
-                result[name] = _matrix_translation(
-                    getattr(physics, name), math_module)
+                matrix = getattr(physics, name)
+                result[name] = _matrix_translation(matrix, math_module)
+                if name == 'lastTickMatrix':
+                    result['yaw'] = _matrix_yaw(matrix)
             except Exception as error:
                 result[name] = '<%s>' % str(error)[:80]
+        position = result.get('lastTickMatrix')
+        if _finite_xyz(position):
+            ground = self._ground_y(position[0], position[1], position[2])
+            result['ground_y'] = ground
+            result['height'] = (
+                position[1] - ground if ground is not None else None)
         for name in ('speed', 'isFrozen', 'movementSignals',
                      'gotTracksContact', 'groundType', 'distanceTraveled'):
             result[name] = _read_attribute(physics, name)
         return result
+
+    def _ground_y(self, x, y, z):
+        """Terrain/static height under (x, z), the runtime's own probe shape."""
+        bigworld = self._bigworld()
+        math_module = self._math()
+        collide = getattr(bigworld, 'wg_collideSegment', None)
+        if not callable(collide) or math_module is None:
+            return None
+        if self._space_id is None:
+            try:
+                self._space_id = int(bigworld.player().spaceID)
+            except Exception:
+                self._space_id = -1
+        if self._space_id < 0:
+            return None
+        try:
+            hit = collide(self._space_id,
+                          math_module.Vector3(x, y + 20.0, z),
+                          math_module.Vector3(x, y - 60.0, z), 128)
+        except Exception:
+            return None
+        if hit is None:
+            return None
+        try:
+            return float(hit[0].y)
+        except Exception:
+            return None
+
+    def _callback_summary(self, since):
+        summary = {}
+        for event in self._callback_events[since:]:
+            entry = summary.setdefault(event['callback'], {
+                'count': 0, 'first': []})
+            entry['count'] += 1
+            if len(entry['first']) < 3:
+                entry['first'].append(
+                    {'body': event['body'], 'args': event['args']})
+        return summary
+
+    def _seed_matrix(self, position, yaw):
+        math_module = self._math()
+        matrix = math_module.Matrix()
+        matrix.setRotateYPR((float(yaw), 0.0, 0.0))
+        matrix.translation = math_module.Vector3(*position)
+        return matrix
+
+    def _apply_pose(self, body, position, yaw, method):
+        """Apply one POSE_METHODS entry; return 'ok' or an error string."""
+        physics = body['physics']
+        try:
+            matrix = self._seed_matrix(position, yaw)
+        except Exception as error:
+            return '<matrix build failed: %s>' % str(error)[:80]
+        self._step('%s pose %s' % (body['label'], method))
+        try:
+            if method == 'lastTickMatrix = Matrix':
+                physics.lastTickMatrix = matrix
+            elif method == 'actualChassisTransform = Matrix':
+                physics.actualChassisTransform = matrix
+            elif method == 'stabilisedMatrixWithLatency = Matrix':
+                physics.stabilisedMatrixWithLatency = matrix
+            elif method == 'staticMode toggle + lastTickMatrix':
+                physics.staticMode = True
+                physics.lastTickMatrix = matrix
+                physics.staticMode = False
+            elif method == 'configure(cfg) again':
+                cfg = body.get('cfg')
+                if cfg is None:
+                    return '<no cfg kept for this body>'
+                physics.lastTickMatrix = matrix
+                if not physics.configure(cfg):
+                    return '<configure returned False>'
+            else:
+                return '<unknown method>'
+        except Exception as error:
+            return '%s: %s' % (_type_name(error), str(error)[:120])
+        return 'ok'
+
+    def _pose_ok(self, snapshot, reference):
+        position = snapshot.get('lastTickMatrix')
+        if not _finite_xyz(position):
+            return False
+        if position == [0.0, 0.0, 0.0]:
+            return False
+        distance = _distance(position, reference)
+        return distance is not None and distance < 30.0
+
+    @staticmethod
+    def _ahead(position, yaw, metres):
+        return [position[0] + math.sin(yaw) * metres, position[1],
+                position[2] + math.cos(yaw) * metres]
 
     def _install_callbacks(self, physics, label):
         installed = []
         for name in PHYSICS_CALLBACK_ATTRIBUTES:
             def _make(callback_name):
                 def _callback(*args):
-                    if len(self._callback_events) < 200:
+                    if len(self._callback_events) < CALLBACK_EVENT_CAP:
                         self._callback_events.append({
                             'body': label, 'callback': callback_name,
                             'args': [_plain(value) for value in args[:6]]})
@@ -778,6 +943,7 @@ class WorkerPhysicsProbe(object):
         if not accepted:
             entry['result'] = '<configure returned %r>' % (accepted,)
             return entry
+        entry['_cfg'] = cfg
         self._step('%s physics.hullCOMZ' % label)
         hull_com_z = _read_attribute(physics, 'hullCOMZ')
         entry['hullCOMZ'] = hull_com_z
@@ -878,6 +1044,7 @@ class WorkerPhysicsProbe(object):
                     physics, physics_shared, descriptor, label)
             else:
                 entry = {'call': name, 'result': '<unknown init mode>'}
+            record['cfg'] = entry.pop('_cfg', None)
             record['init'].append(entry)
             if entry.get('result') == 'ok':
                 record['initialised'] = True
@@ -1089,10 +1256,17 @@ class WorkerPhysicsProbe(object):
         for bot in self._bots(self._config.get('inspect_entities', 3)):
             native = bot.get('native')
             carrier = bot.get('carrier')
+            entity_type = getattr(self._bigworld(), 'Entity', None)
             entry = {
                 'bot_id': bot['bot_id'],
                 'position': bot.get('position'), 'yaw': bot.get('yaw'),
                 'carrier_type': _type_name(carrier),
+                'carrier_mro': [klass.__name__ for klass in
+                                type(carrier).__mro__] if carrier is not None
+                else None,
+                'carrier_is_entity': (
+                    isinstance(carrier, entity_type)
+                    if isinstance(entity_type, type) else '<no BigWorld.Entity>'),
                 'carrier_filter_type': _type_name(
                     getattr(carrier, 'filter', None)),
                 'native_type': _type_name(native),
@@ -1121,6 +1295,17 @@ class WorkerPhysicsProbe(object):
             entries.append(entry)
         data['entities'] = entries
         data['bot_count'] = len(self._bots())
+        try:
+            data['factory'] = self._host.factory_info()
+        except Exception as error:
+            data['factory'] = '<%s>' % str(error)[:80]
+        try:
+            player = self._bigworld().player()
+            data['player_type'] = _type_name(player)
+            data['player_mro'] = [
+                klass.__name__ for klass in type(player).__mro__]
+        except Exception as error:
+            data['player_type'] = '<%s>' % str(error)[:80]
         return True
 
     def _stage_construct_standalone(self, frame_dt):
@@ -1164,7 +1349,89 @@ class WorkerPhysicsProbe(object):
             name for name in dir(body) if not name.startswith('__'))
         data['body_attributes'] = self._read_attributes(
             body, BODY_ATTRIBUTES, 'body')
+        if record.get('initialised') and self._config.get('throwaway_tests'):
+            data['throwaway'] = self._throwaway_tests(record)
         return True
+
+    def _throwaway_tests(self, record):
+        """Setter/method acceptance on a body that is never simulated."""
+        physics = record['physics']
+        bot = record['bot']
+        math_module = self._math()
+        results = collections.OrderedDict()
+        position = bot.get('position') or [0.0, 0.0, 0.0]
+        yaw = float(bot.get('yaw') or 0.0)
+        for name in ('actualChassisTransform', 'stabilisedMatrixWithLatency'):
+            self._step('throwaway %s = Matrix' % name)
+            try:
+                setattr(physics, name, self._seed_matrix(position, yaw))
+                readback = _matrix_translation(
+                    getattr(physics, name), math_module)
+                results[name] = {'set': 'ok', 'readback': readback,
+                                 'distance_m': _distance(readback, position)}
+            except Exception as error:
+                results[name] = {'set': '%s: %s' % (
+                    _type_name(error), str(error)[:100])}
+        for name, value in (('handbrake', False), ('cruiseSignals', 0),
+                            ('allowFreeze', True), ('staticMode', True),
+                            ('staticMode', False)):
+            self._step('throwaway %s = %r' % (name, value))
+            before = _read_attribute(physics, name)
+            try:
+                setattr(physics, name, value)
+                results['%s=%r' % (name, value)] = {
+                    'before': before, 'set': 'ok',
+                    'readback': _read_attribute(physics, name)}
+            except Exception as error:
+                results['%s=%r' % (name, value)] = {
+                    'before': before, 'set': '%s: %s' % (
+                        _type_name(error), str(error)[:100])}
+        counters = {'before': 0, 'after': 0}
+        def _before(*unused):
+            counters['before'] += 1
+        def _after(*unused):
+            counters['after'] += 1
+        for name, callback in (('subscribeBeforeSimulation', _before),
+                               ('subscribeAfterSimulation', _after)):
+            self._step('throwaway %s(callable)' % name)
+            results[name] = _call_with(physics, name, (callback,))
+        for name, args in (('getTouchedGround', (0,)), ('getTouchedGround', (1,)),
+                           ('getTouchedMatkind', (0,)),
+                           ('getTouchedMatkind', (1,)),
+                           ('getAggressiveImpacts', ())):
+            self._step('throwaway %s%r' % (name, args))
+            results['%s%r' % (name, args)] = _call_with(physics, name, args)
+        if math_module is not None:
+            self._step('throwaway applyImpulseToCoM(Vector3(0, 0, 1))')
+            results['applyImpulseToCoM'] = _call_with(
+                physics, 'applyImpulseToCoM',
+                (math_module.Vector3(0.0, 0.0, 1.0),))
+        if self._config.get('owner_self_test'):
+            # The setter demands a weakref to a native PyEntity; the worker's
+            # own avatar is one.  Cleared again at once: this body is never
+            # simulated and the avatar must not stay linked to it.
+            try:
+                player = self._bigworld().player()
+            except Exception as error:
+                player = None
+                results['owner=weakref(player)'] = '<player: %s>' % str(
+                    error)[:80]
+            if player is not None:
+                self._step('throwaway owner = weakref(BigWorld.player())')
+                try:
+                    physics.owner = weakref.ref(player)
+                    results['owner=weakref(player)'] = 'ok'
+                except Exception as error:
+                    results['owner=weakref(player)'] = '%s: %s' % (
+                        _type_name(error), str(error)[:100])
+                self._step('throwaway owner = None')
+                try:
+                    physics.owner = None
+                    results['owner=None'] = 'ok'
+                except Exception as error:
+                    results['owner=None'] = '%s: %s' % (
+                        _type_name(error), str(error)[:100])
+        return results
 
     def _stage_signatures(self, frame_dt):
         data = self._current['data']
@@ -1219,10 +1486,30 @@ class WorkerPhysicsProbe(object):
         data['stop'] = self._set_signals(body, 0, 0, 0)
         return True
 
+    def _frame_dt(self, frame_dt):
+        return max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
+
+    def _subscribe(self, body):
+        """Count before/after-simulation callbacks on a stepped body."""
+        label = body['label']
+        counters = {'before': 0, 'after': 0, 'registered': {}}
+        self._subscriptions[label] = counters
+        def _before(*unused):
+            counters['before'] += 1
+        def _after(*unused):
+            counters['after'] += 1
+        for name, callback in (('subscribeBeforeSimulation', _before),
+                               ('subscribeAfterSimulation', _after)):
+            self._step('%s %s(callable)' % (label, name))
+            counters['registered'][name] = _call_with(
+                body['physics'], name, (callback,))
+        return counters
+
     def _stage_solve_one(self, frame_dt):
-        """Drive one body forward through an explicit simulator batch."""
+        """Body A: where is it after one update, then drive segments."""
         data = self._current['data']
         state = self._stage_state
+        dt = self._frame_dt(frame_dt)
         if 'body' not in state:
             bodies = self._acquire_bodies(1)
             if not bodies:
@@ -1232,89 +1519,137 @@ class WorkerPhysicsProbe(object):
             state['body'] = body
             data['body'] = body['label']
             data['source'] = body['source']
+            data['seed_position'] = (body.get('bot') or {}).get('position')
+            data['base_cfg'] = (body['init'][0].get('base_cfg')
+                                if body.get('init') else None)
             self._simulator_for_stage()
+            data['subscriptions'] = self._subscribe(body)
             data['before'] = self._pose_snapshot(body)
-            self._step('%s movementSignals' % body['label'])
-            data['input'] = self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
-            state['start'] = self._clock()
             state['updates'] = []
-            state['samples'] = []
+            state['pose_index'] = 0
+            state['pose_attempts'] = []
+            state['phase'] = 'pose_check'
             self._driven.append(body)
             return False
         body = state['body']
         simulator = self._simulator_for_stage()
-        dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
-        if not state['updates']:
-            self._step('simulator.update(dt, [%s], [], [])' % body['label'])
+        reference = data.get('seed_position') or data['before'].get(
+            'lastTickMatrix')
+        if state['phase'] == 'pose_check':
+            if not state['updates']:
+                self._step('simulator.update(dt, [%s], [], [])' % body['label'])
+            state['updates'].append(
+                self._timed_update(simulator, dt, [body['physics']]))
+            snapshot = self._pose_snapshot(body)
+            attempt = {'method': POSE_METHODS[state['pose_index']],
+                       'after_update': snapshot}
+            state['pose_attempts'].append(attempt)
+            if self._pose_ok(snapshot, reference):
+                self._pose_method = attempt['method']
+                data['pose_method'] = attempt['method']
+                data['pose_lost'] = False
+            else:
+                state['pose_index'] += 1
+                if state['pose_index'] < len(POSE_METHODS):
+                    attempt_next = POSE_METHODS[state['pose_index']]
+                    result = self._apply_pose(
+                        body, reference,
+                        float((body.get('bot') or {}).get('yaw') or 0.0),
+                        attempt_next)
+                    state['pose_attempts'].append(
+                        {'method': attempt_next, 'apply': result})
+                    data['pose_attempts'] = state['pose_attempts']
+                    return False
+                self._pose_method = POSE_METHODS[0]
+                data['pose_method'] = None
+                data['pose_lost'] = True
+            data['pose_attempts'] = state['pose_attempts']
+            state['phase'] = 'segments'
+            state['segments'] = [
+                ('forward', MOVE_FORWARD_SIGNAL, 1, 0,
+                 float(self._config['drive_seconds'])),
+                ('rotate_left', ROTATE_LEFT_SIGNAL, 0, -1,
+                 float(self._config['rotate_seconds'])),
+                ('backward', MOVE_BACKWARD_SIGNAL, -1, 0,
+                 float(self._config['reverse_seconds'])),
+                ('stop', 0, 0, 0, float(self._config['settle_seconds'])),
+            ]
+            state['segment'] = None
+            data['segments'] = []
+            return False
+        segment = state['segment']
+        if segment is None:
+            if not state['segments']:
+                data['after'] = self._pose_snapshot(body)
+                updates = state['updates']
+                data['update_ms'] = {
+                    'calls': len(updates), 'min': min(updates),
+                    'avg': sum(updates) / len(updates), 'max': max(updates)}
+                data['moved_m'] = _distance(
+                    data['before'].get('lastTickMatrix'),
+                    data['after'].get('lastTickMatrix'))
+                data['stop'] = self._set_signals(body, 0, 0, 0)
+                return True
+            name, signals, movement, rotation, seconds = state['segments'].pop(0)
+            self._step('%s segment %s movementSignals=%d' % (
+                body['label'], name, signals))
+            segment = {
+                'name': name, 'signals': signals, 'seconds': seconds,
+                'start': self._clock(), 'frames': 0,
+                'input': self._set_signals(body, signals, movement, rotation),
+                'begin': self._pose_snapshot(body),
+                'samples': [], 'max_speed': 0.0, 'min_height': None,
+                'max_height': None, 'frozen_frames': 0}
+            state['segment'] = segment
+            data['segments'].append(segment)
         state['updates'].append(
             self._timed_update(simulator, dt, [body['physics']]))
-        if len(state['samples']) < 12:
-            state['samples'].append(self._pose_snapshot(body))
-        if self._clock() - state['start'] < float(
-                self._config['drive_seconds']):
+        segment['frames'] += 1
+        snapshot = self._pose_snapshot(body)
+        try:
+            speed = abs(float(snapshot.get('speed')))
+        except (TypeError, ValueError):
+            speed = 0.0
+        segment['max_speed'] = max(segment['max_speed'], speed)
+        height = snapshot.get('height')
+        if isinstance(height, float):
+            segment['min_height'] = (height if segment['min_height'] is None
+                                     else min(segment['min_height'], height))
+            segment['max_height'] = (height if segment['max_height'] is None
+                                     else max(segment['max_height'], height))
+        if snapshot.get('isFrozen') is True:
+            segment['frozen_frames'] += 1
+        if segment['frames'] <= 12 or segment['frames'] % 5 == 0:
+            segment['samples'].append({
+                't': round(self._clock() - segment['start'], 3),
+                'p': snapshot.get('lastTickMatrix'),
+                'h': height, 'v': snapshot.get('speed'),
+                'yaw': snapshot.get('yaw'), 'frozen': snapshot.get('isFrozen'),
+                'tracks': snapshot.get('gotTracksContact'),
+                'ground': snapshot.get('groundType')})
+        if self._clock() - segment['start'] < segment['seconds']:
             return False
-        data['after'] = self._pose_snapshot(body)
-        updates = state['updates']
-        data['update_ms'] = {
-            'calls': len(updates), 'min': min(updates),
-            'avg': sum(updates) / len(updates), 'max': max(updates)}
-        data['samples'] = state['samples']
-        data['moved_m'] = _distance(
-            data['before'].get('lastTickMatrix'),
-            data['after'].get('lastTickMatrix'))
-        data['stop'] = self._set_signals(body, 0, 0, 0)
-        physics = body['physics']
-        for name in ('getTouchedGround', 'getAggressiveImpacts'):
-            self._step('%s %s()' % (body['label'], name))
-            data[name] = _call_no_args(physics, name)
-        return True
-
-    def _stage_solve_scale(self, frame_dt):
-        """Time one batch update over as many bodies as we can acquire."""
-        data = self._current['data']
-        state = self._stage_state
-        if 'bodies' not in state:
-            bodies = self._acquire_bodies(
-                int(self._config.get('scale_bodies', 29)))
-            state['bodies'] = bodies
-            state['updates'] = []
-            data['body_count'] = len(bodies)
-            data['source'] = self._bodies_source
-            data['labels'] = [body['label'] for body in bodies]
-            if not bodies:
-                data['result'] = '<no bodies>'
-                return True
-            if self._config.get('drive_all'):
-                for body in bodies:
-                    self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
-                    self._driven.append(body)
-            self._simulator_for_stage()
-            return False
-        simulator = self._simulator_for_stage()
-        dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
-        if not state['updates']:
-            self._step('simulator.update(dt, %d bodies, [], [])' %
-                       len(state['bodies']))
-        state['updates'].append(self._timed_update(
-            simulator, dt, [body['physics'] for body in state['bodies']]))
-        if len(state['updates']) < int(self._config['scale_frames']):
-            return False
-        updates = sorted(state['updates'])
-        count = len(updates)
-        data['update_ms'] = {
-            'calls': count, 'min': updates[0], 'p50': updates[count // 2],
-            'p95': updates[int(count * 0.95)], 'max': updates[-1],
-            'avg': sum(updates) / count}
-        data['per_body_avg_ms'] = (
-            data['update_ms']['avg'] / max(1, data['body_count']))
-        data['final_poses'] = [
-            self._pose_snapshot(body) for body in state['bodies'][:4]]
-        return True
+        segment['end'] = snapshot
+        segment['moved_m'] = _distance(
+            segment['begin'].get('lastTickMatrix'),
+            snapshot.get('lastTickMatrix'))
+        begin_yaw = segment['begin'].get('yaw')
+        end_yaw = snapshot.get('yaw')
+        if isinstance(begin_yaw, float) and isinstance(end_yaw, float):
+            delta = end_yaw - begin_yaw
+            while delta > math.pi:
+                delta -= 2.0 * math.pi
+            while delta < -math.pi:
+                delta += 2.0 * math.pi
+            segment['yaw_delta'] = delta
+        state['segment'] = None
+        return False
 
     def _stage_solve_pair(self, frame_dt):
-        """Drive two bodies toward each other for contact callbacks."""
+        """Body B re-seeded pair_gap_m ahead of A, facing it; both drive."""
         data = self._current['data']
         state = self._stage_state
+        dt = self._frame_dt(frame_dt)
         if 'bodies' not in state:
             bodies = self._acquire_bodies(2)
             if len(bodies) < 2:
@@ -1323,35 +1658,200 @@ class WorkerPhysicsProbe(object):
             first, second = bodies[0], bodies[1]
             state['bodies'] = (first, second)
             data['labels'] = [first['label'], second['label']]
-            data['before'] = [self._pose_snapshot(first),
-                              self._pose_snapshot(second)]
-            data['events_before'] = len(self._callback_events)
             self._simulator_for_stage()
+            anchor = self._pose_snapshot(first)
+            position = anchor.get('lastTickMatrix')
+            yaw = anchor.get('yaw')
+            if not _finite_xyz(position) or not isinstance(yaw, float):
+                position = (first.get('bot') or {}).get('position')
+                yaw = float((first.get('bot') or {}).get('yaw') or 0.0)
+            gap = float(self._config['pair_gap_m'])
+            target = self._ahead(position, yaw, gap)
+            ground = self._ground_y(target[0], target[1], target[2])
+            if ground is not None:
+                height = anchor.get('height')
+                target[1] = ground + (height if isinstance(height, float) and
+                                      0.0 <= height <= 3.0 else 0.5)
+            data['pair_seed'] = {'anchor': position, 'anchor_yaw': yaw,
+                                 'target': target, 'target_yaw': yaw + math.pi,
+                                 'method': self._pose_method or POSE_METHODS[0]}
+            data['pair_seed']['apply'] = self._apply_pose(
+                second, target, yaw + math.pi,
+                self._pose_method or POSE_METHODS[0])
+            state['phase'] = 'seed_check'
+            return False
+        first, second = state['bodies']
+        simulator = self._simulator_for_stage()
+        if state['phase'] == 'seed_check':
+            self._step('simulator.update(dt, [%s, %s], [], [])' % (
+                first['label'], second['label']))
+            self._timed_update(simulator, dt, [first['physics'],
+                                               second['physics']])
+            snapshot = self._pose_snapshot(second)
+            data['pair_seed']['after_update'] = snapshot
+            data['pair_seed']['ok'] = self._pose_ok(
+                snapshot, data['pair_seed']['target'])
+            data['before'] = [self._pose_snapshot(first), snapshot]
             self._step('pair movementSignals')
             data['input'] = [
                 self._set_signals(first, MOVE_FORWARD_SIGNAL, 1, 0),
                 self._set_signals(second, MOVE_FORWARD_SIGNAL, 1, 0)]
             state['start'] = self._clock()
-            state['stepped'] = False
+            state['samples'] = []
+            state['min_distance'] = None
             self._driven.extend([first, second])
+            state['phase'] = 'drive'
             return False
-        first, second = state['bodies']
-        simulator = self._simulator_for_stage()
-        dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
-        if not state['stepped']:
-            state['stepped'] = True
-            self._step('simulator.update(dt, [%s, %s], [], [])' % (
-                first['label'], second['label']))
         self._timed_update(simulator, dt, [first['physics'],
-                                            second['physics']])
+                                           second['physics']])
+        a = self._pose_snapshot(first)
+        b = self._pose_snapshot(second)
+        distance = _distance(a.get('lastTickMatrix'), b.get('lastTickMatrix'))
+        if distance is not None:
+            state['min_distance'] = (
+                distance if state['min_distance'] is None
+                else min(state['min_distance'], distance))
+        state['samples'].append({
+            't': round(self._clock() - state['start'], 3), 'd': distance,
+            'va': a.get('speed'), 'vb': b.get('speed'),
+            'ha': a.get('height'), 'hb': b.get('height')})
         if self._clock() - state['start'] < float(
                 self._config['pair_seconds']):
             return False
-        data['after'] = [self._pose_snapshot(first),
-                         self._pose_snapshot(second)]
-        data['events_after'] = len(self._callback_events)
+        data['after'] = [a, b]
+        data['samples'] = state['samples']
+        data['min_distance_m'] = state['min_distance']
         data['stop'] = [self._set_signals(first, 0, 0, 0),
                         self._set_signals(second, 0, 0, 0)]
+        return True
+
+    def _stage_solve_scale(self, frame_dt):
+        """Batch cost: idle bodies, staticMode bodies, all bodies driving."""
+        data = self._current['data']
+        state = self._stage_state
+        dt = self._frame_dt(frame_dt)
+        if 'bodies' not in state:
+            bodies = self._acquire_bodies(
+                int(self._config.get('scale_bodies', 29)))
+            state['bodies'] = bodies
+            data['body_count'] = len(bodies)
+            data['source'] = self._bodies_source
+            data['labels'] = [body['label'] for body in bodies]
+            data['note'] = ('bodies[0] and bodies[1] start where solve_one '
+                            'and solve_pair left them')
+            if not bodies:
+                data['result'] = '<no bodies>'
+                return True
+            self._simulator_for_stage()
+            state['phases'] = ['idle', 'static', 'driving']
+            state['phase'] = None
+            data['phases'] = []          # execution order, not key order
+            return False
+        bodies = state['bodies']
+        simulator = self._simulator_for_stage()
+        phase = state['phase']
+        if phase is None:
+            if not state['phases']:
+                for body in bodies:
+                    self._set_static(body, False)
+                    self._set_signals(body, 0, 0, 0)
+                data['final_poses'] = [
+                    self._pose_snapshot(body) for body in bodies[:4]]
+                return True
+            name = state['phases'].pop(0)
+            self._step('scale phase %s over %d bodies' % (name, len(bodies)))
+            for body in bodies:
+                if name == 'idle':
+                    self._set_static(body, False)
+                    self._set_signals(body, 0, 0, 0)
+                elif name == 'static':
+                    self._set_signals(body, 0, 0, 0)
+                    self._set_static(body, True)
+                else:
+                    self._set_static(body, False)
+                    self._set_signals(body, MOVE_FORWARD_SIGNAL, 1, 0)
+                    if body not in self._driven:
+                        self._driven.append(body)
+            phase = {'name': name, 'updates': [],
+                     'events_at_begin': len(self._callback_events)}
+            state['phase'] = phase
+            self._step('simulator.update(dt, %d bodies, [], [])' % len(bodies))
+            return False
+        phase['updates'].append(self._timed_update(
+            simulator, dt, [body['physics'] for body in bodies]))
+        if len(phase['updates']) < int(self._config['scale_frames']):
+            return False
+        updates = sorted(phase['updates'])
+        count = len(updates)
+        data['phases'].append({
+            'name': phase['name'],
+            'update_ms': {
+                'calls': count, 'min': updates[0], 'p50': updates[count // 2],
+                'p95': updates[int(count * 0.95)], 'max': updates[-1],
+                'avg': sum(updates) / count},
+            'per_body_avg_ms': sum(updates) / count / max(1, len(bodies)),
+            'callbacks': self._callback_summary(phase['events_at_begin']),
+            'sample_poses': [self._pose_snapshot(body) for body in bodies[:2]],
+        })
+        state['phase'] = None
+        return False
+
+    def _set_static(self, body, value):
+        try:
+            body['physics'].staticMode = bool(value)
+        except Exception:
+            pass
+
+    def _stage_extras(self, frame_dt):
+        """Impulse response and post-drive ground queries on body A."""
+        data = self._current['data']
+        state = self._stage_state
+        dt = self._frame_dt(frame_dt)
+        if 'body' not in state:
+            bodies = self._acquire_bodies(1)
+            if not bodies:
+                data['result'] = '<no body available>'
+                return True
+            body = bodies[0]
+            state['body'] = body
+            data['body'] = body['label']
+            physics = body['physics']
+            math_module = self._math()
+            for name, args in (('getTouchedGround', (0,)),
+                               ('getTouchedGround', (1,)),
+                               ('getTouchedMatkind', (0,)),
+                               ('getTouchedMatkind', (1,)),
+                               ('getAggressiveImpacts', ())):
+                self._step('%s %s%r' % (body['label'], name, args))
+                data['%s%r' % (name, args)] = _call_with(physics, name, args)
+            mass = _read_attribute(physics, 'mass')
+            data['mass'] = mass
+            if math_module is None or not isinstance(mass, float):
+                data['impulse'] = '<no Math or mass>'
+                return True
+            magnitude = mass * float(self._config['impulse_scale'])
+            data['before'] = self._pose_snapshot(body)
+            self._step('%s applyImpulseToCoM(Vector3(0, 0, %.3f))' % (
+                body['label'], magnitude))
+            data['impulse'] = _call_with(
+                physics, 'applyImpulseToCoM',
+                (math_module.Vector3(0.0, 0.0, magnitude),))
+            data['impulse_magnitude'] = magnitude
+            state['samples'] = []
+            self._simulator_for_stage()
+            return False
+        body = state['body']
+        self._timed_update(self._simulator_for_stage(), dt, [body['physics']])
+        snapshot = self._pose_snapshot(body)
+        state['samples'].append({'v': snapshot.get('speed'),
+                                 'h': snapshot.get('height'),
+                                 'p': snapshot.get('lastTickMatrix')})
+        if len(state['samples']) < int(self._config['impulse_frames']):
+            return False
+        data['samples'] = state['samples']
+        data['after'] = snapshot
+        data['moved_m'] = _distance(data['before'].get('lastTickMatrix'),
+                                    snapshot.get('lastTickMatrix'))
         return True
 
     def _stage_restore(self, frame_dt):
@@ -1359,12 +1859,13 @@ class WorkerPhysicsProbe(object):
         data = self._current['data'] if self._current else {}
         restored = []
         seen = set()
-        for body in self._driven:
+        for body in self._driven + list(self._bodies):
             if id(body) in seen:
                 continue
             seen.add(id(body))
             try:
                 self._set_signals(body, 0, 0, 0)
+                self._set_static(body, False)
                 restored.append(body['label'])
             except Exception as error:
                 restored.append('%s:<%s>' % (body['label'], str(error)[:60]))
@@ -1387,6 +1888,17 @@ class _RuntimeHost(object):
 
     def constants(self):
         return getattr(self._runtime._runtime, 'constants', None)
+
+    def factory_info(self):
+        runtime = self._runtime
+        factory = getattr(runtime, '_remote_factory', None)
+        config = getattr(runtime, '_config', None) or {}
+        return {
+            'factory_type': _type_name(factory),
+            'native_entities': bool(getattr(factory, 'native_entities', False)),
+            'native_remote_vehicles_config': config.get(
+                'native_remote_vehicles') if hasattr(config, 'get') else None,
+            'worker_mode': bool(getattr(runtime, '_worker_mode', False))}
 
     def _native_entity(self, engine_id):
         """Resolve the native Vehicle past the stock AOI facade if possible."""
