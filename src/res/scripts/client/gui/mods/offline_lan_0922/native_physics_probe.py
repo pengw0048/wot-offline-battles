@@ -32,6 +32,17 @@ runs plus the exact client ``scripts.pkg`` bytecode and data):
   only a weakref whose referent subclasses the native ``PyEntity``; the
   worker's Bot carrier is a plain Python object, so ``owner`` stays unset
   there.  ``vehicleID`` has a setter.
+* Run 4 (2026-09-04): the first ``WGDynamicsSimulator.update`` with a
+  ``WGVehiclePhysics`` terminated the worker (exit code 3) with the BigWorld
+  critical ``SceneObstaclesCollider::collidePolyhedra: UNIMPLEMENTED``.  The
+  #1513 client's ``BW::WGPhysics::SceneObstaclesCollider`` vtable has nine
+  slots; ``collidePolyhedra``, ``collideCompositeShape``,
+  ``getTerrainMatKind``, ``getGroundType`` and ``getTerrainHeight`` are
+  message-and-abort stubs.  The vehicle solver therefore cannot see terrain or
+  obstacles in this binary and every vehicle solve stage is off by default
+  (``vehicle_solver``).  ``WGPhysicalBody`` (box/sphere shapes, raycast
+  contacts, ``isCollidingWithWorld``) uses the implemented slots and is what
+  the ``physical_body`` stage exercises instead.
 
 Stages run one per render frame from ``start_delay_seconds`` after the battle
 goes live.  Every native call group is announced with
@@ -99,6 +110,19 @@ DEFAULT_CONFIG = {
     # never simulated) and the owner self-test with BigWorld.player().
     'throwaway_tests': True,
     'owner_self_test': True,
+    # Stepping a WGVehiclePhysics is fatal in #1513 (run 4); opt in only to
+    # reproduce that crash deliberately.
+    'vehicle_solver': False,
+    # physical_body: drop a box body onto the terrain, push it along the
+    # Bot's heading, release it.
+    'physical_body': True,
+    'physical_body_mass': 20.0,
+    'physical_body_half_extents': [1.5, 1.0, 3.0],
+    'physical_body_drop_m': 3.0,
+    'physical_body_seconds': 3.0,
+    'physical_body_push_seconds': 3.0,
+    'physical_body_push_g': 0.5,
+    'physical_body_release_seconds': 1.0,
     'disable_lsprof': False,
     'opt_in_stages': [],
     'fresh_attribute_reads': False,
@@ -211,7 +235,19 @@ FILTER_READ_ATTRIBUTES = (
 STAGE_ORDER = (
     'inventory', 'inspect_existing', 'construct_standalone',
     'passive_drive', 'solve_one', 'solve_pair', 'solve_scale', 'extras',
-    'restore', 'signatures')
+    'physical_body', 'restore', 'signatures')
+VEHICLE_SOLVER_STAGES = (
+    'passive_drive', 'solve_one', 'solve_pair', 'solve_scale', 'extras')
+VEHICLE_SOLVER_FATAL = (
+    'WGDynamicsSimulator.update with a WGVehiclePhysics aborts the #1513 '
+    'client: SceneObstaclesCollider::collidePolyhedra UNIMPLEMENTED (run 4)')
+PHYSICAL_BODY_READ_ATTRIBUTES = (
+    'mass', 'gravity', 'staticMode', 'isFrozen', 'velocity', 'angVelocity',
+    'forceApplied', 'torqueApplied', 'externalForce', 'visibilityMask',
+    'isCollidingWithWorld', 'isCwwThresholdFactor', 'staticSceneFriction',
+    'staticCollisionEnergy', 'staticCollisionReaction',
+    'staticCollisionNormal', 'staticCollisionPoint',
+    'staticCollisionSelfPoint', 'isUnderWater', 'freezePosErrorEpsilon')
 # Pose setters tried, in order, when the solver ignores the seeded
 # lastTickMatrix (decided by where body A is after its first update).
 POSE_METHODS = (
@@ -513,6 +549,17 @@ class WorkerPhysicsProbe(object):
                             if name not in OPT_IN_STAGES or name in opted]
         else:
             self._stages = [name for name in STAGE_ORDER if name in stages]
+        skipped = {}
+        if not self._config.get('vehicle_solver'):
+            for name in VEHICLE_SOLVER_STAGES:
+                if name in self._stages:
+                    self._stages.remove(name)
+                    skipped[name] = VEHICLE_SOLVER_FATAL
+        if not self._config.get('physical_body', True):
+            if 'physical_body' in self._stages:
+                self._stages.remove('physical_body')
+                skipped['physical_body'] = 'disabled by config'
+        self._report['skipped_stages'] = skipped
         if 'restore' not in self._stages:
             self._stages.append('restore')
 
@@ -866,10 +913,10 @@ class WorkerPhysicsProbe(object):
                 applied[attribute] = '<%s>' % str(error)[:80]
         self._report['simulator_settings'] = applied
 
-    def _timed_update(self, simulator, dt, physics_list):
+    def _timed_update(self, simulator, dt, physics_list, bodies=()):
         started = self._perf()
         # (dt, vehicle physics, physical bodies, BSP collision models)
-        simulator.update(float(dt), list(physics_list), [], [])
+        simulator.update(float(dt), list(physics_list), list(bodies), [])
         return (self._perf() - started) * 1000.0
 
     # ------------------------------------------------------- body acquisition
@@ -1361,7 +1408,8 @@ class WorkerPhysicsProbe(object):
         results = collections.OrderedDict()
         position = bot.get('position') or [0.0, 0.0, 0.0]
         yaw = float(bot.get('yaw') or 0.0)
-        for name in ('actualChassisTransform', 'stabilisedMatrixWithLatency'):
+        for name in ('actualChassisTransform', 'stabilisedMatrixWithLatency',
+                     'matrix'):
             self._step('throwaway %s = Matrix' % name)
             try:
                 setattr(physics, name, self._seed_matrix(position, yaw))
@@ -1853,6 +1901,159 @@ class WorkerPhysicsProbe(object):
         data['moved_m'] = _distance(data['before'].get('lastTickMatrix'),
                                     snapshot.get('lastTickMatrix'))
         return True
+
+    def _physical_body_snapshot(self, body):
+        math_module = self._math()
+        result = {}
+        try:
+            matrix = body.matrix
+            result['p'] = _matrix_translation(matrix, math_module)
+            result['yaw'] = _matrix_yaw(matrix)
+        except Exception as error:
+            result['p'] = '<%s>' % str(error)[:60]
+        position = result.get('p')
+        if _finite_xyz(position):
+            ground = self._ground_y(position[0], position[1], position[2])
+            result['ground_y'] = ground
+            result['h'] = position[1] - ground if ground is not None else None
+        for name in ('velocity', 'isFrozen', 'isCollidingWithWorld',
+                     'staticCollisionEnergy', 'staticCollisionPoint',
+                     'staticCollisionNormal'):
+            result[name] = _read_attribute(body, name)
+        return result
+
+    def _stage_physical_body(self, frame_dt):
+        """Box body: drop onto terrain, push along the heading, release."""
+        data = self._current['data']
+        state = self._stage_state
+        dt = self._frame_dt(frame_dt)
+        math_module = self._math()
+        if 'body' not in state:
+            bots = self._bots(1)
+            if not bots or math_module is None:
+                data['result'] = '<no bot or Math>'
+                return True
+            bot = bots[0]
+            position = list(bot.get('position') or [0.0, 0.0, 0.0])
+            yaw = float(bot.get('yaw') or 0.0)
+            ground = self._ground_y(position[0], position[1], position[2])
+            base_y = ground if ground is not None else position[1]
+            start = [position[0],
+                     base_y + float(self._config['physical_body_drop_m']),
+                     position[2]]
+            half = [float(v) for v in
+                    self._config['physical_body_half_extents']]
+            mass = float(self._config['physical_body_mass'])
+            record = collections.OrderedDict()
+            self._step('BigWorld.WGPhysicalBody()')
+            body = self._bigworld().WGPhysicalBody()
+            self._step('body.setup(%r, Vector3%r)' % (mass, tuple(half)))
+            record['setup'] = _call_with(
+                body, 'setup', (mass, math_module.Vector3(*half)))
+            self._step('body.addBoxShape(Vector3(-half), Vector3(half))')
+            record['addBoxShape'] = _call_with(
+                body, 'addBoxShape',
+                (math_module.Vector3(-half[0], -half[1], -half[2]),
+                 math_module.Vector3(half[0], half[1], half[2])))
+            writes = collections.OrderedDict()
+            for name, value in (('matrix', self._seed_matrix(start, yaw)),
+                                ('staticMode', False), ('isFrozen', False),
+                                ('visibilityMask', 1)):
+                self._step('body.%s = %s' % (name, _plain(value)))
+                try:
+                    setattr(body, name, value)
+                    writes[name] = 'ok'
+                except Exception as error:
+                    writes[name] = '%s: %s' % (
+                        _type_name(error), str(error)[:80])
+            record['writes'] = writes
+            record['attributes'] = self._read_attributes(
+                body, PHYSICAL_BODY_READ_ATTRIBUTES, 'body')
+            record['callbacks'] = self._install_callbacks(body, 'physical_body')
+            data['body'] = record
+            data['start'] = start
+            data['ground_y'] = ground
+            data['yaw'] = yaw
+            data['phases'] = []
+            state['body'] = body
+            state['mass'] = mass
+            state['yaw'] = yaw
+            state['updates'] = []
+            state['phases'] = [
+                ('drop', float(self._config['physical_body_seconds'])),
+                ('push', float(self._config['physical_body_push_seconds'])),
+                ('release', float(self._config['physical_body_release_seconds'])),
+            ]
+            state['phase'] = None
+            self._simulator_for_stage()
+            return False
+        body = state['body']
+        simulator = self._simulator_for_stage()
+        phase = state['phase']
+        if phase is None:
+            if not state['phases']:
+                updates = state['updates']
+                data['update_ms'] = {
+                    'calls': len(updates), 'min': min(updates),
+                    'avg': sum(updates) / len(updates), 'max': max(updates)}
+                data['after'] = self._physical_body_snapshot(body)
+                state['done'] = True
+                return True
+            name, seconds = state['phases'].pop(0)
+            force = None
+            if name == 'push':
+                magnitude = state['mass'] * 9.81 * float(
+                    self._config['physical_body_push_g'])
+                force = math_module.Vector3(
+                    math.sin(state['yaw']) * magnitude, 0.0,
+                    math.cos(state['yaw']) * magnitude)
+            phase = {'name': name, 'seconds': seconds, 'start': self._clock(),
+                     'frames': 0, 'samples': [], 'force': force,
+                     'force_set': None, 'colliding_frames': 0,
+                     'max_speed': 0.0, 'min_h': None, 'max_h': None}
+            if name in ('push', 'release'):
+                value = force if force is not None else math_module.Vector3(
+                    0.0, 0.0, 0.0)
+                self._step('body.externalForce = %s' % _plain(value))
+                try:
+                    body.externalForce = value
+                    phase['force_set'] = 'ok'
+                except Exception as error:
+                    phase['force_set'] = '%s: %s' % (
+                        _type_name(error), str(error)[:80])
+            state['phase'] = phase
+            data['phases'].append(phase)
+            self._step('simulator.update(dt, [], [physical_body], [])')
+            return False
+        if phase['force'] is not None and phase['force_set'] == 'ok':
+            try:
+                body.externalForce = phase['force']
+            except Exception:
+                pass
+        state['updates'].append(
+            self._timed_update(simulator, dt, [], [body]))
+        phase['frames'] += 1
+        snapshot = self._physical_body_snapshot(body)
+        velocity = snapshot.get('velocity')
+        if _finite_xyz(velocity):
+            speed = math.sqrt(sum(v * v for v in velocity))
+            phase['max_speed'] = max(phase['max_speed'], speed)
+        height = snapshot.get('h')
+        if isinstance(height, float):
+            phase['min_h'] = height if phase['min_h'] is None else min(
+                phase['min_h'], height)
+            phase['max_h'] = height if phase['max_h'] is None else max(
+                phase['max_h'], height)
+        if snapshot.get('isCollidingWithWorld') is True:
+            phase['colliding_frames'] += 1
+        if phase['frames'] <= 12 or phase['frames'] % 5 == 0:
+            phase['samples'].append(dict(
+                snapshot, t=round(self._clock() - phase['start'], 3)))
+        if self._clock() - phase['start'] < phase['seconds']:
+            return False
+        phase['end'] = snapshot
+        state['phase'] = None
+        return False
 
     def _stage_restore(self, frame_dt):
         """Zero every signal this probe set.  Never raises."""

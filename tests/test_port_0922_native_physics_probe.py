@@ -188,18 +188,90 @@ class _FakeSimulator(object):
         for sequence in (physics, bodies, collision_models):
             if not isinstance(sequence, list):
                 raise TypeError('WGDynamicsSimulator.update: wrong arguments.')
-        self.updates.append((dt, len(physics)))
-        for item in physics:
+        self.updates.append((dt, len(physics), len(bodies)))
+        for item in list(physics) + list(bodies):
             item.advance(dt)
 
 
 class _FakeBody(object):
-    def __init__(self):
-        self.isCollidingWithWorld = False
+    """WGPhysicalBody stand-in: a box that falls onto the fake ground (y=9.5)."""
 
-    def setup(self, *args):
-        if not args:
+    GROUND_Y = 9.5
+
+    def __init__(self):
+        self.__dict__['callbacks'] = {}
+        self.isCollidingWithWorld = False
+        self.isFrozen = True
+        self.staticMode = True
+        self.visibilityMask = 0
+        self.mass = 0.0
+        self.gravity = 9.81
+        self.half = [0.5, 0.5, 0.5]
+        self.position = [0.0, 0.0, 0.0]
+        self.yaw = 0.0
+        self.vel = [0.0, 0.0, 0.0]
+        self.externalForce = _Vector(0.0, 0.0, 0.0)
+        self.staticCollisionPoint = _Vector(0.0, 0.0, 0.0)
+        self.staticCollisionNormal = _Vector(0.0, 1.0, 0.0)
+        self.staticCollisionEnergy = 0.0
+        self.staticCollisionReaction = 0.0
+        self.staticCollisionSelfPoint = _Vector(0.0, 0.0, 0.0)
+        self.angVelocity = _Vector(0.0, 0.0, 0.0)
+        self.forceApplied = _Vector(0.0, 0.0, 0.0)
+        self.torqueApplied = _Vector(0.0, 0.0, 0.0)
+        self.isCwwThresholdFactor = 0.0
+        self.staticSceneFriction = 0.5
+        self.isUnderWater = False
+        self.freezePosErrorEpsilon = 0.0
+
+    def __setattr__(self, name, value):
+        if name.endswith('Cb'):
+            self.__dict__['callbacks'][name] = value
+            return
+        if name == 'matrix':
+            self.__dict__['position'] = _xyz_list(value.translation)
+            self.__dict__['yaw'] = float(getattr(value, 'yaw', 0.0))
+            return
+        object.__setattr__(self, name, value)
+
+    @property
+    def matrix(self):
+        return _Matrix(self.position[0], self.position[1], self.position[2],
+                       self.yaw)
+
+    @property
+    def velocity(self):
+        return _Vector(*self.vel)
+
+    def setup(self, mass, half):
+        if not isinstance(mass, float):
             raise TypeError('WGPhysicalBody::setup: wrong arguments')
+        self.mass = mass
+        self.half = _xyz_list(half)
+
+    def addBoxShape(self, low, high):
+        self.box = (_xyz_list(low), _xyz_list(high))
+
+    def advance(self, dt):
+        if self.staticMode:
+            return
+        force = self.externalForce
+        self.vel[0] += float(force.x) / max(1.0, self.mass) * dt
+        self.vel[2] += float(force.z) / max(1.0, self.mass) * dt
+        self.vel[1] -= self.gravity * dt
+        for axis in range(3):
+            self.position[axis] += self.vel[axis] * dt
+        floor = self.GROUND_Y + self.half[1]
+        if self.position[1] <= floor:
+            self.position[1] = floor
+            self.vel[1] = 0.0
+            self.isCollidingWithWorld = True
+            self.staticCollisionPoint = _Vector(
+                self.position[0], self.GROUND_Y, self.position[2])
+            self.staticCollisionEnergy = 1.0
+        else:
+            self.isCollidingWithWorld = False
+        self.isFrozen = all(abs(v) < 1e-6 for v in self.vel)
 
 
 class _FakeNativeFilter(object):
@@ -364,7 +436,7 @@ class NativePhysicsProbeTests(unittest.TestCase):
             Entity=_FakeEntity,
             player=lambda: self.player,
             wg_collideSegment=lambda space, top, bottom, flags: (
-                _Vector(top.x, top.y - 20.5, top.z), None, None),
+                _Vector(top.x, _FakeBody.GROUND_Y, top.z), None, None),
             wg_setupPhysicsParam=lambda name, value: self.physics_params.append(
                 (name, value)))
         self.physics_shared = _fake_physics_shared()
@@ -396,7 +468,10 @@ class NativePhysicsProbeTests(unittest.TestCase):
                 'drive_seconds': 0.3, 'rotate_seconds': 0.2,
                 'reverse_seconds': 0.2, 'settle_seconds': 0.2,
                 'pair_seconds': 0.2, 'scale_frames': 5, 'scale_bodies': 3,
-                'impulse_frames': 3}
+                'impulse_frames': 3, 'vehicle_solver': True,
+                'physical_body_seconds': 1.0,
+                'physical_body_push_seconds': 0.3,
+                'physical_body_release_seconds': 0.2}
         base.update(config)
         host = _FakeHost(bots, self.bigworld)
         return self.module.WorkerPhysicsProbe(
@@ -422,10 +497,66 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertEqual(
             ['inventory', 'inspect_existing', 'construct_standalone',
              'passive_drive', 'solve_one', 'solve_pair', 'solve_scale',
-             'extras', 'restore'], probe._stages)
+             'extras', 'physical_body', 'restore'], probe._stages)
         opted = self._probe(self._bots(retail=True),
                             opt_in_stages=['signatures'])
         self.assertEqual('signatures', opted._stages[-1])
+
+    def test_vehicle_solver_stages_are_off_by_default(self):
+        bots = self._bots(retail=False)
+        host = _FakeHost(bots, self.bigworld)
+        probe = self.module.WorkerPhysicsProbe(
+            host, self.directory, config={'start_delay_seconds': 0.5,
+                                          'physical_body_seconds': 1.0,
+                                          'physical_body_push_seconds': 0.3,
+                                          'physical_body_release_seconds': 0.2},
+            writer=self.lines.append, clock=lambda: self.clock[0],
+            perf_clock=lambda: self.clock[0])
+        self.assertEqual(
+            ['inventory', 'inspect_existing', 'construct_standalone',
+             'physical_body', 'restore'], probe._stages)
+        self._run(probe)
+        self.assertTrue(probe.done)
+        report = self._report()
+        self.assertEqual(
+            {'ok'}, set(stage['status'] for stage in report['stages']),
+            report['stages'])
+        self.assertIn('collidePolyhedra UNIMPLEMENTED',
+                      report['skipped_stages']['solve_one'])
+        self.assertEqual(5, len(report['skipped_stages']))
+        self.assertNotIn('simulator.update(dt, [standalone', ''.join(self.lines))
+        # No WGVehiclePhysics was ever handed to the simulator.
+        self.assertTrue(all(count == 0 for _, count, _ in self.simulator.updates))
+
+    def test_physical_body_drops_pushes_and_releases(self):
+        bots = self._bots(retail=False)
+        probe = self._probe(bots, stages=['physical_body'])
+        self._run(probe)
+        report = self._report()
+        stage = [s for s in report['stages'] if s['name'] == 'physical_body'][0]
+        self.assertEqual('ok', stage['status'], stage)
+        data = stage['data']
+        self.assertEqual('returned null', data['body']['setup'])
+        self.assertEqual('returned null', data['body']['addBoxShape'])
+        self.assertEqual({'matrix': 'ok', 'staticMode': 'ok', 'isFrozen': 'ok',
+                          'visibilityMask': 'ok'}, data['body']['writes'])
+        self.assertEqual(20.0, data['body']['attributes']['mass'])
+        self.assertEqual(9.5, data['ground_y'])
+        self.assertEqual(12.5, data['start'][1])
+        self.assertEqual(['drop', 'push', 'release'],
+                         [phase['name'] for phase in data['phases']])
+        drop, push, release = data['phases']
+        self.assertAlmostEqual(1.0, drop['min_h'], places=3)
+        self.assertGreater(drop['colliding_frames'], 0)
+        self.assertEqual(9.5, drop['end']['staticCollisionPoint'][1])
+        self.assertEqual('ok', push['force_set'])
+        self.assertGreater(push['max_speed'], 0.0)
+        self.assertGreater(push['end']['p'][2], drop['end']['p'][2])
+        self.assertEqual('ok', release['force_set'])
+        self.assertGreater(data['update_ms']['calls'], 10)
+        joined = ''.join(self.lines)
+        self.assertIn('step=body.setup(20.0, Vector3(1.5, 1.0, 3.0))', joined)
+        self.assertIn('step=simulator.update(dt, [], [physical_body], [])', joined)
 
     def test_retail_bodies_are_driven_when_preferred(self):
         bots = self._bots(retail=True)

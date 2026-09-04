@@ -136,16 +136,16 @@ checks the native WGVehiclePhysics.configure(cfg) return value before reading a
 single attribute. On a body that is never simulated it then tests the pose,
 handbrake, cruise and staticMode setters, the simulation subscriptions, the
 ground queries, an impulse, and whether the owner setter accepts the worker's
-own avatar. Then, through explicit four-argument WGDynamicsSimulator.update
-batches: body A is stepped once to see whether the solver honours the seeded
-pose (falling back through the other pose setters if not), driven forward,
-rotated, reversed and stopped with per-frame position, height above ground,
-speed, yaw and freeze samples; body B is re-seeded 20 m ahead of A facing it and
-both drive into each other for contact callbacks; up to 29 bodies are batched
-idle, in staticMode and all driving for cost; finally A receives an impulse and
-the ground queries. Every signal and staticMode is zeroed afterwards. Play at
-least 60 s after the battle goes live. Standalone bodies have no presentation,
-so nothing visible moves and only their read-back matrices are evidence. The
+own avatar. The vehicle solver itself is NOT stepped: in #1513 the first
+WGDynamicsSimulator.update with a WGVehiclePhysics aborts the client with
+"SceneObstaclesCollider::collidePolyhedra: UNIMPLEMENTED" (the client's
+obstacle collider stubs polyhedra/composite-shape collision and terrain
+height/material/ground-type queries). Instead a WGPhysicalBody box is dropped
+3 m above the terrain at a Bot's position, pushed along its heading for 3 s
+through externalForce and released, with per-frame position, height above
+ground, velocity and world-contact samples, to learn whether rigid bodies see
+the terrain and the world in this build. Play at least 30 s after the battle
+goes live. Nothing visible moves; the read-back matrices are the evidence. The
 report records the exact cfg handed to configure(), its return value, every
 attribute write, and per-stage callback counts with their first arguments.
 Every native call is announced with an NPHYS step line and each
