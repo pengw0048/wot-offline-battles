@@ -2450,12 +2450,116 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             SIMULATION_WORKER_AUTHORITY_ID, second))
         self.assertEqual(1, record['ricochet_count'])
 
+    def test_worker_roll_becomes_the_victim_blocked_damage_ledger(self):
+        for shot_result, damage, blocked in (
+                (1, 0, 390), (1, 200, 190), (2, 300, 0)):
+            with self.subTest(shot_result=shot_result, damage=damage):
+                state = _state()
+                self.assertTrue(_launch_authority(state, _launch()))
+                victim = state.players[2]
+                health = victim.health
+
+                self.assertTrue(state.resolve_projectile(
+                    SIMULATION_WORKER_AUTHORITY_ID,
+                    _resolve('1:p:1:1', direct=_effect(
+                        damage=damage, shot_result=shot_result,
+                        potential_damage=390))))
+
+                hit = [event for event in state.pending_events
+                       if event.get('kind') == 'hit'][-1]
+                self.assertEqual(blocked, hit['blocked_damage'])
+                self.assertEqual(damage, hit['damage'])
+                self.assertEqual(health - damage, victim.health)
+                self.assertEqual(
+                    blocked,
+                    state._statistics_row('player', 2)['damage_blocked'])
+                # The shooter never blocks his own shot.
+                self.assertEqual(
+                    0, state._statistics_row('player', 1)['damage_blocked'])
+                self.assertEqual(
+                    blocked, state.vehicle_interactions[
+                        ('player', 2)]['player:1']['damage_blocked'])
+
+    def test_first_ricochet_credits_one_bounce_and_no_penetration(self):
+        state = _state()
+        self.assertTrue(_launch_authority(state, _launch()))
+        victim = state.players[2]
+
+        self.assertTrue(state.ricochet_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _ricochet('1:p:1:1', direct=_effect(
+                damage=0, shot_result=0, potential_damage=420))))
+
+        # A bounce is the archetypal blocked hit: the whole roll counts for
+        # the vehicle whose armour stopped it, and the shell keeps flying.
+        bounce = [event for event in state.pending_events
+                  if event.get('kind') == 'hit'][-1]
+        self.assertEqual(0, bounce['shot_result'])
+        self.assertEqual(420, bounce['blocked_damage'])
+        self.assertEqual(0, bounce['damage'])
+        self.assertEqual(1000, victim.health)
+        self.assertEqual(
+            420, state._statistics_row('player', 2)['damage_blocked'])
+        self.assertEqual(
+            1, state.vehicle_interactions[
+                ('player', 2)]['player:1']['ricochets_received'])
+
+        # The continued shell that finally penetrates adds no second credit.
+        self.assertTrue(state.resolve_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _resolve('1:p:1:1', base_checked_ms=100,
+                     resolved_time_ms=150, checked_distance=20.0,
+                     impact=[20.0, 1.0, 0.0],
+                     direct=_effect(damage=100, shot_result=2, x=20.0,
+                                    potential_damage=390))))
+
+        penetration = [event for event in state.pending_events
+                       if event.get('kind') == 'hit'][-1]
+        self.assertEqual(2, penetration['shot_result'])
+        self.assertEqual(0, penetration['blocked_damage'])
+        self.assertEqual(900, victim.health)
+        self.assertEqual(
+            420, state._statistics_row('player', 2)['damage_blocked'])
+
+    def test_splash_never_credits_blocked_damage(self):
+        # Player 4 shares team 2 with the direct victim, so only the splash
+        # exclusion can keep its blocked-damage row at zero.
+        state = _state(players=4)
+        self.assertTrue(_launch_authority(state, _launch(
+            is_he=True, splash_radius=20.0)))
+
+        self.assertTrue(state.resolve_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _resolve('1:p:1:1',
+                     direct=_effect(damage=0, shot_result=1,
+                                    potential_damage=390),
+                     splash=[_effect(
+                         target_id=4, damage=0, shot_result=1,
+                         potential_damage=390,
+                         target_pose=(30.0, 1.0, 0.0))])))
+
+        self.assertEqual(
+            390, state._statistics_row('player', 2)['damage_blocked'])
+        self.assertEqual(2, state.players[4].team)
+        self.assertEqual(
+            0, state._statistics_row('player', 4)['damage_blocked'])
+        splash_hit = [event for event in state.pending_events
+                      if event.get('kind') == 'hit' and event.get('splash')]
+        self.assertEqual([0], [
+            event['blocked_damage'] for event in splash_hit])
+
     def test_ricochet_keeps_wire_and_order_boundaries(self):
         mutations = (
             {'direct': _effect(damage=1, shot_result=0)},
             {'direct': _effect(damage=0, shot_result=1)},
             {'direct': dict(
-                _effect(damage=0, shot_result=0), potential_damage=5000)},
+                _effect(damage=0, shot_result=0), potential_damage=5001)},
+            {'direct': dict(
+                _effect(damage=0, shot_result=0), potential_damage=-1)},
+            {'direct': dict(
+                _effect(damage=0, shot_result=0), potential_damage=True)},
+            {'direct': dict(
+                _effect(damage=0, shot_result=0), potential_damage=100.0)},
             {'direct': _effect(
                 damage=0, shot_result=0, damage_sticker=True)},
             {'direct': _effect(

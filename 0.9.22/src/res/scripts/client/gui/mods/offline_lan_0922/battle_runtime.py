@@ -11883,7 +11883,8 @@ class BattleRuntime(object):
 
     def _projectile_effect(self, record, damage, result, impact,
                            critical, hull_damage, critical_delta,
-                           target_position=None, damage_sticker=None):
+                           target_position=None, damage_sticker=None,
+                           potential_damage=None):
         target_kind = record.get('kind')
         if target_kind == 'human':
             target_kind = 'player'
@@ -11897,6 +11898,12 @@ class BattleRuntime(object):
             'x': float(impact[0]), 'y': float(impact[1]),
             'z': float(impact[2]),
         }
+        if potential_damage is not None:
+            # The armour ledger needs the roll the damage law already made,
+            # before armour and modules reduced it.  Splash carries no roll:
+            # its own law rolls a different quantity and the server excludes
+            # splash from blocked damage.
+            effect['potential_damage'] = max(0, int(potential_damage))
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
@@ -11977,8 +11984,16 @@ class BattleRuntime(object):
             record, critical_target, shot, trace_start, trace_end,
             collisions, result,
             historic=isinstance(collision_pose, dict))
+        damage_rolls = []
+
+        def capture_damage_roll(low, high):
+            """Record the exact roll the damage law is about to consume."""
+            rolled = random.uniform(low, high)
+            damage_rolls.append(rolled)
+            return rolled
+
         damage = combat_rules.damage(
-            shot, result, armor,
+            shot, result, armor, random_uniform=capture_damage_roll,
             spall_coefficient=tank_collision.descriptor_spall_coefficient(
                 getattr(critical_target, 'typeDescriptor', None)))
         hull_damage = damage
@@ -12025,7 +12040,8 @@ class BattleRuntime(object):
         return self._projectile_effect(
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
-            damage_sticker=damage_sticker)
+            damage_sticker=damage_sticker,
+            potential_damage=(int(damage_rolls[0]) if damage_rolls else 0))
 
     def _projectile_splash_effects(self, meta, impact, direct_key):
         source = self._projectile_source_entity(meta)
