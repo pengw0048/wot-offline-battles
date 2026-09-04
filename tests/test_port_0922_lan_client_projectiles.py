@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,8 @@ class RecordingSocket(object):
 
 
 def wire_copy(value):
+    if isinstance(value, module._PreencodedOutbound):
+        return json.loads(value.payload.decode('utf-8'))
     return json.loads(json.dumps(value, separators=(',', ':')))
 
 
@@ -244,7 +247,7 @@ class ProjectileWireTests(unittest.TestCase):
         origin[0] = 999.0
         self.assertEqual(1, len(client._outbound_queue))
         frozen = client._outbound_queue[0][1]
-        self.assertEqual((1.0, 2.0, 3.0), frozen['origin'])
+        self.assertEqual([1.0, 2.0, 3.0], wire_copy(frozen)['origin'])
 
         self.assertTrue(client._send_wire(
             frozen, client.sock, client._transport_generation))
@@ -543,7 +546,8 @@ class ProjectileWireTests(unittest.TestCase):
             fire_intent_seq=1, fire_input_seq=1,
             source_shot=frozen))
 
-        shell = client._outbound_queue[-1][1]['source_shot']['shell']
+        shell = wire_copy(
+            client._outbound_queue[-1][1])['source_shot']['shell']
         self.assertEqual(0.55, shell['explosionDamageFactor'])
         self.assertEqual(1.4, shell['explosionDamageAbsorptionFactor'])
         self.assertEqual(0.2, shell['explosionEdgeDamageFactor'])
@@ -805,7 +809,8 @@ class ProjectileWireTests(unittest.TestCase):
             4, 'player:7:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True))
 
-        self.assertNotIn('hit_vehicle', client._outbound_queue[-1][1])
+        self.assertNotIn(
+            'hit_vehicle', wire_copy(client._outbound_queue[-1][1]))
 
     def test_wreck_impact_is_a_strict_presentation_only_field(self):
         client = self.active_worker_client()
@@ -815,7 +820,7 @@ class ProjectileWireTests(unittest.TestCase):
             4, 'player:7:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True,
             wreck_hit=wreck_hit))
-        message = client._outbound_queue[-1][1]
+        message = wire_copy(client._outbound_queue[-1][1])
         self.assertEqual(wreck_hit, message['wreck_hit'])
         self.assertIsNone(message['direct'])
 
@@ -838,7 +843,8 @@ class ProjectileWireTests(unittest.TestCase):
             4, 'player:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True,
             wreck_hit=wreck_hit))
-        self.assertNotIn('wreck_hit', client._outbound_queue[-1][1])
+        self.assertNotIn(
+            'wreck_hit', wire_copy(client._outbound_queue[-1][1]))
 
     def test_random_map_requires_an_advertised_server_capability(self):
         client = self.active_client()
@@ -938,6 +944,118 @@ class ProjectileWireTests(unittest.TestCase):
             'effective_params': effective_params(),
         }
 
+    @staticmethod
+    def player_snapshot(snapshot_tick, players, bots=None):
+        return {
+            'type': 'snapshot',
+            'protocol': module.PROTOCOL_VERSION,
+            'round_id': 3,
+            'server_tick': snapshot_tick,
+            'bot_state_revision': 0,
+            'bot_authority_id': module.WORKER_AUTHORITY_ID,
+            'server_time_ms': 1000 + snapshot_tick,
+            'authority_epoch': 2,
+            'projectile_revision': 0,
+            'projectiles': [],
+            'bot_manifest': [],
+            'players': players,
+            'bots': [] if bots is None else bots,
+        }
+
+    @staticmethod
+    def player_snapshot_row(player_id, params=None):
+        row = {
+            'id': player_id,
+            'input_seq': 0,
+            'up_cosine': 1.0,
+            'landing_observation_seq': 0,
+            'critical_revision': 0,
+            'critical_base_revision': 0,
+            'critical_ack_seq': 0,
+            'equipment_states': [],
+            'equipment_revision': 0,
+            'equipment_intent_seq': 0,
+            'equipment_intent_result': {
+                'intent_seq': 0, 'accepted': False, 'reason': ''},
+        }
+        if params is not None:
+            row['outfits'] = {}
+            row['effective_params'] = params
+        return row
+
+    def test_repeated_full_snapshot_reuses_canonical_player_parameters(self):
+        client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
+        client.running = True
+        client._handle_message(self.welcome())
+        client.phase = 'battle'
+
+        with mock.patch.object(
+                module.effective_params_wire, 'canonical',
+                wraps=module.effective_params_wire.canonical) as canonical:
+            client._handle_message(self.player_snapshot(10, [
+                self.player_snapshot_row(8, effective_params())]))
+            first = client.last_snapshot['players'][0]['effective_params']
+            client._handle_message(self.player_snapshot(11, [
+                self.player_snapshot_row(8, effective_params())]))
+
+        self.assertTrue(client.running)
+        self.assertEqual(1, canonical.call_count)
+        self.assertIs(
+            first, client.last_snapshot['players'][0]['effective_params'])
+
+    def test_invalid_snapshot_does_not_publish_staged_static_parameters(self):
+        client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
+        client.running = True
+        client._handle_message(self.welcome())
+        client.phase = 'battle'
+        client._handle_message(self.player_snapshot(10, [
+            self.player_snapshot_row(8, effective_params())]))
+        original = client.last_snapshot['players'][0]['effective_params']
+
+        changed = effective_params()
+        changed['physics']['mass'] += 1.0
+        client._handle_message(self.player_snapshot(
+            11, [self.player_snapshot_row(8, changed)], bots='invalid'))
+        self.assertIs(
+            original,
+            client._published_player_effective_params[8])
+
+        client._handle_message(self.player_snapshot(
+            12, [self.player_snapshot_row(8)]))
+        self.assertTrue(client.running)
+        self.assertIs(
+            original, client.last_snapshot['players'][0]['effective_params'])
+
+    def test_full_snapshot_cache_hit_requires_exact_scalar_types(self):
+        cases = (
+            ('integer_as_float', lambda params: params.__setitem__(
+                'version', 1.0)),
+            ('boolean_as_integer', lambda params: params['loadout'].__setitem__(
+                'from_client_factors', 1)),
+        )
+        for label, mutate in cases:
+            with self.subTest(label=label):
+                client = LANClient(
+                    '127.0.0.1', 28782, 'P', 'ussr:MS-1')
+                client.running = True
+                client._handle_message(self.welcome())
+                client.phase = 'battle'
+                client._handle_message(self.player_snapshot(10, [
+                    self.player_snapshot_row(8, effective_params())]))
+                malformed = effective_params()
+                mutate(malformed)
+
+                with mock.patch.object(
+                        module.effective_params_wire, 'canonical',
+                        wraps=module.effective_params_wire.canonical
+                ) as canonical:
+                    client._handle_message(self.player_snapshot(11, [
+                        self.player_snapshot_row(8, malformed)]))
+
+                self.assertTrue(client.running)
+                self.assertEqual(1, canonical.call_count)
+                self.assertEqual(10, client.last_snapshot['server_tick'])
+
     def test_welcome_requires_server_echoed_capability(self):
         self.assertEqual(
             'projectile_ledger_v2', module.PROJECTILE_LEDGER_CAPABILITY)
@@ -989,9 +1107,11 @@ class ProjectileWireTests(unittest.TestCase):
                 shot_seq=index + 1, authority_epoch=4,
                 burst_group_seq=1, burst_index=index, burst_count=3))
         self.assertEqual([1, 2, 3], [
-            row[1]['shot_seq'] for row in client._outbound_queue])
+            wire_copy(row[1])['shot_seq']
+            for row in client._outbound_queue])
         self.assertEqual([0, 1, 2], [
-            row[1]['burst_index'] for row in client._outbound_queue])
+            wire_copy(row[1])['burst_index']
+            for row in client._outbound_queue])
 
     def test_bot_burst_rejects_partial_or_inconsistent_group(self):
         client = self.active_worker_client()

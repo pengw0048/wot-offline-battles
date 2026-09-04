@@ -242,6 +242,46 @@ class EquipmentStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'contract changed'):
             state.restore(snapshot, 1.0)
 
+    def test_trusted_snapshot_reuses_the_validated_contract(self):
+        state = equipment_mechanics.EquipmentState(
+            equipment_mechanics.project_equipment(_defaults()[2]))
+        self.assertIsNotNone(state.activate(
+            10.0, {'destroyed': ['engineHealth']}))
+
+        trusted = state.trusted_snapshot(12.0)
+        detached = state.snapshot(12.0)
+
+        self.assertEqual(detached, trusted)
+        self.assertIs(state.contract, trusted['equipment'])
+        self.assertIsNot(state.contract, detached['equipment'])
+
+        edge = state.trusted_snapshot_edge(12.0)
+        refreshed = state.refresh_trusted_snapshot(trusted, 13.0)
+        self.assertIs(trusted, refreshed)
+        self.assertEqual(edge, state.trusted_snapshot_edge(13.0))
+        self.assertAlmostEqual(87.0, trusted['cooldownTimeLeft'])
+
+    def test_trusted_snapshot_edge_tracks_pending_start_and_clear(self):
+        state = equipment_mechanics.EquipmentState(
+            equipment_mechanics.project_equipment(_defaults()[2]))
+        baseline = state.trusted_snapshot_edge(10.0)
+
+        self.assertIsNone(state.poll_bot(
+            10.0, {'destroyed': ['engineHealth']}))
+        pending = state.trusted_snapshot_edge(10.0)
+        self.assertNotEqual(baseline, pending)
+        wire = state.trusted_snapshot(10.0)
+        self.assertEqual(0.0, wire['aiPendingElapsed'])
+
+        self.assertEqual(pending, state.trusted_snapshot_edge(11.0))
+        self.assertIs(wire, state.refresh_trusted_snapshot(wire, 11.0))
+        self.assertEqual(1.0, wire['aiPendingElapsed'])
+
+        self.assertIsNone(state.poll_bot(11.0, {}))
+        self.assertNotEqual(pending, state.trusted_snapshot_edge(11.0))
+        state.refresh_trusted_snapshot(wire, 11.0)
+        self.assertIsNone(wire['aiPendingElapsed'])
+
     def test_bot_wire_validator_reuses_one_canonical_parse(self):
         contracts = [equipment_mechanics.project_equipment(value)
                      for value in _defaults()]

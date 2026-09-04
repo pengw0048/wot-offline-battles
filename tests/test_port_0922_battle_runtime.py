@@ -6026,7 +6026,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertTrue(battle._send_bot_message({
             'type': 'bot_state', 'bots': [], 'sample_time_us': 40000,
-            'source_batch_horizon_us': 40000}))
+            'source_batch_horizon_us': 40000,
+            'edge_sample_time_us': 40000, 'edge_revision': 7}))
 
         self.assertEqual([
             mock.call((0.0, 0.0, 0.0), 0.0, 0.1, -0.1),
@@ -6048,7 +6049,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((-0.0, 1.0), second_inward)
         battle.client.send_projected_bot_state.assert_called_once_with(
             [], sample_time_us=40000,
-            source_batch_horizon_us=40000, human_ram_armors=[{
+            source_batch_horizon_us=40000,
+            edge_sample_time_us=40000, edge_revision=7,
+            human_ram_armors=[{
                 'seq': 7, 'first_id': 1, 'second_id': 2,
                 'available': True, 'armor_first': 45.0,
                 'armor_second': 80.0,
@@ -18699,12 +18702,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle, '_player_tree_destructible_scan_due'))
         self.assertFalse(hasattr(battle, '_scan_authority_player_trees'))
 
-    def test_authority_bot_motion_notifies_destructibles_before_pose(self):
+    def test_bot_control_destructible_scan_uses_ready_entity_descriptor(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._worker_mode = True
         battle._avatar = runtime.bigworld.avatar
-        battle._binding = mock.Mock()
         battle._destructibles = mock.Mock()
         descriptor = _Descriptor()
         entity = _Vehicle(11, descriptor, _Vector(), (0, 0, 0),
@@ -18712,19 +18714,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._server_entity = mock.Mock(return_value=entity)
         battle._records = {
             'bot:17': {'engine_id': 11, 'kind': 'bot', 'network_id': 17,
-                       'ready': True, 'tombstone': False}}
-        battle._bot_destructible_samples[17] = (
-            runtime.bigworld.now, (7.0, 2.0, 9.0))
+                       'ready': False, 'tombstone': False}}
 
-        def set_vehicle_pose(*unused_args, relax_time=None, now=None):
-            battle._destructibles._fell_trees_near.assert_called_once()
-
-        battle._binding.set_vehicle_pose.side_effect = set_vehicle_pose
-
-        self.assertTrue(battle._apply_authority_bot_poses([{
-            'id': 17, 'alive': True, 'x': 7.0, 'y': 2.0, 'z': 9.0,
-            'yaw': 0.75, 'speed': 6.5,
-            'aim_yaw': 0.9, 'gun_pitch': -0.1}]))
+        self.assertFalse(battle._scan_bot_destructible_body(
+            17, (7.0, 2.0, 9.0), 0.75, 6.5))
+        battle._server_entity.assert_not_called()
+        battle._records['bot:17']['ready'] = True
+        self.assertTrue(battle._scan_bot_destructible_body(
+            17, (7.0, 2.0, 9.0), 0.75, 6.5))
 
         call = battle._destructibles._fell_trees_near.call_args[0]
         self.assertEqual(7, call[0])
@@ -18733,132 +18730,25 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(6.5, call[3])
         self.assertIs(descriptor, call[4])
 
-    def test_stopped_authority_bot_keeps_registration_scan_phase(self):
+    def test_authority_bot_presentation_does_not_scan_destructibles(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._worker_mode = True
         battle._avatar = runtime.bigworld.avatar
         battle._binding = mock.Mock()
         battle._destructibles = mock.Mock()
-        descriptor = _Descriptor()
-        entity = _Vehicle(11, descriptor, _Vector(), (0, 0, 0),
-                          {'health': 500})
-        battle._server_entity = mock.Mock(return_value=entity)
+        battle._server_entity = mock.Mock()
         battle._records = {
             'bot:17': {'engine_id': 11, 'kind': 'bot', 'network_id': 17,
                        'ready': True, 'tombstone': False}}
-        state = {
-            'id': 17, 'alive': True, 'x': 7.0, 'y': 2.0, 'z': 9.0,
-            'yaw': 0.75, 'speed': 0.0,
-            'aim_yaw': 0.9, 'gun_pitch': -0.1}
+        self.assertTrue(battle._apply_authority_bot_poses([{
+            'id': 17, 'alive': True, 'health': 500,
+            'x': 7.0, 'y': 2.0, 'z': 9.0,
+            'yaw': 0.75, 'speed': 6.5,
+            'aim_yaw': 0.0, 'gun_pitch': 0.0}]))
 
-        runtime.bigworld.now = 10.0
-        self.assertTrue(battle._apply_authority_bot_poses([state]))
         battle._destructibles._fell_trees_near.assert_not_called()
-        first_deadline = battle._bot_destructible_samples[17][0]
-        self.assertGreater(first_deadline, 10.0)
-        self.assertLessEqual(first_deadline, 10.1)
-
-        runtime.bigworld.now = first_deadline + 0.001
-        self.assertTrue(battle._apply_authority_bot_poses([state]))
-
-        call = battle._destructibles._fell_trees_near.call_args[0]
-        self.assertEqual(7, call[0])
-        self.assertEqual((7.0, 2.0, 9.0), tuple(call[1]))
-        self.assertEqual(0.0, call[3])
-        self.assertIs(descriptor, call[4])
-        next_deadline = battle._bot_destructible_samples[17][0]
-        self.assertAlmostEqual(runtime.bigworld.now + 0.5, next_deadline)
-        self.assertEqual(1, battle._binding.set_vehicle_pose.call_count)
-        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
-
-    def test_authority_bot_destructible_budget_is_render_rate_independent(self):
-        totals = {}
-        for fps in (40, 60, 120):
-            with self.subTest(fps=fps):
-                runtime = _runtime()
-                battle = BattleRuntime(runtime)
-                battle._worker_mode = True
-                battle._avatar = runtime.bigworld.avatar
-                battle._binding = mock.Mock()
-                battle._destructibles = mock.Mock()
-                descriptor = _Descriptor()
-                entity = _Vehicle(
-                    11, descriptor, _Vector(), (0, 0, 0), {'health': 500})
-                battle._server_entity = mock.Mock(return_value=entity)
-                battle._records = dict(
-                    ('bot:%d' % bot_id, {
-                        'engine_id': 1000 + bot_id, 'kind': 'bot',
-                        'network_id': bot_id, 'ready': True,
-                        'tombstone': False,
-                    })
-                    for bot_id in range(11, 40))
-                dt = 1.0 / float(fps)
-                later_counts = []
-                for frame in range(fps * 2):
-                    runtime.bigworld.now = 10.0 + (frame + 1) * dt
-                    before = battle._destructibles._fell_trees_near.call_count
-                    states = tuple({
-                        'id': bot_id, 'alive': True,
-                        'x': float((bot_id - 11) * 12), 'y': 0.0,
-                        'z': -100.0 + 14.0 * (frame + 1) * dt,
-                        'yaw': 0.0, 'speed': 14.0,
-                        'aim_yaw': 0.0, 'gun_pitch': 0.0,
-                    } for bot_id in range(11, 40))
-                    self.assertTrue(
-                        battle._apply_authority_bot_poses(states))
-                    count = (
-                        battle._destructibles._fell_trees_near.call_count -
-                        before)
-                    if frame == 0:
-                        self.assertEqual(0, count)
-                    else:
-                        later_counts.append(count)
-
-                self.assertEqual(
-                    fps * 2 * 29,
-                    battle._binding.set_vehicle_pose.call_count)
-                self.assertLess(max(later_counts), 29)
-                totals[fps] = (
-                    battle._destructibles._fell_trees_near.call_count)
-
-        self.assertLessEqual(
-            max(totals.values()) - min(totals.values()), 29 * 2)
-
-    def test_authority_bot_destructible_budget_resamples_after_three_metres(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle._avatar = runtime.bigworld.avatar
-        battle._binding = mock.Mock()
-        battle._destructibles = mock.Mock()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            11, descriptor, _Vector(), (0, 0, 0), {'health': 500})
-        battle._server_entity = mock.Mock(return_value=entity)
-        battle._records = {
-            'bot:17': {'engine_id': 11, 'kind': 'bot', 'network_id': 17,
-                       'ready': True, 'tombstone': False}}
-
-        runtime.bigworld.now = 10.0
-        self.assertTrue(battle._apply_authority_bot_poses([{
-            'id': 17, 'x': 0.0, 'y': 0.0, 'z': 0.0,
-            'yaw': 0.0, 'speed': 35.0,
-            'aim_yaw': 0.0, 'gun_pitch': 0.0}]))
-        runtime.bigworld.now = 10.001
-        self.assertTrue(battle._apply_authority_bot_poses([{
-            'id': 17, 'x': 0.0, 'y': 0.0, 'z': 2.99,
-            'yaw': 0.0, 'speed': 35.0,
-            'aim_yaw': 0.0, 'gun_pitch': 0.0}]))
-        self.assertEqual(
-            0, battle._destructibles._fell_trees_near.call_count)
-        runtime.bigworld.now = 10.002
-        self.assertTrue(battle._apply_authority_bot_poses([{
-            'id': 17, 'x': 0.0, 'y': 0.0, 'z': 3.01,
-            'yaw': 0.0, 'speed': 35.0,
-            'aim_yaw': 0.0, 'gun_pitch': 0.0}]))
-        self.assertEqual(
-            1, battle._destructibles._fell_trees_near.call_count)
+        battle._server_entity.assert_not_called()
 
     def test_canonical_fragile_preserves_shot_damage_bit(self):
         runtime = _runtime()
@@ -21917,6 +21807,53 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             12345678901234567890, direct['damage_sticker'])
 
+    def test_worker_player_gun_reuses_unchanged_effective_params_source(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle._projectile_is_authority = lambda: True
+        entity = _Vehicle(
+            11, _Descriptor(), _Vector(50.0, 0.0, 50.0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        effective = _effective_params_snapshot(ammo=[[101, 40]])
+        state = {'effective_params': effective}
+        battle._records = {'player:2': {
+            'engine_id': 11, 'network_id': 2, 'kind': 'player',
+            'local': False, 'ready': True, 'tombstone': False,
+            'state': state,
+        }}
+
+        with mock.patch.object(
+                battle_runtime_module.effective_params, 'canonical',
+                wraps=battle_runtime_module.effective_params.canonical
+        ) as canonical:
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.0))
+            gun = battle._player_authority_guns[2]
+            self.assertIs(effective, gun._effective_params_source)
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.1))
+            self.assertEqual(1, canonical.call_count)
+
+            equal_source = copy.deepcopy(effective)
+            state['effective_params'] = equal_source
+            self.assertTrue(
+                battle._advance_player_fire_authority(0.1, 10.2))
+            self.assertEqual(2, canonical.call_count)
+            self.assertIs(equal_source, gun._effective_params_source)
+
+            changed = copy.deepcopy(effective)
+            changed['physics']['mass'] += 1.0
+            state['effective_params'] = changed
+            self.assertRaises(
+                RuntimeError, battle._advance_player_fire_authority,
+                0.1, 10.3)
+
+        battle._records = {}
+        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.4))
+        self.assertNotIn(2, battle._player_authority_guns)
+
     def test_worker_launch_uses_visible_trigger_ray_not_model_node(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -24296,19 +24233,23 @@ class BattleRuntimeContractTests(unittest.TestCase):
                  'fire_seq': 0}]
 
         self.assertTrue(battle._send_bot_message({
-            'type': 'bot_state', 'bots': bots}))
+            'type': 'bot_state', 'bots': bots,
+            'edge_sample_time_us': 1, 'edge_revision': 2}))
 
-        battle.client.send_projected_bot_state.assert_called_once_with(bots)
+        battle.client.send_projected_bot_state.assert_called_once_with(
+            bots, edge_sample_time_us=1, edge_revision=2)
         battle.client.send_bot_state.assert_not_called()
 
         battle.client.send_projected_bot_state.reset_mock()
         self.assertTrue(battle._send_bot_message({
             'type': 'bot_state', 'bots': bots,
             'sample_time_us': 40000,
-            'source_batch_horizon_us': 40000}))
+            'source_batch_horizon_us': 40000,
+            'edge_sample_time_us': 30000, 'edge_revision': 3}))
         battle.client.send_projected_bot_state.assert_called_once_with(
             bots, sample_time_us=40000,
-            source_batch_horizon_us=40000)
+            source_batch_horizon_us=40000,
+            edge_sample_time_us=30000, edge_revision=3)
 
     @staticmethod
     def _pending_manifest_outbox(payload, round_id=7, authority_id=-1):

@@ -1314,6 +1314,60 @@ class BotRuntimeTests(unittest.TestCase):
                 sys.modules.pop(key, None)
         sys.modules.update(self._modules)
 
+    def test_runtime_owned_numeric_helpers_do_not_reparse_state(self):
+        state = {
+            'health': 500, 'alive': True, 'critical': {},
+            'combat_fire_elapsed': 0.25, 'combat_fire_timer': 0.5,
+            'stun_end_server_time_ms': 1250,
+            'x': 1.25, 'y': 2.5, 'z': -3.75,
+        }
+        original_number = self.module._number
+
+        def unexpected_number(*unused_args, **unused_kwargs):
+            raise AssertionError('trusted runtime state was reparsed')
+
+        self.module._number = unexpected_number
+        try:
+            self.assertEqual((1.25, 2.5, -3.75),
+                             self.module._position(state))
+            self.assertEqual(5.0, self.module._distance(
+                (0.0, 0.0, 0.0), (3.0, 0.0, 4.0)))
+            self.assertAlmostEqual(
+                -math.pi + 0.25,
+                self.module._angle_delta(math.pi + 0.25, 0.0))
+            self.assertEqual(
+                (1.0, 2.0, 3.0),
+                self.module._point({'x': 1.0, 'y': 2.0, 'z': 3.0}))
+            self.assertEqual(
+                (500, True, (), 0.25, 0.5, 1250),
+                self.module._combat_signature(state))
+            self.assertEqual({
+                'health': 500, 'alive': True, 'critical': {},
+                'combat_fire_elapsed': 0.25,
+                'combat_fire_timer': 0.5,
+                'stun_end_server_time_ms': 1250,
+            }, self.module._combat_record(state))
+        finally:
+            self.module._number = original_number
+
+    def test_server_order_points_are_canonicalized_at_admission(self):
+        runtime = self.module.BotRuntime(1)
+
+        self.assertTrue(runtime._apply_orders({
+            'bot_order_revision': 1,
+            'bot_orders': [{
+                'id': 11, 'move_position': {'x': '1.5'},
+                'aim_position': ('2.5', 3, 4.0),
+                'desired_range': '125.5', 'shell_index': '2',
+            }],
+        }))
+
+        admitted = runtime._server_orders[11]
+        self.assertEqual((1.5, 0.0, 0.0), admitted['move_position'])
+        self.assertEqual((2.5, 3.0, 4.0), admitted['aim_position'])
+        self.assertEqual(125.5, admitted['desired_range'])
+        self.assertEqual(2, admitted['shell_index'])
+
     def test_bot_physics_uses_plain_default_crew_factors(self):
         descriptor = _combat_descriptor()
         expected_factors = object()
@@ -1347,6 +1401,60 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(physics_calls))
         self.assertIs(descriptor, physics_calls[0][0])
         self.assertIs(expected_factors, physics_calls[0][1])
+
+    def test_gun_pitch_limits_cache_only_exact_descriptor_and_yaw(self):
+        descriptor = _combat_descriptor()
+        descriptor.gun.pitchLimits = {
+            'minPitch': (
+                (0.0, -0.1), (1.0, -0.3),
+                (2.0 * math.pi, -0.1)),
+            'maxPitch': (
+                (0.0, 0.1), (1.0, 0.2),
+                (2.0 * math.pi, 0.1)),
+        }
+        replacement = _combat_descriptor()
+        replacement.gun.pitchLimits = descriptor.gun.pitchLimits
+        state = {
+            'id': 11, 'critical': {}, 'siege_state': 0,
+            '_overturned': False,
+        }
+        first_yaw = 0.25
+        adjacent_yaw = first_yaw + 0.0001
+        expected_first = self.module.gun_pitch_limits.calc_pitch_limits(
+            first_yaw, descriptor.gun.pitchLimits)
+        expected_adjacent = self.module.gun_pitch_limits.calc_pitch_limits(
+            adjacent_yaw, descriptor.gun.pitchLimits)
+        original_calc = self.module.gun_pitch_limits.calc_pitch_limits
+        calls = []
+
+        def counted_calc(yaw, limits):
+            calls.append((yaw, limits))
+            return original_calc(yaw, limits)
+
+        self.module.gun_pitch_limits.calc_pitch_limits = counted_calc
+        try:
+            first = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, first_yaw)
+            repeated = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, first_yaw)
+            adjacent = self.runtime._effective_gun_pitch_limits(
+                state, descriptor, adjacent_yaw)
+            replaced = self.runtime._effective_gun_pitch_limits(
+                state, replacement, adjacent_yaw)
+        finally:
+            self.module.gun_pitch_limits.calc_pitch_limits = original_calc
+
+        self.assertEqual(expected_first, first)
+        self.assertIs(first, repeated)
+        self.assertEqual(expected_adjacent, adjacent)
+        self.assertNotEqual(first, adjacent)
+        self.assertEqual(expected_adjacent, replaced)
+        self.assertEqual(
+            [first_yaw, adjacent_yaw, adjacent_yaw],
+            [call[0] for call in calls])
+        key = self.module._GUN_PITCH_LIMIT_CACHE
+        self.assertIn(key, state)
+        self.assertNotIn(key, self.module._copy_runtime_state(state))
 
     def test_every_bot_consumer_rejects_missing_default_crew_factors(self):
         descriptor = _combat_descriptor()
@@ -4763,12 +4871,16 @@ class BotRuntimeTests(unittest.TestCase):
         first = next(message for message in self.runtime.update(.04, 10.0)
                      if message.get('type') == 'bot_state')
         self.assertEqual(40000, first['sample_time_us'])
+        self.assertEqual(40000, first['edge_sample_time_us'])
+        first_edge_revision = first['edge_revision']
 
         # This render callback is banked until the next authority deadline.
         self.assertEqual([], self.runtime.update(.02, 10.02))
         second = next(message for message in self.runtime.update(.02, 10.04)
                       if message.get('type') == 'bot_state')
         self.assertEqual(80000, second['sample_time_us'])
+        self.assertEqual(first_edge_revision, second['edge_revision'])
+        self.assertEqual(40000, second['edge_sample_time_us'])
 
         # A slow callback is divided into stable integration slices, but the
         # complete elapsed interval is consumed before update returns.
@@ -4781,12 +4893,20 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [330000, 330000],
             [message['source_batch_horizon_us'] for message in stalled])
+        self.assertEqual(
+            [first_edge_revision, first_edge_revision],
+            [message['edge_revision'] for message in stalled])
+        self.assertEqual(
+            [40000, 40000],
+            [message['edge_sample_time_us'] for message in stalled])
         self.assertEqual([], self.runtime.update(0.0, 10.33))
 
         self.runtime.battle_start(dict(self.start, round_id=6))
         reset = next(message for message in self.runtime.update(.03, 20.0)
                      if message.get('type') == 'bot_state')
         self.assertEqual(30000, reset['sample_time_us'])
+        self.assertGreater(reset['edge_revision'], first_edge_revision)
+        self.assertEqual(30000, reset['edge_sample_time_us'])
 
     def test_one_second_callback_advances_all_time_and_preserves_events(self):
         self.runtime.battle_start(self.start)
@@ -4807,6 +4927,163 @@ class BotRuntimeTests(unittest.TestCase):
             [message['source_batch_horizon_us'] for message in states])
         self.assertEqual([{'type': 'ram_damage', 'event': 'once'}], events)
         self.assertEqual(0.0, self.runtime._accumulator)
+
+    def test_catchup_equipment_clocks_do_not_alias_earlier_messages(self):
+        contracts = _bot_equipment_contracts(self.module)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts,
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        repair = runtime._equipment_states[11][2]
+        self.assertIsNotNone(repair.activate(
+            runtime._equipment_now,
+            {'destroyed': ['engineHealth']},
+            selected='engineHealth'))
+        self.assertTrue(runtime._publish_equipment_state(state))
+        initial_wire = state['equipment_states']
+
+        outgoing = runtime.update(1.0, 10.0)
+        publications = [message for message in outgoing
+                        if message.get('type') == 'bot_state']
+        snapshots = [message['bots'][0]['equipment_states']
+                     for message in publications]
+
+        self.assertEqual(
+            [200000, 1000000],
+            [message['sample_time_us'] for message in publications])
+        self.assertEqual(2, len(set(id(snapshot) for snapshot in snapshots)))
+        self.assertIs(initial_wire, snapshots[0])
+        self.assertIs(state['equipment_states'], snapshots[-1])
+        for expected, snapshot in zip(
+                (89.8, 89.0), snapshots):
+            self.assertAlmostEqual(
+                expected, snapshot[2]['cooldownTimeLeft'])
+
+    def test_destructible_body_scan_uses_final_catchup_pose_once(self):
+        scans = []
+        runtime = self.module.BotRuntime(
+            1, destructible_body_scan=lambda *values: scans.append(values),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.authority_id = 1
+        runtime.adapter = object()
+        runtime.states = {
+            31: {'id': 31, 'slot': 2, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 5.0, 'y': 2.0, 'z': 10.0,
+                 'yaw': 0.25, 'speed': 4.0},
+            11: {'id': 11, 'slot': 0, 'team': 2, 'alive': True,
+                 'health': 500, 'x': -5.0, 'y': 1.0, 'z': 20.0,
+                 'yaw': -0.5, 'speed': -2.0},
+        }
+        slices = []
+
+        def integrate(step, *unused):
+            slices.append(step)
+            for state in runtime.states.values():
+                state['z'] += state['speed'] * step
+            return []
+
+        runtime._run_update_once = integrate
+
+        self.assertEqual([], runtime.update(0.09, 1.09))
+        self.assertEqual([], scans)
+        self.assertEqual([], runtime.update(0.41, 1.50))
+
+        self.assertEqual(3, len(slices))
+        self.assertAlmostEqual(0.5, sum(slices))
+        self.assertTrue(all(
+            step <= self.module.MAX_CONTROL_ELAPSED_SECONDS + 1.0e-9
+            for step in slices))
+        self.assertEqual([11, 31], [values[0] for values in scans])
+        self.assertEqual(2, len(scans))
+        self.assertEqual((-5.0, 1.0), scans[0][1][:2])
+        self.assertAlmostEqual(19.0, scans[0][1][2])
+        self.assertEqual(-0.5, scans[0][2])
+        self.assertEqual(-2.0, scans[0][3])
+        self.assertEqual((5.0, 2.0), scans[1][1][:2])
+        self.assertAlmostEqual(12.0, scans[1][1][2])
+
+    def test_destructible_body_scan_skips_dead_and_low_speed_bots(self):
+        scans = []
+        runtime = self.module.BotRuntime(
+            1, destructible_body_scan=lambda *values: scans.append(values),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.authority_id = 1
+        runtime.adapter = object()
+        runtime.states = {
+            14: {'id': 14, 'slot': 1, 'team': 2, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': -2.0},
+            13: {'id': 13, 'slot': 0, 'team': 2, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 1.0},
+            12: {'id': 12, 'slot': 3, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 0.99},
+            11: {'id': 11, 'slot': 2, 'team': 1, 'alive': True,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 0.0},
+            16: {'id': 16, 'slot': 5, 'team': 1, 'alive': True,
+                 'health': 0, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 8.0},
+            15: {'id': 15, 'slot': 4, 'team': 1, 'alive': False,
+                 'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                 'yaw': 0.0, 'speed': 8.0},
+        }
+        runtime._run_update_once = lambda *unused: []
+
+        self.assertEqual([], runtime.update(
+            self.module.WORKER_CONTROL_SECONDS, 1.0))
+
+        self.assertEqual([13, 14], [values[0] for values in scans])
+
+    def test_publication_edge_revision_is_monotonic_across_reverted_edges(self):
+        continuous = set((
+            'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw',
+            'gun_pitch', 'speed', 'movement_dir', 'rotation_dir',
+            'reload_time', 'burst_time_left', 'siege_time_left_ms',
+            'combat_fire_elapsed', 'combat_fire_timer'))
+        represented = set(('critical', 'equipment_states', 'ammo_remaining'))
+        self.assertEqual(
+            set(self.module.lan_client._BOT_STATE_WIRE_FIELDS),
+            continuous | represented |
+            set(self.module._PUBLICATION_EDGE_SCALAR_FIELDS))
+
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        states = [state]
+        first = self.runtime._mark_publication_edge(
+            states, [], [], 10)
+
+        state['x'] += 1.0
+        continuous = self.runtime._mark_publication_edge(
+            states, [], [], 20)
+        self.assertEqual(first, continuous)
+
+        original_fire_seq = state['fire_seq']
+        state['fire_seq'] += 1
+        fired = self.runtime._mark_publication_edge(
+            states, [{'id': 11, 'fire_seq': state['fire_seq']}], [], 30)
+        self.assertGreater(fired[1], first[1])
+        self.assertEqual(30, fired[0])
+
+        state['fire_seq'] = original_fire_seq
+        reverted = self.runtime._mark_publication_edge(
+            states, [], [], 40)
+        self.assertGreater(reverted[1], fired[1])
+        self.assertEqual(40, reverted[0])
+
+        rammed = self.runtime._mark_publication_edge(states, [], [{
+            'bot_id': 11, 'target_kind': 'bot', 'target_id': 12,
+            'ram_seq': 1,
+        }], 50)
+        self.assertGreater(rammed[1], reverted[1])
 
     def test_worker_stall_refreshes_control_once_and_consumes_all_elapsed(self):
         adapter = _Adapter()
@@ -9729,6 +10006,250 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertIsNone(
             self.module.lan_client.project_bot_state(malformed))
 
+    def test_trusted_equipment_projection_reuses_rows_between_edges(self):
+        contracts = _bot_equipment_contracts(self.module, reuse_count=-1)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        runtime._advance_equipment_clock(10.0)
+        equipment = runtime._equipment_states[11][2]
+        original_validate = self.module.equipment_mechanics._validate_contract
+
+        def unexpected_validate(unused):
+            raise AssertionError('trusted projection revalidated contract')
+
+        self.module.equipment_mechanics._validate_contract = \
+            unexpected_validate
+        try:
+            self.assertFalse(runtime._publish_equipment_state(state))
+            unused = state['equipment_states']
+
+            self.assertIsNotNone(equipment.activate(
+                runtime._equipment_now,
+                {'destroyed': ['engineHealth']},
+                selected='engineHealth'))
+            self.assertTrue(runtime._publish_equipment_state(state))
+            first = state['equipment_states']
+            first_row = first[2]
+            self.assertAlmostEqual(90.0, first_row['cooldownTimeLeft'])
+
+            self.assertFalse(runtime._publish_equipment_state(state))
+            self.assertIs(first, state['equipment_states'])
+            self.assertIs(first_row, state['equipment_states'][2])
+
+            runtime._advance_equipment_clock(0.2)
+            self.assertFalse(runtime._publish_equipment_state(state))
+            self.assertIs(first, state['equipment_states'])
+            self.assertIs(first_row, state['equipment_states'][2])
+            self.assertAlmostEqual(89.8, first_row['cooldownTimeLeft'])
+
+            runtime._advance_equipment_clock(
+                equipment.ready_at - runtime._equipment_now)
+            self.assertTrue(runtime._publish_equipment_state(state))
+            ready = state['equipment_states']
+        finally:
+            self.module.equipment_mechanics._validate_contract = \
+                original_validate
+
+        self.assertIsNot(first, ready)
+        self.assertIsNot(first_row, ready[2])
+        self.assertIs(equipment.contract, ready[2]['equipment'])
+        self.assertEqual(0.0, ready[2]['cooldownTimeLeft'])
+        self.assertEqual(-1, equipment.uses_left)
+
+    def test_equipment_contract_change_is_a_projection_edge(self):
+        contracts = _bot_equipment_contracts(self.module)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        initial_wire = state['equipment_states']
+        replacement = self.module.equipment_mechanics.EquipmentState(
+            contracts[0])
+
+        runtime._equipment_states[11][0] = replacement
+        self.assertTrue(runtime._publish_equipment_state(state))
+
+        self.assertIsNot(initial_wire, state['equipment_states'])
+        self.assertIs(
+            replacement.contract,
+            state['equipment_states'][0]['equipment'])
+
+    def test_equipment_uses_change_is_a_projection_edge(self):
+        contracts = _bot_equipment_contracts(self.module)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        initial_wire = state['equipment_states']
+        equipment = runtime._equipment_states[11][2]
+
+        equipment.uses_left -= 1
+        self.assertTrue(runtime._publish_equipment_state(state))
+        used_wire = state['equipment_states']
+
+        self.assertIsNot(initial_wire, used_wire)
+        self.assertEqual(equipment.uses_left, used_wire[2]['usesLeft'])
+
+    def test_active_equipment_change_is_a_projection_edge(self):
+        contracts = _bot_equipment_contracts(self.module)
+        limiter = self.module.equipment_mechanics.project_equipment(
+            types.SimpleNamespace(
+                id=(11, 24), compactDescr=424,
+                name='removedRpmLimiter', tags=('trigger',),
+                reuseCount=-1, cooldownSeconds=0.0,
+                enginePowerFactor=1.1, engineHpLossPerSecond=1.5))
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        equipment = self.module.equipment_mechanics.EquipmentState(limiter)
+        runtime._equipment_states[11] = [equipment]
+        runtime._equipment_wire_cache.pop(11, None)
+        self.assertTrue(runtime._publish_equipment_state(state))
+        initial_wire = state['equipment_states']
+
+        self.assertIsNotNone(equipment.activate(
+            runtime._equipment_now, requested_active=True))
+        self.assertTrue(runtime._publish_equipment_state(state))
+        active_wire = state['equipment_states']
+
+        self.assertIsNot(initial_wire, active_wire)
+        self.assertTrue(active_wire[0]['active'])
+
+    def test_pending_start_and_clear_are_projection_edges(self):
+        contracts = _bot_equipment_contracts(self.module)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        repair = runtime._equipment_states[11][2]
+        initial_wire = state['equipment_states']
+
+        self.assertIsNone(repair.poll_bot(
+            runtime._equipment_now,
+            {'destroyed': ['engineHealth']}))
+        self.assertTrue(runtime._publish_equipment_state(state))
+        pending_wire = state['equipment_states']
+        self.assertIsNot(initial_wire, pending_wire)
+        self.assertEqual(0.0, pending_wire[2]['aiPendingElapsed'])
+
+        runtime._advance_equipment_clock(0.2)
+        self.assertFalse(runtime._publish_equipment_state(state))
+        self.assertIs(pending_wire, state['equipment_states'])
+        self.assertAlmostEqual(
+            0.2, pending_wire[2]['aiPendingElapsed'])
+
+        self.assertIsNone(repair.poll_bot(runtime._equipment_now, {}))
+        self.assertTrue(runtime._publish_equipment_state(state))
+        cleared_wire = state['equipment_states']
+        self.assertIsNot(pending_wire, cleared_wire)
+        self.assertIsNone(cleared_wire[2]['aiPendingElapsed'])
+
+    def test_equipment_revision_tracks_every_discrete_ledger_edge(self):
+        contracts = _bot_equipment_contracts(self.module, reuse_count=0)
+        limiter = self.module.equipment_mechanics.project_equipment(
+            types.SimpleNamespace(
+                id=(11, 24), compactDescr=424,
+                name='removedRpmLimiter', tags=('trigger',),
+                reuseCount=-1, cooldownSeconds=0.0,
+                enginePowerFactor=1.1, engineHpLossPerSecond=1.5))
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _critical_descriptor(),
+            adapter_factory=lambda *unused: _Adapter(),
+            direction_probe=lambda *unused: {'clear': True},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+
+        def mark(sample_time_us):
+            return runtime._mark_publication_edge(
+                [state], [], [], sample_time_us)[1]
+
+        revision = mark(0)
+        extinguisher = self.module.equipment_mechanics.EquipmentState(
+            contracts[0])
+        runtime._equipment_states[11][0] = extinguisher
+        next_revision = mark(1)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        extinguisher.uses_left = 0
+        next_revision = mark(2)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        rpm_limiter = self.module.equipment_mechanics.EquipmentState(limiter)
+        runtime._equipment_states[11].append(rpm_limiter)
+        next_revision = mark(3)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        self.assertIsNotNone(rpm_limiter.activate(
+            runtime._equipment_now, requested_active=True))
+        next_revision = mark(4)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        medkit = runtime._equipment_states[11][1]
+        self.assertIsNone(medkit.poll_bot(
+            runtime._equipment_now, {'crew_ko': ['commander']}))
+        next_revision = mark(5)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        runtime._advance_equipment_clock(0.2)
+        self.assertEqual(revision, mark(6))
+        self.assertIsNone(medkit.poll_bot(runtime._equipment_now, {}))
+        next_revision = mark(7)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+
+        repair = runtime._equipment_states[11][2]
+        self.assertIsNotNone(repair.activate(
+            runtime._equipment_now,
+            {'destroyed': ['engineHealth']},
+            selected='engineHealth'))
+        next_revision = mark(8)
+        self.assertGreater(next_revision, revision)
+        revision = next_revision
+        self.assertEqual(0, repair.uses_left)
+        runtime._advance_equipment_clock(
+            repair.ready_at - runtime._equipment_now)
+        self.assertGreater(mark(9), revision)
+
     def test_bot_medkit_clears_stun_only_after_a_later_simulation_frame(self):
         contracts = _bot_equipment_contracts(self.module)
         runtime = self.module.BotRuntime(
@@ -12189,6 +12710,34 @@ class BotRuntimeTests(unittest.TestCase):
             self.assertEqual(baseline_runtime._visibility_cache,
                              cached_runtime._visibility_cache)
         self.assertEqual(calls[1], calls[0])
+
+    def test_player_effective_params_are_canonicalized_once_per_tick_source(self):
+        first = _admit_player({'id': 2})
+        second = copy.deepcopy(first)
+        tick_cache = {}
+        calls = []
+        original = self.module.effective_params.canonical
+
+        def canonical(value):
+            calls.append(value)
+            return original(value)
+
+        self.module.effective_params.canonical = canonical
+        try:
+            first_result = self.module._player_effective_params(
+                first, tick_cache)
+            repeated = self.module._player_effective_params(
+                first, tick_cache)
+            second_result = self.module._player_effective_params(
+                second, tick_cache)
+            next_tick = self.module._player_effective_params(first, {})
+        finally:
+            self.module.effective_params.canonical = original
+
+        self.assertIs(first_result, repeated)
+        self.assertEqual(first_result, second_result)
+        self.assertEqual(first_result, next_tick)
+        self.assertEqual(3, len(calls))
 
     def test_contacts_compute_source_view_range_once_per_decision(self):
         runtime = self.module.BotRuntime(

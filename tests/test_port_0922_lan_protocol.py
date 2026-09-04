@@ -15,9 +15,10 @@ sys.path.insert(0, str(ROOT / 'server'))
 from gui.mods.offline_lan_0922.lan_client import (
     HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
-    _projectile_wire_round, _strict_projectile_effect,
-    _valid_player_environment_contract,
-    project_bot_state)
+    _canonical_runtime_vehicle_row,
+    _project_human_ram_armors, _projectile_wire_round,
+    _strict_projectile_effect,
+    _valid_player_environment_contract, project_bot_state)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
@@ -131,24 +132,27 @@ class LanProtocolTests(unittest.TestCase):
 
     def test_worker_bot_state_projects_human_ram_armor_results_exactly(self):
         worker = self._worker_client()
-        worker._send_preencoded_trusted = self.client._send
+        worker._send_preencoded_trusted = (
+            lambda message, coalesce_key=None: self.client._send(message))
         result = {
             'seq': 7, 'first_id': 1, 'second_id': 2,
             'available': True, 'armor_first': 45.0,
             'armor_second': 80.0,
         }
 
+        self.assertEqual([result], _project_human_ram_armors([result]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, armor_first=float('nan'))]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, unexpected=True)]))
+        self.assertIsNone(_project_human_ram_armors([
+            dict(result, first_id=2, second_id=1)]))
         self.assertTrue(worker.send_projected_bot_state(
             [], sample_time_us=40000,
             source_batch_horizon_us=40000,
+            edge_sample_time_us=40000, edge_revision=1,
             human_ram_armors=[result]))
         self.assertEqual([result], self.sent[-1]['human_ram_armors'])
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, armor_first=float('nan'))]))
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, unexpected=True)]))
-        self.assertFalse(worker.send_projected_bot_state(
-            [], human_ram_armors=[dict(result, first_id=2, second_id=1)]))
 
     def test_projectile_effect_carries_only_an_exact_stun_end_time(self):
         effect = {
@@ -1399,6 +1403,50 @@ class ShippingClientInputContractTests(unittest.TestCase):
         self.assertFalse(_valid_player_environment_contract(
             _snapshot_player(input_seq=4, input_processed_seq=True),
             required=True))
+
+    def test_snapshot_validation_covers_pose_number_boundaries(self):
+        self.assertTrue(_valid_player_environment_contract(
+            _snapshot_player(
+                x=1.0, y=-2.0, z=3.0, yaw=math.pi,
+                pitch=0.25, roll=-0.25, aim_yaw=-math.pi,
+                gun_pitch=0.1, speed=12.5, forward=1.0, turn=-1.0),
+            required=True))
+        for field, value in (
+                ('x', float('nan')), ('z', float('inf')),
+                ('yaw', float('-inf')), ('speed', 1000.0),
+                ('forward', 1.01), ('turn', -1.01)):
+            with self.subTest(field=field, value=value):
+                self.assertFalse(_valid_player_environment_contract(
+                    _snapshot_player(**{field: value}), required=True))
+
+    def test_runtime_vehicle_numbers_are_canonicalized_once(self):
+        source = {
+            'id': '11', 'team': 2.0, 'health': '500',
+            'x': '1.25', 'y': 2, 'z': -3.5, 'yaw': '0.5',
+            'speed': 7, 'velocity': ['1.0', 2, 3.5, 99.0],
+            'alive': True,
+        }
+
+        result = _canonical_runtime_vehicle_row(source)
+
+        self.assertEqual(11, result['id'])
+        self.assertEqual(2, result['team'])
+        self.assertEqual(500, result['health'])
+        self.assertEqual((1.25, 2.0, -3.5),
+                         (result['x'], result['y'], result['z']))
+        self.assertEqual(0.5, result['yaw'])
+        self.assertEqual(7.0, result['speed'])
+        self.assertEqual((1.0, 2.0, 3.5), result['velocity'])
+        self.assertIsNot(source, result)
+        self.assertEqual('11', source['id'])
+
+        for changes in (
+                {'x': float('nan')}, {'health': True},
+                {'velocity': (1.0, 2.0)},
+                {'velocity': (1.0, float('inf'), 3.0)}):
+            malformed = dict(source)
+            malformed.update(changes)
+            self.assertIsNone(_canonical_runtime_vehicle_row(malformed))
 
     def test_the_server_publishes_both_input_frontiers(self):
         self.assertTrue(self._send())

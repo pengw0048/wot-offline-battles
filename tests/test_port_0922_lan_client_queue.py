@@ -249,7 +249,8 @@ class LanClientQueueTests(unittest.TestCase):
 
         self.assertTrue(client.send_player_destructible_contact_result(
             1, 3, True, token))
-        queued = client._outbound_queue[0][1]
+        queued = json.loads(
+            client._outbound_queue[0][1].payload.decode('utf-8'))
         self.assertEqual(64, len(queued['token']))
         self.assertFalse(client.send_player_destructible_contact_result(
             1, 4, True, token + [(7, 64, None)]))
@@ -389,10 +390,11 @@ class LanClientQueueTests(unittest.TestCase):
             source_batch_horizon_us=40000))
 
         queued = client._outbound_queue[0]
-        self.assertEqual(40000, queued[1]['sample_time_us'])
+        queued_wire = json.loads(queued[1].payload.decode('utf-8'))
+        self.assertEqual(40000, queued_wire['sample_time_us'])
         self.assertEqual(
-            40000, queued[1]['source_batch_horizon_us'])
-        queued_bots = queued[1]['bots']
+            40000, queued_wire['source_batch_horizon_us'])
+        queued_bots = queued_wire['bots']
         expected = {
             'id', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
             'aim_yaw', 'gun_pitch', 'speed',

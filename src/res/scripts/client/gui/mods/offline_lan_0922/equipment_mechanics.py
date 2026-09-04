@@ -594,6 +594,36 @@ class EquipmentState(object):
                 now, self._ai_pending_since),
         }
 
+    def trusted_snapshot(self, now=0.0):
+        """Project worker-owned state without revalidating canonical values."""
+        snapshot = {
+            'equipment': self.contract,
+            'usesLeft': self.uses_left,
+            'cooldownTimeLeft': 0.0,
+            'active': self.active,
+            'autoPendingElapsed': None,
+            'aiPendingElapsed': None,
+        }
+        return self.refresh_trusted_snapshot(snapshot, now)
+
+    def trusted_snapshot_edge(self, now=0.0):
+        """Return every discrete ledger edge represented on the wire."""
+        return (
+            id(self.contract), self.uses_left, self.active, self.ready_at,
+            bool(now >= self.ready_at),
+            self._auto_pending_since, self._ai_pending_since)
+
+    def refresh_trusted_snapshot(self, snapshot, now=0.0):
+        """Refresh continuous wire clocks on one worker-owned projection."""
+        snapshot['cooldownTimeLeft'] = max(0.0, self.ready_at - now)
+        snapshot['autoPendingElapsed'] = (
+            None if self._auto_pending_since is None else
+            max(0.0, now - self._auto_pending_since))
+        snapshot['aiPendingElapsed'] = (
+            None if self._ai_pending_since is None else
+            max(0.0, now - self._ai_pending_since))
+        return snapshot
+
     def restore(self, snapshot, now=0.0):
         """Load a relative wire snapshot, rejecting partial state."""
         if (not isinstance(snapshot, dict) or

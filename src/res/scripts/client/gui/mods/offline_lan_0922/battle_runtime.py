@@ -128,12 +128,6 @@ TARGET_SELECTION_FOV_DEGREES = 1.0
 TARGET_DESELECTION_FOV_DEGREES = 80.0
 TARGET_MAX_DISTANCE = 710.0
 TARGET_OUTLINE_SECONDS = 0.05
-# Bot tree/column enumeration is a proximity sensor, not presentation work.
-# The sensor looks 6 m ahead plus the admitted hull extent, while copied bot
-# speed is capped at 35 m/s.  Recheck within 0.10 s or 3 m of realised travel,
-# whichever comes first, so no moving hull can skip the contact volume.
-BOT_DESTRUCTIBLE_SECONDS = 0.10
-BOT_DESTRUCTIBLE_TRAVEL_METRES = 3.0
 BOT_SOFT_RECAST_BUDGET = 24
 # A turning rectangle does not share the fixed-orientation swept volume used
 # by longitudinal motion.  Cover each angular interval with the exact local
@@ -1512,7 +1506,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
@@ -1800,7 +1793,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
@@ -3092,6 +3084,9 @@ class BattleRuntime(object):
                 ram_contact_probe=self._bot_ram_contact_armor,
                 bot_equipment_resolver=(
                     self._default_bot_equipment_contracts),
+                destructible_body_scan=(
+                    self._scan_bot_destructible_body
+                    if self._worker_mode else None),
                 baked_graph=self._navigation_graph,
                 # Keep the mature 0.8.2 authority model: the copied physics
                 # integrator owns bot poses and the engine interpolates those
@@ -8007,7 +8002,6 @@ class BattleRuntime(object):
             'grounded_bots': len(self._grounded_bot_ids),
             'bot_assignments': len(self._bot_vehicle_assignments),
             'bot_fire_seen': len(self._bot_fire_seen),
-            'bot_destr_samples': len(self._bot_destructible_samples),
         }
         try:
             counts['projectiles'] = len(self._projectiles)
@@ -8036,7 +8030,6 @@ class BattleRuntime(object):
         ('last_snapshot', '_last_snapshot'),
         ('start_message', '_start_message'),
         ('health', '_last_health'),
-        ('bot_destr_samples', '_bot_destructible_samples'),
         ('spawn_planner', '_spawn_planner'),
         ('projectiles', '_projectiles'),
         ('projectile_meta', '_projectile_meta'),
@@ -10592,7 +10585,8 @@ class BattleRuntime(object):
             poses = self._projectile_record_poses()
             self._sample_projectile_positions(now, poses)
             self._projectile_target_positions = dict(
-                (key, _xyz(pose)) for key, pose in poses.items())
+                (key, (pose['x'], pose['y'], pose['z']))
+                for key, pose in poses.items())
         meta['awaiting_resolution'] = False
         meta['awaiting_ricochet'] = False
         return True
@@ -11207,42 +11201,69 @@ class BattleRuntime(object):
 
     @staticmethod
     def _projectile_plain_pose(position, state=None):
+        """Copy a pose whose numeric fields were already canonicalized."""
+        state = state if isinstance(state, dict) else {}
+        yaw = state.get('yaw', 0.0)
+        aim_yaw = state.get('aim_yaw', yaw)
+        turret_yaw = state.get(
+            'turret_yaw', _angle_delta(yaw, aim_yaw))
+        return {
+            'x': position[0], 'y': position[1],
+            'z': position[2], 'yaw': yaw,
+            'pitch': state.get('pitch', 0.0),
+            'roll': state.get('roll', 0.0),
+            'turret_yaw': turret_yaw,
+            'gun_pitch': state.get('gun_pitch', 0.0),
+            'siege_state': int(state.get('siege_state', 0) or 0),
+        }
+
+    @staticmethod
+    def _projectile_boundary_pose(position, state=None):
+        """Canonicalize one network/native pose before retaining it."""
         state = state if isinstance(state, dict) else {}
         yaw = _number(state.get('yaw'))
         aim_yaw = _number(state.get('aim_yaw'), yaw)
-        turret_yaw = _number(
-            state.get('turret_yaw'), _angle_delta(yaw, aim_yaw))
-        return {
-            'x': _number(position[0]), 'y': _number(position[1]),
-            'z': _number(position[2]), 'yaw': yaw,
+        canonical = {
+            'yaw': yaw,
             'pitch': _number(state.get('pitch')),
             'roll': _number(state.get('roll')),
-            'turret_yaw': turret_yaw,
+            'aim_yaw': aim_yaw,
+            'turret_yaw': _number(
+                state.get('turret_yaw'), _angle_delta(yaw, aim_yaw)),
             'gun_pitch': _number(state.get('gun_pitch')),
             'siege_state': int(state.get('siege_state', 0) or 0),
         }
+        return BattleRuntime._projectile_plain_pose(
+            (_number(position[0]), _number(position[1]),
+             _number(position[2])), canonical)
 
     def _projectile_record_pose(self, key, record, position):
         """Freeze one coherent hull, aim and mode sample for collision."""
         state = record.get('state') or {}
         source = record.get('projectile_collision_pose')
-        if not isinstance(source, dict):
-            source = state
-        source_position = position
-        if all(name in source for name in ('x', 'y', 'z')):
-            source_position = _xyz(source)
-        pose = self._projectile_plain_pose(source_position, source)
+        if isinstance(source, dict):
+            source_position = position
+            if all(name in source for name in ('x', 'y', 'z')):
+                source_position = (
+                    source['x'], source['y'], source['z'])
+            pose = self._projectile_plain_pose(source_position, source)
+        else:
+            source_position = position
+            if all(name in state for name in ('x', 'y', 'z')):
+                source_position = (
+                    state['x'], state['y'], state['z'])
+            pose = self._projectile_boundary_pose(source_position, state)
         entity = self._server_entity(record.get('engine_id'))
         if entity is None:
             return None
         if record.get('local'):
             pose.update({
-                'x': _number(self._local_position[0]),
-                'y': _number(self._local_position[1]),
-                'z': _number(self._local_position[2]),
-                'yaw': _number(self._local_yaw),
-                'pitch': _number(self._local_pitch),
-                'roll': _number(self._local_roll),
+                'x': self._local_position[0],
+                'y': self._local_position[1],
+                'z': self._local_position[2],
+                'yaw': self._local_yaw,
+                'pitch': self._local_pitch,
+                'roll': self._local_roll,
             })
         aim = getattr(entity, 'getAimParams', None)
         if (not isinstance(record.get('projectile_collision_pose'), dict) and
@@ -11341,13 +11362,13 @@ class BattleRuntime(object):
             (wanted - left_time) / (right_time - left_time), 1.0))
         result = dict(left)
         for name in ('x', 'y', 'z'):
-            result[name] = (_number(left.get(name)) +
-                            (_number(right.get(name)) -
-                             _number(left.get(name))) * progress)
+            result[name] = (left.get(name, 0.0) +
+                            (right.get(name, 0.0) -
+                             left.get(name, 0.0)) * progress)
         for name in ('yaw', 'pitch', 'roll', 'turret_yaw', 'gun_pitch'):
-            result[name] = (_number(left.get(name)) + _angle_delta(
-                _number(left.get(name)),
-                _number(right.get(name))) * progress)
+            result[name] = (left.get(name, 0.0) + _angle_delta(
+                left.get(name, 0.0),
+                right.get(name, 0.0)) * progress)
         # Discrete descriptor state changes at its recorded sample, never
         # halfway through the preceding interval.
         result['siege_state'] = left.get('siege_state', 0)
@@ -11497,15 +11518,11 @@ class BattleRuntime(object):
                 if first is None or last is None:
                     fallback.add(key)
                     continue
-                first_position = _xyz(first)
-                last_position = _xyz(last)
+                first_position = (first['x'], first['y'], first['z'])
+                last_position = (last['x'], last['y'], last['z'])
                 values = (
-                    float(first_position[0]), float(first_position[2]),
-                    float(last_position[0]), float(last_position[2]))
-                if any(value != value or abs(value) == float('inf')
-                       for value in values):
-                    fallback.add(key)
-                    continue
+                    first_position[0], first_position[2],
+                    last_position[0], last_position[2])
                 bounds[key] = [
                     min(values[0], values[2]),
                     min(values[1], values[3]),
@@ -11521,14 +11538,8 @@ class BattleRuntime(object):
                         fallback.add(key)
                         bounds.pop(key, None)
                         continue
-                    position = _xyz(pose)
-                    x = float(position[0])
-                    z = float(position[2])
-                    if (x != x or z != z or abs(x) == float('inf') or
-                            abs(z) == float('inf')):
-                        fallback.add(key)
-                        bounds.pop(key, None)
-                        continue
+                    x = pose['x']
+                    z = pose['z']
                     target_bounds = bounds[key]
                     target_bounds[0] = min(target_bounds[0], x)
                     target_bounds[1] = min(target_bounds[1], z)
@@ -11636,7 +11647,8 @@ class BattleRuntime(object):
         states = self._projectiles.snapshot()
         current_poses = self._projectile_record_poses()
         current = dict(
-            (key, _xyz(pose)) for key, pose in current_poses.items())
+            (key, (pose['x'], pose['y'], pose['z']))
+            for key, pose in current_poses.items())
         if (len(self._projectiles) or self._projectile_visual_meta or
                 self._projectile_is_authority()):
             self._sample_projectile_positions(now, current_poses)
@@ -11722,14 +11734,14 @@ class BattleRuntime(object):
     def _projectile_pose_interval_travel(first, second):
         """Return a conservative composed-component angular travel bound."""
         hull = sum(abs(_angle_delta(
-            _number(first.get(name)), _number(second.get(name))))
+            first.get(name, 0.0), second.get(name, 0.0)))
             for name in ('yaw', 'pitch', 'roll'))
         turret = hull + abs(_angle_delta(
-            _number(first.get('turret_yaw')),
-            _number(second.get('turret_yaw'))))
+            first.get('turret_yaw', 0.0),
+            second.get('turret_yaw', 0.0)))
         gun = turret + abs(_angle_delta(
-            _number(first.get('gun_pitch')),
-            _number(second.get('gun_pitch'))))
+            first.get('gun_pitch', 0.0),
+            second.get('gun_pitch', 0.0)))
         return max(hull, turret, gun)
 
     def _projectile_pose_sweep_fractions(self, key, absolute_start,
@@ -11825,10 +11837,10 @@ class BattleRuntime(object):
             return None
         matrix = matrix_factory()
         matrix.setRotateYPR((
-            _number(pose.get('yaw')),
-            _number(pose.get('pitch')),
-            _number(pose.get('roll'))))
-        position = self._vector(_xyz(pose))
+            pose.get('yaw', 0.0),
+            pose.get('pitch', 0.0),
+            pose.get('roll', 0.0)))
+        position = self._vector((pose['x'], pose['y'], pose['z']))
         matrix.translation = position
         appearance = _ProjectileCollisionAppearance(
             self._runtime.math, descriptor, pose.get('turret_yaw', 0.0),
@@ -12013,9 +12025,15 @@ class BattleRuntime(object):
             # This conservative coarse pass avoids constructing native target
             # objects for distant records. The exact pass below repeats it for
             # every angularly bounded subsegment.
-            contact_position = _xyz(target_at_contact)
-            start_position = _xyz(target_at_start)
-            end_position = _xyz(target_at_end)
+            contact_position = (
+                target_at_contact['x'], target_at_contact['y'],
+                target_at_contact['z'])
+            start_position = (
+                target_at_start['x'], target_at_start['y'],
+                target_at_start['z'])
+            end_position = (
+                target_at_end['x'], target_at_end['y'],
+                target_at_end['z'])
             adjusted_start = tuple(
                 float(start[index]) + float(contact_position[index]) -
                 float(start_position[index]) for index in range(3))
@@ -13973,6 +13991,8 @@ class BattleRuntime(object):
                         None if self._worker_mode else self._local_position)
                 control_sample_before = getattr(
                     self._bots, '_sample_time_us', None)
+                # The worker's injected body sensor runs inside this update,
+                # once at the final pose after all catch-up slices.
                 outgoing_messages = self._bots.update(
                     rule_dt, now, players=players)
                 if self._worker_mode:
@@ -14029,10 +14049,9 @@ class BattleRuntime(object):
                 # MatrixAnimation interpolates between changed poses; exact
                 # duplicate render pulls do not require native rewrites.
                 if self._worker_mode:
-                    # The worker also commits native destructible queries and
-                    # canonical projectile collision poses here. Keep those
-                    # failures loud before Bot state publication or projectile
-                    # advancement can make the frame irreversible.
+                    # Keep native pose presentation failures loud before Bot
+                    # state publication or projectile advancement can make the
+                    # frame irreversible.
                     presented = self._present_authority_bot_poses(
                         presentation_states, now)
                 else:
@@ -15776,10 +15795,10 @@ class BattleRuntime(object):
         pos = self._vector(position)
         bot_state = getattr(self._bots, 'states', {}).get(int(bot_id), {})
         airborne = bool(bot_state.get('airborne', False))
-        movement_dir = int(_number(bot_state.get('movement_dir')))
-        rotation_dir = int(_number(bot_state.get('rotation_dir')))
-        turn_speed = _number(getattr(
-            self._bots, '_turn_speeds', {}).get(int(bot_id), 0.0))
+        movement_dir = int(bot_state.get('movement_dir', 0))
+        rotation_dir = int(bot_state.get('rotation_dir', 0))
+        turn_speed = getattr(
+            self._bots, '_turn_speeds', {}).get(int(bot_id), 0.0)
         # Reuse a contained exact receipt when available. While its bounded
         # optimisation queue is pending, the complete dual-height, three-lane
         # native corridor from this same authority tick is sufficient; queue
@@ -17599,35 +17618,24 @@ class BattleRuntime(object):
                 (self._clock(),))
         return False
 
-    def _bot_destructible_scan_due(self, state, now):
-        """Rate-limit proximity enumeration without skipping hull travel."""
-        bot_id = int(state['id'])
-        position = (_number(state.get('x')), _number(state.get('y')),
-                    _number(state.get('z')))
-        previous = self._bot_destructible_samples.get(bot_id)
-        if previous is not None:
-            deadline, sampled_position = previous
-            # A stopped Bot may be waiting for a blank native slot/catalog OBB
-            # to stream.  Keep a low-frequency phase even without hull travel;
-            # registration is read-only for type1/type2 catalog objects.
-            if (float(now) < float(deadline) and
-                    _distance_2d(position, sampled_position) <
-                    BOT_DESTRUCTIBLE_TRAVEL_METRES):
-                return False
-            interval = (0.50 if abs(_number(state.get('speed'))) < 1.0
-                        else BOT_DESTRUCTIBLE_SECONDS)
-            deadline = float(now) + interval
-        else:
-            # Schedule the first enumeration instead of making all 29 bots
-            # scan on the materialisation frame.  The 6 m forward sensor and
-            # 3 m travel trigger keep the hull inside its contact volume while
-            # this phase elapses.  The +1 caps the largest phase at 0.10 s.
-            phase = (((abs(bot_id) * 17 + 5 * 11) % 29) + 1) / 29.0
-            deadline = float(now) + BOT_DESTRUCTIBLE_SECONDS * phase
-            self._bot_destructible_samples[bot_id] = (
-                deadline, position)
+    def _scan_bot_destructible_body(self, bot_id, position, yaw, speed):
+        """Resolve a ready authority body for one control-cadenced scan."""
+        if self._destructibles is None:
             return False
-        self._bot_destructible_samples[bot_id] = (deadline, position)
+        record = self._records.get('bot:%s' % int(bot_id))
+        if record is None or not record.get('ready'):
+            return False
+        entity = self._server_entity(int(record['engine_id']))
+        if entity is None:
+            raise RuntimeError(
+                'authority bot destructible entity is unavailable')
+        descriptor = getattr(entity, 'typeDescriptor', None)
+        if descriptor is None:
+            raise RuntimeError(
+                'authority bot destructible descriptor is unavailable')
+        self._destructibles._fell_trees_near(
+            self._avatar.spaceID, self._vector(position), yaw, speed,
+            descriptor)
         return True
 
     def _bot_pose_relax(self, state, pose, now):
@@ -17642,7 +17650,7 @@ class BattleRuntime(object):
         when the next pose lands.
         """
         key = state.get('id')
-        yaw = _number(state.get('yaw'))
+        yaw = state.get('yaw', 0.0)
         previous = self._bot_pose_times.get(key)
         if previous is not None and previous[2] == pose:
             return None
@@ -17714,37 +17722,24 @@ class BattleRuntime(object):
             engine_id = int(record['engine_id'])
             lifecycle = self._authority_presentation_lifecycle(
                 record, bot_id)
-            x = _number(state.get('x'))
-            y = _number(state.get('y'))
-            z = _number(state.get('z'))
+            x = state.get('x', 0.0)
+            y = state.get('y', 0.0)
+            z = state.get('z', 0.0)
             position = self._vector((
                 x, y, z))
-            yaw = _number(state.get('yaw'))
-            if (self._worker_mode and self._destructibles is not None and
-                    self._bot_destructible_scan_due(state, now)):
-                entity = self._server_entity(engine_id)
-                if entity is None:
-                    raise RuntimeError(
-                        'authority bot presentation entity is unavailable')
-                descriptor = getattr(entity, 'typeDescriptor', None)
-                if descriptor is None:
-                    raise RuntimeError(
-                        'authority bot destructible descriptor is unavailable')
-                self._destructibles._fell_trees_near(
-                    self._avatar.spaceID, position, yaw,
-                    _number(state.get('speed')), descriptor)
-            pitch = _number(state.get('pitch'))
-            roll = _number(state.get('roll'))
+            yaw = state.get('yaw', 0.0)
+            pitch = state.get('pitch', 0.0)
+            roll = state.get('roll', 0.0)
             rotation = _engine_rotation(yaw, pitch, roll)
             relax_time = self._bot_pose_relax(
                 state, (tuple(position), rotation), now)
-            speed = _number(state.get('speed'))
+            speed = state.get('speed', 0.0)
             motion_alive = (
                 bool(state.get('alive', True)) and
-                _number(state.get('health', 1), 1.0) > 0.0)
+                state.get('health', 1) > 0.0)
             motion_active = motion_alive and (
                 speed != 0.0 or
-                any(_number(state.get(name)) != 0.0 for name in (
+                any(state.get(name, 0.0) != 0.0 for name in (
                     'movement_dir', 'rotation_dir', 'vertical_speed',
                     'slide_speed', 'push_x', 'push_z', 'air_lateral_x',
                     'air_lateral_z')) or
@@ -17775,8 +17770,8 @@ class BattleRuntime(object):
                     self._binding.settle_vehicle_motion(engine_id, now=now)
                 record['_authority_pose_signature'] = pose_signature
                 self._authority_pose_writes += 1
-            aim_yaw = _number(state.get('aim_yaw', yaw))
-            gun_pitch = _number(state.get('gun_pitch'))
+            aim_yaw = state.get('aim_yaw', yaw)
+            gun_pitch = state.get('gun_pitch', 0.0)
             # Hydraulic body matrices are live providers. Replaying an
             # identical setHullAimingAnglesDelta input every render callback
             # does not advance them; current hull pitch and Siege state below
@@ -17791,8 +17786,8 @@ class BattleRuntime(object):
                     engine_id, yaw, aim_yaw, gun_pitch)
                 record['_authority_aim_signature'] = aim_signature
                 self._authority_aim_writes += 1
-            turret_yaw = _number(
-                state.get('turret_yaw'), _angle_delta(yaw, aim_yaw))
+            turret_yaw = state.get(
+                'turret_yaw', _angle_delta(yaw, aim_yaw))
             projectile_pose_signature = (
                 lifecycle, x, y, z, yaw, pitch, roll, turret_yaw,
                 gun_pitch, int(state.get('siege_state', 0) or 0))
@@ -18295,6 +18290,10 @@ class BattleRuntime(object):
             projected_sender = getattr(
                 self.client, 'send_projected_bot_state', None)
             if callable(projected_sender):
+                state_kwargs['edge_sample_time_us'] = message.get(
+                    'edge_sample_time_us')
+                state_kwargs['edge_revision'] = message.get(
+                    'edge_revision')
                 return projected_sender(message.get('bots'), **state_kwargs)
             return self.client.send_bot_state(
                 message.get('bots'), **state_kwargs)
@@ -18711,14 +18710,14 @@ class BattleRuntime(object):
                 continue
             live_players.add(player_id)
             state = record.get('state') or {}
-            effective = effective_params.canonical(
-                state.get('effective_params'))
-            if effective is None:
-                raise RuntimeError(
-                    'worker player effective parameters are unavailable')
+            effective_source = state.get('effective_params')
             descriptor = entity.typeDescriptor
             gun = self._player_authority_guns.get(player_id)
             if gun is None:
+                effective = effective_params.canonical(effective_source)
+                if effective is None:
+                    raise RuntimeError(
+                        'worker player effective parameters are unavailable')
                 ammo_layout = {}
                 for row in effective['ammo']:
                     if not isinstance(row, (list, tuple)) or len(row) != 2:
@@ -18729,11 +18728,18 @@ class BattleRuntime(object):
                     descriptor, effective['loadout'])
                 gun.bind_client_contract(effective['gun'], ammo_layout)
                 gun._effective_params = effective
+                gun._effective_params_source = effective_source
                 self._player_authority_guns[player_id] = gun
-            else:
+            elif getattr(gun, '_effective_params_source', None) \
+                    is not effective_source:
+                effective = effective_params.canonical(effective_source)
+                if effective is None:
+                    raise RuntimeError(
+                        'worker player effective parameters are unavailable')
                 if getattr(gun, '_effective_params', None) != effective:
                     raise RuntimeError(
                         'worker player effective parameters changed in battle')
+                gun._effective_params_source = effective_source
         if target_player_ids is None:
             for player_id in tuple(self._player_authority_guns):
                 if player_id not in live_players:
@@ -19051,7 +19057,7 @@ class BattleRuntime(object):
             'x': position[0], 'y': position[1], 'z': position[2],
             'yaw': yaw})
         self._records[key]['projectile_collision_pose'] = \
-            self._projectile_plain_pose(position, seed_pose)
+            self._projectile_boundary_pose(position, seed_pose)
         self._materialize_record(self._records[key])
 
     def _update_entity(self, event):
@@ -19369,7 +19375,7 @@ class BattleRuntime(object):
 
     def _apply_record_pose(self, record, pose):
         state = record.get('state') or {}
-        yaw = _number(pose.get('yaw'))
+        yaw = pose.get('yaw', 0.0)
         if record.get('local'):
             # A snapshot is a delayed echo of the local native physics sample.
             # #1513 exposes no legal pose setter for a client-created Vehicle,
@@ -19378,13 +19384,13 @@ class BattleRuntime(object):
             return
         else:
             now = self._clock()
-            x = _number(pose.get('x'))
-            y = _number(pose.get('y'))
-            z = _number(pose.get('z'))
-            pitch = _number(pose.get('pitch'))
-            roll = _number(pose.get('roll'))
-            aim_yaw = _number(pose.get('aim_yaw', yaw))
-            gun_pitch = _number(pose.get('gun_pitch'))
+            x = pose.get('x', 0.0)
+            y = pose.get('y', 0.0)
+            z = pose.get('z', 0.0)
+            pitch = pose.get('pitch', 0.0)
+            roll = pose.get('roll', 0.0)
+            aim_yaw = pose.get('aim_yaw', yaw)
+            gun_pitch = pose.get('gun_pitch', 0.0)
             collision_pose = self._projectile_plain_pose(
                 (x, y, z), pose)
             collision_pose['siege_state'] = int(
@@ -21415,7 +21421,6 @@ class BattleRuntime(object):
         self._bot_fire_seen = {}
         self._bot_fire_confirmations = {}
         self._bot_launch_payloads = {}
-        self._bot_destructible_samples = {}
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
