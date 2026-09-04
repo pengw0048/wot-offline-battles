@@ -24,10 +24,12 @@ from lan_battle_server import (  # noqa: E402
     PROJECTILE_MAX_ID,
     RICOCHET_CONTINUATION_CAPABILITY, SERVER_CAPABILITIES,
     Player, SimulationWorker, SIMULATION_WORKER_AUTHORITY_ID,
+    SIMULATION_WORKER_CAPABILITY,
     SIMULATION_WORKER_ADVANCEMENT_TYPES,
     SIEGE_DISABLED, SIEGE_ENABLED, SIEGE_SWITCHING_OFF,
     SIEGE_SWITCHING_ON, SIEGE_VEHICLE_PARAMS, TICK_HZ,
     _critical_damage_delta, _critical_payload, _projectile_source_shot,
+    _projectile_wire_round,
 )
 from gui.mods.offline_lan_0922 import vehicle_physics
 from effective_params_fixture import effective_params
@@ -344,6 +346,13 @@ def _player_destructible_contact(seq=1, **changes):
 
 
 class ServerProjectileLedgerTests(unittest.TestCase):
+    def test_projectile_wire_round_is_cross_runtime_half_even(self):
+        self.assertEqual(0.007812, _projectile_wire_round(0.0078125))
+        self.assertEqual(-0.007812, _projectile_wire_round(-0.0078125))
+        self.assertEqual(0.000002, _projectile_wire_round(0.0000015))
+        self.assertEqual(
+            -1.0, math.copysign(1.0, _projectile_wire_round(-0.0000001)))
+
     def _assert_rejected_terminal_retired(self, state, projectile_id,
                                           record=None):
         """Assert a refused live terminal retired its shot silently.
@@ -1439,6 +1448,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(1, relay['shot_seq'])
         self.assertEqual(player.input_seq, relay['input_seq'])
         self.assertEqual(player.pose_time_us, relay['pose_time_us'])
+        self.assertEqual(message['trigger_server_time_ms'],
+                         relay['trigger_launch_time_ms'])
+        self.assertEqual(relay, player.pending_fire_intents[1])
         self.assertEqual((3.25, 1.5, -4.75),
                          (relay['x'], relay['y'], relay['z']))
         self.assertEqual((-0.5, 0.125),
@@ -1598,6 +1610,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             ('dispersion_bounds', {'dispersion_angle': 0.5001}, None,
              'fire_intent_field_invalid'),
             ('missing_origin', {}, 'shot_origin',
+             'fire_intent_wire_shape'),
+            ('canonical_launch_clock_injection',
+             {'trigger_launch_time_ms': 1}, None,
              'fire_intent_wire_shape'),
             ('extra_field', {'unexpected': True}, None,
              'fire_intent_wire_shape'),
@@ -1923,12 +1938,18 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         player = state.players[1]
         state.tick += 30
         self.assertTrue(_update_player_input(state, 1))
+        relayed = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            relayed.append(dict(message)) or True)
         receipt_time_ms = state._server_time_ms()
         self.assertTrue(state.submit_fire_intent(1, _fire_intent(
             state, trigger_server_time_ms=receipt_time_ms + 250)))
         self.assertEqual(
             receipt_time_ms,
             int(player.pending_fire_intents[1]['trigger_launch_time_ms']))
+        self.assertEqual(
+            receipt_time_ms, relayed[-1]['trigger_launch_time_ms'])
+        self.assertEqual(relayed[-1], player.pending_fire_intents[1])
 
         state = _state()
         player = state.players[1]
@@ -1993,6 +2014,36 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 times[-1], state.projectiles['1:p:1:1'][
                     'launch_server_time_ms'])
         self.assertEqual(1, len(set(times)))
+
+    def test_player_launch_cannot_override_the_frozen_trigger_clock(self):
+        state = _state()
+        player = state.players[1]
+        self.assertTrue(_update_player_input(state, 1))
+        relayed = []
+        state.simulation_worker.offer_reliable = lambda message: (
+            relayed.append(dict(message)) or True)
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        relay = relayed[-1]
+        launch = _launch(
+            authority_epoch=state.authority_epoch,
+            fire_intent_seq=relay['intent_seq'],
+            fire_input_seq=relay['input_seq'],
+            shot_seq=relay['shot_seq'],
+            trigger_launch_time_ms=relay['trigger_launch_time_ms'] + 1)
+
+        self.assertFalse(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID, launch))
+        self.assertEqual('shape', state.last_projectile_launch_reject_code)
+        self.assertEqual([relay['intent_seq']],
+                         list(player.pending_fire_intents))
+        self.assertFalse(state.projectiles)
+
+        launch.pop('trigger_launch_time_ms')
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID, launch))
+        self.assertEqual(
+            relay['trigger_launch_time_ms'],
+            state.pending_events[-1]['launch_server_time_ms'])
 
     def test_bot_launch_timing_is_unchanged_by_the_player_mapping(self):
         state = _state()
@@ -3844,8 +3895,46 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 'update_spotted_targets', '_apply_reported_health'):
             self.assertFalse(hasattr(BattleState, method_name))
 
+    def test_player_fire_intent_v5_cannot_join_the_v6_room(self):
+        legacy_capabilities = [
+            PROJECTILE_CAPABILITY,
+            DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
+            RAM_CONTACT_LEDGER_CAPABILITY,
+            HUMAN_RAM_TIMELINE_CAPABILITY,
+            'player_fire_intent_v5',
+            PLAYER_ENVIRONMENT_CAPABILITY,
+            EFFECTIVE_PARAMS_CAPABILITY,
+            RICOCHET_CONTINUATION_CAPABILITY,
+        ]
+        state = BattleState(map_name='04_himmelsdorf')
+
+        player, error = state.add_player(
+            _Socket(), ('127.0.0.1', 1), {
+                'client_build': CLIENT_BUILD_0922,
+                'name': 'Legacy',
+                'capabilities': legacy_capabilities,
+            })
+
+        self.assertIsNone(player)
+        self.assertEqual('unsupported_capabilities', error)
+
+        worker, error = state.add_simulation_worker(
+            _Socket(), ('127.0.0.1', 2), {
+                'role': 'simulation_worker',
+                'client_build': CLIENT_BUILD_0922,
+                'capabilities': legacy_capabilities + [
+                    SIMULATION_WORKER_CAPABILITY],
+            })
+
+        self.assertIsNone(worker)
+        self.assertEqual('unsupported_capabilities', error)
+
     def test_capability_and_active_snapshot_wire_bound(self):
         self.assertEqual('projectile_ledger_v2', PROJECTILE_CAPABILITY)
+        self.assertEqual('player_fire_intent_v6',
+                         PLAYER_FIRE_INTENT_CAPABILITY)
+        self.assertIn(PLAYER_FIRE_INTENT_CAPABILITY, SERVER_CAPABILITIES)
+        self.assertNotIn('player_fire_intent_v5', SERVER_CAPABILITIES)
         self.assertEqual('ricochet_continuation_v1',
                          RICOCHET_CONTINUATION_CAPABILITY)
         self.assertIn(RICOCHET_CONTINUATION_CAPABILITY, SERVER_CAPABILITIES)

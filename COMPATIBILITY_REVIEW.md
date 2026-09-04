@@ -1182,7 +1182,7 @@ queueing a frame, normalizing periodic yaw instead of clipping it, so normal
 #1513 values never produce an avoidable rejection.
 
 A human trigger is a space-time claim, so the fire intent carries both halves
-of it. `player_fire_intent_v5` adds a bounded presentation ledger to the
+of it. `player_fire_intent_v6` carries a bounded presentation ledger in the
 intent: one `(bot_id, bot_state_revision, presentation_time_us)` entry per
 timed Bot record the shooter was displaying, taken from the same
 `SnapshotSync` confirmed-only cursor that positioned the rendered hull. The
@@ -1219,11 +1219,29 @@ the typed terminal `trigger_clock_stale`, a claim beyond the future tolerance
 gets `trigger_clock_future`, and a missing or malformed claim gets
 `trigger_clock_invalid`. The positive tolerance covers clock and RTT
 quantization only: the canonical launch instant is `min(trigger, receipt)`,
-so an admitted projectile never starts in the server's future. That instant
-lives in the pending intent, so transport delay, worker mailbox delay,
-scheduling delay, motion-clock catch-up and an exact retry cannot reinterpret
-it; the authority catches up from it the way a Bot launch already catches up
-from `bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+so an admitted projectile never starts in the server's future. That same
+server-validated instant is frozen in both the worker relay and the pending
+intent. The worker can therefore start the admitted trajectory before its
+canonical echo without letting transport delay, worker mailbox delay,
+scheduling delay, motion-clock catch-up or an exact retry reinterpret it; the
+authority catches up from it the way a Bot launch already catches up from
+`bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+
+The worker resolves admitted human fire at the tail of the current LAN poll,
+after every snapshot and event in that receive batch is coherent, and retains
+the ordinary frame path for native-entity readiness retries. After publishing
+the launch it installs the same deterministic projectile identity and
+six-decimal wire fields locally. The six-decimal operation is an explicit
+integer-rational half-even rule because Python 2.7 and Python 3 builtin
+`round` disagree at exact half values. A matching canonical echo is therefore
+idempotent; a changed echo atomically replaces the provisional manager state,
+and a rejection rolls it back without weakening the ordinary duplicate fence.
+An older snapshot cannot retire a provisional launch or its terminal proposal
+before either outcome arrives. Bot launches remain canonical-echo gated:
+their server launch instant depends on the private admission-time
+`bot_launch_clock_offset_us`, so guessing it in the worker would break exact
+echo identity. This preserves the existing Bot timing path while testing it
+alongside the new human path.
 
 The fire-intent envelope remains exact and closed. Once the current player,
 round, `fire_intent` type and exact next `intent_seq` can be identified safely,

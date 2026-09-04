@@ -41,6 +41,23 @@ def _launch(manager, key='shot', **overrides):
         values['payload'])
 
 
+def _authoritative_snapshot(key='shot', **overrides):
+    values = {
+        'key': key,
+        'start': (1.0, 2.0, 3.0),
+        'velocity': (20.0, 0.0, 0.0),
+        'gravity': (0.0, 0.0, 0.0),
+        'launch_time': 0.0,
+        'max_time': 10.0,
+        'max_distance': 5000.0,
+        'cursor_time': 0.0,
+        'distance': 0.0,
+        'payload': {'authority': 'server'},
+    }
+    values.update(overrides)
+    return values
+
+
 class ProjectileManagerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -205,6 +222,217 @@ class ProjectileManagerTests(unittest.TestCase):
         self.assertTrue(manager.reset())
         self.assertAlmostEqual(0.01, manager.now)
         self.assertTrue(_launch(manager, launch_time=0.01))
+
+    def test_remove_keeps_identity_fence_and_duplicate_launch_is_rejected(self):
+        manager = self.module.InFlightProjectiles()
+        self.assertTrue(_launch(manager))
+        self.assertFalse(_launch(manager))
+        self.assertTrue(manager.remove('shot'))
+        self.assertFalse(manager.contains('shot'))
+        self.assertFalse(_launch(manager))
+
+    def test_active_provisional_rollback_releases_identity_for_relaunch(self):
+        manager = self.module.InFlightProjectiles()
+        self.assertTrue(_launch(manager))
+
+        self.assertTrue(manager.rollback_provisional('shot'))
+
+        self.assertFalse(manager.contains('shot'))
+        self.assertEqual([], manager.snapshot())
+        self.assertFalse(manager.rollback_provisional('shot'))
+        self.assertTrue(_launch(manager))
+
+    def test_terminal_provisional_rollback_releases_identity_for_relaunch(self):
+        manager = self.module.InFlightProjectiles()
+        self.assertTrue(_launch(manager, max_time=0.01))
+        callback_results = []
+
+        def terminal(_state, _result):
+            callback_results.append(
+                manager.rollback_provisional('shot'))
+            callback_results.append(manager.replace_authoritative(
+                _authoritative_snapshot(
+                    cursor_time=0.01, distance=1.0)))
+
+        self.assertTrue(manager.advance(
+            0.01, lambda *_args: None, terminal))
+
+        self.assertEqual([False, False], callback_results)
+        self.assertFalse(manager.contains('shot'))
+        self.assertFalse(_launch(manager, launch_time=0.01))
+        self.assertTrue(manager.rollback_provisional('shot'))
+        self.assertTrue(_launch(manager, launch_time=0.01))
+
+    def test_active_authoritative_replace_is_atomic_and_keeps_order(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager, key='shot'))
+        self.assertTrue(_launch(manager, key='peer'))
+        replacement = _authoritative_snapshot(
+            start=(5.0, 4.0, 3.0),
+            velocity=(20.0, 2.0, -4.0),
+            launch_time=0.1,
+            cursor_time=0.4,
+            distance=6.5,
+            payload={'authority': 'canonical'})
+
+        self.assertTrue(manager.replace_authoritative(replacement))
+
+        self.assertEqual(
+            ['shot', 'peer'],
+            [state['key'] for state in manager.snapshot()])
+        state = manager.get('shot')
+        self.assertEqual((5.0, 4.0, 3.0), state['start'])
+        for expected, actual in zip(
+                (11.0, 4.6, 1.8), state['position']):
+            self.assertAlmostEqual(expected, actual)
+        self.assertAlmostEqual(0.4, state['cursor_time'])
+        self.assertAlmostEqual(6.5, state['distance'])
+        self.assertEqual('canonical', state['payload']['authority'])
+
+    def test_admission_horizon_preserves_launch_between_manager_advances(self):
+        manager = self.module.InFlightProjectiles(initial_time=10.0)
+
+        self.assertTrue(manager.launch(
+            'shot', (0.0, 0.0, 0.0), (100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), 10.04, 10.0, 5000.0,
+            admission_time=10.06))
+
+        self.assertAlmostEqual(10.0, manager.now)
+        self.assertAlmostEqual(10.04, manager.get('shot')['launch_time'])
+        self.assertTrue(manager.advance(
+            10.02, lambda *_args: None,
+            lambda _state, _terminal: None))
+        self.assertAlmostEqual(0.0, manager.get('shot')['elapsed'])
+        chords = []
+        self.assertTrue(manager.advance(
+            10.06,
+            lambda _state, _start, _end, first, last:
+            chords.append((first, last)),
+            lambda _state, _terminal: None))
+        self.assertAlmostEqual(0.02, manager.get('shot')['elapsed'])
+        self.assertAlmostEqual(10.04, chords[0][0])
+        self.assertAlmostEqual(10.06, chords[-1][1])
+
+    def test_admission_horizon_rejects_unadmitted_future_without_mutation(self):
+        manager = self.module.InFlightProjectiles(initial_time=10.0)
+
+        self.assertFalse(manager.launch(
+            'future', (0.0, 0.0, 0.0), (100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), 10.07, 10.0, 5000.0,
+            admission_time=10.06))
+        self.assertFalse(manager.launch(
+            'stale-horizon', (0.0, 0.0, 0.0), (100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), 9.9, 10.0, 5000.0,
+            admission_time=9.99))
+
+        self.assertEqual([], manager.snapshot())
+
+    def test_terminal_identity_accepts_inactive_authoritative_replace(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager, max_time=0.1))
+        self.assertTrue(manager.advance(
+            0.5, lambda *_args: None,
+            lambda _state, _terminal: None))
+        self.assertFalse(manager.contains('shot'))
+
+        self.assertTrue(manager.replace_authoritative(
+            _authoritative_snapshot(
+                start=(2.0, 0.0, 0.0),
+                velocity=(10.0, 0.0, 0.0),
+                cursor_time=0.25,
+                distance=2.5)))
+
+        state = manager.get('shot')
+        self.assertIsNotNone(state)
+        self.assertEqual((4.5, 0.0, 0.0), state['position'])
+        self.assertAlmostEqual(0.25, state['cursor_time'])
+        self.assertAlmostEqual(2.5, state['distance'])
+
+    def test_authoritative_replace_changes_key_atomically_and_keeps_order(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager, key='provisional'))
+        self.assertTrue(_launch(manager, key='peer'))
+
+        self.assertTrue(manager.replace_authoritative(
+            _authoritative_snapshot(
+                key='canonical', cursor_time=0.25, distance=5.0),
+            provisional_key='provisional'))
+
+        self.assertFalse(manager.contains('provisional'))
+        self.assertTrue(manager.contains('canonical'))
+        self.assertEqual(
+            ['canonical', 'peer'],
+            [state['key'] for state in manager.snapshot()])
+        self.assertFalse(_launch(manager, key='canonical'))
+        self.assertTrue(_launch(manager, key='provisional'))
+
+    def test_invalid_cross_key_replace_preserves_provisional_state_and_fence(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager, key='provisional'))
+        before = manager.get('provisional')
+
+        self.assertFalse(manager.replace_authoritative(
+            _authoritative_snapshot(
+                key='canonical', cursor_time=0.6),
+            provisional_key='provisional'))
+
+        self.assertEqual(before, manager.get('provisional'))
+        self.assertFalse(manager.contains('canonical'))
+        self.assertFalse(_launch(manager, key='provisional'))
+        self.assertTrue(_launch(manager, key='canonical'))
+
+    def test_invalid_authoritative_replace_preserves_active_state(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager))
+        before = manager.get('shot')
+
+        self.assertFalse(manager.replace_authoritative(
+            _authoritative_snapshot(cursor_time=0.6)))
+
+        self.assertEqual(before, manager.get('shot'))
+        self.assertFalse(_launch(manager))
+
+        class Uncopyable(object):
+            def __deepcopy__(self, _memo):
+                raise RuntimeError('payload cannot be detached')
+
+        self.assertFalse(manager.replace_authoritative(
+            _authoritative_snapshot(payload=Uncopyable())))
+        self.assertEqual(before, manager.get('shot'))
+
+    def test_invalid_inactive_replace_preserves_terminal_identity_fence(self):
+        manager = self.module.InFlightProjectiles(initial_time=0.5)
+        self.assertTrue(_launch(manager, max_time=0.1))
+        self.assertTrue(manager.advance(
+            0.5, lambda *_args: None,
+            lambda _state, _terminal: None))
+
+        self.assertFalse(manager.replace_authoritative(
+            _authoritative_snapshot(cursor_time=0.6)))
+
+        self.assertFalse(manager.contains('shot'))
+        self.assertFalse(_launch(manager))
+        self.assertTrue(manager.rollback_provisional('shot'))
+
+    def test_provisional_reconciliation_is_rejected_during_advance(self):
+        manager = self.module.InFlightProjectiles()
+        self.assertTrue(_launch(manager))
+        replacement = _authoritative_snapshot()
+        callback_results = []
+
+        def observe(_state, _start, _end, _first, _last):
+            if not callback_results:
+                callback_results.append(
+                    manager.rollback_provisional('shot'))
+                callback_results.append(
+                    manager.replace_authoritative(replacement))
+
+        self.assertTrue(manager.advance(
+            0.01, observe, lambda _state, _terminal: None))
+
+        self.assertEqual([False, False], callback_results)
+        self.assertTrue(manager.contains('shot'))
+        self.assertAlmostEqual(0.01, manager.get('shot')['cursor_time'])
 
     def test_future_launch_stale_advance_and_invalid_inputs_fail_closed(self):
         manager = self.module.InFlightProjectiles()

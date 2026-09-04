@@ -246,7 +246,7 @@ DESTRUCTIBLE_CATALOG_V5_CAPABILITY = "destructible_catalog_v5"
 LEAN_SNAPSHOT_MANIFEST_CAPABILITY = "lean_snapshot_manifest_v1"
 RAM_CONTACT_LEDGER_CAPABILITY = "ram_contact_ledger_v2"
 HUMAN_RAM_TIMELINE_CAPABILITY = "human_ram_timeline_v1"
-PLAYER_FIRE_INTENT_CAPABILITY = "player_fire_intent_v5"
+PLAYER_FIRE_INTENT_CAPABILITY = "player_fire_intent_v6"
 PLAYER_ENVIRONMENT_CAPABILITY = "player_environment_v2"
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 VEHICLE_OVERLAY_CAPABILITY = "vehicle_overlay_v1"
@@ -761,6 +761,37 @@ def _bounded_float(value, low, high, inclusive_low=True):
     return value
 
 
+def _projectile_wire_round(value):
+    """Round one binary float to the six-decimal projectile wire grid.
+
+    Python 2.7 and Python 3 disagree on builtin ``round`` at exact half
+    values. This integer-rational half-even operation has identical semantics
+    in both runtimes and preserves the sign of a rounded negative zero.
+    """
+    number = float(value)
+    numerator, denominator = number.as_integer_ratio()
+    negative = math.copysign(1.0, number) < 0.0
+    scaled = abs(numerator) * 1000000
+    quotient, remainder = divmod(scaled, denominator)
+    twice_remainder = remainder * 2
+    if (twice_remainder > denominator or
+            (twice_remainder == denominator and quotient % 2)):
+        quotient += 1
+    if quotient == 0:
+        return -0.0 if negative else 0.0
+    if negative:
+        quotient = -quotient
+    return float(quotient) / 1000000.0
+
+
+def _projectile_bounded_vector(value, lows, highs):
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError("expected three-vector")
+    return [_projectile_wire_round(_bounded_float(
+        component, lows[index], highs[index]))
+        for index, component in enumerate(value)]
+
+
 def _bot_lineup_allowed_names(catalog):
     """Return selectable catalog identities without hidden test vehicles."""
     excluded_tags = {
@@ -818,42 +849,44 @@ def _projectile_source_shot(value):
             not isinstance(damage, list) or len(damage) != 2):
         raise ValueError("invalid source shell data")
     result = {
-        "speed": round(_bounded_float(
-            value.get("speed"), 0.000001, PROJECTILE_MAX_VELOCITY), 6),
-        "gravity": round(_bounded_float(
-            value.get("gravity"), 0.000001, PROJECTILE_MAX_GRAVITY), 6),
-        "maxDistance": round(_bounded_float(
+        "speed": _projectile_wire_round(_bounded_float(
+            value.get("speed"), 0.000001, PROJECTILE_MAX_VELOCITY)),
+        "gravity": _projectile_wire_round(_bounded_float(
+            value.get("gravity"), 0.000001, PROJECTILE_MAX_GRAVITY)),
+        "maxDistance": _projectile_wire_round(_bounded_float(
             value.get("maxDistance"), 0.000001,
-            PROJECTILE_MAX_DISTANCE), 6),
-        "piercingPower": [round(_bounded_float(
-            component, 0.0, 10000.0), 6) for component in piercing],
+            PROJECTILE_MAX_DISTANCE)),
+        "piercingPower": [_projectile_wire_round(_bounded_float(
+            component, 0.0, 10000.0)) for component in piercing],
         "deadeye": deadeye,
         "shell": {
             "kind": kind,
-            "caliber": round(_bounded_float(
-                shell.get("caliber"), 0.000001, 1000.0), 6),
+            "caliber": _projectile_wire_round(_bounded_float(
+                shell.get("caliber"), 0.000001, 1000.0)),
             "damage": [
-                round(_bounded_float(
-                    damage[0], 0.000001, 10000.0), 6),
-                round(_bounded_float(
-                    damage[1], 0.0, MAX_CRITICAL_DEVICE_HP), 6),
+                _projectile_wire_round(_bounded_float(
+                    damage[0], 0.000001, 10000.0)),
+                _projectile_wire_round(_bounded_float(
+                    damage[1], 0.0, MAX_CRITICAL_DEVICE_HP)),
             ],
-            "explosionRadius": round(_bounded_float(
+            "explosionRadius": _projectile_wire_round(_bounded_float(
                 shell.get("explosionRadius"), 0.0,
-                PROJECTILE_MAX_SPLASH_RADIUS), 6),
+                PROJECTILE_MAX_SPLASH_RADIUS)),
         },
     }
     if he_factor_fields.issubset(shell_fields):
         result["shell"].update({
-            "explosionDamageFactor": round(_bounded_float(
+            "explosionDamageFactor": _projectile_wire_round(_bounded_float(
                 shell.get("explosionDamageFactor"), 0.000001,
-                10000.0), 6),
-            "explosionDamageAbsorptionFactor": round(_bounded_float(
-                shell.get("explosionDamageAbsorptionFactor"),
-                0.000001, 10000.0), 6),
-            "explosionEdgeDamageFactor": round(_bounded_float(
-                shell.get("explosionEdgeDamageFactor"),
-                0.000001, 1.0), 6),
+                10000.0)),
+            "explosionDamageAbsorptionFactor": _projectile_wire_round(
+                _bounded_float(
+                    shell.get("explosionDamageAbsorptionFactor"),
+                    0.000001, 10000.0)),
+            "explosionEdgeDamageFactor": _projectile_wire_round(
+                _bounded_float(
+                    shell.get("explosionEdgeDamageFactor"),
+                    0.000001, 1.0)),
         })
     return result
 
@@ -6180,6 +6213,7 @@ class BattleState:
                 "shot_seq": int(player.fire_seq) + 1,
                 "input_seq": input_seq,
                 "pose_time_us": int(player.pose_time_us),
+                "trigger_launch_time_ms": trigger_launch_time_ms,
                 "presentation_ledger": [
                     dict(entry) for entry in presentation_ledger],
                 "shell_index": shell_index,
@@ -6204,14 +6238,12 @@ class BattleState:
             }
             player.fire_intent_seq = intent_seq
             player.fire_intent_fingerprints[intent_seq] = fingerprint
-            # The visible client freezes this value in the same round-clock
-            # domain used by projectile events. Keeping the validated value in
-            # the pending intent makes retries and delayed canonical launches
-            # reuse the trigger instant without consulting a jumping motion
-            # clock or a later server tick.
-            player.pending_fire_intents[intent_seq] = dict(
-                relay,
-                trigger_launch_time_ms=trigger_launch_time_ms)
+            # The visible client supplies a trigger claim in the round-clock
+            # domain used by projectile events. The worker relay and pending
+            # intent share the one server-validated and clamped value, so eager
+            # simulation, retries and delayed canonical launches cannot
+            # reinterpret it from a jumping motion clock or a later server tick.
+            player.pending_fire_intents[intent_seq] = dict(relay)
             while (len(player.fire_intent_fingerprints) >
                    PLAYER_FIRE_INTENT_HISTORY):
                 player.fire_intent_fingerprints.popitem(last=False)
@@ -6389,10 +6421,10 @@ class BattleState:
                     message.get("shot_seq"), 1, PROJECTILE_MAX_ID)
                 burst = self._projectile_burst(message, shot_seq)
                 shell_index = _exact_int(message.get("shell_index"), 0, 9)
-                origin = _bounded_vector(
+                origin = _projectile_bounded_vector(
                     message.get("origin"), (-5000.0, -1000.0, -5000.0),
                     (5000.0, 3000.0, 5000.0))
-                velocity = _bounded_vector(
+                velocity = _projectile_bounded_vector(
                     message.get("velocity"),
                     (-PROJECTILE_MAX_VELOCITY,) * 3,
                     (PROJECTILE_MAX_VELOCITY,) * 3)
@@ -6400,23 +6432,23 @@ class BattleState:
                                       for component in velocity))
                 if speed <= 0.001 or speed > PROJECTILE_MAX_VELOCITY:
                     raise ValueError("invalid launch speed")
-                gravity = round(_bounded_float(
+                gravity = _projectile_wire_round(_bounded_float(
                     message.get("gravity"), 0.0,
-                    PROJECTILE_MAX_GRAVITY, False), 6)
-                max_distance = round(_bounded_float(
+                    PROJECTILE_MAX_GRAVITY, False))
+                max_distance = _projectile_wire_round(_bounded_float(
                     message.get("max_distance"), 0.0,
-                    PROJECTILE_MAX_DISTANCE, False), 6)
+                    PROJECTILE_MAX_DISTANCE, False))
                 max_time_ms = _exact_int(
                     message.get("max_time_ms"), 1,
                     PROJECTILE_MAX_LIFETIME_MS)
                 if not isinstance(message.get("is_he"), bool):
                     raise ValueError("invalid HE flag")
                 is_he = message["is_he"]
-                splash_radius = round(_bounded_float(
+                splash_radius = _projectile_wire_round(_bounded_float(
                     message.get("splash_radius"), 0.0,
-                    PROJECTILE_MAX_SPLASH_RADIUS), 6)
-                penetration_factor = round(_bounded_float(
-                    message.get("penetration_factor"), 0.0, 100.0), 6)
+                    PROJECTILE_MAX_SPLASH_RADIUS))
+                penetration_factor = _projectile_wire_round(_bounded_float(
+                    message.get("penetration_factor"), 0.0, 100.0))
                 source_shot = _projectile_source_shot(
                     message.get("source_shot"))
                 fire_intent_seq = (
@@ -6592,7 +6624,7 @@ class BattleState:
                 return self._set_protocol_reject(
                     reject_kind, "identity", "source vehicle is invalid")
             try:
-                range_origin = _bounded_vector(
+                range_origin = _projectile_bounded_vector(
                     shooter_position,
                     (-5000.0, -1000.0, -5000.0),
                     (5000.0, 3000.0, 5000.0))
