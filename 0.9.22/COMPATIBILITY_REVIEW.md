@@ -1060,6 +1060,32 @@ Repair reports remain pending until the server acknowledges their proposal
 revision, so a successful socket write or an older snapshot cannot rewind the
 HUD state.
 
+Track damage follows the detailed model Update 6.4 introduced. A track
+material's live `damageKind` selects the shell damage channel:
+`common/vehicle.xml` ships both tracks as `damageKind=auto`, and
+`vehicles.py::_readArmor()` resolves `auto` to armour damage whenever the
+material armour is nonzero. A
+direct solid hit on the leading or rearmost configured driving wheel takes the
+full roll; the ordinary middle run divides it by the target chassis'
+`bulkHealthFactor`. The zone is classified from the chassis-local contact of
+the exact collision the shot resolved against, carried privately beside the
+retail four-field collision value so the stock gun-marker and `ProjectileMover`
+consumers keep their exact ABI. Because the client exposes only driving-wheel
+NAMES and radii and never their node positions, the two configured wheel sizes
+from `chassis.drivingWheelsSizes` are anchored to the two ends of
+`chassis.topRightCarryingPoint`; that is this product's documented 0.9.x
+endpoint convention, not a recovered native equation. `_readChassis()` reads
+`bulkHealthFactor` only when `not IS_CLIENT and not IS_BOT`, so the value is
+resolved once per vehicle/chassis identity from the client's own raw
+`scripts/item_defs/vehicles/<nation>/<name>.xml` section through `ResMgr` and
+cached. That raw read is unproved on #1513: if it fails, the one middle track
+hit keeps the previous device-damage result and writes one bounded diagnostic
+instead of guessing a divisor. HE direct hits and splash stay on the previous
+device-damage law, because no reviewed evidence covers the wheel zones for a
+blast. Both shipped `usa:A107_T1_HMC` chassis make the endpoint zones overlap,
+so that vehicle deliberately uses the same safe fallback rather than an
+invented split.
+
 The stock debug controller reads `BigWorld.statPing()` and
 `statLagDetected()`, which report the unavailable retail transport in this
 client-only battle. A scoped, identity-safe `DebugPanel.updateDebugInfo`
@@ -1102,6 +1128,61 @@ the snapshot publishes them so a reconnecting client resumes at the next
 eligible sequence. The shipping client canonicalizes the same envelope before
 queueing a frame, normalizing periodic yaw instead of clipping it, so normal
 #1513 values never produce an avoidable rejection.
+
+A human trigger is a space-time claim, so the fire intent carries both halves
+of it. `player_fire_intent_v5` adds a bounded presentation ledger to the
+intent: one `(bot_id, bot_state_revision, presentation_time_us)` entry per
+timed Bot record the shooter was displaying, taken from the same
+`SnapshotSync` confirmed-only cursor that positioned the rendered hull. The
+ledger carries no pose and no verdict. Spotting is not its filter:
+`SnapshotSync` positions every timed Bot whether or not it is rendered, so an
+unspotted Bot sits at the same delayed pose as a visible one and is listed,
+which is what keeps first-hit ordering along the trajectory coherent.
+"Unpresented" therefore means a record with no timed cursor at all - a first
+sample, a late join, a teleport reset, or a Bot whose retained wire samples no
+longer bracket its cursor. The server validates every entry
+against the canonical Bot lineup, the same 255-revision window the RAM
+receipt path uses, its own `bot_state_time_us`, and the shooter's trigger
+time; a record whose cursor is further behind than the wire bound is omitted
+by the client so the condition stays local to that vehicle. The hidden worker
+then rebuilds each named record's timeline from its own retained collision
+history and shifts that candidate - and only that candidate - by its own
+`pose_time_us - presentation_time_us` lag for the whole flight. An
+unpresented Bot, a remote human, which does not use the timed Bot buffer at
+all, and every Bot-fired shot keep the authoritative timeline. When the
+retained history cannot cover a compensated sample the projectile takes an
+explicit local terminal failure recording
+`historic_pose_unavailable`; it never substitutes a current pose. A trigger
+inside the first frames of a round can ask for a sample older than the worker
+has ever recorded; that rewind is clamped to the retained history and marked
+`presentation_history_clamped` rather than failing an otherwise legal shot,
+which can never move a candidate forward of its authoritative pose.
+
+The launch instant is frozen directly in the round-local server tick domain.
+At the trigger edge the visible client estimates that tick from its latest
+server-clock anchor and sends `trigger_server_time_ms` beside the frozen
+muzzle and presentation ledger. The server accepts an exact integer no more
+than 500 ms behind receipt and no more than 250 ms ahead. An older claim gets
+the typed terminal `trigger_clock_stale`, a claim beyond the future tolerance
+gets `trigger_clock_future`, and a missing or malformed claim gets
+`trigger_clock_invalid`. The positive tolerance covers clock and RTT
+quantization only: the canonical launch instant is `min(trigger, receipt)`,
+so an admitted projectile never starts in the server's future. That instant
+lives in the pending intent, so transport delay, worker mailbox delay,
+scheduling delay, motion-clock catch-up and an exact retry cannot reinterpret
+it; the authority catches up from it the way a Bot launch already catches up
+from `bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+
+The fire-intent envelope remains exact and closed. Once the current player,
+round, `fire_intent` type and exact next `intent_seq` can be identified safely,
+a malformed payload is consumed as one recorded terminal result:
+`fire_intent_wire_shape` for missing base fields or any unexpected field and
+`fire_intent_field_invalid` for invalid core field values. Missing or malformed
+ledger and trigger-clock fields keep their feature-specific typed results.
+Exact retries fold to that result, changed same-sequence payloads conflict, and
+the next intent can proceed. Messages that cannot establish the current
+identity, round, type or exact sequence still consume nothing. Extra fields
+remain rejected rather than extending the protocol.
 
 ## AI, room and round boundaries
 

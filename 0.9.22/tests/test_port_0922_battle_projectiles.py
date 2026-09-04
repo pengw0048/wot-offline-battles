@@ -217,6 +217,40 @@ def _battle(now=0.0):
     return battle, bigworld
 
 
+
+class _TrackMaterial(object):
+    """A #1513 track MaterialInfo: nonzero armour, so damageKind resolves 0."""
+
+    def __init__(self, name):
+        self.extra = types.SimpleNamespace(name=name)
+        self.armor = 20.0
+        self.vehicleDamageFactor = 0.0
+        self.damageKind = 0
+        self.chanceToHitByProjectile = 1.0
+        self.chanceToHitByExplosion = 1.0
+
+
+def _track_target_descriptor():
+    """Exact A83_T110E4 chassis geometry, health pool and bulk factor."""
+    health = {'maxHealth': 100, 'maxRegenHealth': 50}
+    return types.SimpleNamespace(
+        name='usa:A83_T110E4',
+        chassis={
+            'name': 'Chassis_T110E4',
+            'maxHealth': 250, 'maxRegenHealth': 190,
+            'bulkHealthFactor': 3.0,
+            'topRightCarryingPoint': (1.51097, 2.00908),
+            'drivingWheelsSizes': (0.329521 * 2.2, 0.3375 * 2.2)},
+        engine=dict(health, fireStartingChance=0.0),
+        hull={'ammoBayHealth': dict(health)},
+        fuelTank=dict(health), radio=dict(health), gun=dict(health),
+        turret={'turretRotatorHealth': dict(health),
+                'surveyingDeviceHealth': dict(health)},
+        miscAttrs={},
+        type=types.SimpleNamespace(name='usa:A83_T110E4', mode=0,
+                                   crewRoles=(('commander',), ('driver',))))
+
+
 def _event():
     return {
         'kind': 'shot', 'attacker': 7,
@@ -1633,6 +1667,306 @@ class BattleProjectileTests(unittest.TestCase):
             chassis_matrix,
             collide.call_args.kwargs['chassis_matrix'])
         self.assertIsNot(rendered_matrix, collide.call_args.args[1])
+
+    def _moving_target_battle(self, presentation_offsets=None,
+                             target_speed=10.0, stall=False):
+        """One player shot at a Bot driving laterally across the muzzle ray.
+
+        History is sampled on the worker's own clock.  The Bot crosses the ray
+        at ``x = 5`` at t = 0.0 and has moved a full metre past it by t = 0.1,
+        so the pose the collision path chooses is directly observable.
+        """
+        battle, unused_bigworld = _battle()
+        self.assertTrue(battle._accept_projectile_event(_event()))
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=42, isStarted=True, typeDescriptor=None,
+            isTurretDetached=False,
+            position=_Vector((5.0, 1.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 42 else None)
+        battle._projectile_current_positions = {
+            'player:7': (0.0, 0.0, 0.0), 'bot:8': (5.0, 1.0, 1.0)}
+        battle._projectile_position_history = []
+        source_pose = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        samples = ([-0.2, -0.1, 0.0, 0.1, 0.2] if not stall
+                   else [-0.2, 0.1])
+        for sample_time in samples:
+            battle._sample_projectile_positions(sample_time, {
+                'player:7': source_pose,
+                'bot:8': battle._projectile_plain_pose(
+                    (5.0, 1.0, sample_time * target_speed))})
+        meta = battle._projectile_meta['player:7:1']
+        meta['presentation_offsets'] = dict(presentation_offsets or {})
+        battle._resolve_shot_scene = mock.Mock(return_value={
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+            'world_distance': 99999.0, 'stopped_by_destructible': False,
+        })
+        battle._projectile_vehicle_collisions = mock.Mock(
+            return_value=((types.SimpleNamespace(dist=5.0),), ()))
+        return battle, target
+
+    def test_player_shot_collides_the_target_timeline_it_displayed(self):
+        # 90 ms of confirmed-only presentation delay is the normal steady
+        # state, so the shooter saw the Bot 0.9 m behind its authority pose.
+        battle, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.09})
+        state = battle._projectiles.get('player:7:1')
+
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual('impact', terminal['reason'])
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        # Each exact query carries its sub-segment's contact pose.  The
+        # compensated window is [-0.09, 0.01] s, so the contact sample sits at
+        # -0.04 s: exactly 0.9 m behind the uncompensated authority pose.
+        self.assertEqual(1, len(poses))
+        self.assertAlmostEqual(-0.4, poses[0]['z'], places=6)
+
+        # The candidate keeps advancing along its own historical timeline for
+        # the rest of the flight.  It is never frozen at the displayed pose,
+        # and it never jumps forward to the current authority pose.
+        battle._projectile_vehicle_collisions.reset_mock()
+        battle._projectile_chord(
+            state, (10.0, 1.0, 0.0), (20.0, 1.0, 0.0), 0.1, 0.2)
+        later = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        self.assertEqual(1, len(later))
+        self.assertAlmostEqual(0.6, later[0]['z'], places=6)
+
+    def test_uncompensated_shot_still_uses_the_authority_timeline(self):
+        battle, unused_target = self._moving_target_battle()
+        state = battle._projectiles.get('player:7:1')
+
+        battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        # Without presentation evidence the same chord covers [0.0, 0.1] s,
+        # one full metre of target travel later than the displayed timeline.
+        self.assertEqual(1, len(poses))
+        self.assertAlmostEqual(0.5, poses[0]['z'], places=6)
+
+    def test_stationary_target_is_unchanged_by_presentation_offsets(self):
+        compensated, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.09}, target_speed=0.0)
+        plain, unused_plain_target = self._moving_target_battle(
+            target_speed=0.0)
+        for battle in (compensated, plain):
+            battle._projectile_chord(
+                battle._projectiles.get('player:7:1'),
+                (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual(
+            [call.args[4] for call
+             in plain._projectile_vehicle_collisions.call_args_list],
+            [call.args[4] for call
+             in compensated._projectile_vehicle_collisions.call_args_list])
+
+    def test_stalled_presentation_stays_inside_the_retained_window(self):
+        # A 300 ms authority gap holds the displayed cursor near the last
+        # confirmed sample, so the shooter's own lag grows to cover it.  The
+        # worker has no finer history across its own stall, so the rewound
+        # sample is the interpolation of that same gap - bounded by it, and
+        # never replaced by a current pose.
+        battle, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.2}, stall=True)
+        state = battle._projectiles.get('player:7:1')
+
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual('impact', terminal['reason'])
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        self.assertEqual(1, len(poses))
+        self.assertAlmostEqual(-1.5, poses[0]['z'], places=6)
+
+    def test_presentation_rewind_is_clamped_to_retained_history(self):
+        # A trigger in the first frames of a round can ask for a sample older
+        # than the authority ever recorded.  The rewind is clamped to what
+        # retained history proves - never forward of the authoritative pose,
+        # and never a substituted current pose - and the boundary is recorded.
+        battle, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.3})
+        state = battle._projectiles.get('player:7:1')
+
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual('impact', terminal['reason'])
+        self.assertEqual(
+            'presentation_history_clamped',
+            battle._records['bot:8']['projectile_collision_pose_boundary'])
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        # History starts at -0.2 s, so the chord shifts back by exactly that
+        # much: the window becomes [-0.2, -0.1] s and its contact sample sits
+        # at -0.15 s, the oldest timeline the authority can prove.
+        self.assertAlmostEqual(-1.5, poses[0]['z'], places=6)
+        self.assertAlmostEqual(
+            0.2,
+            battle._projectile_meta['player:7:1'][
+                'presentation_offsets']['bot:8'],
+            places=6)
+
+        # The first chord freezes that one clamp. The next chord advances the
+        # same target timeline by 100 ms instead of repeatedly sampling the
+        # oldest retained window as the projectile clock moves forward.
+        battle._projectile_vehicle_collisions.reset_mock()
+        terminal = battle._projectile_chord(
+            state, (10.0, 1.0, 0.0), (20.0, 1.0, 0.0), 0.1, 0.2)
+        self.assertEqual('impact', terminal['reason'])
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        self.assertEqual(1, len(poses))
+        self.assertAlmostEqual(-0.5, poses[0]['z'], places=6)
+
+    def test_missing_chord_history_is_still_a_local_terminal_failure(self):
+        battle, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.09})
+        battle._projectile_position_history = \
+            battle._projectile_position_history[-1:]
+        state = battle._projectiles.get('player:7:1')
+
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual({'reason': 'callback_error', 'fraction': 0.0},
+                         terminal)
+        self.assertEqual(
+            'historic_pose_unavailable',
+            battle._projectile_meta['player:7:1'][
+                'terminal_failure_boundary'])
+        battle._projectile_vehicle_collisions.assert_not_called()
+
+    def test_first_hit_ordering_uses_each_candidates_own_cursor(self):
+        battle, unused_target = self._moving_target_battle(
+            presentation_offsets={'bot:8': 0.09})
+        near = types.SimpleNamespace(
+            id=43, isStarted=True, typeDescriptor=None,
+            isTurretDetached=False,
+            position=_Vector((3.0, 1.0, 0.0)), isAlive=lambda: True)
+        source = types.SimpleNamespace(
+            id=41, isStarted=True, typeDescriptor=None,
+            position=_Vector((0.0, 0.0, 0.0)), isAlive=lambda: True)
+        far = battle._server_entity(42)
+        battle._records['bot:9'] = {
+            'engine_id': 43, 'network_id': 9, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._server_entity = lambda entity_id: {
+            41: source, 42: far, 43: near}.get(entity_id)
+        # bot:9 is never presented, so it keeps the authoritative timeline
+        # while bot:8 is rewound by its own cursor.
+        battle._projectile_position_history = []
+        source_pose = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        for sample_time in (-0.2, -0.1, 0.0, 0.1, 0.2):
+            battle._sample_projectile_positions(sample_time, {
+                'player:7': source_pose,
+                'bot:8': battle._projectile_plain_pose(
+                    (5.0, 1.0, sample_time * 10.0)),
+                'bot:9': battle._projectile_plain_pose(
+                    (3.0, 1.0, sample_time * 10.0))})
+        battle._projectile_current_positions['bot:9'] = (3.0, 1.0, 1.0)
+        distances = {'bot:8': 5.0, 'bot:9': 3.0}
+        seen = []
+
+        def collide(record, target, start, end, pose=None):
+            key = 'bot:8' if target is far else 'bot:9'
+            seen.append((key, dict(pose)))
+            return ((types.SimpleNamespace(dist=distances[key]),), ())
+
+        battle._projectile_vehicle_collisions = collide
+        state = battle._projectiles.get('player:7:1')
+
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (10.0, 1.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual('impact', terminal['reason'])
+        self.assertEqual(
+            'bot:9',
+            battle._projectile_terminal_data['player:7:1']['target_key'])
+        compensated = [pose for key, pose in seen if key == 'bot:8']
+        authoritative = [pose for key, pose in seen if key == 'bot:9']
+        self.assertAlmostEqual(-0.4, compensated[0]['z'], places=6)
+        self.assertAlmostEqual(0.5, authoritative[0]['z'], places=6)
+
+    def test_canonical_launch_binds_its_frozen_presentation_evidence(self):
+        battle, unused_bigworld = _battle()
+        battle._worker_mode = True
+        battle._player_fire_intent_history[(7, 1)] = {
+            'pose_time_us': 5000000,
+            'presentation_ledger': [{
+                'bot_id': 8, 'bot_state_revision': 91,
+                'presentation_time_us': 4910000}],
+        }
+
+        self.assertTrue(battle._accept_projectile_event(_event()))
+        meta = battle._projectile_meta['player:7:1']
+        self.assertEqual({'bot:8': 0.09}, meta['presentation_offsets'])
+
+        # A later snapshot echo of the same canonical launch may not rebind
+        # the evidence the shot was admitted with.
+        self.assertTrue(battle._accept_projectile_event(_event()))
+        self.assertEqual({'bot:8': 0.09}, meta['presentation_offsets'])
+        self.assertIs(meta, battle._projectile_meta['player:7:1'])
+
+    def test_bot_and_remote_human_shots_carry_no_presentation_offset(self):
+        battle, unused_bigworld = _battle()
+        battle._worker_mode = True
+        battle._player_fire_intent_history[(7, 1)] = {
+            'pose_time_us': 1000000,
+            'presentation_ledger': [{
+                'bot_id': 8, 'bot_state_revision': 4,
+                'presentation_time_us': 910000}],
+        }
+
+        self.assertEqual(
+            {'bot:8': 0.09},
+            battle._projectile_presentation_offsets({
+                'shooter_kind': 'player', 'shooter_id': 7,
+                'fire_intent_seq': 1}))
+        self.assertEqual({}, battle._projectile_presentation_offsets({
+            'shooter_kind': 'bot', 'shooter_id': 8, 'fire_intent_seq': 1}))
+        # A different shooter's intent is never borrowed.
+        self.assertEqual({}, battle._projectile_presentation_offsets({
+            'shooter_kind': 'player', 'shooter_id': 9,
+            'fire_intent_seq': 1}))
+        battle._worker_mode = False
+        self.assertEqual({}, battle._projectile_presentation_offsets({
+            'shooter_kind': 'player', 'shooter_id': 7,
+            'fire_intent_seq': 1}))
+
+    def test_presentation_offsets_reject_impossible_evidence(self):
+        battle, unused_bigworld = _battle()
+        battle._worker_mode = True
+        battle._player_fire_intent_history[(7, 1)] = {
+            'pose_time_us': 1000000,
+            'presentation_ledger': [
+                {'bot_id': 8, 'bot_state_revision': 4,
+                 'presentation_time_us': 1000000},
+                {'bot_id': 9, 'bot_state_revision': 4,
+                 'presentation_time_us': 1200000},
+                {'bot_id': 10, 'bot_state_revision': 4,
+                 'presentation_time_us': 960000},
+            ],
+        }
+
+        # An entry at or after the trigger has nothing to compensate; only a
+        # genuinely delayed sample produces a rewind.
+        self.assertEqual(
+            {'bot:10': 0.04},
+            battle._projectile_presentation_offsets({
+                'shooter_kind': 'player', 'shooter_id': 7,
+                'fire_intent_seq': 1}))
 
     def test_destroyed_vehicle_still_owns_projectile_collision(self):
         battle, unused_bigworld = _battle()
@@ -3499,6 +3833,206 @@ class BattleProjectileTests(unittest.TestCase):
             10.8, target.collideSegmentExt.call_args.args[1].x)
         self.assertEqual(2, len(critical.call_args.args[1]))
         self.assertAlmostEqual(10.8, critical.call_args.args[3].x)
+
+    def test_direct_effect_forwards_frozen_local_contacts_to_the_crit_law(
+            self):
+        # The track zone law needs the chassis-local contact of the exact
+        # collision this strike resolved against, never a later live pose.
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        meta = battle._projectile_wire_meta(_event())
+        collision = types.SimpleNamespace(
+            dist=10.0, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        pointless = types.SimpleNamespace(
+            collision=types.SimpleNamespace(
+                dist=11.0, hitAngleCos=1.0, matInfo=object(),
+                compName='vehicleHull'),
+            worldNormal=None, localPoint=None)
+        evidence = types.SimpleNamespace(
+            collision=collision, worldNormal=None,
+            localPoint=(0.1, -0.4, 1.5))
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [collision],
+            'collision_evidence': [evidence, pointless],
+            'query': (_Vector((0.0, 1.0, 0.0)),
+                      _Vector((12.0, 1.0, 0.0))),
+            'impact': (10.0, 1.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact',
+                return_value={'result': 2}), \
+                mock.patch.object(
+                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                mock.patch.object(
+                    combat_rules, 'damage', return_value=390), \
+                mock.patch.object(
+                    critical_damage, 'propose_direct',
+                    return_value=(390, None, None)) as critical:
+            battle._projectile_direct_effect(
+                meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                terminal)
+
+        # Evidence with no recorded point is dropped rather than guessed.
+        self.assertEqual(
+            (('vehicleChassis', 10.0, (0.1, -0.4, 1.5)),),
+            critical.call_args.kwargs['collision_contacts'])
+
+    def test_extended_trace_replaces_the_local_contacts_it_supersedes(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        first = types.SimpleNamespace(
+            dist=9.80, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        inside = types.SimpleNamespace(
+            dist=10.79, hitAngleCos=1.0, matInfo=object(),
+            compName='vehicleChassis')
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((10.0, 0.0, 0.0)), isAlive=lambda: True,
+            collideSegmentExt=mock.Mock())
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else target if entity_id == 55 else None)
+        stale = types.SimpleNamespace(
+            collision=first, worldNormal=None, localPoint=(0.0, 0.0, -9.0))
+        extended = (
+            types.SimpleNamespace(
+                collision=first, worldNormal=None,
+                localPoint=(0.0, 0.0, 1.1)),
+            types.SimpleNamespace(
+                collision=inside, worldNormal=None,
+                localPoint=(0.0, 0.0, 2.09)))
+        battle._projectile_vehicle_collisions = mock.Mock(
+            return_value=((first, inside), extended))
+        event = _event()
+        event['source_shot']['shell']['caliber'] = 100.0
+        meta = battle._projectile_wire_meta(event)
+        terminal = {
+            'target_key': 'bot:17', 'collisions': [first],
+            'collision_evidence': [stale],
+            'query': (_Vector(), _Vector((10.0, 0.0, 0.0))),
+            'impact': (9.8, 0.0, 0.0),
+            'piercing_loss': 0.0, 'penetration_factor': 1.0,
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact',
+                return_value={'result': 2}), \
+                mock.patch.object(
+                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                mock.patch.object(
+                    combat_rules, 'damage', return_value=390), \
+                mock.patch.object(
+                    critical_damage, 'propose_direct',
+                    return_value=(390, None, None)) as critical:
+            battle._projectile_direct_effect(
+                meta, {'start': (0.0, 0.0, 0.0), 'distance': 9.8},
+                terminal)
+
+        self.assertEqual(
+            (('vehicleChassis', 9.8, (0.0, 0.0, 1.1)),
+             ('vehicleChassis', 10.79, (0.0, 0.0, 2.09))),
+            critical.call_args.kwargs['collision_contacts'])
+
+    def test_player_and_bot_shots_reach_one_track_damage_result(self):
+        # Both shooter kinds resolve here on the hidden worker, so the same
+        # frozen collision evidence must produce the same track HP loss.
+        losses = []
+        for shooter_kind, shooter_id, attacker in (
+                ('player', 7, 41), ('bot', 9, 41)):
+            battle, unused_bigworld = _battle()
+            source = battle._server_entity(41)
+            target = types.SimpleNamespace(
+                id=55, isStarted=True,
+                typeDescriptor=_track_target_descriptor(),
+                position=_Vector((10.0, 0.0, 0.0)), matrix=object(),
+                isAlive=lambda: True, health=1000,
+                devices_hp={}, _destroyed_devices=set(), _crew_ko=set(),
+                is_on_fire=False, getComponents=lambda: ())
+            battle._records['bot:17'] = {
+                'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+                'local': False, 'ready': True,
+                'state': {'health': 1000, 'alive': True,
+                          'combat_base_revision': 0, 'combat_ack_seq': 0}}
+            battle._records['%s:%s' % (shooter_kind, shooter_id)] = {
+                'engine_id': 41, 'network_id': shooter_id,
+                'kind': shooter_kind, 'local': False, 'ready': True,
+                'state': {'health': 100, 'alive': True}}
+            battle._server_entity = lambda entity_id: (
+                source if entity_id == 41 else
+                target if entity_id == 55 else None)
+            event = _event()
+            event['shooter_kind'] = shooter_kind
+            event['shooter_id'] = shooter_id
+            event['projectile_id'] = '%s:%s:1' % (shooter_kind, shooter_id)
+            if shooter_kind == 'bot':
+                # A Bot launch carries no player fire-intent sequence.
+                event.pop('fire_intent_seq')
+                event.pop('fire_input_seq')
+            meta = battle._projectile_wire_meta(event)
+            self.assertIsNotNone(meta)
+            collision = types.SimpleNamespace(
+                dist=10.0, hitAngleCos=1.0,
+                matInfo=_TrackMaterial('leftTrackHealth'),
+                compName='vehicleChassis')
+            terminal = {
+                'target_key': 'bot:17', 'collisions': [collision],
+                'collision_evidence': [types.SimpleNamespace(
+                    collision=collision, worldNormal=None,
+                    localPoint=(0.0, 0.0, 0.0))],
+                'query': (_Vector((0.0, 1.0, 0.0)),
+                          _Vector((12.0, 1.0, 0.0))),
+                'impact': (10.0, 1.0, 0.0),
+                'piercing_loss': 0.0, 'penetration_factor': 1.0,
+            }
+
+            crit_bigworld = types.ModuleType('BigWorld')
+            crit_bigworld.player = lambda: types.SimpleNamespace(
+                playerVehicleID=999,
+                arena=types.SimpleNamespace(
+                    onVehicleKilled=lambda *unused: None))
+            crit_bigworld.time = lambda: 12.0
+            with mock.patch.dict(sys.modules, {
+                        'BigWorld': crit_bigworld,
+                        'Math': types.ModuleType('Math')}), \
+                    mock.patch.object(
+                        combat_rules, 'resolve_armor_contact',
+                        return_value={'result': 2}), \
+                    mock.patch.object(
+                        combat_rules, 'he_nominal_armor',
+                        return_value=100.0), \
+                    mock.patch.object(
+                        combat_rules, 'damage', return_value=0), \
+                    mock.patch('random.uniform',
+                               side_effect=lambda low, high: low), \
+                    mock.patch('random.random', return_value=0.0):
+                effect = battle._projectile_direct_effect(
+                    meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
+                    terminal)
+
+            self.assertEqual(attacker, source.id)
+            losses.append(effect['critical_delta']['devices'])
+
+        # 390 armour damage rolled at its low bound is 292.5, divided by the
+        # chassis bulkHealthFactor 3.0 for a middle-of-track hit.
+        self.assertEqual(losses[0], losses[1])
+        self.assertEqual(
+            [{'name': 'leftTrackHealth', 'hp_loss': 97.5}], losses[0])
 
     def test_direct_hit_uses_same_frozen_target_for_armor_and_modules(self):
         battle, unused_bigworld = _battle()

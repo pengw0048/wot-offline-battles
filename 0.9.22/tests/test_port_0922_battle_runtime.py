@@ -1586,7 +1586,8 @@ class _Client(object):
         return True
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle):
+                         dispersion_angle, presentation_ledger,
+                         trigger_server_time_ms):
         self._fire_intent_seq += 1
         self.sent.append((
             'fire_intent', (shell_index,),
@@ -1594,7 +1595,10 @@ class _Client(object):
              'intent_seq': self._fire_intent_seq,
              'shot_origin': list(shot_origin),
              'shot_direction': list(shot_direction),
-             'dispersion_angle': float(dispersion_angle)}))
+             'dispersion_angle': float(dispersion_angle),
+             'presentation_ledger': [
+                 dict(entry) for entry in presentation_ledger],
+             'trigger_server_time_ms': trigger_server_time_ms}))
         return self._fire_intent_seq
 
 
@@ -2924,6 +2928,67 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         hull_start = hull_tester.localHitTest.call_args[0][0]
         self.assertEqual(-10.0, chassis_start.z)
         self.assertEqual(-20.0, hull_start.z)
+
+    def test_collision_evidence_carries_the_component_local_contact(self):
+        # The authoritative resolver needs the chassis-local contact of a
+        # track hit. It must come from the same ray the native hit test ran
+        # on, at the pose that collision was evaluated at.
+        descriptor = _Descriptor()
+        material = types.SimpleNamespace(
+            armor=20.0, damageKind=0,
+            extra=types.SimpleNamespace(name='leftTrackHealth'))
+        chassis_tester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[
+                (12.0, None, 1.0, 21), (12.0, None, 1.0, 22)]))
+        descriptor.chassis.hitTester = chassis_tester
+        descriptor.chassis.materials = {21: material, 22: material}
+        descriptor.hull.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[]))
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0), {'health': 500})
+        body_matrix = _Matrix()
+        body_matrix.translation = _Vector(0.0, 0.0, 20.0)
+        chassis_matrix = _Matrix()
+        chassis_matrix.translation = _Vector(0.0, 0.0, 10.0)
+
+        evidence = remote_vehicle_module._collide_vehicle_evidence_at_matrix(
+            vehicle, body_matrix, _Vector(0.0, 1.0, 0.0),
+            _Vector(0.0, 1.0, 100.0),
+            types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix),
+            chassis_matrix=chassis_matrix)
+
+        # The chassis ray starts at local z = -10 and the hit is 12 m along
+        # it, so the contact sits 2 m ahead of the chassis origin.
+        self.assertEqual(2, len(evidence))
+        for item in evidence:
+            self.assertEqual('vehicleChassis', item.collision.compName)
+            self.assertEqual(4, len(item.collision))
+            self.assertAlmostEqual(2.0, item.localPoint[2])
+        # Equal-distance duplicates on one component share one contact.
+        self.assertEqual(evidence[0].localPoint, evidence[1].localPoint)
+
+    def test_public_collision_path_stays_the_four_field_retail_value(self):
+        descriptor = _Descriptor()
+        material = types.SimpleNamespace(armor=20.0)
+        descriptor.chassis.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[(12.0, None, 1.0, 21)]))
+        descriptor.chassis.materials = {21: material}
+        descriptor.hull.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[]))
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0), {'health': 500})
+
+        collisions = collide_vehicle_at_matrix(
+            vehicle, _Matrix(), _Vector(0.0, 1.0, 0.0),
+            _Vector(0.0, 1.0, 100.0),
+            types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix))
+
+        self.assertEqual(1, len(collisions))
+        self.assertEqual(4, len(collisions[0]))
+        self.assertEqual(
+            ('dist', 'hitAngleCos', 'matInfo', 'compName'),
+            collisions[0]._fields)
+        self.assertFalse(hasattr(collisions[0], 'localPoint'))
 
     def test_remote_collision_preserves_ext_shape_across_ticks_and_skip_gun(self):
         descriptor = _Descriptor()
@@ -6930,6 +6995,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
         battle._start_message = {'round_id': 7}
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._records = {'player:1': record}
         battle._gun_state = gun_mechanics.GunState(
             descriptor, ammo_layout={101: 20, 102: 10})
@@ -13506,6 +13573,143 @@ class BattleRuntimeContractTests(unittest.TestCase):
     def test_battle_frame_requests_the_next_render_frame(self):
         self.assertEqual(0.0, FRAME_SECONDS)
 
+    def _live_frame_battle(self, runtime):
+        """One battle-live runtime whose frame reaches the guarded pulls."""
+        battle = BattleRuntime(runtime)
+        battle.client = types.SimpleNamespace()
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._last_frame_time = 0.98
+        battle._avatar = runtime.bigworld.avatar
+        battle._frame_diagnostics = None
+        battle._flush_pending_bot_create = mock.Mock()
+        battle._flush_pending_entities = mock.Mock()
+        battle._drain_event_journal = mock.Mock()
+        battle._maybe_send_battle_ready = mock.Mock()
+        battle._tick_critical_states = mock.Mock()
+        battle._tick_drowning = mock.Mock()
+        battle._tick_overturn = mock.Mock()
+        battle._drive_local = mock.Mock()
+        battle._update_spotting = mock.Mock()
+        battle._schedule = mock.Mock()
+        battle._fail = mock.Mock()
+        return battle
+
+    def test_a_failing_spotting_pull_is_retried_not_retired(self):
+        """Spotting is pulled every frame, so one failure must not blind the round."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._update_spotting = mock.Mock(
+            side_effect=RuntimeError('vision query failed'))
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        # disable=False: the boundary is retried on the next frame instead of
+        # being retired for the round.
+        self.assertEqual(2, battle._update_spotting.call_count)
+        self.assertIn('spotting', log.getvalue())
+        self.assertIn('degraded for this round', log.getvalue())
+
+    def test_a_failing_bot_pose_pull_is_retried_not_retired(self):
+        """A transient pose failure must not freeze every Bot for the round."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        presentation_states = mock.Mock(
+            side_effect=RuntimeError('authority pose pull failed'))
+        battle._bots = types.SimpleNamespace(
+            presentation_states=presentation_states,
+            is_authority=lambda: False,
+            update=mock.Mock(return_value=()))
+        battle._advance_artillery_arcs = mock.Mock()
+        battle._authority_players = mock.Mock(return_value=())
+        battle._enqueue_bot_message = mock.Mock(return_value=True)
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        self.assertEqual(2, presentation_states.call_count)
+        self.assertIn('bot pose presentation', log.getvalue())
+
+    def test_worker_bot_pose_failure_stops_state_and_projectile_commit(self):
+        """Worker collision poses must fail before irreversible frame work."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._worker_mode = True
+        error = RuntimeError('authority collision pose failed')
+        presentation_states = mock.Mock(side_effect=error)
+        update = mock.Mock(return_value=({'type': 'bot_state'},))
+        battle._bots = types.SimpleNamespace(
+            presentation_states=presentation_states,
+            is_authority=lambda: True,
+            update=update)
+        battle._advance_player_fire_authority = mock.Mock()
+        battle._publish_player_environment = mock.Mock()
+        battle._advance_artillery_arcs = mock.Mock()
+        battle._authority_players = mock.Mock(return_value=())
+        battle._resolve_player_destructible_contacts = mock.Mock()
+        battle._record_worker_control_diagnostics = mock.Mock()
+        battle._enqueue_bot_message = mock.Mock(return_value=True)
+        battle._advance_projectiles = mock.Mock()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            battle._frame()
+
+        update.assert_called_once()
+        battle._fail.assert_called_once_with(error)
+        battle._enqueue_bot_message.assert_not_called()
+        battle._advance_projectiles.assert_not_called()
+        battle._schedule.assert_not_called()
+
+    def test_a_failing_target_lock_validation_does_not_end_the_round(self):
+        """Releasing a stale stock lock is presentation hygiene, not authority."""
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        runtime.compatibility.validate_target_lock = mock.Mock(
+            side_effect=RuntimeError('auto aim read failed'))
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            battle._frame()
+            battle._frame()
+
+        self.assertEqual('running', battle.state)
+        battle._fail.assert_not_called()
+        self.assertEqual(2, battle._schedule.call_count)
+        self.assertEqual(
+            2, runtime.compatibility.validate_target_lock.call_count)
+        self.assertIn('target lock validation', log.getvalue())
+
+    def test_local_driving_failure_still_ends_the_round(self):
+        """Authority steps stay loud.
+
+        A frozen local player with no reported error is worse than a clean
+        round failure, so _drive_local must never be moved behind
+        _run_optional_feature.
+        """
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        error = RuntimeError('local control step failed')
+        battle._drive_local = mock.Mock(side_effect=error)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            battle._frame()
+
+        battle._fail.assert_called_once_with(error)
+        battle._schedule.assert_not_called()
+
     def test_optional_frame_failures_disable_features_not_the_round(self):
         runtime = _runtime()
         runtime.bigworld.now = 1.0
@@ -19985,6 +20189,119 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle.shoot(0.0, 0.0))
         self.assertFalse(any(kind == 'fire' for kind, unused in client.sent))
 
+    def test_presentation_ledger_names_only_verifiable_displayed_bots(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._bots = types.SimpleNamespace(states={})
+        for revision, sample_time in ((35, 50000), (36, 100000),
+                                      (37, 200000)):
+            self.assertTrue(battle._remember_ram_bot_snapshot({
+                'bot_state_revision': revision,
+                'bot_state_time_us': sample_time,
+                'bots': [{'id': bot_id, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                          'yaw': 0.0, 'alive': True}
+                         for bot_id in (11, 12, 13, 14)],
+            }))
+        battle._records = {
+            # Two live Bots on delayed confirmed-only cursors.
+            'bot:12': {'kind': 'bot', 'network_id': 12, 'ready': True,
+                       'presentation_time_us': 150000},
+            'bot:11': {'kind': 'bot', 'network_id': 11, 'ready': True,
+                       'presentation_time_us': 190000},
+            # A first sample or late join has no timed cursor yet.
+            'bot:13': {'kind': 'bot', 'network_id': 13, 'ready': True},
+            # A destroyed Bot's record is retired.
+            'bot:14': {'kind': 'bot', 'network_id': 14, 'ready': True,
+                       'tombstone': True,
+                       'presentation_time_us': 150000},
+            # A Bot whose entity has not finished onEnterWorld.
+            'bot:15': {'kind': 'bot', 'network_id': 15, 'ready': False,
+                       'presentation_time_us': 150000},
+            # Remote humans do not use the timed Bot buffer at all.
+            'player:3': {'kind': 'player', 'network_id': 3, 'ready': True,
+                         'presentation_time_us': 150000},
+        }
+
+        self.assertEqual([
+            {'bot_id': 11, 'bot_state_revision': 37,
+             'presentation_time_us': 190000},
+            {'bot_id': 12, 'bot_state_revision': 37,
+             'presentation_time_us': 150000},
+        ], battle._presentation_ledger())
+
+        # Once the exact wire samples behind a cursor are gone, the entry
+        # would be unverifiable, so it is not claimed at all.
+        battle._records['bot:12']['presentation_time_us'] = 250000
+        self.assertEqual([
+            {'bot_id': 11, 'bot_state_revision': 37,
+             'presentation_time_us': 190000},
+        ], battle._presentation_ledger())
+
+        # A cursor further behind than the wire bound is contained to that one
+        # vehicle: it is omitted, and the whole trigger still goes out.
+        battle._records['bot:12']['presentation_time_us'] = 150000
+        battle._pose_motion_time_us = 1160000
+        battle._pose_motion_local_time = battle._clock()
+        self.assertEqual([
+            {'bot_id': 11, 'bot_state_revision': 37,
+             'presentation_time_us': 190000},
+        ], battle._presentation_ledger())
+
+    def test_trigger_freezes_the_presentation_ledger_with_the_ray(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        descriptor = _Descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(0, 0, 0), (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle.client = client
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._projectile_server_time_ms = 12000
+        battle._projectile_server_local_time = battle._clock()
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = _LANInputSender(battle)
+        battle._gun_state = gun_mechanics.GunState(descriptor)
+        battle._gun_state.reload_time = 0.0
+        battle._gun_state.clip = 1
+        battle._publish_ammo_state = mock.Mock()
+        battle._publish_reload_event = mock.Mock()
+        battle._resolve_hit = mock.Mock()
+        battle._records = {'player:1': {'engine_id': 10, 'local': True}}
+        battle._bots = types.SimpleNamespace(states={})
+        battle._records['bot:5'] = {
+            'kind': 'bot', 'network_id': 5, 'ready': True,
+            'presentation_time_us': 340000}
+
+        # Before two wire samples bracket the displayed cursor there is no
+        # verifiable evidence, so the shot legally claims none and the worker
+        # collides that Bot on the authoritative trigger timeline.
+        self.assertEqual([], battle._presentation_ledger())
+
+        for revision, sample_time in ((11, 300000), (12, 400000)):
+            self.assertTrue(battle._remember_ram_bot_snapshot({
+                'bot_state_revision': revision,
+                'bot_state_time_us': sample_time,
+                'bots': [{'id': 5, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                          'yaw': 0.0, 'alive': True}],
+            }))
+
+        self.assertTrue(battle.shoot(0.2, -0.1))
+
+        intent = next(item for item in client.sent
+                      if item[0] == 'fire_intent')
+        self.assertEqual([{
+            'bot_id': 5, 'bot_state_revision': 12,
+            'presentation_time_us': 340000,
+        }], intent[2]['presentation_ledger'])
+        self.assertEqual(12000, intent[2]['trigger_server_time_ms'])
+        # The ledger is frozen before the trigger's own input checkpoint is
+        # sent, so the intent's pose time and its evidence describe one edge.
+        order = [item[0] for item in client.sent]
+        self.assertLess(order.index('input'), order.index('fire_intent'))
+
     def test_authoritative_shot_enters_native_1513_bloom_once(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -19997,6 +20314,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20031,6 +20350,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [0.0, 2.0, 0.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.25,
+            'presentation_ledger': [],
+            'trigger_server_time_ms': 0,
         }, intent[2])
         current_input = next(item for item in client.sent
                              if item[0] == 'input')
@@ -20078,6 +20399,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20131,6 +20454,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20143,7 +20468,33 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle.shoot(0.2, -0.1))
         self.assertEqual([], battle._avatar.dispersion_queries)
         client.send_fire_intent.assert_called_once_with(
-            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25)
+            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0)
+
+    def test_trigger_without_a_server_clock_is_rejected_before_send(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        client.send_fire_intent = mock.Mock(return_value=1)
+        descriptor = _Descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle.client = client
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = _LANInputSender(battle)
+        battle._gun_state = gun_mechanics.GunState(descriptor)
+        battle._gun_state.reload_time = 0.0
+        battle._gun_state.clip = 1
+
+        self.assertFalse(battle.shoot(0.2, -0.1))
+
+        client.send_fire_intent.assert_not_called()
+        self.assertEqual([], client.sent)
+        self.assertIsNone(battle._local_fire_intent)
 
     def test_trigger_advances_gun_through_hud_ready_edge_before_validation(self):
         runtime = _runtime()
@@ -20158,6 +20509,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 10000
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20256,6 +20609,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [1.0, 3.0, 3.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.02,
+            'presentation_ledger': [],
             '_client_received_time': 10.0,
             '_client_dispatch_delay': 0.01,
         }
@@ -21219,6 +21573,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [4.0, 2.0, 8.0],
             'shot_direction': [0.6, 0.0, 0.8],
             'dispersion_angle': 0.02,
+            'presentation_ledger': [{
+                'bot_id': 6, 'bot_state_revision': 41,
+                'presentation_time_us': 910}],
         }
 
         with mock.patch.object(
@@ -21241,6 +21598,23 @@ class BattleRuntimeContractTests(unittest.TestCase):
                          call.kwargs['source_shot']['shell']['damage'])
         self.assertFalse(call.kwargs['source_shot']['deadeye'])
         self.assertTrue(donated_shot['deadeye'])
+
+        # A retransmitted trigger is the same admitted shot: it keeps the
+        # frozen ray and evidence and never resamples an authoritative
+        # dispersion or publishes a second canonical launch.
+        self.assertTrue(battle.on_fire_intent(dict(intent)))
+        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.1))
+        self.assertEqual(1, client.send_projectile_launch.call_count)
+        self.assertEqual(
+            [{'bot_id': 6, 'bot_state_revision': 41,
+              'presentation_time_us': 910}],
+            battle._player_fire_intent_history[
+                (2, 3)]['presentation_ledger'])
+        # A conflicting retry under the same identity is a hard contract
+        # failure, not a silent rebind of the frozen evidence.
+        self.assertRaises(
+            RuntimeError, battle.on_fire_intent,
+            dict(intent, presentation_ledger=[]))
 
     def test_worker_promotes_the_queued_shell_at_the_shot_boundary(self):
         runtime = _runtime()
@@ -21299,6 +21673,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_origin': [4.0, 2.0, 8.0],
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.02,
+            'presentation_ledger': [],
         }
 
         self.assertTrue(battle.on_fire_intent(intent))
