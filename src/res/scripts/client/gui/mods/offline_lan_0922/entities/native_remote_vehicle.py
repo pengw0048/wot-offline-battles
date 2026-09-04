@@ -11,6 +11,7 @@ fallback for diagnostics and clients that cannot provide the pinned ABI.
 from __future__ import print_function
 
 import math
+import sys
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _RemoteShotPresenter, _blend_angle, _component_aim_angles,
@@ -104,8 +105,9 @@ class _NativeRemoteState(object):
 
     def __init__(self, bigworld, math_module, compatibility, data_links,
                  position, rotation, interpolate_motion=True,
-                 authority_geometry=False):
+                 authority_geometry=False, capability_report=None):
         self._bigworld = bigworld
+        self._capability_report = capability_report
         self._math = math_module
         self._compatibility = compatibility
         self._data_links = data_links
@@ -156,8 +158,11 @@ class _NativeRemoteState(object):
         self.track_mode = None
         self._track_feed = None
         self._track_feed_hidden = False
+        self.track_outcome = 'never fed'
+        self.track_written = None
         self.presentation_capabilities = {}
         self.presentation_errors = {}
+        self._capabilities_changed = False
 
     def _write_matrix(self, matrix):
         matrix.setRotateYPR((self.yaw, self.pitch, self.roll))
@@ -408,6 +413,8 @@ class _NativeRemoteState(object):
             return False
 
     def _record_capability(self, name, available, error=None):
+        if self.presentation_capabilities.get(name) is not bool(available):
+            self._capabilities_changed = True
         self.presentation_capabilities[name] = bool(available)
         if error is None:
             self.presentation_errors.pop(name, None)
@@ -419,6 +426,23 @@ class _NativeRemoteState(object):
                 self.presentation_capabilities
             entity._offlinePresentationErrors = self.presentation_errors
         return bool(available)
+
+    def _publish_capabilities(self):
+        """Report the binding outcome once each set of records is complete.
+
+        ``_bind_stock_motion`` fills five records one at a time, so reporting
+        every write would publish partial sets.  Call this at the two stable
+        points instead: after the initial rebind and after the first belt
+        write settles the engine-owned record.
+        """
+        # update_tracks reaches this on every belt write, so the steady
+        # state must cost one boolean test rather than a dict sort.
+        if not self._capabilities_changed:
+            return False
+        self._capabilities_changed = False
+        if not callable(self._capability_report):
+            return False
+        return bool(self._capability_report(self))
 
     def _read_vehicle_speed(self):
         return float(self.speed)
@@ -515,6 +539,7 @@ class _NativeRemoteState(object):
             'stock_suspension', suspension is not None,
             None if suspension is not None else
             'stock suspension is unavailable')
+        self._publish_capabilities()
         return bool(engine_ready or swinging is not None or
                     wheels is not None or suspension is not None)
 
@@ -582,6 +607,7 @@ class _NativeRemoteState(object):
         entity.settle_motion = self.settle_motion
         entity.update_tracks = self.update_tracks
         entity.track_scroll_readback = self.track_scroll_readback
+        entity.track_feed_state = self.track_feed_state
         entity.model.matrix = self.provider
         self._publish_pose()
         appearance = entity.appearance
@@ -691,6 +717,7 @@ class _NativeRemoteState(object):
     def update_tracks(self, left, right, mode):
         entity = self.entity
         if entity is None:
+            self.track_outcome = 'detached'
             return False
         if not self._engine_owns_entity():
             # Once BigWorld releases the PyEntity, even reading a component
@@ -701,9 +728,11 @@ class _NativeRemoteState(object):
             self.presentation_errors.setdefault(
                 'engine_owned_track_motion',
                 'BigWorld no longer owns the Vehicle entity')
+            self.track_outcome = 'not engine owned'
             return False
         appearance = getattr(entity, 'appearance', None)
         if appearance is None:
+            self.track_outcome = 'no appearance'
             return False
         left = float(left)
         right = float(right)
@@ -715,6 +744,9 @@ class _NativeRemoteState(object):
         hidden = not bool(getattr(entity, '_offlineNativeDrawVisible', True))
         if hidden:
             if self._track_feed_hidden:
+                # The belts are already settled behind a hidden compound, so
+                # the caller's authoritative speed is deliberately not fed.
+                self.track_outcome = 'hidden and settled'
                 return False
             self._track_feed_hidden = True
             left = 0.0
@@ -734,6 +766,7 @@ class _NativeRemoteState(object):
         feed = (round(left, 3), round(right, 3), tuple(mode),
                 left_contact, right_contact)
         if feed == self._track_feed:
+            self.track_outcome = 'deduplicated'
             return bool(self.presentation_capabilities.get(
                 'engine_owned_track_motion'))
         native_updated = False
@@ -758,6 +791,7 @@ class _NativeRemoteState(object):
             self._record_capability(
                 'engine_owned_track_motion', False,
                 'Appearance/filter ownership or movementInfo is unavailable')
+        self._publish_capabilities()
         if not hidden and mode != self.track_mode:
             appearance.changeEngineMode(mode, True)
             self.track_mode = mode
@@ -770,7 +804,24 @@ class _NativeRemoteState(object):
         # allowed to retry instead of becoming a permanent false success.
         if native_updated:
             self._track_feed = feed
+        self.track_written = (left, right)
+        self.track_outcome = ('hidden and settling' if hidden else
+                              ('engine and python' if native_updated
+                               else 'python only'))
         return bool(native_updated)
+
+    def track_feed_state(self):
+        """Report what the last belt update actually wrote, and why.
+
+        ``_update_bot_tracks`` logs the authoritative feed it computed, which
+        is not what reaches the controller on a hide edge or a deduplicated
+        sample.  Publishing the effective write and its outcome keeps a zero
+        readback attributable instead of looking like a native failure.
+        """
+        return (self.track_written, self.track_outcome,
+                bool(self._track_feed_hidden),
+                self.presentation_capabilities.get(
+                    'engine_owned_track_motion'))
 
     def track_scroll_readback(self):
         if self.track_scroll is None:
@@ -826,9 +877,32 @@ class NativeRemoteVehicleFactory(object):
         self._failed_creates = set()
         self._descriptors = {}
         self._hit_testers = {}
+        self._reported_capabilities = set()
         self.track_animation_error = None
         self._shot_presenter = _RemoteShotPresenter(
             bigworld, math_module, model_assembler, self._space_id)
+
+    def report_capabilities(self, state):
+        """Log each distinct stock presentation binding result once a round.
+
+        ``_bind_stock_motion`` records whether the stock engine audition,
+        swinging animator, LOD position, wheels animator and suspension were
+        rebound to the copied LAN pose, and ``update_tracks`` adds the
+        engine-owned belt write.  Nothing consumed those records, so a real
+        battle could not show which stock components were live.  One line per
+        distinct outcome keeps a full lineup readable.
+        """
+        capabilities = state.presentation_capabilities
+        signature = tuple(sorted(capabilities.items()))
+        if not signature or signature in self._reported_capabilities:
+            return False
+        self._reported_capabilities.add(signature)
+        errors = dict(state.presentation_errors)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] PRESENTATION %s%s\n' % (
+                ' '.join('%s=%s' % (name, value) for name, value in signature),
+                '' if not errors else ' errors=%r' % (errors,)))
+        return True
 
     def prepare_descriptor(self, descriptor):
         # Stock Vehicle.prerequisites/CompoundAppearance own BSP references.
@@ -853,7 +927,8 @@ class NativeRemoteVehicleFactory(object):
             self._bigworld, self._math, self._compatibility,
             self._data_links, position, rotation,
             interpolate_motion=self._interpolate_motion,
-            authority_geometry=self._authority_geometry)
+            authority_geometry=self._authority_geometry,
+            capability_report=self.report_capabilities)
         self._vehicles[int(entity_id)] = None
         try:
             self._binding.arena_vehicle_added(entity_id, {

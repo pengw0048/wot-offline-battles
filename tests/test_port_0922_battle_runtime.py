@@ -35,6 +35,8 @@ from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, _NativeRemoteState, present_shot_impulse
+from gui.mods.offline_lan_0922.entities import native_remote_vehicle as \
+    native_remote_vehicle_module
 
 
 class _Vector(object):
@@ -2518,6 +2520,65 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual([moving, moving], vehicle.engine_modes)
         self.assertTrue(factory.destroy(vehicle_id))
 
+    def test_hidden_belt_settle_is_reported_as_a_deliberate_zero(self):
+        """A zero readback must be attributable, not look like a failure.
+
+        The runtime logs the authoritative belt speed it computed, which is
+        not what reaches the controller once a hidden compound has been
+        settled.  Real client logs therefore showed a non-zero ``fed`` beside
+        a ``0.0`` scroll readback with no recorded cause.
+        """
+        runtime = _runtime()
+        holder = {}
+        binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            _VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=lambda entity_id:
+            holder['factory'].get(entity_id))
+        factory = NativeRemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7,
+            binding=binding, compatibility=runtime.compatibility)
+        holder['factory'] = factory
+        properties = binding.properties_from_compact_descr(
+            'ussr:R11_MS-1', 2, 'Native remote')
+        vehicle_id = factory.create(
+            _Descriptor(), properties, _Vector(), (0.0, 0.0, 0.0))
+        pending = runtime.bigworld.pending_entities[vehicle_id]
+        pending.filter.movementInfo = object()
+        pending.filter.setTracksSpeed = mock.Mock()
+        pending.appearance.filter = pending.filter
+        pending.appearance.flyingInfoProvider = types.SimpleNamespace(
+            isLeftSideFlying=False, isRightSideFlying=False)
+        runtime.bigworld.enter_pending_vehicle(vehicle_id)
+        self.assertTrue(factory.is_ready(vehicle_id))
+        vehicle = factory.get(vehicle_id)
+        moving = (ENGINE_MODE_RUNNING, 1)
+
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual(
+            ((2.0, 3.0), 'engine and python', False, True),
+            vehicle.track_feed_state())
+        # An unchanged feed keeps reporting the engine-owned write it made.
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual('deduplicated', vehicle.track_feed_state()[1])
+
+        vehicle._offlineNativeDrawVisible = False
+        self.assertTrue(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual(
+            ((0.0, 0.0), 'hidden and settling', True, True),
+            vehicle.track_feed_state())
+        # This is the shape the real client logged: a live authoritative feed
+        # whose effective write is the deliberate hide-edge zero.
+        self.assertFalse(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual(
+            ((0.0, 0.0), 'hidden and settled', True, True),
+            vehicle.track_feed_state())
+
+        runtime.bigworld.entities.pop(vehicle_id)
+        self.assertFalse(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual('not engine owned', vehicle.track_feed_state()[1])
+
     def test_guest_native_vehicle_uses_one_stable_pose_matrix(self):
         runtime = _runtime()
         holder = {}
@@ -2678,6 +2739,84 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         vehicle.appearance.swingingAnimator = types.SimpleNamespace()
         vehicle.appearance.receiveShotImpulse = mock.Mock()
         return runtime, factory, binding, vehicle_id, vehicle
+
+    def test_bot_track_report_names_the_effective_write(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._remote_factory = factory
+        vehicle.update_tracks(2.0, 3.0, (ENGINE_MODE_RUNNING, 1))
+        stream = io.StringIO()
+
+        with mock.patch.object(battle_runtime_module.sys, 'stdout', stream):
+            self.assertTrue(battle._report_bot_tracks(
+                vehicle, 9.4, 9.4, (ENGINE_MODE_RUNNING, 1), 1.0))
+            self.assertFalse(battle._report_bot_tracks(
+                vehicle, 9.4, 9.4, (ENGINE_MODE_RUNNING, 1), 2.0))
+
+        line = stream.getvalue()
+        self.assertIn('fed=(9.400, 9.400)', line)
+        self.assertIn('wrote=(2.0, 3.0)', line)
+        self.assertIn('outcome=python only', line)
+        self.assertIn('hidden=False', line)
+
+    def test_stock_presentation_bindings_are_reported_once_per_outcome(self):
+        """One battle must show which stock components were actually bound.
+
+        ``_bind_stock_motion`` recorded the engine audition, swinging
+        animator, LOD position, wheels and suspension results and nothing
+        consumed them, so a real client log could not distinguish a rebound
+        stock component from a missing one.
+        """
+        runtime = _runtime()
+        holder = {}
+        binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            _VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=lambda entity_id:
+            holder['factory'].get(entity_id))
+        factory = NativeRemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7,
+            binding=binding, compatibility=runtime.compatibility)
+        holder['factory'] = factory
+        properties = binding.properties_from_compact_descr(
+            'ussr:R11_MS-1', 2, 'Native remote')
+        identifiers = []
+        for unused_index in range(2):
+            vehicle_id = factory.create(
+                _Descriptor(), properties, _Vector(), (0.0, 0.0, 0.0))
+            pending = runtime.bigworld.pending_entities[vehicle_id]
+            pending.filter.movementInfo = object()
+            pending.filter.setTracksSpeed = mock.Mock()
+            pending.appearance.filter = pending.filter
+            pending.appearance.flyingInfoProvider = types.SimpleNamespace(
+                isLeftSideFlying=False, isRightSideFlying=False)
+            pending.appearance.swingingAnimator = types.SimpleNamespace(
+                worldMatrix=None, placingCompensationMatrix=None)
+            runtime.bigworld.enter_pending_vehicle(vehicle_id)
+            identifiers.append(vehicle_id)
+        stream = io.StringIO()
+
+        with mock.patch.object(
+                native_remote_vehicle_module.sys, 'stdout', stream):
+            for vehicle_id in identifiers:
+                self.assertTrue(factory.is_ready(vehicle_id))
+            # The engine-owned belt record only exists after the first write,
+            # so it is the second stable reporting point.
+            self.assertTrue(factory.get(identifiers[0]).update_tracks(
+                2.0, 3.0, (ENGINE_MODE_RUNNING, 1)))
+            self.assertTrue(factory.get(identifiers[1]).update_tracks(
+                2.0, 3.0, (ENGINE_MODE_RUNNING, 1)))
+
+        lines = stream.getvalue().strip().splitlines()
+        # Two Bots with one shared outcome publish one line per stable point.
+        self.assertEqual(2, len(lines))
+        self.assertIn('body_swinging=True', lines[0])
+        self.assertIn('stock_wheels=False', lines[0])
+        self.assertNotIn('engine_owned_track_motion', lines[0])
+        self.assertIn('WheelsAnimator is unavailable', lines[0])
+        self.assertIn('engine_owned_track_motion=True', lines[1])
 
     def test_shot_impulse_normalises_direction_and_keeps_retail_impulse(self):
         appearance = types.SimpleNamespace(

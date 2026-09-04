@@ -18143,20 +18143,29 @@ class BattleRuntime(object):
     def _report_bot_tracks(self, vehicle, left, right, mode, now):
         """Log what the scroll controller actually holds.
 
-        ``leftContact``/``rightContact`` still reading the constructor's
-        ``True`` and ``leftScroll``/``rightScroll`` still reading ``0.0`` mean
-        the controller's 20 Hz updater never ran, which is what a filter with
-        no owning entity looks like from Python.
+        ``fed`` is the authoritative belt speed this runtime computed, which
+        is not always what reaches the controller: a hidden compound is
+        settled to zero on its hide edge and an unchanged feed is
+        deduplicated.  ``wrote`` and ``outcome`` name the effective write, so
+        ``leftScroll``/``rightScroll`` reading ``0.0`` stays attributable
+        rather than looking like a native failure.  A zero readback with
+        ``outcome=engine and python`` and the constructor's ``True`` contacts
+        is the real defect: the controller's 20 Hz updater never ran, which is
+        what a filter with no owning entity looks like from Python.
         """
         if self._track_report_time is not None and (
                 now - self._track_report_time) < TRACK_REPORT_SECONDS:
             return False
         self._track_report_time = now
+        feed_state = getattr(vehicle, 'track_feed_state', None)
+        written, outcome, hidden, engine_owned = (
+            feed_state() if callable(feed_state)
+            else (None, 'unavailable', None, None))
         sys.stdout.write(
             '[Offline LAN 0.9.22] bot tracks id=%s mode=%r fed=(%.3f, %.3f) '
-            'scroll=%r error=%r\n' % (
-                vehicle.bw_entity_id, mode, left, right,
-                vehicle.track_scroll_readback(),
+            'wrote=%r outcome=%s hidden=%s engine=%s scroll=%r error=%r\n' % (
+                vehicle.bw_entity_id, mode, left, right, written, outcome,
+                hidden, engine_owned, vehicle.track_scroll_readback(),
                 self._remote_factory.track_animation_error))
         return True
 
