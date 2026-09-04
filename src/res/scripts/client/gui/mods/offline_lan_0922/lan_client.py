@@ -198,13 +198,14 @@ class _OutboundPayloadError(Exception):
 
 
 class _PreencodedOutbound(object):
-    """Immutable wire bytes owned by the reliable outbound queue."""
+    """Immutable wire bytes and private reliable-queue classification."""
 
-    __slots__ = ('payload', 'coalesce_key')
+    __slots__ = ('payload', 'coalesce_key', 'message_type')
 
-    def __init__(self, payload, coalesce_key=None):
+    def __init__(self, payload, coalesce_key=None, message_type=None):
         self.payload = payload
         self.coalesce_key = coalesce_key
+        self.message_type = message_type
 
 
 def _json_text_size(value):
@@ -3665,11 +3666,21 @@ class LANClient(object):
                 for index in range(len(self._outbound_queue) - 1, -1, -1):
                     queued = self._outbound_queue[index][1]
                     if isinstance(queued, _PreencodedOutbound):
-                        if queued.coalesce_key == message.coalesce_key:
-                            replacement_index = index
-                        # A different canonical Bot checkpoint is a state
-                        # edge.  Never move a later state back across it.
-                        break
+                        if queued.coalesce_key is not None:
+                            if queued.coalesce_key == message.coalesce_key:
+                                replacement_index = index
+                            # A different canonical Bot checkpoint is a
+                            # state edge. Never move a later state back across
+                            # it.
+                            break
+                        if queued.message_type == 'bot_ram_report':
+                            # The server validates this one-shot contact
+                            # against the immediately preceding authority
+                            # pose. A newer checkpoint may not replace that
+                            # state from across the event even when its
+                            # continuous key is equal.
+                            break
+                        continue
                     if (isinstance(queued, dict) and
                             queued.get('type') == 'bot_ram_report'):
                         # The server validates this one-shot contact against
@@ -3749,9 +3760,12 @@ class LANClient(object):
         encoded_size = len(payload)
         if encoded_size > MAX_MESSAGE_BYTES:
             return False
+        message_type = (
+            message.get('type') if isinstance(message, dict) else None)
         return self._enqueue_outbound(
-            _PreencodedOutbound(payload, coalesce_key), encoded_size,
-            generation)
+            _PreencodedOutbound(
+                payload, coalesce_key, message_type=message_type),
+            encoded_size, generation)
 
     def _send(self, message):
         """Freeze and enqueue one reliable message without wire I/O."""

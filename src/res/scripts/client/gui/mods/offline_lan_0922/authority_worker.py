@@ -172,7 +172,8 @@ class AuthorityWorkerLANClient(LANClient):
 
     def _outbound_discrete_headroom_enabled(self, message):
         """Reserve bounded backlog space for worker combat/protocol edges."""
-        kind = message.get('type') if isinstance(message, dict) else None
+        kind = (message.get('type') if isinstance(message, dict) else
+                getattr(message, 'message_type', None))
         return kind not in (
             'bot_state', 'bot_observation', 'projectile_progress',
             'simulation_progress', 'player_environment')
@@ -187,6 +188,10 @@ class AuthorityWorkerLANClient(LANClient):
                 SIMULATION_WORKER_CAPABILITY],
             'role': WORKER_ROLE,
         }
+
+    def _send(self, message):
+        """Queue one worker-owned message as immutable encoded wire bytes."""
+        return self._send_preencoded_trusted(message)
 
     def send_projected_bot_state(self, bots, sample_time_us=None,
                                  source_batch_horizon_us=None,

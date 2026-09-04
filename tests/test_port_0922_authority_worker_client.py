@@ -251,6 +251,12 @@ def _projected_bot_equipment_states():
         for contract in contracts]
 
 
+def _queued_wire(value):
+    if isinstance(value, lan_client_module._PreencodedOutbound):
+        return json.loads(value.payload.decode('utf-8'))
+    return value
+
+
 class AuthorityWorkerClientTests(unittest.TestCase):
     @staticmethod
     def _active_client():
@@ -436,6 +442,63 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(100.0,
                          wire['bots'][0]['critical']['devices'][0]['hp'])
 
+    def test_worker_owned_message_is_encoded_without_recursive_walks(self):
+        client = self._active_client()
+        bases = {'1': {'points': 10}}
+        dumps_calls = []
+        original_dumps = lan_client_module.json.dumps
+
+        def recording_dumps(message, *args, **kwargs):
+            dumps_calls.append((message.get('type'), dict(kwargs)))
+            return original_dumps(message, *args, **kwargs)
+
+        with mock.patch.object(
+                lan_client_module, '_freeze_outbound',
+                side_effect=AssertionError('worker payload was copied')):
+            with mock.patch.object(
+                    lan_client_module, '_json_text_size',
+                    side_effect=AssertionError('worker text was measured')):
+                with mock.patch.object(
+                        lan_client_module.json, 'dumps',
+                        side_effect=recording_dumps):
+                    self.assertTrue(client.send_rules_state(bases))
+                    bases['1']['points'] = 99
+                    generation = client._transport_generation
+                    queued = client._dequeue_outbound(generation)
+                    self.assertIsNotNone(queued)
+                    self.assertTrue(client._send_wire(
+                        queued[1], client.sock, generation))
+
+        self.assertEqual([('rules_state', {
+            'separators': (',', ':'), 'allow_nan': False})], dumps_calls)
+        self.assertIsInstance(
+            queued[1], lan_client_module._PreencodedOutbound)
+        self.assertEqual('rules_state', queued[1].message_type)
+        self.assertEqual(queued[2], len(client.sock.sent[0]))
+        wire = json.loads(client.sock.sent[0].decode('utf-8'))
+        self.assertEqual(10, wire['rules']['bases']['1']['points'])
+
+    def test_worker_owned_message_keeps_nan_and_exact_size_boundaries(self):
+        client = self._active_client()
+        self.assertFalse(client._send({
+            'type': 'simulation_progress', 'frame_seq': float('nan')}))
+        self.assertEqual([], client._outbound_queue)
+
+        message = {'type': 'simulation_progress', 'frame_seq': 1}
+        payload = (json.dumps(message, separators=(',', ':')) +
+                   '\n').encode('utf-8')
+        original_limit = lan_client_module.MAX_MESSAGE_BYTES
+        try:
+            lan_client_module.MAX_MESSAGE_BYTES = len(payload) - 1
+            self.assertFalse(client._send(message))
+            lan_client_module.MAX_MESSAGE_BYTES = len(payload)
+            self.assertTrue(client._send(message))
+        finally:
+            lan_client_module.MAX_MESSAGE_BYTES = original_limit
+
+        self.assertEqual(1, len(client._outbound_queue))
+        self.assertEqual(len(payload), client._outbound_queue[0][2])
+
     def test_worker_bot_state_trusted_path_relies_on_projection_and_encoder(self):
         client = self._active_client()
         extra = _projected_bot_state()
@@ -587,10 +650,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
              if isinstance(item[1], lan_client_module._PreencodedOutbound)
              else item[1]['type'])
             for item in client._outbound_queue])
-        wires = [
-            json.loads(item[1].payload.decode('utf-8'))
-            for item in client._outbound_queue
-            if isinstance(item[1], lan_client_module._PreencodedOutbound)]
+        wires = [_queued_wire(item[1])
+                 for item in client._outbound_queue]
+        wires = [wire for wire in wires if wire['type'] == 'bot_state']
         self.assertEqual(9.0, wires[-1]['bots'][0]['x'])
 
     def test_worker_ram_event_preserves_its_preceding_pose_barrier(self):
@@ -616,10 +678,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
              if isinstance(item[1], lan_client_module._PreencodedOutbound)
              else item[1]['type'])
             for item in client._outbound_queue])
-        states = [
-            json.loads(item[1].payload.decode('utf-8'))
-            for item in client._outbound_queue
-            if isinstance(item[1], lan_client_module._PreencodedOutbound)]
+        states = [_queued_wire(item[1])
+                  for item in client._outbound_queue]
+        states = [state for state in states if state['type'] == 'bot_state']
         self.assertEqual([5.0, 20.0], [
             state['bots'][0]['x'] for state in states])
 
@@ -666,7 +727,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
         self.assertEqual(4, len(client._outbound_queue))
         self.assertEqual('projectile_launch',
-                         client._outbound_queue[2][1]['type'])
+                         _queued_wire(client._outbound_queue[2][1])['type'])
 
     def test_worker_normal_30hz_pose_backlog_stays_bounded(self):
         client = self._active_client()
@@ -733,7 +794,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertTrue(client.connected)
         self.assertEqual(2, len(client._outbound_queue))
         self.assertEqual('projectile_launch',
-                         client._outbound_queue[1][1]['type'])
+                         _queued_wire(client._outbound_queue[1][1])['type'])
         self.assertIsNone(client.last_error)
 
     def test_worker_bot_state_encoding_cannot_cross_transport_generation(self):
