@@ -1796,7 +1796,12 @@ class OfflineCompatibility(object):
                 compatibility._target_lock_input_avatar = None
                 if target is None and candidate is not None:
                     target = candidate
-            if (candidate is not None and
+            # Map a native selection back to the gameplay adapter that owns
+            # it.  ``target`` must be a live entity: a native remote candidate
+            # has no ``bw_entity``, so without the explicit None test stock's
+            # own ``autoAim(None)`` unlock would match that missing attribute
+            # and silently lock whatever the crosshair last outlined.
+            if (candidate is not None and target is not None and
                     target is getattr(candidate, 'bw_entity', None)):
                 target = candidate
             if not bool(getattr(

@@ -19350,8 +19350,8 @@ class BattleRuntime(object):
                 vehicle._offlineNativeMarkerVisible = bool(world_started)
         return bool(world_started or minimap_started)
 
-    def _strategic_spg_view_active(self):
-        """Whether this client currently owns the stock SPG overhead camera."""
+    def _spg_aiming_view_active(self):
+        """Whether exact #1513 currently owns an SPG aiming camera."""
         descriptor = self._local_descriptor
         tags = _field(_field(descriptor, 'type', {}), 'tags', ()) or ()
         if 'SPG' not in tags:
@@ -19360,9 +19360,11 @@ class BattleRuntime(object):
         modes = getattr(self._runtime.avatar_input_handler, '_CTRL_MODE', None)
         if handler is None or modes is None:
             return False
-        strategic = getattr(modes, 'STRATEGIC', 'strategic')
-        return getattr(
-            handler, '_AvatarInputHandler__ctrlModeName', None) == strategic
+        current = getattr(handler, '_AvatarInputHandler__ctrlModeName', None)
+        # The exact-client ABI audit pins both names and their literal values.
+        # Missing attributes are a client-contract failure, not a mode that
+        # should be guessed through a fallback.
+        return current in (modes.STRATEGIC, modes.ARTY)
 
     def _spot_presentation_visibility(
             self, entity, remembered, was_model_visible=False):
@@ -19370,10 +19372,12 @@ class BattleRuntime(object):
 
         The minimap follows team spotting memory.  The ordinary world model
         and 3D marker remain bounded by the 565 m entity AOI, except that an
-        SPG in strategic view must be able to aim at every team-spotted target
-        in its shell range.  Exact #1513 keeps an already-present entity for
-        the additional five-metre ``CIRCULAR_AOI_MARGIN`` to prevent boundary
-        flicker.
+        SPG in either of its aiming cameras must be able to aim at every
+        team-spotted target in its shell range.  The exemption covers the
+        whole aiming slice so switching between those cameras cannot make an
+        engaged target disappear.  Exact #1513 keeps an already-present entity
+        for the additional five-metre ``CIRCULAR_AOI_MARGIN`` to prevent
+        boundary flicker.
         """
         remembered = bool(remembered)
         aoi_radius = spotting.VEHICLE_AOI_RADIUS
@@ -19382,7 +19386,7 @@ class BattleRuntime(object):
         within_aoi = _distance_2d(
             self._local_position, _xyz(entity.position)) <= aoi_radius
         model_visible = remembered and (
-            within_aoi or self._strategic_spg_view_active())
+            within_aoi or self._spg_aiming_view_active())
         return model_visible, remembered
 
     def _apply_spot_presentation(self, record, entity, remembered):
@@ -20041,7 +20045,8 @@ class BattleRuntime(object):
                 float(record.get('spot_until', 0.0)),
                 float(record.get('radio_spot_until', 0.0)))
             # Team memory owns the marker.  The ordinary 565 m vehicle AOI
-            # owns the model except while an SPG is using strategic view.
+            # owns the model except while an SPG is using one of its aiming
+            # cameras.
             previous = (
                 bool(record.get('spot_visible', False)),
                 bool(record.get(
