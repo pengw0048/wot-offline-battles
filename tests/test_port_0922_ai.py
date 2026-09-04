@@ -1543,6 +1543,74 @@ class BotAiPortTests(unittest.TestCase):
         self.assertEqual('drive', order['recovery_mode'])
         self.assertAlmostEqual(desired_yaw, order['target_yaw'])
 
+    def test_route_heading_drift_does_not_acquire_an_avoidance_lease(self):
+        driver = LocalDriver()
+        target = (0.0, 0.0, 10.0)
+        driver.drive(
+            137, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
+            target, (), lambda unused_yaw: True)
+
+        held = driver.drive(
+            137, (1.0, 0.0, 1.0), 0.0, 4.0, 0.1,
+            target, (), lambda unused_yaw: True)
+        refreshed = driver.drive(
+            137, (1.0, 0.0, 2.0), 0.0, 4.0, 0.3,
+            target, (), lambda unused_yaw: True)
+
+        self.assertEqual('drive', held['recovery_mode'])
+        self.assertEqual('drive', refreshed['recovery_mode'])
+        self.assertAlmostEqual(math.atan2(-1.0, 8.0),
+                               refreshed['target_yaw'])
+
+    def test_separation_heading_releases_when_hulls_no_longer_overlap(self):
+        driver = LocalDriver()
+        neighbour = {'position': (3.0, 0.0, 0.0), 'yaw': 0.0,
+                     'half_length': 3.5, 'half_width': 1.5}
+        target = (0.0, 0.0, 8.0)
+        first = driver.drive(
+            138, (0.0, 0.0, 0.0), 0.0, 1.0, 0.1,
+            target, (neighbour,), lambda unused_yaw: True,
+            half_length=3.5, half_width=1.5)
+        # The other hull moves away before the former 1.2-second lease ends.
+        neighbour['position'] = (10.0, 0.0, 0.0)
+        released = driver.drive(
+            138, (0.0, 0.0, 0.1), 0.0, 1.0, 0.1,
+            target, (neighbour,), lambda unused_yaw: True,
+            half_length=3.5, half_width=1.5)
+
+        self.assertEqual('avoid', first['recovery_mode'])
+        self.assertEqual('drive', released['recovery_mode'])
+        self.assertAlmostEqual(0.0, released['target_yaw'])
+
+    def test_separation_behind_hull_turns_before_driving_into_overlap(self):
+        driver = LocalDriver()
+        order = driver.drive(
+            139, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1,
+            (50.0, 0.0, 0.0), ({
+                'position': (0.0, 0.0, 6.0), 'yaw': 0.0,
+                'half_length': 3.5, 'half_width': 1.7,
+            },), lambda unused_yaw: True)
+
+        self.assertEqual('avoid', order['recovery_mode'])
+        self.assertGreater(order['target_yaw'], math.pi * 0.5)
+        self.assertEqual(0.0, order['throttle'])
+        self.assertGreater(order['turn'], 0.0)
+
+    def test_target_behind_hull_brakes_before_route_heading_lease_expires(self):
+        driver = LocalDriver()
+        target = (50.0, 0.0, 0.0)
+        first = driver.drive(
+            140, (0.0, 0.0, 0.0), 0.0, 4.0, 0.1,
+            target, (), lambda unused_yaw: True)
+        second = driver.drive(
+            140, (0.0, 0.0, 3.0), 0.0, 4.0, 0.1,
+            target, (), lambda unused_yaw: True)
+
+        self.assertEqual(1.0, first['throttle'])
+        self.assertAlmostEqual(first['target_yaw'], second['target_yaw'])
+        self.assertEqual('drive', second['recovery_mode'])
+        self.assertEqual(0.0, second['throttle'])
+
     def test_failed_yaw_cache_uses_circular_buckets(self):
         driver = LocalDriver()
         state = driver._state(136, (0.0, 0.0, 0.0))

@@ -185,6 +185,7 @@ class LocalDriver(object):
 				'recovery_time': 0.0,
 				'recovery_count': 0,
 				'steering_yaw': None,
+				'steering_reason': 'route',
 				'steering_age': 999.0,
 				'plan_age': 999.0,
 				'phase': phase,
@@ -482,6 +483,9 @@ class LocalDriver(object):
 		# frames need one terrain ray set instead of probing all seven candidates.
 		for unused_score, candidate in candidates:
 			if self._clear(direction_clear, candidate):
+				state['steering_reason'] = (
+					'route' if abs(_angle_delta(candidate, desired_yaw)) <= 0.05
+					else ('separation' if separation is not None else 'obstacle'))
 				return candidate
 		return None
 
@@ -608,13 +612,20 @@ class LocalDriver(object):
 
 		chosen_yaw = None
 		old_yaw = state.get('steering_yaw')
+		steering_reason = state.get('steering_reason', 'route')
 		# Keep a clear avoidance branch long enough for the hull to pass the wall,
 		# while retaining the shorter cadence for an unobstructed route heading.
 		# Replanning a symmetric left/right choice every few frames made bots wag
 		# in front of flat walls without committing to either exit.
-		hold_seconds = (1.20 if old_yaw is not None and
-			abs(_angle_delta(desired_yaw, old_yaw)) > 0.05 else 0.35)
+		# The reason belongs to the original selection: motion past a nearby goal
+		# must not promote a held route heading into a fresh avoidance lease.
+		hold_seconds = 0.35 if steering_reason == 'route' else 1.20
+		separation_active = bool(
+			steering_reason != 'separation' or
+			self._separation_yaw(position, yaw, neighbours,
+				own_half_length, own_half_width) is not None)
 		if (old_yaw is not None and state['plan_age'] < hold_seconds and
+				separation_active and
 				abs(_angle_delta(desired_yaw, old_yaw)) < 2.15 and
 				self._failure_penalty(state, old_yaw) <= 0.0 and
 				self._clear(direction_clear, old_yaw)):
@@ -647,7 +658,7 @@ class LocalDriver(object):
 		turn = max(-1.0, min(1.0, delta / 0.58))
 		# This branch commands forward drive. Signed speed can still be negative
 		# while braking a recovery or sliding downhill; steering remains forward.
-		avoiding = abs(_angle_delta(chosen_yaw, desired_yaw)) > 0.05
+		avoiding = state['steering_reason'] != 'route'
 		throttle = 1.0
 		climb_grade = ((float(target[1]) - float(position[1])) /
 		               max(0.1, target_distance))
@@ -656,10 +667,13 @@ class LocalDriver(object):
 			# while the hull is still turning makes it circle at the foot of the
 			# climb and repeatedly invalidates the next terrain sample.
 			throttle = 0.0
-		elif abs(delta) > math.pi * 0.5 and not avoiding:
-			# Only a target behind the hull needs a stationary pivot. Side and
-			# diagonal route corners retain forward progress while steering, which
-			# avoids long zero-throttle pauses on slow heavy tanks.
+		elif (abs(delta) > math.pi * 0.5 or
+				(not avoiding and heading_error > math.pi * 0.5)):
+			# A selected escape behind the hull needs a pivot too: forward drive
+			# initially moves into the contact it is trying to leave. On a clear
+			# route use the live goal as well as the held heading, so passing the
+			# goal cannot delay braking until the steering lease expires. Side and
+			# diagonal corners still retain forward progress while steering.
 			throttle = 0.0
 		if stop_at_target and not avoiding and stopping_distance is not None:
 			try:

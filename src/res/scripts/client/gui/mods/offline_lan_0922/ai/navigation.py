@@ -1365,8 +1365,14 @@ class TerrainNavigator(object):
 		if index + 1 >= len(path):
 			return False
 		target = path[index + 1]
-		if (not self.grid.live_shortcut_preserves_climb_approach(
-				current, path, index, index + 1) or
+		# Consuming a reached setup is not a shortcut over an unreached bend.
+		# The driver cannot approach a point inside its arrival radius any
+		# further; give it the next checked edge so it can align for the climb.
+		# Keep the tighter driver radius here, not the grid's lookahead radius.
+		reached = _distance_2d(current, path[index]) <= WAYPOINT_ARRIVAL_RADIUS
+		if ((not reached and
+				 not self.grid.live_shortcut_preserves_climb_approach(
+					 current, path, index, index + 1)) or
 				self.grid.segment_penalty(current, target, now) > 0.0 or
 				not self.grid.segment_clear(current, target)):
 			return False
@@ -1380,13 +1386,18 @@ class TerrainNavigator(object):
 		return self.grid.segment_has_baked_hazard(
 			path[index], target, BAKED_SHALLOW_WATER)
 
-	def _planned_current_segment_clear(self, current, path, index, now):
+	def _planned_current_segment_clear(self, current, path, index, now,
+			selected_target=None):
 		"""Keep following the adjacent A* ford selected on the prior frame."""
 		if index <= 0 or index >= len(path):
 			return False
 		target = path[index]
-		if (not self.grid.live_shortcut_preserves_climb_approach(
-				current, path, index - 1, index) or
+		# An already selected ford has consumed its approach. Once the hull
+		# passes that setup, the short vector back to it must not undo the
+		# accepted climb. New targets still need the approach check below.
+		if ((selected_target != target and
+				 not self.grid.live_shortcut_preserves_climb_approach(
+					 current, path, index - 1, index)) or
 				self.grid.segment_penalty(current, target, now) > 0.0 or
 				not self.grid.segment_clear(current, target)):
 			return False
@@ -1503,6 +1514,7 @@ class TerrainNavigator(object):
 				 int(state.get('replan_generation', 0))) +
 				tuple(path_key))
 			plan_start = tuple(state.get('recovery_start') or current)
+		previous_path = self.paths.get(state.get('path_key'))
 		key, path = self._path(effective_key, plan_start, goal, now,
 		                       None)
 		if path is None:
@@ -1549,12 +1561,17 @@ class TerrainNavigator(object):
 					best_index = index
 			state['index'] = best_index
 		index = min(int(state.get('index', 0)), len(path) - 1)
+		selected_target = None
+		if (active_key == key and previous_path is path and
+				state.get('last_target') == path[index]):
+			selected_target = state.get('controlled_shallow_target')
 		current_segment_shallow = self.grid.segment_has_baked_hazard(
 			current, path[index], BAKED_SHALLOW_WATER)
 		if (self.grid.segment_penalty(current, path[index], now) > 0.0 or
 				(current_segment_shallow and
 				 not self._planned_current_segment_clear(
-					 current, path, index, now)) or
+					 current, path, index, now,
+					 selected_target)) or
 				not self.grid.segment_clear(current, path[index])):
 			join_key = ('join', bot_id, self.grid.cell_for(current)) + tuple(path_key)
 			key, joined_path = self._path(join_key, current, goal, now, avoid_points)

@@ -1672,18 +1672,14 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(math.pi / 2.0, state['yaw'])
         self.assertEqual((0.0, 0.0), (state['x'], state['z']))
         self.assertEqual(0, state['movement_dir'])
-        # The step is withheld, but a shallow-water veto is not a realised
-        # physical failure: it must not ban the approach heading for five
-        # seconds nor delete the decision, or the hull turns away from a ford
-        # it may legitimately take and re-selects it on the next tactical
-        # update. Only a fatal hazard escalates - see the deep-water test
-        # below. The cached corridor also survives: it proves the pre-turn
-        # travel yaw, which the shallow veto never disputed.
+        # A withheld step is not a realised physical failure. Keep the chosen
+        # approach and the pre-turn corridor proof; subsequent slices still
+        # validate the actual travel yaw before allowing any translation.
         self.assertIn(11, runtime._decision_cache)
         self.assertIn(11, runtime._motion_probe_cache)
 
-    def test_post_turn_travel_yaw_into_deep_water_still_escalates(self):
-        """A fatal hazard keeps the full realised-motion invalidation."""
+    def test_post_turn_deep_water_forecast_stops_without_losing_control(self):
+        """Fatal lookahead blocks translation without retiring the turn."""
         graph = _graph()
         graph['hazards'] = (0, self.module.BAKED_FATAL_HAZARDS & 1, 0)
         graph['bake'] = {
@@ -1727,8 +1723,8 @@ class BotRuntimeTests(unittest.TestCase):
 
         self.assertEqual((0.0, 0.0), (state['x'], state['z']))
         self.assertEqual(0, state['movement_dir'])
-        self.assertNotIn(11, runtime._decision_cache)
-        self.assertNotIn(11, runtime._motion_probe_cache)
+        self.assertIn(11, runtime._decision_cache)
+        self.assertIn(11, runtime._motion_probe_cache)
 
     def test_post_turn_travel_yaw_allows_only_its_controlled_shallow_step(self):
         graph = _graph()
@@ -10849,6 +10845,112 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertTrue(runtime._planner_corridor_clear(
             approach, toward_ford, 0.0, allow_shallow=True,
             hazard_only=True))
+
+    def _fatal_forecast_runtime(self, hazard, turning,
+                                collision_forecast=False):
+        graph = self._ford_graph(size=9, shallow_column=5)
+        graph['hazards'] = tuple(
+            hazard if value else 0 for value in graph['hazards'])
+        command = self._stationary_command()
+        command.update({
+            'target_yaw': 0.0 if turning else math.pi * 0.5,
+            'throttle': 1.0 if turning else 0.0,
+            'turn': -1.0 if turning else 0.0,
+            'move_position': (16.0, 0.0, 28.0),
+            'recovery_mode': 'drive' if turning else 'arrived',
+            'movement_intent': turning,
+        })
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': not collision_forecast,
+                'collision': collision_forecast, 'slope': 0.0},
+            motion_resolver=lambda *unused: 'clear',
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=graph,
+            control_seconds=0.1)
+        runtime.battle_start(self.start)
+        runtime.states[11].update(
+            x=16.0, y=0.0, z=16.0, yaw=math.pi * 0.5,
+            speed=0.0, grounded_once=True)
+        runtime.adapter.driver = self.module.ai_driver.LocalDriver()
+        runtime.adapter.driver._state(11, (16.0, 0.0, 16.0))[
+            'steering_yaw'] = command['target_yaw']
+        return runtime
+
+    def test_fatal_forecast_does_not_record_stationary_motion_as_failure(self):
+        for hazard in (1, 2):
+            with self.subTest(hazard=hazard):
+                runtime = self._fatal_forecast_runtime(hazard, turning=False)
+                state = runtime.states[11]
+
+                runtime.update(0.4, 0.4)
+
+                self.assertEqual((16.0, 16.0), (state['x'], state['z']))
+                self.assertEqual(0.0, state['speed'])
+                self.assertEqual({}, runtime.adapter.driver.states[11][
+                    'failed_yaws'])
+                self.assertIn(11, runtime._decision_cache)
+                self.assertIn(11, runtime._motion_probe_cache)
+
+    def test_fatal_forecast_keeps_escape_turn_in_every_catchup_slice(self):
+        for hazard in (1, 2):
+            with self.subTest(hazard=hazard):
+                runtime = self._fatal_forecast_runtime(hazard, turning=True)
+                state = runtime.states[11]
+                position = (state['x'], state['y'], state['z'])
+                self.assertFalse(runtime._planner_corridor_clear(
+                    position, math.pi * 0.5, 0.0, hazard_only=True))
+                self.assertTrue(runtime._planner_corridor_clear(
+                    position, 0.0, 0.0, hazard_only=True))
+                slices = []
+                original = runtime._run_update_once
+
+                def record_slice(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    slices.append((state['x'], state['z'], state['yaw']))
+                    return result
+
+                runtime._run_update_once = record_slice
+                runtime.update(0.4, 0.4)
+
+                self.assertEqual(2, len(slices))
+                self.assertEqual([(16.0, 16.0)] * 2,
+                                 [pose[:2] for pose in slices])
+                self.assertLess(slices[0][2], math.pi * 0.5)
+                self.assertLess(slices[1][2], slices[0][2])
+                self.assertEqual(1, len(runtime.adapter.calls))
+                self.assertEqual({}, runtime.adapter.driver.states[11][
+                    'failed_yaws'])
+                self.assertEqual(0.0, runtime.adapter.driver.states[11][
+                    'steering_yaw'])
+
+    def test_fatal_forecast_cannot_promote_distant_collision_to_contact(self):
+        runtime = self._fatal_forecast_runtime(
+            2, turning=True, collision_forecast=True)
+        state = runtime.states[11]
+        state['speed'] = 4.0
+        contacts = []
+        runtime.navigator.report_blocked_step = (
+            lambda *args: contacts.append(args))
+        sweeps = []
+
+        def resolve(*args):
+            sweeps.append(args)
+            return 'clear'
+
+        runtime.motion_resolver = resolve
+        runtime.update(0.4, 0.4)
+
+        # The distant generic ray and baked lookahead establish no current
+        # contact. A withheld translation must not run passive slide/crush
+        # queries, move sideways, or penalize the navigator's chosen edge.
+        self.assertEqual((16.0, 16.0), (state['x'], state['z']))
+        self.assertEqual([], sweeps)
+        self.assertEqual([], contacts)
+        self.assertEqual({}, runtime.adapter.driver.states[11]['failed_yaws'])
 
     def test_commit_gate_admits_a_lagging_hull_closing_on_its_ford(self):
         """The post-turn hull yaw lags the candidate the planner chose.

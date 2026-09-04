@@ -9604,27 +9604,16 @@ class BotRuntime(object):
                 if committed_corridor is False:
                     # Copied physics integrates the post-turn hull yaw, while
                     # the native motion receipt above proves the pre-turn
-                    # corridor. Never let that difference enter an unplanned
-                    # shallow-water cell; rotating toward a dry escape remains
-                    # allowed and the next decision can choose a new route.
+                    # corridor. Keep the baked hazard veto on every slice, but
+                    # do not treat its lookahead as a realised motion failure.
+                    # The hull may still be turning toward a clear candidate:
+                    # invalidating that command cancels its remaining catch-up
+                    # turns and repeatedly discards the driver's chosen exit.
+                    # Actual contact and the realised-pose guard still retire
+                    # failed commands below.
                     path_clear = False
                     throttle = 0.0
                     state['movement_dir'] = 0
-                    committed_fatal = (
-                        committed_corridor if committed_shallow_admitted else
-                        self._planner_corridor_clear(
-                            position, committed_travel_yaw,
-                            state.get('speed', 0.0),
-                            wet_escape=committed_wet_escape,
-                            allow_shallow=True, hazard_only=True))
-                    if committed_fatal is False:
-                        self._invalidate_realised_motion(
-                            state['id'], committed_travel_yaw)
-                    # A shallow-only veto withholds this pose and applies the
-                    # existing safety damping below, but does not invalidate
-                    # the approach. Banning it for five seconds and deleting
-                    # the decision made the hull turn away from a ford it had
-                    # legitimately chosen, which caused shoreline dithering.
                 previous_speed = _number(state.get('speed'))
                 speed = (0.0 if siege_motion_locked else
                     vehicle_physics.longitudinal_step(
@@ -9637,11 +9626,15 @@ class BotRuntime(object):
                 contact_deflected = False
                 if not path_clear:
                     if (isinstance(motion_probe, dict) and
-                          motion_probe.get('collision', False)):
+                          motion_probe.get('collision', False) and
+                          not exact_motion_owns_collision):
                         hard_contact = True
                     else:
-                        # Water, slope and other planner vetoes are not hull
-                        # contacts. Keep their existing AI safety damping.
+                        # A baked veto may have withheld a step whose generic
+                        # ray saw a distant obstacle. When the exact resolver
+                        # owns contact, that forecast cannot trigger a passive
+                        # slide or a blocked-edge report without a hull sweep.
+                        # Keep the existing AI safety damping for this veto.
                         speed *= 0.2
                     state.pop('destructible_contact_speed', None)
                 motion_status = 'clear'
