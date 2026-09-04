@@ -469,7 +469,7 @@ class NativePhysicsProbeTests(unittest.TestCase):
                 'reverse_seconds': 0.2, 'settle_seconds': 0.2,
                 'pair_seconds': 0.2, 'scale_frames': 5, 'scale_bodies': 3,
                 'impulse_frames': 3, 'vehicle_solver': True,
-                'physical_body_seconds': 1.0,
+                'physical_body': True, 'physical_body_seconds': 1.0,
                 'physical_body_push_seconds': 0.3,
                 'physical_body_release_seconds': 0.2}
         base.update(config)
@@ -514,7 +514,7 @@ class NativePhysicsProbeTests(unittest.TestCase):
             perf_clock=lambda: self.clock[0])
         self.assertEqual(
             ['inventory', 'inspect_existing', 'construct_standalone',
-             'physical_body', 'restore'], probe._stages)
+             'restore'], probe._stages)
         self._run(probe)
         self.assertTrue(probe.done)
         report = self._report()
@@ -523,7 +523,10 @@ class NativePhysicsProbeTests(unittest.TestCase):
             report['stages'])
         self.assertIn('collidePolyhedra UNIMPLEMENTED',
                       report['skipped_stages']['solve_one'])
-        self.assertEqual(5, len(report['skipped_stages']))
+        self.assertIn('collideCompositeShape UNIMPLEMENTED',
+                      report['skipped_stages']['physical_body'])
+        self.assertEqual(6, len(report['skipped_stages']))
+        self.assertEqual([], self.simulator.updates)
         self.assertNotIn('simulator.update(dt, [standalone', ''.join(self.lines))
         # No WGVehiclePhysics was ever handed to the simulator.
         self.assertTrue(all(count == 0 for _, count, _ in self.simulator.updates))

@@ -140,12 +140,11 @@ own avatar. The vehicle solver itself is NOT stepped: in #1513 the first
 WGDynamicsSimulator.update with a WGVehiclePhysics aborts the client with
 "SceneObstaclesCollider::collidePolyhedra: UNIMPLEMENTED" (the client's
 obstacle collider stubs polyhedra/composite-shape collision and terrain
-height/material/ground-type queries). Instead a WGPhysicalBody box is dropped
-3 m above the terrain at a Bot's position, pushed along its heading for 3 s
-through externalForce and released, with per-frame position, height above
-ground, velocity and world-contact samples, to learn whether rigid bodies see
-the terrain and the world in this build. Play at least 30 s after the battle
-goes live. Nothing visible moves; the read-back matrices are the evidence. The
+height/material/ground-type queries), and the first update with a
+WGPhysicalBody box aborts with "collideCompositeShape: UNIMPLEMENTED". Both
+stepping stages are therefore off unless enabled in worker_diagnostics.json;
+this build only records construction, configuration and the native attribute
+and method surface. Play at least 20 s after the battle goes live. The
 report records the exact cfg handed to configure(), its return value, every
 attribute write, and per-stage callback counts with their first arguments.
 Every native call is announced with an NPHYS step line and each

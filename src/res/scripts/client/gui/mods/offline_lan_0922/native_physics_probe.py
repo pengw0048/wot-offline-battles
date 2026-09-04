@@ -40,9 +40,13 @@ runs plus the exact client ``scripts.pkg`` bytecode and data):
   ``getTerrainMatKind``, ``getGroundType`` and ``getTerrainHeight`` are
   message-and-abort stubs.  The vehicle solver therefore cannot see terrain or
   obstacles in this binary and every vehicle solve stage is off by default
-  (``vehicle_solver``).  ``WGPhysicalBody`` (box/sphere shapes, raycast
-  contacts, ``isCollidingWithWorld``) uses the implemented slots and is what
-  the ``physical_body`` stage exercises instead.
+  (``vehicle_solver``).
+* Run 5 (2026-09-04): the first ``update`` with a ``WGPhysicalBody`` box
+  aborted the same way with ``SceneObstaclesCollider::collideCompositeShape:
+  UNIMPLEMENTED``.  No dynamics body of either kind can be stepped against
+  the world in this binary; ``physical_body`` is off by default as well.
+  What remains usable without native patching is construction, configuration
+  and the attribute/method surface, which the first three stages record.
 
 Stages run one per render frame from ``start_delay_seconds`` after the battle
 goes live.  Every native call group is announced with
@@ -114,8 +118,9 @@ DEFAULT_CONFIG = {
     # reproduce that crash deliberately.
     'vehicle_solver': False,
     # physical_body: drop a box body onto the terrain, push it along the
-    # Bot's heading, release it.
-    'physical_body': True,
+    # Bot's heading, release it.  Fatal in #1513 (run 5); opt in only to
+    # reproduce that crash deliberately.
+    'physical_body': False,
     'physical_body_mass': 20.0,
     'physical_body_half_extents': [1.5, 1.0, 3.0],
     'physical_body_drop_m': 3.0,
@@ -241,6 +246,10 @@ VEHICLE_SOLVER_STAGES = (
 VEHICLE_SOLVER_FATAL = (
     'WGDynamicsSimulator.update with a WGVehiclePhysics aborts the #1513 '
     'client: SceneObstaclesCollider::collidePolyhedra UNIMPLEMENTED (run 4)')
+PHYSICAL_BODY_FATAL = (
+    'WGDynamicsSimulator.update with a WGPhysicalBody aborts the #1513 '
+    'client: SceneObstaclesCollider::collideCompositeShape UNIMPLEMENTED '
+    '(run 5)')
 PHYSICAL_BODY_READ_ATTRIBUTES = (
     'mass', 'gravity', 'staticMode', 'isFrozen', 'velocity', 'angVelocity',
     'forceApplied', 'torqueApplied', 'externalForce', 'visibilityMask',
@@ -555,10 +564,10 @@ class WorkerPhysicsProbe(object):
                 if name in self._stages:
                     self._stages.remove(name)
                     skipped[name] = VEHICLE_SOLVER_FATAL
-        if not self._config.get('physical_body', True):
+        if not self._config.get('physical_body'):
             if 'physical_body' in self._stages:
                 self._stages.remove('physical_body')
-                skipped['physical_body'] = 'disabled by config'
+                skipped['physical_body'] = PHYSICAL_BODY_FATAL
         self._report['skipped_stages'] = skipped
         if 'restore' not in self._stages:
             self._stages.append('restore')
