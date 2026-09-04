@@ -1679,6 +1679,7 @@ class BattleRuntime(object):
         self._projectiles = None
         self._projectile_meta = {}
         self._projectile_visual_meta = {}
+        self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
@@ -1944,6 +1945,7 @@ class BattleRuntime(object):
             initial_time=projectile_now)
         self._projectile_meta = {}
         self._projectile_visual_meta = {}
+        self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
@@ -9613,35 +9615,19 @@ class BattleRuntime(object):
             if canonical:
                 normalized = self._projectile_wire_meta(event)
                 if normalized is not None:
+                    normalized['source_descriptor'] = entity.typeDescriptor
                     self._install_projectile_meta(normalized)
                     burst_index = normalized['burst_index']
                 projectile_id = event.get('projectile_id')
                 origin = event.get('origin')
                 velocity = event.get('velocity')
                 gravity = _number(event.get('gravity'))
-                visual_admitted = self._admit_projectile_visual(
-                    entity.id, projectile_id, self._clock())
-                # Present from the last server-committed collision cursor,
-                # not from an extrapolated wall-clock age.  The hidden
-                # worker can still be resolving later chords when this launch
-                # reaches the visible client.  Fast-forwarding the native
-                # mover beyond that cursor lets its cosmetic simulator pass a
-                # tank (or strike the world) before the canonical terminal
-                # arrives a few frames later.
-                elapsed = self._projectile_visual_age(normalized)
-                reference_origin = trajectory_position(
-                    origin, velocity, (0.0, -gravity, 0.0), elapsed)
-                reference_velocity = (
-                    float(velocity[0]),
-                    float(velocity[1]) - gravity * elapsed,
-                    float(velocity[2]))
-                if projectile_id is not None:
-                    self._projectile_visual_meta[str(projectile_id)] = {
-                        'origin': tuple(float(value) for value in origin),
-                        'velocity': tuple(float(value) for value in velocity),
-                        'gravity': gravity,
-                        'admitted': visual_admitted,
-                    }
+                if normalized is not None:
+                    self._ensure_projectile_visual(normalized, self._clock())
+                    visual = self._projectile_visual_meta.get(
+                        normalized['projectile_id'])
+                    visual_admitted = bool(
+                        visual is None or visual.get('admitted', True))
                 for name, value in (
                         ('_offlineLANShotOrigin', origin),
                         ('_offlineLANShotVelocity', velocity),
@@ -9649,33 +9635,12 @@ class BattleRuntime(object):
                         ('_offlineLANShotMaxDistance',
                          event.get('maxDistance')),
                         ('_offlineLANProjectileID', projectile_id),
-                        ('_offlineLANShotReferenceOrigin', reference_origin),
-                        ('_offlineLANShotReferenceVelocity',
-                         reference_velocity)):
+                        # RemoteVehicle.showShooting still owns the muzzle and
+                        # recoil call.  The factory-backed controlled tracer
+                        # above is the sole flight owner.
+                        ('_offlineLANCanonicalTracerOwned', True)):
                     setattr(entity, name, value)
                     transient_names.append(name)
-                # RemoteVehicle.showShooting delegates to the same factory
-                # presenter and consumes the transient canonical values.  The
-                # stock local Vehicle has no such delegate, so launch its
-                # authoritative tracer explicitly from the event instead of
-                # reconstructing it from a later muzzle pose.
-                if (visual_admitted and
-                        (not bool(getattr(
-                            entity, '_offlineLANPresentation', False)) or
-                         burst_index > 0 or
-                         not self._optional_feature_enabled(
-                             'shot muzzle presentation')) and
-                        self._remote_factory is not None):
-                    self._run_optional_feature(
-                        'projectile visual launch',
-                        self._remote_factory.play_projectile_tracer,
-                        args=(
-                            entity.typeDescriptor,
-                            entity._offlineLANShotIndex,
-                            origin, velocity, gravity,
-                            event.get('maxDistance'), entity.id,
-                            projectile_id, reference_origin,
-                            reference_velocity))
             if burst_index == 0:
                 # One native call owns the grouped muzzle effect and local
                 # waiting-for-shot handshake.  Later physical rounds already
@@ -9729,6 +9694,12 @@ class BattleRuntime(object):
             return False
         if self._projectile_epoch == epoch:
             return True
+        # An authority epoch fences every projectile presentation as well as
+        # its simulator state.  Drop the old controlled tracers without using
+        # their terminal path: a worker handoff is neither a hit nor a miss
+        # and must not emit impact feedback or a world explosion.
+        self._reset_projectile_visuals()
+        self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_epoch = epoch
         self._projectile_meta = {}
         self._projectile_terminal_data = {}
@@ -9845,13 +9816,7 @@ class BattleRuntime(object):
 
     @staticmethod
     def _projectile_visual_age(raw):
-        """Return only the server-confirmed age of a visual segment.
-
-        Native ``ProjectileMover`` advances independently after ``add``.  Its
-        reference point therefore starts at the durable collision cursor, not
-        at an estimated current server time that can be ahead of the worker's
-        terminal receipt.
-        """
+        """Return the durable collision-confirmed age of one visual segment."""
         if not isinstance(raw, dict):
             return 0.0
         segment_start = raw.get('segment_start_time_ms', 0)
@@ -10183,18 +10148,24 @@ class BattleRuntime(object):
             return False
         now = self._clock()
         active_ids = set()
+        normalized_rows = []
         for raw in rows:
             normalized = self._projectile_wire_meta(raw)
             if normalized is None:
                 raise RuntimeError('active projectile snapshot is malformed')
             projectile_id = normalized['projectile_id']
+            if projectile_id in self._projectile_visual_terminals:
+                # The ordered terminal can overtake an older state snapshot.
+                # Fence that row before it can recreate either presentation
+                # metadata or an authority simulator entry.
+                continue
             active_ids.add(projectile_id)
-            self._install_projectile_meta(normalized)
-            self._ensure_projectile_visual(normalized, now)
+            normalized_rows.append(normalized)
+            installed = self._install_projectile_meta(normalized)
+            self._ensure_projectile_visual(installed, now)
         if not self._projectile_is_authority():
             return True
-        for raw in rows:
-            normalized = self._projectile_wire_meta(raw)
+        for normalized in normalized_rows:
             projectile_id = normalized['projectile_id']
             meta = self._install_projectile_meta(normalized)
             if self._projectiles.contains(meta['manager_key']):
@@ -10293,7 +10264,7 @@ class BattleRuntime(object):
         meta['awaiting_ricochet'] = False
         meta['pending_ricochet'] = None
         now = self._clock()
-        self._ensure_projectile_visual(normalized, now)
+        self._ensure_projectile_visual(meta, now)
         if self._projectile_is_authority():
             self._accept_projectile_event(event)
         return True
@@ -10322,6 +10293,10 @@ class BattleRuntime(object):
         if isinstance(event.get('wreck_hit'), dict):
             self._present_projectile_wreck_hit(projectile_id, event)
         self._stop_projectile_visual(projectile_id, event)
+        # Active snapshots can be duplicated behind the ordered journal. Keep
+        # a same-epoch terminal fence so one such row cannot resurrect a
+        # tracer after its exact impact was already presented.
+        self._projectile_visual_terminals.add(projectile_id)
         if self._projectiles is not None:
             manager_key = (meta.get('manager_key') if meta is not None else
                            projectile_id)
@@ -10414,76 +10389,190 @@ class BattleRuntime(object):
         return True
 
     def _ensure_projectile_visual(self, normalized, now):
-        """Ensure late joiners and delayed snapshots see the live tracer."""
+        """Create one tracer and monotonically extend its confirmed frontier."""
         if self._worker_mode:
             return False
         if self._remote_factory is None or not isinstance(normalized, dict):
             return False
-        descriptor = self._projectile_source_descriptor(normalized)
-        if descriptor is None:
+        projectile_id = normalized['projectile_id']
+        if projectile_id in self._projectile_visual_terminals:
             return False
+        confirmed_elapsed = self._projectile_visual_age(normalized)
         existing_visual = self._projectile_visual_meta.get(
-            normalized['projectile_id'])
+            projectile_id)
         if (existing_visual is not None and
                 int(existing_visual.get('ricochet_count', 0)) !=
                 normalized['ricochet_count']):
-            meta = self._projectile_meta.get(normalized['projectile_id'])
+            meta = self._projectile_meta.get(projectile_id)
             if meta is not None:
                 meta['hit_vehicle'] = True
             self._stop_projectile_visual(
-                normalized['projectile_id'], {
+                projectile_id, {
                     'impact': list(normalized['segment_origin']),
                     'resolved_time_ms': normalized[
                         'segment_start_time_ms'],
                 })
-        elapsed = self._projectile_visual_age(normalized)
+            existing_visual = None
+        elif existing_visual is not None:
+            # Snapshots may be duplicated or arrive after an older one.  They
+            # can only move the display fence forward and must never relaunch
+            # a tracer that this canonical segment already owns. A failed
+            # initial creation owns no resource, so it may retry at the newest
+            # confirmed pose without manufacturing an unconfirmed flight.
+            existing_visual['confirmed_elapsed'] = max(
+                float(existing_visual.get('confirmed_elapsed', 0.0)),
+                confirmed_elapsed)
+            if (existing_visual.get('active', False) or
+                    not existing_visual.get('admitted', True) or
+                    not existing_visual.get('launch_retryable', False)):
+                return bool(existing_visual.get('active', False))
+
+        descriptor = self._projectile_source_descriptor(normalized)
+        if descriptor is None:
+            return False
         gravity = normalized['gravity']
-        reference_origin = trajectory_position(
-            normalized['segment_origin'], normalized['segment_velocity'],
-            (0.0, -gravity, 0.0), elapsed)
-        reference_velocity = (
-            normalized['segment_velocity'][0],
-            normalized['segment_velocity'][1] - gravity * elapsed,
-            normalized['segment_velocity'][2])
-        self._projectile_visual_meta[normalized['projectile_id']] = {
-            'origin': tuple(normalized['segment_origin']),
-            'velocity': tuple(normalized['segment_velocity']),
-            'gravity': gravity,
-            'segment_start_time_ms': normalized['segment_start_time_ms'],
-            'ricochet_count': normalized['ricochet_count'],
-        }
-        record = self._records.get('%s:%s' % (
-            normalized['shooter_kind'], normalized['shooter_id']))
-        attacker_id = int(record.get('engine_id', 0) or 0) \
-            if record is not None else 0
-        if attacker_id <= 0:
-            # ProjectileMover only uses the attacker id for presentation
-            # attribution.  A disconnected shooter must not erase a live
-            # projectile restored from the durable snapshot.
-            attacker_id = int(normalized['shooter_id'])
-        admitted = (bool(existing_visual.get('admitted', True))
-                    if existing_visual is not None else
-                    self._admit_projectile_visual(
-                        attacker_id, normalized['projectile_id'], now))
-        self._projectile_visual_meta[normalized['projectile_id']][
-            'admitted'] = admitted
+        if existing_visual is None:
+            display_elapsed = confirmed_elapsed
+            visual = {
+                'origin': tuple(normalized['segment_origin']),
+                'velocity': tuple(normalized['segment_velocity']),
+                'gravity': gravity,
+                'segment_start_time_ms': normalized[
+                    'segment_start_time_ms'],
+                'ricochet_count': normalized['ricochet_count'],
+                'display_elapsed': display_elapsed,
+                'confirmed_elapsed': confirmed_elapsed,
+                'last_frame': float(now),
+                'active': False,
+                'launch_retryable': True,
+            }
+            self._projectile_visual_meta[projectile_id] = visual
+            record = self._records.get('%s:%s' % (
+                normalized['shooter_kind'], normalized['shooter_id']))
+            attacker_id = int(record.get('engine_id', 0) or 0) \
+                if record is not None else 0
+            if attacker_id <= 0:
+                # Presentation attribution survives a disconnected shooter;
+                # its canonical network id is still stable for this shot.
+                attacker_id = int(normalized['shooter_id'])
+            visual['attacker_id'] = attacker_id
+            visual['admitted'] = self._admit_projectile_visual(
+                attacker_id, projectile_id, now)
+        else:
+            visual = existing_visual
+            display_elapsed = float(visual['confirmed_elapsed'])
+            visual['display_elapsed'] = display_elapsed
+            visual['last_frame'] = float(now)
+            attacker_id = int(visual['attacker_id'])
+
+        admitted = bool(visual.get('admitted', True))
         if not admitted or not self._optional_feature_enabled(
                 'projectile visual launch'):
             return False
+        reference_origin = trajectory_position(
+            normalized['segment_origin'], normalized['segment_velocity'],
+            (0.0, -gravity, 0.0), display_elapsed)
+        reference_velocity = (
+            normalized['segment_velocity'][0],
+            normalized['segment_velocity'][1] - gravity * display_elapsed,
+            normalized['segment_velocity'][2])
         try:
-            return bool(self._remote_factory.play_projectile_tracer(
+            visual['active'] = bool(
+                self._remote_factory.play_projectile_tracer(
                 descriptor, normalized['shell_index'],
                 normalized['segment_origin'],
                 normalized['segment_velocity'], gravity, max(
                     0.001, normalized['max_distance'] -
                     normalized['checked_distance']),
-                attacker_id, normalized['projectile_id'], reference_origin,
+                attacker_id, projectile_id, reference_origin,
                 reference_velocity,
                 is_ricochet=bool(normalized['ricochet_count'])))
+            visual['launch_retryable'] = not visual['active']
+            return visual['active']
         except Exception as error:
             self._warn_optional_failure(
                 'projectile visual launch', error)
             return False
+
+    @staticmethod
+    def _projectile_visual_pose(visual, elapsed=None):
+        """Return the controlled position and velocity at one segment age."""
+        if elapsed is None:
+            elapsed = float(visual.get('display_elapsed', 0.0))
+        gravity = float(visual['gravity'])
+        position = trajectory_position(
+            visual['origin'], visual['velocity'],
+            (0.0, -gravity, 0.0), elapsed)
+        velocity = (
+            visual['velocity'][0],
+            visual['velocity'][1] - gravity * elapsed,
+            visual['velocity'][2])
+        return position, velocity
+
+    def _advance_projectile_visuals(self, now):
+        """Advance visible tracers without crossing a confirmed worker cursor."""
+        if (self._worker_mode or self._remote_factory is None or
+                not self._projectile_visual_meta or
+                not self._optional_feature_enabled(
+                    'projectile visual update')):
+            return False
+        callback = getattr(
+            self._remote_factory, 'update_projectile_visual', None)
+        if not callable(callback):
+            return False
+        frame = float(now)
+        advanced = False
+        for projectile_id, visual in tuple(
+                self._projectile_visual_meta.items()):
+            if (not visual.get('active', False) or
+                    not visual.get('admitted', True)):
+                continue
+            previous_frame = float(visual.get('last_frame', frame))
+            dt = max(0.0, frame - previous_frame)
+            visual['last_frame'] = max(previous_frame, frame)
+            previous_elapsed = max(
+                0.0, float(visual.get('display_elapsed', 0.0)))
+            confirmed_elapsed = max(
+                previous_elapsed,
+                float(visual.get('confirmed_elapsed', previous_elapsed)))
+            display_elapsed = min(
+                previous_elapsed + dt, confirmed_elapsed)
+            visual['display_elapsed'] = display_elapsed
+            position, velocity = self._projectile_visual_pose(
+                visual, display_elapsed)
+            try:
+                visible = bool(callback(
+                    projectile_id, position, velocity=velocity))
+            except Exception as error:
+                self._warn_optional_failure(
+                    'projectile visual update', error)
+                visible = False
+            if not visible:
+                # A lost native resource must not be recreated from a later
+                # snapshot at a different point in the same segment.
+                visual['active'] = False
+                visual['launch_retryable'] = False
+                continue
+            advanced = advanced or display_elapsed > previous_elapsed
+        return advanced
+
+    def _reset_projectile_visuals(self):
+        """Fence an epoch change without manufacturing terminal feedback."""
+        self._projectile_visual_meta = {}
+        reset = getattr(
+            self._remote_factory, 'reset_projectile_visuals', None)
+        if callable(reset):
+            try:
+                reset_complete = bool(reset())
+            except Exception as error:
+                self._warn_optional_failure(
+                    'projectile visual epoch reset', error, disable=False)
+            else:
+                if not reset_complete:
+                    self._warn_optional_failure(
+                        'projectile visual epoch reset', RuntimeError(
+                            'presenter retained old-epoch visual owners'),
+                        disable=False)
 
     def _projectile_explosion(self, projectile_id, impact, outcome='impact'):
         """Return ``(effectsDescr, effectMaterial, velocity)`` for a world hit.
@@ -10556,6 +10645,7 @@ class BattleRuntime(object):
             self._projectile_visual_meta.pop(projectile_id, None)
             return False
         if self._remote_factory is None:
+            self._projectile_visual_meta.pop(projectile_id, None)
             return False
         impact = event.get('impact') if isinstance(event, dict) else None
         if impact is None:
@@ -10586,7 +10676,10 @@ class BattleRuntime(object):
             stopped = bool(self._remote_factory.stop_projectile_tracer(
                 projectile_id, impact,
                 explosion=self._projectile_explosion(
-                    projectile_id, impact, outcome)))
+                    projectile_id, impact, outcome),
+                missed=bool(
+                    isinstance(event, dict) and
+                    event.get('hit_vehicle') is False)))
         except Exception as error:
             # Terminal authority has already been applied.  A native cosmetic
             # retirement failure must not poison the ordered event journal.
@@ -11052,6 +11145,7 @@ class BattleRuntime(object):
         self._projectile_perf = {}
         self._projectile_scan_count = 0
         self._projectile_candidate_count = 0
+        self._advance_projectile_visuals(now)
         if self._projectiles is None:
             return False
         self._flush_pending_projectile_resolutions()
@@ -20775,6 +20869,7 @@ class BattleRuntime(object):
         self._projectiles = None
         self._projectile_meta = {}
         self._projectile_visual_meta = {}
+        self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
