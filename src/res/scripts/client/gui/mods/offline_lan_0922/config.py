@@ -69,9 +69,11 @@ DEFAULT_CONFIG = {
     'physics_tuning': {},
     'he_tuning': {},
     'perfect_accuracy': False,
-    # Native belt animation for bots.  Off: a client-only vehicle gets no
-    # engine-owned filter, so the belts cannot turn.  See
-    # COMPATIBILITY_REVIEW.md.
+    # Belt animation for the compound-only fallback below.  Off: a
+    # client-created compound owns no engine filter, so WGVehicleFilter
+    # cannot turn its belts.  This flag does not reach the default
+    # native_remote_vehicles path, whose stock Vehicle entities always feed
+    # belt speed and engine mode.  See COMPATIBILITY_REVIEW.md.
     'bot_track_animation': False,
     # Stock remote Vehicle entities provide native wheels, suspension,
     # acceleration swing and engine audio. Copied LAN physics remains

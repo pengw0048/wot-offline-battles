@@ -1092,6 +1092,31 @@ then cancels the local Avatar's shot-wait callback; zero is not a single-shot
 sentinel and leaves the native firing extra unbounded. Remote events use the
 same finite presentation without claiming prediction.
 
+A hit vehicle also receives retail's hull shot impulse. Exact #1513
+`Vehicle.showDamageFromShot` builds the first decoded hit point's world-space
+axis from `compoundModel.node(componentName)` and calls
+`appearance.receiveShotImpulse(dir, shotEffects[effectsIndex]['targetImpulse'])`
+only inside the decoded direct-hit branch, so an HE near miss presents
+`armorSplashHit` with no hull reaction; the impulse is scaled by neither damage
+nor calibre. `CompoundAppearance.receiveShotImpulse` skips a damaged model,
+forwards to `swingingAnimator.receiveShotImpulse` without a `None` guard, and
+also forwards to `CrashedTracksController.receiveShotImpulse`, which is
+`return None` in this build. `model_assembler.createSwingingAnimator` calls
+`setupShotSwinging(hull.swinging.sensitivityToImpulse)`, and
+`vehicle_assembler._assembleSwinging` installs the animator as the HULL node's
+provider while `CompoundAppearance.__linkCompound` keeps the compound root on
+the entity matrix; this port's pose-provider swap therefore leaves the animator
+in the transform chain, and its `worldMatrix` rebind supplies the same input
+retail passes. Disassembly of the exact executable shows the native animator
+method accumulating `dir * impulse` into three floats of the animator object
+itself, reading no filter, physics body, node or model, so the only live
+requirement is a stock animator. The port keeps the engine-ownership and
+proven-rebind gates, rejects an absent animator instead of raising inside stock
+code, normalises its contact direction, and presents no impulse for a splash,
+killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
+camera shake is not ported. Whether the resulting rocking magnitude matches
+retail still needs exact Windows acceptance.
+
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision
