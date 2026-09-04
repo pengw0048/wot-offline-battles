@@ -1139,18 +1139,31 @@ has ever recorded; that rewind is clamped to the retained history and marked
 `presentation_history_clamped` rather than failing an otherwise legal shot,
 which can never move a candidate forward of its authoritative pose.
 
-The launch instant is mapped rather than stamped. `pose_time_us` is the
-shooter's logical motion clock, already validated and clamped to server
-receipt when the trigger's input checkpoint is admitted, while
-`launch_server_time_ms` is the round-local tick clock; the two share no
-epoch. At fire-intent admission the server reads both clocks under one lock
-and stores `trigger_launch_time_ms = server tick - (motion receipt - trigger
-pose time)`, bounded to half a second and floored at the round origin. Only
-that elapsed interval crosses the clock boundary. The value lives in the
-pending intent, so transport delay, worker mailbox delay, scheduling delay
-and an exact retry all produce the same canonical launch instant, and the
-authority catches up from it the way a Bot launch already catches up from
-`bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+The launch instant is frozen directly in the round-local server tick domain.
+At the trigger edge the visible client estimates that tick from its latest
+server-clock anchor and sends `trigger_server_time_ms` beside the frozen
+muzzle and presentation ledger. The server accepts an exact integer no more
+than 500 ms behind receipt and no more than 250 ms ahead. An older claim gets
+the typed terminal `trigger_clock_stale`, a claim beyond the future tolerance
+gets `trigger_clock_future`, and a missing or malformed claim gets
+`trigger_clock_invalid`. The positive tolerance covers clock and RTT
+quantization only: the canonical launch instant is `min(trigger, receipt)`,
+so an admitted projectile never starts in the server's future. That instant
+lives in the pending intent, so transport delay, worker mailbox delay,
+scheduling delay, motion-clock catch-up and an exact retry cannot reinterpret
+it; the authority catches up from it the way a Bot launch already catches up
+from `bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+
+The fire-intent envelope remains exact and closed. Once the current player,
+round, `fire_intent` type and exact next `intent_seq` can be identified safely,
+a malformed payload is consumed as one recorded terminal result:
+`fire_intent_wire_shape` for missing base fields or any unexpected field and
+`fire_intent_field_invalid` for invalid core field values. Missing or malformed
+ledger and trigger-clock fields keep their feature-specific typed results.
+Exact retries fold to that result, changed same-sequence payloads conflict, and
+the next intent can proceed. Messages that cannot establish the current
+identity, round, type or exact sequence still consume nothing. Extra fields
+remain rejected rather than extending the protocol.
 
 ## AI, room and round boundaries
 
