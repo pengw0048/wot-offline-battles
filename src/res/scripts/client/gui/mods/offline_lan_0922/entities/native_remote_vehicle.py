@@ -45,6 +45,52 @@ def set_draw_visibility(entity, visible):
     return True
 
 
+def present_shot_impulse(math_module, appearance, direction, impulse):
+    """Feed one retail hull shot impulse through a stock CompoundAppearance.
+
+    Exact #1513 ``Vehicle.showDamageFromShot`` passes the first decoded hit
+    point's world-space axis and ``shotEffects[effectsIndex]['targetImpulse']``
+    to ``CompoundAppearance.receiveShotImpulse(dir, impulse)``.  That method
+    skips a damaged model, forwards to ``swingingAnimator.receiveShotImpulse``
+    and to ``CrashedTracksController.receiveShotImpulse``, which is a no-op in
+    this build.  The native animator method only accumulates ``dir * impulse``
+    into its own shot-swinging vector, so a live stock animator is the whole
+    requirement: it reads no filter, physics body, node or model.  Stock
+    dereferences ``swingingAnimator`` without a guard, so a missing animator
+    must be rejected here instead of raising inside stock code.
+    """
+    if appearance is None or getattr(
+            appearance, 'swingingAnimator', None) is None:
+        return False
+    receive = getattr(appearance, 'receiveShotImpulse', None)
+    if not callable(receive):
+        return False
+    try:
+        impulse = float(impulse)
+        if hasattr(direction, 'x'):
+            values = [float(direction.x), float(direction.y),
+                      float(direction.z)]
+        else:
+            values = [float(direction[index]) for index in range(3)]
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+            OverflowError):
+        return False
+    if impulse <= 0.0 or math.isnan(impulse) or math.isinf(impulse):
+        return False
+    if any(math.isnan(value) or math.isinf(value) for value in values):
+        return False
+    length = math.sqrt(sum(value * value for value in values))
+    if length <= 1.0e-6:
+        return False
+    # Retail's direction is a hit component's transformed unit axis and the
+    # native accumulator scales it by the impulse.  Normalise this runtime's
+    # contact direction rather than rejecting a denormalised one, so the
+    # rocking magnitude stays the retail impulse.
+    receive(math_module.Vector3(values[0] / length, values[1] / length,
+                                values[2] / length), impulse)
+    return True
+
+
 class _AimTarget(object):
 
     def __init__(self, math_module):
@@ -627,6 +673,21 @@ class _NativeRemoteState(object):
             entity._gun_pitch = raw_gun_pitch
         return True
 
+    def present_hit_impulse(self, direction, impulse):
+        """Rock the hull like retail, only while stock still owns the model."""
+        if not self._engine_owns_entity():
+            # Once BigWorld releases the PyEntity, reading ``appearance`` can
+            # already dereference freed native memory.
+            return False
+        if self.presentation_capabilities.get('body_swinging') is not True:
+            # This runtime rebinds the stock animator's world matrix to the
+            # copied LAN provider.  Without that proven rebind the animator
+            # is either absent or still swinging around a stale spawn pose.
+            return False
+        return present_shot_impulse(
+            self._math, getattr(self.entity, 'appearance', None),
+            direction, impulse)
+
     def update_tracks(self, left, right, mode):
         entity = self.entity
         if entity is None:
@@ -878,6 +939,12 @@ class NativeRemoteVehicleFactory(object):
         if state is None or state.entity is None:
             return False
         return state.update_siege_pose()
+
+    def present_hit_impulse(self, entity_id, direction, impulse):
+        state = self._states.get(int(entity_id))
+        if state is None or state.entity is None:
+            return False
+        return state.present_hit_impulse(direction, impulse)
 
     def request_wreck(self, unused_entity_id):
         # Vehicle.onHealthChanged owns stock damaged-model replacement.

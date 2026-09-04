@@ -29,7 +29,7 @@ from gui.mods.offline_lan_0922.entities.avatar_server import AvatarServerBridge
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
-    NativeRemoteVehicleFactory, set_draw_visibility
+    NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     PROJECTILE_VISUAL_START_MAX_DIFF, RemoteVehicleFactory,
     _collide_vehicle_evidence_at_matrix,
@@ -1512,6 +1512,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -1799,6 +1800,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -8520,6 +8522,74 @@ class BattleRuntime(object):
             return False
         return True
 
+    _HIT_IMPULSE_REPORT_LIMIT = 16
+
+    def _local_vehicle_appearance(self):
+        """Return the player's own stock appearance while it is still live."""
+        lookup = getattr(self._runtime.bigworld, 'entity', None)
+        if not callable(lookup):
+            return None
+        vehicle = lookup(int(getattr(self._avatar, 'playerVehicleID', 0) or 0))
+        if vehicle is None or not bool(getattr(vehicle, 'isStarted', False)):
+            return None
+        return getattr(vehicle, 'appearance', None)
+
+    def _present_hit_impulse(self, event, target_record, direction,
+                             effects_descr):
+        """Present retail's hull shot impulse on one vehicle this shot hit.
+
+        Retail reaches ``CompoundAppearance.receiveShotImpulse`` only inside
+        ``Vehicle.showDamageFromShot``'s decoded direct-hit branch, so an HE
+        near miss presents ``armorSplashHit`` with no hull reaction at all.
+        The impulse is the shot effect group's own ``targetImpulse``: retail
+        scales it by neither damage nor calibre.
+        """
+        state = target_record.get('state') or {}
+        if event.get('splash', False) or event.get('dead', False):
+            return False
+        if not bool(state.get('alive', True)) or int(
+                state.get('health', 1) or 0) <= 0:
+            return False
+        impulse = _number(_field(effects_descr, 'targetImpulse', 0.0))
+        if impulse <= 0.0:
+            return False
+        if target_record.get('local'):
+            # The player's own tank is a fully stock, filter-attached entity,
+            # but nothing in this runtime routes retail's server-side
+            # showDamageFromShot to it, so it needs the same presentation.
+            presented = present_shot_impulse(
+                self._runtime.math, self._local_vehicle_appearance(),
+                direction, impulse)
+        elif target_record.get('native_remote'):
+            present = getattr(
+                self._remote_factory, 'present_hit_impulse', None)
+            if not callable(present):
+                return False
+            presented = present(
+                int(target_record['engine_id']), direction, impulse)
+        else:
+            # The compound-only fallback owns no stock swinging animator.
+            return False
+        self._report_hit_impulse(target_record, direction, impulse, presented)
+        return bool(presented)
+
+    def _report_hit_impulse(self, target_record, direction, impulse,
+                            presented):
+        """Log the first hull impulses of the round and their arguments."""
+        if self._hit_impulse_reports >= self._HIT_IMPULSE_REPORT_LIMIT:
+            return False
+        self._hit_impulse_reports += 1
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] IMPULSE id=%s local=%s dir=(%.3f, %.3f, '
+            '%.3f) impulse=%.1f presented=%s\n' % (
+                target_record.get('engine_id'),
+                bool(target_record.get('local')),
+                _number(getattr(direction, 'x', 0.0)),
+                _number(getattr(direction, 'y', 0.0)),
+                _number(getattr(direction, 'z', 0.0)),
+                impulse, bool(presented)))
+        return True
+
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
         """Port the mature 0.8.2 hit feedback through exact #1513 APIs."""
@@ -8585,6 +8655,11 @@ class BattleRuntime(object):
             raise RuntimeError('combat shell effects index is unavailable')
         effects_descr = self._runtime.vehicles.g_cache.shotEffects[
             effects_index]
+        # Retail rocks the hull before it spawns the armour effect, and a
+        # failed terrain effect must not swallow the hull reaction.
+        self._run_optional_feature(
+            'vehicle hit impulse', self._present_hit_impulse,
+            (event, target_record, direction, effects_descr))
         # Retail presents an HE near-miss through
         # Vehicle.showDamageFromExplosion/armorSplashHit.  Direct hits keep
         # the three protocol outcomes: ricochet, resisted and pierced.
@@ -21583,6 +21658,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
