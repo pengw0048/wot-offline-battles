@@ -120,15 +120,21 @@ def _xyz_list(vector):
     return [float(vector.x), float(vector.y), float(vector.z)]
 
 
+class _FakeEntity(object):
+    """Stands in for BigWorld.Entity; only native entities may own a body."""
+
+
 class _FakeSimulator(object):
     def __init__(self):
         self.numSubsteps = 2
         self.numIterations = 10
         self.updates = []
 
-    def update(self, dt, physics, bodies):
-        if not isinstance(physics, list):
-            raise TypeError('WGDynamicsSimulator.update: wrong arguments.')
+    def update(self, dt, physics, bodies, collision_models):
+        # The exe registers update(float, PyObject, PyObject, PyObject).
+        for sequence in (physics, bodies, collision_models):
+            if not isinstance(sequence, list):
+                raise TypeError('WGDynamicsSimulator.update: wrong arguments.')
         self.updates.append((dt, len(physics)))
         for item in physics:
             item.advance(dt)
@@ -186,7 +192,7 @@ class _FakeDescriptor(object):
         self.physics = {'weight': 21500.0}
 
 
-class _FakeNativeEntity(object):
+class _FakeNativeEntity(_FakeEntity):
     def __init__(self, physics, position):
         self.filter = _FakeNativeFilter(physics)
         self.typeDescriptor = _FakeDescriptor()
@@ -294,6 +300,7 @@ class NativePhysicsProbeTests(unittest.TestCase):
             WGVehiclePhysics=_FakePhysics,
             WGDynamicsSimulator=lambda: self.simulator,
             WGPhysicalBody=_FakeBody,
+            Entity=_FakeEntity,
             player=lambda: types.SimpleNamespace(arenaTypeID=(5 << 16) | 7),
             wg_setupPhysicsParam=lambda name, value: self.physics_params.append(
                 (name, value)))
@@ -541,18 +548,39 @@ class NativePhysicsProbeTests(unittest.TestCase):
         scale = by_name['solve_scale']['data']
         self.assertEqual(3, scale['body_count'])
         self.assertEqual(3, len(report['standalone_bodies']))
-        for body in report['standalone_bodies']:
+        for index, body in enumerate(report['standalone_bodies']):
             self.assertTrue(body['initialised'])
             self.assertEqual('detailed', body['init_mode'])
             self.assertEqual('_FakeNativeEntity', body['owner'])
             self.assertEqual(32, body['visibilityMask'])
+            self.assertEqual(100 + index, body['vehicleID'])
             self.assertEqual('lastTickMatrix = Matrix', body['seed']['result'])
         # Common conf is applied exactly once for the whole probe.
         self.assertEqual(2, len(self.physics_params))
+        self.assertEqual(self.module.UPDATE_SIGNATURE, report['update_signature'])
+        joined = ''.join(self.lines)
+        self.assertIn('step=simulator.update(dt, [standalone:11], [], [])', joined)
+        self.assertNotIn('seed rollback', joined)
+        self.assertEqual(4, self.simulator.update.__code__.co_argcount - 1)
         self.assertEqual(
             ['standalone:11', 'standalone:12'],
             by_name['solve_pair']['data']['labels'])
         self.assertEqual(2, report['simulator_settings']['numSubsteps'])
+
+    def test_plain_carrier_never_becomes_owner(self):
+        bots = self._bots(retail=False)
+        for bot in bots:
+            bot['native'] = None
+        probe = self._probe(bots, stages=['construct_standalone'])
+        self._run(probe)
+        report = self._report()
+        construct = [s for s in report['stages']
+                     if s['name'] == 'construct_standalone'][0]['data']
+        self.assertTrue(construct['initialised'])
+        self.assertEqual('<skipped: _FakeCarrier is not a BigWorld.Entity>',
+                         construct['owner'])
+        self.assertEqual(100, construct['vehicleID'])
+        self.assertNotIn('physics.owner', ''.join(self.lines))
 
     def test_stage_exception_is_recorded_and_probe_continues(self):
         def broken(*unused):

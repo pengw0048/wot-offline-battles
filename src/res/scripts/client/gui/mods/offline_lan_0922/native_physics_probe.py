@@ -19,7 +19,19 @@ runs plus the exact client ``scripts.pkg`` bytecode and data):
   hands it to ``WGVehiclePhysics.configure``.  The client package ships only
   two fields of that block per vehicle, so ``derived_xphysics`` builds it from
   the client descriptor and a read-only proxy supplies it to ``configurePhysics``
-  without mutating the shared ``VehicleType``.
+  without mutating the shared ``VehicleType``.  Run 3 (2026-09-04) accepted
+  that cfg for all 29 Bots (``configure`` returned True, every getter readable
+  afterwards, nothing moves without a simulator).
+* The exe's method registrations (read from the binary, not guessed):
+  ``WGDynamicsSimulator.update(float, seq<WGVehiclePhysics>,
+  seq<WGPhysicalBody>, seq<WGBspCollisionModel>)`` (four arguments; run 3
+  failed with three), ``WGVehiclePhysics.rollback(uint, uint)`` (not a pose
+  setter), ``setSignal(int)``, ``applyImpulseToCoM(Vector3)``,
+  ``setArenaBounds(Vector2, Vector2)``, ``getTouchedGround(uint)``,
+  ``subscribeBefore/AfterSimulation(callable)``.  The ``owner`` setter accepts
+  only a weakref whose referent subclasses the native ``PyEntity``; the
+  worker's Bot carrier is a plain Python object, so ``owner`` stays unset
+  there.  ``vehicleID`` has a setter.
 
 Stages run one per render frame from ``start_delay_seconds`` after the battle
 goes live.  Every native call group is announced with
@@ -114,6 +126,9 @@ COMMON_CONF_PARAMS = (
     'WARMSTARTING_THRESHOLD')
 # Vehicle.__startWGPhysics passes these to setArenaBounds.
 RETAIL_ARENA_BOUNDS = ((-10000, -10000), (10000, 10000))
+# WGDynamicsSimulator.update as registered in the #1513 exe.
+UPDATE_SIGNATURE = ('update(float dt, seq<WGVehiclePhysics>, '
+                    'seq<WGPhysicalBody>, seq<WGBspCollisionModel>)')
 
 # Attributes the exe's string table exposes on WGVehiclePhysics.  Every read
 # is individually guarded and announced; a missing or write-only attribute is
@@ -418,8 +433,9 @@ class WorkerPhysicsProbe(object):
         self._stage_index = 0
         self._stage_state = None
         self._report = {
-            'schema': 3, 'diagnostic': 'native_physics_probe',
-            'config': dict(self._config), 'stages': [], 'last_begun': None}
+            'schema': 4, 'diagnostic': 'native_physics_probe',
+            'config': dict(self._config), 'stages': [], 'last_begun': None,
+            'update_signature': UPDATE_SIGNATURE}
         self._current = None
         self._simulator = None
         self._standalone = {}
@@ -687,7 +703,8 @@ class WorkerPhysicsProbe(object):
 
     def _timed_update(self, simulator, dt, physics_list):
         started = self._perf()
-        simulator.update(float(dt), list(physics_list), [])
+        # (dt, vehicle physics, physical bodies, BSP collision models)
+        simulator.update(float(dt), list(physics_list), [], [])
         return (self._perf() - started) * 1000.0
 
     # ------------------------------------------------------- body acquisition
@@ -877,13 +894,20 @@ class WorkerPhysicsProbe(object):
             record['setArenaBounds'] = '%s: %s' % (_type_name(error), str(error))
         owner_mode = self._config.get('owner_mode', 'entity')
         target = bot.get('native') or bot.get('carrier')
+        entity_type = getattr(bigworld, 'Entity', None)
         if owner_mode == 'entity' and target is not None:
-            self._step('%s physics.owner = weakref(entity)' % label)
-            try:
-                physics.owner = weakref.ref(target)
-                record['owner'] = _type_name(target)
-            except Exception as error:
-                record['owner'] = '<%s>' % str(error)[:80]
+            if isinstance(entity_type, type) and not isinstance(
+                    target, entity_type):
+                # The setter accepts only a weakref to a native PyEntity.
+                record['owner'] = '<skipped: %s is not a BigWorld.Entity>' % (
+                    _type_name(target),)
+            else:
+                self._step('%s physics.owner = weakref(entity)' % label)
+                try:
+                    physics.owner = weakref.ref(target)
+                    record['owner'] = _type_name(target)
+                except Exception as error:
+                    record['owner'] = '<%s>' % str(error)[:80]
         for name, value in (('staticMode', False), ('movementSignals', 0)):
             self._step('%s physics.%s = %r' % (label, name, value))
             try:
@@ -891,6 +915,14 @@ class WorkerPhysicsProbe(object):
             except Exception as error:
                 record['%s_set' % name] = '<%s>' % str(error)[:80]
         self._set_visibility_mask(physics, label, record)
+        engine_id = bot.get('engine_id')
+        if engine_id is not None:
+            self._step('%s physics.vehicleID = %r' % (label, engine_id))
+            try:
+                physics.vehicleID = int(engine_id)
+                record['vehicleID'] = _read_attribute(physics, 'vehicleID')
+            except Exception as error:
+                record['vehicleID'] = '<%s>' % str(error)[:80]
         self._step('%s install callbacks' % label)
         record['callbacks'] = self._install_callbacks(physics, label)
         record['seed'] = self._seed_pose(physics, bot, label)
@@ -912,13 +944,13 @@ class WorkerPhysicsProbe(object):
         except Exception as error:
             return {'attempts': attempts,
                     'result': '<matrix build failed: %s>' % str(error)[:80]}
-        # configure() is the detailed cfg parser (see _init_detailed); it is
-        # never tried as a pose setter.
+        # configure() is the detailed cfg parser and rollback() is registered
+        # as (uint, uint) in the exe; neither is a pose setter.  Whether the
+        # solver honours lastTickMatrix is what the solve stages' pose
+        # snapshots show.
         candidates = (
             ('lastTickMatrix = Matrix', lambda: setattr(
                 physics, 'lastTickMatrix', matrix)),
-            ('rollback(Matrix)', lambda: physics.rollback(matrix)),
-            ('rollback(Vector3, yaw)', lambda: physics.rollback(vector, yaw)),
         )
         for name, call in candidates:
             self._step('%s seed %s' % (label, name))
@@ -974,7 +1006,8 @@ class WorkerPhysicsProbe(object):
                 'skipped': record.get('skipped'),
                 'owner': record.get('owner'), 'seed': record.get('seed'),
                 'setArenaBounds': record.get('setArenaBounds'),
-                'visibilityMask': record.get('visibilityMask')})
+                'visibilityMask': record.get('visibilityMask'),
+                'vehicleID': record.get('vehicleID')})
             if record.get('initialised'):
                 self._bodies.append(record)
 
@@ -1107,6 +1140,7 @@ class WorkerPhysicsProbe(object):
         data['owner'] = record.get('owner')
         data['setArenaBounds'] = record.get('setArenaBounds')
         data['visibilityMask'] = record.get('visibilityMask')
+        data['vehicleID'] = record.get('vehicleID')
         data['seed'] = record.get('seed')
         physics = record['physics']
         if physics is not None:
@@ -1211,7 +1245,7 @@ class WorkerPhysicsProbe(object):
         simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
         if not state['updates']:
-            self._step('simulator.update(dt, [%s], [])' % body['label'])
+            self._step('simulator.update(dt, [%s], [], [])' % body['label'])
         state['updates'].append(
             self._timed_update(simulator, dt, [body['physics']]))
         if len(state['samples']) < 12:
@@ -1259,7 +1293,7 @@ class WorkerPhysicsProbe(object):
         simulator = self._simulator_for_stage()
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
         if not state['updates']:
-            self._step('simulator.update(dt, %d bodies, [])' %
+            self._step('simulator.update(dt, %d bodies, [], [])' %
                        len(state['bodies']))
         state['updates'].append(self._timed_update(
             simulator, dt, [body['physics'] for body in state['bodies']]))
@@ -1306,7 +1340,7 @@ class WorkerPhysicsProbe(object):
         dt = max(0.001, min(0.1, frame_dt if frame_dt > 0.0 else 0.033))
         if not state['stepped']:
             state['stepped'] = True
-            self._step('simulator.update(dt, [%s, %s], [])' % (
+            self._step('simulator.update(dt, [%s, %s], [], [])' % (
                 first['label'], second['label']))
         self._timed_update(simulator, dt, [first['physics'],
                                             second['physics']])
