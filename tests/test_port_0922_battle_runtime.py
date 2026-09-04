@@ -990,6 +990,7 @@ class _Compatibility(object):
         self.target_lock_validations = []
         self.account_int_commands = []
         self.postmortem_vehicle_id = 0
+        self.target_focus_clears = 0
 
     def dispatch_account_int_command(self, command, values):
         self.account_int_commands.append((command, values))
@@ -1021,6 +1022,10 @@ class _Compatibility(object):
 
     def set_target_lock_candidate(self, vehicle):
         self.target_lock_candidate = vehicle
+        return True
+
+    def clear_target_focus(self):
+        self.target_focus_clears += 1
         return True
 
     def set_postmortem_vehicle(self, vehicle_id):
@@ -11521,6 +11526,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
+        battle.state = 'running'
         battle._binding = mock.Mock()
         battle._avatar.playerVehicleID = 10
         battle._synchronise_player_identity(10)
@@ -11535,7 +11541,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         target_record = {
             'engine_id': 11, 'local': False, 'kind': 'bot',
             'network_id': 2, 'presentation': True, 'native_remote': True,
-            'ready': True, 'visual_started': False,
+            'ready': True, 'arena_added': True, 'visual_started': False,
             'spot_visible': False, 'spot_marker_visible': False,
             'state': {'team': 2, 'health': 500, 'alive': True,
                       'x': 0.0, 'y': 0.0, 'z': 10.0}}
@@ -11547,23 +11553,48 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           'frags': 0}},
             'bot:2': target_record,
         }
-        request_wreck = mock.Mock(return_value=True)
+        request_wreck = mock.Mock(return_value=False)
         battle._remote_factory = types.SimpleNamespace(
             get=lambda engine_id: target if engine_id == 11 else None,
             request_wreck=request_wreck)
         event = {
+            'event_id': '1:1:0',
             'kind': 'bot_hit', 'attacker': 1, 'target_bot': 2,
             'health': 0, 'dead': True, 'attack_reason': 0,
             'death_reason': 0, 'source': 'shot', 'world_pose': True,
             'x': 0.0, 'y': 1.0, 'z': 10.0, 'shell_index': 0,
             'shot_result': 2, 'damage': 500}
+        statistics = {
+            'event_id': '1:1:1', 'kind': 'vehicle_statistics',
+            'actor_kind': 'player', 'actor_id': 1, 'frags': 1,
+            'team_killer': False}
+        result = {
+            'event_id': '1:1:2', 'kind': 'battle_result', 'winner': 1,
+            'reason': 'team_eliminated'}
+
+        def on_round_finished(winner, reason):
+            # The last-shot event batch must finish the blind death edge and
+            # frag publication before entering the native result lifecycle.
+            self.assertEqual(0, target.health)
+            self.assertTrue(target.model.visible)
+            request_wreck.assert_called_once_with(11)
+            battle._binding.arena_vehicle_killed.assert_called_once_with(
+                11, 10, 0)
+            battle._binding.arena_vehicle_statistics.assert_called_once_with(
+                10, 1)
+            battle._avatar.round_finished.append((winner, reason))
+
+        battle._avatar.onRoundFinished = mock.Mock(
+            side_effect=on_round_finished)
 
         with mock.patch.object(
                 critical_damage, 'apply_death',
                 return_value=None) as apply_death:
-            self.assertTrue(battle._apply_combat_event(event))
-            # An ordered replay must not repeat native death/effect callbacks.
-            self.assertTrue(battle._apply_combat_event(event))
+            events = {'events': [event, statistics, result]}
+            self.assertTrue(battle.on_events(events))
+            # An ordered replay must not repeat native death, frag or result
+            # callbacks.
+            self.assertTrue(battle.on_events(events))
 
         self.assertEqual(0, target.health)
         self.assertEqual(0, target_record['state']['health'])
@@ -11585,17 +11616,13 @@ class BattleRuntimeContractTests(unittest.TestCase):
             setVehicleState.assert_not_called()
         battle._binding.arena_vehicle_killed.assert_called_once_with(
             11, 10, 0)
+        battle._binding.arena_vehicle_statistics.assert_called_once_with(
+            10, 1)
+        battle._avatar.onRoundFinished.assert_called_once_with(
+            1, runtime.constants.FINISH_REASON.EXTERMINATION)
         battle._avatar.terrainEffects.addNew.assert_not_called()
         self.assertEqual([], battle._avatar.shot_results)
         self.assertEqual([], battle._avatar.battle_events)
-
-        statistics = {
-            'kind': 'vehicle_statistics', 'actor_kind': 'player',
-            'actor_id': 1, 'frags': 1, 'team_killer': False}
-        self.assertTrue(battle._apply_vehicle_statistics_event(statistics))
-        self.assertFalse(battle._apply_vehicle_statistics_event(statistics))
-        battle._binding.arena_vehicle_statistics.assert_called_once_with(
-            10, 1)
 
     def test_blind_critical_state_has_no_remote_vehicle_effect(self):
         runtime = _runtime()
@@ -23933,6 +23960,63 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime.bigworld.callbacks.pop()()
         self.assertEqual('stopped', battle.state)
         self.assertIsNone(battle._server)
+
+    def test_avatar_leave_clears_target_before_trigger_teardown(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        start = {
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'players': [{
+                'id': 1, 'team': 1, 'slot': 0, 'name': 'Player',
+                'vehicle': 'ussr:R11_MS-1', 'health': 500}],
+            'bots': []}
+        self.assertTrue(battle.start({
+            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+            'name': 'Player'}, start, client))
+        runtime.bigworld.callbacks.pop(0)()
+        runtime.bigworld.callbacks.pop(0)()
+        server = battle._server
+        lifecycle = {
+            'focused': True,
+            'trigger_owner_live': True,
+        }
+        calls = []
+
+        def clear_target_focus():
+            calls.append('clear_target_focus')
+            if not lifecycle['focused']:
+                return False
+            if not lifecycle['trigger_owner_live']:
+                raise AttributeError(
+                    "'NoneType' object has no attribute "
+                    "'deactivateTrigger'")
+            lifecycle['focused'] = False
+            return True
+
+        original_retire = runtime.compatibility.retire_current_player
+
+        def retire_current_player():
+            calls.append('retire_current_player')
+            lifecycle['trigger_owner_live'] = False
+            if lifecycle['focused']:
+                raise AttributeError(
+                    "'NoneType' object has no attribute "
+                    "'deactivateTrigger'")
+            return original_retire()
+
+        runtime.compatibility.clear_target_focus = clear_target_focus
+        runtime.compatibility.retire_current_player = retire_current_player
+
+        server.leaveArena({})
+
+        self.assertFalse(lifecycle['focused'])
+        self.assertEqual(['clear_target_focus'], calls)
+        runtime.bigworld.callbacks.pop()()
+        self.assertEqual(
+            ['clear_target_focus', 'clear_target_focus',
+             'retire_current_player'], calls)
+        self.assertEqual('stopped', battle.state)
 
     def test_avatar_leave_delegates_session_ownership_after_mailbox_returns(self):
         runtime = _runtime()

@@ -623,6 +623,7 @@ class OfflineCompatibility(object):
         self._target_lock_candidate = None
         self._target_lock_input_pending = False
         self._target_lock_input_avatar = None
+        self._target_focus_clear_attempted = False
 
     def install(self):
         if self._installed:
@@ -2778,6 +2779,7 @@ class OfflineCompatibility(object):
         self._target_lock_candidate = None
         self._target_lock_input_pending = False
         self._target_lock_input_avatar = None
+        self._target_focus_clear_attempted = False
         self._installed = False
 
     def garage_state(self):
@@ -3017,6 +3019,7 @@ class OfflineCompatibility(object):
         self._battle_player_vehicle_id = 0
         self._postmortem_vehicle_id = 0
         self._target_lock_candidate = None
+        self._target_focus_clear_attempted = False
         self._native_battle = True
         self._battle_gui_type = gui_type
         self._battle_bonus_type = bonus_type
@@ -3174,6 +3177,34 @@ class OfflineCompatibility(object):
                 raise ValueError(
                     'target-lock candidate has no visual entity')
         self._target_lock_candidate = vehicle
+        return True
+
+    def clear_target_focus(self):
+        """Release the native mouse target while its battle owners are live.
+
+        Exact #1513 synchronously calls ``PlayerAvatar.targetBlur`` from
+        ``BigWorld.target.clear()``.  That callback owns the target edge and
+        reads the battle Trigger manager, so it must run before Avatar GUI
+        teardown rather than from stock ``onBecomeNonPlayer`` afterwards.
+        """
+        if (not self._battle_active or
+                self._target_focus_clear_attempted):
+            return False
+        self._target_lock_candidate = None
+        target = self._original_target
+        if not callable(target):
+            raise RuntimeError('#1513 BigWorld.target is unavailable')
+        clear = getattr(target, 'clear', None)
+        if not callable(clear):
+            raise RuntimeError(
+                '#1513 BigWorld target-clear boundary is unavailable')
+        # PyTarget.__call__ hides an internally retained hidden target, so a
+        # None result cannot prove that clear is unnecessary.  Install the
+        # idempotence token before the native call because clear synchronously
+        # re-enters PlayerAvatar.targetBlur and may raise after releasing the
+        # engine pointer.
+        self._target_focus_clear_attempted = True
+        clear()
         return True
 
     def _target_lock_holds(self, current_id):

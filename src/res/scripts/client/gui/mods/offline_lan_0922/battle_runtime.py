@@ -21172,9 +21172,17 @@ class BattleRuntime(object):
         """Release battle-scoped native visuals before Hangar takes over."""
         cleanup_error = None
         try:
-            self._release_postmortem_visibility()
+            # BigWorld.target.clear() synchronously reaches stock targetBlur.
+            # Run it before any GUI, trigger, edge or remote-entity owner can
+            # be retired; PlayerAvatar.onBecomeNonPlayer clears it too late.
+            self._runtime.compatibility.clear_target_focus()
         except Exception as error:
             cleanup_error = error
+        try:
+            self._release_postmortem_visibility()
+        except Exception as error:
+            if cleanup_error is None:
+                cleanup_error = error
         if self._local_matrix is not None or self._local_model is not None:
             try:
                 self._detach_local_presentation()
