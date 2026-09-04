@@ -1041,6 +1041,32 @@ Repair reports remain pending until the server acknowledges their proposal
 revision, so a successful socket write or an older snapshot cannot rewind the
 HUD state.
 
+Track damage follows the detailed model Update 6.4 introduced. A track
+material's live `damageKind` selects the shell damage channel:
+`common/vehicle.xml` ships both tracks as `damageKind=auto`, and
+`vehicles.py::_readArmor()` resolves `auto` to armour damage whenever the
+material armour is nonzero. A
+direct solid hit on the leading or rearmost configured driving wheel takes the
+full roll; the ordinary middle run divides it by the target chassis'
+`bulkHealthFactor`. The zone is classified from the chassis-local contact of
+the exact collision the shot resolved against, carried privately beside the
+retail four-field collision value so the stock gun-marker and `ProjectileMover`
+consumers keep their exact ABI. Because the client exposes only driving-wheel
+NAMES and radii and never their node positions, the two configured wheel sizes
+from `chassis.drivingWheelsSizes` are anchored to the two ends of
+`chassis.topRightCarryingPoint`; that is this product's documented 0.9.x
+endpoint convention, not a recovered native equation. `_readChassis()` reads
+`bulkHealthFactor` only when `not IS_CLIENT and not IS_BOT`, so the value is
+resolved once per vehicle/chassis identity from the client's own raw
+`scripts/item_defs/vehicles/<nation>/<name>.xml` section through `ResMgr` and
+cached. That raw read is unproved on #1513: if it fails, the one middle track
+hit keeps the previous device-damage result and writes one bounded diagnostic
+instead of guessing a divisor. HE direct hits and splash stay on the previous
+device-damage law, because no reviewed evidence covers the wheel zones for a
+blast. Both shipped `usa:A107_T1_HMC` chassis make the endpoint zones overlap,
+so that vehicle deliberately uses the same safe fallback rather than an
+invented split.
+
 The stock debug controller reads `BigWorld.statPing()` and
 `statLagDetected()`, which report the unavailable retail transport in this
 client-only battle. A scoped, identity-safe `DebugPanel.updateDebugInfo`

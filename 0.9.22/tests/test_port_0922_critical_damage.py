@@ -13,6 +13,7 @@ from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import internal_hit_layouts
 from gui.mods.offline_lan_0922 import internal_layout_profiles
+from gui.mods.offline_lan_0922 import track_damage
 
 
 class _Extra(object):
@@ -23,12 +24,17 @@ class _Extra(object):
 
 class _Material(object):
 
-    def __init__(self, name, chance=1.0):
+    def __init__(self, name, chance=1.0, damage_kind=None):
         self.extra = _Extra(name)
         self.armor = 20.0
         self.vehicleDamageFactor = 0.0
         self.chanceToHitByProjectile = chance
         self.chanceToHitByExplosion = chance
+        if damage_kind is not None:
+            # vehicles.py::_readArmor resolves the shipped 'auto' kind to 0
+            # for a nonzero-armour material. Leaving the attribute off keeps
+            # the pre-fix behaviour a legacy caller still sees.
+            self.damageKind = damage_kind
 
 
 class _Strict1513Component(object):
@@ -1487,6 +1493,359 @@ class CriticalDamageTests(unittest.TestCase):
             [('driver', 'normal', 'repair')],
             [(event['name'], event['state'], event['cause'])
              for event in payload['events']])
+
+
+# Exact global 0.9.22 A83_T110E4 chassis data. topRightCarryingPoint is
+# 1.51097 2.00908; drivingWheels 'WD_L0 WD_L6' have radii 0.329521 and 0.3375
+# and _readChassis publishes them as radius * 2.2. bulkHealthFactor is 3.0 and
+# the track pool is 250 HP. Its 155 mm AP shell deals (750 armour, 210 device).
+_HALF_LENGTH = 2.00908
+_FRONT_WHEEL = 0.329521 * 2.2
+_REAR_WHEEL = 0.3375 * 2.2
+_FRONT_BOUND = _HALF_LENGTH - _FRONT_WHEEL
+_REAR_BOUND = _REAR_WHEEL - _HALF_LENGTH
+_T110E4_SHELL = {'damage': (750.0, 210.0), 'kind': 'ARMOR_PIERCING',
+                 'caliber': 155.0}
+# random.uniform is pinned to its low bound in these tests, so the armour roll
+# is 562.5 and the device roll 157.5. A mean-based mock could not tell the two
+# laws apart: 750 / 3 is exactly the 250 HP pool.
+_ARMOR_ROLL = 750.0 * 0.75
+_DEVICE_ROLL = 210.0 * 0.75
+
+
+def _low_bound(low, unused_high):
+    return low
+
+
+def _track_descriptor(bulk=3.0, **chassis_overrides):
+    """A T110E4-like descriptor with real driving-wheel chassis geometry."""
+    descriptor = _descriptor()
+    chassis = {
+        'name': 'Chassis_T110E4',
+        'maxHealth': 250, 'maxRegenHealth': 190,
+        'topRightCarryingPoint': (1.51097, _HALF_LENGTH),
+        'drivingWheelsSizes': (_FRONT_WHEEL, _REAR_WHEEL),
+    }
+    if bulk is not None:
+        chassis['bulkHealthFactor'] = bulk
+    chassis.update(chassis_overrides)
+    descriptor.chassis = chassis
+    descriptor.name = 'usa:A83_T110E4'
+    descriptor.type.name = 'usa:A83_T110E4'
+    descriptor.type.mode = 0
+    return descriptor
+
+
+def _track_hit(name, local_z, distance=1.0, damage_kind=0):
+    """One native track collision plus its private local-contact record."""
+    collision = (distance, 1.0, _Material(name, damage_kind=damage_kind),
+                 track_damage.TRACK_COMPONENT_NAME)
+    contact = (track_damage.TRACK_COMPONENT_NAME, distance,
+               (0.0, 0.0, float(local_z)))
+    return collision, contact
+
+
+class TrackWheelDamageTests(unittest.TestCase):
+    """Update 6.4 leading/rearmost wheel zones on the exact #1513 law."""
+
+    def setUp(self):
+        self.player = types.SimpleNamespace(
+            playerVehicleID=999,
+            arena=types.SimpleNamespace(onVehicleKilled=lambda *args: None),
+            vehicleTypeDescriptor=_descriptor())
+        self.bigworld = types.ModuleType('BigWorld')
+        self.bigworld.player = lambda: self.player
+        self.bigworld.time = lambda: 12.0
+        self.math = types.ModuleType('Math')
+        track_damage.reset_caches()
+        track_damage.reset_diagnostics()
+
+    def tearDown(self):
+        track_damage.reset_caches()
+        track_damage.reset_diagnostics()
+
+    def _apply(self, vehicle, hits, shell=None, uniform=_low_bound,
+               by_explosion=False):
+        collisions = tuple(hit[0] for hit in hits)
+        contacts = tuple(hit[1] for hit in hits if hit[1] is not None)
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
+                mock.patch('random.uniform', side_effect=uniform), \
+                mock.patch('random.random', return_value=0.0):
+            if by_explosion:
+                return critical_damage.apply_explosion(
+                    vehicle, collisions, object(), object(), 0,
+                    shell or _T110E4_SHELL, attacker_id=2)
+            return critical_damage.apply_direct(
+                vehicle, collisions, object(), object(), 0,
+                shell or _T110E4_SHELL, attacker_id=2, penetrated=False,
+                collision_contacts=contacts)
+
+    def _vehicle(self, bulk=3.0, **chassis_overrides):
+        return types.SimpleNamespace(
+            id=1, health=2000,
+            typeDescriptor=_track_descriptor(bulk, **chassis_overrides),
+            position=object(), matrix=object(),
+            devices_hp={}, _destroyed_devices=set(), _crew_ko=set(),
+            is_on_fire=False, getComponents=lambda: ())
+
+    def test_track_material_damage_kind_selects_the_armor_channel(self):
+        vehicle = self._vehicle()
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 0.0)])
+
+        # 562.5 armour / 3.0 bulk, not the 157.5 device roll the old law used.
+        self.assertAlmostEqual(
+            250.0 - _ARMOR_ROLL / 3.0,
+            vehicle.devices_hp['leftTrackHealth'])
+
+    def test_an_ordinary_module_still_uses_the_devices_channel(self):
+        # Only the two track names consult damageKind. An engine material
+        # that happens to carry damageKind 0 must keep the devices law, so
+        # this fix cannot silently multiply every module crit.
+        vehicle = self._vehicle()
+        vehicle.typeDescriptor.engine = {
+            'maxHealth': 1000, 'maxRegenHealth': 500,
+            'fireStartingChance': 0.0}
+        collision = (1.0, 1.0, _Material('engineHealth', damage_kind=0),
+                     'vehicleHull')
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
+                mock.patch('random.uniform', side_effect=_low_bound), \
+                mock.patch('random.random', return_value=0.0):
+            critical_damage.apply_direct(
+                vehicle, (collision,), object(), object(), 0, _T110E4_SHELL,
+                attacker_id=2, penetrated=False)
+
+        self.assertAlmostEqual(
+            1000.0 - _DEVICE_ROLL, vehicle.devices_hp['engineHealth'])
+
+    def test_a_device_damage_kind_track_keeps_the_zone_law(self):
+        # The zone belongs to the track, not to the channel: a material that
+        # resolved to the devices channel is still split into wheels and run.
+        wheel = self._vehicle()
+        self._apply(
+            wheel, [_track_hit('leftTrackHealth', 1.5, damage_kind=1)])
+        self.assertAlmostEqual(
+            250.0 - _DEVICE_ROLL, wheel.devices_hp['leftTrackHealth'])
+
+        middle = self._vehicle()
+        self._apply(
+            middle, [_track_hit('leftTrackHealth', 0.0, damage_kind=1)])
+        self.assertAlmostEqual(
+            250.0 - _DEVICE_ROLL / 3.0, middle.devices_hp['leftTrackHealth'])
+
+    def test_a_leading_wheel_hit_breaks_a_fresh_250_hp_track_at_once(self):
+        for side in ('leftTrackHealth', 'rightTrackHealth'):
+            vehicle = self._vehicle()
+            self._apply(vehicle, [_track_hit(side, 1.5)])
+            self.assertEqual(0, vehicle.devices_hp[side])
+            self.assertIn(side, vehicle._destroyed_devices)
+
+    def test_a_rearmost_wheel_hit_breaks_a_fresh_250_hp_track_at_once(self):
+        for side in ('leftTrackHealth', 'rightTrackHealth'):
+            vehicle = self._vehicle()
+            self._apply(vehicle, [_track_hit(side, -1.5)])
+            self.assertEqual(0, vehicle.devices_hp[side])
+            self.assertIn(side, vehicle._destroyed_devices)
+
+    def test_a_middle_track_hit_is_reduced_by_the_chassis_bulk_factor(self):
+        for side in ('leftTrackHealth', 'rightTrackHealth'):
+            vehicle = self._vehicle()
+            self._apply(vehicle, [_track_hit(side, 0.0)])
+            self.assertAlmostEqual(62.5, vehicle.devices_hp[side])
+            self.assertNotIn(side, vehicle._destroyed_devices)
+
+    def test_left_and_right_tracks_keep_separate_hp_pools(self):
+        vehicle = self._vehicle()
+        self._apply(vehicle, [
+            _track_hit('leftTrackHealth', 0.0, distance=1.0),
+            _track_hit('rightTrackHealth', 1.5, distance=1.2)])
+
+        self.assertAlmostEqual(62.5, vehicle.devices_hp['leftTrackHealth'])
+        self.assertEqual(0, vehicle.devices_hp['rightTrackHealth'])
+
+    def test_exact_zone_boundaries_belong_to_the_wheel(self):
+        cases = (
+            (_FRONT_BOUND, 0),
+            (_FRONT_BOUND - 1.0e-6, 62.5),
+            (_REAR_BOUND, 0),
+            (_REAR_BOUND + 1.0e-6, 62.5),
+        )
+        for local_z, expected in cases:
+            vehicle = self._vehicle()
+            self._apply(vehicle, [_track_hit('leftTrackHealth', local_z)])
+            self.assertAlmostEqual(
+                expected, vehicle.devices_hp['leftTrackHealth'], places=4,
+                msg='z=%r' % (local_z,))
+
+    def test_a_non_default_bulk_factor_comes_from_the_data(self):
+        # Pz.Kpfw. III Ausf. K ships 5.0; a hardcoded /3 would be wrong here.
+        vehicle = self._vehicle(bulk=5.0)
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 0.0)])
+        self.assertAlmostEqual(
+            250.0 - _ARMOR_ROLL / 5.0,
+            vehicle.devices_hp['leftTrackHealth'])
+
+    def test_two_sequential_middle_hits_accumulate_on_one_pool(self):
+        vehicle = self._vehicle(bulk=5.0)
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 0.0)])
+        self.assertAlmostEqual(137.5, vehicle.devices_hp['leftTrackHealth'])
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 0.2)])
+        self.assertAlmostEqual(25.0, vehicle.devices_hp['leftTrackHealth'])
+        self.assertNotIn('leftTrackHealth', vehicle._destroyed_devices)
+
+    def test_duplicate_native_boxes_apply_one_loss_per_strike(self):
+        vehicle = self._vehicle()
+        chance = mock.Mock(return_value=0.0)
+        collisions = (
+            (1.0, 1.0, _Material('leftTrackHealth', damage_kind=0),
+             track_damage.TRACK_COMPONENT_NAME),
+            (1.0, 1.0, _Material('leftTrackHealth', damage_kind=0),
+             track_damage.TRACK_COMPONENT_NAME),
+            (1.4, 1.0, _Material('leftTrackHealth', damage_kind=0),
+             track_damage.TRACK_COMPONENT_NAME))
+        contacts = (
+            (track_damage.TRACK_COMPONENT_NAME, 1.0, (0.0, 0.0, 0.0)),
+            (track_damage.TRACK_COMPONENT_NAME, 1.0, (0.0, 0.0, 0.0)),
+            (track_damage.TRACK_COMPONENT_NAME, 1.4, (0.0, 0.0, 1.5)))
+
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
+                mock.patch('random.uniform', side_effect=_low_bound), \
+                mock.patch('random.random', chance):
+            critical_damage.apply_direct(
+                vehicle, collisions, object(), object(), 0, _T110E4_SHELL,
+                attacker_id=2, penetrated=False,
+                collision_contacts=contacts)
+
+        # Equal-distance duplicates share one contact, and the nearest hit is
+        # the only one scored: the middle result, never the later wheel box.
+        self.assertAlmostEqual(62.5, vehicle.devices_hp['leftTrackHealth'])
+        self.assertEqual(1, chance.call_count)
+
+    def test_the_proposal_delta_carries_the_zone_scaled_loss(self):
+        vehicle = self._vehicle()
+        collision, contact = _track_hit('leftTrackHealth', 1.5)
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
+                mock.patch('random.uniform', side_effect=_low_bound), \
+                mock.patch('random.random', return_value=0.0):
+            unused, payload, delta = critical_damage.propose_direct(
+                vehicle, (collision,), object(), object(), 0, _T110E4_SHELL,
+                attacker_id=2, penetrated=False, with_delta=True,
+                collision_contacts=(contact,))
+
+        self.assertEqual(
+            [{'name': 'leftTrackHealth', 'hp_loss': 250.0}],
+            delta['devices'])
+        self.assertEqual('destroyed', payload['devices'][0]['state'])
+        # A proposal must not touch the live vehicle.
+        self.assertEqual({}, getattr(vehicle, 'devices_hp', None) or {})
+
+    def test_the_same_frozen_evidence_gives_one_delta_for_any_shooter(self):
+        collision, contact = _track_hit('leftTrackHealth', 0.0)
+        deltas = []
+        for attacker_id in (2, 4321):
+            vehicle = self._vehicle()
+            with mock.patch.dict(
+                    sys.modules,
+                    {'BigWorld': self.bigworld, 'Math': self.math}), \
+                    mock.patch('random.uniform', side_effect=_low_bound), \
+                    mock.patch('random.random', return_value=0.0):
+                unused, unused_payload, delta = critical_damage.propose_direct(
+                    vehicle, (collision,), object(), object(), 0,
+                    _T110E4_SHELL, attacker_id=attacker_id, penetrated=False,
+                    with_delta=True, collision_contacts=(contact,))
+            deltas.append(delta['devices'])
+        self.assertEqual(deltas[0], deltas[1])
+        self.assertEqual(
+            [{'name': 'leftTrackHealth', 'hp_loss': _ARMOR_ROLL / 3.0}],
+            deltas[0])
+
+    def test_apcr_and_heat_direct_hits_use_the_same_track_law(self):
+        for kind in ('ARMOR_PIERCING_CR', 'HOLLOW_CHARGE'):
+            vehicle = self._vehicle()
+            shell = dict(_T110E4_SHELL)
+            shell['kind'] = kind
+            self._apply(
+                vehicle, [_track_hit('leftTrackHealth', 1.5)], shell=shell)
+            self.assertEqual(0, vehicle.devices_hp['leftTrackHealth'])
+
+    def test_he_direct_and_splash_stay_on_the_previous_device_law(self):
+        # The demonstrated regression is the solid direct hit. Routing HE
+        # through the armour channel and the wheel zones would turn every
+        # splash into a guaranteed detrack, which no evidence supports.
+        vehicle = self._vehicle()
+        shell = {'damage': (750.0, 210.0), 'kind': 'HIGH_EXPLOSIVE',
+                 'caliber': 155.0, 'explosionRadius': 3.0}
+        self._apply(
+            vehicle, [_track_hit('leftTrackHealth', 1.5)], shell=shell,
+            by_explosion=True)
+
+        self.assertAlmostEqual(
+            250.0 - _DEVICE_ROLL, vehicle.devices_hp['leftTrackHealth'])
+
+    def test_a_missing_local_contact_keeps_the_previous_device_result(self):
+        vehicle = self._vehicle()
+        collision = _track_hit('leftTrackHealth', 1.5)[0]
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
+                mock.patch('random.uniform', side_effect=_low_bound), \
+                mock.patch('random.random', return_value=0.0):
+            critical_damage.apply_direct(
+                vehicle, (collision,), object(), object(), 0, _T110E4_SHELL,
+                attacker_id=2, penetrated=False, collision_contacts=())
+
+        self.assertAlmostEqual(
+            250.0 - _DEVICE_ROLL, vehicle.devices_hp['leftTrackHealth'])
+
+    def test_every_malformed_input_falls_back_without_raising(self):
+        cases = (
+            ('missing damageKind', {}, {'damage_kind': None}, None),
+            ('malformed damageKind', {}, {'damage_kind': 9}, None),
+            ('missing wheel sizes', {'drivingWheelsSizes': None}, {}, None),
+            ('malformed wheel sizes',
+             {'drivingWheelsSizes': (float('nan'), 0.7)}, {}, None),
+            ('missing carrying extent',
+             {'topRightCarryingPoint': None}, {}, None),
+            ('inverted carrying extent',
+             {'topRightCarryingPoint': (1.5, -2.0)}, {}, None),
+            ('overlapping wheel zones',
+             {'drivingWheelsSizes': (2.0, 2.02)}, {}, None),
+            ('wrong component', {}, {}, 'vehicleHull'),
+        )
+        for label, chassis_overrides, hit_overrides, component in cases:
+            vehicle = self._vehicle(**chassis_overrides)
+            collision, contact = _track_hit(
+                'leftTrackHealth', 0.0, **hit_overrides)
+            if component is not None:
+                collision = (collision[0], collision[1], collision[2],
+                             component)
+            with mock.patch.dict(
+                    sys.modules,
+                    {'BigWorld': self.bigworld, 'Math': self.math}), \
+                    mock.patch('random.uniform', side_effect=_low_bound), \
+                    mock.patch('random.random', return_value=0.0):
+                critical_damage.apply_direct(
+                    vehicle, (collision,), object(), object(), 0,
+                    _T110E4_SHELL, attacker_id=2, penetrated=False,
+                    collision_contacts=(contact,))
+            self.assertAlmostEqual(
+                250.0 - _DEVICE_ROLL,
+                vehicle.devices_hp['leftTrackHealth'], msg=label)
+
+    def test_a_middle_hit_without_a_resolvable_bulk_factor_falls_back(self):
+        # No descriptor value and no client resources: the one middle hit
+        # keeps the former device-damage result instead of a guessed divisor.
+        vehicle = self._vehicle(bulk=None)
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 0.0)])
+        self.assertAlmostEqual(
+            250.0 - _DEVICE_ROLL, vehicle.devices_hp['leftTrackHealth'])
+
+    def test_an_end_wheel_hit_needs_no_bulk_factor_at_all(self):
+        vehicle = self._vehicle(bulk=None)
+        self._apply(vehicle, [_track_hit('leftTrackHealth', 1.5)])
+        self.assertEqual(0, vehicle.devices_hp['leftTrackHealth'])
 
 
 class CrewInjuryLawTests(unittest.TestCase):

@@ -2843,6 +2843,67 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(-10.0, chassis_start.z)
         self.assertEqual(-20.0, hull_start.z)
 
+    def test_collision_evidence_carries_the_component_local_contact(self):
+        # The authoritative resolver needs the chassis-local contact of a
+        # track hit. It must come from the same ray the native hit test ran
+        # on, at the pose that collision was evaluated at.
+        descriptor = _Descriptor()
+        material = types.SimpleNamespace(
+            armor=20.0, damageKind=0,
+            extra=types.SimpleNamespace(name='leftTrackHealth'))
+        chassis_tester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[
+                (12.0, None, 1.0, 21), (12.0, None, 1.0, 22)]))
+        descriptor.chassis.hitTester = chassis_tester
+        descriptor.chassis.materials = {21: material, 22: material}
+        descriptor.hull.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[]))
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0), {'health': 500})
+        body_matrix = _Matrix()
+        body_matrix.translation = _Vector(0.0, 0.0, 20.0)
+        chassis_matrix = _Matrix()
+        chassis_matrix.translation = _Vector(0.0, 0.0, 10.0)
+
+        evidence = remote_vehicle_module._collide_vehicle_evidence_at_matrix(
+            vehicle, body_matrix, _Vector(0.0, 1.0, 0.0),
+            _Vector(0.0, 1.0, 100.0),
+            types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix),
+            chassis_matrix=chassis_matrix)
+
+        # The chassis ray starts at local z = -10 and the hit is 12 m along
+        # it, so the contact sits 2 m ahead of the chassis origin.
+        self.assertEqual(2, len(evidence))
+        for item in evidence:
+            self.assertEqual('vehicleChassis', item.collision.compName)
+            self.assertEqual(4, len(item.collision))
+            self.assertAlmostEqual(2.0, item.localPoint[2])
+        # Equal-distance duplicates on one component share one contact.
+        self.assertEqual(evidence[0].localPoint, evidence[1].localPoint)
+
+    def test_public_collision_path_stays_the_four_field_retail_value(self):
+        descriptor = _Descriptor()
+        material = types.SimpleNamespace(armor=20.0)
+        descriptor.chassis.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[(12.0, None, 1.0, 21)]))
+        descriptor.chassis.materials = {21: material}
+        descriptor.hull.hitTester = types.SimpleNamespace(
+            localHitTest=mock.Mock(return_value=[]))
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0), {'health': 500})
+
+        collisions = collide_vehicle_at_matrix(
+            vehicle, _Matrix(), _Vector(0.0, 1.0, 0.0),
+            _Vector(0.0, 1.0, 100.0),
+            types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix))
+
+        self.assertEqual(1, len(collisions))
+        self.assertEqual(4, len(collisions[0]))
+        self.assertEqual(
+            ('dist', 'hitAngleCos', 'matInfo', 'compName'),
+            collisions[0]._fields)
+        self.assertFalse(hasattr(collisions[0], 'localPoint'))
+
     def test_remote_collision_preserves_ext_shape_across_ticks_and_skip_gun(self):
         descriptor = _Descriptor()
         gun_material = types.SimpleNamespace(armor=25.0)
