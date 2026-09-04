@@ -11578,6 +11578,28 @@ class BattleRuntime(object):
         # presentation evidence, which keeps Bot fire, remote humans and
         # unpresented vehicles on the authoritative timeline.
         presentation_offsets = meta.get('presentation_offsets') or {}
+        if (presentation_offsets and
+                not meta.get('presentation_offsets_frozen') and
+                history_floor is not None):
+            retained = max(0.0, float(absolute_start) - history_floor)
+            frozen_offsets = {}
+            clamped_keys = set()
+            for key, raw_offset in presentation_offsets.items():
+                offset = max(0.0, float(raw_offset))
+                frozen_offsets[key] = min(offset, retained)
+                if offset > retained:
+                    clamped_keys.add(key)
+            # The first real chord owns the history boundary for this shot.
+            # Persisting the clamp keeps every later chord on one steadily
+            # advancing target timeline instead of repeatedly sampling the
+            # oldest retained pose as more history becomes available.
+            meta['presentation_offsets'] = frozen_offsets
+            meta['presentation_offsets_frozen'] = True
+            meta['presentation_history_clamped_keys'] = frozenset(
+                clamped_keys)
+            presentation_offsets = frozen_offsets
+        clamped_keys = meta.get(
+            'presentation_history_clamped_keys', frozenset())
         direction_tuple = tuple(
             (float(end[index]) - float(start[index])) / chord_length
             for index in range(3))
@@ -11601,18 +11623,9 @@ class BattleRuntime(object):
             if self._worker_mode and record.get('local'):
                 continue
             presentation_offset = float(presentation_offsets.get(key, 0.0))
-            if presentation_offset and history_floor is not None:
-                retained = float(absolute_start) - history_floor
-                if retained < presentation_offset:
-                    # Only a trigger inside the first frames of a round can
-                    # ask for a sample older than the authority has ever
-                    # recorded.  Rewind as far as retained history actually
-                    # proves rather than failing an otherwise legal shot, and
-                    # record the boundary.  This never moves a candidate
-                    # forward of its authoritative pose.
-                    presentation_offset = max(0.0, retained)
-                    record['projectile_collision_pose_boundary'] = \
-                        'presentation_history_clamped'
+            if key in clamped_keys:
+                record['projectile_collision_pose_boundary'] = \
+                    'presentation_history_clamped'
             pose_start = float(absolute_start) - presentation_offset
             pose_end = float(absolute_end) - presentation_offset
             if not (history_floor is not None and
@@ -20473,12 +20486,15 @@ class BattleRuntime(object):
         # muzzle ray.  The following input carries this trigger's motion time,
         # so the ledger and that time describe one instant.
         presentation_ledger = self._presentation_ledger()
+        trigger_server_time_ms = self._projectile_estimated_server_time(now)
+        if trigger_server_time_ms is None:
+            return self._reject_local_fire('trigger_clock_unavailable')
         if not self._sender.send_current():
             return self._reject_local_fire('input_send_failed')
         intent_seq = sender(
             shell_index, list(_xyz(shot_origin)),
             list(_xyz(shot_direction)), dispersion_angle,
-            presentation_ledger)
+            presentation_ledger, trigger_server_time_ms)
         if not intent_seq:
             return self._reject_local_fire('intent_send_failed')
         self._local_fire_intent = {

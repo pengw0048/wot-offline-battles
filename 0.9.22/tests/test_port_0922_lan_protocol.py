@@ -679,6 +679,7 @@ class LanProtocolTests(unittest.TestCase):
             'gravity': 9.81,
             'max_distance': 720.0,
             'max_time_ms': 20000,
+            'trigger_server_time_ms': 100,
             'source_shot': {
                 'speed': 900.0, 'gravity': 9.81,
                 'maxDistance': 720.0,
@@ -708,6 +709,7 @@ class LanProtocolTests(unittest.TestCase):
             'shot_direction': [1.0, 0.0, 0.0],
             'dispersion_angle': 0.0,
             'presentation_ledger': [],
+            'trigger_server_time_ms': 100,
         }, self.sent[-1])
         self.assertFalse(any(field in self.sent[-1]
                              for field in ('position', 'origin', 'velocity',

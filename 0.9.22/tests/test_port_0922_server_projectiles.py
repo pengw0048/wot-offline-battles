@@ -13,7 +13,7 @@ sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import (  # noqa: E402
     BattleState, CLIENT_BUILD_082, CLIENT_BUILD_0922, ClientHandler,
-    MAX_LINE_BYTES,
+    MAX_LINE_BYTES, MAX_MOTION_TIME_US,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PREBATTLE_SECONDS,
     HUMAN_RAM_TIMELINE_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
@@ -117,6 +117,7 @@ def _fire_intent(state, player_id=1, **changes):
         'shot_direction': [0.0, 0.0, 1.0],
         'dispersion_angle': 0.01,
         'presentation_ledger': [],
+        'trigger_server_time_ms': state._server_time_ms(),
     }
     message.update(changes)
     return message
@@ -1800,25 +1801,24 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 0, int(state.players[1].pose_time_us) - int(lag_us)),
         }
 
-    def test_player_launch_maps_the_visible_trigger_clock(self):
+    def test_player_launch_uses_the_frozen_visible_trigger_clock(self):
         state = _state()
         player = state.players[1]
+        state.tick = 450
         self.assertTrue(_update_player_input(state, 1))
-        trigger_pose_time_us = int(player.pose_time_us)
-        # 133 ms of transport and worker mailbox delay: four 30 Hz round ticks
-        # and the same real interval on the independent motion clock.
+        trigger_time_ms = state._server_time_ms()
+        # Admission is 133 ms later. A simultaneous catch-up correction moves
+        # the independent motion clock by another 300 ms, but must not change
+        # the trigger already frozen in the round projectile clock.
         state.tick += 4
-        receipt_motion_time_us = trigger_pose_time_us + 133000
-        state._logical_motion_time_us = (
-            lambda raw_time_us=None: receipt_motion_time_us)
+        state.motion_time_offset_us += 300000
         receipt_tick_ms = state._server_time_ms()
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, trigger_server_time_ms=trigger_time_ms)))
         relay = player.pending_fire_intents[1]
         mapped = int(relay['trigger_launch_time_ms'])
 
-        self.assertEqual(trigger_pose_time_us, int(relay['pose_time_us']))
-        # Only the elapsed interval crosses the clock boundary; neither epoch
-        # does.  The admitted launch therefore stays at the visible trigger.
+        self.assertEqual(trigger_time_ms, mapped)
         self.assertEqual(receipt_tick_ms - 133, mapped)
 
         state.tick += 6
@@ -1833,32 +1833,82 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             state._server_time_ms() - 333,
             record['launch_server_time_ms'])
 
-    def test_trigger_clock_mapping_is_bounded_and_round_scoped(self):
+    def test_trigger_clock_bounds_have_typed_terminal_results(self):
         state = _state()
-        player = state.players[1]
+        state.tick += 30
         self.assertTrue(_update_player_input(state, 1))
-        trigger_pose_time_us = int(player.pose_time_us)
-        state.tick += 300
-        # A shooter whose clock claims a ten-second-old trigger cannot rewind
-        # the round ledger by ten seconds.
-        state._logical_motion_time_us = (
-            lambda raw_time_us=None: trigger_pose_time_us + 10000000)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() - 500)))
         self.assertEqual(
             state._server_time_ms() - 500,
-            int(player.pending_fire_intents[1]['trigger_launch_time_ms']))
+            state.players[1].pending_fire_intents[1][
+                'trigger_launch_time_ms'])
 
-        # A trigger the server has not yet reached never moves a launch into
-        # the future either.
         state = _state()
         player = state.players[1]
+        state.tick += 30
         self.assertTrue(_update_player_input(state, 1))
-        state._logical_motion_time_us = (
-            lambda raw_time_us=None: int(player.pose_time_us) - 5000)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        delivered = []
+        player.offer_reliable = lambda message: (
+            delivered.append(dict(message)) or True)
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() - 501)))
         self.assertEqual(
-            state._server_time_ms(),
+            (False, 'trigger_clock_stale'), player.fire_intent_results[1])
+        self.assertEqual('trigger_clock_stale', delivered[-1]['reason'])
+        self.assertNotIn(1, player.pending_fire_intents)
+
+        # A small ahead estimate is legal clock quantization, but canonical
+        # projectile time is clamped once to server receipt.
+        state = _state()
+        player = state.players[1]
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        receipt_time_ms = state._server_time_ms()
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, trigger_server_time_ms=receipt_time_ms + 250)))
+        self.assertEqual(
+            receipt_time_ms,
             int(player.pending_fire_intents[1]['trigger_launch_time_ms']))
+
+        state = _state()
+        player = state.players[1]
+        state.tick += 30
+        self.assertTrue(_update_player_input(state, 1))
+        delivered = []
+        player.offer_reliable = lambda message: (
+            delivered.append(dict(message)) or True)
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state,
+            trigger_server_time_ms=state._server_time_ms() + 251)))
+        self.assertEqual(
+            (False, 'trigger_clock_future'), player.fire_intent_results[1])
+        self.assertEqual('trigger_clock_future', delivered[-1]['reason'])
+        self.assertNotIn(1, player.pending_fire_intents)
+
+    def test_invalid_trigger_clock_is_a_typed_local_failure(self):
+        missing = object()
+        for raw_time in (missing, None, True, 1.0, -1,
+                         MAX_MOTION_TIME_US // 1000 + 1):
+            state = _state()
+            player = state.players[1]
+            self.assertTrue(_update_player_input(state, 1))
+            delivered = []
+            player.offer_reliable = lambda message: (
+                delivered.append(dict(message)) or True)
+            intent = _fire_intent(state, trigger_server_time_ms=raw_time)
+            if raw_time is missing:
+                intent.pop('trigger_server_time_ms')
+
+            self.assertTrue(state.submit_fire_intent(1, intent))
+            self.assertEqual(
+                (False, 'trigger_clock_invalid'),
+                player.fire_intent_results[1])
+            self.assertEqual('trigger_clock_invalid', delivered[-1]['reason'])
+            self.assertNotIn(1, player.pending_fire_intents)
 
     def test_mapped_launch_time_is_invariant_to_further_delay(self):
         times = []
@@ -1941,15 +1991,30 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             [], state.players[1].pending_fire_intents[1][
                 'presentation_ledger'])
 
-    def test_missing_presentation_ledger_fails_the_envelope(self):
+    def test_missing_presentation_ledger_is_a_typed_local_failure(self):
         state = _state()
+        player = state.players[1]
         self.assertTrue(_update_player_input(state, 1))
         message = _fire_intent(state)
         message.pop('presentation_ledger')
+        delivered = []
+        player.offer_reliable = lambda result: (
+            delivered.append(dict(result)) or True)
 
-        self.assertFalse(state.submit_fire_intent(1, message))
-        self.assertEqual(0, state.players[1].fire_intent_seq)
-        self.assertEqual({}, dict(state.players[1].pending_fire_intents))
+        self.assertTrue(state.submit_fire_intent(1, message))
+        self.assertEqual(1, player.fire_intent_seq)
+        self.assertEqual(
+            (False, 'presentation_ledger_invalid'),
+            player.fire_intent_results[1])
+        self.assertEqual('presentation_ledger_invalid', delivered[-1]['reason'])
+        self.assertEqual({}, dict(player.pending_fire_intents))
+        # The exact malformed retry is idempotent and does not republish its
+        # terminal; the next sequence can still be admitted normally.
+        self.assertTrue(state.submit_fire_intent(1, dict(message)))
+        self.assertEqual(1, len(delivered))
+        self.assertTrue(_update_player_input(state, 1))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertIn(2, player.pending_fire_intents)
 
     def test_invalid_presentation_evidence_is_a_typed_local_failure(self):
         bot_id = 16

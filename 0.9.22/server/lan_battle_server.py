@@ -275,7 +275,7 @@ PLAYER_PRESENTATION_MAX_LAG_US = 1000000
 # Ordinary LAN transport puts a trigger a few milliseconds behind its server
 # admission.  Half a second bounds a stalled sender without letting a broken
 # clock rewind the round projectile ledger.
-PLAYER_TRIGGER_MAX_LAG_US = 500000
+PLAYER_TRIGGER_MAX_LAG_MS = 500
 PLAYER_FIRE_ORIGIN_RADIUS = 25.0
 MAX_PLAYER_DISPERSION_ANGLE = 0.5
 MAX_PLAYER_CLIP_SIZE = 255
@@ -6214,33 +6214,42 @@ class BattleState:
         result.sort(key=lambda entry: entry["bot_id"])
         return result
 
-    def _mapped_trigger_launch_time_ms(self, pose_time_us):
-        """Convert one trigger motion time into the round projectile clock.
-
-        ``pose_time_us`` is the shooter's logical motion clock, already
-        validated and clamped to server receipt by
-        ``_record_player_pose_sample``.  ``_server_time_ms`` is the round-local
-        tick clock.  The two share no epoch, so only the *elapsed* interval
-        crosses the boundary: the trigger happened this far before the current
-        tick.  Both clocks are read in the same locked call, and the result is
-        stored once so transport, worker scheduling and retries cannot push an
-        admitted shot forward.
-        """
-        lag_us = max(0, min(
-            PLAYER_TRIGGER_MAX_LAG_US,
-            self._logical_motion_time_us() - int(pose_time_us)))
-        return max(0, self._server_time_ms() - int(lag_us // 1000))
+    def _validated_trigger_launch_time_ms(self, raw_time_ms):
+        """Validate one trigger frozen directly in the round tick domain."""
+        try:
+            trigger_time_ms = _exact_int(
+                raw_time_ms, 0, MAX_MOTION_TIME_US // 1000)
+        except (TypeError, ValueError, OverflowError):
+            return None, "trigger_clock_invalid"
+        receipt_time_ms = self._server_time_ms()
+        if trigger_time_ms > receipt_time_ms + PROJECTILE_CLOCK_LEEWAY_MS:
+            return None, "trigger_clock_future"
+        if receipt_time_ms - trigger_time_ms > PLAYER_TRIGGER_MAX_LAG_MS:
+            return None, "trigger_clock_stale"
+        # A small ahead estimate is legal clock/RTT quantization, but an
+        # admitted projectile may never start after the server's receipt.
+        return min(trigger_time_ms, receipt_time_ms), None
 
     def submit_fire_intent(self, player_id, message):
         """Consume one ordered trigger or relay it to the native authority."""
         with self.lock:
+            expected_fields = frozenset((
+                "type", "round_id", "intent_seq", "input_seq",
+                "shell_index", "shot_origin", "shot_direction",
+                "dispersion_angle", "presentation_ledger",
+                "trigger_server_time_ms"))
             if (self.client_build != CLIENT_BUILD_0922 or
                     not self._message_round_matches(message) or
                     not isinstance(message, dict) or
-                    set(message) != {
-                        "type", "round_id", "intent_seq", "input_seq",
-                        "shell_index", "shot_origin", "shot_direction",
-                        "dispersion_angle", "presentation_ledger"} or
+                    set(message) not in (
+                        expected_fields,
+                        expected_fields - frozenset((
+                            "presentation_ledger",)),
+                        expected_fields - frozenset((
+                            "trigger_server_time_ms",)),
+                        expected_fields - frozenset((
+                            "presentation_ledger",
+                            "trigger_server_time_ms"))) or
                     message.get("type") != "fire_intent"):
                 return False
             try:
@@ -6291,6 +6300,11 @@ class BattleState:
                 return reject("player_dead")
             if self._player_overturn_danger(player_id):
                 return reject("player_overturned")
+            trigger_launch_time_ms, trigger_error = \
+                self._validated_trigger_launch_time_ms(
+                    message.get("trigger_server_time_ms"))
+            if trigger_error is not None:
+                return reject(trigger_error)
 
             direction_length = math.sqrt(sum(
                 component * component for component in shot_direction))
@@ -6371,15 +6385,14 @@ class BattleState:
             }
             player.fire_intent_seq = intent_seq
             player.fire_intent_fingerprints[intent_seq] = fingerprint
-            # The trigger-to-round-clock conversion happens exactly once, here,
-            # where both clocks are readable under one lock.  Keeping the
-            # mapped value in the pending intent - not on the wire - makes a
-            # duplicate or delayed canonical launch reuse the same instant
-            # instead of re-deriving it from a later server tick.
+            # The visible client freezes this value in the same round-clock
+            # domain used by projectile events. Keeping the validated value in
+            # the pending intent makes retries and delayed canonical launches
+            # reuse the trigger instant without consulting a jumping motion
+            # clock or a later server tick.
             player.pending_fire_intents[intent_seq] = dict(
                 relay,
-                trigger_launch_time_ms=self._mapped_trigger_launch_time_ms(
-                    int(player.pose_time_us)))
+                trigger_launch_time_ms=trigger_launch_time_ms)
             while (len(player.fire_intent_fingerprints) >
                    PLAYER_FIRE_INTENT_HISTORY):
                 player.fire_intent_fingerprints.popitem(last=False)

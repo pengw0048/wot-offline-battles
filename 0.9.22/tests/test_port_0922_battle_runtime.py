@@ -1576,7 +1576,8 @@ class _Client(object):
         return True
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle, presentation_ledger):
+                         dispersion_angle, presentation_ledger,
+                         trigger_server_time_ms):
         self._fire_intent_seq += 1
         self.sent.append((
             'fire_intent', (shell_index,),
@@ -1586,7 +1587,8 @@ class _Client(object):
              'shot_direction': list(shot_direction),
              'dispersion_angle': float(dispersion_angle),
              'presentation_ledger': [
-                 dict(entry) for entry in presentation_ledger]}))
+                 dict(entry) for entry in presentation_ledger],
+             'trigger_server_time_ms': trigger_server_time_ms}))
         return self._fire_intent_seq
 
 
@@ -6851,6 +6853,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
         battle._start_message = {'round_id': 7}
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._records = {'player:1': record}
         battle._gun_state = gun_mechanics.GunState(
             descriptor, ammo_layout={101: 20, 102: 10})
@@ -20037,6 +20041,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 12000
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20073,6 +20079,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'bot_id': 5, 'bot_state_revision': 12,
             'presentation_time_us': 340000,
         }], intent[2]['presentation_ledger'])
+        self.assertEqual(12000, intent[2]['trigger_server_time_ms'])
         # The ledger is frozen before the trigger's own input checkpoint is
         # sent, so the intent's pose time and its evidence describe one edge.
         order = [item[0] for item in client.sent]
@@ -20090,6 +20097,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20125,6 +20134,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'shot_direction': [0.0, 0.0, 1.0],
             'dispersion_angle': 0.25,
             'presentation_ledger': [],
+            'trigger_server_time_ms': 0,
         }, intent[2])
         current_input = next(item for item in client.sent
                              if item[0] == 'input')
@@ -20172,6 +20182,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20225,6 +20237,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 0
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)
@@ -20237,7 +20251,33 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle.shoot(0.2, -0.1))
         self.assertEqual([], battle._avatar.dispersion_queries)
         client.send_fire_intent.assert_called_once_with(
-            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [])
+            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0)
+
+    def test_trigger_without_a_server_clock_is_rejected_before_send(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        client.send_fire_intent = mock.Mock(return_value=1)
+        descriptor = _Descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle.client = client
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = _LANInputSender(battle)
+        battle._gun_state = gun_mechanics.GunState(descriptor)
+        battle._gun_state.reload_time = 0.0
+        battle._gun_state.clip = 1
+
+        self.assertFalse(battle.shoot(0.2, -0.1))
+
+        client.send_fire_intent.assert_not_called()
+        self.assertEqual([], client.sent)
+        self.assertIsNone(battle._local_fire_intent)
 
     def test_trigger_advances_gun_through_hud_ready_edge_before_validation(self):
         runtime = _runtime()
@@ -20252,6 +20292,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = client
         battle.state = 'running'
         battle._battle_live = True
+        battle._projectile_server_time_ms = 10000
+        battle._projectile_server_local_time = battle._clock()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = _LANInputSender(battle)

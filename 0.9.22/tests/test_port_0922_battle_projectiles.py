@@ -1795,7 +1795,7 @@ class BattleProjectileTests(unittest.TestCase):
         # retained history proves - never forward of the authoritative pose,
         # and never a substituted current pose - and the boundary is recorded.
         battle, unused_target = self._moving_target_battle(
-            presentation_offsets={'bot:8': 5.0})
+            presentation_offsets={'bot:8': 0.3})
         state = battle._projectiles.get('player:7:1')
 
         terminal = battle._projectile_chord(
@@ -1811,6 +1811,23 @@ class BattleProjectileTests(unittest.TestCase):
         # much: the window becomes [-0.2, -0.1] s and its contact sample sits
         # at -0.15 s, the oldest timeline the authority can prove.
         self.assertAlmostEqual(-1.5, poses[0]['z'], places=6)
+        self.assertAlmostEqual(
+            0.2,
+            battle._projectile_meta['player:7:1'][
+                'presentation_offsets']['bot:8'],
+            places=6)
+
+        # The first chord freezes that one clamp. The next chord advances the
+        # same target timeline by 100 ms instead of repeatedly sampling the
+        # oldest retained window as the projectile clock moves forward.
+        battle._projectile_vehicle_collisions.reset_mock()
+        terminal = battle._projectile_chord(
+            state, (10.0, 1.0, 0.0), (20.0, 1.0, 0.0), 0.1, 0.2)
+        self.assertEqual('impact', terminal['reason'])
+        poses = [call.args[4] for call
+                 in battle._projectile_vehicle_collisions.call_args_list]
+        self.assertEqual(1, len(poses))
+        self.assertAlmostEqual(-0.5, poses[0]['z'], places=6)
 
     def test_missing_chord_history_is_still_a_local_terminal_failure(self):
         battle, unused_target = self._moving_target_battle(

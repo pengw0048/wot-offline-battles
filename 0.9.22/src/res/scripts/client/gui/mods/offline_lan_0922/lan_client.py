@@ -2397,7 +2397,7 @@ class LANClient(object):
                   max_distance=None, max_time_ms=None, is_he=False,
                   splash_radius=0.0, penetration_factor=1.0,
                   source_shot=None, dispersion_angle=0.0,
-                  presentation_ledger=()):
+                  presentation_ledger=(), trigger_server_time_ms=None):
         """Compatibility wrapper that submits only a player trigger intent."""
         parsed_velocity = _strict_launch_velocity(velocity)
         if parsed_velocity is None:
@@ -2407,10 +2407,11 @@ class LANClient(object):
         return self.send_fire_intent(
             shell_index, position,
             [component / speed for component in parsed_velocity],
-            dispersion_angle, presentation_ledger)
+            dispersion_angle, presentation_ledger, trigger_server_time_ms)
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle, presentation_ledger):
+                         dispersion_angle, presentation_ledger,
+                         trigger_server_time_ms):
         """Queue one ordered trigger input without damage or ballistics."""
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
@@ -2424,12 +2425,15 @@ class LANClient(object):
         parsed_dispersion = _projectile_float_range(
             dispersion_angle, 0.0, MAX_PLAYER_DISPERSION_ANGLE)
         parsed_ledger = _strict_presentation_ledger(presentation_ledger)
+        parsed_trigger_time = _projectile_int_range(
+            trigger_server_time_ms, 0, MAX_MOTION_TIME_US // 1000)
         direction_length = (math.sqrt(sum(
             component * component for component in parsed_direction))
             if parsed_direction is not None else 0.0)
         if (parsed_shell is None or parsed_origin is None or
                 parsed_direction is None or parsed_dispersion is None or
                 parsed_ledger is None or
+                parsed_trigger_time is None or
                 direction_length <= 0.000001):
             return None
         parsed_direction = [
@@ -2444,6 +2448,7 @@ class LANClient(object):
                 'shot_direction': parsed_direction,
                 'dispersion_angle': parsed_dispersion,
                 'presentation_ledger': parsed_ledger,
+                'trigger_server_time_ms': parsed_trigger_time,
             }
             if not self._send(message):
                 return None
