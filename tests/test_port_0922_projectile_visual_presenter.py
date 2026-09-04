@@ -302,16 +302,17 @@ class ProjectileVisualPresenterTests(unittest.TestCase):
             self.bigworld, self.math, types.SimpleNamespace(), 7)
 
     def _launch(self, factory, projectile_id='round:shot', attacker_id=42,
+                origin=(1.0, 2.0, 3.0),
                 reference_position=(3.0, 4.0, 5.0),
                 reference_velocity=(100.0, 10.0, 0.0),
-                effects=None, is_ricochet=False):
+                effects=None, is_ricochet=False, visual_start=None):
         effects = self.effects if effects is None else effects
         with mock.patch.dict(sys.modules, _modules(effects)):
             return factory.play_projectile_tracer(
-                _descriptor(), 0, (1.0, 2.0, 3.0),
+                _descriptor(), 0, origin,
                 (120.0, 20.0, 0.0), 9.81, 640.0, attacker_id,
                 projectile_id, reference_position, reference_velocity,
-                is_ricochet)
+                is_ricochet, visual_start)
 
     def test_player_and_bot_use_visible_stock_effects_on_controlled_servos(self):
         factory = self._factory()
@@ -382,6 +383,30 @@ class ProjectileVisualPresenterTests(unittest.TestCase):
         self.assertEqual(1, len(self.bigworld._player.models))
         self.assertEqual(1, len(self.projectile_effects.attach_calls))
         self.assertEqual([], _ProjectileMover.instances)
+
+    def test_visual_start_uses_stock_twenty_metre_guard(self):
+        factory = self._factory()
+        origin = (1.0, 2.0, 3.0)
+        reference = (51.0, 2.0, 3.0)
+
+        self.assertTrue(self._launch(
+            factory, projectile_id='edge:accepted', origin=origin,
+            reference_position=reference,
+            visual_start=(71.0, 2.0, 3.0)))
+        self.assertTrue(self._launch(
+            factory, projectile_id='edge:rejected', origin=origin,
+            reference_position=reference,
+            visual_start=(71.001, 2.0, 3.0)))
+
+        presenter = factory._shot_presenter
+        accepted = presenter._projectile_shots['edge:accepted']
+        rejected = presenter._projectile_shots['edge:rejected']
+        self.assertEqual(
+            (71.0, 2.0, 3.0), _xyz(accepted['pose'].translation))
+        self.assertEqual(reference, _xyz(rejected['pose'].translation))
+        self.assertEqual(
+            [(71.0, 2.0, 3.0), reference],
+            [_xyz(position) for position in self.flock.positions])
 
     def test_terminal_pins_then_keeps_stock_tail_before_owner_cleanup(self):
         factory = self._factory()
@@ -700,6 +725,25 @@ class ProjectileVisualPresenterTests(unittest.TestCase):
                 factory_type, 'update_projectile_visual', None)))
             self.assertTrue(callable(getattr(
                 factory_type, 'reset_projectile_visuals', None)))
+
+    def test_both_factory_implementations_forward_visual_start(self):
+        visual_start = (7.0, 8.0, 9.0)
+        for factory_type in (RemoteVehicleFactory,
+                             NativeRemoteVehicleFactory):
+            with self.subTest(factory=factory_type.__name__):
+                factory = factory_type.__new__(factory_type)
+                factory._shot_presenter = mock.Mock()
+                factory._shot_presenter.play_canonical.return_value = 17
+
+                self.assertEqual(17, factory.play_projectile_tracer(
+                    _descriptor(), 0, (1.0, 2.0, 3.0),
+                    (120.0, 20.0, 0.0), 9.81, 640.0, 42,
+                    'forwarded:1', (3.0, 4.0, 5.0),
+                    (100.0, 10.0, 0.0), False, visual_start))
+
+                self.assertEqual(
+                    visual_start,
+                    factory._shot_presenter.play_canonical.call_args.args[-1])
 
 
 if __name__ == '__main__':

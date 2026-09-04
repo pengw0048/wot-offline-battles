@@ -87,6 +87,10 @@ except NameError:
     _STRING_TYPES = (str,)
 
 
+# Exact #1513 ProjectileMover.add guard between startPoint and refStartPoint.
+PROJECTILE_VISUAL_START_MAX_DIFF = 20.0
+
+
 # Exact value contract returned by #1513 ``Vehicle.collideSegment``.  The
 # stock ProjectileMover uses both tuple indexing and these named fields.
 _SegmentCollisionResult = namedtuple(
@@ -326,6 +330,7 @@ class _RemoteShotPresenter(object):
     are outside the standard-battle catalog and fail closed on this ledger.
     """
 
+    _STOCK_VISUAL_START_MAX_DIFF = PROJECTILE_VISUAL_START_MAX_DIFF
     # A stock gun can emit a short autocannon burst, so keep a generous
     # immediate allowance.  Sustained edited reloads are presentation-only
     # load and refill more slowly than they can create native particles.
@@ -542,7 +547,8 @@ class _RemoteShotPresenter(object):
     def play_canonical(self, descriptor, shell_index, origin, velocity,
                        gravity, max_distance, attacker_id,
                        projectile_id=None, reference_position=None,
-                       reference_velocity=None, is_ricochet=False):
+                       reference_velocity=None, is_ricochet=False,
+                       visual_start=None):
         """Create one tracer whose pose is owned by authoritative updates.
 
         The origin and velocity belong to the authoritative launch event.
@@ -552,6 +558,9 @@ class _RemoteShotPresenter(object):
         hidden-worker-confirmed cursor when a launch arrives late.  No
         ballistic motor is created here, so the tracer cannot run ahead of
         that cursor while the next collision receipt is pending.
+        ``visual_start`` is the separate current-muzzle pose used by stock
+        #1513 presentation; its exact 20 m guard never changes the launch or
+        confirmed-reference trajectory.
         """
         if self._closed or not self._launches_enabled:
             return False
@@ -561,8 +570,24 @@ class _RemoteShotPresenter(object):
         if shot is None or shell is None or effects_index is None:
             return False
         launch_start = self._finite_vector(origin)
-        visual_start = (launch_start if reference_position is None else
-                        self._finite_vector(reference_position))
+        reference_start = (
+            launch_start if reference_position is None else
+            self._finite_vector(reference_position))
+        requested_visual_start = self._finite_vector(visual_start)
+        if requested_visual_start is not None and reference_start is not None:
+            try:
+                offset_sq = sum(
+                    (getattr(requested_visual_start, name) -
+                     getattr(reference_start, name)) ** 2
+                    for name in ('x', 'y', 'z'))
+                if offset_sq > self._STOCK_VISUAL_START_MAX_DIFF ** 2:
+                    # Exact #1513 ProjectileMover.add falls all the way back
+                    # to refStartPoint; it does not clamp the offset to 20 m.
+                    requested_visual_start = reference_start
+            except Exception:
+                requested_visual_start = reference_start
+        initial_position = (reference_start if requested_visual_start is None
+                            else requested_visual_start)
         visual_velocity = self._finite_vector(
             velocity if reference_velocity is None else reference_velocity)
         gravity = self._finite_float(gravity)
@@ -592,7 +617,8 @@ class _RemoteShotPresenter(object):
             if not released:
                 return False
             self._remove_projectile_mapping(projectile_id)
-        if (launch_start is None or visual_start is None or
+        if (launch_start is None or reference_start is None or
+                initial_position is None or
                 visual_velocity is None or gravity is None or
                 maximum is None or gravity < 0.0 or maximum <= 0.0 or
                 attacker_id <= 0):
@@ -653,7 +679,7 @@ class _RemoteShotPresenter(object):
             self._next_shot_id += 1
             pose = self._math.Matrix()
             self._write_projectile_pose(
-                pose, visual_start, visual_velocity)
+                pose, initial_position, visual_velocity)
             model = model_factory(selected_name)
             servo = servo_factory(pose)
             entry = {
@@ -665,7 +691,7 @@ class _RemoteShotPresenter(object):
                 'projectile_effects': projectile_effects,
                 'effects_data': {},
                 'attacker_id': attacker_id,
-                'position': visual_start,
+                'position': initial_position,
                 'velocity': visual_velocity,
                 'in_scene': False,
                 'motor_attached': False,
@@ -695,7 +721,7 @@ class _RemoteShotPresenter(object):
             entry['flying_attached'] = True
             self._projectile_shots[projectile_id] = entry
             self._projectile_order.append(projectile_id)
-            self._notify_projectile_launch(launch_start)
+            self._notify_projectile_launch(initial_position)
             return visual_id
         except Exception as error:
             if entry is not None:
@@ -2949,12 +2975,13 @@ class RemoteVehicleFactory(object):
                                velocity, gravity, max_distance, attacker_id,
                                projectile_id=None, reference_position=None,
                                reference_velocity=None,
-                               is_ricochet=False):
+                               is_ricochet=False, visual_start=None):
         """Play one authoritative launch without consulting a vehicle pose."""
         return self._shot_presenter.play_canonical(
             descriptor, shell_index, origin, velocity, gravity,
             max_distance, attacker_id, projectile_id,
-            reference_position, reference_velocity, is_ricochet)
+            reference_position, reference_velocity, is_ricochet,
+            visual_start)
 
     def admit_projectile_visual(self, attacker_id, projectile_id, now=None):
         """Reserve one bounded cosmetic slot for a canonical projectile."""

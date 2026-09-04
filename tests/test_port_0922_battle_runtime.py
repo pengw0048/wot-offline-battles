@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import dis
 import io
 import math
 from pathlib import Path
@@ -1956,6 +1957,8 @@ def _runtime():
                 ARCADE='arcade', SNIPER='sniper',
                 STRATEGIC='strategic', ARTY='arty',
                 POSTMORTEM='postmortem')),
+        cameras=types.SimpleNamespace(
+            isPointOnScreen=lambda unused_point: False),
         aih_constants=types.SimpleNamespace(
             GUN_MARKER_FLAG=types.SimpleNamespace(
                 UNDEFINED=0, CONTROL_ENABLED=1, CLIENT_MODE_ENABLED=2,
@@ -5155,6 +5158,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
             side_effect=_plain_bot_factors)
         self._bot_factors_patch.start()
         self.addCleanup(self._bot_factors_patch.stop)
+
+    def test_production_runtime_wires_stock_camera_visibility_module(self):
+        instructions = [
+            (instruction.opname, instruction.argval)
+            for instruction in dis.get_instructions(
+                battle_runtime_module._load_runtime)]
+
+        self.assertIn(('IMPORT_FROM', 'cameras'), instructions)
+        self.assertTrue(any(
+            instructions[index:index + 3] == [
+                ('LOAD_FAST', 'cameras'),
+                ('LOAD_FAST', 'runtime'),
+                ('STORE_ATTR', 'cameras')]
+            for index in range(len(instructions) - 2)))
 
     def test_local_state_falls_back_before_roster_publishes_the_player(self):
         battle = BattleRuntime(_runtime())
@@ -20794,6 +20811,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'presentation_ledger': [],
         }
         key = (2, 3)
+        battle._advance_projectiles = mock.Mock(return_value=True)
 
         # The transport can beat the snapshot/native entity lifecycle.  The
         # fast path must not turn that harmless ordering into a terminal
@@ -20804,6 +20822,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertNotIn(key, battle._player_fire_intent_history)
         client.send_projectile_launch.assert_not_called()
         client.send_fire_intent_result.assert_not_called()
+        battle._advance_projectiles.assert_not_called()
 
         descriptor = _Descriptor()
         entity = _Vehicle(
@@ -20857,7 +20876,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._projectile_epoch = 4
         battle._projectile_server_time_ms = 1000
         battle._projectile_server_local_time = 10.0
-        battle._next_projectile_progress_time = 10.0
+        # A newly admitted click must publish its first safe cursor even when
+        # the ordinary 10 Hz progress deadline is still in the future.
+        battle._next_projectile_progress_time = 11.0
         descriptor = _Descriptor()
         entity = _Vehicle(
             11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
@@ -20891,6 +20912,13 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'dispersion_angle': 0.02,
             'presentation_ledger': [],
         }
+        battle._projectile_record_poses = mock.Mock(return_value={})
+        battle._sample_projectile_positions = mock.Mock()
+        battle._prune_projectile_position_history = mock.Mock()
+        battle._build_projectile_spatial_bins = mock.Mock()
+        battle._clear_projectile_spatial_index = mock.Mock()
+        battle._projectile_chord = mock.Mock(return_value=None)
+        battle._projectile_terminal = mock.Mock(return_value=None)
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
@@ -20905,20 +20933,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1, client.send_projectile_launch.call_count)
         self.assertIn('path=poll', output.getvalue())
 
-        battle._projectile_record_poses = mock.Mock(return_value={})
-        battle._sample_projectile_positions = mock.Mock()
-        battle._prune_projectile_position_history = mock.Mock()
-        battle._build_projectile_spatial_bins = mock.Mock()
-        battle._clear_projectile_spatial_index = mock.Mock()
-        battle._projectile_chord = mock.Mock(return_value=None)
-        battle._projectile_terminal = mock.Mock(return_value=None)
-
-        self.assertTrue(battle._advance_projectiles(10.05))
-
         client.send_projectile_progress.assert_called_once()
         cursor = client.send_projectile_progress.call_args.args[1][0]
         self.assertEqual(projectile_id, cursor['projectile_id'])
         self.assertGreater(cursor['checked_through_ms'], 0)
+        self.assertEqual(11.0, battle._next_projectile_progress_time)
 
     def test_worker_resolves_immediate_player_destructible_contact(self):
         battle = BattleRuntime(_runtime())
