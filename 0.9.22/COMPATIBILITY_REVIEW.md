@@ -1045,8 +1045,7 @@ Track damage follows the detailed model Update 6.4 introduced. A track
 material's live `damageKind` selects the shell damage channel:
 `common/vehicle.xml` ships both tracks as `damageKind=auto`, and
 `vehicles.py::_readArmor()` resolves `auto` to armour damage whenever the
-material armour is nonzero, which every shipped chassis
-`leftTrack`/`rightTrack` value is. A
+material armour is nonzero. A
 direct solid hit on the leading or rearmost configured driving wheel takes the
 full roll; the ordinary middle run divides it by the target chassis'
 `bulkHealthFactor`. The zone is classified from the chassis-local contact of
@@ -1064,7 +1063,9 @@ cached. That raw read is unproved on #1513: if it fails, the one middle track
 hit keeps the previous device-damage result and writes one bounded diagnostic
 instead of guessing a divisor. HE direct hits and splash stay on the previous
 device-damage law, because no reviewed evidence covers the wheel zones for a
-blast.
+blast. Both shipped `usa:A107_T1_HMC` chassis make the endpoint zones overlap,
+so that vehicle deliberately uses the same safe fallback rather than an
+invented split.
 
 The stock debug controller reads `BigWorld.statPing()` and
 `statLagDetected()`, which report the unavailable retail transport in this

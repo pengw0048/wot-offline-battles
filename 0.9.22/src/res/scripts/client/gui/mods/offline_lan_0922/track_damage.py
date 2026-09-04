@@ -9,10 +9,9 @@ Two separate defects are addressed here.
 
 1. Damage channel.  ``common/vehicle.xml`` gives both track materials
    ``damageKind=auto``.  ``vehicles.py::_readArmor()`` resolves ``auto`` to
-   ``damageKind = 0 if armor else 1``, and every shipped chassis gives its
-   ``leftTrack``/``rightTrack`` armour a nonzero value, so a normal track
-   material selects the ARMOR channel ``shell.damage[0]`` - not the device
-   channel ``shell.damage[1]`` an ordinary module uses.
+   ``damageKind = 0 if armor else 1``, so an armoured track material selects
+   the ARMOR channel ``shell.damage[0]`` - not the device channel
+   ``shell.damage[1]`` an ordinary module uses.
 
 2. Track zones.  Update 6.4 split the track into a leading/rearmost driving
    wheel that takes the full roll and an ordinary middle run that is much
@@ -177,8 +176,9 @@ def wheel_zone_bounds(chassis):
     if half_length is None or front is None or rear is None:
         return None
     if front + rear >= 2.0 * half_length:
-        # The two end zones would meet or overlap, which would make the whole
-        # track a driving wheel.  Impossible geometry: reject it locally.
+        # The endpoint convention is ambiguous when the two zones meet or
+        # overlap. This occurs on both shipped T1 HMC chassis, so preserve the
+        # previous device-damage behaviour instead of guessing a boundary.
         return None
     return (half_length - front, rear - half_length)
 

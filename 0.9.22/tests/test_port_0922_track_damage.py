@@ -175,6 +175,14 @@ class WheelZoneGeometryTests(unittest.TestCase):
             track_damage.ZONE_REAR,
             track_damage.classify_zone(-T110E4_HALF_LENGTH - 0.2, bounds))
 
+    def test_exact_t1_hmc_overlapping_end_zones_use_safe_fallback(self):
+        chassis = {
+            'topRightCarryingPoint': _Vector2(1.0, 0.76849),
+            'drivingWheelsSizes': (0.35 * 2.2, 0.464022994 * 2.2),
+        }
+
+        self.assertIsNone(track_damage.wheel_zone_bounds(chassis))
+
     def test_impossible_geometry_is_rejected_instead_of_guessed(self):
         cases = [
             {'topRightCarryingPoint': None},
