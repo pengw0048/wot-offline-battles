@@ -992,21 +992,30 @@ boundary, so an unspotted vehicle cannot remain visible in only one UI layer.
 
 That single boundary was not sufficient. Windows playtesting reported a green
 penetration indicator, ground dust and a visible silhouette for an unspotted
-enemy, and two further stock surfaces explain it. Recorded
-`ProjectileMover.getCollidableEntities` filters `arena.vehicles` only by
-`BigWorld.entity` presence and `isStarted`; retail relies on the server AOI to
-remove an unspotted enemy from that facade, while a client-created LAN remote
-never leaves it, so the stock dynamic-collision users kept resolving one.
-Recorded `CompoundAppearance.changeVisibility` writes `compoundModel.visible`,
-`showStickers` and the crashed-track controller only, and recorded
-`ProjectileMover.add` proves this build keeps `visible` and
-`visibleAttachments` as two independent model draw flags, so node-bound
-effects survived the compound gate. The port now gates the collidable-entity
-query for an undrawn remote, mirrors the attachment draw flag, stops the fire
-extra on the hide edge and stops feeding belt speed and engine mode to a
-hidden native remote. Whether the vehicle compound exposes
-`visibleAttachments` and which layer actually emits the dust remain exact-
-client questions; the runtime logs once when the attachment gate is absent.
+enemy, and two further stock surfaces explain it. Exact #1513 bytecode confirms
+that `ProjectileMover.getCollidableEntities` filters `arena.vehicles` only by
+`BigWorld.entity` presence, `isStarted` and `segmentMayHitEntity`. It also
+confirms that the trajectory and SPG hit-marker modules retain directly
+imported copies of that query, while their copies still resolve the canonical
+segment prefilter at call time. Retail relies on the server AOI to remove an
+unspotted enemy from the facade; a client-created LAN remote never leaves it,
+so the port gates both the canonical query and prefilter for an undrawn remote.
+This is a visible-client presentation rule only: hidden-worker projectile
+collision enumerates the runtime records and calls each target directly, so a
+geometric blind hit still resolves and damages the target.
+
+Exact #1513 bytecode also confirms that
+`CompoundAppearance.changeVisibility` writes `compoundModel.visible`,
+`showStickers` and the crashed-track controller only; `ProjectileMover.add`
+sets `visible` and `visibleAttachments` independently on its projectile model,
+and the fire extra attaches through `appearance.boundEffects`. The port mirrors
+the attachment flag when the native compound exposes it, stops the fire extra
+on the hide edge, settles native belt speed immediately, and stops feeding
+later belt/engine presentation while hidden. Static package inspection does
+not prove that `PyCompoundModel` inherits the plain model's
+`visibleAttachments` property or identify the native dust emitter, so those
+two surfaces still require exact Windows runtime acceptance; the runtime logs
+once when the attachment gate is absent.
 
 Authority Bot snapshots also retain the 0.8.2 no-rewind rule: the client that
 integrates a Bot never reapplies its older server echo pose, while other

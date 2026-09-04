@@ -54,12 +54,12 @@ def set_model_attachment_visibility(model, visible):
     Exact #1513 ``CompoundAppearance.changeVisibility`` writes only
     ``compoundModel.visible`` (plus stickers and crashed tracks).
     ``ProjectileMover.add`` proves that this build keeps ``visible`` and
-    ``visibleAttachments`` as two independent model draw flags: stock hides
-    the projectile mesh with the first while the attached tracer effect stays
-    drawn through the second, and this port copies that same pair for its own
-    tracers.  Node-bound vehicle effects therefore survive the stock gate,
-    which is how a hidden tank can keep drawing ground dust and an effect
-    silhouette.  Mirror both flags for every remote presentation.
+    ``visibleAttachments`` as two independent flags on its projectile model:
+    stock hides that mesh with the first while the attached tracer stays drawn
+    through the second, and this port copies the same pair for its own tracer.
+    Static package inspection cannot prove that ``PyCompoundModel`` exposes
+    the plain model's attachment property, so mirror it when available and
+    retain the complete compound gate either way.
     """
     global _attachment_gate_reported
     if model is None:

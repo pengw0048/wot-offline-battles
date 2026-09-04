@@ -3021,6 +3021,8 @@ class OfflineCompatibilityTests(unittest.TestCase):
                 target = bigworld.player().autoAimVehicle
                 return target.position, target.matrix
 
+        projectile_mover_module = types.SimpleNamespace()
+
         def segment_may_hit_entity(entity, start_point, end_point):
             return entity.filter.segmentMayHitEntity(
                 start_point, end_point, 1)
@@ -3043,10 +3045,16 @@ class OfflineCompatibilityTests(unittest.TestCase):
                 entity = bigworld.entities.get(vehicle_id)
                 if entity is None or not getattr(entity, 'isStarted', False):
                     continue
-                if not segment_may_hit_entity(entity, startPoint, endPoint):
+                if not projectile_mover_module.segmentMayHitEntity(
+                        entity, startPoint, endPoint):
                     continue
                 collidable.append(entity)
             return collidable
+
+        projectile_mover_module.segmentMayHitEntity = \
+            segment_may_hit_entity
+        projectile_mover_module.getCollidableEntities = \
+            get_collidable_entities
 
         def visible_vehicle_collision(
                 vehicle, matrix, start_point, end_point, math_module):
@@ -3159,9 +3167,7 @@ class OfflineCompatibilityTests(unittest.TestCase):
             login_status=statuses,
             offline_map_creator=_OfflineMapCreator(operations),
             player_events=player_events,
-            projectile_mover_module=types.SimpleNamespace(
-                segmentMayHitEntity=segment_may_hit_entity,
-                getCollidableEntities=get_collidable_entities),
+            projectile_mover_module=projectile_mover_module,
             predefined_hosts=_Hosts(existing_hosts, host_failure),
             prb_loader=_PrbLoader(operations),
             remote_filter_type=remote_vehicle_module._RemoteFilter,
@@ -3464,6 +3470,8 @@ class OfflineCompatibilityTests(unittest.TestCase):
         bigworld = runtime.bigworld
         vehicle_type = runtime.vehicle_module.Vehicle
         original_query = runtime.projectile_mover_module.getCollidableEntities
+        original_prefilter = \
+            runtime.projectile_mover_module.segmentMayHitEntity
         compatibility = compatibility_module.OfflineCompatibility(runtime)
         compatibility.install()
 
@@ -3499,11 +3507,16 @@ class OfflineCompatibilityTests(unittest.TestCase):
 
         query = runtime.projectile_mover_module.getCollidableEntities
         self.assertIsNot(original_query, query)
+        self.assertIsNot(
+            original_prefilter,
+            runtime.projectile_mover_module.segmentMayHitEntity)
         # Outside a battle the wrapper stays out of the stock result.
         self.assertIn(unspotted, query((), start, end))
+        self.assertIn(unspotted, original_query((), start, end))
 
         compatibility.configure_battle()
         collidable = query((56,), start, end)
+        imported_collidable = original_query((56,), start, end)
 
         self.assertIn(spotted, collidable)
         # A drawn wreck still blocks a shot, so spotting alone is not enough.
@@ -3512,6 +3525,13 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertNotIn(unspotted, collidable)
         self.assertNotIn(stopped, collidable)
         self.assertNotIn(skipped, collidable)
+        # Exact trajectory and SPG-marker modules retain an imported reference
+        # to the original query.  Its canonical module-global prefilter must
+        # enforce the same gate even though the function binding is stale.
+        self.assertNotIn(unspotted, imported_collidable)
+        self.assertIn(spotted, imported_collidable)
+        self.assertIn(wreck, imported_collidable)
+        self.assertIn(stock, imported_collidable)
 
         # Revealing the same enemy restores it without reinstalling anything.
         unspotted._offlineNativeDrawVisible = True
@@ -3521,6 +3541,9 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertIs(
             original_query,
             runtime.projectile_mover_module.getCollidableEntities)
+        self.assertIs(
+            original_prefilter,
+            runtime.projectile_mover_module.segmentMayHitEntity)
 
     def test_offline_avatar_speed_boundary_uses_copied_pose_overlay(self):
         compatibility_module = _load_port_source('compat')

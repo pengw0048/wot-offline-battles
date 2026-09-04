@@ -548,7 +548,9 @@ class OfflineCompatibility(object):
         self._vehicle_set_gun_angles_code = None
         self._gun_rotator_stabilised_code = None
         self._gun_rotator_predict_locked_target_code = None
+        self._original_projectile_segment_may_hit = None
         self._projectile_segment_may_hit_code = None
+        self._projectile_segment_may_hit_wrapper = None
         self._original_projectile_collidable_entities = None
         self._projectile_collidable_entities_wrapper = None
         self._camera_acceleration_update_code = None
@@ -827,6 +829,8 @@ class OfflineCompatibility(object):
         if self._projectile_segment_may_hit_code is None:
             raise RuntimeError(
                 '#1513 projectile collision prefilter code is unavailable')
+        self._original_projectile_segment_may_hit = \
+            projectile_segment_may_hit
         projectile_collidable_entities_original = getattr(
             getattr(runtime, 'projectile_mover_module', None),
             'getCollidableEntities', None)
@@ -1623,6 +1627,24 @@ class OfflineCompatibility(object):
                 return entities
             return drawn
 
+        def projectile_segment_may_hit(entity, startPoint, endPoint):
+            """Apply the draw gate to stale imported stock queries too.
+
+            Several exact #1513 aiming modules import
+            ``getCollidableEntities`` directly.  Replacing the canonical
+            module attribute therefore does not change those already-bound
+            function objects, but all of them resolve ``segmentMayHitEntity``
+            through the canonical ProjectileMover globals on every query.
+            Keep the post-filter above for unsegmented callers and place the
+            same predicate here so every recorded segmented caller observes
+            the visibility gate.
+            """
+            if (compatibility._battle_active and
+                    undrawn_lan_remote(entity)):
+                return False
+            return compatibility._original_projectile_segment_may_hit(
+                entity, startPoint, endPoint)
+
         def vehicle_getattribute(vehicle, name):
             caller_code = None
             locked_target_code = \
@@ -2347,6 +2369,8 @@ class OfflineCompatibility(object):
         self._vehicle_set_gun_angles_wrapper = vehicle_set_gun_angles
         self._vehicle_collide_segment_wrapper = vehicle_collide_segment
         self._vehicle_collide_segment_ext_wrapper = vehicle_collide_segment_ext
+        self._projectile_segment_may_hit_wrapper = (
+            projectile_segment_may_hit)
         self._projectile_collidable_entities_wrapper = (
             projectile_collidable_entities)
         self._compound_getattribute_wrapper = compound_getattribute
@@ -2414,6 +2438,8 @@ class OfflineCompatibility(object):
                     vehicle_type.set_gunAnglesPacked = vehicle_set_gun_angles
                 vehicle_type.collideSegment = vehicle_collide_segment
                 vehicle_type.collideSegmentExt = vehicle_collide_segment_ext
+            runtime.projectile_mover_module.segmentMayHitEntity = (
+                projectile_segment_may_hit)
             runtime.projectile_mover_module.getCollidableEntities = (
                 projectile_collidable_entities)
             if compound_type is not None:
@@ -2650,6 +2676,13 @@ class OfflineCompatibility(object):
         projectile_mover_module = getattr(
             runtime, 'projectile_mover_module', None)
         if (projectile_mover_module is not None and
+                self._original_projectile_segment_may_hit is not None and
+                getattr(projectile_mover_module,
+                        'segmentMayHitEntity', None) is
+                self._projectile_segment_may_hit_wrapper):
+            projectile_mover_module.segmentMayHitEntity = (
+                self._original_projectile_segment_may_hit)
+        if (projectile_mover_module is not None and
                 self._original_projectile_collidable_entities is not None and
                 getattr(projectile_mover_module,
                         'getCollidableEntities', None) is
@@ -2697,7 +2730,9 @@ class OfflineCompatibility(object):
         self._vehicle_set_gun_angles_code = None
         self._gun_rotator_stabilised_code = None
         self._gun_rotator_predict_locked_target_code = None
+        self._original_projectile_segment_may_hit = None
         self._projectile_segment_may_hit_code = None
+        self._projectile_segment_may_hit_wrapper = None
         self._original_vehicle_collide_segment = None
         self._original_vehicle_collide_segment_ext = None
         self._vehicle_collide_segment_wrapper = None

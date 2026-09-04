@@ -258,8 +258,9 @@ class _Model(object):
     _SUPPORTED_ATTRIBUTES = frozenset((
         'matrix', 'visible', 'node_bindings', 'fashions'))
     # ``ProjectileMover.add`` proves #1513 keeps the mesh and the attachment
-    # draw flags apart.  Whether the vehicle compound also exposes the second
-    # one is not provable without the client, so both shapes are modelled.
+    # draw flags apart on its projectile model. Static package inspection
+    # cannot prove whether the native vehicle compound exposes the second one,
+    # so both shapes are modelled.
     _ATTACHMENT_GATE_ATTRIBUTE = 'visibleAttachments'
 
     def __init__(self, attachment_gate=True):
@@ -17511,6 +17512,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         enemy = _Vehicle(
             1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
             (0.0, 0.0, 0.0), {'health': 500})
+        enemy.engineMode = (ENGINE_MODE_RUNNING, 1)
+        enemy.update_tracks = mock.Mock(return_value=True)
         battle._remote_factory = types.SimpleNamespace(
             get=lambda entity_id: enemy if entity_id == 1000 else None)
         record = {
@@ -17524,6 +17527,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
             record, True, True))
         self.assertTrue(enemy.model.visible)
         self.assertTrue(enemy.model.visibleAttachments)
+        record['_remote_track_pending'] = False
+        record['_remote_track_state_signature'] = (8.0, True, 0.0)
 
         self.assertFalse(battle._set_record_spot_visibility(
             record, False, False))
@@ -17531,18 +17536,24 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(enemy.draw_pass_visible)
         self.assertFalse(enemy.model.visible)
         self.assertFalse(enemy.model.visibleAttachments)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertTrue(record['_remote_track_pending'])
+        self.assertNotIn('_remote_track_state_signature', record)
 
         self.assertTrue(battle._set_record_spot_visibility(
             record, True, True))
         self.assertTrue(enemy.model.visibleAttachments)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
 
     def test_native_spot_gate_survives_a_build_without_attachment_flag(self):
         """A missing attachment flag is a presentation gap, not a round abort.
 
         Only a plain #1513 ``PyModel`` is proved to expose
-        ``visibleAttachments``; whether the vehicle compound does cannot be
-        established without the exact client.  The spotting gate must still
-        close the compound and keep the round running either way.
+        ``visibleAttachments``; static package inspection cannot establish
+        whether the native vehicle compound does.  The spotting gate must
+        still close the compound and keep the round running either way.
         """
         runtime = _runtime()
         battle = BattleRuntime(runtime)

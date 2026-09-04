@@ -19222,6 +19222,22 @@ class BattleRuntime(object):
                 vehicle._offlineNativeDrawVisible = draw_vehicle
                 set_draw_visibility(vehicle, draw_vehicle)
                 vehicle.targetCaps = [1] if visible and alive else []
+                # Closing the draw pass is itself the track-presentation
+                # edge. Waiting for another pose update is insufficient:
+                # unchanged speed/yaw is deduplicated and could leave the
+                # last native belt/dust feed running for the whole dark
+                # interval. Settle it now, then force the first reveal-side
+                # pose to replay the authoritative speed and engine mode.
+                if not draw_vehicle:
+                    stop_tracks = getattr(vehicle, 'update_tracks', None)
+                    if callable(stop_tracks):
+                        self._run_optional_feature(
+                            'remote track animation', stop_tracks,
+                            (0.0, 0.0, getattr(
+                                vehicle, 'engineMode',
+                                (ENGINE_MODE_IDLE, 0))))
+                record['_remote_track_pending'] = True
+                record.pop('_remote_track_state_signature', None)
             else:
                 vehicle.appearance.changeVisibility(draw_vehicle)
             # A fire transition received while this enemy was hidden had no
