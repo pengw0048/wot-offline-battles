@@ -128,14 +128,18 @@ This build also runs the staged native vehicle physics probe in the hidden
 worker, starting 8 s after the battle goes live: it inventories the exe's
 WGVehiclePhysics / WGDynamicsSimulator / WGPhysicalBody Python surface and
 physics_shared, looks for a retail physics object on each Bot's native
-WGVehicleFilter, constructs a standalone body and initialises it through
-physics_shared before reading a single attribute, drives one body forward for
-two seconds through movementSignals and an explicit WGDynamicsSimulator.update
-batch, times one batch over up to 29 bodies, drives two bodies for contact
-callbacks, then zeroes every signal it set. When no retail body exists the
-probe builds its own standalone bodies from the Bots' descriptors; those have
-no presentation, so nothing visible moves and only their read-back matrices
-are evidence. Every native call is announced with an NPHYS step line and each
+WGVehicleFilter, mirrors physics_shared.updateCommonConf() once, then builds
+standalone bodies from the Bots' own descriptors with the retail server recipe
+(physics_shared.configurePhysics over g_defaultTankXPhysicsCfg, engine
+smplEnginePower and the vehicle speed limits from the client descriptor) and
+checks the native WGVehiclePhysics.configure(cfg) return value before reading a
+single attribute. It then drives one body forward for two seconds through
+movementSignals and an explicit WGDynamicsSimulator.update batch, times one
+batch over up to 29 bodies, drives two bodies for contact callbacks, and zeroes
+every signal it set. Standalone bodies have no presentation, so nothing visible
+moves and only their read-back matrices are evidence. The report records the
+exact cfg handed to configure(), its return value, and every attribute write.
+Every native call is announced with an NPHYS step line and each
 stage rewrites offline-worker-native-physics-probe-round<N>.json next to
 authority_worker_status.json, so a native crash still leaves the earlier
 stages on disk (collect the dump the launcher wrote). To skip stages or disable

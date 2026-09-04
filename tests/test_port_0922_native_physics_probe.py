@@ -70,11 +70,14 @@ class _FakePhysics(object):
             self.__dict__['actualChassisTransform'] = _Matrix(*self.position)
         object.__setattr__(self, name, value)
 
+    reject_configure = False
+
     def __getattr__(self, name):
-        if name == 'mass':
+        if name in ('mass', 'hullCOMZ'):
             if not self.__dict__.get('initialised'):
-                raise RuntimeError('simulated native crash: mass before init')
-            return 45000.0
+                raise RuntimeError(
+                    'simulated native crash: %s before init' % name)
+            return 45000.0 if name == 'mass' else 0.15
         if name in ('forceApplied', 'torqueApplied'):
             return _Vector(0.0, 0.0, 0.0)
         if name.endswith('Cb'):
@@ -90,8 +93,13 @@ class _FakePhysics(object):
         return []
 
     def configure(self, *args):
-        if not args:
+        if len(args) != 1 or not isinstance(args[0], dict):
             raise TypeError('WGVehiclePhysics::configure: wrong arguments.')
+        if _FakePhysics.reject_configure or 'modes' not in args[0]:
+            return False
+        self.__dict__['configured_cfg'] = args[0]
+        self.__dict__['initialised'] = True
+        return True
 
     def rollback(self, *args):
         raise TypeError('WGVehiclePhysics::rollback: wrong arguments.')
@@ -150,10 +158,38 @@ class _FakeNativeFilter(object):
         self.inputs.append((movement, rotation))
 
 
+class _Named(object):
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeVehicleType(object):
+    def __init__(self):
+        self.name = 'china:Ch02_Type62'
+        self.speedLimits = (16.666, 6.388)
+        self.xphysics = {
+            'engines': {'_12150L-3_V-12': {'smplEnginePower': 454.6309}},
+            'chassis': {'Chassis_Ch02_Type62': {'grounds': {
+                'ground': {'rollingFriction': 0.0483},
+                'stone': {'rollingFriction': 0.0483}}}}}
+        self.useHullZ = False
+        self.hullAimingParams = {'pitch': {'isAvailable': False},
+                                 'yaw': {'isAvailable': False}}
+
+
+class _FakeDescriptor(object):
+    def __init__(self, siege=False):
+        self.type = _FakeVehicleType()
+        self.engine = _Named('_12150L-3_V-12')
+        self.chassis = _Named('Chassis_Ch02_Type62')
+        self.hasSiegeMode = siege
+        self.physics = {'weight': 21500.0}
+
+
 class _FakeNativeEntity(object):
     def __init__(self, physics, position):
         self.filter = _FakeNativeFilter(physics)
-        self.typeDescriptor = object()
+        self.typeDescriptor = _FakeDescriptor()
         self.position = _Vector(*position)
         self.yaw = 0.3
 
@@ -213,13 +249,33 @@ def _fake_physics_shared():
     module.NUM_ITERATIONS = 10
     module.FRICTION_RATIO = 1.0
 
-    def initVehiclePhysicsServer(physics, descriptor):
-        physics.staticMode = False
-        physics.__dict__['initialised'] = True
+    module.CONTACT_ENERGY_POW = 3.0
+    module.CONTACT_FRICTION_TERRAIN = 1.0
+    module.g_defaultTankXPhysicsCfg = {'clearance': 0.7, 'engine': {}}
+    module.calls = []
+
+    def configurePhysics(physics, baseCfg, typeDesc, gravityFactor):
+        module.calls.append(('configurePhysics', typeDesc.type.name,
+                             typeDesc.engine.name, gravityFactor))
+        detailed = typeDesc.type.xphysics['detailed']
+        if detailed is not baseCfg:
+            raise AssertionError('proxy must expose the same detailed dict')
+        cfg = {'modes': {'normal': {
+            'fullMass': typeDesc.physics['weight'] * 0.001,
+            'engine': dict(detailed['engines'][typeDesc.engine.name]),
+            'chassis': dict(detailed['chassis'][typeDesc.chassis.name])}},
+            'vehicleType': 0}
+        if not physics.configure(cfg):
+            module.calls.append(('LOG_ERROR', 'configure failed'))
+        physics.centerOfMass = _Vector(0.0, 1.25, physics.hullCOMZ)
+        physics.isFrozen = False
+        physics.movementSignals = 0
 
     def initVehiclePhysicsClient(physics, descriptor):
-        raise RuntimeError('client init should not be reached first')
-    module.initVehiclePhysicsServer = initVehiclePhysicsServer
+        module.calls.append(('initVehiclePhysicsClient',))
+        physics.staticMode = False
+        physics.__dict__['initialised'] = True
+    module.configurePhysics = configurePhysics
     module.initVehiclePhysicsClient = initVehiclePhysicsClient
     return module
 
@@ -232,11 +288,17 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.clock = [1000.0]
         self.directory = tempfile.mkdtemp()
         self.simulator = _FakeSimulator()
+        self.physics_params = []
+        _FakePhysics.reject_configure = False
         self.bigworld = types.SimpleNamespace(
             WGVehiclePhysics=_FakePhysics,
             WGDynamicsSimulator=lambda: self.simulator,
-            WGPhysicalBody=_FakeBody)
-        sys.modules['physics_shared'] = _fake_physics_shared()
+            WGPhysicalBody=_FakeBody,
+            player=lambda: types.SimpleNamespace(arenaTypeID=(5 << 16) | 7),
+            wg_setupPhysicsParam=lambda name, value: self.physics_params.append(
+                (name, value)))
+        self.physics_shared = _fake_physics_shared()
+        sys.modules['physics_shared'] = self.physics_shared
 
     def tearDown(self):
         sys.modules.pop('physics_shared', None)
@@ -255,7 +317,8 @@ class NativePhysicsProbeTests(unittest.TestCase):
                 'bot_id': 11 + index, 'engine_id': 100 + index,
                 'native': _FakeNativeEntity(physics, position),
                 'carrier': _FakeCarrier(position),
-                'descriptor': object(), 'position': position, 'yaw': 0.3})
+                'descriptor': _FakeDescriptor(), 'position': position,
+                'yaw': 0.3})
         return bots
 
     def _probe(self, bots, **config):
@@ -292,9 +355,11 @@ class NativePhysicsProbeTests(unittest.TestCase):
                             opt_in_stages=['signatures'])
         self.assertEqual('signatures', opted._stages[-1])
 
-    def test_retail_bodies_are_preferred_and_driven(self):
+    def test_retail_bodies_are_driven_when_preferred(self):
         bots = self._bots(retail=True)
-        probe = self._probe(bots, opt_in_stages=['signatures'])
+        probe = self._probe(bots, opt_in_stages=['signatures'],
+                            prefer_standalone=False,
+                            read_retail_physics_attributes=True)
         self._run(probe)
         self.assertTrue(probe.done)
         report = self._report()
@@ -320,18 +385,131 @@ class NativePhysicsProbeTests(unittest.TestCase):
         # construct_standalone never reads a fresh body before init.
         construct = by_name['construct_standalone']['data']
         self.assertTrue(construct['initialised'])
-        self.assertEqual('initVehiclePhysicsServer', construct['init'][0]['call'])
+        self.assertEqual('detailed', construct['init_mode'])
+        detailed = construct['init'][0]
+        self.assertEqual('detailed', detailed['call'])
+        self.assertEqual('ok', detailed['result'])
+        self.assertEqual(True, detailed['configure'])
+        self.assertEqual(0.15, detailed['hullCOMZ'])
+        self.assertEqual(['centerOfMass', 'isFrozen', 'movementSignals'],
+                         detailed['writes'])
+        self.assertEqual(
+            {'smplEnginePower': 454.6309, 'smplFwMaxSpeed': 16.666,
+             'smplBkMaxSpeed': 6.388},
+            detailed['base_cfg']['engines']['_12150L-3_V-12'])
+        self.assertEqual({}, detailed['base_cfg']['chassis']['Chassis_Ch02_Type62'])
+        self.assertEqual(21.5, detailed['cfg_normal']['fullMass'])
         self.assertEqual(
             45000.0, construct['physics_attributes_initialised']['mass'])
         self.assertNotIn('physics_attributes_fresh', construct)
         self.assertEqual('lastTickMatrix = Matrix', construct['seed']['result'])
+        self.assertEqual(32, construct['visibilityMask'])
+        # The recorded centerOfMass carries the native hullCOMZ, not 0.0.
+        physics = _FakePhysics.created[-1]
+        self.assertEqual(0.15, physics.centerOfMass.z)
+        self.assertEqual('ok', report['common_conf']['CONTACT_ENERGY_POW'])
+        self.assertEqual('<constant missing>',
+                         report['common_conf']['WARMSTARTING_THRESHOLD'])
+        self.assertEqual([('CONTACT_ENERGY_POW', 3.0),
+                          ('CONTACT_FRICTION_TERRAIN', 1.0)],
+                         self.physics_params)
         joined = ''.join(self.lines)
         self.assertIn('step=construct BigWorld.WGVehiclePhysics()', joined)
-        self.assertIn('step=construct physics_shared.initVehiclePhysicsServer',
+        self.assertIn('step=construct physics_shared.configurePhysics(recorder)',
                       joined)
+        self.assertIn('step=construct physics.configure(cfg)', joined)
+        self.assertIn('step=construct physics.hullCOMZ', joined)
+        self.assertIn('step=construct physics.visibilityMask = 32', joined)
+        self.assertIn('step=BigWorld.wg_setupPhysicsParam(CONTACT_ENERGY_POW, 3.0)',
+                      joined)
+        # configure() is never tried as a pose setter.
+        self.assertNotIn('seed configure(', joined)
         self.assertIn('stage=signatures end status=ok', joined)
         signatures = by_name['signatures']['data']
         self.assertIn('wrong arguments', signatures['physics']['rollback'])
+
+    def test_standalone_bodies_are_preferred_over_retail_bodies(self):
+        bots = self._bots(retail=True)
+        probe = self._probe(bots)
+        self._run(probe)
+        self.assertTrue(probe.done)
+        report = self._report()
+        by_name = dict((stage['name'], stage) for stage in report['stages'])
+        self.assertEqual(
+            {'ok'}, set(stage['status'] for stage in report['stages']),
+            report['stages'])
+        self.assertEqual('standalone', report['bodies_source'])
+        existing = by_name['inspect_existing']['data']['entities'][0]
+        self.assertEqual('_FakePhysics', existing['retail_physics_type'])
+        self.assertEqual('<skipped: retail never reads them>',
+                         existing['physics_attributes'])
+        solve_one = by_name['solve_one']['data']
+        self.assertEqual('standalone', solve_one['source'])
+        self.assertGreater(solve_one['moved_m'], 0.5)
+        for bot in bots:
+            self.assertEqual(0, bot['native'].filter.getVehiclePhysics().movementSignals)
+        self.assertEqual(
+            ['detailed'] * 3,
+            [body['init_mode'] for body in report['standalone_bodies']])
+
+    def test_rejected_configure_falls_back_without_reading_the_body(self):
+        _FakePhysics.reject_configure = True
+        bots = self._bots(retail=False)
+        probe = self._probe(bots, init_order=['detailed'])
+        self._run(probe)
+        self.assertTrue(probe.done)
+        report = self._report()
+        by_name = dict((stage['name'], stage) for stage in report['stages'])
+        self.assertEqual('none', report['bodies_source'])
+        construct = by_name['construct_standalone']['data']
+        self.assertFalse(construct['initialised'])
+        self.assertEqual('<configure returned False>',
+                         construct['init'][0]['result'])
+        self.assertNotIn('physics_attributes_initialised', construct)
+        joined = ''.join(self.lines)
+        self.assertNotIn('physics.hullCOMZ', joined)
+        self.assertNotIn('before init', joined)
+        self.assertEqual('<no body available>',
+                         by_name['solve_one']['data']['result'])
+        # The client recipe still works as the second choice.
+        _FakePhysics.reject_configure = True
+        probe = self._probe(bots)
+        self.lines[:] = []
+        self._run(probe)
+        report = self._report()
+        self.assertEqual('standalone', report['bodies_source'])
+        self.assertEqual(
+            ['client'] * 3,
+            [body['init_mode'] for body in report['standalone_bodies']])
+        self.assertEqual('<configure returned False>',
+                         report['standalone_bodies'][0]['init'][0]['result'])
+
+    def test_siege_descriptors_are_skipped(self):
+        bots = self._bots(retail=False)
+        bots[0]['descriptor'] = _FakeDescriptor(siege=True)
+        probe = self._probe(bots)
+        self._run(probe)
+        report = self._report()
+        skipped = [body for body in report['standalone_bodies']
+                   if body['skipped'] == 'hasSiegeMode']
+        self.assertEqual(['standalone:11'], [body['label'] for body in skipped])
+        self.assertEqual(2, len([body for body in report['standalone_bodies']
+                                 if body['initialised']]))
+
+    def test_derived_xphysics_shapes(self):
+        derived = self.module.derived_xphysics(_FakeDescriptor())
+        self.assertEqual(
+            {'gravityFactor': 1.0,
+             'engines': {'_12150L-3_V-12': {
+                 'smplEnginePower': 454.6309, 'smplFwMaxSpeed': 16.666,
+                 'smplBkMaxSpeed': 6.388}},
+             'chassis': {'Chassis_Ch02_Type62': {}}}, derived)
+        shipped = self.module.derived_xphysics(_FakeDescriptor(), 'shipped')
+        grounds = shipped['chassis']['Chassis_Ch02_Type62']['grounds']
+        self.assertEqual(['ground', 'soft', 'stone'], sorted(grounds))
+        self.assertEqual({'medium': {'rollingFriction': 0.0483}},
+                         grounds['ground'])
+        self.assertEqual({'rollingFriction': 0.0483}, grounds['soft'])
 
     def test_standalone_bodies_are_built_when_retail_bodies_are_absent(self):
         bots = self._bots(retail=False)
@@ -356,8 +534,12 @@ class NativePhysicsProbeTests(unittest.TestCase):
         self.assertEqual(3, len(report['standalone_bodies']))
         for body in report['standalone_bodies']:
             self.assertTrue(body['initialised'])
+            self.assertEqual('detailed', body['init_mode'])
             self.assertEqual('_FakeNativeEntity', body['owner'])
+            self.assertEqual(32, body['visibilityMask'])
             self.assertEqual('lastTickMatrix = Matrix', body['seed']['result'])
+        # Common conf is applied exactly once for the whole probe.
+        self.assertEqual(2, len(self.physics_params))
         self.assertEqual(
             ['standalone:11', 'standalone:12'],
             by_name['solve_pair']['data']['labels'])

@@ -1,16 +1,25 @@
 """Staged, fail-closed probe of #1513's native vehicle physics surface.
 
-Diagnostic evidence only.  Two Windows runs established the ground truth this
-version is built on:
+Diagnostic evidence only.  Ground truth this version is built on (two Windows
+runs plus the exact client ``scripts.pkg`` bytecode and data):
 
 * The Python carrier the runtime hands out for a Bot (``RemoteVehicle``) owns
   a Python ``_RemoteFilter``; the native ``Vehicle`` entity behind it owns the
   stock ``WGVehicleFilter``.  Whether that native filter carries a retail
   ``WGVehiclePhysics`` is exactly what ``inspect_existing`` records.
-* Reading an attribute of a ``WGVehiclePhysics`` that ``physics_shared`` has
-  not initialised dereferences a NULL body (``mass`` getter,
-  ``WorldOfTanks.exe+0xb50ad0``).  Bodies are therefore initialised before the
+* Reading an attribute of a ``WGVehiclePhysics`` that has not been configured
+  dereferences a NULL body (``mass`` getter, ``WorldOfTanks.exe+0xb50ad0``).
+  The native ``configure(cfg)`` return value is therefore checked before the
   first attribute read, and the pre-initialisation read is opt-in.
+* Retail ``Vehicle.__startWGPhysics`` initialises every vehicle's filter body
+  with ``physics_shared.initVehiclePhysicsClient`` (damper springs, no drive
+  parameters).  The drive-capable recipe is the server one:
+  ``physics_shared.configurePhysics`` builds the cfg from
+  ``g_defaultTankXPhysicsCfg`` plus ``typeDesc.type.xphysics['detailed']`` and
+  hands it to ``WGVehiclePhysics.configure``.  The client package ships only
+  two fields of that block per vehicle, so ``derived_xphysics`` builds it from
+  the client descriptor and a read-only proxy supplies it to ``configurePhysics``
+  without mutating the shared ``VehicleType``.
 
 Stages run one per render frame from ``start_delay_seconds`` after the battle
 goes live.  Every native call group is announced with
@@ -19,16 +28,17 @@ rewritten after each stage, so a native crash leaves the last step in
 ``python.log`` and every earlier stage's data on disk.  A Python exception is
 recorded and the probe continues; nothing here may raise into the frame.
 
-Bodies used by the drive/solve stages are retail bodies when the native filter
-exposes them, otherwise standalone bodies the probe constructs and initialises
-through ``physics_shared`` from the Bot's own descriptor.  Standalone bodies
-have no presentation; their read-back matrices are the evidence.  The probe
-never calls ``WGVehicleFilter.setVehiclePhysics`` or ``syncGunAngles`` and
-never touches human vehicles.
+Bodies used by the drive/solve stages are standalone bodies the probe
+constructs from the Bot's own descriptor (retail filter bodies are the
+fallback; they cannot self-propel).  Standalone bodies have no presentation;
+their read-back matrices are the evidence.  The probe never calls
+``WGVehicleFilter.setVehiclePhysics`` or ``syncGunAngles`` and never touches
+human vehicles.
 """
 
 from __future__ import print_function
 
+import collections
 import json
 import math
 import os
@@ -66,11 +76,44 @@ DEFAULT_CONFIG = {
     'opt_in_stages': [],
     'fresh_attribute_reads': False,
     'allow_standalone_bodies': True,
-    # 'server' first: WGDynamicsSimulator is the retail server-style solver.
-    'init_order': ['initVehiclePhysicsServer', 'initVehiclePhysicsClient'],
+    # Standalone bodies are the design target; retail filter bodies are the
+    # client-side damper-spring model and cannot self-propel.
+    'prefer_standalone': True,
+    # 'detailed' = the retail server recipe (physics_shared.configurePhysics
+    # over g_defaultTankXPhysicsCfg + descriptor-derived fields, then the
+    # native configure(cfg)); 'client' = retail initVehiclePhysicsClient.
+    'init_order': ['detailed', 'client'],
+    # 'omit' leaves chassis grounds to the native defaults.  'shipped' feeds
+    # the per-material rollingFriction the client package carries plus a
+    # PLACEHOLDER 'soft' block copied from 'medium' (the retail 'soft' block
+    # is not shipped); use it only to test whether configure() accepts it.
+    'grounds_mode': 'omit',
+    # Mirror physics_shared.updateCommonConf() once (22 process-global
+    # wg_setupPhysicsParam calls, each guarded) before the first configure.
+    'apply_common_conf': True,
+    # Retail never reads attributes off a client-initialised body; keep
+    # those getters off unless explicitly requested.
+    'read_retail_physics_attributes': False,
     # 'entity' installs weakref(native Vehicle) like retail; 'none' leaves it.
     'owner_mode': 'entity',
 }
+
+# physics_shared.updateCommonConf() in retail order; every name is a module
+# constant of physics_shared and a BigWorld.wg_setupPhysicsParam key.
+COMMON_CONF_PARAMS = (
+    'CONTACT_ENERGY_POW', 'CONTACT_ENERGY_POW2', 'SLOPE_FRICTION_FUNC_DEF',
+    'SLOPE_FRICTION_FUNC_VAL', 'SLOPE_FRICTION_MODELS_FUNC_VAL',
+    'CONTACT_FRICTION_TERRAIN', 'CONTACT_FRICTION_STATICS',
+    'CONTACT_FRICTION_STATICS_VERT', 'CONTACT_FRICTION_DESTRUCTIBLES',
+    'CONTACT_FRICTION_VEHICLES', 'VEHICLE_ON_BODY_DEFAULT_FRICTION',
+    'ROLLER_FRICTION_GAIN_MIN', 'ROLLER_FRICTION_GAIN_MAX',
+    'ROLLER_FRICTION_ANGLE_MIN', 'ROLLER_FRICTION_ANGLE_MAX',
+    'ARENA_BOUNDS_FRICTION_HOR', 'ARENA_BOUNDS_FRICTION_VERT',
+    'USE_PSEUDO_CONTACTS', 'CONTACT_PENETRATION',
+    'WARMSTARTING_VEHICLE_VEHICLE', 'WARMSTARTING_VEHICLE_STATICS',
+    'WARMSTARTING_THRESHOLD')
+# Vehicle.__startWGPhysics passes these to setArenaBounds.
+RETAIL_ARENA_BOUNDS = ((-10000, -10000), (10000, 10000))
 
 # Attributes the exe's string table exposes on WGVehiclePhysics.  Every read
 # is individually guarded and announced; a missing or write-only attribute is
@@ -261,6 +304,86 @@ def _call_no_args(target, name):
     return 'returned %s' % json.dumps(_plain(value))[:200]
 
 
+class _AttributeProxy(object):
+    """Forward attribute reads to a target, overriding a few names.
+
+    physics_shared only reads from typeDesc (it mutates the xphysics dict,
+    never the descriptor), so a read-only proxy keeps the shared VehicleType
+    untouched.
+    """
+
+    def __init__(self, target, **overrides):
+        self.__dict__['_target'] = target
+        self.__dict__['_overrides'] = overrides
+
+    def __getattr__(self, name):
+        overrides = self.__dict__['_overrides']
+        if name in overrides:
+            return overrides[name]
+        return getattr(self.__dict__['_target'], name)
+
+
+class _ConfigureRecorder(object):
+    """Stand in for WGVehiclePhysics while configurePhysics runs in Python.
+
+    Captures the cfg dict it would hand to the native configure() and the
+    attribute writes it performs afterwards, so the native call can be made
+    separately and its return value checked before any getter is touched.
+    """
+
+    def __init__(self):
+        self.__dict__['writes'] = []
+        self.__dict__['cfg'] = None
+        self.__dict__['hullCOMZ'] = 0.0
+
+    def configure(self, cfg):
+        self.__dict__['cfg'] = cfg
+        return True
+
+    def __setattr__(self, name, value):
+        self.__dict__['writes'].append((name, value))
+
+
+def derived_xphysics(descriptor, grounds_mode='omit'):
+    """Build the xphysics['detailed'] block for one client descriptor.
+
+    The #1513 client package ships only two fields of the retail block per
+    vehicle (engine smplEnginePower and per-material medium rollingFriction),
+    so everything else comes from physics_shared.g_defaultTankXPhysicsCfg.
+    The single substitution is smplFwMaxSpeed/smplBkMaxSpeed, taken from the
+    vehicle-level type.speedLimits the client reads; retail reads them per
+    engine from the unstripped XML.
+    """
+    vehicle_type = descriptor.type
+    engine_name = descriptor.engine.name
+    chassis_name = descriptor.chassis.name
+    shipped = getattr(vehicle_type, 'xphysics', None) or {}
+    engine = {}
+    shipped_engine = (shipped.get('engines') or {}).get(engine_name) or {}
+    if 'smplEnginePower' in shipped_engine:
+        engine['smplEnginePower'] = float(shipped_engine['smplEnginePower'])
+    limits = getattr(vehicle_type, 'speedLimits', None)
+    if limits:
+        engine['smplFwMaxSpeed'] = float(limits[0])
+        engine['smplBkMaxSpeed'] = float(limits[1])
+    chassis = {}
+    if grounds_mode == 'shipped':
+        shipped_chassis = (shipped.get('chassis') or {}).get(chassis_name)
+        grounds = {}
+        for ground, entry in sorted(
+                ((shipped_chassis or {}).get('grounds') or {}).items()):
+            grounds[str(ground)] = {'medium': dict(entry)}
+        if grounds:
+            # PLACEHOLDER: retail's 'soft' block is not in the client package.
+            grounds['soft'] = dict(grounds[sorted(grounds)[0]]['medium'])
+            chassis['grounds'] = grounds
+    # A non-empty chassis entry makes updatePhysicsCfg require 'grounds'
+    # with a 'soft' block, so 'omit' leaves the entry empty on purpose.
+    return {'gravityFactor': 1.0,
+            'engines': {engine_name: engine},
+            'chassis': {chassis_name: chassis}}
+
+
 def _function_signature(function):
     code = getattr(function, 'func_code', getattr(function, '__code__', None))
     if code is None:
@@ -295,15 +418,17 @@ class WorkerPhysicsProbe(object):
         self._stage_index = 0
         self._stage_state = None
         self._report = {
-            'schema': 2, 'diagnostic': 'native_physics_probe',
+            'schema': 3, 'diagnostic': 'native_physics_probe',
             'config': dict(self._config), 'stages': [], 'last_begun': None}
         self._current = None
         self._simulator = None
         self._standalone = {}
         self._bodies = []          # acquired body records for drive/solve
         self._bodies_source = None
+        self._standalone_attempted = set()   # bot ids tried once, ever
         self._driven = []
         self._callback_events = []
+        self._common_conf = None
         stages = self._config.get('stages')
         opted = set(self._config.get('opt_in_stages') or ())
         if stages == 'all' or not stages:
@@ -566,14 +691,140 @@ class WorkerPhysicsProbe(object):
         return (self._perf() - started) * 1000.0
 
     # ------------------------------------------------------- body acquisition
+    def _apply_common_conf(self, physics_shared):
+        """Mirror physics_shared.updateCommonConf() once, one guarded call each."""
+        if self._common_conf is not None or not self._config.get(
+                'apply_common_conf', True):
+            return
+        setter = getattr(self._bigworld(), 'wg_setupPhysicsParam', None)
+        results = collections.OrderedDict()
+        if not callable(setter):
+            results['wg_setupPhysicsParam'] = '<missing>'
+        else:
+            for name in COMMON_CONF_PARAMS:
+                value = getattr(physics_shared, name, None)
+                if value is None:
+                    results[name] = '<constant missing>'
+                    continue
+                self._step('BigWorld.wg_setupPhysicsParam(%s, %r)' % (
+                    name, value))
+                try:
+                    setter(name, value)
+                    results[name] = 'ok'
+                except Exception as error:
+                    results[name] = '<%s: %s>' % (
+                        _type_name(error), str(error)[:80])
+        self._common_conf = results
+        self._report['common_conf'] = results
+
+    def _init_detailed(self, physics, physics_shared, descriptor, label):
+        """Retail server recipe with the native configure() checked first."""
+        entry = {'call': 'detailed'}
+        configure_physics = getattr(physics_shared, 'configurePhysics', None)
+        if not callable(configure_physics):
+            entry['result'] = '<physics_shared.configurePhysics missing>'
+            return entry
+        try:
+            base = derived_xphysics(
+                descriptor, self._config.get('grounds_mode', 'omit'))
+        except Exception as error:
+            entry['result'] = 'derive: %s: %s' % (
+                _type_name(error), str(error)[:160])
+            return entry
+        entry['base_cfg'] = _plain(base)
+        recorder = _ConfigureRecorder()
+        proxy = _AttributeProxy(
+            descriptor,
+            type=_AttributeProxy(descriptor.type, xphysics={'detailed': base}))
+        self._step('%s physics_shared.configurePhysics(recorder)' % label)
+        try:
+            configure_physics(recorder, base, proxy, float(base['gravityFactor']))
+        except Exception as error:
+            entry['result'] = 'configurePhysics: %s: %s' % (
+                _type_name(error), str(error)[:160])
+            return entry
+        cfg = recorder.cfg
+        if not isinstance(cfg, dict):
+            entry['result'] = '<configurePhysics never called configure>'
+            return entry
+        modes = cfg.get('modes') or {}
+        entry['cfg_modes'] = sorted(str(name) for name in modes)
+        entry['cfg_normal'] = _plain(modes.get('normal'))
+        self._step('%s physics.configure(cfg)' % label)
+        try:
+            accepted = physics.configure(cfg)
+        except Exception as error:
+            entry['result'] = 'configure: %s: %s' % (
+                _type_name(error), str(error)[:160])
+            return entry
+        entry['configure'] = _plain(accepted)
+        if not accepted:
+            entry['result'] = '<configure returned %r>' % (accepted,)
+            return entry
+        self._step('%s physics.hullCOMZ' % label)
+        hull_com_z = _read_attribute(physics, 'hullCOMZ')
+        entry['hullCOMZ'] = hull_com_z
+        math_module = self._math()
+        writes = []
+        for name, value in recorder.writes:
+            if (name == 'centerOfMass' and math_module is not None and
+                    isinstance(hull_com_z, float)):
+                try:
+                    value = math_module.Vector3(
+                        float(value.x), float(value.y), hull_com_z)
+                except Exception:
+                    pass
+            self._step('%s physics.%s = %s' % (label, name, _plain(value)))
+            try:
+                setattr(physics, name, value)
+                writes.append(name)
+            except Exception as error:
+                writes.append('%s:<%s>' % (name, str(error)[:60]))
+        entry['writes'] = writes
+        entry['result'] = 'ok'
+        return entry
+
+    def _init_client(self, physics, physics_shared, descriptor, label):
+        """Retail client recipe: proves creation only, the body cannot drive."""
+        entry = {'call': 'client', 'drive_capable': False}
+        function = getattr(physics_shared, 'initVehiclePhysicsClient', None)
+        if not callable(function):
+            entry['result'] = '<physics_shared.initVehiclePhysicsClient missing>'
+            return entry
+        self._step('%s physics_shared.initVehiclePhysicsClient' % label)
+        try:
+            function(physics, descriptor)
+        except Exception as error:
+            entry['result'] = '%s: %s' % (_type_name(error), str(error)[:200])
+            return entry
+        entry['result'] = 'ok'
+        return entry
+
+    def _set_visibility_mask(self, physics, label, record):
+        """Retail: ArenaType.getVisibilityMask(player.arenaTypeID >> 16)."""
+        try:
+            arena_type_id = int(self._bigworld().player().arenaTypeID)
+        except Exception as error:
+            record['visibilityMask'] = '<arenaTypeID: %s>' % str(error)[:60]
+            return
+        try:
+            import ArenaType
+            mask = ArenaType.getVisibilityMask(arena_type_id >> 16)
+        except Exception:
+            mask = 1 << (arena_type_id >> 16)
+        self._step('%s physics.visibilityMask = %r' % (label, mask))
+        try:
+            physics.visibilityMask = mask
+            record['visibilityMask'] = mask
+        except Exception as error:
+            record['visibilityMask'] = '<%s>' % str(error)[:80]
+
     def _construct_body(self, bot, label):
         """Construct, initialise and pose one standalone body; never raise."""
         record = {'label': label, 'source': 'standalone', 'bot': bot,
-                  'physics': None, 'init': [], 'seed': None, 'owner': None}
+                  'physics': None, 'init': [], 'seed': None, 'owner': None,
+                  'initialised': False, 'init_mode': None}
         bigworld = self._bigworld()
-        self._step('%s BigWorld.WGVehiclePhysics()' % label)
-        physics = bigworld.WGVehiclePhysics()
-        record['physics'] = physics
         descriptor = bot.get('descriptor')
         if descriptor is None:
             record['init'].append({'call': '-', 'result': '<no descriptor>'})
@@ -584,38 +835,39 @@ class WorkerPhysicsProbe(object):
             record['init'].append({
                 'call': 'import physics_shared', 'result': str(error)[:120]})
             return record
-        initialised = False
-        for name in self._config.get('init_order') or ():
-            function = getattr(physics_shared, name, None)
-            if function is None:
-                record['init'].append({'call': name, 'result': '<missing>'})
-                continue
-            self._step('%s physics_shared.%s' % (label, name))
-            try:
-                function(physics, descriptor)
-            except Exception as error:
-                record['init'].append({
-                    'call': name,
-                    'result': '%s: %s' % (_type_name(error), str(error)[:200])})
-                continue
-            record['init'].append({'call': name, 'result': 'ok'})
-            initialised = True
-            break
-        record['initialised'] = initialised
-        if not initialised:
+        self._apply_common_conf(physics_shared)
+        if getattr(descriptor, 'hasSiegeMode', False):
+            # configurePhysics wants defaultVehicleDescr and siegeVehicleDescr
+            # proxied as well; the probe does not need siege vehicles.
+            record['skipped'] = 'hasSiegeMode'
+            record['init'].append({'call': '-', 'result': '<skipped: hasSiegeMode>'})
             return record
+        self._step('%s BigWorld.WGVehiclePhysics()' % label)
+        physics = bigworld.WGVehiclePhysics()
+        record['physics'] = physics
+        for name in self._config.get('init_order') or ():
+            if name == 'detailed':
+                entry = self._init_detailed(
+                    physics, physics_shared, descriptor, label)
+            elif name == 'client':
+                entry = self._init_client(
+                    physics, physics_shared, descriptor, label)
+            else:
+                entry = {'call': name, 'result': '<unknown init mode>'}
+            record['init'].append(entry)
+            if entry.get('result') == 'ok':
+                record['initialised'] = True
+                record['init_mode'] = name
+                break
+        if not record['initialised']:
+            return record
+        # Vehicle.__startWGPhysics order: bounds, owner, static, signals, mask.
         self._step('%s physics.setArenaBounds' % label)
         try:
-            physics.setArenaBounds((-10000, -10000), (10000, 10000))
+            physics.setArenaBounds(*RETAIL_ARENA_BOUNDS)
             record['setArenaBounds'] = 'ok'
         except Exception as error:
             record['setArenaBounds'] = '%s: %s' % (_type_name(error), str(error))
-        for name, value in (('staticMode', False), ('movementSignals', 0)):
-            self._step('%s physics.%s = %r' % (label, name, value))
-            try:
-                setattr(physics, name, value)
-            except Exception as error:
-                record['%s_set' % name] = '<%s>' % str(error)[:80]
         owner_mode = self._config.get('owner_mode', 'entity')
         target = bot.get('native') or bot.get('carrier')
         if owner_mode == 'entity' and target is not None:
@@ -625,6 +877,13 @@ class WorkerPhysicsProbe(object):
                 record['owner'] = _type_name(target)
             except Exception as error:
                 record['owner'] = '<%s>' % str(error)[:80]
+        for name, value in (('staticMode', False), ('movementSignals', 0)):
+            self._step('%s physics.%s = %r' % (label, name, value))
+            try:
+                setattr(physics, name, value)
+            except Exception as error:
+                record['%s_set' % name] = '<%s>' % str(error)[:80]
+        self._set_visibility_mask(physics, label, record)
         self._step('%s install callbacks' % label)
         record['callbacks'] = self._install_callbacks(physics, label)
         record['seed'] = self._seed_pose(physics, bot, label)
@@ -646,14 +905,13 @@ class WorkerPhysicsProbe(object):
         except Exception as error:
             return {'attempts': attempts,
                     'result': '<matrix build failed: %s>' % str(error)[:80]}
+        # configure() is the detailed cfg parser (see _init_detailed); it is
+        # never tried as a pose setter.
         candidates = (
             ('lastTickMatrix = Matrix', lambda: setattr(
                 physics, 'lastTickMatrix', matrix)),
             ('rollback(Matrix)', lambda: physics.rollback(matrix)),
-            ('configure(Matrix)', lambda: physics.configure(matrix)),
             ('rollback(Vector3, yaw)', lambda: physics.rollback(vector, yaw)),
-            ('configure(Vector3, yaw)', lambda: physics.configure(
-                vector, yaw)),
         )
         for name, call in candidates:
             self._step('%s seed %s' % (label, name))
@@ -681,45 +939,70 @@ class WorkerPhysicsProbe(object):
                         'readback': readback}
         return {'attempts': attempts, 'result': '<no setter moved the body>'}
 
+    def _retail_bodies(self, bots):
+        retail = []
+        for bot in bots:
+            self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
+            unused_filter, physics = self._retail_physics(bot)
+            if physics is not None:
+                retail.append({'label': 'bot:%s' % bot['bot_id'],
+                               'source': 'retail', 'bot': bot,
+                               'physics': physics})
+        return retail
+
+    def _build_standalone(self, bots, needed):
+        """Construct at most one body per Bot, ever; failures are not retried."""
+        for bot in bots:
+            if len(self._bodies) >= needed:
+                break
+            if bot['bot_id'] in self._standalone_attempted:
+                continue
+            self._standalone_attempted.add(bot['bot_id'])
+            label = 'standalone:%s' % bot['bot_id']
+            record = self._construct_body(bot, label)
+            self._report.setdefault('standalone_bodies', []).append({
+                'label': label, 'init': record.get('init'),
+                'initialised': record.get('initialised'),
+                'init_mode': record.get('init_mode'),
+                'skipped': record.get('skipped'),
+                'owner': record.get('owner'), 'seed': record.get('seed'),
+                'setArenaBounds': record.get('setArenaBounds'),
+                'visibilityMask': record.get('visibilityMask')})
+            if record.get('initialised'):
+                self._bodies.append(record)
+
     def _acquire_bodies(self, count):
-        """Retail bodies when the native filter has them, else standalone."""
+        """Standalone bodies first (the design target), retail as fallback."""
         needed = int(count)
         if len(self._bodies) >= needed:
             return self._bodies[:needed]
         bots = self._bots()
         if self._bodies_source is None:
-            retail = []
-            for bot in bots:
-                self._step('bot:%s filter.getVehiclePhysics' % bot['bot_id'])
-                unused_filter, physics = self._retail_physics(bot)
-                if physics is not None:
-                    retail.append({'label': 'bot:%s' % bot['bot_id'],
-                                   'source': 'retail', 'bot': bot,
-                                   'physics': physics})
-            if retail:
-                self._bodies_source = 'retail'
-                self._bodies = retail
-                return self._bodies[:needed]
-            if not self._config.get('allow_standalone_bodies', True):
+            allow_standalone = self._config.get('allow_standalone_bodies', True)
+            order = ['retail']
+            if allow_standalone:
+                if self._config.get('prefer_standalone', True):
+                    order = ['standalone', 'retail']
+                else:
+                    order = ['retail', 'standalone']
+            for source in order:
+                if source == 'retail':
+                    retail = self._retail_bodies(bots)
+                    if retail:
+                        self._bodies_source = 'retail'
+                        self._bodies = retail
+                        break
+                else:
+                    self._bodies_source = 'standalone'
+                    self._build_standalone(bots, needed)
+                    if self._bodies:
+                        break
+                    self._bodies_source = None
+            if self._bodies_source is None:
                 self._bodies_source = 'none'
                 return []
-            self._bodies_source = 'standalone'
-        if self._bodies_source == 'standalone':
-            used = set(id(record['bot']) for record in self._bodies)
-            for bot in bots:
-                if len(self._bodies) >= needed:
-                    break
-                if id(bot) in used:
-                    continue
-                label = 'standalone:%s' % bot['bot_id']
-                record = self._construct_body(bot, label)
-                self._report.setdefault('standalone_bodies', []).append({
-                    'label': label, 'init': record.get('init'),
-                    'initialised': record.get('initialised'),
-                    'owner': record.get('owner'), 'seed': record.get('seed'),
-                    'setArenaBounds': record.get('setArenaBounds')})
-                if record.get('initialised'):
-                    self._bodies.append(record)
+        elif self._bodies_source == 'standalone':
+            self._build_standalone(bots, needed)
         return self._bodies[:needed]
 
     # ---------------------------------------------------------------- stages
@@ -789,9 +1072,12 @@ class WorkerPhysicsProbe(object):
                     entry['physics_dir'] = sorted(
                         name for name in dir(physics)
                         if not name.startswith('__'))
-                    entry['physics_attributes'] = self._read_attributes(
-                        physics, PHYSICS_READ_ATTRIBUTES,
-                        'bot:%s retail physics' % bot['bot_id'])
+                    if self._config.get('read_retail_physics_attributes'):
+                        entry['physics_attributes'] = self._read_attributes(
+                            physics, PHYSICS_READ_ATTRIBUTES,
+                            'bot:%s retail physics' % bot['bot_id'])
+                    else:
+                        entry['physics_attributes'] = '<skipped: retail never reads them>'
             entries.append(entry)
         data['entities'] = entries
         data['bot_count'] = len(self._bots())
@@ -809,16 +1095,20 @@ class WorkerPhysicsProbe(object):
         self._standalone['physics'] = record['physics']
         data['init'] = record['init']
         data['initialised'] = record.get('initialised')
+        data['init_mode'] = record.get('init_mode')
+        data['skipped'] = record.get('skipped')
         data['owner'] = record.get('owner')
         data['setArenaBounds'] = record.get('setArenaBounds')
+        data['visibilityMask'] = record.get('visibilityMask')
         data['seed'] = record.get('seed')
         physics = record['physics']
-        data['physics_dir'] = sorted(
-            name for name in dir(physics) if not name.startswith('__'))
+        if physics is not None:
+            data['physics_dir'] = sorted(
+                name for name in dir(physics) if not name.startswith('__'))
         if record.get('initialised'):
             data['physics_attributes_initialised'] = self._read_attributes(
                 physics, PHYSICS_READ_ATTRIBUTES, 'initialised physics')
-        elif self._config.get('fresh_attribute_reads'):
+        elif self._config.get('fresh_attribute_reads') and physics is not None:
             data['physics_attributes_fresh'] = self._read_attributes(
                 physics, PHYSICS_READ_ATTRIBUTES, 'fresh physics')
         simulator = self._simulator_for_stage()
