@@ -1,6 +1,5 @@
 import contextlib
 import copy
-import dis
 import io
 import math
 from pathlib import Path
@@ -5160,18 +5159,19 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.addCleanup(self._bot_factors_patch.stop)
 
     def test_production_runtime_wires_stock_camera_visibility_module(self):
-        instructions = [
-            (instruction.opname, instruction.argval)
-            for instruction in dis.get_instructions(
-                battle_runtime_module._load_runtime)]
+        cameras = types.SimpleNamespace(isPointOnScreen=mock.Mock())
+        modules = {'AvatarInputHandler': mock.Mock(cameras=cameras)}
 
-        self.assertIn(('IMPORT_FROM', 'cameras'), instructions)
-        self.assertTrue(any(
-            instructions[index:index + 3] == [
-                ('LOAD_FAST', 'cameras'),
-                ('LOAD_FAST', 'runtime'),
-                ('STORE_ATTR', 'cameras')]
-            for index in range(len(instructions) - 2)))
+        def import_runtime_module(name, *unused_args, **unused_kwargs):
+            if name not in modules:
+                modules[name] = mock.Mock(name=name)
+            return modules[name]
+
+        with mock.patch('builtins.__import__',
+                        side_effect=import_runtime_module):
+            runtime = battle_runtime_module._load_runtime()
+
+        self.assertIs(cameras, runtime.cameras)
 
     def test_local_state_falls_back_before_roster_publishes_the_player(self):
         battle = BattleRuntime(_runtime())
