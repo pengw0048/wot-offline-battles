@@ -98,12 +98,12 @@ Diagnostic build: {identity}
 This reversible profiler overlay adds function-level Python profiling and
 fire-latency instrumentation to the current hidden-worker Python workload.
 It changes no gameplay rule, cadence, budget or wire message. It is built
-for an existing v0.6.6 launcher installation. You
+for an existing v0.6.7 launcher installation. You
 still start the game, LAN server, visible client and hidden
 worker through that same launcher. This ZIP only avoids rebuilding or replacing
 the launcher itself.
 
-Run the launcher once and let it finish its normal v0.6.6 installation before
+Run the launcher once and let it finish its normal v0.6.7 installation before
 using this ZIP. The ZIP does not contain the LAN server, baked map data, native
 bridge, launcher, or any player-owned configuration. It replaces the one
 existing org.peng.offline_lan_0922 WOTMOD and keeps a private backup for

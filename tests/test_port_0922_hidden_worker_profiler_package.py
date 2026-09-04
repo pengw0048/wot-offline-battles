@@ -115,7 +115,7 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
         payloads = {
             'meta.xml': (
                 b'<root><id>org.peng.offline_lan_0922</id>'
-                b'<version>0.6.6</version></root>'),
+                b'<version>0.6.7</version></root>'),
             self.validator.validate_wotmod.ENTRY: b'\x03\xf3\r\ncompiled',
         }
         with tempfile.NamedTemporaryFile(suffix='.wotmod') as stream:
@@ -178,7 +178,7 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
                 archive, expected_pyc_members=expected)
         self.assertEqual('profiler-test-a', marker['diagnosticBuildIdentity'])
         self.assertEqual(
-            'org.peng.offline_lan_0922_0.6.6.wotmod',
+            'org.peng.offline_lan_0922_0.6.7.wotmod',
             marker['packageFile'])
         self.assertNotIn(
             'build_identity.json', self.validator.REQUIRED_FILES)
@@ -217,7 +217,7 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
                 'Get-Process -Name "WoT-Offline-Battles-Launcher"',
                 '.offline-hidden-worker-profiler-backup',
                 'Updated hidden-worker profiler to build', 'Get-Sha256',
-                'Expected exactly one v0.6.6',
+                'Expected exactly one v0.6.7',
                 'previousPackages', 'diagnosticBuildIdentity',
                 'Original launcher WOTMOD backup remains at'):
             self.assertIn(required, source)
@@ -311,7 +311,7 @@ class HiddenWorkerProfilerPackageTests(unittest.TestCase):
         self.assertIn('native vehicle physics probe', text)
         self.assertIn('offline-worker-native-physics-probe-round<N>.json', text)
         self.assertIn('worker_diagnostics.json', text)
-        self.assertIn('let it finish its normal v0.6.6 installation', text)
+        self.assertIn('let it finish its normal v0.6.7 installation', text)
         self.assertIn('still start the game, LAN server, visible client and hidden', text)
         self.assertIn('through that same launcher', text)
         self.assertIn('avoids rebuilding or replacing', text)

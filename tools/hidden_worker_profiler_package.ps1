@@ -57,10 +57,10 @@ function Read-DiagnosticMarker([string]$Path) {
     if ($marker.schema -ne 1 -or
             $marker.diagnostic -ne "hidden_worker_profiler" -or
             $marker.baseModId -ne "org.peng.offline_lan_0922" -or
-            $marker.baseSemanticVersion -ne "0.6.6" -or
+            $marker.baseSemanticVersion -ne "0.6.7" -or
             [string]::IsNullOrWhiteSpace([string]$marker.diagnosticBuildIdentity) -or
             [string]$marker.packageFile -ne
-                "org.peng.offline_lan_0922_0.6.6.wotmod" -or
+                "org.peng.offline_lan_0922_0.6.7.wotmod" -or
             [string]$marker.packageSha256 -notmatch "^[0-9a-f]{64}$") {
         throw "The hidden-worker profiler build marker is invalid."
     }
@@ -81,7 +81,7 @@ function Update-Profiler(
     $backup = Read-JsonFile $backupManifestPath
     if ($backup.schema -ne 1 -or
             [string]$backup.packageFile -ne
-                "org.peng.offline_lan_0922_0.6.6.wotmod" -or
+                "org.peng.offline_lan_0922_0.6.7.wotmod" -or
             [string]$backup.packageSha256 -notmatch "^[0-9a-f]{64}$" -or
             [string]::IsNullOrWhiteSpace(
                 [string]$backup.diagnosticBuildIdentity)) {
@@ -223,8 +223,8 @@ function Install-Profiler(
         $packages = @(Get-ChildItem -LiteralPath $ModDirectory -Filter $ModPattern -File)
     }
     if ($packages.Count -ne 1 -or $packages[0].Name -ne
-            "org.peng.offline_lan_0922_0.6.6.wotmod") {
-        throw "Expected exactly one v0.6.6 org.peng.offline_lan_0922 WOTMOD. Install or repair v0.6.6 with the launcher first."
+            "org.peng.offline_lan_0922_0.6.7.wotmod") {
+        throw "Expected exactly one v0.6.7 org.peng.offline_lan_0922 WOTMOD. Install or repair v0.6.7 with the launcher first."
     }
 
     if ([System.IO.Directory]::Exists($BackupRoot)) {
@@ -319,7 +319,7 @@ function Uninstall-Profiler(
     $backup = Read-JsonFile $backupManifestPath
     if ($backup.schema -ne 1 -or
             [string]$backup.packageFile -ne
-                "org.peng.offline_lan_0922_0.6.6.wotmod" -or
+                "org.peng.offline_lan_0922_0.6.7.wotmod" -or
             [string]$backup.packageSha256 -notmatch "^[0-9a-f]{64}$") {
         throw "The hidden-worker profiler backup manifest is invalid."
     }

@@ -20,7 +20,7 @@ import validate_wotmod
 
 
 MOD_ID = 'org.peng.offline_lan_0922'
-MOD_VERSION = '0.6.6'
+MOD_VERSION = '0.6.7'
 MARKER_FILENAME = 'hidden_worker_profiler_build.json'
 PACKAGE_MEMBER = (
     'payload/mods/0.9.22.0.1/' + MOD_ID + '_' + MOD_VERSION + '.wotmod')
