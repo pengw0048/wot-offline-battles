@@ -51,7 +51,7 @@ from gui.mods.offline_lan_0922 import (
     lan_client as lan_protocol,
     loadout as loadout_law, prebaked_destructibles, prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
-    tank_collision,
+    tank_collision, track_damage,
     vehicle_blacklist, vehicle_configuration, vehicle_physics,
     world_collision)
 
@@ -3098,6 +3098,7 @@ class BattleRuntime(object):
             # Sampled here, not before BotRuntime exists: the bot, navigator
             # and planner structures are most of what this port holds.
             reset_pose_animation_writes()
+            track_damage.reset_diagnostics()
             self._report_memory('battle_start')
             provider = getattr(self._avatar, 'guiSessionProvider', None)
             vehicle_view_state = getattr(
@@ -11650,6 +11651,31 @@ class BattleRuntime(object):
         return (limited, query_start,
                 query_start + direction.scale(trace_distance))
 
+    @staticmethod
+    def _collision_contacts(evidence):
+        """Reduce private collision evidence to plain local-contact records.
+
+        The critical-damage law never receives the private evidence object
+        itself, only ``(component, distance, local_point)`` for the exact
+        collisions this strike resolved against.  The local point is the one
+        the native hit test produced at the frozen collision pose, so a later
+        live pose can never reach the track zone classifier.
+        """
+        contacts = []
+        for item in evidence or ():
+            collision = getattr(item, 'collision', None)
+            point = getattr(item, 'localPoint', None)
+            if collision is None or point is None:
+                continue
+            try:
+                contacts.append((
+                    str(collision.compName), float(collision.dist),
+                    (float(point[0]), float(point[1]), float(point[2]))))
+            except (AttributeError, TypeError, ValueError,
+                    IndexError, KeyError, OverflowError):
+                continue
+        return tuple(contacts)
+
     def _projectile_source_descriptor(self, meta):
         descriptor = meta.get('source_descriptor')
         if descriptor is not None:
@@ -11860,7 +11886,9 @@ class BattleRuntime(object):
             damage, critical, critical_delta = critical_damage.propose_direct(
                 critical_target, layers, trace_start, trace_end, damage,
                 legacy_shell, attacker_id, penetrated=int(result) == 2,
-                deadeye=deadeye, with_delta=True)
+                deadeye=deadeye, with_delta=True,
+                collision_contacts=self._collision_contacts(
+                    collision_evidence))
         critical = self._critical_with_crew_roster(
             critical_target, critical)
         return self._projectile_effect(
