@@ -274,29 +274,30 @@ class ProjectileWireTests(unittest.TestCase):
         client._send = lambda unused_message: False
 
         self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
         self.assertEqual(0, client._fire_intent_seq)
 
         client._send = lambda unused_message: True
         self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
         self.assertEqual(1, client._fire_intent_seq)
 
     def test_visible_fire_intent_requires_input_and_sequences_monotonically(self):
         client = self.active_client()
 
         self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
         self.assertTrue(self.send_player_input(client))
         self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01))
+            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
         self.assertTrue(self.send_player_input(client, shell_index=1))
         self.assertEqual(2, client.send_fire_intent(
-            1, [1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 0.02))
+            1, [1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 0.02, [], 200))
         message = wire_copy(client._outbound_queue[-1][1])
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
+            'presentation_ledger', 'trigger_server_time_ms',
         }, set(message))
         self.assertEqual('fire_intent', message['type'])
         self.assertEqual(2, message['intent_seq'])
@@ -304,6 +305,19 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual([1.0, 2.0, 3.0], message['shot_origin'])
         self.assertEqual([1.0, 0.0, 0.0], message['shot_direction'])
         self.assertEqual(0.02, message['dispersion_angle'])
+        self.assertEqual(200, message['trigger_server_time_ms'])
+
+    def test_visible_fire_intent_requires_an_exact_trigger_clock(self):
+        for value in (None, True, 1.0, -1,
+                      module.MAX_MOTION_TIME_US // 1000 + 1):
+            client = self.active_client()
+            self.assertTrue(self.send_player_input(client))
+
+            self.assertIsNone(client.send_fire_intent(
+                2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0],
+                0.01, [], value))
+            self.assertEqual(0, client._fire_intent_seq)
+            self.assertEqual(1, len(client._outbound_queue))
 
     def test_player_input_carries_one_atomic_queued_shell_selection(self):
         client = self.active_client()
@@ -561,12 +575,14 @@ class ProjectileWireTests(unittest.TestCase):
             shell_index=1, position=[1.0, 2.0, 3.0],
             velocity=[100.0, 0.0, 0.0], gravity=9.81,
             max_distance=500.0, max_time_ms=5000,
-            source_shot=source_shot(100.0, 9.81, 500.0)))
+            source_shot=source_shot(100.0, 9.81, 500.0),
+            trigger_server_time_ms=100))
         message = wire_copy(client._outbound_queue[-1][1])
         self.assertEqual('fire_intent', message['type'])
         self.assertEqual({
             'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
             'shot_origin', 'shot_direction', 'dispersion_angle',
+            'presentation_ledger', 'trigger_server_time_ms',
         }, set(message))
 
     def test_progress_shape_is_exact_and_duplicate_ids_fail_closed(self):

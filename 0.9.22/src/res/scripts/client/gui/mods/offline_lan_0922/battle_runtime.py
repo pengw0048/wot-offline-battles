@@ -7122,6 +7122,61 @@ class BattleRuntime(object):
             return int(timeline[right_index][1])
         return None
 
+    def _presentation_ledger(self):
+        """Name the delayed Bot timelines this client is currently showing.
+
+        ``SnapshotSync`` renders every timed Bot from a confirmed-only cursor
+        that trails authority, and each record keeps its own adaptive cursor.
+        The ledger reports only identity, wire revision and motion-clock
+        sample time; the authority reconstructs the pose itself.  A record
+        without a timed cursor - a first sample, a late join or a teleport
+        reset - is deliberately absent, which the authority reads as
+        "collide this vehicle on the authoritative trigger timeline".
+
+        Spotting is not the filter.  ``SnapshotSync`` positions every timed
+        Bot whether or not it is rendered, so an unspotted Bot's entity sits
+        at the same delayed pose as a visible one and belongs in the ledger:
+        that is what keeps first-hit ordering along the trajectory coherent.
+        """
+        trigger_time_us = self._estimated_motion_time_us(self._clock())
+        entries = []
+        for record in self._records.values():
+            if (record.get('kind') != 'bot' or record.get('tombstone') or
+                    not record.get('ready')):
+                continue
+            presentation_time_us = record.get('presentation_time_us')
+            if presentation_time_us is None:
+                continue
+            try:
+                bot_id = int(record.get('network_id'))
+                presentation_time_us = int(presentation_time_us)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if bot_id <= 0 or presentation_time_us < 0:
+                continue
+            if (trigger_time_us is not None and
+                    presentation_time_us <
+                    trigger_time_us - lan_protocol.MAX_PRESENTATION_LAG_US):
+                # Past this bound the cursor is not evidence of an ordinary
+                # delayed presentation.  Omitting the entry contains the
+                # condition to that one vehicle - the authority then collides
+                # it on the authoritative timeline - instead of failing the
+                # whole trigger on the server's wire bound.
+                continue
+            revision = self._ram_bot_revision_at(
+                bot_id, presentation_time_us)
+            if revision is None:
+                # The exact wire samples behind this cursor are no longer
+                # retained, so the authority could not verify the claim.
+                continue
+            entries.append({
+                'bot_id': bot_id,
+                'bot_state_revision': int(revision),
+                'presentation_time_us': presentation_time_us,
+            })
+        entries.sort(key=lambda entry: entry['bot_id'])
+        return entries
+
     def on_roster(self, message):
         """Apply authority changes that can arrive before live snapshots.
 
@@ -7244,7 +7299,8 @@ class BattleRuntime(object):
             'next_shell_index', 'shell_change_pending',
             'gun_checkpoint_seq', 'gun_checkpoint',
             'aim_yaw', 'gun_pitch', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
-            'speed', 'shot_origin', 'shot_direction', 'dispersion_angle'}
+            'speed', 'shot_origin', 'shot_direction', 'dispersion_angle',
+            'presentation_ledger'}
         transport_fields = {
             '_client_received_time', '_client_dispatch_delay'}
         if (not isinstance(message, dict) or
@@ -7272,6 +7328,9 @@ class BattleRuntime(object):
                                    message['shot_direction'])
             gun_checkpoint = lan_protocol._canonical_human_gun_checkpoint(
                 message['gun_checkpoint'])
+            presentation_ledger = (
+                lan_protocol._strict_presentation_ledger(
+                    message['presentation_ledger']))
         except (TypeError, ValueError, OverflowError):
             raise RuntimeError('worker fire intent has invalid values')
         values += (aim_yaw, gun_pitch) + shot_origin + shot_direction
@@ -7284,6 +7343,9 @@ class BattleRuntime(object):
                 input_seq <= 0 or pose_time_us < 0 or
                 gun_checkpoint_seq != input_seq or
                 gun_checkpoint is None or
+                presentation_ledger is None or
+                any(entry['presentation_time_us'] > pose_time_us
+                    for entry in presentation_ledger) or
                 not 0 <= shell_index <= 9 or
                 not 0 <= next_shell_index <= 9 or
                 not isinstance(message['shell_change_pending'], bool) or
@@ -9991,6 +10053,45 @@ class BattleRuntime(object):
             return None
         return result
 
+    def _projectile_presentation_offsets(self, normalized):
+        """Bind one admitted shot to the target timelines its shooter saw.
+
+        The returned mapping is a per-record collision-time shift in seconds.
+        A record named by the shooter's frozen ledger is collided along its
+        displayed timeline; every other record - an unpresented Bot, a remote
+        human, or any Bot fired at by another Bot - keeps the authoritative
+        timeline and therefore an offset of zero.
+        """
+        if (not self._worker_mode or
+                normalized.get('shooter_kind') != 'player'):
+            return {}
+        try:
+            key = (int(normalized['shooter_id']),
+                   int(normalized['fire_intent_seq']))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}
+        intent = self._player_fire_intent_history.get(
+            key, self._player_fire_intents.get(key))
+        if not isinstance(intent, dict):
+            return {}
+        try:
+            trigger_time_us = int(intent['pose_time_us'])
+            ledger = intent['presentation_ledger']
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {}
+        offsets = {}
+        for entry in ledger or ():
+            try:
+                bot_id = int(entry['bot_id'])
+                presentation_time_us = int(entry['presentation_time_us'])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            lag_us = trigger_time_us - presentation_time_us
+            if lag_us <= 0:
+                continue
+            offsets['bot:%d' % bot_id] = float(lag_us) / 1000000.0
+        return offsets
+
     def _install_projectile_meta(self, normalized):
         projectile_id = normalized['projectile_id']
         meta = self._projectile_meta.get(projectile_id)
@@ -10000,7 +10101,10 @@ class BattleRuntime(object):
                 projectile_id if normalized['ricochet_count'] == 0 else
                 (projectile_id, normalized['ricochet_count']))
             meta['destructibles_pending'] = []
+            meta['presentation_offsets'] = (
+                self._projectile_presentation_offsets(normalized))
             self._projectile_meta[projectile_id] = meta
+            self._report_player_shot_timing(meta)
         else:
             # Launch fields are immutable; only the server-acknowledged cursor
             # and accumulated penetration state may advance in snapshots.
@@ -10942,6 +11046,20 @@ class BattleRuntime(object):
         return int(math.floor(
             coordinate / PROJECTILE_SPATIAL_CELL_METRES))
 
+    def _projectile_presentation_lag(self, states):
+        """Return the largest presentation shift among active projectiles."""
+        maximum = 0.0
+        for state in states:
+            manager_key = state.get('key')
+            projectile_id = (manager_key[0]
+                             if isinstance(manager_key, tuple) else
+                             manager_key)
+            meta = self._projectile_meta.get(projectile_id)
+            offsets = (meta or {}).get('presentation_offsets')
+            if offsets:
+                maximum = max(maximum, max(offsets.values()))
+        return maximum
+
     def _build_projectile_spatial_bins(self, states, now,
                                        maximum_chords=None):
         """Index a conservative target envelope for one synchronous advance.
@@ -10958,6 +11076,11 @@ class BattleRuntime(object):
         try:
             floor = min(float(state['cursor_time']) for state in states)
             ceiling = float(now)
+            # Presentation-compensated candidates are read one shooter lag
+            # earlier than the projectile cursor.  Index that whole envelope
+            # or the broad phase could drop a target which has since moved to
+            # another cell.
+            floor -= self._projectile_presentation_lag(states)
         except (KeyError, TypeError, ValueError, OverflowError):
             return False
         history = self._projectile_position_history
@@ -11448,10 +11571,35 @@ class BattleRuntime(object):
         if chord_length <= 0.000001:
             return None
         history = self._projectile_position_history
-        history_covers_chord = bool(
-            history and
-            float(absolute_start) >= history[0][0] - 1.0e-9 and
-            float(absolute_end) <= history[-1][0] + 1.0e-9)
+        history_floor = history[0][0] if history else None
+        history_ceiling = history[-1][0] if history else None
+        # Each candidate is collided on the timeline its shooter actually saw.
+        # The offset is zero for every record without trigger-edge
+        # presentation evidence, which keeps Bot fire, remote humans and
+        # unpresented vehicles on the authoritative timeline.
+        presentation_offsets = meta.get('presentation_offsets') or {}
+        if (presentation_offsets and
+                not meta.get('presentation_offsets_frozen') and
+                history_floor is not None):
+            retained = max(0.0, float(absolute_start) - history_floor)
+            frozen_offsets = {}
+            clamped_keys = set()
+            for key, raw_offset in presentation_offsets.items():
+                offset = max(0.0, float(raw_offset))
+                frozen_offsets[key] = min(offset, retained)
+                if offset > retained:
+                    clamped_keys.add(key)
+            # The first real chord owns the history boundary for this shot.
+            # Persisting the clamp keeps every later chord on one steadily
+            # advancing target timeline instead of repeatedly sampling the
+            # oldest retained pose as more history becomes available.
+            meta['presentation_offsets'] = frozen_offsets
+            meta['presentation_offsets_frozen'] = True
+            meta['presentation_history_clamped_keys'] = frozenset(
+                clamped_keys)
+            presentation_offsets = frozen_offsets
+        clamped_keys = meta.get(
+            'presentation_history_clamped_keys', frozenset())
         direction_tuple = tuple(
             (float(end[index]) - float(start[index])) / chord_length
             for index in range(3))
@@ -11474,7 +11622,15 @@ class BattleRuntime(object):
                 continue
             if self._worker_mode and record.get('local'):
                 continue
-            if not history_covers_chord:
+            presentation_offset = float(presentation_offsets.get(key, 0.0))
+            if key in clamped_keys:
+                record['projectile_collision_pose_boundary'] = \
+                    'presentation_history_clamped'
+            pose_start = float(absolute_start) - presentation_offset
+            pose_end = float(absolute_end) - presentation_offset
+            if not (history_floor is not None and
+                    pose_start >= history_floor - 1.0e-9 and
+                    pose_end <= history_ceiling + 1.0e-9):
                 # Static scenery can still be resolved without vehicle pose
                 # history. A live vehicle target cannot: retire the projectile
                 # instead of silently treating that target as absent.
@@ -11487,11 +11643,11 @@ class BattleRuntime(object):
                     'historic_pose_unavailable'
                 return {'reason': 'callback_error', 'fraction': 0.0}
             target_at_start = self._projectile_historic_pose(
-                key, absolute_start)
+                key, pose_start)
             target_at_end = self._projectile_historic_pose(
-                key, absolute_end)
+                key, pose_end)
             target_at_contact = self._projectile_historic_pose(
-                key, (float(absolute_start) + float(absolute_end)) * 0.5)
+                key, (pose_start + pose_end) * 0.5)
             if (target_at_start is None or target_at_end is None or
                     target_at_contact is None):
                 target = self._server_entity(record.get('engine_id'))
@@ -11574,7 +11730,7 @@ class BattleRuntime(object):
                     nearest_collision_pose = None
                 continue
             sweep_fractions = self._projectile_pose_sweep_fractions(
-                key, absolute_start, absolute_end)
+                key, pose_start, pose_end)
             if sweep_fractions is None:
                 # The angular budget no longer discards a shot; only a pose
                 # this history cannot supply reaches here.
@@ -11588,13 +11744,9 @@ class BattleRuntime(object):
                 start_fraction = sweep_fractions[segment_index]
                 end_fraction = sweep_fractions[segment_index + 1]
                 segment_absolute_start = (
-                    float(absolute_start) +
-                    (float(absolute_end) - float(absolute_start)) *
-                    start_fraction)
+                    pose_start + (pose_end - pose_start) * start_fraction)
                 segment_absolute_end = (
-                    float(absolute_start) +
-                    (float(absolute_end) - float(absolute_start)) *
-                    end_fraction)
+                    pose_start + (pose_end - pose_start) * end_fraction)
                 segment_absolute_contact = (
                     segment_absolute_start + segment_absolute_end) * 0.5
                 segment_target_start = self._projectile_historic_pose(
@@ -12096,6 +12248,37 @@ class BattleRuntime(object):
             if len(effects) >= 30:
                 break
         return effects
+
+    def _report_player_shot_timing(self, meta):
+        """Write one bounded per-shot line correlating both shot clocks.
+
+        This is emitted once per admitted player projectile, not per frame.
+        It carries only measured inputs - never a conclusion - so a Windows
+        session can join the visible trigger, the mapped round-local launch
+        and the compensated target timelines by projectile identity.
+        """
+        if not self._worker_mode or meta.get('shooter_kind') != 'player':
+            return False
+        try:
+            intent = self._player_fire_intent_history.get(
+                (int(meta['shooter_id']), int(meta['fire_intent_seq'])))
+            offsets = meta.get('presentation_offsets') or {}
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] PLAYER SHOT TIMING id=%s player=%s '
+                'intent=%s input=%s pose_time_us=%s launch_ms=%d '
+                'presented=%d lag_ms=%s\n'
+                % (meta.get('projectile_id'), meta.get('shooter_id'),
+                   meta.get('fire_intent_seq'), meta.get('fire_input_seq'),
+                   (intent or {}).get('pose_time_us'),
+                   int(meta.get('launch_server_time_ms', 0)),
+                   len(offsets),
+                   '-' if not offsets else '%.1f-%.1f' % (
+                       min(offsets.values()) * 1000.0,
+                       max(offsets.values()) * 1000.0)))
+        except Exception:
+            # Diagnostics are best effort and never fail an admitted shot.
+            return False
+        return True
 
     def _report_projectile_terminal_failure(
             self, meta, state, stage, reason, error=None):
@@ -20304,11 +20487,19 @@ class BattleRuntime(object):
             dispersion_angle = self._native_dispersion_angle()
         except RuntimeError:
             return self._reject_local_fire('shot_ray_unavailable')
+        # Freeze the displayed Bot timeline in the same edge that freezes the
+        # muzzle ray.  The following input carries this trigger's motion time,
+        # so the ledger and that time describe one instant.
+        presentation_ledger = self._presentation_ledger()
+        trigger_server_time_ms = self._projectile_estimated_server_time(now)
+        if trigger_server_time_ms is None:
+            return self._reject_local_fire('trigger_clock_unavailable')
         if not self._sender.send_current():
             return self._reject_local_fire('input_send_failed')
         intent_seq = sender(
             shell_index, list(_xyz(shot_origin)),
-            list(_xyz(shot_direction)), dispersion_angle)
+            list(_xyz(shot_direction)), dispersion_angle,
+            presentation_ledger, trigger_server_time_ms)
         if not intent_seq:
             return self._reject_local_fire('intent_send_failed')
         self._local_fire_intent = {
