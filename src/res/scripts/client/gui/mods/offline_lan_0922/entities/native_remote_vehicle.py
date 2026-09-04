@@ -442,7 +442,15 @@ class _NativeRemoteState(object):
         self._capabilities_changed = False
         if not callable(self._capability_report):
             return False
-        return bool(self._capability_report(self))
+        try:
+            return bool(self._capability_report(self))
+        except Exception:
+            # update_tracks runs under an optional-feature guard that retires
+            # belt animation for the whole round on an exception.  A failed
+            # diagnostic write must never cost the presentation, and it
+            # cannot report its own failure, so stop reporting instead.
+            self._capability_report = None
+            return False
 
     def _read_vehicle_speed(self):
         return float(self.speed)

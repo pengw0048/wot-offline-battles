@@ -2740,6 +2740,24 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         vehicle.appearance.receiveShotImpulse = mock.Mock()
         return runtime, factory, binding, vehicle_id, vehicle
 
+    def test_failed_capability_log_never_retires_belt_animation(self):
+        """update_tracks retires belts for the round on any exception."""
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        state._capability_report = mock.Mock(
+            side_effect=IOError('python.log is unavailable'))
+        state._capabilities_changed = True
+
+        self.assertFalse(state._publish_capabilities())
+        self.assertIsNone(state._capability_report)
+        # The belt write itself still completes rather than raising into the
+        # optional-feature guard that would retire it for the round.
+        state._capability_report = mock.Mock(
+            side_effect=IOError('python.log is unavailable'))
+        vehicle.update_tracks(2.0, 3.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertEqual('python only', vehicle.track_feed_state()[1])
+
     def test_bot_track_report_names_the_effective_write(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
             self._ready_native_factory()
