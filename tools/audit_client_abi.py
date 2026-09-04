@@ -463,6 +463,7 @@ EXPECTED_ABI = {
         'PlayerAvatar.enableOwnVehicleAutorotation': ('self', 'enable'),
         'PlayerAvatar.autoAim': ('self', 'target'),
         'PlayerAvatar.targetFocus': ('self', 'entity'),
+        'PlayerAvatar.targetBlur': ('self', 'prevEntity'),
         'PlayerAvatar.shoot': ('self', 'isRepeat'),
         'PlayerAvatar.__isOwnVehicleSwitchingSiegeMode': ('self',),
         'PlayerAvatar.cancelWaitingForShot': ('self',),
@@ -1148,6 +1149,11 @@ EXPECTED_CODE_NAMES = {
         'PlayerAvatar.targetFocus': (
             '_PlayerAvatar__vehicles', 'guiSessionProvider',
             'setTargetInFocus', 'drawEdge'),
+        'PlayerAvatar.targetBlur': (
+            '_PlayerAvatar__vehicles', 'guiSessionProvider',
+            'setTargetInFocus', 'removeEdge', 'target',
+            'TriggersManager', 'g_manager', 'deactivateTrigger',
+            'TRIGGER_TYPE', 'AIM_AT_VEHICLE'),
         'PlayerAvatar.shoot': (
             'base', 'vehicle_shoot', '_PlayerAvatar__startWaitingForShot',
             '_PlayerAvatar__isOwnVehicleSwitchingSiegeMode'),

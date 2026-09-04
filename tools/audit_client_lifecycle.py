@@ -332,6 +332,19 @@ ORDERED_USES = (
         'native Avatar closes the arena music and ambience lifecycle',
     ),
     (
+        'scripts/client/Avatar.pyc',
+        'PlayerAvatar.onBecomeNonPlayer',
+        ('_PlayerAvatar__destroyGUI', 'BigWorld', 'target', 'clear'),
+        'Avatar destroys battle GUI before its late native target clear',
+    ),
+    (
+        'scripts/client/Avatar.pyc',
+        'PlayerAvatar.targetBlur',
+        ('removeEdge', 'target', 'TriggersManager', 'g_manager',
+         'deactivateTrigger', 'TRIGGER_TYPE', 'AIM_AT_VEHICLE'),
+        'target blur releases the edge before reading the Trigger owner',
+    ),
+    (
         'scripts/client/account_helpers/AccountSyncData.pyc',
         'AccountSyncData.setAccount',
         ('_AccountSyncData__account',

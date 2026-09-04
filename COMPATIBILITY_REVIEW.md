@@ -887,6 +887,17 @@ synthetic entity to native lookup and invokes the stock viewpoint callback. It
 is deliberately limited to an active postmortem control after the delay;
 enemy, dead, absent and not-ready vehicles fail closed.
 
+Exact `#1513` destroys the battle GUI before its late
+`BigWorld.target.clear()` in `PlayerAvatar.onBecomeNonPlayer()`. That clear
+synchronously enters `PlayerAvatar.targetBlur()`, which removes the target
+edge and unconditionally reads `TriggersManager.g_manager`. A hidden native
+target may already be absent from the callable `PyTarget` result while its
+pending blur still retains the entity. The shared presentation-quiesce boundary
+therefore clears native target focus once per battle before postmortem, local
+pose, outline or remote-entity owners are retired. ABI and lifecycle audits pin
+the target-blur signature and this stock teardown order; only Windows `#1513`
+acceptance can prove the native result-screen behavior.
+
 Local Vehicle creation is gated by the complete pinned `Vehicle.def` SHA-256
 `e585c59235ebb2cfbb7857645878ed095360a8efe5df666c055e59a74e6a55c5`,
 uses all of its client properties, and publishes the exact

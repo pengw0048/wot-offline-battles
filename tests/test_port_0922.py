@@ -3703,6 +3703,60 @@ class OfflineCompatibilityTests(unittest.TestCase):
             original_auto_aim,
             runtime.avatar_module.PlayerAvatar.__dict__['autoAim'])
 
+    def test_target_focus_clear_runs_stock_blur_while_triggers_are_live(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, operations = self._runtime()
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.configure_battle()
+        lifecycle = {
+            'focused': True,
+            'trigger_owner_live': True,
+        }
+
+        def clear():
+            operations.append(('native_target_clear',))
+            if not lifecycle['focused']:
+                return
+            operations.append(('stock_target_blur',))
+            lifecycle['focused'] = False
+            if not lifecycle['trigger_owner_live']:
+                raise AttributeError(
+                    "'NoneType' object has no attribute "
+                    "'deactivateTrigger'")
+
+        # PyTarget.__call__ reports None for a hidden entity even while its
+        # internal target pointer remains live and still needs targetBlur.
+        runtime.bigworld._target = None
+        runtime.bigworld.target.clear = clear
+        compatibility._target_lock_candidate = object()
+
+        self.assertTrue(compatibility.clear_target_focus())
+        self.assertFalse(lifecycle['focused'])
+        self.assertIsNone(compatibility._target_lock_candidate)
+        self.assertEqual([
+            ('native_target_clear',),
+            ('stock_target_blur',),
+        ], operations[-2:])
+
+        self.assertFalse(compatibility.clear_target_focus())
+        self.assertEqual(1, operations.count(('native_target_clear',)))
+
+        compatibility.deactivate_map()
+        runtime.bigworld._target = object()
+        self.assertFalse(compatibility.clear_target_focus())
+        self.assertEqual(1, operations.count(('native_target_clear',)))
+
+        compatibility.configure_battle()
+        lifecycle['focused'] = True
+        lifecycle['trigger_owner_live'] = False
+        with self.assertRaisesRegex(
+                AttributeError, "deactivateTrigger"):
+            compatibility.clear_target_focus()
+        self.assertFalse(lifecycle['focused'])
+        self.assertFalse(compatibility.clear_target_focus())
+        self.assertEqual(2, operations.count(('native_target_clear',)))
+        compatibility.fini()
+
     def test_target_lock_input_scope_clears_on_consume_and_failure(self):
         compatibility_module = _load_port_source('compat')
         runtime, unused_operations = self._runtime()
