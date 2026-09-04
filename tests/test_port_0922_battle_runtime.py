@@ -20743,6 +20743,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle = BattleRuntime(_runtime())
         battle._worker_mode = True
         battle.state = 'running'
+        battle._battle_live = True
+        battle._projectile_is_authority = lambda: True
         battle.client = _Client()
         battle.client.authority_epoch = 4
         battle._start_message = {'round_id': 7}
@@ -20778,6 +20780,112 @@ class BattleRuntimeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, 'worker fire intent is malformed'):
             battle.on_fire_intent(dict(intent, unexpected='wire field'))
+
+    def test_worker_fire_fast_path_revisits_older_intents_in_order(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        battle.state = 'running'
+        battle._battle_live = True
+        battle.client = _Client()
+        battle.client.authority_epoch = 4
+        battle._start_message = {'round_id': 7}
+        battle._clock = mock.Mock(return_value=12.5)
+        older_key = (1, 2)
+        battle._player_fire_intents[older_key] = {'player_id': 1}
+        battle._advance_player_fire_authority = mock.Mock(return_value=True)
+        intent = {
+            'type': 'fire_intent', 'round_id': 7,
+            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
+            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'shell_index': 0, 'next_shell_index': 0,
+            'shell_change_pending': False,
+            'gun_checkpoint_seq': 8,
+            'gun_checkpoint': _human_gun_checkpoint(),
+            'aim_yaw': 0.2, 'gun_pitch': -0.1,
+            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.0,
+            'pitch': 0.0, 'roll': 0.0, 'speed': 4.0,
+            'shot_origin': [1.0, 3.0, 3.0],
+            'shot_direction': [0.0, 0.0, 1.0],
+            'dispersion_angle': 0.02,
+            'presentation_ledger': [],
+        }
+
+        self.assertTrue(battle.on_fire_intent(intent))
+        battle._advance_player_fire_authority.assert_not_called()
+        self.assertTrue(battle.flush_admitted_player_fire_intents())
+
+        battle._advance_player_fire_authority.assert_called_once_with(
+            0.0, 12.5, intent_keys=(older_key, (2, 3)),
+            defer_missing_player=True)
+
+    def test_worker_fire_fast_path_retries_player_missing_at_dispatch(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle.state = 'running'
+        battle._battle_live = True
+        battle._start_message = {'round_id': 7}
+        battle._projectile_is_authority = lambda: True
+        battle._config = {'perfect_accuracy': True}
+        client = _Client()
+        client.authority_epoch = 4
+        client.send_projectile_launch = mock.Mock(
+            side_effect=lambda *args, **unused_kwargs: args[2])
+        client.send_fire_intent_result = mock.Mock(return_value=True)
+        battle.client = client
+        intent = {
+            'type': 'fire_intent', 'round_id': 7,
+            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
+            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
+            'shell_index': 0, 'next_shell_index': 0,
+            'shell_change_pending': False,
+            'gun_checkpoint_seq': 8,
+            'gun_checkpoint': _human_gun_checkpoint(),
+            'aim_yaw': 0.2, 'gun_pitch': -0.1,
+            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
+            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
+            'shot_origin': [4.0, 2.0, 8.0],
+            'shot_direction': [0.0, 0.0, 1.0],
+            'dispersion_angle': 0.02,
+            'presentation_ledger': [],
+        }
+        key = (2, 3)
+
+        # The transport can beat the snapshot/native entity lifecycle.  The
+        # fast path must not turn that harmless ordering into a terminal
+        # rejection or lose the admitted shot.
+        self.assertTrue(battle.on_fire_intent(intent))
+        self.assertTrue(battle.flush_admitted_player_fire_intents())
+        self.assertIn(key, battle._player_fire_intents)
+        self.assertNotIn(key, battle._player_fire_intent_history)
+        client.send_projectile_launch.assert_not_called()
+        client.send_fire_intent_result.assert_not_called()
+
+        descriptor = _Descriptor()
+        entity = _Vehicle(
+            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        effective = _effective_params_snapshot(ammo=[[101, 40]])
+        battle._records = {'player:2': {
+            'engine_id': 11, 'network_id': 2, 'kind': 'player',
+            'local': False, 'ready': True, 'tombstone': False,
+            'state': {
+                'alive': True, 'shell_index': 0, 'speed': 0.0,
+                'turn': 0.0, 'effective_params': effective,
+            },
+        }}
+
+        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
+        self.assertNotIn(key, battle._player_fire_intents)
+        self.assertIn(key, battle._player_fire_intent_history)
+        self.assertEqual(1, client.send_projectile_launch.call_count)
+
+        # The ordinary frame remains safe to call after the deferred intent
+        # has been launched: no second canonical projectile is emitted.
+        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.1))
+        self.assertEqual(1, client.send_projectile_launch.call_count)
+        client.send_fire_intent_result.assert_not_called()
 
     def test_worker_resolves_immediate_player_destructible_contact(self):
         battle = BattleRuntime(_runtime())
@@ -21734,6 +21842,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 side_effect=AssertionError(
                     'stale model node must not be read')) as node:
             self.assertTrue(battle.on_fire_intent(intent))
+            client.send_projectile_launch.assert_not_called()
+            # WorkerSession invokes this after the current LAN batch is fully
+            # applied but before the next full Bot frame.
+            self.assertTrue(battle.flush_admitted_player_fire_intents())
+            self.assertEqual(1, client.send_projectile_launch.call_count)
+            self.assertNotIn((2, 3), battle._player_fire_intents)
             self.assertTrue(
                 battle._advance_player_fire_authority(0.1, 10.0))
             node.assert_not_called()
