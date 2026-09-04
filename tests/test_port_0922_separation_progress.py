@@ -1,4 +1,4 @@
-"""Exercise local separation with the real BotRuntime integration/contact loop.
+"""Exercise close traffic with the real BotRuntime integration/contact loop.
 
 Flat ground and synthetic descriptors isolate driver progress from native
 geometry. Fixed local targets intentionally leave the server and A* out: a
@@ -110,7 +110,10 @@ class SeparationProgressTests(unittest.TestCase):
                     runtime.update(1.0 / 30.0, frame / 30.0)
 
                 state = runtime.states[1]
-                self.assertGreater(modes['avoid'], 0)
+                # A nearby teammate must not replace the clear route with
+                # repulsion steering. Physical contact can still separate the
+                # hulls while the Bot finishes its original approach.
+                self.assertEqual(0, modes['avoid'])
                 self.assertLessEqual(
                     math.hypot(goal[0] - state['x'], goal[2] - state['z']),
                     1.5, 'the local driver kept orbiting its clear target')
