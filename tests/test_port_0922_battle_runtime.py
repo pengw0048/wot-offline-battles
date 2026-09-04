@@ -9646,6 +9646,67 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(result['clear'])
         self.assertTrue(result['collision'])
 
+    def test_short_direction_probe_reuses_ground_at_the_same_endpoint(self):
+        # Map 86 low-speed motion is capped to a 4 m baked edge. Both
+        # horizontal ray heights then share one endpoint. Recasting its ground
+        # from a different vertical origin can differ by one float32 ULP;
+        # that is not a climb or drop over the zero remaining distance.
+        for distance in (0.5, 4.0, 8.0):
+            for drift in (-2.0 ** -23, 2.0 ** -23):
+                with self.subTest(distance=distance, drift=drift):
+                    runtime = _runtime()
+                    ground_calls, lanes = [], []
+
+                    def collide(unused_space, start, end, unused_mask):
+                        if start.x == end.x and start.z == end.z:
+                            ground_calls.append((start, end))
+                            ground_y = 1.1 + (drift if len(ground_calls) > 1
+                                              else 0.0)
+                            return (_Vector(start.x, ground_y, start.z),)
+                        lanes.append((start, end))
+                        return None
+
+                    runtime.bigworld.wg_collideSegment = collide
+                    battle = BattleRuntime(runtime)
+                    battle._avatar = runtime.bigworld.avatar
+
+                    result = battle._direction_probe(
+                        (18.0, 1.1, -230.0), 0.0, 0.0, None, distance)
+
+                    self.assertTrue(result['clear'], result)
+                    self.assertEqual(0.0, result['slope'])
+                    self.assertEqual(1, len(ground_calls))
+                    self.assertEqual(6, len(lanes))
+                    self.assertEqual({1.8, 2.6}, {
+                        round(start.y, 1) for start, unused in lanes})
+
+    def test_short_direction_probe_preserves_grade_and_high_wall_checks(self):
+        for grade in (-0.6, -0.1, 0.1, 0.6):
+            for wall in (False, True):
+                with self.subTest(grade=grade, wall=wall):
+                    runtime = _runtime()
+
+                    def collide(unused_space, start, end, unused_mask):
+                        if start.x == end.x and start.z == end.z:
+                            return (_Vector(start.x, grade * start.z,
+                                            start.z),)
+                        if wall and start.y > 1.0:
+                            return (end,)
+                        return None
+
+                    runtime.bigworld.wg_collideSegment = collide
+                    battle = BattleRuntime(runtime)
+                    battle._avatar = runtime.bigworld.avatar
+
+                    result = battle._direction_probe(
+                        (0.0, 0.0, 0.0), 0.0, 0.0, None, 4.0)
+
+                    self.assertAlmostEqual(grade, result['slope'])
+                    self.assertEqual(abs(grade) < 0.38 and not wall,
+                                     result['clear'])
+                    self.assertEqual(abs(grade) < 0.38 and wall,
+                                     result['collision'])
+
     def test_direction_probe_preserves_a_clear_downhill_grade_sign(self):
         runtime = _runtime()
 

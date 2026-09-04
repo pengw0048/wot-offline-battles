@@ -8,6 +8,7 @@ local driver must finish this clear final approach beside a parked hull.
 import collections
 import math
 import sys
+import types
 import unittest
 
 import test_port_0922_bot_runtime as runtime_fixtures
@@ -50,6 +51,59 @@ class SeparationProgressTests(unittest.TestCase):
             if key == 'gui' or key.startswith('gui.'):
                 sys.modules.pop(key, None)
         sys.modules.update(self._gui_modules)
+
+    def test_short_edge_ground_roundoff_does_not_stop_the_motion_loop(self):
+        from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime
+        from test_port_0922_bot_corridor_width import _Vector
+
+        ground_samples = {}
+
+        def collide(unused_space, start, end, unused_mask):
+            if start.x == end.x and start.z == end.z:
+                key = (start.x, start.z)
+                sample = ground_samples.get(key, 0)
+                ground_samples[key] = sample + 1
+                # Model different float32 results when the same ground column
+                # is recast from a vertically shifted ray origin.
+                height = 1.1 + (2.0 ** -23 if sample % 2 else 0.0)
+                return (_Vector(start.x, height, start.z),)
+            return None
+
+        battle = object.__new__(BattleRuntime)
+        battle._runtime = types.SimpleNamespace(
+            math=types.SimpleNamespace(Vector3=_Vector),
+            bigworld=types.SimpleNamespace(wg_collideSegment=collide))
+        battle._avatar = types.SimpleNamespace(spaceID=1)
+        battle._water_depth = lambda unused: -1.0
+        battle._destructibles = None
+        graph = _flat_graph()
+        graph['heights_mm'] = [1100] * len(graph['heights_mm'])
+        command = {
+            'target_yaw': 0.0, 'throttle': 1.0, 'turn': 0.0,
+            'fire_allowed': False, 'movement_intent': True,
+            'move_position': (0.0, 1.1, 30.0),
+            'combat_mode': 'route', 'recovery_mode': 'drive',
+        }
+        adapter = runtime_fixtures._FixedAdapter(command)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=(
+                lambda unused: runtime_fixtures._combat_descriptor()),
+            adapter_factory=lambda *args, **kwargs: adapter,
+            direction_probe=battle._direction_probe,
+            ground_probe=lambda *unused: 1.1,
+            physics_ground_probe=lambda *unused: 1.1,
+            spawn_resolver=lambda *unused: ((0.0, 1.1, 0.0), 0.0),
+            baked_graph=graph)
+        runtime.battle_start({
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'bots': [{'id': 1, 'team': 1, 'slot': 0, 'name': 'Fixture'}],
+        })
+
+        for frame in range(1, 91):
+            runtime.update(1.0 / 30.0, frame / 30.0)
+
+        self.assertGreater(runtime.states[1]['z'], 3.0)
+        self.assertGreater(runtime.states[1]['speed'], 1.0)
 
     def test_close_target_beside_parked_hull_does_not_become_an_orbit(self):
         for neighbour, goal in (

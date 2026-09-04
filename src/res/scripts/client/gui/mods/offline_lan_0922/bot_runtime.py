@@ -5474,17 +5474,19 @@ class BotRuntime(object):
         return True
 
     def _log_motion_stall(self, state, command, throttle, turn,
-                          path_clear, motion_probe, now):
-        """Record a persistent travel stall at most once per three seconds."""
-        if not self.debug_logging:
-            return
+                          path_clear, motion_probe, now, pose_frozen=False):
+        """Record stationary authority decisions without requiring debug mode.
+
+        Include intentional holds: a mistaken arrival or navigation wait is
+        exactly what this diagnostic must distinguish from physical blockage.
+        Emit at most once per three seconds per hull; movement resets the timer.
+        """
         position = _position(state)
-        if (not command.get('movement_intent', False) or
-                command.get('recovery_mode') == 'arrived'):
-            state.pop('_motion_stall_log', None)
-            return
         previous = state.get('_motion_stall_log')
-        if previous is None or _distance(position, previous[0]) >= 0.5:
+        moved = (previous is not None and
+                 (position[0] - previous[0][0]) ** 2 +
+                 (position[2] - previous[0][2]) ** 2 >= 0.25)
+        if previous is None or moved:
             state['_motion_stall_log'] = (position, now)
             return
         if now - previous[1] < 3.0:
@@ -5493,17 +5495,24 @@ class BotRuntime(object):
         cached = self._decision_cache.get(state['id'])
         planner_age = now - cached[2] if cached is not None else -1.0
         probe = motion_probe if isinstance(motion_probe, dict) else {}
+        strategic = self._server_orders.get(state['id']) or {}
         print('[BOT STALL] id=%s pos=(%.1f,%.1f) mode=%s recovery=%s '
-              'traffic=%s goal=%s speed=%.2f throttle=%.2f turn=%.2f '
-              'water=%.2f path_clear=%s collision=%s deferred=%s '
-              'planner_age=%.2f' % (
+              'traffic=%s intent=%s goal=%s strategic_goal=%s '
+              'yaw=%.3f target_yaw=%s speed=%.2f throttle=%.2f turn=%.2f '
+              'y=%.3f water=%.2f path_clear=%s collision=%s '
+              'slope=%s probe_water=%s deferred=%s frozen=%s '
+              'hull_aim=%s grind=%s planner_age=%.2f' % (
                   state['id'], position[0], position[2],
                   command.get('combat_mode'), command.get('recovery_mode'),
                   command.get('traffic_mode', 'none'),
-                  command.get('move_position'), state.get('speed', 0.0),
-                  throttle, turn, state.get('_water_depth', -1.0),
-                  path_clear, probe.get('collision'), probe.get('deferred'),
-                  planner_age))
+                  command.get('movement_intent'), command.get('move_position'),
+                  strategic.get('move_position'), state.get('yaw', 0.0),
+                  command.get('target_yaw'), state.get('speed', 0.0),
+                  throttle, turn, position[1], state.get('_water_depth', -1.0),
+                  path_clear, probe.get('collision'), probe.get('slope'),
+                  probe.get('water'), probe.get('deferred'),
+                  pose_frozen, state.get('hull_aiming', False),
+                  self._hard_contact_grinds.get(state['id'], 0), planner_age))
 
     def set_camera_position(self, position):
         """Publish the viewpoint that drives the presentation detail tiers."""
@@ -9976,7 +9985,8 @@ class BotRuntime(object):
             state['rotation_dir'] = steer_dir
             self._log_direction_flip(state, path_clear, motion_probe, now)
             self._log_motion_stall(
-                state, command, throttle, turn, path_clear, motion_probe, now)
+                state, command, throttle, turn, path_clear, motion_probe, now,
+                pose_frozen)
             if not self.native_motion:
                 params = self._physics_params_for(state['id'])
                 # The selected corridor's ground sample is also the copied

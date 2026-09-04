@@ -12910,7 +12910,7 @@ class BotRuntimeTests(unittest.TestCase):
     def test_stall_diagnostic_records_cause_without_per_frame_logging(self):
         from contextlib import redirect_stdout
         self.runtime.battle_start(self.start)
-        self.runtime.debug_logging = True
+        self.assertFalse(self.runtime.debug_logging)
         state = self.runtime.states[11]
         order = {'movement_intent': True, 'recovery_mode': 'drive',
                  'combat_mode': 'route', 'traffic_mode': 'yield',
@@ -12920,13 +12920,35 @@ class BotRuntimeTests(unittest.TestCase):
             for now in (0.0, 0.1, 2.9, 3.0, 3.1):
                 self.runtime._log_motion_stall(
                     state, order, 0.0, 0.0, True,
-                    {'collision': False, 'deferred': False}, now)
+                    {'collision': False, 'deferred': False,
+                     'slope': 0.000001, 'water': False}, now)
             state['z'] += 0.6
             self.runtime._log_motion_stall(
                 state, order, 1.0, 0.0, True, {}, 6.0)
         self.assertEqual(1, output.getvalue().count('[BOT STALL]'))
         self.assertIn('traffic=yield', output.getvalue())
         self.assertIn('planner_age=', output.getvalue())
+        self.assertIn('slope=1e-06 probe_water=False', output.getvalue())
+
+    def test_stall_diagnostic_includes_arrival_wait_and_physical_hold(self):
+        from contextlib import redirect_stdout
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        self.runtime._server_orders[11] = {'move_position': (0.0, 0.0, 200.0)}
+        for mode in ('arrived', 'nav_wait', 'physical_hold'):
+            state.pop('_motion_stall_log', None)
+            order = {'movement_intent': False, 'recovery_mode': mode,
+                     'combat_mode': 'route', 'move_position': (0.0, 0.0, 0.0)}
+            output = io.StringIO()
+            with redirect_stdout(output):
+                for now in (0.0, 3.0):
+                    self.runtime._log_motion_stall(
+                        state, order, 0.0, 0.0, True, {}, now, True)
+            self.assertEqual(1, output.getvalue().count('[BOT STALL]'))
+            self.assertIn('recovery=' + mode, output.getvalue())
+            self.assertIn('intent=False', output.getvalue())
+            self.assertIn('frozen=True', output.getvalue())
+            self.assertIn('strategic_goal=(0.0, 0.0, 200.0)', output.getvalue())
 
     def test_unavailable_motion_probe_holds_last_drive_command(self):
         command = {

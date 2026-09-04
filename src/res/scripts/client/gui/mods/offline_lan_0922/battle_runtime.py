@@ -4647,36 +4647,42 @@ class BattleRuntime(object):
             nx = x + sine * distance
             nz = z + cosine * distance
             run = distance - previous_distance
-            probe_up = max(4.5, run * 0.52)
-            probe_down = max(5.0, run * 0.45)
-            try:
-                ground = self._runtime.bigworld.wg_collideSegment(
-                    self._avatar.spaceID,
-                    self._vector((nx, previous_y + probe_up, nz)),
-                    self._vector((nx, previous_y - probe_down, nz)), 128)
-            except Exception:
-                return {'clear': False, 'collision': True,
-                        'water': False, 'slope': 99.0}
-            if ground is None:
-                return {'clear': False, 'collision': False,
-                        'water': False, 'slope': 99.0}
-            next_y = float(ground[0].y)
-            water_depth = self._water_depth((nx, next_y, nz))
-            if (wet_escape and
-                    water_depth > current_water +
-                    BOT_WATER_ESCAPE_DEEPEN_EPSILON):
-                return {'clear': False, 'collision': False,
-                        'water': True, 'slope': 0.0}
-            if not wet_escape and water_depth > BOT_WATER_AVOID_DEPTH:
-                return {'clear': False, 'collision': False,
-                        'water': True, 'slope': 0.0}
-            delta = next_y - previous_y
-            slope = delta / max(0.1, run)
-            if abs(slope) > abs(maximum_slope):
-                maximum_slope = slope
-            if delta > run * 0.48 or delta < -run * 0.38:
-                return {'clear': False, 'collision': False,
-                        'water': False, 'slope': slope}
+            # A capped local edge can put both ray heights at the same XZ.
+            # Reuse that support sample: a second native cast from a shifted
+            # origin can differ by float32 rounding, and a zero-length segment
+            # has no slope against which to compare even that tiny difference.
+            next_y = previous_y
+            if run > 0.0:
+                probe_up = max(4.5, run * 0.52)
+                probe_down = max(5.0, run * 0.45)
+                try:
+                    ground = self._runtime.bigworld.wg_collideSegment(
+                        self._avatar.spaceID,
+                        self._vector((nx, previous_y + probe_up, nz)),
+                        self._vector((nx, previous_y - probe_down, nz)), 128)
+                except Exception:
+                    return {'clear': False, 'collision': True,
+                            'water': False, 'slope': 99.0}
+                if ground is None:
+                    return {'clear': False, 'collision': False,
+                            'water': False, 'slope': 99.0}
+                next_y = float(ground[0].y)
+                water_depth = self._water_depth((nx, next_y, nz))
+                if (wet_escape and
+                        water_depth > current_water +
+                        BOT_WATER_ESCAPE_DEEPEN_EPSILON):
+                    return {'clear': False, 'collision': False,
+                            'water': True, 'slope': 0.0}
+                if not wet_escape and water_depth > BOT_WATER_AVOID_DEPTH:
+                    return {'clear': False, 'collision': False,
+                            'water': True, 'slope': 0.0}
+                delta = next_y - previous_y
+                slope = delta / max(0.1, run)
+                if abs(slope) > abs(maximum_slope):
+                    maximum_slope = slope
+                if delta > run * 0.48 or delta < -run * 0.38:
+                    return {'clear': False, 'collision': False,
+                            'water': False, 'slope': slope}
             for offset in (-corridor_half_width, 0.0, corridor_half_width):
                 ray_start = self._vector((
                     x + lateral_x * offset, y + height,
