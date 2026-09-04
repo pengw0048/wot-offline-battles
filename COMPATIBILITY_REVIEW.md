@@ -1110,7 +1110,10 @@ in the transform chain, and its `worldMatrix` rebind supplies the same input
 retail passes. Disassembly of the exact executable shows the native animator
 method accumulating `dir * impulse` into three floats of the animator object
 itself, reading no filter, physics body, node or model, so the only live
-requirement is a stock animator. The port keeps the engine-ownership and
+requirement is a stock animator. Every vehicle definition in the pinned
+package carries `sensitivityToImpulse`, and `vehicles/common/shot_effects.xml`
+carries `targetImpulse`, so both inputs come from shipped client data rather
+than a substituted constant. The port keeps the engine-ownership and
 proven-rebind gates, rejects an absent animator instead of raising inside stock
 code, normalises its contact direction, and presents no impulse for a splash,
 killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
