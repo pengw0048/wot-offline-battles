@@ -19144,18 +19144,8 @@ class BattleRuntime(object):
                 vehicle._offlineNativeMarkerVisible = bool(world_started)
         return bool(world_started or minimap_started)
 
-    # Exact #1513 gives an SPG two aiming cameras: the overhead strategic
-    # view and the trajectory view that AvatarInputHandler selects with
-    # ``_CTRL_MODE.ARTY``.  Both aim away from the vehicle, so both must draw
-    # the same team-spotted targets; ordinary arcade driving does not.  Each
-    # entry keeps a literal fallback because only ``POSTMORTEM`` is pinned by
-    # the client ABI audit.  A fallback can match nothing but the exact name
-    # the live handler reports, so an absent constant neither widens the
-    # exemption nor raises.
-    _SPG_AIMING_CTRL_MODES = (('STRATEGIC', 'strategic'), ('ARTY', 'arty'))
-
     def _spg_aiming_view_active(self):
-        """Whether this client currently owns an SPG aiming camera."""
+        """Whether exact #1513 currently owns an SPG aiming camera."""
         descriptor = self._local_descriptor
         tags = _field(_field(descriptor, 'type', {}), 'tags', ()) or ()
         if 'SPG' not in tags:
@@ -19165,12 +19155,10 @@ class BattleRuntime(object):
         if handler is None or modes is None:
             return False
         current = getattr(handler, '_AvatarInputHandler__ctrlModeName', None)
-        if current is None:
-            return False
-        for name, fallback in self._SPG_AIMING_CTRL_MODES:
-            if current == getattr(modes, name, fallback):
-                return True
-        return False
+        # The exact-client ABI audit pins both names and their literal values.
+        # Missing attributes are a client-contract failure, not a mode that
+        # should be guessed through a fallback.
+        return current in (modes.STRATEGIC, modes.ARTY)
 
     def _spot_presentation_visibility(
             self, entity, remembered, was_model_visible=False):

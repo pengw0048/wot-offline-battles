@@ -1934,7 +1934,8 @@ def _runtime():
         avatar_input_handler=types.SimpleNamespace(
             _CTRL_MODE=types.SimpleNamespace(
                 ARCADE='arcade', SNIPER='sniper',
-                STRATEGIC='strategic', POSTMORTEM='postmortem')),
+                STRATEGIC='strategic', ARTY='arty',
+                POSTMORTEM='postmortem')),
         aih_constants=types.SimpleNamespace(
             GUN_MARKER_FLAG=types.SimpleNamespace(
                 UNDEFINED=0, CONTROL_ENABLED=1, CLIENT_MODE_ENABLED=2,
@@ -19742,17 +19743,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime, battle, record = self._spg_distant_target_battle()
         handler = battle._avatar.inputHandler
         modes = runtime.avatar_input_handler._CTRL_MODE
-        # The pinned client ABI proves only POSTMORTEM, so the port must also
-        # work when the trajectory-view constant is not exposed by name.
-        self.assertFalse(hasattr(modes, 'ARTY'))
+        self.assertEqual('strategic', modes.STRATEGIC)
+        self.assertEqual('arty', modes.ARTY)
 
-        # Overhead strategic view, the trajectory view resolved through the
-        # literal fallback, and the trajectory view resolved through an
-        # exposed constant must all draw the same team-spotted target.
-        for step, mode in enumerate(
-                ('strategic', 'arty', 'strategic', 'arty')):
-            if step == 3:
-                modes.ARTY = 'arty'
+        # Switching between both exact #1513 SPG aiming modes must re-assert
+        # the same team-spotted target instead of inheriting an old verdict.
+        for step, mode in enumerate((
+                modes.STRATEGIC, modes.ARTY,
+                modes.STRATEGIC, modes.ARTY)):
             handler._AvatarInputHandler__ctrlModeName = mode
             self.assertTrue(battle._spg_aiming_view_active())
             # Clear the previous verdict so the exemption has to re-assert
@@ -19776,9 +19774,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime, battle, record = self._spg_distant_target_battle(
             tags=('mediumTank',))
         handler = battle._avatar.inputHandler
-        runtime.avatar_input_handler._CTRL_MODE.ARTY = 'arty'
+        modes = runtime.avatar_input_handler._CTRL_MODE
 
-        for step, mode in enumerate(('strategic', 'arty', 'arcade')):
+        for step, mode in enumerate((
+                modes.STRATEGIC, modes.ARTY, modes.ARCADE)):
             handler._AvatarInputHandler__ctrlModeName = mode
             self.assertFalse(battle._spg_aiming_view_active())
             battle._update_spotting(10.0 + 0.1 * step)

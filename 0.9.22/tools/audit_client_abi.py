@@ -1933,6 +1933,12 @@ EXPECTED_GLOBALS = {
 
 
 EXPECTED_CLASS_CONSTANTS = {
+    'scripts/client/AvatarInputHandler/aih_constants.pyc': {
+        'CTRL_MODE_NAME': {
+            'STRATEGIC': 'strategic',
+            'ARTY': 'arty',
+        },
+    },
     'scripts/client/ProjectileMover.pyc': {
         'ProjectileMover': {
             '_ProjectileMover__PROJECTILE_TIME_AFTER_DEATH': 2.0,
