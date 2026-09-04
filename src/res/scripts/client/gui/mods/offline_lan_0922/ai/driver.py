@@ -213,7 +213,8 @@ class LocalDriver(object):
 				'escape_side': 0.0,
 				'escape_side_until': 0.0,
 				'last_desired_yaw': None,
-				'last_heading_error': None,
+				'heading_progress_yaw': None,
+				'best_heading_error': None,
 				'traffic_waiting': False,
 				'traffic_wait_time': 0.0,
 				'last_step': 0.0,
@@ -589,18 +590,9 @@ class LocalDriver(object):
 		self._prune_failures(state)
 		state['steering_age'] += step
 		state['plan_age'] += step
-		previous_desired_yaw = state.get('last_desired_yaw')
 		desired_yaw = _yaw_to(position, target)
 		heading_error = abs(_angle_delta(desired_yaw, yaw))
-		previous_heading_error = state.get('last_heading_error')
-		stable_heading = bool(
-			previous_desired_yaw is not None and
-			abs(_angle_delta(desired_yaw, previous_desired_yaw)) <= 0.12)
-		heading_progress = bool(
-			stable_heading and previous_heading_error is not None and
-			heading_error + 0.002 < previous_heading_error)
 		state['last_desired_yaw'] = desired_yaw
-		state['last_heading_error'] = heading_error
 		target_distance = _distance(position, target)
 		if not movement_intent:
 			# Cover/engagement orders intentionally stop within a tolerance. Do not
@@ -609,6 +601,7 @@ class LocalDriver(object):
 			state['recovery_time'] = 0.0
 			state['recovery_side'] = 0.0
 			state['steering_yaw'] = None
+			state['heading_progress_yaw'] = None
 			state['braking_target'] = None
 			return {
 				'throttle': 0.0,
@@ -628,6 +621,7 @@ class LocalDriver(object):
 			state['recovery_time'] = 0.0
 			state['recovery_side'] = 0.0
 			state['steering_yaw'] = None
+			state['heading_progress_yaw'] = None
 			state['last_position'] = (
 				float(position[0]), float(position[2]))
 			state['braking_target'] = None
@@ -638,11 +632,25 @@ class LocalDriver(object):
 				'recovery_mode': 'arrived',
 			}
 
-		# Physical progress is translation. A stable pivot may borrow a bounded
-		# heading-progress lease while its error is actually shrinking, but merely
-		# rotating (especially alternating left/right) cannot keep a wedged hull
-		# alive forever. Keep the position as an accumulation anchor so genuine
-		# low-speed travel is not lost between short planner samples.
+		# Credit only a new best alignment with a fixed heading anchor. Comparing
+		# adjacent samples lets a stationary left/right oscillation repeatedly
+		# earn back the stuck time from its previous half-cycle. Keep small goal
+		# changes out of this measurement so waypoint jitter is not hull progress.
+		progress_yaw = state['heading_progress_yaw']
+		heading_progress = False
+		if (displacement >= 0.08 or progress_yaw is None or
+				abs(_angle_delta(desired_yaw, progress_yaw)) > 0.12):
+			state['heading_progress_yaw'] = desired_yaw
+			state['best_heading_error'] = heading_error
+		else:
+			progress_error = abs(_angle_delta(progress_yaw, yaw))
+			if progress_error + 0.002 < state['best_heading_error']:
+				state['best_heading_error'] = progress_error
+				heading_progress = True
+
+		# Accumulate translation between planner samples, preserving real slow
+		# travel. A continuous turn may earn heading credit until it aligns;
+		# revisiting an angle already reached cannot renew that credit.
 		if displacement >= 0.08:
 			state['last_position'] = (
 				float(position[0]), float(position[2]))
@@ -660,6 +668,7 @@ class LocalDriver(object):
 				state['recovery_count'] += 1
 				state['recovery_side'] = 0.0
 				state['stuck_time'] = 0.0
+				state['heading_progress_yaw'] = None
 		else:
 			if state['stuck_time'] >= threshold:
 				if state.get('last_clear_yaw') is not None:

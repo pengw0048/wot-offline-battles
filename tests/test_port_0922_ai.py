@@ -1741,6 +1741,48 @@ class BotAiPortTests(unittest.TestCase):
         self.assertIsNotNone(recovery)
         self.assertGreater(driver.states[70]['stuck_time'], 0.0)
 
+    def test_stationary_yaw_oscillation_cannot_renew_heading_progress(self):
+        # A fixed waypoint and a hull rocking at 0.1 rad/s produce equal
+        # improving/regressing samples. Counting each improvement again used
+        # to cancel all stuck time, even after a minute without translation.
+        driver = LocalDriver()
+        modes = set()
+        for tick in range(600):
+            phase = tick % 20
+            yaw = 0.20 + 0.01 * min(phase, 20 - phase)
+            order = driver.drive(
+                2, 1, (0.0, 0.0, 0.0), yaw, 0.0, 0.1,
+                (0.0, 0.0, 100.0), (), lambda unused_yaw: True)
+            modes.add(order['recovery_mode'])
+
+        self.assertTrue(modes & {'reverse_turn', 'pivot_recovery'})
+
+    def test_waypoint_jitter_is_not_physical_heading_progress(self):
+        driver = LocalDriver()
+        modes = set()
+        for tick in range(100):
+            phase = tick % 20
+            target_yaw = 0.01 * min(phase, 20 - phase)
+            target = (math.sin(target_yaw) * 100.0, 0.0,
+                      math.cos(target_yaw) * 100.0)
+            order = driver.drive(
+                2, 1, (0.0, 0.0, 0.0), 0.3, 0.0, 0.1,
+                target, (), lambda unused_yaw: True)
+            modes.add(order['recovery_mode'])
+
+        self.assertTrue(modes & {'reverse_turn', 'pivot_recovery'})
+
+    def test_slow_monotonic_pivot_keeps_heading_progress(self):
+        driver = LocalDriver()
+        for tick in range(300):
+            # The same 0.1 rad/s angular speed is real progress when the hull
+            # keeps approaching the target, even through a long heavy U-turn.
+            order = driver.drive(
+                2, 1, (0.0, 0.0, 0.0), tick * 0.01, 0.0, 0.1,
+                (0.0, 0.0, -100.0), (), lambda unused_yaw: True)
+            self.assertNotIn(order['recovery_mode'],
+                             ('reverse_turn', 'pivot_recovery'))
+
     def test_terminal_target_coasts_inside_copied_stopping_distance(self):
         driver = LocalDriver()
         terminal = driver.drive(
