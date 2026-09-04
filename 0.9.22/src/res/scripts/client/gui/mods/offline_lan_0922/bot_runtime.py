@@ -2171,18 +2171,49 @@ class BotRuntime(object):
                             'navigation graph route waypoint is invalid')
         return routes
 
+    def _baked_objective_bases(self):
+        """Return this map's decoded CTF bases from the baked graph.
+
+        ``bake_navigation_0922`` stores the exact ``teamBasePositions`` it
+        decoded from the arena definition, and ``SpawnPlanner`` already reads
+        the same field.  The static tactical tables carry a hand-written copy
+        of those two points which is only as good as whoever typed it, so the
+        graph shipped with the map is the source the director must orient a
+        route against.
+        """
+        points = (self.baked_graph or {}).get('objective_bases')
+        if not isinstance(points, (list, tuple)) or len(points) != 2:
+            return None
+        bases = {}
+        for team, point in enumerate(points, 1):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                return None
+            try:
+                values = (float(point[0]), float(point[1]))
+            except (TypeError, ValueError):
+                return None
+            if any(math.isnan(value) or math.isinf(value)
+                   for value in values):
+                return None
+            bases[team] = values
+        return bases
+
     def _new_adapter(self, map_name, round_id):
         """Keep custom two-argument factories compatible with the graph seam."""
+        seam = {}
         baked_routes = (self.baked_graph or {}).get('routes')
-        if (not isinstance(baked_routes, dict) or not any(
+        if (isinstance(baked_routes, dict) and any(
                 baked_routes.get(key) for key in (1, 2, '1', '2'))):
+            seam['baked_routes'] = baked_routes
+        bases = self._baked_objective_bases()
+        if bases is not None:
+            seam['bases'] = bases
+        if not seam:
             return self.adapter_factory(map_name, round_id)
         if self.adapter_factory is BotAdapter:
-            return self.adapter_factory(map_name, round_id,
-                                        baked_routes=baked_routes)
+            return self.adapter_factory(map_name, round_id, **seam)
         try:
-            return self.adapter_factory(map_name, round_id,
-                                        baked_routes=baked_routes)
+            return self.adapter_factory(map_name, round_id, **seam)
         except TypeError:
             return self.adapter_factory(map_name, round_id)
 

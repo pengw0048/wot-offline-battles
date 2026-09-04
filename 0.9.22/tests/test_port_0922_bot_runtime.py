@@ -11115,6 +11115,71 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertTrue(driver._reverse_blocked_by_vehicle(
             (0.0, 0.0, 0.0), 0.0, neighbours, 2.0, 1.0))
 
+    def test_the_baked_graph_owns_the_tactical_bases(self):
+        """The decoded arena bases must beat the hand-written tactical copy.
+
+        01_karelia is the case that proves it: its static table holds the two
+        team bases the other way round from the arena definition the
+        navigation graph was baked from, so orienting a route against the
+        static copy sends a team at its own base.
+        """
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=self.module.BotAdapter,
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.2},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.baked_graph = _graph()
+
+        adapter = runtime._new_adapter('01_karelia', 5)
+        static = self.module.tactical_maps.get_tactical_map(
+            '01_karelia').get('bases')
+        self.assertEqual({1: (8.0, 0.0), 2: (0.0, 0.0)},
+                         adapter.director.bases)
+        # The static copy is still reachable as the no-graph fallback, and it
+        # is exactly what must not have won here.
+        self.assertNotEqual(static, adapter.director.bases)
+        self.assertEqual(
+            {1: (8.0, 0.0), 2: (0.0, 0.0)},
+            runtime._baked_objective_bases())
+
+    def test_a_graphless_round_keeps_the_static_tactical_bases(self):
+        """Without a baked graph the static table remains the only source."""
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=self.module.BotAdapter,
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.2},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.baked_graph = None
+
+        self.assertIsNone(runtime._baked_objective_bases())
+        adapter = runtime._new_adapter('01_karelia', 5)
+        static = self.module.tactical_maps.get_tactical_map(
+            '01_karelia').get('bases')
+        self.assertEqual(static, adapter.director.bases)
+
+    def test_a_malformed_graph_base_is_refused_not_half_applied(self):
+        """A partial base pair must fall back whole, never mix two sources."""
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=self.module.BotAdapter,
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.2},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        for broken in (((8.0, 0.0),), ((8.0, 0.0), (0.0,)),
+                       ((8.0, 0.0), (float('nan'), 0.0)),
+                       ((8.0, 0.0), ('x', 0.0)), 'not-a-sequence', None):
+            graph = _graph()
+            graph['objective_bases'] = broken
+            runtime.baked_graph = graph
+            self.assertIsNone(
+                runtime._baked_objective_bases(),
+                'accepted a malformed objective base: %r' % (broken,))
+
     def test_production_adapter_exposes_a_lease_capable_driver(self):
         """The wiring above must reach the shipped adapter, not a double."""
         adapter = self.module.BotAdapter('01_karelia', 5)
