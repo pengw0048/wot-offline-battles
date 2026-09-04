@@ -17487,6 +17487,18 @@ class BattleRuntime(object):
         # presentation/audio state owned exclusively by the visible client.
         if self._worker_mode or self._remote_factory is None:
             return False
+        vehicle = self._remote_factory.get(record['engine_id'])
+        if vehicle is None:
+            return False
+        if (record.get('native_remote') and
+                not bool(getattr(
+                    vehicle, '_offlineNativeDrawVisible', True)) and
+                not record.get('_remote_track_pending')):
+            # A successful hide-edge zero feed is already terminal.  Keep
+            # accepting hidden state changes for dedupe bookkeeping without
+            # waking the native belt/dust writer again; reveal clears the
+            # signature and forces one real authoritative replay.
+            return True
         if turn_override is not None:
             # Guest poses arrive once per rendered frame, while the stock
             # PyTrackScroll controller itself advances at 20 Hz.  Carry the
@@ -17506,9 +17518,6 @@ class BattleRuntime(object):
             record['_remote_track_next_update'] = (
                 float(next_update) +
                 periods * REMOTE_TRACK_PRESENTATION_SECONDS)
-        vehicle = self._remote_factory.get(record['engine_id'])
-        if vehicle is None:
-            return False
         alive = bool(state.get('alive', True)) and int(
             state.get('health', 1) or 0) > 0
         speed = _number(state.get('speed'))
@@ -19230,14 +19239,17 @@ class BattleRuntime(object):
                 # pose to replay the authoritative speed and engine mode.
                 if not draw_vehicle:
                     stop_tracks = getattr(vehicle, 'update_tracks', None)
+                    tracks_stopped = False
                     if callable(stop_tracks):
-                        self._run_optional_feature(
+                        tracks_stopped = self._run_optional_feature(
                             'remote track animation', stop_tracks,
                             (0.0, 0.0, getattr(
                                 vehicle, 'engineMode',
                                 (ENGINE_MODE_IDLE, 0))))
-                record['_remote_track_pending'] = True
-                record.pop('_remote_track_state_signature', None)
+                    record['_remote_track_pending'] = not tracks_stopped
+                else:
+                    record['_remote_track_pending'] = True
+                    record.pop('_remote_track_state_signature', None)
             else:
                 vehicle.appearance.changeVisibility(draw_vehicle)
             # A fire transition received while this enemy was hidden had no

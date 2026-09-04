@@ -1928,7 +1928,19 @@ class OfflineCompatibilityTests(unittest.TestCase):
 
         def stock_show(vehicle, visible):
             operations.append(('stock_vehicle_show', vehicle.id, visible))
-            vehicle.model.visible = bool(visible)
+            # Exact #1513 Vehicle.show(False) retains ShadowPassBit instead of
+            # fully hiding the compound.  Reproduce that distinction so this
+            # test catches a shadow-only initial visibility leak.
+            vehicle.model.visible = True if visible else 'shadow-only'
+
+        class Appearance(object):
+            def __init__(self, vehicle):
+                self.vehicle = vehicle
+
+            def changeVisibility(self, visible):
+                operations.append((
+                    'compound_visibility', self.vehicle.id, visible))
+                self.vehicle.model.visible = bool(visible)
 
         def stock_start_visual(vehicle):
             operations.append(('stock_visual_controllers_started', vehicle.id))
@@ -1963,6 +1975,7 @@ class OfflineCompatibilityTests(unittest.TestCase):
         enemy.guiSessionProvider = provider
         enemy.targetCaps = [1]
         enemy.model = types.SimpleNamespace(visible=True)
+        enemy.appearance = Appearance(enemy)
         enemy.isStarted = False
 
         result = enemy.startVisual()
@@ -1972,6 +1985,7 @@ class OfflineCompatibilityTests(unittest.TestCase):
             ('stock_visual_controllers_started', 11), operations)
         self.assertNotIn(('stock_vehicle_show', 11, True), operations)
         self.assertNotIn(('start_vehicle_visual', 11, True), operations)
+        self.assertIn(('compound_visibility', 11, False), operations)
         self.assertFalse(enemy.model.visible)
         self.assertEqual([], enemy.targetCaps)
 

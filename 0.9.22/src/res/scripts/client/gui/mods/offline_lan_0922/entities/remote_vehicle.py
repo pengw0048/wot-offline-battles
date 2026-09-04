@@ -43,8 +43,8 @@ def reset_pose_animation_writes():
     _pose_object_allocations = 0
 
 
-# One line per process: an absent attachment gate is a presentation gap, not
-# a reason to abort a round that is otherwise correctly hidden.
+# One line per process: an absent or read-only attachment gate is a
+# presentation gap, not a reason to abort a round whose compound is hidden.
 _attachment_gate_reported = False
 
 
@@ -57,22 +57,24 @@ def set_model_attachment_visibility(model, visible):
     ``visibleAttachments`` as two independent flags on its projectile model:
     stock hides that mesh with the first while the attached tracer stays drawn
     through the second, and this port copies the same pair for its own tracer.
-    Static package inspection cannot prove that ``PyCompoundModel`` exposes
-    the plain model's attachment property, so mirror it when available and
+    Static package inspection cannot prove that ``PyCompoundModel`` exposes a
+    writable plain-model attachment property, so mirror it when writable and
     retain the complete compound gate either way.
     """
     global _attachment_gate_reported
     if model is None:
         return False
-    if not hasattr(model, 'visibleAttachments'):
+    try:
+        getattr(model, 'visibleAttachments')
+        model.visibleAttachments = bool(visible)
+    except (AttributeError, TypeError, ReferenceError):
         if not _attachment_gate_reported:
             _attachment_gate_reported = True
             sys.stdout.write(
-                '[Offline LAN 0.9.22] compound model has no '
+                '[Offline LAN 0.9.22] compound model has no writable '
                 'visibleAttachments gate; hidden vehicle effects may still '
                 'draw\n')
         return False
-    model.visibleAttachments = bool(visible)
     return True
 
 

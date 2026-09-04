@@ -17539,14 +17539,48 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(enemy.model.visibleAttachments)
         enemy.update_tracks.assert_called_once_with(
             0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
-        self.assertTrue(record['_remote_track_pending'])
-        self.assertNotIn('_remote_track_state_signature', record)
+        self.assertFalse(record['_remote_track_pending'])
+        self.assertEqual(
+            (8.0, True, 0.0),
+            record['_remote_track_state_signature'])
+
+        # Repeated dark snapshots at the same pose must not retry the
+        # successful hide-edge native feed at the 20 Hz track cadence.
+        pose = {
+            'x': 100.0, 'y': 0.0, 'z': 0.0,
+            'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
+            'aim_yaw': 0.0, 'gun_pitch': 0.0}
+        record['_remote_pose_signature'] = (
+            100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        record['track_pose_sample'] = (battle._clock(), 0.0)
+        battle._apply_record_pose(record, pose)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+
+        # A changed authority speed while dark updates only the dedupe
+        # identity. It must not restart belt/dust presentation.
+        record['state']['speed'] = 9.0
+        battle._apply_record_pose(record, pose)
+        enemy.update_tracks.assert_called_once_with(
+            0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertEqual(
+            (9.0, True, 0.0),
+            record['_remote_track_state_signature'])
 
         self.assertTrue(battle._set_record_spot_visibility(
             record, True, True))
         self.assertTrue(enemy.model.visibleAttachments)
+        self.assertTrue(record['_remote_track_pending'])
+        self.assertNotIn('_remote_track_state_signature', record)
         enemy.update_tracks.assert_called_once_with(
             0.0, 0.0, (ENGINE_MODE_RUNNING, 1))
+
+        # A failed hide-edge settle remains explicitly retryable.
+        enemy.update_tracks.return_value = False
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+        self.assertTrue(record['_remote_track_pending'])
+        self.assertEqual(2, enemy.update_tracks.call_count)
 
     def test_native_spot_gate_survives_a_build_without_attachment_flag(self):
         """A missing attachment flag is a presentation gap, not a round abort.
@@ -17580,6 +17614,41 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(enemy.draw_pass_visible)
         self.assertFalse(enemy.model.visible)
         self.assertFalse(hasattr(enemy.model, 'visibleAttachments'))
+
+    def test_native_spot_gate_survives_a_read_only_attachment_flag(self):
+        """A readable but unwritable native flag is the same bounded gap."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        enemy = _Vehicle(
+            1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), {'health': 500})
+
+        class ReadOnlyAttachmentModel(object):
+            visible = True
+
+            @property
+            def visibleAttachments(self):
+                return True
+
+        enemy.model = ReadOnlyAttachmentModel()
+        enemy.appearance.compoundModel = enemy.model
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: enemy if entity_id == 1000 else None)
+        record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'native_remote': True, 'visual_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+
+        self.assertFalse(battle._set_record_spot_visibility(
+            record, False, False))
+
+        self.assertFalse(enemy.draw_pass_visible)
+        self.assertFalse(enemy.model.visible)
+        self.assertTrue(enemy.model.visibleAttachments)
 
     def test_native_reverse_sample_preserves_yaw_component_order(self):
         runtime = _runtime()

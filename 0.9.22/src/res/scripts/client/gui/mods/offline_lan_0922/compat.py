@@ -1394,16 +1394,29 @@ class OfflineCompatibility(object):
             if not prime_initial_remote_enemy(avatar, vehicle):
                 return False
             show = getattr(vehicle, 'show', None)
+            appearance = getattr(vehicle, 'appearance', None)
+            change_visibility = None
+            if appearance is not None:
+                change_visibility = getattr(
+                    appearance, 'changeVisibility', None)
             try:
                 provider = compatibility._original_avatar_getattribute(
                     avatar, 'guiSessionProvider')
             except AttributeError:
                 provider = None
             stop_visual = getattr(provider, 'stopVehicleVisual', None)
-            if not callable(show) or not callable(stop_visual):
+            if (not callable(show) or not callable(stop_visual) or
+                    (appearance is not None and
+                     not callable(change_visibility))):
                 raise RuntimeError(
                     '#1513 initial enemy visibility gate is unavailable')
+            # Exact #1513 Vehicle.show(False) deliberately retains the
+            # ShadowPassBit.  The early onEnterWorld call has no appearance
+            # yet, but the startVisual tail does; close the whole compound at
+            # that first point where the stock visual has been initialised.
             show(False)
+            if change_visibility is not None:
+                change_visibility(False)
             stop_visual(int(vehicle.id), False)
             return True
 

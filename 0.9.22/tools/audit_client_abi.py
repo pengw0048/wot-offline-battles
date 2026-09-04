@@ -580,6 +580,7 @@ EXPECTED_ABI = {
         'Vehicle.prerequisites': ('self', 'respawnCompactDescr'),
         'Vehicle.onEnterWorld': ('self', 'prereqs'),
         'Vehicle.onLeaveWorld': ('self',),
+        'Vehicle.show': ('self', 'show'),
         'Vehicle.showShooting': ('self', 'burstCount', 'isPredictedShot'),
         'Vehicle.showAmmoBayEffect': (
             'self', 'mode', 'fireballVolume', 'projectedTurretSpeed'),
@@ -686,6 +687,8 @@ EXPECTED_ABI = {
             'self', 'modelState', 'resourceList'),
         'CompoundAppearance.setupGunMatrixTargets': ('self', 'target'),
         'CompoundAppearance.changeVisibility': ('self', 'modelVisible'),
+        'CompoundAppearance.changeDrawPassVisibility': (
+            'self', 'visibilityMask'),
         'CompoundAppearance.deactivate': ('self', 'stopEffects'),
         'CompoundAppearance.addCrashedTrack': ('self', 'isLeft'),
         'CompoundAppearance.delCrashedTrack': ('self', 'isLeft'),
@@ -1315,6 +1318,9 @@ EXPECTED_CODE_NAMES = {
         'Vehicle.onLeaveWorld': (
             '_Vehicle__stopExtras', 'BigWorld', 'player',
             'vehicle_onLeaveWorld', 'isStarted'),
+        'Vehicle.show': (
+            'BigWorld', 'DrawAll', 'ShadowPassBit', 'isStarted',
+            'appearance', 'changeDrawPassVisibility', 'showStickers'),
         'Vehicle.showShooting': (
             'siegeState', 'VEHICLE_SIEGE_STATE', 'ENABLED', 'DISABLED',
             'typeDescriptor', 'extrasDict', 'stopFor', 'startFor',
@@ -1622,6 +1628,10 @@ EXPECTED_CODE_NAMES = {
             'target'),
         'CompoundAppearance.changeVisibility': (
             'compoundModel', 'visible', 'showStickers',
+            '_CompoundAppearance__crashedTracksCtrl', 'setVisible'),
+        'CompoundAppearance.changeDrawPassVisibility': (
+            'BigWorld', 'ColorPassBit', 'compoundModel', 'visible',
+            'skipColorPass', 'showStickers',
             '_CompoundAppearance__crashedTracksCtrl', 'setVisible'),
         'CompoundAppearance.deactivate': (
             'BigWorld', 'player', 'inputHandler',
