@@ -101,6 +101,28 @@ class ClientAbiProjectileAuditTests(unittest.TestCase):
         self.assertEqual('arty', modes['ARTY'])
 
     def test_controlled_tracer_dependencies_are_pinned(self):
+        self.assertEqual(
+            ('point',),
+            AUDIT.EXPECTED_ABI[
+                'scripts/client/AvatarInputHandler/cameras.pyc'][
+                    'isPointOnScreen'])
+        avatar = AUDIT.EXPECTED_ABI['scripts/client/Avatar.pyc']
+        self.assertEqual(
+            ('self', 'shooterID', 'shotID', 'isRicochet', 'effectsIndex',
+             'refStartPoint', 'velocity', 'gravity', 'maxShotDist'),
+            avatar['PlayerAvatar.showTracer'])
+        avatar_names = AUDIT.EXPECTED_CODE_NAMES[
+            'scripts/client/Avatar.pyc']['PlayerAvatar.showTracer']
+        self.assertTrue({
+            'BigWorld', 'entity', 'isStarted', 'Math', 'Matrix',
+            'cameras', 'isPointOnScreen', 'appearance', 'compoundModel',
+            'node', 'translation', '_PlayerAvatar__projectileMover', 'add',
+        }.issubset(avatar_names))
+        self.assertIn(
+            'HP_gunFire',
+            AUDIT.EXPECTED_CODE_LITERALS[
+                'scripts/client/Avatar.pyc']['PlayerAvatar.showTracer'])
+
         effects = AUDIT.EXPECTED_ABI[
             'scripts/client/helpers/EffectsList.pyc']
         self.assertEqual(
@@ -185,6 +207,12 @@ class ClientAbiProjectileAuditTests(unittest.TestCase):
             'fireMissedTrigger', 'TriggersManager', 'g_manager',
             'fireTrigger', 'TRIGGER_TYPE', 'PLAYER_SHOT_MISSED',
         }.isdisjoint(mover_names['ProjectileMover.__delProjectile']))
+        self.assertEqual(
+            20,
+            AUDIT.EXPECTED_CLASS_CONSTANTS[
+                'scripts/client/ProjectileMover.pyc'][
+                    'ProjectileMover'][
+                        '_ProjectileMover__START_POINT_MAX_DIFF'])
         self.assertEqual(
             2.0,
             AUDIT.EXPECTED_CLASS_CONSTANTS[
