@@ -784,6 +784,15 @@ round; the worker puts the same field on a Bot launch, computed from the
 inventory it has just debited. The server freezes the flag on the projectile
 and awards the medal only when that shot also left no living enemy.
 
+That one optional field crosses four exact contracts on its way, and each had
+to be widened for it: the fire-intent key set in `submit_fire_intent`, the
+`launch_projectile` allowlist, the worker's `on_fire_intent` relay check, and
+`_local_launch_record`, the projection that decides which Bot fields reach the
+launch publisher at all. The first three reject an unknown field outright; the
+fourth drops it silently, which would have left Bots unable to earn the medal
+with nothing to show for it. Each of the three rejecting validators has a test
+that an unknown field is still refused.
+
 Battle-hero medals go to one actor per battle, ordered by the medal's own
 metric and broken by earned experience, which is Wargaming's documented
 tie-break. Bots are ordinary participants and can take one.

@@ -8305,6 +8305,12 @@ class BotRuntimeTests(unittest.TestCase):
             launch['fire_seq'] for launch in runtime._pending_launches])
         self.assertEqual([0, 1, 2], [
             launch['burst_index'] for launch in runtime._pending_launches])
+        # Each frozen launch carries the shell total it was drawn from, which
+        # Fadin's medal reads and only this worker can know.
+        total = sum(ammo_state.remaining)
+        self.assertEqual([total + 3, total + 2, total + 1], [
+            launch['shells_before_shot']
+            for launch in runtime._pending_launches])
         self.assertEqual(initial_ammo - 3,
                          ammo_state.remaining[ammo_state.loaded])
         self.assertEqual(2, gun_state.clip)

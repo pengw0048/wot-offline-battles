@@ -885,6 +885,10 @@ def _local_launch_record(state, launch_time_us=None):
     }
     if 'shot_origin' in state:
         result['shot_origin'] = state['shot_origin']
+    if 'shells_before_shot' in state:
+        # Fadin's medal reads the shell total this round was drawn from, and
+        # only this worker knows it.
+        result['shells_before_shot'] = int(state['shells_before_shot'])
     if class_tag == 'SPG':
         for name in (
                 'shot_velocity', 'shot_gravity',
