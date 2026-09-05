@@ -868,6 +868,32 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertNotIn(50002, owned)
         self.assertEqual({50001}, owned)
 
+    def test_the_saved_garage_names_the_vehicles_it_holds(self):
+        """The launcher reads this file with no client to resolve ids with."""
+        snapshot = self._two_vehicle_snapshot()
+        for record in snapshot['vehicles']:
+            record['vehicleTypeName'] = 'ussr:R%d' % record['id']
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(snapshot))
+
+        self.assertEqual(
+            ['ussr:R10', 'ussr:R9'],
+            self._store().owned_vehicle_names())
+
+    def test_a_save_written_before_names_reports_the_ones_it_has(self):
+        snapshot = self._two_vehicle_snapshot()
+        snapshot['vehicles'][0]['vehicleTypeName'] = 'ussr:R11_MS-1'
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(snapshot))
+
+        self.assertEqual(
+            ['ussr:R11_MS-1'], self._store().owned_vehicle_names())
+        # The compact descriptors are unaffected: ownership still resolves.
+        self.assertEqual(
+            {50001, 50002}, set(self._store().owned_vehicle_types()))
+
     def test_an_unwritten_save_owns_nothing_rather_than_guessing(self):
         """A first launch has to fall back to the save's seed."""
         self.assertEqual([], self._store().owned_vehicle_types())

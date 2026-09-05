@@ -183,12 +183,27 @@ def _restore_garage(snapshot):
             '[Offline LAN 0.9.22] the saved garage could not be restored: '
             '%s\n' % error)
         return False
-    if restored and migrated[0]:
+    if not restored:
+        return restored
+    # A save written before records carried their vehicle names has to gain
+    # them here: the launcher reads that file without a client and cannot
+    # resolve a compact descriptor on its own.
+    named = set(store.owned_vehicle_names())
+    unnamed = sum(
+        1 for record in (snapshot.get('vehicles') or ())
+        if isinstance(record, dict) and
+        str(record.get('vehicleTypeName') or '') not in named)
+    if migrated[0] or unnamed:
         store.mark_dirty()
         if store.flush(snapshot):
-            sys.stdout.write(
-                '[Offline LAN 0.9.22] upgraded saved skill choices for %d '
-                'crew member(s)\n' % migrated[0])
+            if migrated[0]:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] upgraded saved skill choices for %d '
+                    'crew member(s)\n' % migrated[0])
+            if unnamed:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] named %d saved vehicle(s) for the '
+                    'launcher\n' % unnamed)
     return restored
 
 

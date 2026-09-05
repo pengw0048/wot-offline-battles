@@ -214,6 +214,11 @@ class GarageStore(object):
             compact_descr = _encode_bytes(record.get('compDescr'))
             if compact_descr is not None:
                 stored['compDescr'] = compact_descr
+            # The launcher reads this file without a client to resolve a
+            # compact descriptor with, so the save names its own vehicles.
+            type_name = record.get('vehicleTypeName')
+            if isinstance(type_name, str) and type_name:
+                stored['name'] = type_name
             outfits = {}
             if isinstance(record.get('outfits'), dict):
                 for raw_season, outfit_data in record['outfits'].items():
@@ -270,6 +275,24 @@ class GarageStore(object):
             'battleCrewReceipts': list(battle_receipts)[
                 -MAX_BATTLE_RECEIPTS:],
         }
+
+    def owned_vehicle_names(self):
+        """Return the ``nation:vehicle`` names this save owns.
+
+        A save written before records carried their names answers with the
+        vehicles it can name and leaves out the rest; the client fills the
+        missing ones in on its next start.
+        """
+        stored = self._read()
+        vehicles = (stored or {}).get('vehicles')
+        if not isinstance(vehicles, dict):
+            return []
+        names = []
+        for value in vehicles.values():
+            name = value.get('name') if isinstance(value, dict) else None
+            if isinstance(name, str) and name:
+                names.append(name)
+        return sorted(set(names))
 
     def owned_vehicle_types(self):
         """Return the vehicle type compact descriptors this save owns.

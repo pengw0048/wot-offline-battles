@@ -366,6 +366,9 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
         'eqsLayout': list(consumables),
         'inventoryItems': record_inventory_items,
         'vehicleTypeCompactDescr': vehicle_int_compact_descr,
+        # The launcher has no client to resolve a compact descriptor with, so
+        # the record carries the exact 'nation:vehicle' name the client uses.
+        'vehicleTypeName': str(descriptor.type.name),
     }
     return {
         'record': record,

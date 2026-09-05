@@ -594,6 +594,80 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         self.assertEqual({90011}, set(snapshot['vehicleTypeCompactDescrs']))
 
+    def test_a_save_written_before_names_gains_them_on_the_next_start(self):
+        """The launcher cannot resolve a compact descriptor on its own."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+
+        class _Store(object):
+            def __init__(self):
+                self.dirty = False
+                self.flushed = None
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return []
+
+            def mark_dirty(self):
+                self.dirty = True
+
+            def flush(self, candidate):
+                self.flushed = candidate
+                return True
+
+        store = _Store()
+        bootstrap._store = store
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            with mock.patch.object(
+                    bootstrap, '_validate_restored_garage', return_value=True):
+                self.assertTrue(bootstrap._restore_garage(snapshot))
+
+        self.assertTrue(store.dirty)
+        self.assertIs(snapshot, store.flushed)
+        self.assertEqual(
+            ['nation-0:vehicle-11', 'nation-0:vehicle-12',
+             'nation-1:vehicle-7'],
+            sorted(record['vehicleTypeName']
+                   for record in snapshot['vehicles']))
+
+    def test_a_save_that_already_names_its_vehicles_is_not_rewritten(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+
+        class _Store(object):
+            def __init__(self, names):
+                self.dirty = False
+                self.names = names
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return list(self.names)
+
+            def mark_dirty(self):
+                self.dirty = True
+
+            def flush(self, candidate):
+                raise AssertionError('nothing had to be migrated')
+
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            bootstrap._store = _Store([
+                record['vehicleTypeName'] for record in snapshot['vehicles']])
+            with mock.patch.object(
+                    bootstrap, '_validate_restored_garage', return_value=True):
+                self.assertTrue(bootstrap._restore_garage(snapshot))
+
+        self.assertFalse(bootstrap._store.dirty)
+
     def test_a_hidden_worker_never_reads_the_visible_client_save(self):
         """The worker owns no garage store and must not open that file."""
         (bootstrap, unused_callbacks, unused_compatibility,
@@ -896,13 +970,17 @@ class BootstrapLifecycleTests(unittest.TestCase):
         }
 
         class _Store(object):
-            def __init__(self):
+            def __init__(self, names=()):
                 self.dirty = False
                 self.flushed = None
+                self.names = list(names)
 
             def apply(self, candidate, validator=None):
                 validator(candidate)
                 return True
+
+            def owned_vehicle_names(self):
+                return list(self.names)
 
             def mark_dirty(self):
                 self.dirty = True
