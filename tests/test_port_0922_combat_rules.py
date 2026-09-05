@@ -76,7 +76,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.penetration(
             _shot(piercing=(200.0, 100.0), maximum=500.0),
             500.0, 1.0, 1.0,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         self.assertEqual(0.0, result[2])
@@ -100,7 +100,7 @@ class CombatRulesTests(unittest.TestCase):
 
         factor = combat_rules.sample_penetration_factor(low_roll)
         self.assertEqual(0.75, factor)
-        self.assertEqual([(0.75, 1.25)], draws)
+        self.assertEqual([(1.0, 0.1)], draws)
         self.assertEqual(
             30.0, combat_rules.sampled_piercing(
                 _shot(piercing=(40.0, 40.0)), 10.0, factor, 0.0))
@@ -112,7 +112,7 @@ class CombatRulesTests(unittest.TestCase):
                 dist=10.0, hitAngleCos=1.0, matInfo=hull,
                 compName='vehicleHull'),),
             pierce_loss=5.0, penetration_factor=factor,
-            random_uniform=lambda unused_low, unused_high: self.fail(
+            random_gauss=lambda unused_low, unused_high: self.fail(
                 'vehicle resolution must not draw penetration again'))
 
         self.assertEqual(2, result[0])
@@ -163,10 +163,10 @@ class CombatRulesTests(unittest.TestCase):
             _shot(piercing=(100.0, 100.0)), 50.0,
             (_collision(5.0, 1.0, screen, 'vehicleChassis'),
              _collision(5.2, 1.0, hull)),
-            random_uniform=one_roll)
+            random_gauss=one_roll)
 
         self.assertEqual(2, result[0])
-        self.assertEqual([(0.75, 1.25)], draws)
+        self.assertEqual([(1.0, 0.1)], draws)
 
     def test_two_caliber_normalization_has_an_exact_boundary(self):
         armor = 60.0
@@ -240,7 +240,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.penetration(
             _shot(kind='HOLLOW_CHARGE', piercing=(400.0, 400.0)),
             50.0, 60.0, 0.30,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(2, result[0])
 
@@ -355,7 +355,7 @@ class CombatRulesTests(unittest.TestCase):
 
         value = combat_rules.damage(
             shot, 1, 100.0,
-            random_uniform=lambda low, high: (low + high) * 0.5)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(70, value)
 
@@ -364,10 +364,10 @@ class CombatRulesTests(unittest.TestCase):
 
         low = combat_rules.damage(
             shot, 2, 100.0,
-            random_uniform=lambda minimum, unused_maximum: minimum)
+            random_gauss=lambda mean, sigma: mean - 2.5 * sigma)
         high = combat_rules.damage(
             shot, 2, 100.0,
-            random_uniform=lambda unused_minimum, maximum: maximum)
+            random_gauss=lambda mean, sigma: mean + 2.5 * sigma)
 
         self.assertEqual(300, low)
         self.assertEqual(500, high)
@@ -382,10 +382,10 @@ class CombatRulesTests(unittest.TestCase):
                 shot.shell.damage = (400.0, 165.0)
                 low = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_uniform=lambda minimum, unused_maximum: minimum)
+                    random_gauss=lambda mean, sigma: mean - 2.5 * sigma)
                 high = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_uniform=lambda unused_minimum, maximum: maximum)
+                    random_gauss=lambda mean, sigma: mean + 2.5 * sigma)
 
                 self.assertEqual(300, low)
                 self.assertEqual(500, high)
@@ -400,7 +400,7 @@ class CombatRulesTests(unittest.TestCase):
 
         result = combat_rules.resolve_hull_hit(
             _shot(piercing=(120.0, 120.0)), 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         # The 90 mm shell triggers the two-calibre normalization rule on the
@@ -601,7 +601,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.resolve_hull_hit(
             _shot(piercing=(160.0, 160.0)), 50.0, collisions,
             pierce_loss=50.0,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         self.assertEqual(70.0, result[3])
@@ -615,10 +615,10 @@ class CombatRulesTests(unittest.TestCase):
         shot = _shot(piercing=(160.0, 160.0), damage=240.0)
         clear = combat_rules.resolve_hull_hit(
             shot, 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
         crossed = combat_rules.resolve_hull_hit(
             shot, 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0,
+            random_gauss=lambda mean, unused_sigma: mean,
             pierce_loss=25.0)
 
         self.assertEqual(2, clear[0])
@@ -626,10 +626,10 @@ class CombatRulesTests(unittest.TestCase):
         self.assertEqual(
             combat_rules.damage(
                 shot, clear[0], 50.0,
-                random_uniform=lambda unused_low, unused_high: 1.0),
+                random_gauss=lambda mean, unused_sigma: mean),
             combat_rules.damage(
                 shot, crossed[0], 50.0,
-                random_uniform=lambda unused_low, unused_high: 1.0))
+                random_gauss=lambda mean, unused_sigma: mean))
 
     def test_collision_adapter_rejects_incomplete_1513_result(self):
         collision = types.SimpleNamespace(
@@ -777,13 +777,13 @@ class CombatRulesTests(unittest.TestCase):
             kind='HIGH_EXPLOSIVE', damage=400.0,
             explosion_radius=10.0)
 
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
         center = combat_rules.he_splash_damage(
-            shot, 0.0, 0.0, random_uniform=uniform)
+            shot, 0.0, 0.0, random_gauss=mean_roll)
         middle = combat_rules.he_splash_damage(
-            shot, 50.0, 0.5, random_uniform=uniform)
+            shot, 50.0, 0.5, random_gauss=mean_roll)
         edge = combat_rules.he_splash_damage(
-            shot, 0.0, 1.0, random_uniform=uniform)
+            shot, 0.0, 1.0, random_gauss=mean_roll)
 
         self.assertTrue(combat_rules.is_he(shot))
         self.assertEqual(10.0, combat_rules.he_radius(shot))
@@ -794,16 +794,16 @@ class CombatRulesTests(unittest.TestCase):
     def test_spall_liner_scales_the_he_armour_absorption_term(self):
         shot = _shot(
             kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
 
         bare = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform)
+            shot, 50.0, 0.0, random_gauss=mean_roll)
         lined = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform, spall_coefficient=1.5)
+            shot, 50.0, 0.0, random_gauss=mean_roll, spall_coefficient=1.5)
         direct_bare = combat_rules.damage(
-            shot, 1, 50.0, random_uniform=uniform)
+            shot, 1, 50.0, random_gauss=mean_roll)
         direct_lined = combat_rules.damage(
-            shot, 1, 50.0, random_uniform=uniform, spall_coefficient=1.5)
+            shot, 1, 50.0, random_gauss=mean_roll, spall_coefficient=1.5)
 
         # 400 * 0.5 - 1.3 * 50 * spall
         self.assertEqual(135, bare)
@@ -814,13 +814,13 @@ class CombatRulesTests(unittest.TestCase):
     def test_he_absorption_ignores_an_absent_or_invalid_spall_factor(self):
         shot = _shot(
             kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
         baseline = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform)
+            shot, 50.0, 0.0, random_gauss=mean_roll)
 
         for value in (None, 'x', float('nan'), float('inf'), 0.0, -2.0, 0.5):
             self.assertEqual(baseline, combat_rules.he_splash_damage(
-                shot, 50.0, 0.0, random_uniform=uniform,
+                shot, 50.0, 0.0, random_gauss=mean_roll,
                 spall_coefficient=value), value)
 
     def test_spall_coefficient_reads_the_1513_descriptor_default(self):
@@ -848,7 +848,7 @@ class CombatRulesTests(unittest.TestCase):
 
         value = combat_rules.he_splash_damage(
             shot, 50.0, 0.5,
-            random_uniform=lambda low, high: (low + high) * 0.5)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual((0.6, 1.0, 0.2), combat_rules.he_factors(shot))
         self.assertEqual(110, value)

@@ -245,7 +245,7 @@ class HEBlastSurfaceRuntimeTests(unittest.TestCase):
                 mock.patch.object(
                     battle, '_projectile_he_world_visible', visible), \
                 mock.patch.object(
-                    random, 'uniform',
+                    random, 'gauss',
                     side_effect=AssertionError('surface search must not roll')):
             contact = battle._projectile_he_blast_contact(
                 _meta(), record, target, _shot(), (0.0, 0.0, 0.0),
@@ -363,7 +363,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
 
     def _direct_fixture(self, kind='HIGH_EXPLOSIVE'):
         battle, unused_bigworld = _runtime()
-        shot = _shot(kind=kind)
+        shot = _shot(kind=kind, damage=400.0)
         meta = _meta(shot)
         source = types.SimpleNamespace(id=41, typeDescriptor=types.SimpleNamespace(
             gun=types.SimpleNamespace(shots=[])))
@@ -416,7 +416,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact', return_value=contact), \
-                mock.patch.object(random, 'uniform', return_value=400.0), \
+                mock.patch.object(random, 'gauss', return_value=400.0), \
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact',
                     return_value=blast) as blast_contact, \
@@ -454,7 +454,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact', return_value=contact), \
-                mock.patch.object(random, 'uniform', return_value=400.0), \
+                mock.patch.object(random, 'gauss', return_value=400.0), \
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact',
                     side_effect=AssertionError(
@@ -484,7 +484,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
                 {'BigWorld': bigworld_module, 'Math': math_module}), \
                 mock.patch.object(
                 combat_rules, 'resolve_armor_contact', return_value=contact), \
-                mock.patch.object(random, 'uniform', return_value=400.0), \
+                mock.patch.object(random, 'gauss', return_value=400.0), \
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact', return_value=None), \
                 mock.patch.object(
@@ -534,7 +534,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
             'gravity': (0.0, 0.0, 0.0),
         }
 
-        with mock.patch.object(random, 'uniform', return_value=640.0) as roll, \
+        with mock.patch.object(random, 'gauss', return_value=640.0) as roll, \
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact',
                     return_value=blast) as blast_contact, \
@@ -587,7 +587,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
             'gravity': (0.0, 0.0, 0.0),
         }
 
-        with mock.patch.object(random, 'uniform') as roll, \
+        with mock.patch.object(random, 'gauss') as roll, \
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact') as blast_contact:
             effects = battle._projectile_splash_effects(

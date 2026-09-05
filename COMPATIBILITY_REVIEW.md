@@ -362,11 +362,11 @@ contracts: `maxHpForShootingThrough` is `19`, and every listed material has
 `projectilePiercingPowerReduction` factor/minimum values `(0, 25)`. Version
 0.3.68 therefore lets AP, APCR and APHE continue only through an item whose
 scale-adjusted health is at most 19. Each accepted item leaves damage unchanged
-and adds a fixed 25 mm penetration loss; multiple items accumulate. The first
-operation that actually needs penetration lazily samples one shell factor and
-reuses it, while the range-dependent mean is evaluated at each tested obstacle
-distance and again at the vehicle. A pure miss or HE/HEAT stopped by a
-destructible consumes no penetration RNG. A sampled remainder below 1 mm makes
+and adds a fixed 25 mm penetration loss; multiple items accumulate. Each launch
+freezes one shell factor and reuses it, while the range-dependent mean is
+evaluated at each tested obstacle distance and again at the vehicle. Scene
+queries without an admitted projectile sample lazily only when penetration is
+needed. A sampled remainder below 1 mm makes
 the shell disappear at that
 obstacle. An above-threshold item may be destroyed but stops traversal. Under
 the pre-1.13 HE mechanics used by #1513, HE and HEAT stop at the first
@@ -376,12 +376,43 @@ The threshold and material reduction are exact pinned-resource evidence.
 Official same-family mechanics descriptions support the shell-family split,
 cumulative penetration reduction and unchanged damage. The proprietary retail
 0.9.22 server implementation and its exact operation order are not published,
-however. The lazy one-factor, per-tested-hit-range, then cumulative-reduction
+however. The one-factor, per-tested-hit-range, then cumulative-reduction
 order above is therefore documented as a high-confidence reconstruction rather than an exact
 server-source copy. The resulting fragile/module payload preserves its encoded
 shot bit, but the local manager order is unsynchronized: the copied projectile
 path does not deliver the retail server's later `damagedDestructibles` payload
 required to release a projectile-synchronized native order.
+
+Shell penetration and vehicle-damage rolls use a reconstruction of the public
+normal-distribution rule. The former uniform draw inside +/-25% overproduced
+both high and low rolls. [Overlord's February 2011 answer](https://wot-news.com/track/post/eu/Overlord/1298631177)
+describes normal damage, penetration and dispersion with a 2.5-sigma interval;
+[MrConway's June 2017 answer](https://wot-news.com/track/post/eu/MrConway/1497292760)
+still explicitly describes nonuniform penetration and damage. Accordingly,
+the shell value has mean equal to its descriptor value, standard deviation
+equal to 10% of that value, and limits of +/-25%. Out-of-interval samples are
+redrawn. **Resampling is an explicit reconstruction choice:** neither public
+answer identifies the outlier algorithm, and the 2011 sigma value is not
+exact #1513 server evidence. No claim of proprietary-server RNG equivalence
+follows from local distribution tests. This change covers the armour-damage
+channel even when a track material selects it; the separate devices-damage
+channel and aiming dispersion retain their existing laws.
+
+One accepted penetration factor remains frozen across range, obstacles,
+ordered vehicle layers and a ricochet continuation. AP/APCR continuations
+preserve penetration spent on external plates, use the selected ricochet
+plate's actual trajectory position/time/distance, and apply their retained
+base multiplier to later destructibles. The native query may be in a moving
+target's frozen frame; its selected collision fraction is mapped onto the
+corresponding projectile chord before creating the reflected segment.
+
+Independent affine and moving-plane tests exercise the real component adapter,
+chord, armour resolver and wire-effect parser for ordinary player/Bot AP/APCR
+hits. They check component transforms, impact points, material identity,
+relative incidence and reuse of the frozen roll. They establish local geometry
+and data flow, not the exact Windows native BSP implementation, presentation
+timing or parity with a live retail server. The stock penetration preview and
+AP/APCR normalization/material laws are unchanged.
 
 The complete streamed-slot boundary comes from the exact #1513 native path:
 `game.onChunkLoad(spaceID, chunkID, numDestructibles, isOutside)` writes

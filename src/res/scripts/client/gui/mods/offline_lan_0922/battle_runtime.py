@@ -12290,6 +12290,7 @@ class BattleRuntime(object):
         nearest_evidence = None
         nearest_fraction = 1.0
         nearest_query = None
+        nearest_trajectory_query = None
         nearest_collision_pose = None
         broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
         for key, record in self._projectile_chord_records(
@@ -12412,6 +12413,12 @@ class BattleRuntime(object):
                     nearest_evidence = evidence
                     nearest_fraction = fraction
                     nearest_query = (query_start, query_end)
+                    nearest_trajectory_query = {
+                        'start': tuple(start),
+                        'end': tuple(end),
+                        'absolute_start': float(absolute_start),
+                        'absolute_end': float(absolute_end),
+                    }
                     nearest_collision_pose = None
                 continue
             sweep_fractions = self._projectile_pose_sweep_fractions(
@@ -12509,6 +12516,16 @@ class BattleRuntime(object):
                     nearest_evidence = evidence
                     nearest_fraction = fraction
                     nearest_query = (query_start, query_end)
+                    nearest_trajectory_query = {
+                        'start': tuple(projectile_start),
+                        'end': tuple(projectile_end),
+                        'absolute_start': float(absolute_start) +
+                        (float(absolute_end) - float(absolute_start)) *
+                        segment_start_fraction,
+                        'absolute_end': float(absolute_start) +
+                        (float(absolute_end) - float(absolute_start)) *
+                        segment_end_fraction,
+                    }
                     nearest_collision_pose = segment_collision_pose
 
         scene_end_tuple = lerp3(start, end, nearest_fraction)
@@ -12554,6 +12571,7 @@ class BattleRuntime(object):
                 'collisions': nearest_collisions,
                 'collision_evidence': nearest_evidence,
                 'query': nearest_query,
+                'trajectory_query': nearest_trajectory_query,
                 'collision_pose': nearest_collision_pose,
                 'piercing_loss': meta['piercing_loss'],
                 'penetration_factor': meta.get('penetration_factor'),
@@ -12941,6 +12959,11 @@ class BattleRuntime(object):
                 'base_penetration_multiplier', 1.0))
         result = 1 if contact is None else contact['result']
         terminal_data['armor_contact'] = contact
+        terminal_data['ricochet_contact'] = None
+        if contact is not None and int(result) == 0:
+            terminal_data['ricochet_contact'] = (
+                self._projectile_ricochet_contact(
+                    meta, state, terminal_data, collisions, contact))
         terminal_data['world_normal'] = None
         if contact is not None and collision_evidence:
             matching = []
@@ -12958,13 +12981,7 @@ class BattleRuntime(object):
             record, critical_target, shot, trace_start, trace_end,
             collisions, result,
             historic=isinstance(collision_pose, dict))
-        damage_rolls = []
-
-        def capture_damage_roll(low, high):
-            """Record the exact roll the damage law is about to consume."""
-            rolled = random.uniform(low, high)
-            damage_rolls.append(rolled)
-            return rolled
+        damage_roll = combat_rules.shell_damage_roll(shot)
 
         critical_impact = self._vector(terminal_data['impact'])
         query_delta = query[1] - query[0]
@@ -12987,7 +13004,7 @@ class BattleRuntime(object):
             terminal_data['blast_impact'] = _xyz(critical_impact)
         damage = combat_rules.damage(
             shot, 2 if is_he else result, 0.0,
-            random_uniform=capture_damage_roll,
+            rolled_damage=damage_roll,
             spall_coefficient=tank_collision.descriptor_spall_coefficient(
                 getattr(critical_target, 'typeDescriptor', None)))
         blast_contact = None
@@ -13038,7 +13055,7 @@ class BattleRuntime(object):
             critical_target, critical)
         potential_damage = None
         if contact is not None:
-            potential_damage = int(damage_rolls[0]) if damage_rolls else 0
+            potential_damage = int(damage_roll)
         return self._projectile_effect(
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
@@ -13048,8 +13065,73 @@ class BattleRuntime(object):
                 contact is not None and
                 contact.get('layer') == 'structural'))
 
+    def _projectile_ricochet_contact(
+            self, meta, state, terminal_data, collisions, contact):
+        """Map the selected native plate back onto the projectile trajectory."""
+        current_time = self._projectile_elapsed_ms(meta, state)
+        current_distance = self._projectile_checked_distance(meta, state)
+        current_loss = self._projectile_checked_piercing_loss(meta)
+        result = {
+            'impact': tuple(terminal_data['impact']),
+            'resolved_time_ms': current_time,
+            'checked_distance': current_distance,
+            'piercing_loss': max(
+                current_loss,
+                _number(contact.get('accumulated_loss'), current_loss)),
+            'elapsed_delta': 0.0,
+        }
+        mapping = terminal_data.get('trajectory_query')
+        if mapping is None:
+            return result
+        query = terminal_data.get('query')
+        try:
+            query_length = float((query[1] - query[0]).length)
+            first_distance = min(
+                float(collision.dist) for collision in collisions)
+            contact_distance = float(contact['distance'])
+            trajectory_start = tuple(
+                float(mapping['start'][index]) for index in range(3))
+            trajectory_end = tuple(
+                float(mapping['end'][index]) for index in range(3))
+            absolute_start = float(mapping['absolute_start'])
+            absolute_end = float(mapping['absolute_end'])
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                OverflowError):
+            raise ValueError('ricochet trajectory mapping is malformed')
+        if query_length <= 0.000001 or absolute_end < absolute_start:
+            raise ValueError('ricochet trajectory mapping is degenerate')
+        first_fraction = first_distance / query_length
+        contact_fraction = contact_distance / query_length
+        if contact_fraction + 0.000001 < first_fraction:
+            raise ValueError('ricochet contact precedes the vehicle impact')
+        # Do not use lerp3 here: an exact ten-calibre extension may put the
+        # selected plate beyond the original chord and needs linear
+        # extrapolation from that chord's already-reviewed mapping.
+        trajectory_delta = tuple(
+            trajectory_end[index] - trajectory_start[index]
+            for index in range(3))
+        contact_impact = tuple(
+            trajectory_start[index] +
+            trajectory_delta[index] * contact_fraction
+            for index in range(3))
+        trajectory_length = math.sqrt(sum(
+            value * value for value in trajectory_delta))
+        fraction_delta = max(0.0, contact_fraction - first_fraction)
+        elapsed_delta = max(
+            0.0, (absolute_end - absolute_start) * fraction_delta)
+        result.update({
+            'impact': contact_impact,
+            'resolved_time_ms': current_time +
+            int(round(elapsed_delta * 1000.0)),
+            'checked_distance': current_distance +
+            trajectory_length * fraction_delta,
+            'elapsed_delta': elapsed_delta,
+        })
+        return result
+
     def _projectile_splash_effects(self, meta, impact, direct_key, state=None,
                                    visual_impact=None):
+
         source = self._projectile_source_entity(meta)
         shot = self._projectile_shot(meta)
         if not shot or not combat_rules.is_he(shot):
@@ -13307,18 +13389,33 @@ class BattleRuntime(object):
                 float(gravity[index]) * elapsed
                 for index in range(3))
         ricochet = None
+        ricochet_contact = (data.get('ricochet_contact')
+                             if isinstance(data, dict) else None)
+        ricochet_time = (int(ricochet_contact['resolved_time_ms'])
+                          if isinstance(ricochet_contact, dict) else
+                          self._projectile_elapsed_ms(meta, state))
+        ricochet_distance = (
+            float(ricochet_contact['checked_distance'])
+            if isinstance(ricochet_contact, dict) else
+            float(state.get('distance', 0.0)))
         if (outcome == 'impact' and hit_vehicle and direct is not None and
                 int(direct.get('shot_result', -1)) == 0 and
                 int(meta.get('ricochet_count', 0)) == 0 and
-                self._projectile_elapsed_ms(meta, state) <
-                int(meta.get('max_time_ms', 0)) and
-                float(state.get('distance', 0.0)) <
+                ricochet_time < int(meta.get('max_time_ms', 0)) and
+                ricochet_distance <
                 float(meta.get('max_distance', 0.0)) and
                 data.get('world_normal') is not None):
             shot = self._projectile_shot(meta)
             shell_kind = _field(_field(shot, 'shell', {}), 'kind', None)
             multiplier = combat_rules.first_ricochet_penetration_multiplier(
                 shell_kind)
+            if incoming is not None and isinstance(ricochet_contact, dict):
+                contact_elapsed = max(
+                    0.0, float(ricochet_contact.get('elapsed_delta', 0.0)))
+                incoming = tuple(
+                    incoming[index] +
+                    float(gravity[index]) * contact_elapsed
+                    for index in range(3))
             if incoming is not None:
                 reflected = ideal_reflection_velocity(
                     incoming, data['world_normal'])
@@ -13328,16 +13425,25 @@ class BattleRuntime(object):
                 speed = math.sqrt(sum(value * value for value in reflected))
                 if 0.000001 < speed <= lan_protocol.MAX_PROJECTILE_VELOCITY:
                     direction = tuple(value / speed for value in reflected)
+                    ricochet_impact = (
+                        tuple(ricochet_contact['impact'])
+                        if isinstance(ricochet_contact, dict) else impact)
                     segment_origin = tuple(
-                        impact[index] + direction[index] * 0.002
+                        ricochet_impact[index] + direction[index] * 0.002
                         for index in range(3))
                     ricochet = {
                         'state': state,
-                        'impact': impact,
+                        'impact': ricochet_impact,
                         'segment_origin': segment_origin,
                         'segment_velocity': reflected,
                         'base_penetration_multiplier': multiplier,
                         'direct': direct,
+                        'resolved_time_ms': ricochet_time,
+                        'checked_distance': ricochet_distance,
+                        'piercing_loss': (
+                            ricochet_contact['piercing_loss']
+                            if isinstance(ricochet_contact, dict) else
+                            self._projectile_checked_piercing_loss(meta)),
                     }
         wreck_hit = None
         if hit_vehicle and direct is None:
@@ -13423,18 +13529,21 @@ class BattleRuntime(object):
                     'authority_epoch': self._projectile_epoch,
                     'projectile_id': meta['projectile_id'],
                     'base_checked_ms': int(meta.get('base_checked_ms', 0)),
-                    'resolved_time_ms': self._projectile_elapsed_ms(
-                        meta, state),
+                    'resolved_time_ms': int(pending.get(
+                        'resolved_time_ms',
+                        self._projectile_elapsed_ms(meta, state))),
                     'impact': list(pending['impact']),
                     'segment_origin': list(pending['segment_origin']),
                     'segment_velocity': list(pending['segment_velocity']),
                     'base_penetration_multiplier': pending[
                         'base_penetration_multiplier'],
                     'direct': copy.deepcopy(pending['direct']),
-                    'checked_distance': self._projectile_checked_distance(
-                        meta, state),
-                    'piercing_loss': self._projectile_checked_piercing_loss(
-                        meta),
+                    'checked_distance': max(
+                        self._projectile_checked_distance(meta, state),
+                        _number(pending.get('checked_distance'), 0.0)),
+                    'piercing_loss': max(
+                        self._projectile_checked_piercing_loss(meta),
+                        _number(pending.get('piercing_loss'), 0.0)),
                     'penetration_factor': float(
                         meta.get('penetration_factor', 1.0)),
                     'destructibles': copy.deepcopy(
@@ -21371,6 +21480,11 @@ class BattleRuntime(object):
         initial_piercing_loss = max(
             0.0, _number(initial_piercing_loss, 0.0))
         distance_offset = max(0.0, _number(distance_offset, 0.0))
+        base_penetration_multiplier = 1.0
+        if isinstance(projectile_state, dict):
+            base_penetration_multiplier = _number(
+                (projectile_state.get('payload') or {}).get(
+                    'base_penetration_multiplier'), 1.0)
         if self._destructibles is None:
             hit = self._runtime.bigworld.wg_collideSegment(
                 self._avatar.spaceID, start, end, 128)
@@ -21416,7 +21530,8 @@ class BattleRuntime(object):
                     combat_rules.sampled_piercing(
                         shot, piercing_distance,
                         penetration_factor,
-                        piercing_loss) < 1.0):
+                        piercing_loss,
+                        base_penetration_multiplier) < 1.0):
                 return {
                     'world_distance': obstacle_distance,
                     'piercing_loss': piercing_loss,

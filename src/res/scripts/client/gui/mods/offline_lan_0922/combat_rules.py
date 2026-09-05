@@ -69,7 +69,7 @@ def _offh_material_flag(material, name, default):
 
 def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 		initial_pierce_loss=0.0, penetration_factor=None,
-		base_penetration_multiplier=1.0):
+		base_penetration_multiplier=1.0, random_gauss=None):
 	'''Resolve the terminal external or structural plate in projectile order.
 
 	Returns a contact dictionary for the plate that stops external traversal or
@@ -104,7 +104,7 @@ def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 			continue
 		_comp = _h[3] if len(_h) > 3 else None
 		if factor is None:
-			factor = random.uniform(0.75, 1.25)
+			factor = sample_penetration_factor(random_gauss)
 		if base_pierce is None:
 			base_pierce = (_offh_range_piercing(shot, dist_m) *
 				float(base_penetration_multiplier) * float(factor))
@@ -176,11 +176,12 @@ def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 
 
 def _offh_resolve_hull_hit(shot, dist_m, all_hits, initial_pierce_loss=0.0,
-		penetration_factor=None, base_penetration_multiplier=1.0):
+		penetration_factor=None, base_penetration_multiplier=1.0,
+		random_gauss=None):
 	'''Keep the legacy structural-hit tuple contract unchanged.'''
 	contact = _offh_resolve_armor_contact(
 		shot, dist_m, all_hits, initial_pierce_loss, penetration_factor,
-		base_penetration_multiplier)
+		base_penetration_multiplier, random_gauss)
 	if contact is None or contact['layer'] != 'structural':
 		return None
 	return (contact['result'], contact['effective_armor'],
@@ -335,7 +336,7 @@ def _offh_he_apply_tuning(overrides):
 
 def _offh_penetration(shot, dist_m, armor, hit_angle_cos, pierce_loss=0.0,
 		penetration_factor=None, material=None, allow_ricochet=True,
-		base_penetration_multiplier=1.0):
+		base_penetration_multiplier=1.0, random_gauss=None):
 	'''Armour test shared by the player and by bot-vs-bot fire.
 
 	Returns (result, eff_armor, pierce): 0 ricochet, 1 no penetration, 2 penetration.
@@ -358,7 +359,7 @@ def _offh_penetration(shot, dist_m, armor, hit_angle_cos, pierce_loss=0.0,
 	pierce = (_offh_range_piercing(shot, dist_m) *
 		float(base_penetration_multiplier))
 	if penetration_factor is None:
-		penetration_factor = random.uniform(0.75, 1.25)
+		penetration_factor = sample_penetration_factor(random_gauss)
 	pierce *= float(penetration_factor)
 	# spaced armour already crossed (tracks, external devices) is subtracted here
 	pierce -= float(pierce_loss or 0.0)
@@ -602,31 +603,47 @@ def he_blast_contact(shot, burst, start, end, collisions, rolled_damage,
 	return None
 
 
-def _call_with_uniform(function, uniform, *args):
-    if uniform is None:
-        return function(*args)
-    original = random.uniform
-    random.uniform = uniform
-    try:
-        return function(*args)
-    finally:
-        random.uniform = original
+def sample_shell_value(mean, random_gauss=None):
+    """Reconstruct the publicly described +/-25%, 2.5-sigma shell roll.
+
+    WG described penetration and vehicle damage as normal, not uniform:
+    https://wot-news.com/track/post/eu/Overlord/1298631177
+    https://wot-news.com/track/post/eu/MrConway/1497292760
+    Those statements do not specify outlier handling. Conditional resampling
+    is an explicit reconstruction choice, not a recovered #1513 server ABI;
+    it preserves the normal density inside the stated interval without
+    inventing probability mass at the endpoints. See COMPATIBILITY_REVIEW.
+    """
+    mean = float(mean)
+    if mean != mean or abs(mean) == float('inf'):
+        raise ValueError('shell roll mean must be finite')
+    if mean <= 0.0:
+        return 0.0
+    sampler = random.gauss if random_gauss is None else random_gauss
+    minimum, maximum = mean * 0.75, mean * 1.25
+    sigma = mean * 0.25 / 2.5
+    while True:
+        value = float(sampler(mean, sigma))
+        if value != value or abs(value) == float('inf'):
+            raise ValueError('shell roll must be finite')
+        if minimum <= value <= maximum:
+            return value
+
 
 
 def penetration(shot, distance, armor, hit_angle_cos,
-                pierce_loss=0.0, random_uniform=None,
+                pierce_loss=0.0, random_gauss=None,
                 penetration_factor=None, material=None,
                 base_penetration_multiplier=1.0):
-    return _call_with_uniform(
-        _offh_penetration, random_uniform, legacy_shot(shot),
+    return _offh_penetration(
+        legacy_shot(shot),
         distance, armor, hit_angle_cos, pierce_loss, penetration_factor,
-        material, True, base_penetration_multiplier)
+        material, True, base_penetration_multiplier, random_gauss)
 
 
-def sample_penetration_factor(random_uniform=None):
-    """Draw the one #1513 penetration random factor owned by a shell."""
-    sampler = random.uniform if random_uniform is None else random_uniform
-    return float(sampler(0.75, 1.25))
+def sample_penetration_factor(random_gauss=None):
+    """Draw the one penetration factor frozen and owned by a shell."""
+    return sample_shell_value(1.0, random_gauss)
 
 
 def range_piercing(shot, distance):
@@ -657,23 +674,23 @@ def nominal_piercing_after_loss(shot, distance, pierce_loss=0.0):
                float(pierce_loss or 0.0))
 
 
-def resolve_armor_contact(shot, distance, collisions, random_uniform=None,
+def resolve_armor_contact(shot, distance, collisions, random_gauss=None,
                           pierce_loss=0.0, penetration_factor=None,
                           base_penetration_multiplier=1.0):
     """Return the terminal external or structural armor contact."""
-    return _call_with_uniform(
-        _offh_resolve_armor_contact, random_uniform, legacy_shot(shot),
+    return _offh_resolve_armor_contact(
+        legacy_shot(shot),
         distance, collision_layers(collisions), pierce_loss,
-        penetration_factor, base_penetration_multiplier)
+        penetration_factor, base_penetration_multiplier, random_gauss)
 
 
-def resolve_hull_hit(shot, distance, collisions, random_uniform=None,
+def resolve_hull_hit(shot, distance, collisions, random_gauss=None,
                      pierce_loss=0.0, penetration_factor=None,
                      base_penetration_multiplier=1.0):
-    return _call_with_uniform(
-        _offh_resolve_hull_hit, random_uniform, legacy_shot(shot),
+    return _offh_resolve_hull_hit(
+        legacy_shot(shot),
         distance, collision_layers(collisions), pierce_loss,
-        penetration_factor, base_penetration_multiplier)
+        penetration_factor, base_penetration_multiplier, random_gauss)
 
 
 def he_nominal_armor(collisions, descriptor=None):
@@ -681,9 +698,8 @@ def he_nominal_armor(collisions, descriptor=None):
         collision_layers(collisions), descriptor)
 
 
-def damage(shot, result, nominal_armor, random_uniform=None,
-           spall_coefficient=1.0):
-    """Apply the legacy direct-damage formula to the resolved vehicle hit."""
+def shell_damage_roll(shot, random_gauss=None):
+    """Draw vehicle damage before armour absorption and integer HP display."""
     converted = legacy_shot(shot)
     shell = converted.get('shell') or {}
     raw = shell.get('damage')
@@ -694,8 +710,16 @@ def damage(shot, result, nominal_armor, random_uniform=None,
             average = float(raw)
         except (TypeError, ValueError):
             return 0
-    uniform = random_uniform or random.uniform
-    rolled = int(uniform(average * 0.75, average * 1.25))
+    return sample_shell_value(average, random_gauss)
+
+
+def damage(shot, result, nominal_armor, random_gauss=None,
+           spall_coefficient=1.0, rolled_damage=None):
+    """Apply direct damage, optionally reusing the caller's exact frozen roll."""
+    converted = legacy_shot(shot)
+    if rolled_damage is None:
+        rolled_damage = shell_damage_roll(converted, random_gauss)
+    rolled = int(rolled_damage)
     if int(result) == 2:
         return rolled
     if _offh_is_he(converted):
@@ -717,19 +741,9 @@ def he_factors(shot):
 
 
 def he_splash_damage(shot, nominal_armor, distance_fraction,
-                     random_uniform=None, spall_coefficient=1.0):
+                     random_gauss=None, spall_coefficient=1.0):
     converted = legacy_shot(shot)
-    shell = converted.get('shell') or {}
-    raw = shell.get('damage')
-    try:
-        average = float(raw[0])
-    except (TypeError, ValueError, IndexError):
-        try:
-            average = float(raw)
-        except (TypeError, ValueError):
-            return 0
-    uniform = random_uniform or random.uniform
-    rolled = uniform(average * 0.75, average * 1.25)
+    rolled = shell_damage_roll(converted, random_gauss)
     return _offh_he_damage(
         converted, rolled, nominal_armor, distance_fraction,
         spall_coefficient)
