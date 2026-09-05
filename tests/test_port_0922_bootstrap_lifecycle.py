@@ -942,6 +942,22 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual(0, snapshot['wallet']['freeXP'])
         self.assertEqual(30, snapshot['accountSlots'])
         self.assertEqual(30, snapshot['accountBerths'])
+        # The recruit window prices the three schools from this table and the
+        # garage charges from it, so a career pays and a sandbox does not.
+        self.assertEqual(
+            [0, 20000, 0],
+            [cost['credits'] for cost in snapshot['tankmanCosts']])
+        self.assertEqual(
+            [0, 0, 200], [cost['gold'] for cost in snapshot['tankmanCosts']])
+
+    def test_a_sandbox_recruits_for_nothing(self):
+        unused_bootstrap, snapshot = self._build()
+
+        self.assertEqual(
+            [0, 0, 0], [cost['credits'] for cost in snapshot['tankmanCosts']])
+        self.assertEqual(
+            [50, 75, 100],
+            [cost['roleLevel'] for cost in snapshot['tankmanCosts']])
 
     def test_a_new_account_has_a_tech_tree_left_to_research(self):
         """The sandbox unlocks the catalogue; a career must not."""

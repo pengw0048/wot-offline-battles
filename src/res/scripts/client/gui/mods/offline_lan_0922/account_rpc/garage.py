@@ -1273,6 +1273,131 @@ class GarageState(object):
         self.revision += 1
         return tankman_inventory_id
 
+    def buy_tankman(self, vehicle_type_compact_descr, role_index,
+                    cost_type_index):
+        """Recruit one crew member into the barracks.
+
+        #1513's recruit window sends the vehicle they are trained for, the
+        role as an index into ``tankmen.SKILL_NAMES``, and which of the three
+        schools was chosen.  The account carries the same three schools the
+        window priced them from, so what the player was shown is what is
+        charged.
+
+        The window lists every vehicle the account has unlocked, not the ones
+        it owns: its criteria are ``REQ_CRITERIA.UNLOCKED`` without
+        ``INVENTORY``.  Hiring a crew before buying the tank is the case the
+        barracks exists for, so owning one is not required here either.
+        """
+        compact_descr = _int(vehicle_type_compact_descr)
+        if compact_descr not in self._unlocks():
+            raise GarageError(
+                'vehicle type %d is not researched' % compact_descr)
+        nation_id, vehicle_type_id, roles = self._vehicle_type_crew(
+            compact_descr)
+        role = self._crew_role_name(role_index)
+        if role not in [row[0] for row in roles]:
+            raise GarageError(
+                'this vehicle has no %s in its crew' % role)
+        self._require_berths(1)
+        tankman_id, tankman_compact_descr = self._recruit(
+            nation_id, vehicle_type_id, role, cost_type_index)
+        self._to_barracks(tankman_id, tankman_compact_descr)
+        self.revision += 1
+        return tankman_id
+
+    def _vehicle_type_crew(self, vehicle_type_compact_descr):
+        """Return one vehicle type's nation, id and crew roles."""
+        vehicles = self._vehicles_module()
+        try:
+            vehicle_type = vehicles.getVehicleType(
+                _int(vehicle_type_compact_descr))
+            nation_id, type_id = vehicle_type.id
+            return _int(nation_id), _int(type_id), tuple(
+                vehicle_type.crewRoles)
+        except Exception as error:
+            raise GarageError('unknown vehicle type: %s' % error)
+
+    def buy_and_equip_tankman(self, vehicle_inventory_id, slot,
+                              cost_type_index):
+        """Recruit one crew member straight into a seat."""
+        record = self._record(vehicle_inventory_id, touch=False)
+        roles = self._crew_roles(record)
+        slot = _int(slot)
+        crew = list(record.get('crew') or ())
+        if slot < 0 or slot >= len(crew) or len(crew) != len(roles):
+            raise GarageError('vehicle has no crew seat %d' % slot)
+        occupant = crew[slot]
+        if occupant is not None:
+            # The newcomer is not coming out of the barracks, so the seat's
+            # occupant needs a berth of their own.
+            self._require_berths(1)
+        vehicles = self._vehicles_module()
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            nation_id, vehicle_type_id = descriptor.type.id
+        except Exception as error:
+            raise GarageError('the client refused the vehicle: %s' % error)
+        tankman_id, compact_descr = self._recruit(
+            _int(nation_id), _int(vehicle_type_id), roles[slot][0],
+            cost_type_index)
+        rows = dict(record.get('tankmen') or {})
+        if occupant is not None:
+            self._to_barracks(occupant, rows.pop(occupant))
+        rows[tankman_id] = compact_descr
+        crew[slot] = tankman_id
+        record['crew'] = crew
+        record['tankmen'] = rows
+        self._touched.add(_int(record.get('id', 0)))
+        self._touched_tankmen.add(tankman_id)
+        self.revision += 1
+        return tankman_id
+
+    def _recruit(self, nation_id, vehicle_type_id, role, cost_type_index):
+        """Charge one recruitment and return the crew member it bought."""
+        cost = self._tankman_cost(cost_type_index)
+        tankmen = self._tankmen_module()
+        try:
+            # generateTankmen's isPremium selects the premium name and icon
+            # groups through generatePassport, which is not the same thing as
+            # the school's gold price.  The stock garage builds every crew
+            # member with False, so a recruit gets the same faces.
+            compact_descrs = list(tankmen.generateTankmen(
+                _int(nation_id), _int(vehicle_type_id), ((role,),), False,
+                _int(cost.get('roleLevel', 0)),
+                tankmen.getSkillsMask(()), False))
+        except Exception as error:
+            raise GarageError('the client refused the recruit: %s' % error)
+        if len(compact_descrs) != 1:
+            raise GarageError('the client produced no crew member to recruit')
+        # Charge only once the client has actually produced the crew member,
+        # so a refusal never costs the player anything.
+        self._charge(cost)
+        return self._next_tankman_id(), compact_descrs[0]
+
+    def _tankman_cost(self, cost_type_index):
+        costs = self._snapshot.get('tankmanCosts')
+        if not isinstance(costs, (list, tuple)) or not costs:
+            from gui.mods.offline_lan_0922.account_rpc import data
+
+            costs = data.DEFAULT_TANKMAN_COSTS
+        index = _int(cost_type_index)
+        if not 0 <= index < len(costs):
+            raise GarageError('unknown recruitment school %r'
+                              % (cost_type_index,))
+        return dict(costs[index])
+
+    def _crew_role_name(self, role_index):
+        tankmen = self._tankmen_module()
+        names = getattr(tankmen, 'SKILL_NAMES', ())
+        index = _int(role_index)
+        try:
+            role = names[index]
+        except (IndexError, TypeError):
+            raise GarageError('unknown crew role index %r' % (role_index,))
+        if role not in tuple(getattr(tankmen, 'ROLES', ()) or ()):
+            raise GarageError('%r is not a crew role' % (role,))
+        return role
+
     def _seated_record(self, tankman_inventory_id):
         wanted = _int(tankman_inventory_id)
         for record in self._records():

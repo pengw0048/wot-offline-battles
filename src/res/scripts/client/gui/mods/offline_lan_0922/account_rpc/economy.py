@@ -67,6 +67,33 @@ CAREER_WALLET = {
 SANDBOX_WALLET = {
     CREDITS: SANDBOX_CREDITS, GOLD: SANDBOX_GOLD, FREE_XP: SANDBOX_FREE_XP}
 
+# The three recruitment schools #1513 offers, in the order its shop data lists
+# them: ``Shop.buyTankman`` sends the player's choice as an index into this
+# tuple, and ``ShopCommonStats.tankmanCost`` is what the recruit window reads
+# to price them.  The prices are server state the client never receives, so
+# free, 20000 credits and 200 gold are the long-published retail numbers,
+# chosen the same way the gold exchange rate and the garage slot price were.
+# ``baseRoleLoss`` and ``classChangeRoleLoss`` stay at zero because retraining
+# does not exist offline yet, and the recruit window reads both.
+def _tankman_cost(credits_amount, gold, role_level, premium=False):
+    return {
+        'credits': credits_amount, 'gold': gold, 'roleLevel': role_level,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
+        'isPremium': premium,
+    }
+
+
+CAREER_TANKMAN_COSTS = (
+    _tankman_cost(0, 0, 50),
+    _tankman_cost(20000, 0, 75),
+    _tankman_cost(0, 200, 100, premium=True),
+)
+SANDBOX_TANKMAN_COSTS = (
+    _tankman_cost(0, 0, 50),
+    _tankman_cost(0, 0, 75),
+    _tankman_cost(0, 0, 100, premium=True),
+)
+
 
 class EconomyError(Exception):
     pass

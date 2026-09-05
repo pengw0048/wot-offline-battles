@@ -63,6 +63,11 @@ vehicles, modules, ammunition and consumables are researched and bought in the
 garage at this client's own prices. Gold is spent but not earned, so premium
 vehicles and gold ammunition are paid for out of the gold the launcher grants.
 
+Crew members are recruited from the same three schools the game offers, at
+50%, 75% or 100% of their role: free, 20000 credits and 200 gold in a career,
+and free in a fully unlocked save. A recruit goes to the barracks or straight
+into a seat.
+
 The barracks holds the crew members no vehicle is carrying. Selling a vehicle
 can send its crew there instead of dismissing them, a seat can be unloaded and
 filled again, and a crew member can move straight from one tank to another;

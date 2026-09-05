@@ -52,7 +52,7 @@ def _garage(context):
     return state
 
 
-def _fitting(context, mutate):
+def _fitting(context, mutate, extension=None):
     """Apply one fitting mutation and push the resulting inventory diff.
 
     #1513 refreshes the garage from ``PlayerAccount.update``, which unpickles
@@ -67,9 +67,12 @@ def _fitting(context, mutate):
     state.touched_vehicles()
     state.touched_items()
     try:
-        mutate(state)
+        outcome = mutate(state)
     except garage.GarageError as error:
         return Result(commands.RES_FAILURE, str(error))
+    # A few #1513 callbacks read a value out of the response's ext dictionary
+    # rather than re-reading the inventory, so the mutation can name one.
+    ext = None if extension is None else extension(outcome)
     context['selected_vehicle'] = state.snapshot()
     mutated = _clock()
     store = context.get('garage_store')
@@ -82,7 +85,7 @@ def _fitting(context, mutate):
     push = context.get('push_update')
     if not callable(push):
         _report_fitting_cost(started, mutated, saved, saved, None)
-        return Result(commands.RES_SUCCESS)
+        return Result(commands.RES_SUCCESS, ext=ext)
     push_and_wait = context.get('push_update_and_wait')
 
     touched = state.touched_vehicles()
@@ -111,7 +114,7 @@ def _fitting(context, mutate):
         _report_fitting_cost(started, mutated, saved, built, diff)
 
     return Result(
-        commands.RES_SUCCESS, before_response=publish,
+        commands.RES_SUCCESS, ext=ext, before_response=publish,
         wait_for_before_response=True)
 
 
@@ -235,6 +238,28 @@ def _dismiss_tankman(context, args):
     if len(args) < 1:
         return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
     return _fitting(context, lambda state: state.dismiss_tankman(args[0]))
+
+
+def _buy_tankman(context, args):
+    # Shop.buyTankman -> _doCmdInt4(CMD_BUY_TMAN, cacheRev, vehTypeCompDescr,
+    # roleIdx, tmanCostTypeIdx), where roleIdx is tankmen.SKILL_INDICES[role].
+    # Its callback reads ext['tmanInvID'], so the response has to carry it.
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context,
+        lambda state: state.buy_tankman(args[1], args[2], args[3]),
+        extension=lambda tankman_id: {'tmanInvID': int(tankman_id)})
+
+
+def _buy_and_equip_tankman(context, args):
+    # Shop.buyAndEquipTankman -> _doCmdInt4(CMD_BUY_AND_EQUIP_TMAN, cacheRev,
+    # vehInvID, slot, tmanCostTypeIdx).
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context,
+        lambda state: state.buy_and_equip_tankman(args[1], args[2], args[3]))
 
 
 def _buy_item(context, args):
@@ -552,6 +577,8 @@ HANDLERS = {
     commands.CMD_TRAINING_TMAN: _train_tankman,
     commands.CMD_EQUIP_TMAN: _equip_tankman,
     commands.CMD_DISMISS_TMAN: _dismiss_tankman,
+    commands.CMD_BUY_TMAN: _buy_tankman,
+    commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,
     commands.CMD_BUY_ITEM: _buy_item,
     commands.CMD_UNLOCK: _unlock,
     commands.CMD_EXCHANGE: _exchange,

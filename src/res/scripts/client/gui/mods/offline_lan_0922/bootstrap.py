@@ -689,6 +689,8 @@ def _selected_vehicle(config, restore_saved=True):
                              economy.SANDBOX_GARAGE_SLOTS),
             'accountBerths': (economy.CAREER_BARRACKS_BERTHS if career else
                               economy.SANDBOX_BARRACKS_BERTHS),
+            'tankmanCosts': (economy.CAREER_TANKMAN_COSTS if career else
+                             economy.SANDBOX_TANKMAN_COSTS),
             'nextInventoryID': len(records) + 1,
             'defaultVehicleSettings': default_settings,
         })

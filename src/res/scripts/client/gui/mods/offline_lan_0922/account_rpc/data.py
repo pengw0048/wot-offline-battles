@@ -40,6 +40,30 @@ BATTLE_HERO_ACHIEVEMENTS = frozenset((
     'steelwall', 'supporter', 'scout', 'evileye'))
 
 
+DEFAULT_TANKMAN_COSTS = (
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 50,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False,
+    },
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 75,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False,
+    },
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 100,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': True,
+    },
+)
+
+
+def _tankman_costs(vehicle):
+    """Return the account's three recruitment choices, positionally."""
+    costs = vehicle.get('tankmanCosts')
+    if not isinstance(costs, (list, tuple)) or len(costs) != 3:
+        return DEFAULT_TANKMAN_COSTS
+    return tuple(dict(cost) for cost in costs)
+
+
 def _vehicle_records(vehicle):
     records = vehicle.get('vehicles')
     if records is None:
@@ -683,25 +707,11 @@ def shop(revision=0, selected_vehicle=None):
                 'credits': 0, 'gold': 0, 'xpReuseFraction': 1.0,
             },
         },
-        # The three native recruitment choices are positional.  Keep their
-        # complete descriptor dictionaries even though offline prices are 0.
-        'tankmanCost': (
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 50,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': False,
-            },
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 75,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': False,
-            },
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 100,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': True,
-            },
-        ),
+        # The three native recruitment choices are positional: the recruit
+        # window prices them from here and sends back the index.  The account
+        # carries the same table, so what the window shows is what the garage
+        # charges.
+        'tankmanCost': _tankman_costs(vehicle),
         'premiumCost': {},
         # RefSystem.__update indexes posByXPinTeam directly.  Once this dict is
         # non-empty, its #1513 helpers also index the other three values, so

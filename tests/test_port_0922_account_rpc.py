@@ -252,6 +252,47 @@ class AccountRpcTests(unittest.TestCase):
         self.assertEqual(diff['inventory'],
                          refresh.call_args[0][0]['inventory'])
 
+    def test_a_recruit_answers_through_the_ext_response_the_shop_reads(self):
+        """Shop.buyTankman's callback reads ext['tmanInvID'] and nothing else.
+
+        A plain onCmdResponse leaves the recruit window with no id to select,
+        so the whole recruitment has to travel the pickled ext path.
+        """
+        snapshot = _full_garage_snapshot()
+        snapshot['accountBerths'] = 4
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+
+        vehicles = types.SimpleNamespace(
+            getVehicleType=lambda compact_descr: types.SimpleNamespace(
+                id=(0, 1), crewRoles=(('commander',), ('driver',))))
+        tankmen = types.SimpleNamespace(
+            SKILL_NAMES=('reserved', 'commander', 'radioman', 'driver'),
+            ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
+            getSkillsMask=lambda names: 0,
+            generateTankmen=lambda *args: [b'recruit'])
+        context = {
+            'garage': account_requests.garage.GarageState(
+                snapshot, vehicles_module=vehicles, tankmen_module=tankmen),
+        }
+        server = FakeServer(
+            lambda: self.player,
+            lambda delay, fn: self.pending.append((delay, fn)), context)
+
+        server.doCmdInt4(51, commands.CMD_BUY_TMAN, 0, 50001, 3, 0)
+        # The response waits for the garage refresh, which schedules its own
+        # callback, so drain the queue rather than assuming one step.
+        while self.pending:
+            self._run()
+
+        request_id, result_id, error, ext = self.player.ext_responses[0]
+        self.assertEqual(51, request_id)
+        self.assertEqual(commands.RES_SUCCESS, result_id)
+        self.assertEqual('', error)
+        tankman_id = pickle.loads(ext)['tmanInvID']
+        self.assertEqual(
+            {tankman_id: b'recruit'},
+            context['garage'].snapshot()['barracksTankmen'])
+
     def test_add_skill_success_waits_for_current_vehicle_refresh(self):
         trace = []
         snapshot = _full_garage_snapshot()

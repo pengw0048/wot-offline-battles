@@ -212,14 +212,29 @@ def _modules():
     vehicles = types.SimpleNamespace(
         VehicleDescr=lambda compactDescr: _Descriptor(compactDescr),
         getDefaultAmmoForGun=lambda gun: [20010, 30, 20011, 15],
+        getVehicleType=lambda compact_descr: types.SimpleNamespace(
+            id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES),
         getTypeOfCompactDescr=item_type)
+    # #1513's own table, out of items/components/skills_constants.pyc: the
+    # five roles come first and every command sends an index into it.
     skill_names = [
         'unused_skill_%d' % index for index in range(61)]
-    skill_names[:3] = ['repair', 'camouflage', 'brotherhood']
+    skill_names[:10] = [
+        'reserved', 'commander', 'radioman', 'driver', 'gunner', 'loader',
+        'repair', 'fireFighting', 'camouflage', 'brotherhood']
     skill_names[48] = 'loader_intuition'
+
+    def generate_tankmen(nation_id, vehicle_type_id, roles, is_premium,
+                         role_level, skills_mask, is_preview):
+        return [b'tman:new:%s#%d' % (role[0].encode('ascii'), role_level)
+                for role in roles]
+
     tankmen = types.SimpleNamespace(
         TankmanDescr=_TankmanDescriptor,
-        SKILL_NAMES=tuple(skill_names))
+        SKILL_NAMES=tuple(skill_names),
+        ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
+        getSkillsMask=lambda names: 0,
+        generateTankmen=generate_tankmen)
     return vehicles, tankmen
 
 
@@ -406,7 +421,7 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual(0, state.revision)
 
     def test_a_crew_skill_rebuilds_only_that_tankman(self):
-        self.state.add_tankman_skill(101, 2)
+        self.state.add_tankman_skill(101, 9)
 
         self.assertEqual(
             b'tman:101|brotherhood', self._record()['tankmen'][101])
@@ -418,10 +433,10 @@ class GarageStateTests(unittest.TestCase):
 
     def test_an_unknown_tankman_is_refused(self):
         with self.assertRaises(self.garage.GarageError):
-            self.state.add_tankman_skill(999, 0)
+            self.state.add_tankman_skill(999, 6)
 
     def test_dropping_skills_clears_them(self):
-        self.state.add_tankman_skill(101, 0)
+        self.state.add_tankman_skill(101, 6)
         self.state.drop_tankman_skills(101)
 
         self.assertEqual(b'tman:101|', self._record()['tankmen'][101])
@@ -698,7 +713,7 @@ class GarageStateTests(unittest.TestCase):
         state = self._two_seat_state()
         state.equip_tankman(9, 0, -1)
 
-        state.add_tankman_skill(101, 2)
+        state.add_tankman_skill(101, 9)
         state.train_tankman(101, 10)
 
         # Ten free experience buys ten times as much crew experience.
@@ -717,6 +732,157 @@ class GarageStateTests(unittest.TestCase):
         # The crew member in the barracks fought no battle.
         self.assertEqual(
             {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
+    # ---- recruiting -----------------------------------------------------
+
+    CAREER_COSTS = (
+        {'credits': 0, 'gold': 0, 'roleLevel': 50,
+         'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False},
+        {'credits': 20000, 'gold': 0, 'roleLevel': 75,
+         'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False},
+        {'credits': 0, 'gold': 200, 'roleLevel': 100,
+         'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': True},
+    )
+
+    def _recruiting_state(self, berths=4, credits_amount=100000, gold=1000,
+                          unlocks=(50001,)):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = berths
+        snapshot['tankmanCosts'] = self.CAREER_COSTS
+        snapshot['unlockItemCompactDescrs'] = set(unlocks)
+        snapshot['wallet'] = {
+            'credits': credits_amount, 'gold': gold, 'freeXP': 0}
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_recruit_arrives_in_the_barracks_at_the_school_paid_for(self):
+        """The window prices the three schools from the same table."""
+        state = self._recruiting_state()
+
+        # SKILL_NAMES[3] is 'driver'; the recruit window sends that index.
+        tankman_id = state.buy_tankman(50001, 3, 1)
+
+        self.assertEqual(103, tankman_id)
+        self.assertEqual(
+            {103: b'tman:new:driver#75'},
+            state.snapshot()['barracksTankmen'])
+        self.assertEqual(100000 - 20000, state.snapshot()['wallet']['credits'])
+
+    def test_the_hundred_per_cent_school_is_paid_for_in_gold(self):
+        state = self._recruiting_state()
+
+        state.buy_tankman(50001, 1, 2)
+
+        self.assertEqual(1000 - 200, state.snapshot()['wallet']['gold'])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(
+            b'tman:new:commander#100',
+            state.snapshot()['barracksTankmen'][103])
+
+    def test_an_account_that_cannot_pay_recruits_nobody(self):
+        state = self._recruiting_state(credits_amount=100)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50001, 3, 1)
+
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
+        self.assertEqual(100, state.snapshot()['wallet']['credits'])
+
+    def test_a_full_barracks_recruits_nobody_and_keeps_the_money(self):
+        state = self._recruiting_state(berths=0)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50001, 3, 1)
+
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_a_role_the_vehicle_does_not_crew_is_refused(self):
+        state = self._recruiting_state()
+
+        # SKILL_NAMES[5] is 'loader', and this vehicle has none.
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50001, 5, 0)
+
+    def test_an_index_that_is_a_skill_rather_than_a_role_is_refused(self):
+        state = self._recruiting_state()
+
+        # SKILL_NAMES[6] is 'repair', which is a skill, not a crew role.
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50001, 6, 0)
+
+    def test_an_unknown_school_is_refused(self):
+        state = self._recruiting_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50001, 3, 7)
+
+    def test_a_recruit_can_be_bought_straight_into_an_empty_seat(self):
+        state = self._recruiting_state()
+        state.equip_tankman(9, 1, -1)
+
+        tankman_id = state.buy_and_equip_tankman(9, 1, 0)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, tankman_id], record['crew'])
+        self.assertEqual(b'tman:new:driver#50', record['tankmen'][tankman_id])
+        # Only the crew member who was unloaded is in the barracks.
+        self.assertEqual(
+            {102: b'tman:102'}, state.snapshot()['barracksTankmen'])
+
+    def test_a_recruit_bought_into_a_taken_seat_needs_a_berth_for_its_own(self):
+        state = self._recruiting_state(berths=0)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_and_equip_tankman(9, 1, 0)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, 102], record['crew'])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_a_recruit_bought_into_a_taken_seat_replaces_its_occupant(self):
+        state = self._recruiting_state()
+
+        tankman_id = state.buy_and_equip_tankman(9, 1, 1)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, tankman_id], record['crew'])
+        self.assertEqual(
+            {102: b'tman:102'}, state.snapshot()['barracksTankmen'])
+        self.assertEqual(100000 - 20000, state.snapshot()['wallet']['credits'])
+
+    def test_a_crew_can_be_hired_before_the_vehicle_is_bought(self):
+        """The recruit window lists unlocked vehicles, not owned ones."""
+        state = self._recruiting_state(unlocks=(50001, 50002))
+
+        state.buy_tankman(50002, 3, 0)
+
+        self.assertEqual(
+            {103: b'tman:new:driver#50'}, state.snapshot()['barracksTankmen'])
+
+    def test_a_vehicle_the_account_has_not_researched_hires_nobody(self):
+        state = self._recruiting_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.buy_tankman(50002, 3, 0)
+
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
+
+    def test_a_sandbox_recruits_for_nothing(self):
+        """Its published table is the one the window shows, and it is free."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        snapshot['unlockItemCompactDescrs'] = {50001}
+        snapshot['wallet'] = {'credits': 0, 'gold': 0, 'freeXP': 0}
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+        state.buy_tankman(50001, 3, 2)
+
+        self.assertEqual(
+            b'tman:new:driver#100',
+            state.snapshot()['barracksTankmen'][103])
 
 
 class FittingRequestTests(unittest.TestCase):
@@ -856,7 +1022,8 @@ class FittingRequestTests(unittest.TestCase):
         self.assertEqual({10010: 7}, self.pushed[0]['inventory'][10])
 
     def test_add_skill_uses_the_int3_payload(self):
-        result = self._dispatch(self.commands.CMD_TMAN_ADD_SKILL, (101, 0, 0))
+        # #1513 sends tankmen.SKILL_INDICES[name]; 'repair' is 6.
+        result = self._dispatch(self.commands.CMD_TMAN_ADD_SKILL, (101, 6, 0))
 
         self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
         self.assertEqual(
@@ -864,7 +1031,7 @@ class FittingRequestTests(unittest.TestCase):
             self.state.snapshot()['vehicles'][0]['tankmen'][101])
 
     def test_drop_skills_uses_shop_revision_then_tankman_id(self):
-        self.state.add_tankman_skill(101, 0)
+        self.state.add_tankman_skill(101, 6)
 
         result = self._dispatch(
             self.commands.CMD_TMAN_DROP_SKILLS, (77, 101, 0))
@@ -1150,7 +1317,7 @@ class GaragePersistenceTests(unittest.TestCase):
         state.equip_shells(9, [10010, 38, 10011, 9])
         state.set_layouts(
             9, [10010, 38, 10011, 9], 0, [11001, 1, 0, 0, 0, 0, 0, 0])
-        state.add_tankman_skill(101, 2)
+        state.add_tankman_skill(101, 9)
         # VEHICLE_SETTINGS_FLAG.AUTO_EQUIP, the value #1513 itself sends.
         state.change_vehicle_setting(9, 8, 1)
         store = self._store()

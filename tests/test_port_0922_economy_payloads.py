@@ -5,8 +5,9 @@ than guessed from a parameter name: ``Stats.unlock``,
 ``Stats.__exchange_onGetRate``, ``Stats.__convertToFreeXP_onGetParameters``,
 ``Stats.__slot_onShopSynced``, ``Stats.__berths_onShopSynced``,
 ``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
-``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman`` and
-``Inventory.dismissTankman``.  The economy suite proves the garage
+``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman``,
+``Inventory.dismissTankman``, ``Shop.buyTankman`` and
+``Shop.buyAndEquipTankman``.  The economy suite proves the garage
 transactions; this one proves the payload reaches them with every value in the
 position the client actually sends it.
 """
@@ -42,10 +43,13 @@ class _RecordingGarage(object):
     def snapshot(self):
         return {}
 
+    # Shop.buyTankman's callback reads the new id out of the response.
+    RESULTS = {'buy_tankman': 100005}
+
     def __getattr__(self, name):
         def record(*args, **kwargs):
             self.calls.append((name, args, kwargs))
-            return None
+            return self.RESULTS.get(name)
 
         return record
 
@@ -56,6 +60,10 @@ class EconomyPayloadTests(unittest.TestCase):
         result = account_requests.dispatch(command, {'garage': garage}, args)
         self.assertEqual(commands.RES_SUCCESS, result.result_id)
         return garage.calls
+
+    def _respond(self, command, args):
+        garage = _RecordingGarage()
+        return account_requests.dispatch(command, {'garage': garage}, args)
 
     def _refuse(self, command, args):
         result = account_requests.dispatch(
@@ -151,6 +159,33 @@ class EconomyPayloadTests(unittest.TestCase):
                 'items_from_vehicle': [],
                 'items_from_inventory': []})],
             self._dispatch(commands.CMD_SELL_VEHICLE, ([17, 10, 0, 0, 0],)))
+
+    def test_recruiting_carries_the_vehicle_type_the_role_and_the_school(self):
+        # Shop.buyTankman -> _doCmdInt4(CMD_BUY_TMAN, cacheRev,
+        #   makeIntCompactDescrByID('vehicle', nationIdx, innationIdx),
+        #   tankmen.SKILL_INDICES[role], tmanCostTypeIdx)
+        self.assertEqual(
+            [('buy_tankman', (50001, 3, 1), {})],
+            self._dispatch(commands.CMD_BUY_TMAN, (17, 50001, 3, 1)))
+
+    def test_a_recruit_answers_with_the_inventory_id_the_callback_reads(self):
+        """Shop.buyTankman's callback takes ext['tmanInvID'], not the cache."""
+        result = self._respond(commands.CMD_BUY_TMAN, (17, 50001, 3, 1))
+
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        self.assertEqual({'tmanInvID': 100005}, result.ext)
+
+    def test_recruiting_into_a_seat_carries_the_vehicle_seat_and_school(self):
+        # Shop.buyAndEquipTankman -> _doCmdInt4(CMD_BUY_AND_EQUIP_TMAN,
+        #   cacheRev, vehInvID, slot, tmanCostTypeIdx)
+        self.assertEqual(
+            [('buy_and_equip_tankman', (10, 2, 0), {})],
+            self._dispatch(commands.CMD_BUY_AND_EQUIP_TMAN, (17, 10, 2, 0)))
+
+    def test_a_truncated_recruit_payload_is_refused_instead_of_guessed(self):
+        for args in ((17, 50001, 3), (17, 50001), (17,), ()):
+            self._refuse(commands.CMD_BUY_TMAN, args)
+            self._refuse(commands.CMD_BUY_AND_EQUIP_TMAN, args)
 
     def test_seating_a_crew_member_carries_the_vehicle_seat_and_tankman(self):
         # Inventory.equipTankman ->
