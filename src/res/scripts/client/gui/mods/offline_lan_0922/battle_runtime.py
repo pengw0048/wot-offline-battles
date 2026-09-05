@@ -15,7 +15,8 @@ import traceback
 
 from gui.mods.offline_lan_0922.ai import maps as tactical_maps
 from gui.mods.offline_lan_0922.ai import planner as bot_planner
-from gui.mods.offline_lan_0922.ai.cover import score_candidates
+from gui.mods.offline_lan_0922.ai import tactical_geometry
+from gui.mods.offline_lan_0922.ai.driver import gun_yaw_limits
 from gui.mods.offline_lan_0922.artillery_controller import \
     ArtilleryController
 from gui.mods.offline_lan_0922.authority_worker_probe import \
@@ -1261,6 +1262,36 @@ class _LANInputSender(object):
         self.aim_pitch = 0.0
         self.aim_point = None
         self.handbrake = False
+
+    def send_team_command(self, request):
+        owner = self.owner
+        if (owner._worker_mode or owner._avatar is None or
+                owner.state != 'running' or not isinstance(request, dict)):
+            return False
+        target_kind = target_id = None
+        stock_id = request.get('stock_target_id')
+        if stock_id is not None:
+            matching = [record for record in owner._records.values()
+                        if record.get('engine_id') == stock_id and
+                        record.get('ready') and not record.get('tombstone')]
+            if len(matching) != 1:
+                return False
+            record = matching[0]
+            if record.get('kind') not in ('bot', 'player'):
+                return False
+            target_kind = 'human' if record['kind'] == 'player' else 'bot'
+            target_id = record.get('network_id')
+        return owner.client.send_team_command(
+            request.get('command'), target_kind=target_kind,
+            target_id=target_id, cell_index=request.get('cell_index'),
+            details=request.get('details'))
+
+    def send_team_chat(self, request):
+        owner = self.owner
+        if (owner._worker_mode or owner._avatar is None or
+                owner.state != 'running' or not isinstance(request, dict)):
+            return False
+        return owner.client.send_team_chat(request.get('text'))
 
     def align_aim(self, turret_yaw=0.0, gun_pitch=0.0):
         """Seed the world-space LAN aim from the attached native gun."""
@@ -2912,6 +2943,7 @@ class BattleRuntime(object):
             commands = self._runtime.account_commands
             self._server = AvatarServerBridge(
                 self._avatar, self._binding, builder, self._sender,
+                radio_player_getter=self._runtime.bigworld.player,
                 account_commands=(commands.CMD_GET_AVATAR_SYNC,
                                   commands.CMD_ADD_INT_USER_SETTINGS,
                                   commands.CMD_DEL_INT_USER_SETTINGS),
@@ -3125,6 +3157,7 @@ class BattleRuntime(object):
                 vehicle_selector=self._select_bot_vehicle,
                 visibility_probe=self._bot_visibility,
                 firing_lane_probe=self._bot_firing_lane,
+                incoming_lane_probe=self._bot_incoming_lane,
                 friendly_lane_probe=self._bot_friendly_firing_lane,
                 direct_launch_origin_probe=self._bot_direct_launch_origin,
                 direct_aim_point_probe=self._bot_aim_point,
@@ -3222,6 +3255,11 @@ class BattleRuntime(object):
                 self._remember_ram_bot_snapshot(self._last_snapshot)
             self.state = 'running'
             if not self._worker_mode:
+                # Stock __startGUI has registered the battle messenger before
+                # setClientReady reaches this boundary. Initialize channels
+                # after that owner exists and before our shared load barrier.
+                self._run_optional_feature(
+                    'team chat initialization', self._server.start_team_chat)
                 self._bind_local_arcade_camera()
                 self._run_optional_feature(
                     'engine RPM presentation', self._publish_rpm,
@@ -3323,6 +3361,108 @@ class BattleRuntime(object):
             self._publish_reload_event(
                 self._gun_state.reload_time,
                 self._gun_state.reload_duration, force=True)
+        return True
+
+    def _radio_message_current(self, message):
+        return (self.state == 'running' and not self._worker_mode and
+                self._avatar is not None and
+                self._server is not None and isinstance(message, dict) and
+                message.get('round_id') == self._start_message.get('round_id'))
+
+    def _radio_identity(self, kind, network_id):
+        record_kind = 'player' if kind == 'human' else 'bot'
+        try:
+            record = self._records.get('%s:%d' % (record_kind, int(network_id)))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not record or record.get('tombstone') or not record.get('ready'):
+            return None
+        entity_id = record.get('engine_id')
+        arena = getattr(self._avatar, 'arena', None)
+        info = (getattr(arena, 'vehicles', {}) or {}).get(entity_id)
+        if not isinstance(info, dict) or not info.get('accountDBID'):
+            return None
+        return entity_id, info['accountDBID']
+
+    def on_team_command_ack(self, message):
+        if not self._radio_message_current(message):
+            return False
+        responders = []
+        for bot_id in message.get('recipient_bot_ids') or ():
+            identity = self._radio_identity('bot', bot_id)
+            if identity is not None:
+                responders.append(identity[1])
+        return self._server.receive_team_command_ack(
+            message.get('command_seq'), message.get('accepted'), responders)
+
+    def on_team_chat_ack(self, message):
+        if not self._radio_message_current(message):
+            return False
+        return self._server.receive_team_chat_ack(
+            message.get('chat_seq'), message.get('accepted'))
+
+    def on_team_chat(self, message):
+        if (not self._radio_message_current(message) or
+                message.get('team') != self.client.team):
+            return False
+        issuer = self._radio_identity('human', message.get('issuer_id'))
+        if issuer is None:
+            return False
+        seen = getattr(self, '_team_chat_seen', {})
+        key = (message['round_id'], message['issuer_id'])
+        if message['chat_seq'] <= seen.get(key, 0):
+            return False
+        result = self._server.receive_team_chat(message.get('text'), issuer[1])
+        if result:
+            seen[key] = message['chat_seq']
+            self._team_chat_seen = seen
+        return result
+
+    def on_team_command(self, message):
+        from gui.mods.offline_lan_0922.tactical_radio import COMMAND_DETAIL_FIELDS
+        if (not self._radio_message_current(message) or
+                message.get('team') != self.client.team):
+            return False
+        # The same-team relay owns the command echo for every player.
+        # Admission receipts only close the request and publish the Bot reply.
+        issuer = self._radio_identity('human', message.get('issuer_id'))
+        if issuer is None:
+            return False
+        target_id = None
+        if 'target_id' in message:
+            target = self._radio_identity(message.get('target_kind'),
+                                          message['target_id'])
+            if target is None:
+                return False
+            target_id = target[0]
+        seen = getattr(self, '_radio_seen', {})
+        key = (message['round_id'], message['issuer_id'])
+        if message['command_seq'] <= seen.get(key, 0):
+            return False
+        required, optional = COMMAND_DETAIL_FIELDS.get(
+            message.get('command'), ((), ()))
+        details = dict((field, message[field]) for field in required + optional
+                       if field in message)
+        extra = {'details': details} if details else {}
+        result = self._server.receive_team_command(
+            message.get('command'), issuer[1], target_id,
+            message.get('cell_index'), **extra)
+        if result:
+            seen[key] = message['command_seq']
+            self._radio_seen = seen
+        return result
+
+    def on_team_command_terminal(self, message):
+        if not self._radio_message_current(message):
+            return False
+        seen = getattr(self, '_radio_terminals', set())
+        key = (message['round_id'], message['command_seq'])
+        if key in seen:
+            return False
+        seen.add(key)
+        self._radio_terminals = seen
+        sys.stdout.write('[Offline LAN 0.9.22] BOT ORDER END seq=%s command=%s reason=%s\n' % (
+            message['command_seq'], message.get('command'), message.get('code')))
         return True
 
     def on_battle_live(self, message):
@@ -5316,86 +5456,224 @@ class BattleRuntime(object):
                 abs(height - point[1]), 2.5)))
         return maximum
 
+    def _observed_vehicle_descriptor(self, target):
+        kind = 'player' if target.get('kind') == 'human' else 'bot'
+        network_id = target.get('network_id', target.get('id'))
+        record = self._records.get('%s:%d' % (kind, int(network_id)))
+        if not record or record.get('tombstone') or not record.get('ready'):
+            return None
+        entity = self._server_entity(record.get('engine_id'))
+        if entity is None or not getattr(entity, 'isStarted', False):
+            return None
+        # Descriptors are static content. The entity's omniscient matrix,
+        # reload, ammunition and current gun angles are never read here.
+        return getattr(entity, 'typeDescriptor', None)
+
+    def _observed_gun_origin(self, target):
+        descriptor = self._observed_vehicle_descriptor(target)
+        if descriptor is None:
+            return None
+        yaw = target.get('yaw', 0.0)
+        origin, unused_direction = shot_geometry.shot_origin_and_direction(
+            descriptor, _xyz(target.get('position', target)), yaw, target.get('pitch', 0.0),
+            target.get('roll', 0.0), target.get(
+                'turret_yaw', target.get('aim_yaw', yaw) - yaw),
+            target.get('gun_pitch', 0.0))
+        return origin
+
+    def _tactical_ray_clear(self, start, end):
+        return self._runtime.bigworld.wg_collideSegment(
+            self._avatar.spaceID, self._vector(start),
+            self._vector(end), 128) is None
+
+    def _bot_incoming_lane(self, source, target):
+        """Probe enemy gun -> own body, never infer it from the reverse ray."""
+        try:
+            own = dict(source, kind='bot', network_id=source['id'])
+            descriptor = self._observed_vehicle_descriptor(own)
+            origin = self._observed_gun_origin(target)
+            if descriptor is None or origin is None:
+                return None
+            samples = shot_geometry.vehicle_aim_samples(descriptor)[:2]
+            if not samples:
+                return None
+            return any(self._tactical_ray_clear(
+                origin, shot_geometry.vehicle_aim_point(sample, source))
+                for sample in samples)
+        except Exception:
+            return None
+
+    def _cover_surface_pose(self, source, point, descriptor, ground=None):
+        plane = self._sample_ground_plane(point, source.get('yaw', 0.0),
+                                          descriptor, ground_probe=ground)
+        if plane is None or math.degrees(math.atan(
+                plane['slope_tangent'])) > 24.0:
+            return None
+        pose = dict(source)
+        pose.update(position=(point[0], plane['center_y'], point[2]),
+                    pitch=plane['pitch'], roll=plane['roll'])
+        return pose
+
+    def _cover_gun_lane(self, pose, descriptor, target, clear):
+        """Prove a peek from the installed gun envelope and physical pivot."""
+        target_descriptor = self._observed_vehicle_descriptor(target)
+        if target_descriptor is None:
+            return False
+        yaw = pose.get('yaw', 0.0)
+        origin, unused = shot_geometry.shot_origin_and_direction(
+            descriptor, pose['position'], yaw, pose.get('pitch', 0.0),
+            pose.get('roll', 0.0), pose.get('turret_yaw', 0.0),
+            pose.get('gun_pitch', 0.0))
+        for sample in shot_geometry.vehicle_aim_samples(target_descriptor)[:2]:
+            point = shot_geometry.vehicle_aim_point(sample, target)
+            direction = tuple(point[i] - origin[i] for i in range(3))
+            turret_yaw, pitch = shot_geometry.world_direction_to_local_gun_angles(
+                direction, yaw, pose.get('pitch', 0.0), pose.get('roll', 0.0))
+            limits = BotRuntime._effective_gun_pitch_limits(
+                pose, descriptor, turret_yaw)
+            yaw_min, yaw_max, unused = gun_yaw_limits(descriptor)
+            if (limits is None or not limits[0] <= pitch <= limits[1] or
+                    not yaw_min <= turret_yaw <= yaw_max):
+                continue
+            aimed_origin, unused = shot_geometry.shot_origin_and_direction(
+                descriptor, pose['position'], yaw, pose.get('pitch', 0.0),
+                pose.get('roll', 0.0), turret_yaw, pitch)
+            if clear(aimed_origin, point):
+                return True
+        return False
+
     def _sample_bot_cover(self, source, target, route_position,
                           ally_positions, segment_clear):
-        """Port the 0.8.2 four-point cover fan through #1513 ray probes."""
-        current = _xyz(source)
-        target_position = target.get('position') or _xyz(target)
-        dx = current[0] - float(target_position[0])
-        dz = current[2] - float(target_position[2])
-        length = math.sqrt(dx * dx + dz * dz)
-        if length < 2.0 or not callable(segment_clear):
+        """Search cover with at most 40 direct native queries per job.
+
+        Rotate the candidate fan between normal staggered cover jobs. Geometry
+        is advisory: actual navigation, body support and final fire retain their
+        independent native proofs. Incomplete probes never produce a candidate.
+        """
+        if not callable(segment_clear) or self._bots is None:
             return ()
-        away_x, away_z = dx / length, dz / length
-        right_x, right_z = away_z, -away_x
+        current = _xyz(source)
+        own = dict(source, kind='bot', network_id=source['id'])
+        descriptor = self._observed_vehicle_descriptor(own)
+        if descriptor is None:
+            return ()
+        samples = tactical_geometry.body_samples(descriptor)
+        if not samples:
+            return ()
+        bbox = _field(_field(_field(descriptor, 'hull'), 'hitTester'), 'bbox')
+        width = float(bbox[1][0]) - float(bbox[0][0])
+        length = float(bbox[1][2]) - float(bbox[0][2])
+        if min(width, length) <= 0.0:
+            return ()
+        observed = []
+        for key, remembered in self._bots._visible_target_poses.items():
+            if (key[0] != source.get('team') or
+                    self._bots._team_spot_time_left(key, self._clock()) <= 0.0):
+                continue
+            value = dict(remembered, kind=key[1], network_id=key[2])
+            observed.append(((key[1], key[2]), value))
+        threats = tactical_geometry.relevant_threats(current, target, observed)
+        origins = []
+        for threat in threats:
+            origin = self._observed_gun_origin(threat)
+            if origin is None:
+                return ()
+            origins.append(origin)
+        record = self._records.get('bot:%d' % source['id'])
+        phase = record.get('cover_search_phase', 0)
+        record['cover_search_phase'] = phase + 1
+        offsets = tactical_geometry.search_offsets(width, length, phase)
+        # Budget includes vertical ground rays and water queries as well as
+        # exposure. Grid traversal retains its existing independent budget.
+        budget = tactical_geometry.RayBudget(self._tactical_ray_clear, 40)
+        ground_cache = {}
+        def ground_at(x, z, hint):
+            key = (x, z, hint)
+            if key not in ground_cache:
+                ground_cache[key] = budget.call(self._cover_ground, x, z, hint)
+            return ground_cache[key]
+        target_position = _xyz(target.get('position', target))
+        dx, dz = (current[0] - target_position[0],
+                  current[2] - target_position[2])
+        distance = math.hypot(dx, dz)
+        if distance < 2.0:
+            return ()
+        away = (dx / distance, dz / distance)
+        right = (away[1], -away[0])
         route = _xyz(route_position)
         route_dx, route_dz = route[0] - current[0], route[2] - current[2]
-        route_length = math.sqrt(route_dx * route_dx + route_dz * route_dz)
+        route_length = math.hypot(route_dx, route_dz)
         candidates = []
-        for away, lateral in ((0.0, 0.0), (14.0, 0.0),
-                              (10.0, 13.0), (10.0, -13.0)):
-            x = current[0] + away_x * away + right_x * lateral
-            z = current[2] + away_z * away + right_z * lateral
-            ground = self._cover_ground(x, z, current[1])
-            if ground is None:
-                continue
-            point = (x, ground, z)
-            water_depth = self._water_depth(point)
-            if (water_depth > BOT_WATER_AVOID_DEPTH or
-                    not segment_clear(current, point)):
-                continue
-            occluded = not self._has_los(point, target_position)
-            if not occluded:
-                continue
-            slope = self._cover_slope(point)
-            if slope > 24.0:
-                continue
-            peek = None
-            for side in (-1.0, 1.0):
-                peek_x = point[0] + right_x * side * 6.5 - away_x * 2.0
-                peek_z = point[2] + right_z * side * 6.5 - away_z * 2.0
-                peek_y = self._cover_ground(peek_x, peek_z, point[1])
-                if peek_y is None:
+        # Ground/path work is bounded too, even when every point has no ground.
+        for backward, lateral in offsets[:4]:
+            try:
+                point = (current[0] + away[0] * backward + right[0] * lateral,
+                         current[1],
+                         current[2] + away[1] * backward + right[1] * lateral)
+                ground = ground_at(point[0], point[2], point[1])
+                if ground is None:
                     continue
-                peek_point = (peek_x, peek_y, peek_z)
-                if (self._water_depth(peek_point) <=
-                        BOT_WATER_AVOID_DEPTH and
-                        segment_clear(point, peek_point) and
-                        self._has_los(peek_point, target_position)):
-                    peek = peek_point
+                point = (point[0], ground, point[2])
+                water_depth = budget.call(self._water_depth, point)
+                if (water_depth > BOT_WATER_AVOID_DEPTH or
+                        not segment_clear(current, point)):
+                    continue
+                pose = self._cover_surface_pose(source, point, descriptor, ground_at)
+                if pose is None:
+                    continue
+                try:
+                    hidden = tactical_geometry.exposure(samples, pose, origins,
+                                                        budget.clear)
+                    if hidden is None or hidden > 0.5:
+                        continue
+                    side = -1.0 if phase % 2 else 1.0
+                    peek = (point[0] + right[0] * width * 1.5 * side,
+                            point[1],
+                            point[2] + right[1] * width * 1.5 * side)
+                    peek_ground = ground_at(peek[0], peek[2], peek[1])
+                    if peek_ground is None:
+                        continue
+                    peek = (peek[0], peek_ground, peek[2])
+                    if (budget.call(self._water_depth, peek) > BOT_WATER_AVOID_DEPTH or
+                            not segment_clear(point, peek) or
+                            not segment_clear(peek, point)):
+                        continue
+                    peek_pose = self._cover_surface_pose(source, peek, descriptor, ground_at)
+                    if peek_pose is None or not self._cover_gun_lane(
+                            peek_pose, descriptor, target, budget.clear):
+                        continue
+                    exposed = tactical_geometry.exposure(samples, peek_pose,
+                                                         origins, budget.clear)
+                    midpoint = tuple((current[i] + point[i]) * 0.5 for i in range(3))
+                    mid_pose = dict(pose, position=midpoint)
+                    approach = tactical_geometry.exposure(samples[:2], mid_pose,
+                                                          origins, budget.clear)
+                except tactical_geometry.ProbeBudgetExhausted:
                     break
-            move_dx, move_dz = point[0] - current[0], point[2] - current[2]
-            move_length = math.sqrt(move_dx * move_dx + move_dz * move_dz)
-            alignment = 0.5
-            if move_length > 0.1 and route_length > 0.1:
-                dot = ((move_dx / move_length) * (route_dx / route_length) +
-                       (move_dz / move_length) * (route_dz / route_length))
-                alignment = max(0.0, min(1.0, (dot + 1.0) * 0.5))
-            nearby = sum(1 for ally in (ally_positions or ())
-                         if 0.5 < _distance_2d(point, ally) < 13.0)
-            candidate = {
-                'id': '%s:%d:%d' % (
-                    source.get('id'), int(round(point[0] / 4.0)),
-                    int(round(point[2] / 4.0))),
-                'position': point,
-                'travel_distance': _distance_2d(point, current),
-                'route_alignment': alignment,
-                'enemy_occlusion': 1.0,
-                'exposure': 0.12,
-                'slope': slope,
-                'water': max(0.0, min(1.0, water_depth)),
-                'ally_congestion': max(0.0, min(1.0, nearby / 3.0)),
-                'peek_feasible': peek is not None,
-                'escape_feasible': True,
-            }
-            if peek is not None:
-                candidate['peek_position'] = peek
-            candidates.append(candidate)
-        ranked = score_candidates(candidates)
-        for candidate in ranked:
-            for key in ('breakdown', 'reasons', 'rank', 'score'):
-                candidate.pop(key, None)
-        return tuple(ranked)
+                move_dx, move_dz = point[0] - current[0], point[2] - current[2]
+                travel = math.hypot(move_dx, move_dz)
+                alignment = 0.5
+                if travel > 0.1 and route_length > 0.1:
+                    alignment = max(0.0, min(1.0, 0.5 + 0.5 * (
+                        move_dx * route_dx + move_dz * route_dz) /
+                        (travel * route_length)))
+                nearby = sum(1 for ally in (ally_positions or ())
+                             if 0.5 < _distance_2d(point, ally) < 13.0)
+                candidates.append({
+                    'id': '%s:%d:%d:%d' % (source['id'],
+                        int(round(point[0] / 4.0)), int(round(point[2] / 4.0)), side),
+                    'position': point, 'peek_position': peek,
+                    'travel_distance': travel, 'route_alignment': alignment,
+                    'enemy_occlusion': 1.0 - hidden,
+                    'exposure': (hidden + exposed + approach) / 3.0,
+                    'slope': math.degrees(max(abs(pose['pitch']), abs(pose['roll']))),
+                    'water': water_depth,
+                    'ally_congestion': min(1.0, nearby / 3.0),
+                    'peek_feasible': True, 'escape_feasible': True,
+                })
+            except tactical_geometry.ProbeBudgetExhausted:
+                break
+        return tuple(candidates)
 
     def local_pose(self):
         # The copied 0.8.2 integrator owns this pose.  #1513's stock camera,
@@ -15610,8 +15888,10 @@ class BattleRuntime(object):
                 max(0.0, now - started)))
         return True
 
-    def _sample_ground_plane(self, position, yaw, descriptor=None):
+    def _sample_ground_plane(self, position, yaw, descriptor=None,
+                             ground_probe=None):
         """Fit one continuous terrain plane under the local suspension."""
+        ground = ground_probe or self._ground_y
         length = 5.0
         width = 3.0
         try:
@@ -15627,19 +15907,19 @@ class BattleRuntime(object):
         half_length = length * 0.5
         half_width = width * 0.5
         sin_yaw, cos_yaw = math.sin(yaw), math.cos(yaw)
-        front_y = self._ground_y(
+        front_y = ground(
             position[0] + sin_yaw * half_length,
             position[2] + cos_yaw * half_length, position[1])
-        rear_y = self._ground_y(
+        rear_y = ground(
             position[0] - sin_yaw * half_length,
             position[2] - cos_yaw * half_length, position[1])
-        right_y = self._ground_y(
+        right_y = ground(
             position[0] + cos_yaw * half_width,
             position[2] - sin_yaw * half_width, position[1])
-        left_y = self._ground_y(
+        left_y = ground(
             position[0] - cos_yaw * half_width,
             position[2] + sin_yaw * half_width, position[1])
-        center_y = self._ground_y(
+        center_y = ground(
             position[0], position[2], position[1])
         if None in (front_y, rear_y, right_y, left_y, center_y):
             return None
@@ -19320,6 +19600,52 @@ class BattleRuntime(object):
         except Exception:
             return None
 
+    def _bot_aim_damage_score(self, descriptor, entry, source, target,
+                              origin, point):
+        """Rank a tested sample with the existing #1513 armour resolver.
+
+        The midpoint penetration/damage rolls make this an advisory nominal
+        estimate. It neither samples nor commits the real projectile's RNG.
+        """
+        try:
+            target_descriptor = entry['descriptor']
+            for name in ('chassis', 'hull', 'turret', 'gun'):
+                tester = _field(_field(target_descriptor, name), 'hitTester')
+                if not callable(getattr(tester, 'localHitTest', None)):
+                    return None
+            yaw = target.get('yaw', 0.0)
+            matrix = self._runtime.math.Matrix()
+            matrix.setRotateYPR((yaw, target.get('pitch', 0.0),
+                                 target.get('roll', 0.0)))
+            position = self._vector(_xyz(target.get('position', target)))
+            matrix.translation = position
+            appearance = _ProjectileCollisionAppearance(
+                self._runtime.math, target_descriptor,
+                target.get('turret_yaw', target.get('aim_yaw', yaw) - yaw),
+                target.get('gun_pitch', 0.0))
+            proxy = _ProjectileCollisionTarget(
+                None, target_descriptor, matrix, position, appearance,
+                self._runtime.math)
+            collisions = collide_vehicle_at_matrix(
+                proxy, matrix, self._vector(origin), self._vector(point),
+                self._runtime.math)
+            if not collisions:
+                return None
+            shot = self._descriptor_shot(descriptor, source.get('shell_index', 0))
+            distance = math.sqrt(sum((point[i] - origin[i]) ** 2 for i in range(3)))
+            contact = combat_rules.resolve_armor_contact(
+                shot, distance, collisions, penetration_factor=1.0)
+            if contact is None:
+                return None
+            if contact['layer'] != 'structural' and not combat_rules.is_he(shot):
+                return 0.0
+            nominal = combat_rules.he_nominal_armor(collisions, target_descriptor)
+            return float(combat_rules.damage(
+                shot, contact['result'], nominal,
+                random_uniform=lambda minimum, maximum: (minimum + maximum) * 0.5))
+        except Exception:
+            return None
+
     def _bot_firing_lane(self, source, target):
         """Select a real exposed part with at most two static rays per job."""
         profile = source.get('profile')
@@ -19367,14 +19693,26 @@ class BattleRuntime(object):
                 if samples[index] not in attempts:
                     attempts.append(samples[index])
             entry['selected'] = None
+            best = None
+            best_score = None
             for sample in attempts:
                 point = shot_geometry.vehicle_aim_point(sample, target)
                 hit = self._runtime.bigworld.wg_collideSegment(
                     self._avatar.spaceID, self._vector(origin),
                     self._vector(point), 128)
-                if hit is None:
-                    entry['selected'] = sample
-                    return True
+                if hit is not None:
+                    continue
+                score = self._bot_aim_damage_score(
+                    descriptor, entry, source, target, origin, point)
+                if best is None or (score is not None and
+                        best_score is not None and score > best_score):
+                    best, best_score = sample, score
+                # Missing material evidence cannot authorize a weak-spot
+                # claim. Preserve the exposed-part behaviour in that case.
+                if score is None:
+                    break
+            entry['selected'] = best
+            return best is not None
         except Exception:
             if entry is not None:
                 entry['selected'] = None
@@ -22628,13 +22966,21 @@ class BattleRuntime(object):
     def _quiesce_native_presentations(self):
         """Release battle-scoped native visuals before Hangar takes over."""
         cleanup_error = None
+        if self._server is not None:
+            try:
+                # Close channel controllers while the current Avatar and
+                # battle GUI still own them, before onBecomeNonPlayer.
+                self._server.close_team_chat()
+            except Exception as error:
+                cleanup_error = error
         try:
             # BigWorld.target.clear() synchronously reaches stock targetBlur.
             # Run it before any GUI, trigger, edge or remote-entity owner can
             # be retired; PlayerAvatar.onBecomeNonPlayer clears it too late.
             self._runtime.compatibility.clear_target_focus()
         except Exception as error:
-            cleanup_error = error
+            if cleanup_error is None:
+                cleanup_error = error
         try:
             self._release_postmortem_visibility()
         except Exception as error:
@@ -22744,6 +23090,9 @@ class BattleRuntime(object):
         self._unusable_vehicles_reported = set()
         self._records = {}
         self._records_revision += 1
+        self._radio_seen = {}
+        self._radio_terminals = set()
+        self._team_chat_seen = {}
         _release_layout_caches()
         if self._map_create_attempted:
             creator = self._runtime.offline_map_creator

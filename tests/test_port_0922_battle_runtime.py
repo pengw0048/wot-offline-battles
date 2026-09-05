@@ -964,6 +964,7 @@ class _Avatar(object):
         self.shot_results = []
         self.dispersion_queries = []
         self.battle_events = []
+        self.chat_actions = []
         self.responses = []
         self.misc_statuses = []
         self.cancelWaitingForShot = mock.Mock()
@@ -1025,6 +1026,14 @@ class _Avatar(object):
                                          with_shot=0):
         self.dispersion_queries.append((turret_rotation_speed, with_shot))
         return [0.25, 0.125]
+
+    def messenger_onActionByServer_chat2(self, action_id, request_id, args):
+        if action_id == 19:
+            # The real handler/controller registration happens in
+            # Avatar.__startGUI, before the native client-ready callback.
+            if not self._offlineLANInitComplete or not self.playerVehicleID:
+                raise RuntimeError('battle messenger is not ready')
+        self.chat_actions.append((action_id, request_id, dict(args)))
 
     def set_playerVehicleID(self, previous):
         self.previous_vehicle_id = previous
@@ -9716,10 +9725,19 @@ class BattleRuntimeContractTests(unittest.TestCase):
             type(runtime.app_loader).__dict__['showBattlePage'])
         self.assertEqual('newer', runtime.app_loader.showBattlePage())
 
-    def test_map_to_native_vehicle_to_ready_lifecycle(self):
+    @mock.patch('gui.mods.offline_lan_0922.tactical_radio.'
+                '_notify_stock_ignore_lists_ready')
+    def test_map_to_native_vehicle_to_ready_lifecycle(self, notify_users):
         runtime = _runtime()
         runtime.bigworld.defer_vehicle_entry = True
         battle = BattleRuntime(runtime)
+
+        def users_ready():
+            self.assertEqual('running', battle.state)
+            self.assertEqual([19], [entry[0] for entry in
+                                    runtime.bigworld.avatar.chat_actions])
+
+        notify_users.side_effect = users_ready
         client = _Client()
         start = {
             'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
@@ -9734,6 +9752,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual('loading_entities', battle.state)
         self.assertIsNotNone(battle._server.vehicle_id)
+        self.assertEqual([], runtime.bigworld.avatar.chat_actions)
+        notify_users.assert_not_called()
         self.assertEqual(
             battle._server.vehicle_id,
             runtime.bigworld.avatar.playerVehicleID)
@@ -9758,7 +9778,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual('running', battle.state)
         self.assertEqual(1, runtime.bigworld.avatar.vehicle_changed)
+        self.assertEqual([19], [entry[0] for entry in
+                                runtime.bigworld.avatar.chat_actions])
         self.assertFalse(battle._server.setClientReady())
+        self.assertFalse(battle._server.start_team_chat())
+        self.assertEqual(1, len(runtime.bigworld.avatar.chat_actions))
+        notify_users.assert_called_once_with()
         self.assertEqual(500, runtime.bigworld.entity(
             battle._server.vehicle_id).health)
 
@@ -26063,6 +26088,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         calls = []
 
         def retire():
+            server.close_team_chat.assert_called_once_with()
             calls.append('retire')
 
         def destroy():

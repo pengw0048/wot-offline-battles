@@ -69,6 +69,22 @@ whose profile changed after it started must be restarted first.
   shared contacts to route, take cover, pick targets and choose ammunition,
   including SPG arcs. Navigation and foliage data ship for all 41 supported
   standard-battle maps.
+- Team text chat, minimap pings and fixed battle messages are relayed to
+  human teammates, including the sender, independently from Bot responses.
+  Text and pings remain available during the countdown and after the sender's
+  tank is destroyed; a team with no living Bots can still communicate.
+  Text uses the stock team
+  channel, formatting and cooldown. Reload, cassette and SPG aim-area messages
+  preserve the status supplied by the stock client. Common/all-team chat is
+  not supported.
+- Stock battle commands can direct nearby allied Bots: request help, name a
+  target, ask a Bot to follow or stop, return to base, or ping a minimap cell.
+  At most two Bots accept a general request; a named ally command addresses
+  that Bot. An accepting Bot replies through the stock team-message system.
+  Orders expire after 15 seconds and yield to urgent defense and survival.
+  Minimap requests choose passable ground inside the cell; following Bots
+  leave room behind the player. Native menu, marker and sound presentation
+  still needs acceptance on the supported Windows client.
 - Automatically generated Bot lineups contain no self-propelled artillery.
   Player vehicles and manually assigned Bot lineups remain unrestricted;
   tank destroyers are not artillery and remain in the automatic pool.

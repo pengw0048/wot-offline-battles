@@ -143,6 +143,14 @@ class ServerCaptureTests(unittest.TestCase):
                 {'id': '2:0', 'x': 500.0, 'y': 0.0, 'z': 0.0},
             ],
         }, context['capture_bases'])
+        self.assertEqual((-500.0, -500.0, 500.0, 500.0),
+                         context['arena_bounds'])
+
+    def test_defense_context_omits_invalid_tactical_bounds(self):
+        state = self._state()
+        state._map_rule_data = lambda: {'bounds': (0.0, 0.0, float('nan'), 1.0)}
+
+        self.assertIsNone(state._bot_defense_context()['arena_bounds'])
 
     def test_first_live_bot_publication_preserves_manifest_world_pose(self):
         state = self._state()
