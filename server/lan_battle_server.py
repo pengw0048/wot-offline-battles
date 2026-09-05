@@ -6337,7 +6337,7 @@ class BattleState:
                 # ever earn Fadin's medal, and a missing count is not a
                 # reason to reject a legal trigger.
                 "shells_before_shot": _optional_exact_int(
-                    message.get("shells_before_shot"), 0, 1000),
+                    message.get("shells_before_shot"), 1, 1000),
             }
             player.fire_intent_seq = intent_seq
             player.fire_intent_fingerprints[intent_seq] = fingerprint
@@ -6762,13 +6762,16 @@ class BattleState:
             self.projectiles[projectile_id] = record
             # Freeze whether this was the shooter's final round while the
             # producer that owns the ammunition is still the one reporting it.
+            # A shot was drawn from at least one shell, so zero is an
+            # invalid report rather than an emptier rack; Fadin's medal wants
+            # exactly the final round, which is a total of one.
             shells_before_shot = (
-                _optional_exact_int(intent.get("shells_before_shot"), 0, 1000)
+                _optional_exact_int(intent.get("shells_before_shot"), 1, 1000)
                 if shooter_kind == "player" else
-                _optional_exact_int(message.get("shells_before_shot"), 0, 1000))
+                _optional_exact_int(message.get("shells_before_shot"), 1, 1000))
             if shells_before_shot is not None:
                 self.last_shell_shots[str(projectile_id)] = (
-                    shells_before_shot <= 1)
+                    shells_before_shot == 1)
             if shooter_kind == "player":
                 shooter.fire_seq = shot_seq
                 if bool(intent.get("shell_change_pending", False)):
@@ -7479,6 +7482,10 @@ class BattleState:
         if _destroyed_tracks(admitted_critical) - _destroyed_tracks(
                 critical_before):
             self.track_immobilisers[victim] = shooter
+            if int(record["team"]) != int(proposal["target_team"]):
+                # Fire Support counts an enemy whose track this shooter
+                # destroyed even when the shot dealt no hit points.
+                self.support_targets.setdefault(shooter, set()).add(victim)
         enemy_hit = (
             int(record["team"]) != int(proposal["target_team"]))
         if enemy_hit and proposal["splash"]:
@@ -7490,6 +7497,12 @@ class BattleState:
             victim_state = self._statistics_row(*victim)
             victim_state["crits_received_mask"] |= crits_mask
             self._or_interaction(shooter, victim, "crits", crits_mask)
+        if not proposal["splash"] and not enemy_hit and shooter != victim:
+            # Top Gun and Sniper both forbid hitting a friendly vehicle at
+            # all, so a direct friendly hit needs an owner even though it
+            # earns the shooter nothing.
+            self.ally_hits[shooter] = int(
+                self.ally_hits.get(shooter, 0)) + 1
         if not proposal["splash"] and enemy_hit:
             self._increment_interaction(
                 shooter, victim, "direct_hits")
@@ -8296,6 +8309,7 @@ class BattleState:
                 "distance": record["distance"],
                 "defended_base": record["defended_base"],
                 "actor_speed": record["actor_speed"],
+                "victim_speed": record["victim_speed"],
             })
 
         actors = []
@@ -8322,6 +8336,13 @@ class BattleState:
                     self.exclusive_spot_assists.get(identity, ())),
                 "ever_spotted": identity in self.ever_spotted_targets,
                 "ally_damage": int(self.ally_damage.get(identity, 0)),
+                "ally_hits": int(self.ally_hits.get(identity, 0)),
+                "team_kills": int(self.team_kills.get(identity, 0)),
+                "support_targets": len(
+                    self.support_targets.get(identity, ())),
+                "solo_capture": (
+                    self.capture_point_earners.get(
+                        3 - int(row["team"]), set()) == {identity}),
                 "last_shell_finisher": identity in self.last_shell_finishers,
                 "lucky_devil": identity in self.lucky_devils,
                 "best_deflection_streak": int(
@@ -10428,6 +10449,14 @@ class BattleState:
         self.ever_spotted_targets = set()
         # actor -> damage it dealt to its own team.
         self.ally_damage = {}
+        # actor -> vehicles of its own team it destroyed.
+        self.team_kills = {}
+        # actor -> direct hits it landed on its own team.
+        self.ally_hits = {}
+        # actor -> enemies it damaged or whose track it destroyed.
+        self.support_targets = {}
+        # base team -> every actor that ever earned a point capturing it.
+        self.capture_point_earners = {1: set(), 2: set()}
         # actors that destroyed the last living enemy with their last shell.
         self.last_shell_finishers = set()
         # projectile id -> whether it was the shooter's final round.
@@ -10594,8 +10623,10 @@ class BattleState:
             "defended_base": victim in self.capture_invaders.get(
                 self._vehicle_team(*attacker), set()),
             # Rock Solid bounds the rammer's own speed at the moment of the
-            # kill, which is only knowable here.
+            # kill and requires the victim to have been the faster of the two,
+            # so both are only knowable here.
             "actor_speed": round(self._vehicle_speed(attacker), 4),
+            "victim_speed": round(self._vehicle_speed(victim), 4),
         })
         # Fadin's medal wants the shot that ended the battle to have been the
         # shooter's last round.  Both facts are only true at this instant.
@@ -10777,6 +10808,9 @@ class BattleState:
             attacker_row["team"] = attacker_team
         attacker_row["damage_dealt"] += damage
         self.damaged_targets.setdefault(attacker, set()).add(target)
+        # Fire Support counts distinct enemies this actor actually hurt; a
+        # ricochet or non-penetration never reaches here.
+        self.support_targets.setdefault(attacker, set()).add(target)
         self._increment_interaction(
             attacker, target, "damage", damage)
         self._increment_interaction(
@@ -10871,6 +10905,9 @@ class BattleState:
         else:
             return False
         if delta < 0:
+            actor_identity = (str(attacker_kind), int(attacker_id))
+            self.team_kills[actor_identity] = int(
+                self.team_kills.get(actor_identity, 0)) + 1
             self._record_lucky_devils(
                 (str(victim_kind), int(victim_id)), int(victim_team))
         if delta > 0:
@@ -11541,9 +11578,12 @@ class BattleState:
                         contributors.get(vehicle_id, 0) or 0) + 1
                     # #1513 reports each vehicle's own accumulated capture
                     # points; the Invader medal reads exactly this total.
-                    self._statistics_row(
-                        *_capture_key_actor(vehicle_id))[
-                            "capture_points"] += 1
+                    earner = _capture_key_actor(vehicle_id)
+                    self._statistics_row(earner[0], earner[1])[
+                        "capture_points"] += 1
+                    # The Sneaky medal is only for a base captured alone, so
+                    # remember everyone that ever moved this base's counter.
+                    self.capture_point_earners[base_team].add(earner)
                 self.capture_cursors[base_team] = (
                     cursor + budget) % len(invader_keys)
             elif not invader_keys:

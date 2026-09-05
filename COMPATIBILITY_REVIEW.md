@@ -729,9 +729,26 @@ shipped, so `scripts/item_defs/achievements.xml` selects the subset that
 matters: each achievement there carries a `mode`, and only `mode="random"`
 belongs to the battles this product packs.
 
+A threshold is not an award rule. The rest of each rule is in the client's own
+description text, `res/text/LC_MESSAGES/achievements.mo`, where every medal
+carries a `<name>_descr` summary and a `<name>_condition` clause list. Those
+clauses decide the class fences, the friendly-fire exclusions, the win and
+survival requirements and the tier floors that no constant carries: Cold-Blooded
+ships only a distance and a kill count while its description also demands
+light-tank victims and a Tier IV gun, and Rock Solid's constant bounds the
+rammer's speed while its description also requires the victim to have been
+faster. Each predicate quotes the clause it enforces, so the code and the
+client cannot drift apart.
+
+The same text settles two questions a threshold cannot. Cool-Headed has no
+survival clause, so a vehicle that dies still keeps a ten-bounce run. The
+Billotte family says "击毁数将在受到所有伤害后计算" — frags are counted after
+all damage is received — which makes the final totals the rule and rules out
+any per-event ordering requirement.
+
 `UNAWARDED_ACHIEVEMENTS` in the same module records every medal this product
 deliberately does not award and why, so no later change closes a gap by
-inventing a coefficient. Two of those reasons come straight from the pinned
+inventing a coefficient. Every one of those reasons comes from the pinned
 client rather than from documentation:
 
 - `gui/shared/gui_items/dossier/factories.pyc` registers `sniper` and
@@ -739,8 +756,12 @@ client rather than from documentation:
   `validators.alreadyAchieved`. The client itself treats both as historical
   and will not accept a newly earned one.
 - `alaric` and `lumberjack` have conditions and record IDs but no entry at all
-  in `item_defs/achievements.xml`, so the client has no metadata to render
-  them. They were cancelled before release and no account has ever held one.
+  in `item_defs/achievements.xml`, and no name, description or condition in
+  `achievements.mo` either. They were cancelled before release and no account
+  has ever held one.
+
+The deprecation is stated in the text as well: Sniper reads "从0.8.11版本后将
+无法获得" and Bölter's Medal "从0.8.0版本后将无法获得".
 
 The remaining three are product decisions, not missing data: the two platoon
 medals have no platoon to award to, and Mark of Mastery needs the per-vehicle

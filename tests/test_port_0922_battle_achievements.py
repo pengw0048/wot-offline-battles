@@ -1,7 +1,11 @@
 """Award and packing contracts for #1513 post-battle achievements."""
 
+import io
 import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -80,7 +84,9 @@ def _actor(actor_kind='player', actor_id=1, team=1, **overrides):
         'xp': 500, 'stats': dict(EMPTY_STATS), 'kills': [],
         'damaged_targets': [],
         'exclusive_spot_assists': 0, 'ever_spotted': True,
-        'ally_damage': 0, 'last_shell_finisher': False,
+        'ally_damage': 0, 'ally_hits': 0, 'team_kills': 0,
+        'support_targets': 0, 'solo_capture': True,
+        'last_shell_finisher': False,
         'lucky_devil': False, 'best_deflection_streak': 0,
         'crits_received': 0, 'hits_received': 0,
         'damaging_hits_received': 0, 'deflected_hits_received': 0,
@@ -98,12 +104,13 @@ def _actor(actor_kind='player', actor_id=1, team=1, **overrides):
 
 def _kill(victim_id, victim_tier=5, victim_class='mediumTank',
           victim_kind='bot', death_reason=0, distance=500.0,
-          defended_base=False, actor_speed=10.0):
+          defended_base=False, actor_speed=10.0, victim_speed=12.0):
     return {
         'victim_kind': victim_kind, 'victim_id': victim_id,
         'victim_tier': victim_tier, 'victim_class': victim_class,
         'death_reason': death_reason, 'distance': distance,
         'defended_base': defended_base, 'actor_speed': actor_speed,
+        'victim_speed': victim_speed,
     }
 
 
@@ -168,10 +175,19 @@ class BattleHeroTests(unittest.TestCase):
                           stats={'dropped_capture_points': 70})
         short = _actor(actor_id=3, team=2,
                        stats={'dropped_capture_points': 69})
-        awards = _awards([invader, defender, short])
+        awards = _awards([invader, defender, short], base_captured_team=1)
         self.assertIn('invader', awards[('player', 1)])
         self.assertIn('defender', awards[('player', 2)])
         self.assertEqual(awards[('player', 3)], [])
+
+    def test_invader_needs_the_capture_to_complete(self):
+        # "此荣誉只颁发给成功占领基地" - points alone are not the medal.
+        invader = _actor(actor_id=1, stats={'capture_points': 99})
+        self.assertNotIn(
+            'invader', _awards([invader])[('player', 1)])
+        self.assertNotIn(
+            'invader',
+            _awards([invader], base_captured_team=2)[('player', 1)])
 
     def test_steel_wall_needs_potential_damage_hits_and_survival(self):
         survivor = _actor(actor_id=1, potential_damage_received=1200,
@@ -190,15 +206,55 @@ class BattleHeroTests(unittest.TestCase):
                          max_health=6000)
         self.assertNotIn('mainGun', _awards([hero, tougher])[('player', 1)])
 
-    def test_confederate_counts_enemies_finished_by_someone_else(self):
-        targets = [('bot', index) for index in range(1, 7)]
-        helper = _actor(actor_id=1, damaged_targets=targets)
-        finisher = _actor(actor_id=2, kills=[
-            _kill(index) for index in range(1, 7)])
-        awards = _awards([helper, finisher])
+    def test_fire_support_counts_enemies_hurt_or_immobilised(self):
+        # "战斗中比其它玩家击伤更多的敌方坦克或击毁他们的履带(至少为6辆)".
+        helper = _actor(actor_id=1, support_targets=6)
+        quieter = _actor(actor_id=2, support_targets=5)
+        awards = _awards([helper, quieter])
         self.assertIn('supporter', awards[('player', 1)])
-        # The actor that scored the kills did not "assist" itself.
         self.assertNotIn('supporter', awards[('player', 2)])
+
+    def test_fire_support_ignores_kills_scored_by_other_players(self):
+        # Damaging nobody and letting allies do the work is not support:
+        # the old rule counted "damaged then finished by someone else".
+        bystander = _actor(
+            actor_id=1, support_targets=0,
+            damaged_targets=[('bot', index) for index in range(1, 7)])
+        finisher = _actor(actor_id=2, support_targets=0, kills=[
+            _kill(index) for index in range(1, 7)])
+        awards = _awards([bystander, finisher])
+        self.assertNotIn('supporter', awards[('player', 1)])
+        self.assertNotIn('supporter', awards[('player', 2)])
+
+    def test_scout_needs_a_win(self):
+        # "必须胜利才可以获得."
+        loser = _actor(actor_id=1, stats={'spotted': 12}, won=False)
+        self.assertNotIn('scout', _awards([loser])[('player', 1)])
+
+    def test_damage_hero_and_sniper_forbid_hitting_an_ally(self):
+        # "玩家不能击中盟友坦克" / "玩家不得直接射中任何友军".
+        gunner = _actor(actor_id=1, stats={'damage': 4000}, ally_hits=1)
+        marksman = _actor(
+            actor_id=2, sniper_damage=1200, hits_with_damage=9, ally_hits=1,
+            max_health=900, stats={'shots': 10, 'direct_hits': 9,
+                                   'damage': 1500})
+        awards = _awards([gunner, marksman])
+        self.assertNotIn('mainGun', awards[('player', 1)])
+        self.assertNotIn('sniper2', awards[('player', 2)])
+
+    def test_sniper_needs_damage_above_its_own_hit_points(self):
+        # "距离300米外造成的伤害必须超过玩家车辆的生命值，至少1000点".
+        weak = _actor(actor_id=1, sniper_damage=1200, hits_with_damage=9,
+                      max_health=1200,
+                      stats={'shots': 10, 'direct_hits': 9, 'damage': 1500})
+        self.assertNotIn('sniper2', _awards([weak])[('player', 1)])
+
+    def test_artillery_can_never_be_the_sniper(self):
+        # "自行火炮无法获得."
+        gun = _actor(actor_id=1, vehicle_class='SPG', sniper_damage=1200,
+                     hits_with_damage=9, max_health=900,
+                     stats={'shots': 10, 'direct_hits': 9, 'damage': 1500})
+        self.assertNotIn('sniper2', _awards([gun])[('player', 1)])
 
     def test_scout_and_patrol_duty_use_distinct_spotting_inputs(self):
         scout = _actor(actor_id=1, stats={'spotted': 9})
@@ -254,8 +310,11 @@ class SourcedMedalTests(unittest.TestCase):
         broken = _actor(actor_id=1, best_deflection_streak=9,
                         deflected_hits_received=30)
         self.assertNotIn('ironMan', _awards([broken])[('player', 1)])
+
+    def test_cool_headed_does_not_require_surviving(self):
+        # Its condition text carries no survival clause, unlike Spartan.
         dead = _actor(actor_id=1, best_deflection_streak=12, survived=False)
-        self.assertNotIn('ironMan', _awards([dead])[('player', 1)])
+        self.assertIn('ironMan', _awards([dead])[('player', 1)])
 
     def test_fadin_follows_the_last_shell_finisher_flag(self):
         finisher = _actor(actor_id=1, last_shell_finisher=True)
@@ -284,11 +343,18 @@ class SourcedMedalTests(unittest.TestCase):
                       kills=[_kill(1, death_reason=2, actor_speed=2.0)])
         self.assertNotIn('medalMonolith', _awards([tank])[('player', 1)])
 
-    def test_rock_solid_is_lost_by_damaging_an_ally(self):
+    def test_rock_solid_is_lost_by_destroying_an_ally(self):
         dirty = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
-                       ally_damage=40,
+                       team_kills=1,
                        kills=[_kill(1, death_reason=2, actor_speed=2.0)])
         self.assertNotIn('medalMonolith', _awards([dirty])[('player', 1)])
+
+    def test_rock_solid_needs_the_victim_to_be_the_faster_vehicle(self):
+        # "击毁您的敌方坦克速度必须高于您的自行火炮速度."
+        slower = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
+                        kills=[_kill(1, death_reason=2, actor_speed=2.0,
+                                     victim_speed=1.0)])
+        self.assertNotIn('medalMonolith', _awards([slower])[('player', 1)])
 
 
 class EpicMedalTests(unittest.TestCase):
@@ -383,7 +449,8 @@ class EpicMedalTests(unittest.TestCase):
                 for index in (1, 2)]
 
     def test_artillery_medals_require_a_self_propelled_gun(self):
-        gore_stats = {'damage': 8000, 'kills': 2}
+        gore_stats = {'damage': 8000, 'kills': 2,
+                      'damage_received': 400, 'damage_blocked': 200}
         artillery = _actor(actor_id=1, vehicle_class='SPG',
                            max_health=800, stats=gore_stats,
                            damaging_hits_received=2,
@@ -417,24 +484,56 @@ class EpicMedalTests(unittest.TestCase):
             'medalAntiSpgFire',
             _awards([partial] + battery)[('player', 1)])
 
-    def test_gores_medal_is_lost_by_damaging_an_ally(self):
+    def test_gores_medal_is_lost_by_destroying_an_ally(self):
+        # "玩家不能击毁任何盟友坦克"; a friendly hit alone is not the bar,
+        # since "击中或命中盟友坦克也不被计算在内".
         stats = {'damage': 8000, 'kills': 2}
         clean = _actor(actor_id=1, vehicle_class='SPG', max_health=800,
-                       stats=stats)
-        self.assertIn('medalGore', _awards([clean])[('player', 1)])
-        dirty = _actor(actor_id=1, vehicle_class='SPG', max_health=800,
                        stats=stats, ally_damage=120)
-        self.assertNotIn('medalGore', _awards([dirty])[('player', 1)])
+        self.assertIn('medalGore', _awards([clean])[('player', 1)])
+        killer = _actor(actor_id=1, vehicle_class='SPG', max_health=800,
+                        stats=stats, team_kills=1)
+        self.assertNotIn('medalGore', _awards([killer])[('player', 1)])
 
-    def test_cool_blood_counts_close_kills_only(self):
-        close = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 2},
-                       kills=[_kill(1, distance=40.0),
-                              _kill(2, distance=99.0)])
-        self.assertIn('medalCoolBlood', _awards([close])[('player', 1)])
-        far = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 2},
-                     kills=[_kill(1, distance=140.0),
-                            _kill(2, distance=99.0)])
-        self.assertNotIn('medalCoolBlood', _awards([far])[('player', 1)])
+    def _cold_blooded(self, **overrides):
+        row = {
+            'vehicle_class': 'SPG', 'tier': 4, 'stats': {'kills': 2},
+            'kills': [_kill(1, victim_class='lightTank', distance=40.0),
+                      _kill(2, victim_class='lightTank', distance=99.0)],
+        }
+        row.update(overrides)
+        return _actor(actor_id=1, **row)
+
+    def test_cold_blooded_needs_close_light_tanks_from_a_tier_four_gun(self):
+        self.assertIn(
+            'medalCoolBlood',
+            _awards([self._cold_blooded()])[('player', 1)])
+
+    def test_cold_blooded_rejects_distant_kills(self):
+        far = self._cold_blooded(kills=[
+            _kill(1, victim_class='lightTank', distance=140.0),
+            _kill(2, victim_class='lightTank', distance=99.0)])
+        self.assertNotIn(
+            'medalCoolBlood', _awards([far])[('player', 1)])
+
+    def test_cold_blooded_counts_light_tanks_only(self):
+        # "击毁至少2辆敌方轻型坦克."
+        heavies = self._cold_blooded(kills=[
+            _kill(1, victim_class='heavyTank', distance=40.0),
+            _kill(2, victim_class='mediumTank', distance=50.0)])
+        self.assertNotIn(
+            'medalCoolBlood', _awards([heavies])[('player', 1)])
+
+    def test_cold_blooded_needs_at_least_a_tier_four_gun(self):
+        # "使用至少为4级的自行火炮."
+        low = self._cold_blooded(tier=3)
+        self.assertNotIn(
+            'medalCoolBlood', _awards([low])[('player', 1)])
+
+    def test_cold_blooded_is_lost_by_destroying_an_ally(self):
+        dirty = self._cold_blooded(team_kills=1)
+        self.assertNotIn(
+            'medalCoolBlood', _awards([dirty])[('player', 1)])
 
     def test_bombardier_kamikaze_sturdy_and_raider(self):
         bomber = _actor(actor_id=1, best_multi_kill_shot=2)
@@ -463,6 +562,49 @@ class EpicMedalTests(unittest.TestCase):
                       ever_spotted=True)
         self.assertNotIn(
             'raider', _awards([seen], base_captured_team=1)[('player', 1)])
+
+    def test_sneaky_needs_the_capture_to_be_solo(self):
+        # "单独占领敌人基地" - a shared capture is not this medal.
+        shared = _actor(actor_id=1, team=1, captured_base=True,
+                        ever_spotted=False, solo_capture=False)
+        self.assertNotIn(
+            'raider', _awards([shared], base_captured_team=1)[('player', 1)])
+
+    def test_sneaky_survives_being_shot_at(self):
+        # "如果坦克被偶然击中或受损并不取消此勋章的获得."
+        battered = _actor(actor_id=1, team=1, captured_base=True,
+                          ever_spotted=False, health=1,
+                          damaging_hits_received=6, crits_received=3)
+        self.assertIn(
+            'raider',
+            _awards([battered], base_captured_team=1)[('player', 1)])
+
+    def test_stark_needs_two_thirds_of_its_hit_points_absorbed(self):
+        # "受到的伤害以及装甲伤害必须是自身坦克生命值的三分之二."
+        row = {
+            'vehicle_class': 'SPG', 'max_health': 900,
+            'damaging_hits_received': 2, 'stats': {
+                'kills': 2, 'damage_received': 400, 'damage_blocked': 200},
+        }
+        self.assertIn(
+            'medalStark', _awards([_actor(actor_id=1, **row)])[('player', 1)])
+        row['stats'] = {
+            'kills': 2, 'damage_received': 300, 'damage_blocked': 200}
+        self.assertNotIn(
+            'medalStark', _awards([_actor(actor_id=1, **row)])[('player', 1)])
+
+    def test_tier_delta_medals_never_count_artillery_victims(self):
+        # "击毁2辆或2辆以上的敌方坦克与自行反坦克炮."
+        scout = _actor(actor_id=1, tier=5, vehicle_class='lightTank',
+                       stats={'kills': 2}, kills=[
+                           _kill(1, victim_tier=6, victim_class='SPG'),
+                           _kill(2, victim_tier=6, victim_class='SPG')])
+        self.assertNotIn('medalOrlik', _awards([scout])[('player', 1)])
+        proper = _actor(actor_id=1, tier=5, vehicle_class='lightTank',
+                        stats={'kills': 2}, kills=[
+                            _kill(1, victim_tier=6, victim_class='heavyTank'),
+                            _kill(2, victim_tier=6, victim_class='AT-SPG')])
+        self.assertIn('medalOrlik', _awards([proper])[('player', 1)])
 
     def test_bots_earn_the_same_medals_as_human_players(self):
         bot = _actor(actor_kind='bot', actor_id=3, stats={'kills': 6})
@@ -627,6 +769,60 @@ class DossierAccumulationTests(unittest.TestCase):
     def test_account_snapshot_publishes_the_dossier_key(self):
         snapshot = data.stats(postbattle_progress={'achievements': {}})
         self.assertEqual(snapshot['stats']['dossier'], '')
+
+    def test_a_corrupt_counter_never_reaches_the_dossier_builder(self):
+        # A hand-edited or partially written cache must not break the account
+        # snapshot the garage is built from.
+        for bad in ('bad', None, True, -1, 0, 1.5, [], {}):
+            counts = {'warrior': bad, 'medalKolobanov': 1}
+            compact = data.account_dossier(
+                {'achievements': counts}, dossier_factory=_FakeDossier)
+            self.assertEqual(
+                {'medalKolobanov': 1}, compact['achievements'],
+                'counter %r must be dropped' % (bad,))
+
+    def test_an_unknown_medal_name_is_dropped_from_persisted_counters(self):
+        store = postbattle_store.PostBattleStore(path=None)
+        store._progress['achievements'] = {
+            'warrior': 3, 'notAMedal': 4, 'sniper': 2}
+        self.assertEqual(
+            {'warrior': 3},
+            postbattle_store._achievement_counts(
+                store._progress['achievements']))
+
+    def test_a_corrupt_cache_still_loads_and_accumulates(self):
+        path = os.path.join(self._temporary_dir(), 'postbattle.json')
+        store = postbattle_store.PostBattleStore(path=path)
+        receipt = ResultPackingTests._receipt(['warrior'])
+        receipt['account_key'] = store.account_key
+        self.assertTrue(store.accept(receipt))
+        with io.open(path, encoding='utf-8') as stream:
+            value = json.load(stream)
+        value['progress']['achievements'] = {
+            'warrior': 'bad', 'medalKolobanov': -2, 'notAMedal': 9}
+        for row in value['progress']['vehicles'].values():
+            row['achievements'] = {'warrior': True}
+        with io.open(path, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(value))
+
+        reloaded = postbattle_store.PostBattleStore(path=path)
+
+        self.assertEqual({}, reloaded.progress()['achievements'])
+        second = dict(receipt)
+        second['receipt_id'] = 'server:9:1'
+        second['arena_unique_id'] = (9 << 32) | 1
+        second['round_id'] = 9
+        self.assertTrue(reloaded.accept(second))
+        self.assertEqual(
+            {'warrior': 1}, reloaded.progress()['achievements'])
+        self.assertEqual(
+            {'warrior': 1},
+            reloaded.progress()['vehicles']['ussr:R11_MS-1']['achievements'])
+
+    def _temporary_dir(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        return directory
 
     def test_a_vehicle_without_medals_leaves_the_block_untouched(self):
         rows = data.dossiers(
@@ -982,6 +1178,40 @@ class LuckyDevilTests(unittest.TestCase):
         self.assertTrue(state._record_frag(
             'player', 1, 2, 'bot', 1, attacker_team=1))
         self.assertEqual(set(), state.lucky_devils)
+
+
+class SupportAndFriendlyFireTests(unittest.TestCase):
+    """Round state the corrected predicates read."""
+
+    def test_real_damage_and_track_kills_both_count_as_support(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state._record_damage(('player', 1), ('bot', 1), 120, {})
+        self.assertEqual(
+            {('bot', 1)}, state.support_targets[('player', 1)])
+
+    def test_a_bounce_never_counts_as_support(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state._record_damage(('player', 1), ('bot', 1), 0, {})
+        self.assertNotIn(('player', 1), state.support_targets)
+
+    def test_a_teammate_is_never_a_support_target(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.bot_states[1]['team'] = 1
+        state._record_damage(('player', 1), ('bot', 1), 120, {})
+        self.assertNotIn(('player', 1), state.support_targets)
+
+    def test_a_friendly_kill_is_counted_against_the_actor(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.bot_states[1]['team'] = 1
+        self.assertTrue(state._record_frag(
+            'player', 1, 1, 'bot', 1, attacker_team=1))
+        self.assertEqual(1, state.team_kills[('player', 1)])
+
+    def test_an_enemy_kill_is_not_a_friendly_kill(self):
+        state, unused_player = ServerReceiptTests._battle()
+        self.assertTrue(state._record_frag(
+            'player', 1, 2, 'bot', 1, attacker_team=1))
+        self.assertEqual({}, state.team_kills)
 
 
 class LastShellTests(unittest.TestCase):

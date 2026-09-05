@@ -322,6 +322,25 @@ def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
     return details.pack()
 
 
+def _achievement_counts(value):
+    """Return one medal-counter map safe to hand the #1513 dossier builder.
+
+    Persisted progress is optional state a player can edit or a partial write
+    can corrupt.  Only names this build awards survive, and only as positive
+    whole counts, because the native dossier block coerces with ``int`` and a
+    bad value there breaks the account snapshot the garage is built from.
+    """
+    if not isinstance(value, dict):
+        return {}
+    counts = {}
+    for name in AWARDABLE_ACHIEVEMENTS:
+        count = value.get(name)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            continue
+        counts[name] = count
+    return counts
+
+
 def _achievement_records(names, record_db_ids=None):
     """Return sorted ``(name, database id)`` pairs for awarded medals.
 
@@ -741,11 +760,13 @@ class PostBattleStore(object):
         row['kills'] += stats['kills']
         # #1513 counts every medal in both the account and the vehicle
         # dossier; the results badge renders the account total.
-        account_medals = progress.setdefault('achievements', {})
-        vehicle_medals = row.setdefault('achievements', {})
+        account_medals = _achievement_counts(progress.get('achievements'))
+        vehicle_medals = _achievement_counts(row.get('achievements'))
+        progress['achievements'] = account_medals
+        row['achievements'] = vehicle_medals
         for name in receipt['achievements']:
-            account_medals[name] = int(account_medals.get(name, 0)) + 1
-            vehicle_medals[name] = int(vehicle_medals.get(name, 0)) + 1
+            account_medals[name] = account_medals.get(name, 0) + 1
+            vehicle_medals[name] = vehicle_medals.get(name, 0) + 1
         for target_name, source_name in (
                 ('shots', 'shots'), ('directHits', 'direct_hits'),
                 ('piercings', 'piercings'), ('spotted', 'spotted'),
@@ -819,15 +840,17 @@ class PostBattleStore(object):
                               int(self._progress.get('wins', 0))))
             # Files written before offline achievements shipped have no
             # medal counters; an empty map is the correct starting total.
-            if not isinstance(self._progress.get('achievements'), dict):
-                self._progress['achievements'] = {}
+            # A corrupt or hand-edited counter must not reach the dossier
+            # builder, so only known names with positive whole counts survive.
+            self._progress['achievements'] = _achievement_counts(
+                self._progress.get('achievements'))
             for row in self._progress.get('vehicles', {}).values():
                 if isinstance(row, dict):
                     row.setdefault(
                         'losses', max(0, int(row.get('battles', 0)) -
                                       int(row.get('wins', 0))))
-                    if not isinstance(row.get('achievements'), dict):
-                        row['achievements'] = {}
+                    row['achievements'] = _achievement_counts(
+                        row.get('achievements'))
         except (IOError, OSError, TypeError, ValueError):
             # Keep a corrupt optional cache from preventing an offline login.
             self._pending = {}

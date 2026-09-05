@@ -1375,6 +1375,33 @@ class ServerProjectileLedgerTests(unittest.TestCase):
 
         self.assertIs(True, state.last_shell_shots['1:b:16:1'])
 
+    def test_a_zero_shell_report_cannot_award_the_last_shell(self):
+        # A shot was drawn from at least one shell, so zero fails the bound.
+        # The shot itself is already admitted and must still resolve, so the
+        # bad achievement input is contained to itself rather than destroying
+        # a legal launch.
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=0)))
+
+        self.assertEqual({}, state.last_shell_shots)
+        self.assertIn('1:b:16:1', state.projectiles)
+
+    def test_two_shells_before_the_shot_is_not_a_last_shell(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=2)))
+
+        self.assertIs(False, state.last_shell_shots['1:b:16:1'])
+
     def test_a_launch_with_shells_left_is_not_a_last_shell(self):
         state = _state()
         self._armed_bot(state)

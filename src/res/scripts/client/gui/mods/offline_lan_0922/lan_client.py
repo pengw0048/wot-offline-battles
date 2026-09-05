@@ -2641,7 +2641,9 @@ class LANClient(object):
             }
             # The client owns its ammunition, so Fadin's medal needs the
             # shell total standing at the trigger edge, this round included.
-            parsed_shells = _projectile_int_range(shells_before_shot, 0, 1000)
+            # A shot that happened was drawn from at least one shell, so
+            # zero is not a smaller count, it is an invalid report.
+            parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
             if parsed_shells is not None:
                 message['shells_before_shot'] = parsed_shells
             if not self._send(message):
@@ -2819,7 +2821,9 @@ class LANClient(object):
                 message['fire_input_seq'] = parsed_input_seq
             # The worker owns Bot ammunition, so it is the only producer that
             # can report the shell total this shot was drawn from.
-            parsed_shells = _projectile_int_range(shells_before_shot, 0, 1000)
+            # A shot that happened was drawn from at least one shell, so
+            # zero is not a smaller count, it is an invalid report.
+            parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
             if parsed_shells is not None:
                 message['shells_before_shot'] = parsed_shells
             if not self._send(message):

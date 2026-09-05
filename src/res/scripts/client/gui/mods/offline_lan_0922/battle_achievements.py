@@ -15,10 +15,15 @@ that file also decides which medals exist at all, since a condition without an
 entry there is one Wargaming cancelled before release.
 
 The client ships the thresholds but not the retail award predicates, which run
-on Wargaming's battle server.  Each predicate below therefore combines an exact
-#1513 constant with the publicly documented shape of that medal.  Anything that
-would need a coefficient this repository cannot source is not awarded at all;
-``UNAWARDED_ACHIEVEMENTS`` records those and why.
+on Wargaming's battle server.  The rest of each rule is in the client's own
+description text, ``res/text/LC_MESSAGES/achievements.mo``: every medal there
+carries a ``<name>_descr`` summary and a ``<name>_condition`` clause list, and
+those clauses are what each predicate below implements.  The clause is quoted
+in Chinese beside the code that enforces it so the two cannot drift.  A
+threshold alone is never the rule: ``medalCoolBlood`` ships only a distance and
+a kill count, while its description also demands light-tank victims and a Tier
+IV gun.  Anything that would still need a coefficient this repository cannot
+source is not awarded at all; ``UNAWARDED_ACHIEVEMENTS`` records those and why.
 
 This module is pure data: it takes one finished-round summary and returns the
 achievement names for every actor.  It never touches live battle state.  It
@@ -144,6 +149,14 @@ _UNIQUE_BATTLE_HEROES = (
     "supporter", "scout", "evileye", "sniper2",
 )
 
+# "坦克与自行反坦克炮" - every tier-delta medal counts tanks and tank
+# destroyers, never artillery.
+_DIRECT_FIRE_CLASSES = ("lightTank", "mediumTank", "heavyTank", "AT-SPG")
+
+# "使用至少为4级的自行火炮" - Cold-Blooded's only tier floor, which #1513
+# ships in the description rather than in ACHIEVEMENT_CONDITIONS.
+_COOL_BLOOD_MIN_TIER = 4
+
 _LIGHT_TANK = "lightTank"
 _MEDIUM_TANK = "mediumTank"
 _TANK_DESTROYER = "AT-SPG"
@@ -186,7 +199,7 @@ def _kills(actor):
     return list(rows) if isinstance(rows, (list, tuple)) else []
 
 
-def _tier_kills(actor, delta, victim_class=None):
+def _tier_kills(actor, delta, victim_classes=None):
     """Count kills of victims at least ``delta`` tiers above the actor.
 
     A tier of zero means the client never catalogued that vehicle, so its
@@ -197,8 +210,8 @@ def _tier_kills(actor, delta, victim_class=None):
         return 0
     total = 0
     for kill in _kills(actor):
-        if (victim_class is not None and
-                kill.get("victim_class") != victim_class):
+        if (victim_classes is not None and
+                kill.get("victim_class") not in victim_classes):
             continue
         victim_tier = _int(kill.get("victim_tier"))
         if victim_tier > 0 and victim_tier - tier >= delta:
@@ -206,9 +219,11 @@ def _tier_kills(actor, delta, victim_class=None):
     return total
 
 
-def _class_kills(actor, victim_class):
+def _class_kills(actor, victim_classes):
+    if isinstance(victim_classes, str):
+        victim_classes = (victim_classes,)
     return sum(1 for kill in _kills(actor)
-               if kill.get("victim_class") == victim_class)
+               if kill.get("victim_class") in victim_classes)
 
 
 def _health_percent(actor):
@@ -228,15 +243,15 @@ def _billotte_family(actor, condition):
             _float(common.get("hpPercentage"), 0.0))
 
 
-def _kill_band(actor, condition, delta=None, victim_class=None):
+def _kill_band(actor, condition, delta=None, victim_classes=None):
     """Count the qualifying kills and test the medal's inclusive band."""
     if delta is None:
-        if victim_class is None:
+        if victim_classes is None:
             count = _stat(actor, "kills")
         else:
-            count = _class_kills(actor, victim_class)
+            count = _class_kills(actor, victim_classes)
     else:
-        count = _tier_kills(actor, delta, victim_class=victim_class)
+        count = _tier_kills(actor, delta, victim_classes=victim_classes)
     minimum = _int(condition.get("minKills"), 0)
     maximum = _int(condition.get("maxKills"), 255)
     return count if minimum <= count <= maximum else 0
@@ -282,8 +297,11 @@ def _unique_hero_metric(name, actor, context):
         kills = _stat(actor, "kills")
         return kills if kills >= condition["minFrags"] else None
     if name == "invader":
+        # "此荣誉只颁发给成功占领基地" - only a completed capture qualifies.
         points = _stat(actor, "capture_points")
-        return points if points >= condition["minCapturePts"] else None
+        captured = context["base_captured_team"] == _int(actor.get("team"))
+        return (points if captured and points >= condition["minCapturePts"]
+                else None)
     if name == "defender":
         points = _stat(actor, "dropped_capture_points")
         return points if points >= condition["minPoints"] else None
@@ -294,29 +312,42 @@ def _unique_hero_metric(name, actor, context):
             potential >= condition["minDamage"] and
             _int(actor.get("hits_received")) >= condition["minHits"]) else None
     if name == "mainGun":
+        # "玩家不能击中盟友坦克" - one friendly hit ends it.
+        if _int(actor.get("ally_hits")):
+            return None
         damage = _stat(actor, "damage")
         enemy_health = context["enemy_team_health"][_int(actor.get("team"))]
         threshold = condition["minDamageToTotalHealthRatio"] * enemy_health
         return damage if (damage >= condition["minDamage"] and
                           enemy_health > 0 and damage >= threshold) else None
     if name == "supporter":
-        assists = len(context["confederate"].get(_identity(actor), ()))
+        # "比其它玩家击伤更多的敌方坦克或击毁他们的履带", with
+        # "跳弹未击穿不被计算在内": distinct enemies this actor actually hurt
+        # or immobilised, never a bounce and never somebody else's kill.
+        assists = _int(actor.get("support_targets"))
         return assists if assists >= condition["minAssists"] else None
     if name == "scout":
+        # "必须胜利才可以获得."
         detections = _stat(actor, "spotted")
-        return (detections if detections >= condition["minDetections"]
-                else None)
+        return (detections if actor.get("won") and
+                detections >= condition["minDetections"] else None)
     if name == "evileye":
         assists = _int(actor.get("exclusive_spot_assists"))
         return assists if assists >= condition["minAssists"] else None
     if name == "sniper2":
+        # "自行火炮无法获得", "玩家不得直接射中任何友军", and the damage from
+        # 300 m out must beat both 1000 and the shooter's own hit points.
+        if (actor.get("vehicle_class") == _SPG or
+                _int(actor.get("ally_hits"))):
+            return None
         damage = _int(actor.get("sniper_damage"))
         return damage if (
             _stat(actor, "shots") >= condition["minShots"] and
             _accuracy(actor) >= condition["minAccuracy"] and
             _damage_hit_ratio(actor) >=
             condition["minHitsWithDamagePercent"] and
-            damage >= condition["minDamage"]) else None
+            damage >= condition["minDamage"] and
+            damage > _int(actor.get("max_health"))) else None
     raise KeyError(name)
 
 
@@ -338,7 +369,8 @@ def _epic_achievements(actor, context):
             earned.append(name)
 
     # Historical tier-delta medals.  #1513 restricts each one to the vehicle
-    # class its namesake fought in; the tier delta itself is the constant.
+    # class its namesake fought in, and every one of these descriptions says
+    # "坦克与自行反坦克炮" - tanks and tank destroyers, never artillery.
     for name, required_class in (
             ("medalOrlik", _LIGHT_TANK),
             ("medalOskin", _MEDIUM_TANK),
@@ -347,7 +379,8 @@ def _epic_achievements(actor, context):
             ("medalHalonen", _TANK_DESTROYER)):
         condition = ACHIEVEMENT_CONDITIONS[name]
         if vehicle_class == required_class and _kill_band(
-                actor, condition, delta=condition["minVictimLevelDelta"]):
+                actor, condition, delta=condition["minVictimLevelDelta"],
+                victim_classes=_DIRECT_FIRE_CLASSES):
             earned.append(name)
 
     # Artillery-hunting medals.  A self-propelled gun cannot earn them.
@@ -355,13 +388,14 @@ def _epic_achievements(actor, context):
         for name, delta in (("medalBurda", 1), ("medalPascucci", None),
                             ("medalDumitru", None)):
             condition = ACHIEVEMENT_CONDITIONS[name]
-            if _kill_band(actor, condition, delta=delta, victim_class=_SPG):
+            if _kill_band(actor, condition, delta=delta,
+                          victim_classes=(_SPG,)):
                 earned.append(name)
     if vehicle_class == _LIGHT_TANK and survived:
         condition = ACHIEVEMENT_CONDITIONS["medalTamadaYoshio"]
         if _kill_band(actor, condition,
                       delta=condition["minVictimLevelDelta"],
-                      victim_class=_SPG):
+                      victim_classes=(_SPG,)):
             earned.append("medalTamadaYoshio")
 
     for name in ("medalBillotte", "medalBrunoPietro", "medalTarczay"):
@@ -381,8 +415,8 @@ def _epic_achievements(actor, context):
     if base_defence_kills >= condition["minKills"]:
         earned.append("medalDeLanglade")
 
-    # Naidin's medal (``huntsman``) asks for every enemy light tank, and the
-    # count only means anything when the enemy team actually fielded some.
+    # Naidin's medal (``huntsman``): "一场战斗中击毁敌方所有轻型坦克(至少
+    # 三辆)".  The count only means anything when the enemy fielded some.
     condition = ACHIEVEMENT_CONDITIONS["huntsman"]
     enemy_light_tanks = context["enemy_class_counts"][
         _int(actor.get("team"))].get(_LIGHT_TANK, 0)
@@ -391,9 +425,10 @@ def _epic_achievements(actor, context):
         earned.append("huntsman")
 
     # Cool-Headed (``ironMan``) counts bounces in a row, not bounces in total.
+    # "至少连续十次未被敌方击穿或被敌方坦克击中但跳弹" carries no survival
+    # clause, unlike Spartan below.
     condition = ACHIEVEMENT_CONDITIONS["ironMan"]
-    if (survived and
-            _int(actor.get("best_deflection_streak")) >= condition["minHits"]):
+    if _int(actor.get("best_deflection_streak")) >= condition["minHits"]:
         earned.append("ironMan")
 
     if actor.get("lucky_devil"):
@@ -403,39 +438,54 @@ def _epic_achievements(actor, context):
         earned.append("medalFadin")
 
     if vehicle_class == _SPG:
+        # Every artillery medal here carries "玩家不能击毁任何盟友坦克".
+        # Friendly hits simply do not count toward a total; a friendly kill
+        # ends the award outright.
+        clean = not _int(actor.get("team_kills"))
+        max_health = _int(actor.get("max_health"))
         condition = ACHIEVEMENT_CONDITIONS["medalGore"]
         damage = _stat(actor, "damage")
-        max_health = _int(actor.get("max_health"))
-        if (damage >= condition["minDamage"] and max_health > 0 and
-                damage >= condition["minDamageRate"] * max_health and
-                not _int(actor.get("ally_damage"))):
+        if (clean and damage >= condition["minDamage"] and max_health > 0 and
+                damage >= condition["minDamageRate"] * max_health):
             earned.append("medalGore")
-        # Rock Solid: ram an enemy to death from a crawl and drive away.
+        # Rock Solid: ram an enemy to death from a crawl while it was the
+        # faster of the two, and drive away.
+        # "击毁您的敌方坦克速度必须高于您的自行火炮速度."
         condition = ACHIEVEMENT_CONDITIONS["monolith"]
-        if (survived and not _int(actor.get("ally_damage")) and any(
+        if (clean and survived and any(
                 _int(kill.get("death_reason")) == 2 and
                 _float(kill.get("actor_speed"), -1.0) >= 0.0 and
-                _float(kill.get("actor_speed")) <= condition["maxSpeed_ms"]
+                _float(kill.get("actor_speed")) <= condition["maxSpeed_ms"] and
+                _float(kill.get("victim_speed"), -1.0) >
+                _float(kill.get("actor_speed"))
                 for kill in _kills(actor))):
             earned.append("medalMonolith")
+        # "受到的伤害以及装甲伤害必须是自身坦克生命值的三分之二."
         condition = ACHIEVEMENT_CONDITIONS["medalStark"]
-        if (survived and kills >= condition["minKills"] and
+        absorbed = _stat(actor, "damage_received") + _stat(
+            actor, "damage_blocked")
+        if (clean and survived and kills >= condition["minKills"] and
                 _int(actor.get("damaging_hits_received")) >=
-                condition["hits"]):
+                condition["hits"] and max_health > 0 and
+                3 * absorbed >= 2 * max_health):
             earned.append("medalStark")
+        # "在不超过100米的距离内击毁至少2辆敌方轻型坦克" with
+        # "使用至少为4级的自行火炮."
         condition = ACHIEVEMENT_CONDITIONS["medalCoolBlood"]
         close_kills = sum(
             1 for kill in _kills(actor)
-            if _float(kill.get("distance"), -1.0) >= 0.0 and
+            if kill.get("victim_class") == _LIGHT_TANK and
+            _float(kill.get("distance"), -1.0) >= 0.0 and
             _float(kill.get("distance")) <= condition["maxDistance"])
-        if close_kills >= condition["minKills"]:
+        if (clean and tier >= _COOL_BLOOD_MIN_TIER and
+                close_kills >= condition["minKills"]):
             earned.append("medalCoolBlood")
-        # Counter-battery fire wants the whole enemy battery, not a pair of
-        # artillery kills, so the roster bounds it the way Naidin's does.
+        # "使用自行火炮击毁敌方所有自行火炮(至少2辆)" - the whole enemy
+        # battery, not any two artillery kills.
         condition = ACHIEVEMENT_CONDITIONS["medalAntiSpgFire"]
         enemy_spgs = context["enemy_class_counts"][
             _int(actor.get("team"))].get(_SPG, 0)
-        if (enemy_spgs >= condition["minKills"] and
+        if (clean and enemy_spgs >= condition["minKills"] and
                 _class_kills(actor, _SPG) >= enemy_spgs):
             earned.append("medalAntiSpgFire")
 
@@ -456,7 +506,12 @@ def _epic_achievements(actor, context):
     if survived and _int(actor.get("deflected_hits_at_low_health")) > 0:
         earned.append("sturdy")
 
-    if (actor.get("captured_base") and not actor.get("ever_spotted") and
+    # "单独占领敌人基地且在整场战斗中未被敌人发现" - the capture must have
+    # completed, this actor must be the only vehicle that ever moved that
+    # base's counter, and nobody may have detected it all battle.  Taking
+    # damage does not disqualify: "如果坦克被偶然击中或受损并不取消".
+    if (actor.get("captured_base") and actor.get("solo_capture") and
+            not actor.get("ever_spotted") and
             context["base_captured_team"] == _int(actor.get("team"))):
         earned.append("raider")
 

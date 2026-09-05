@@ -588,8 +588,11 @@ def _write_achievements(dossier, counts):
     block = dossier['achievements']
     heroes = 0
     for name in sorted(counts):
-        value = max(0, int(counts.get(name, 0) or 0))
-        if not value:
+        value = counts.get(name)
+        # Optional persisted state reaches here, so a counter that is not a
+        # positive whole number is dropped rather than coerced.  ``bool`` is
+        # an ``int`` subclass and is not a count.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             continue
         if name in BATTLE_HERO_ACHIEVEMENTS:
             heroes += value
