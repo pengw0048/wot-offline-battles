@@ -1194,13 +1194,41 @@ the authority manifest arrived.
 
 The exact relative-aim call treats the point as relative coordinates. Stopping
 gun tracking reconstructs world aim from the current hull yaw. A local shot
-uses the public `gunRotator.getCurShotPosition()` boundary, performs client
-map/vehicle collision and armor checks, and reports the proposed hit to the
-server. The echoed server shot event calls `Vehicle.showShooting()` with the
+freezes the public `gunRotator.getCurShotPosition()` ray in its fire intent;
+the hidden worker performs map/vehicle collision and armour checks and reports
+the proposed result to the server. The echoed shot event calls
+`Vehicle.showShooting()` with the
 descriptor's positive `gun.burst[0]` and the authoritative flag. Exact #1513
 then cancels the local Avatar's shot-wait callback; zero is not a single-shot
 sentinel and leaves the native firing extra unbounded. Remote events use the
 same finite presentation without claiming prediction.
+
+Canonical shell visuals use the stock #1513 `ProjectileMover` after the worker's
+launch is admitted. `PlayerAvatar.__startWaitingForShot` still owns the stock
+120--200 ms predicted-muzzle timeout; a tracer starts only from the canonical
+launch or an active snapshot, with the admitted muzzle/velocity and the current
+on-screen `HP_gunFire` as stock's separate, 20 m-guarded visual start. A late
+first snapshot seeds the checked trajectory pose. Once started, the stock
+`PyBallisticsSimulator` motor owns cosmetic flight: progress snapshots neither
+clamp nor rewrite it, and no Python Servo competes for its pose. The worker
+continues to own every collision, damage, ricochet and terminal verdict.
+
+The presenter binds the mover to the loaded space before `add`, reserves its
+logical shot identity before native creation can re-enter, and deduplicates that
+identity even if the native motor expires before the worker result. Canonical
+rows disable stock `fireMissedTrigger`; their `__notifyProjectileHit` path is
+scoped out so only the worker terminal emits the existing input/flock/missed
+feedback once. Terminal events call stock `hide` or `explode`, while a ricochet
+retires the old native id and starts a new one with stock `hold`. `hide` owns its
+negative-id row and particle tail; capacity counts both active and tail rows
+without detaching a live native motor. A late world terminal can use stock's
+unknown-id explosion without recreating a tracer. Round reset and teardown
+destroy the mover before forgetting its ids. A failed native teardown retains
+that owner and stops further cosmetic admission. The ABI/lifecycle audits pin
+the relevant calls and private-row consumers. Exact Windows acceptance must
+still establish native rendering, collision appearance, tail lifetime, late
+terminal correction and frame pacing; local tests only establish the adapter's
+ownership and worker-authority boundaries.
 
 A hit vehicle also receives retail's hull shot impulse. Exact #1513
 `Vehicle.showDamageFromShot` builds the first decoded hit point's world-space

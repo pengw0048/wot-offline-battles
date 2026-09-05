@@ -177,14 +177,21 @@ ORDERED_CONTRACTS = (
         'entities/remote_vehicle.py',
         '_RemoteShotPresenter._projectile_mover',
         'ProjectileMover ownership follows the stock space binding',
-        (('call', 'ProjectileMover'), ('call', 'set_space_id'),
+        (('call', 'CanonicalProjectileMover'), ('call', 'set_space_id'),
          ('assign', 'self._mover')),
     ),
     (
         'entities/remote_vehicle.py',
         '_RemoteShotPresenter.destroy',
         'ProjectileMover native teardown precedes owner release',
-        (('call', 'callback'), ('assign', 'self._mover'),
+        (('call', 'self._mover.destroy'), ('assign', 'self._mover'),
+         ('call', 'self.reset_canonical')),
+    ),
+    (
+        'entities/remote_vehicle.py',
+        '_RemoteShotPresenter.reset_canonical',
+        'round reset retires native flight before forgetting logical shots',
+        (('call', 'mover.destroy'), ('assign', 'self._mover'),
          ('assign', 'self._projectile_shots')),
     ),
     (
@@ -435,6 +442,14 @@ class _ModuleIndex(ast.NodeVisitor):
         return '.'.join(self._scope) if self._scope else '<module>'
 
     def visit_ClassDef(self, node):
+        # Constructing a Python subclass still acquires its native base.
+        # Record it in the enclosing scope, where the constructor is called.
+        for base in node.bases:
+            resource = self._resource_name(base)
+            if resource is not None:
+                self._assignment_aliases[(self._qualname(), node.name)] = \
+                    resource
+                break
         self._scope.append(node.name)
         self.generic_visit(node)
         self._scope.pop()
@@ -472,8 +487,12 @@ class _ModuleIndex(ast.NodeVisitor):
             if leaf in RESOURCE_CALLS:
                 return leaf
             if isinstance(callee, ast.Name):
-                alias = self._assignment_aliases.get(
-                    (self._qualname(), callee.id))
+                alias = None
+                for width in range(len(self._scope), -1, -1):
+                    scope = '.'.join(self._scope[:width]) or '<module>'
+                    alias = self._assignment_aliases.get((scope, callee.id))
+                    if alias is not None:
+                        break
                 if alias is None:
                     alias = self._import_aliases.get(callee.id)
                 if alias is not None:

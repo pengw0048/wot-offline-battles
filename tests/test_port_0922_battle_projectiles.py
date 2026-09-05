@@ -112,8 +112,8 @@ class _Client(object):
         return int(args[2])
 
 
-class _ControlledTracerFactory(object):
-    """Stateful fake for the one controlled visual owned by each projectile."""
+class _NativeTracerFactory(object):
+    """Native motor stand-in; no Python position-update method is exposed."""
 
     def __init__(self, admitted=True, order=None, fail_plays=0,
                  reset_succeeds=True):
@@ -124,7 +124,6 @@ class _ControlledTracerFactory(object):
         self.active = {}
         self.play_attempts = []
         self.play_calls = []
-        self.update_calls = []
         self.stop_calls = []
         self.reset_calls = 0
 
@@ -141,7 +140,7 @@ class _ControlledTracerFactory(object):
             self.fail_plays -= 1
             return False
         if projectile_id in self.active:
-            raise AssertionError('controlled tracer was rebuilt')
+            raise AssertionError('native tracer was rebuilt')
         reference = (origin if reference_position is None else
                      reference_position)
         position = reference if visual_start is None else visual_start
@@ -156,22 +155,23 @@ class _ControlledTracerFactory(object):
             'position': tuple(float(value) for value in position),
             'velocity': tuple(float(value) for value in current_velocity),
             'visible': True,
+            'gravity': gravity,
             'ricochet': bool(is_ricochet),
         }
         self.active[projectile_id] = row
         self.play_calls.append((projectile_id, dict(row)))
         return 1000000 + len(self.play_calls)
 
-    def update_projectile_visual(
-            self, projectile_id, position, velocity=None):
-        row = self.active.get(projectile_id)
-        if row is None:
-            return False
-        row['position'] = tuple(float(value) for value in position)
-        if velocity is not None:
-            row['velocity'] = tuple(float(value) for value in velocity)
-        self.update_calls.append((projectile_id, dict(row)))
-        return bool(row['visible'])
+    def engine_frame(self, dt):
+        for row in self.active.values():
+            position, velocity = row['position'], row['velocity']
+            row['position'] = (
+                position[0] + velocity[0] * dt,
+                position[1] + velocity[1] * dt -
+                0.5 * row['gravity'] * dt * dt,
+                position[2] + velocity[2] * dt)
+            row['velocity'] = (
+                velocity[0], velocity[1] - row['gravity'] * dt, velocity[2])
 
     def stop_projectile_tracer(
             self, projectile_id, end_position, explosion=None,
@@ -1473,11 +1473,11 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(10.0, battle._projectile_server_local_time)
         self.assertEqual(11000, battle._projectile_estimated_server_time(11.0))
 
-    def test_canonical_launch_creates_a_visible_controlled_tracer(self):
+    def test_late_first_snapshot_seeds_a_native_tracer_at_its_checked_pose(self):
         battle, unused_bigworld = _battle(now=1.0)
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         source_shot = dict(_event()['source_shot'])
         source_shot.update({
@@ -1503,14 +1503,13 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual((40.0, 8.2, 0.0), tracer['position'])
         visual = battle._projectile_visual_meta['player:7:1']
         self.assertTrue(visual['active'])
-        self.assertEqual(0.4, visual['display_elapsed'])
-        self.assertEqual(0.4, visual['confirmed_elapsed'])
-        self.assertEqual(1.0, visual['last_frame'])
+        self.assertEqual((40.0, 8.2, 0.0),
+                         factory.play_calls[0][1]['reference_position'])
         source.showShooting.assert_called_once_with(1, False)
         self.assertFalse(hasattr(
             source, '_offlineLANCanonicalTracerOwned'))
 
-    def test_bot_launch_uses_the_same_visible_controlled_tracer_path(self):
+    def test_bot_launch_uses_the_same_visible_native_tracer_path(self):
         battle, unused_bigworld = _battle(now=1.0)
         descriptor = battle._server_entity(41).typeDescriptor
         source = types.SimpleNamespace(
@@ -1525,7 +1524,7 @@ class BattleProjectileTests(unittest.TestCase):
         original_server_entity = battle._server_entity
         battle._server_entity = lambda entity_id: (
             source if entity_id == 77 else original_server_entity(entity_id))
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         event = dict(
             _event(), attacker_bot=11, shooter_kind='bot', shooter_id=11,
@@ -1543,7 +1542,7 @@ class BattleProjectileTests(unittest.TestCase):
             battle._projectile_visual_meta['bot:11:1']['active'])
         source.showShooting.assert_called_once_with(1, False)
 
-    def test_zero_cursor_tracer_bridges_muzzle_to_confirmed_frontier(self):
+    def test_zero_cursor_native_tracer_flies_without_progress_and_never_rewinds(self):
         battle, unused_bigworld = _battle(now=0.0)
         battle.client.is_bot_authority = lambda: False
         source = battle._server_entity(41)
@@ -1556,103 +1555,48 @@ class BattleProjectileTests(unittest.TestCase):
         battle._runtime.math.Matrix = lambda value: value
         battle._runtime.cameras = types.SimpleNamespace(
             isPointOnScreen=mock.Mock(return_value=True))
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         source_shot = dict(_event()['source_shot'])
         source_shot.update({
-            'speed': math.sqrt(10400.0),
-            'gravity': 10.0,
-            'maxDistance': 1000.0,
-        })
+            'speed': math.sqrt(10400.0), 'gravity': 10.0,
+            'maxDistance': 1000.0})
         event = dict(
             _event(), maxDistance=1000.0, max_time_ms=20000,
             source_shot=source_shot,
             velocity=[100.0, 20.0, 0.0],
             segment_velocity=[100.0, 20.0, 0.0], gravity=10.0,
             launch_server_time_ms=0)
-
         self.assertTrue(battle._show_shot(event))
-        visual = battle._projectile_visual_meta['player:7:1']
-        self.assertEqual(1, len(factory.play_calls))
-        self.assertEqual((15.0, 1.0, 0.0),
-                         factory.active['player:7:1']['position'])
-        self.assertEqual((0.0, 1.0, 0.0),
-                         factory.play_calls[0][1]['origin'])
-        self.assertEqual((0.0, 1.0, 0.0),
-                         factory.play_calls[0][1]['reference_position'])
-        self.assertEqual((15.0, 1.0, 0.0),
-                         factory.play_calls[0][1]['visual_start'])
-        self.assertTrue(visual['active'])
-        self.assertTrue(visual['first_frontier_pending'])
-        self.assertTrue(visual['admitted'])
-        self.assertEqual(0.0, visual['display_elapsed'])
-        self.assertEqual(0.0, visual['confirmed_elapsed'])
+        tracer = factory.active['player:7:1']
+        self.assertEqual((15.0, 1.0, 0.0), tracer['position'])
+        self.assertEqual((0.0, 1.0, 0.0), tracer['reference_position'])
         source.showShooting.assert_called_once_with(1, False)
 
-        for frame in (0.01, 0.02):
+        # The visible engine advances independently while the worker sends no
+        # progress at all. BattleRuntime must neither clamp nor replace it.
+        for frame in (0.1, 0.2):
+            factory.engine_frame(0.1)
             self.assertFalse(battle._advance_projectiles(frame))
-        self.assertEqual([], factory.update_calls)
-        self.assertEqual((15.0, 1.0, 0.0),
-                         factory.active['player:7:1']['position'])
+        self.assertAlmostEqual(35.0, tracer['position'][0])
+        self.assertEqual(0, battle._projectile_meta[
+            'player:7:1']['base_checked_ms'])
+        self.assertEqual(0, len(battle._projectiles))
 
-        early_progress = dict(event, checked_through_ms=10,
-                              checked_distance=1.0, piercing_loss=0.0)
-        early_normalized = battle._projectile_wire_meta(early_progress)
-        early_normalized['source_descriptor'] = source.typeDescriptor
-        battle._install_projectile_meta(early_normalized)
-        self.assertTrue(battle._ensure_projectile_visual(
-            early_normalized, 0.02))
-        self.assertEqual([], factory.update_calls)
-        self.assertEqual((15.0, 1.0, 0.0),
-                         factory.active['player:7:1']['position'])
-        self.assertTrue(visual['first_frontier_pending'])
-
-        progress = dict(event, checked_through_ms=400,
-                        checked_distance=40.0, piercing_loss=0.0)
-        normalized = battle._projectile_wire_meta(progress)
-        normalized['source_descriptor'] = source.typeDescriptor
-        battle._install_projectile_meta(normalized)
-        self.assertTrue(battle._ensure_projectile_visual(normalized, 0.02))
-        self.assertEqual(1, len(factory.play_calls))
-        tracer = factory.active['player:7:1']
-        self.assertEqual((40.0, 8.2, 0.0), tracer['position'])
-        self.assertEqual((40.0, 8.2, 0.0),
-                         factory.update_calls[0][1]['position'])
-        self.assertFalse(visual['first_frontier_pending'])
-        self.assertEqual(0.4, visual['display_elapsed'])
-
-        self.assertFalse(battle._advance_projectiles(0.1))
-        visual = battle._projectile_visual_meta['player:7:1']
-        tracer = factory.active['player:7:1']
-        self.assertTrue(visual['active'])
-        self.assertTrue(tracer['visible'])
-        self.assertLessEqual(
-            visual['display_elapsed'], visual['confirmed_elapsed'])
-        self.assertFalse(visual['first_frontier_pending'])
-        self.assertEqual(0.4, visual['display_elapsed'])
-        self.assertAlmostEqual(40.0, tracer['position'][0])
-        self.assertTrue(all(
-            row[1]['position'][0] >= 15.0 for row in factory.update_calls))
-
-        # A duplicate and then a regressing snapshot neither rebuilds the
-        # visible tracer nor lowers the already confirmed frontier.
-        self.assertTrue(battle._ensure_projectile_visual(normalized, 0.1))
-        regressed = dict(normalized, base_checked_ms=200)
-        self.assertTrue(battle._ensure_projectile_visual(regressed, 0.1))
-        self.assertEqual(1, len(factory.play_calls))
-        self.assertEqual(0.4, visual['confirmed_elapsed'])
-
-        # Even an arbitrarily large render stall clamps at the collision-free
-        # cursor.  The tracer remains present rather than being suppressed.
-        self.assertFalse(battle._advance_projectiles(30.0))
-        visual = battle._projectile_visual_meta['player:7:1']
-        tracer = factory.active['player:7:1']
-        self.assertTrue(visual['active'])
-        self.assertTrue(tracer['visible'])
-        self.assertEqual(0.4, visual['display_elapsed'])
-        self.assertLessEqual(
-            visual['display_elapsed'], visual['confirmed_elapsed'])
-        self.assertAlmostEqual(40.0, tracer['position'][0])
+        for checked in (10, 400, 400, 200):
+            progress = dict(event, checked_through_ms=checked,
+                            checked_distance=checked / 10.0, piercing_loss=0.0)
+            normalized = battle._projectile_wire_meta(progress)
+            normalized['source_descriptor'] = source.typeDescriptor
+            before = tracer['position']
+            self.assertTrue(battle._ensure_projectile_visual(normalized, 0.2))
+            self.assertEqual(before, tracer['position'])
+            self.assertEqual(1, len(factory.play_calls))
+        self.assertTrue(battle._stop_projectile_visual('player:7:1', {
+            'impact': [20.0, 1.0, 0.0], 'resolved_time_ms': 200,
+            'hit_vehicle': True}))
+        self.assertEqual((20.0, 1.0, 0.0), factory.stop_calls[0][1])
+        self.assertNotIn('player:7:1', factory.active)
 
     def test_zero_cursor_visual_start_requires_onscreen_muzzle(self):
         cases = (
@@ -1678,7 +1622,7 @@ class BattleProjectileTests(unittest.TestCase):
                     screen_check = mock.Mock(return_value=screen_result)
                 battle._runtime.cameras = types.SimpleNamespace(
                     isPointOnScreen=screen_check)
-                factory = _ControlledTracerFactory()
+                factory = _NativeTracerFactory()
                 battle._remote_factory = factory
 
                 self.assertTrue(battle._show_shot(_event()))
@@ -1689,7 +1633,7 @@ class BattleProjectileTests(unittest.TestCase):
                     factory.play_calls[0][1]['visual_start'])
                 self.assertTrue(
                     battle._projectile_visual_meta[
-                        'player:7:1']['first_frontier_pending'])
+                        'player:7:1']['active'])
 
     def test_failed_launch_stays_inactive_and_retries_under_runtime_ownership(self):
         battle, unused_bigworld = _battle(now=1.0)
@@ -1702,7 +1646,7 @@ class BattleProjectileTests(unittest.TestCase):
             return True
 
         source.showShooting = show_shooting
-        factory = _ControlledTracerFactory(fail_plays=1)
+        factory = _NativeTracerFactory(fail_plays=1)
         battle._remote_factory = factory
 
         self.assertTrue(battle._show_shot(_event()))
@@ -1710,7 +1654,6 @@ class BattleProjectileTests(unittest.TestCase):
         visual = battle._projectile_visual_meta['player:7:1']
         self.assertEqual([True], ownership)
         self.assertFalse(visual['active'])
-        self.assertTrue(visual['launch_retryable'])
         self.assertNotIn('player:7:1', factory.active)
         self.assertEqual(['player:7:1'], factory.play_attempts)
 
@@ -1745,7 +1688,7 @@ class BattleProjectileTests(unittest.TestCase):
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(
             side_effect=RuntimeError('native muzzle failed'))
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
 
         first = _event()
@@ -1766,7 +1709,7 @@ class BattleProjectileTests(unittest.TestCase):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         launch = _event()
         self.assertTrue(battle._show_shot(launch))
@@ -1795,7 +1738,7 @@ class BattleProjectileTests(unittest.TestCase):
                 battle, unused_bigworld = _battle()
                 source = battle._server_entity(41)
                 source.showShooting = mock.Mock(return_value=True)
-                factory = _ControlledTracerFactory()
+                factory = _NativeTracerFactory()
                 battle._remote_factory = factory
                 launch = _event()
                 self.assertTrue(battle._show_shot(launch))
@@ -1818,7 +1761,7 @@ class BattleProjectileTests(unittest.TestCase):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory(order=order)
+        factory = _NativeTracerFactory(order=order)
         battle._remote_factory = factory
         launch = _event()
         self.assertTrue(battle._show_shot(launch))
@@ -1842,7 +1785,7 @@ class BattleProjectileTests(unittest.TestCase):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         launch = _event()
         self.assertTrue(battle._show_shot(launch))
@@ -1884,7 +1827,7 @@ class BattleProjectileTests(unittest.TestCase):
         battle._runtime.math.Matrix = lambda value: value
         battle._runtime.cameras = types.SimpleNamespace(
             isPointOnScreen=mock.Mock(return_value=True))
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         launch = _event()
         self.assertTrue(battle._show_shot(launch))
@@ -1922,14 +1865,12 @@ class BattleProjectileTests(unittest.TestCase):
         visual = battle._projectile_visual_meta['player:7:1']
         self.assertTrue(visual['active'])
         self.assertEqual(1, visual['ricochet_count'])
-        self.assertEqual(0.0, visual['display_elapsed'])
-        self.assertEqual(0.0, visual['confirmed_elapsed'])
 
     def test_epoch_change_resets_old_tracers_without_terminal_feedback(self):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory()
+        factory = _NativeTracerFactory()
         battle._remote_factory = factory
         launch = _event()
         self.assertTrue(battle._show_shot(launch))
@@ -1948,7 +1889,7 @@ class BattleProjectileTests(unittest.TestCase):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         source.showShooting = mock.Mock(return_value=True)
-        factory = _ControlledTracerFactory(reset_succeeds=False)
+        factory = _NativeTracerFactory(reset_succeeds=False)
         battle._remote_factory = factory
         battle._warn_optional_failure = mock.Mock(return_value=True)
         self.assertTrue(battle._show_shot(_event()))
