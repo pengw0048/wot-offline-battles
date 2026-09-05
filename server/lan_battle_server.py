@@ -5334,6 +5334,7 @@ class BattleState:
                     "worker human ram armor results are invalid")
             pending_projectile_launches = {}
             fire_deaths = []
+            fire_lineage_clears = set()
             capture_resets = set()
             stun_clears = []
             seen = set()
@@ -5459,13 +5460,20 @@ class BattleState:
                         "fire_attacker_kind"]
                     current["death_attacker_id"] = int(current[
                         "fire_attacker_id"])
+                    victim_identity = ("bot", int(bot_id))
+                    fire_attacker = (
+                        str(current["fire_attacker_kind"]),
+                        int(current["fire_attacker_id"]))
                     fire_deaths.append((
                         current["fire_attacker_kind"],
                         current["fire_attacker_id"], current,
-                        previous_health - current_health))
+                        previous_health - current_health,
+                        self.last_shell_fire_sources.get(victim_identity) ==
+                        fire_attacker))
                 if (not current.get("alive") or
                         not bool((current.get("critical") or {}).get(
                             "fire", False))):
+                    fire_lineage_clears.add(("bot", int(bot_id)))
                     current["fire_attacker_kind"] = ""
                     current["fire_attacker_id"] = 0
                 if (not source_clock_rebase and current["alive"] and
@@ -5506,12 +5514,16 @@ class BattleState:
                 pending_projectile_launches)
             self.bot_pending_projectile_metadata.update(
                 pending_projectile_launches)
+            for victim_identity in fire_lineage_clears:
+                self.last_shell_fire_sources.pop(victim_identity, None)
             for bot_id in capture_resets:
                 self._drop_capture_for_vehicle("bot", bot_id)
-            for attacker_kind, attacker_id, victim, damage in fire_deaths:
+            for (attacker_kind, attacker_id, victim, damage,
+                 last_shell_fire) in fire_deaths:
                 self._record_frag(
                     attacker_kind, attacker_id, victim["team"],
-                    "bot", victim["id"])
+                    "bot", victim["id"],
+                    last_shell_fire=last_shell_fire)
                 event = {
                     "kind": ("bot_bot_hit" if attacker_kind == "bot"
                              else "bot_hit"),
@@ -7038,6 +7050,7 @@ class BattleState:
             "stun_end_server_time_ms",
             "target_x", "target_y", "target_z",
             "damage_sticker",
+            "structural_armor_hit",
         }
         required = {
             "target_kind", "target_id", "damage", "shot_result",
@@ -7056,6 +7069,9 @@ class BattleState:
         damage = _exact_int(raw.get("damage"), 0, 5000)
         potential_damage = (_exact_int(raw["potential_damage"], 0, 5000)
                             if "potential_damage" in raw else 0)
+        # Optional achievement metadata never owns projectile admission.
+        # Unknown/malformed values are conservative external-module hits.
+        structural_armor_hit = raw.get("structural_armor_hit") is True
         shot_result = _exact_int(raw.get("shot_result"), 0, 2)
         pose = _bounded_vector(
             [raw.get("x"), raw.get("y"), raw.get("z")],
@@ -7155,6 +7171,7 @@ class BattleState:
             "target": target, "target_team": target_team,
             "target_alive": target_alive, "damage": damage,
             "potential_damage": potential_damage,
+            "structural_armor_hit": structural_armor_hit,
             "shot_result": shot_result, "pose": pose,
             "critical": critical,
             "critical_delta": critical_delta,
@@ -7274,9 +7291,11 @@ class BattleState:
                     "x", "y", "z"}
                 # A bounce is the archetypal blocked-damage contact, so the
                 # harmless direct effect keeps the worker's potential-damage
-                # roll along with its decal identity.  Critical, stun and
+                # roll, decal identity and armour layer. Critical, stun and
                 # splash tokens stay forbidden on a continuing shell.
-                direct_optional = {"damage_sticker", "potential_damage"}
+                direct_optional = {
+                    "damage_sticker", "potential_damage",
+                    "structural_armor_hit"}
                 if (not isinstance(raw_direct, dict) or
                         not direct_fields.issubset(raw_direct) or
                         set(raw_direct) - (direct_fields | direct_optional)):
@@ -7423,6 +7442,28 @@ class BattleState:
             health = int(target["health"])
             alive = bool(target["alive"])
 
+        shooter = (str(record["shooter_kind"]), int(record["shooter_id"]))
+        victim = (str(target_kind), int(target_id))
+        before_fire = bool(
+            isinstance(critical_before, dict) and
+            critical_before.get("fire", False))
+        current_critical = (target.critical if target_kind == "player"
+                            else target.get("critical"))
+        after_fire = bool(
+            isinstance(current_critical, dict) and
+            current_critical.get("fire", False))
+        if not before_fire and after_fire:
+            if self.last_shell_shots.get(str(record["projectile_id"])):
+                self.last_shell_fire_sources[victim] = shooter
+            else:
+                self.last_shell_fire_sources.pop(victim, None)
+        elif not after_fire:
+            self.last_shell_fire_sources.pop(victim, None)
+        if not alive:
+            # A direct terminal uses the killing projectile below. Fire
+            # lineage is only for a later canonical fire tick.
+            self.last_shell_fire_sources.pop(victim, None)
+
         if (applied > 0 or _critical_damage_transition(
                 critical_before, admitted_critical)):
             self._drop_capture_for_vehicle(
@@ -7474,8 +7515,6 @@ class BattleState:
                 if critical_commit:
                     event.update(critical_commit)
         self.pending_events.append(event)
-        shooter = (str(record["shooter_kind"]), int(record["shooter_id"]))
-        victim = (str(target_kind), int(target_id))
         self._record_damage(
             shooter, victim, applied, critical_before,
             attacker_team=int(record["team"]))
@@ -7542,7 +7581,9 @@ class BattleState:
                 # vehicle was already below its health threshold, so the
                 # health at this hit is the only usable moment.
                 maximum = self._vehicle_max_health(victim)
-                if health * 100 <= SPARTAN_HEALTH_PERCENT * maximum:
+                if (proposal["structural_armor_hit"] and
+                        health * 100 <=
+                        SPARTAN_HEALTH_PERCENT * maximum):
                     victim_row["deflected_hits_at_low_health"] += 1
                 victim_row["deflection_streak"] += 1
                 victim_row["best_deflection_streak"] = max(
@@ -8338,10 +8379,12 @@ class BattleState:
                 "ally_damage": int(self.ally_damage.get(identity, 0)),
                 "ally_hits": int(self.ally_hits.get(identity, 0)),
                 "team_kills": int(self.team_kills.get(identity, 0)),
+                "enemy_damage_received": int(
+                    self.enemy_damage_received.get(identity, 0)),
                 "support_targets": len(
                     self.support_targets.get(identity, ())),
                 "solo_capture": (
-                    self.capture_point_earners.get(
+                    self.capture_attempt_participants.get(
                         3 - int(row["team"]), set()) == {identity}),
                 "last_shell_finisher": identity in self.last_shell_finishers,
                 "lucky_devil": identity in self.lucky_devils,
@@ -10222,11 +10265,13 @@ class BattleState:
         changed = 0
         now = float(self.tick) / TICK_HZ
         for player in list(self.players.values()):
+            victim = ("player", int(player.player_id))
             burning = bool(
                 isinstance(player.critical, dict) and
                 player.critical.get("fire", False))
             if (not player.connected or not player.participating or
                     not player.alive or not burning):
+                self.last_shell_fire_sources.pop(victim, None)
                 if not burning:
                     player.combat_fire_elapsed = 0.0
                     player.combat_fire_timer = 0.0
@@ -10239,6 +10284,7 @@ class BattleState:
                         if attacker_kind in ("player", "bot") and
                         attacker_id > 0 else None)
             if attacker is None:
+                self.last_shell_fire_sources.pop(victim, None)
                 continue
             result = player_critical_mechanics.advance_fire(
                 player, max(0.0, float(dt)), now)
@@ -10296,14 +10342,19 @@ class BattleState:
                 if attacker is not None:
                     player.death_attacker_kind = attacker_kind
                     player.death_attacker_id = attacker_id
+                    last_shell_fire = (
+                        self.last_shell_fire_sources.pop(victim, None) ==
+                        attacker)
                     self._record_frag(
                         attacker_kind, attacker_id, player.team,
-                        "player", player.player_id)
+                        "player", player.player_id,
+                        last_shell_fire=last_shell_fire)
                 player.fire_attacker_kind = ""
                 player.fire_attacker_id = 0
                 if self._maybe_finish_battle():
                     break
             elif not bool(player.critical.get("fire", False)):
+                self.last_shell_fire_sources.pop(victim, None)
                 player.fire_attacker_kind = ""
                 player.fire_attacker_id = 0
         return changed
@@ -10451,16 +10502,24 @@ class BattleState:
         self.ally_damage = {}
         # actor -> vehicles of its own team it destroyed.
         self.team_kills = {}
+        # target -> damage received from enemies. The public result statistic
+        # also includes friendly damage, but Stark explicitly does not.
+        self.enemy_damage_received = {}
         # actor -> direct hits it landed on its own team.
         self.ally_hits = {}
         # actor -> enemies it damaged or whose track it destroyed.
         self.support_targets = {}
-        # base team -> every actor that ever earned a point capturing it.
-        self.capture_point_earners = {1: set(), 2: set()}
+        # base team -> every actor that joined the current non-zero capture
+        # attempt. A counter returning to zero starts a new attempt.
+        self.capture_attempt_participants = {1: set(), 2: set()}
         # actors that destroyed the last living enemy with their last shell.
         self.last_shell_finishers = set()
         # projectile id -> whether it was the shooter's final round.
         self.last_shell_shots = {}
+        # burning victim -> shooter when its igniting projectile was the
+        # shooter's last round. This stays private to the server until that
+        # fire ends or destroys the victim.
+        self.last_shell_fire_sources = {}
         # actors that stood beside an enemy its own team destroyed.
         self.lucky_devils = set()
         # actor -> targets it damaged while it was their only direct spotter.
@@ -10608,7 +10667,8 @@ class BattleState:
         return alive
 
     def _record_kill(self, attacker, victim, death_reason,
-                     projectile_id=None, distance=None):
+                     projectile_id=None, distance=None,
+                     last_shell_fire=False):
         """Freeze one enemy kill with the facts #1513 medals ask about."""
         attacker = (str(attacker[0]), int(attacker[1]))
         victim = (str(victim[0]), int(victim[1]))
@@ -10628,10 +10688,12 @@ class BattleState:
             "actor_speed": round(self._vehicle_speed(attacker), 4),
             "victim_speed": round(self._vehicle_speed(victim), 4),
         })
-        # Fadin's medal wants the shot that ended the battle to have been the
-        # shooter's last round.  Both facts are only true at this instant.
-        if (projectile_id is not None and
-                self.last_shell_shots.get(str(projectile_id)) and
+        # Fadin wants the final enemy destroyed either directly by the last
+        # round or by the fire that round started. Both facts are only true
+        # at this instant.
+        if (((projectile_id is not None and
+              self.last_shell_shots.get(str(projectile_id))) or
+             bool(last_shell_fire)) and
                 not self._living_enemies(self._vehicle_team(*attacker))):
             self.last_shell_finishers.add(attacker)
         if projectile_id is not None:
@@ -10799,6 +10861,9 @@ class BattleState:
                 self.ally_damage[attacker] = int(
                     self.ally_damage.get(attacker, 0)) + damage
             return
+        target = (str(target[0]), int(target[1]))
+        self.enemy_damage_received[target] = int(
+            self.enemy_damage_received.get(target, 0)) + damage
         if target[0] == "bot":
             self.bot_planner.report_damage(
                 target[1], attacker[0], attacker[1], damage,
@@ -10859,7 +10924,8 @@ class BattleState:
 
     def _record_frag(self, attacker_kind, attacker_id, victim_team,
                      victim_kind, victim_id, attacker_team=None,
-                     projectile_id=None, distance=None):
+                     projectile_id=None, distance=None,
+                     last_shell_fire=False):
         """Apply the shared +1 enemy / -1 ally frag and team-killer law."""
         if (attacker_kind == victim_kind and
                 int(attacker_id) == int(victim_id)):
@@ -10930,7 +10996,8 @@ class BattleState:
             interaction["death_reason"] = max(
                 minimum, min(maximum, int(reason)))
             self._record_kill(
-                attacker, victim, int(reason), projectile_id, distance)
+                attacker, victim, int(reason), projectile_id, distance,
+                last_shell_fire=last_shell_fire)
         self.pending_events.append({
             "kind": "vehicle_statistics",
             "actor_kind": attacker_kind,
@@ -11469,6 +11536,8 @@ class BattleState:
             state["points"] = min(100, sum(
                 max(0, int(points or 0))
                 for points in contributors.values()))
+            if state["points"] == 0:
+                self.capture_attempt_participants[base_team].clear()
             if not contributors:
                 self.capture_cursors[base_team] = 0
             rate = min(max(0, int(state.get("invaders", 0))), 3)
@@ -11563,11 +11632,19 @@ class BattleState:
             points = min(100, sum(
                 max(0, int(value or 0))
                 for value in contributors.values()))
+            if points == 0:
+                self.capture_attempt_participants[base_team].clear()
             # Standard CTF bases do not stop capture merely because an owner
             # enters its own circle. Only an invader leaving, dying, or taking
             # qualifying damage drops that vehicle's contribution.
             state['stopped'] = False
             if invader_keys and points < 100:
+                # Sneaky belongs only to an attempt made alone. Count every
+                # vehicle that joined while the counter was non-zero or was
+                # about to advance, even when the final one-point budget did
+                # not happen to select that vehicle.
+                self.capture_attempt_participants[base_team].update(
+                    _capture_key_actor(key) for key in invader_keys)
                 cursor = (self.capture_cursors[base_team] %
                           len(invader_keys))
                 budget = min(3, len(invader_keys), 100 - points)
@@ -11581,9 +11658,6 @@ class BattleState:
                     earner = _capture_key_actor(vehicle_id)
                     self._statistics_row(earner[0], earner[1])[
                         "capture_points"] += 1
-                    # The Sneaky medal is only for a base captured alone, so
-                    # remember everyone that ever moved this base's counter.
-                    self.capture_point_earners[base_team].add(earner)
                 self.capture_cursors[base_team] = (
                     cursor + budget) % len(invader_keys)
             elif not invader_keys:

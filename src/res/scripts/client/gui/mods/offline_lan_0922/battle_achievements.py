@@ -461,10 +461,13 @@ def _epic_achievements(actor, context):
                 for kill in _kills(actor))):
             earned.append("medalMonolith")
         # "受到的伤害以及装甲伤害必须是自身坦克生命值的三分之二."
+        # The description narrows both incoming hits to enemy tanks. Friendly
+        # damage still belongs in the public result row, but never in this
+        # award input, and Stark carries no friendly-kill disqualifier.
         condition = ACHIEVEMENT_CONDITIONS["medalStark"]
-        absorbed = _stat(actor, "damage_received") + _stat(
+        absorbed = _int(actor.get("enemy_damage_received")) + _stat(
             actor, "damage_blocked")
-        if (clean and survived and kills >= condition["minKills"] and
+        if (survived and kills >= condition["minKills"] and
                 _int(actor.get("damaging_hits_received")) >=
                 condition["hits"] and max_health > 0 and
                 3 * absorbed >= 2 * max_health):

@@ -85,6 +85,7 @@ def _actor(actor_kind='player', actor_id=1, team=1, **overrides):
         'damaged_targets': [],
         'exclusive_spot_assists': 0, 'ever_spotted': True,
         'ally_damage': 0, 'ally_hits': 0, 'team_kills': 0,
+        'enemy_damage_received': 0,
         'support_targets': 0, 'solo_capture': True,
         'last_shell_finisher': False,
         'lucky_devil': False, 'best_deflection_streak': 0,
@@ -453,6 +454,7 @@ class EpicMedalTests(unittest.TestCase):
                       'damage_received': 400, 'damage_blocked': 200}
         artillery = _actor(actor_id=1, vehicle_class='SPG',
                            max_health=800, stats=gore_stats,
+                           enemy_damage_received=400,
                            damaging_hits_received=2,
                            kills=[_kill(1, victim_class='SPG'),
                                   _kill(2, victim_class='SPG',
@@ -464,6 +466,7 @@ class EpicMedalTests(unittest.TestCase):
         self.assertIn('medalAntiSpgFire', awards)
         tank = _actor(actor_id=1, vehicle_class='heavyTank',
                       max_health=800, stats=gore_stats,
+                      enemy_damage_received=400,
                       damaging_hits_received=2,
                       kills=[_kill(1, victim_class='SPG'),
                              _kill(2, victim_class='SPG', distance=50.0)])
@@ -583,15 +586,29 @@ class EpicMedalTests(unittest.TestCase):
         # "受到的伤害以及装甲伤害必须是自身坦克生命值的三分之二."
         row = {
             'vehicle_class': 'SPG', 'max_health': 900,
-            'damaging_hits_received': 2, 'stats': {
+            'damaging_hits_received': 2, 'enemy_damage_received': 400,
+            'stats': {
                 'kills': 2, 'damage_received': 400, 'damage_blocked': 200},
         }
         self.assertIn(
             'medalStark', _awards([_actor(actor_id=1, **row)])[('player', 1)])
         row['stats'] = {
             'kills': 2, 'damage_received': 300, 'damage_blocked': 200}
+        row['enemy_damage_received'] = 300
         self.assertNotIn(
             'medalStark', _awards([_actor(actor_id=1, **row)])[('player', 1)])
+
+    def test_stark_ignores_friendly_damage_and_friendly_kills(self):
+        row = _actor(
+            actor_id=1, vehicle_class='SPG', max_health=900,
+            damaging_hits_received=2, enemy_damage_received=0,
+            team_kills=1,
+            stats={'kills': 2, 'damage_received': 600,
+                   'damage_blocked': 0})
+        self.assertNotIn('medalStark', _awards([row])[('player', 1)])
+
+        row['enemy_damage_received'] = 600
+        self.assertIn('medalStark', _awards([row])[('player', 1)])
 
     def test_tier_delta_medals_never_count_artillery_victims(self):
         # "击毁2辆或2辆以上的敌方坦克与自行反坦克炮."
@@ -969,6 +986,65 @@ class CaptureAndLoneStandTests(unittest.TestCase):
         self.assertEqual(
             state._statistics_row('player', 1)['capture_points'], 2)
 
+    def test_a_zero_counter_starts_a_new_solo_capture_attempt(self):
+        state, player = self._capture_battle()
+        player.x, player.z = 0.0, 0.0
+        state.bot_states[9] = {
+            'id': 9, 'team': 1, 'alive': True, 'world_pose': True,
+            'x': 100.0, 'y': 0.0, 'z': 100.0,
+        }
+        self.assertTrue(state._update_capture())
+        self.assertEqual(
+            {('bot', 9)}, state.capture_attempt_participants[2])
+
+        state.bot_states[9]['x'] = 0.0
+        state.tick += int(round(lan_server_module.TICK_HZ))
+        self.assertTrue(state._update_capture())
+        self.assertEqual(set(), state.capture_attempt_participants[2])
+
+        player.x, player.z = 100.0, 100.0
+        state.tick += int(round(lan_server_module.TICK_HZ))
+        self.assertTrue(state._update_capture())
+        self.assertEqual(
+            {('player', 1)}, state.capture_attempt_participants[2])
+
+    def test_final_capture_tick_counts_every_vehicle_in_the_circle(self):
+        state, unused_player = self._capture_battle()
+        state.bot_states[9] = {
+            'id': 9, 'team': 1, 'alive': True, 'world_pose': True,
+            'x': 100.0, 'y': 0.0, 'z': 100.0,
+        }
+        state.capture_contributors[2]['human:1'] = 99
+        # Sorted keys put the Bot first. Select the human for the final point
+        # to prove the unselected teammate still makes the attempt shared.
+        state.capture_cursors[2] = 1
+
+        self.assertTrue(state._update_capture())
+
+        self.assertEqual(100, state.rules_state['bases']['2']['points'])
+        self.assertEqual(
+            {('bot', 9), ('player', 1)},
+            state.capture_attempt_participants[2])
+        self.assertEqual(
+            0, state._statistics_row('bot', 9)['capture_points'])
+
+    def test_departed_participant_remains_while_capture_points_remain(self):
+        state, unused_player = self._capture_battle()
+        state.bot_states[9] = {
+            'id': 9, 'team': 1, 'alive': True, 'world_pose': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0,
+        }
+        state.capture_contributors[2].update(
+            {'human:1': 2, 'bot:9': 1})
+        state.capture_attempt_participants[2].update(
+            {('player', 1), ('bot', 9)})
+
+        self.assertTrue(state._update_capture())
+
+        self.assertEqual(
+            {('player', 1), ('bot', 9)},
+            state.capture_attempt_participants[2])
+
     @staticmethod
     def _capture_battle():
         state, player = ServerReceiptTests._battle()
@@ -1183,6 +1259,19 @@ class LuckyDevilTests(unittest.TestCase):
 class SupportAndFriendlyFireTests(unittest.TestCase):
     """Round state the corrected predicates read."""
 
+    def test_stark_tracks_only_enemy_damage_received(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state._record_damage(('bot', 1), ('player', 1), 120, {})
+        self.assertEqual(120, state.enemy_damage_received[('player', 1)])
+        self.assertEqual(
+            120, state._statistics_row('player', 1)['damage_received'])
+
+        state.bot_states[1]['team'] = 1
+        state._record_damage(('bot', 1), ('player', 1), 80, {})
+        self.assertEqual(120, state.enemy_damage_received[('player', 1)])
+        self.assertEqual(
+            200, state._statistics_row('player', 1)['damage_received'])
+
     def test_real_damage_and_track_kills_both_count_as_support(self):
         state, unused_player = ServerReceiptTests._battle()
         state._record_damage(('player', 1), ('bot', 1), 120, {})
@@ -1240,6 +1329,19 @@ class LastShellTests(unittest.TestCase):
         state, unused_player = ServerReceiptTests._battle()
         state._record_kill(('player', 1), ('bot', 1), 0, projectile_id='p1')
         self.assertEqual(set(), state.last_shell_finishers)
+
+    def test_bot_fire_death_uses_the_same_last_shell_rule(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.bot_states[7] = {
+            'id': 7, 'team': 1, 'alive': True,
+            'vehicle': 'ussr:R11_MS-1', 'max_health': 1000,
+        }
+
+        self.assertTrue(state._record_frag(
+            'bot', 7, 2, 'bot', 1, attacker_team=1,
+            last_shell_fire=True))
+
+        self.assertIn(('bot', 7), state.last_shell_finishers)
 
 
 class _ReplayConnector(object):

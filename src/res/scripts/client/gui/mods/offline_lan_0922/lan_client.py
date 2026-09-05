@@ -1122,10 +1122,11 @@ def _strict_projectile_effect(value):
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
     damage_sticker_fields = frozenset(('damage_sticker',))
     potential_fields = frozenset(('potential_damage',))
+    structural_fields = frozenset(('structural_armor_hit',))
     keys = set(value)
     if not required.issubset(keys) or not keys.issubset(
             required | critical_fields | stun_fields | target_pose_fields |
-            damage_sticker_fields | potential_fields):
+            damage_sticker_fields | potential_fields | structural_fields):
         return None
     kind = value.get('target_kind')
     target_id = _projectile_int_range(
@@ -1143,6 +1144,7 @@ def _strict_projectile_effect(value):
     has_target_pose = bool(keys & target_pose_fields)
     has_damage_sticker = 'damage_sticker' in value
     has_potential_damage = 'potential_damage' in value
+    has_structural_armor_hit = 'structural_armor_hit' in value
     expected = (required |
                 (critical_fields if has_critical else frozenset()) |
                 (stun_fields if has_stun else frozenset()) |
@@ -1150,6 +1152,8 @@ def _strict_projectile_effect(value):
                 (damage_sticker_fields if has_damage_sticker else
                  frozenset()) |
                 (potential_fields if has_potential_damage else frozenset()))
+    expected |= (structural_fields if has_structural_armor_hit else
+                 frozenset())
     if (kind not in ('player', 'bot') or target_id is None or
             damage is None or shot_result is None or
             any(component is None for component in position) or
@@ -1207,6 +1211,11 @@ def _strict_projectile_effect(value):
         if potential_damage is None:
             return None
         result['potential_damage'] = potential_damage
+    if has_structural_armor_hit:
+        # This field only affects an optional achievement counter. A missing
+        # or malformed value must not discard an otherwise valid terminal.
+        result['structural_armor_hit'] = (
+            value.get('structural_armor_hit') is True)
     if has_target_pose:
         target_position = []
         for axis in ('x', 'y', 'z'):
@@ -3058,9 +3067,10 @@ class LANClient(object):
             'target_kind', 'target_id', 'damage', 'shot_result',
             'x', 'y', 'z'}
         # A bounce is the archetypal blocked-damage contact, so a continuing
-        # shell still publishes its potential-damage roll and decal identity.
-        # Critical, stun and splash tokens stay forbidden on this wire.
-        direct_optional = {'damage_sticker', 'potential_damage'}
+        # shell still publishes its potential-damage roll, decal identity and
+        # armour layer. Critical, stun and splash tokens stay forbidden here.
+        direct_optional = {
+            'damage_sticker', 'potential_damage', 'structural_armor_hit'}
         if (parsed_epoch is None or parsed_epoch != _exact_int(
                 self.authority_epoch) or parsed_projectile_id is None or
                 parsed_base is None or parsed_time is None or

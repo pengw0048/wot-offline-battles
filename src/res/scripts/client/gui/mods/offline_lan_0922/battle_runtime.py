@@ -12599,7 +12599,8 @@ class BattleRuntime(object):
     def _projectile_effect(self, record, damage, result, impact,
                            critical, hull_damage, critical_delta,
                            target_position=None, damage_sticker=None,
-                           potential_damage=None):
+                           potential_damage=None,
+                           structural_armor_hit=None):
         target_kind = record.get('kind')
         if target_kind == 'human':
             target_kind = 'player'
@@ -12623,6 +12624,11 @@ class BattleRuntime(object):
             # the validator drop the whole terminal.
             effect['potential_damage'] = max(
                 0, min(5000, int(potential_damage)))
+        if structural_armor_hit is not None:
+            # Sturdy excludes tracks, screens and other external modules.
+            # Preserve the exact armour contact layer already chosen by the
+            # worker instead of trying to reconstruct it on the server.
+            effect['structural_armor_hit'] = bool(structural_armor_hit)
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
@@ -12763,7 +12769,10 @@ class BattleRuntime(object):
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
             damage_sticker=damage_sticker,
-            potential_damage=potential_damage)
+            potential_damage=potential_damage,
+            structural_armor_hit=(
+                contact is not None and
+                contact.get('layer') == 'structural'))
 
     def _projectile_splash_effects(self, meta, impact, direct_key):
         source = self._projectile_source_entity(meta)
