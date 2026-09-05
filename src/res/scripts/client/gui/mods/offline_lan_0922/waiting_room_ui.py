@@ -65,7 +65,10 @@ POINTER_TICK_SECONDS = 0.03
 RANDOM_MAP_OPTION = 'server_random'
 
 _HOST_CONTROLS = ('previous', 'map', 'next', 'start')
-_TEAM_SELECT_CONTROLS = ('team1', 'team2')
+_TEAM_SELECT_CONTROLS = ('team1', 'team_random', 'team2')
+_TEAM_SELECT_ACTIONS = {
+    'team1': 1, 'team_random': 0, 'team2': 2,
+}
 _TEAM_SIZE_CONTROLS = (
     'team1_down', 'team1_up', 'team2_down', 'team2_up')
 _TEAM_SIZE_ACTIONS = {
@@ -385,6 +388,7 @@ class WaitingRoomUI(object):
         make_control('team1_down', (-0.82, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team1', (-0.52, -0.18, CONTROL_Z), 0.42, 0.14)
         make_control('team1_up', (-0.22, -0.18, CONTROL_Z), 0.12, 0.14)
+        make_control('team_random', (0.0, -0.18, CONTROL_Z), 0.26, 0.14)
         make_control('team2_down', (0.22, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team2', (0.52, -0.18, CONTROL_Z), 0.42, 0.14)
         make_control('team2_up', (0.82, -0.18, CONTROL_Z), 0.12, 0.14)
@@ -413,6 +417,8 @@ class WaitingRoomUI(object):
         make_label('team1', 'TEAM 1', (-0.52, -0.18, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team1_up', '+', (-0.22, -0.18, 0.0), 0.10, 0.09,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('team_random', 'RANDOM', (0.0, -0.18, 0.0), 0.24, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team2_down', '-', (0.22, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
@@ -899,6 +905,9 @@ class WaitingRoomUI(object):
             friendly_bot_tier_mode(shown_tier_mode),
             '...' if self._pending_bot_tier_mode is not None else ''))
         current_team = team_status.get('team')
+        preferred_team = team_status.get('preferred', current_team)
+        self._set_text('team_random', 'RANDOM%s' % (
+            ' (ON)' if preferred_team == 0 else ''))
         sizes = team_status.get('sizes') or {}
         counts = team_status.get('counts') or {}
         for team in (1, 2):
@@ -970,7 +979,7 @@ class WaitingRoomUI(object):
                 self._on_close()
             return True
         if role in _TEAM_SELECT_CONTROLS:
-            return self._select_team(int(role[-1]))
+            return self._select_team(_TEAM_SELECT_ACTIONS[role])
         if role in _TEAM_SIZE_ACTIONS:
             team, step = _TEAM_SIZE_ACTIONS[role]
             return self._adjust_team_size(team, step)
@@ -991,16 +1000,24 @@ class WaitingRoomUI(object):
         status = self._team_status() or {}
         if not callable(self._request_team) or not status.get('supported'):
             return False
-        if status.get('team') == team:
-            self._message = 'Already on Team %d.' % team
+        current_choice = status.get('preferred', status.get('team'))
+        if current_choice == team:
+            self._message = ('Random team selection is already on.'
+                             if team == 0 else
+                             'Already on Team %d.' % team)
             self.refresh()
             return True
-        self._message = 'Requesting Team %d...' % team
+        self._message = ('Requesting a random team...'
+                         if team == 0 else
+                         'Requesting Team %d...' % team)
         self.refresh()
         if self._request_team(team) is False:
-            self._message = 'The server did not accept Team %d.' % team
+            self._message = ('The server did not accept random selection.'
+                             if team == 0 else
+                             'The server did not accept Team %d.' % team)
             self.refresh()
             return False
+        self.refresh()
         return True
 
     def _adjust_team_size(self, team, step):

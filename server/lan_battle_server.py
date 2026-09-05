@@ -2534,8 +2534,11 @@ class BattleState:
                 return None, "team_full"
             if not candidates:
                 return None, "team_full"
-            team = min(candidates, key=lambda value: (
-                len(occupied[value]), value))
+            smallest_team = min(len(occupied[value]) for value in candidates)
+            balanced = [value for value in candidates
+                        if len(occupied[value]) == smallest_team]
+            team = (random.choice(balanced) if requested_team == 0
+                    else balanced[0])
             slot = available[team][0]
             player_id = self.next_id
             self.next_id += 1
@@ -2578,18 +2581,40 @@ class BattleState:
                 team = _requested_team(requested_team)
             except ValueError:
                 return False, "invalid_team"
-            if team not in (1, 2):
-                return False, "invalid_team"
-            if team == player.team:
+            if team in (1, 2) and team == player.team:
                 return True, None
             occupied = {
-                participant.slot for participant in self.players.values()
-                if participant.connected and participant.team == team
+                candidate: {
+                    participant.slot for participant in self.players.values()
+                    if (participant.connected and
+                        participant.player_id != player_id and
+                        participant.team == candidate)
+                }
+                for candidate in (1, 2)
             }
-            slots = [slot for slot in range(self.team_sizes[team])
-                     if slot not in occupied]
-            if not slots:
+            available = {
+                candidate: [
+                    slot for slot in range(self.team_sizes[candidate])
+                    if slot not in occupied[candidate]]
+                for candidate in (1, 2)
+            }
+            candidates = ([team] if team in (1, 2)
+                          else [candidate for candidate in (1, 2)
+                                if available[candidate]])
+            if team in (1, 2) and not available[team]:
                 return False, "team_full"
+            if not candidates:
+                return False, "team_full"
+            if team == 0:
+                smallest_team = min(
+                    len(occupied[candidate]) for candidate in candidates)
+                candidates = [
+                    candidate for candidate in candidates
+                    if len(occupied[candidate]) == smallest_team]
+                team = random.choice(candidates)
+            slots = available[team]
+            if team == player.team:
+                return True, None
             player.team = team
             player.slot = slots[0]
             player.x, player.z, player.yaw = self._spawn_for(
