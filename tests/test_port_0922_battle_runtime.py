@@ -9917,6 +9917,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             bot_runtime.WORKER_CONTROL_SECONDS,
             battle._bots._control_seconds)
+        self.assertIsNone(battle._bots._suspension_ground_probe)
 
     def test_player_identity_sync_rejects_arena_dp_mismatch(self):
         runtime = _runtime()
@@ -13503,6 +13504,47 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual((0, 0, 0), entity.health_change)
         self.assertEqual([], battle._avatar.shot_results)
+        self.assertEqual([], battle._avatar.battle_events)
+
+    def test_local_environment_damage_uses_received_damage_without_direction(
+            self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        battle._avatar.playerVehicleID = 10
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._records = {'player:1': {
+            'engine_id': 10,
+            'state': {'health': 500, 'team': 1, 'alive': True},
+            'kind': 'player', 'network_id': 1, 'local': True}}
+
+        self.assertTrue(battle._apply_combat_event({
+            'kind': 'health', 'target': 1, 'damage': 120,
+            'health': 380, 'dead': False, 'source': 'environment',
+            'attack_reason': 3, 'death_reason': 0}))
+
+        self.assertEqual((380, 0, 3), entity.health_change)
+        self.assertEqual([{
+            'eventType': 10, 'targetID': 10, 'count': 1,
+            'details': (120 << 16) | (3 << 9),
+        }], battle._avatar.battle_events[0])
+        self.assertEqual([], battle._avatar.hit_directions)
+        self.assertEqual([], battle._avatar.shot_results)
+
+    def test_nonfall_environment_death_has_no_received_damage_event(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = {'engine_id': 10, 'local': True}
+
+        for reason_id in (5, 7):
+            self.assertFalse(battle._present_environment_feedback({
+                'source': 'environment', 'damage': 500,
+            }, target, reason_id))
+
         self.assertEqual([], battle._avatar.battle_events)
 
     def test_disconnected_projectile_attacker_does_not_block_damage(self):

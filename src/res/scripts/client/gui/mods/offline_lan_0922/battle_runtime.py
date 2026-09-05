@@ -3130,7 +3130,6 @@ class BattleRuntime(object):
                 spawn_resolver=self._formation_pose,
                 ground_probe=self._navigation_ground,
                 physics_ground_probe=self._ground_y,
-                suspension_ground_probe=self._suspension_ground_y,
                 obstacle_probe=self._navigation_obstacle,
                 bounds=getattr(self._spawn_planner, 'bounds', None),
                 cover_probe=self._sample_bot_cover,
@@ -9563,6 +9562,33 @@ class BattleRuntime(object):
             callback(output)
         return bool(output)
 
+    def _present_environment_feedback(self, event, target_record, reason_id):
+        """Feed attacker-free fall damage to the stock damage log."""
+        world_collision = self._attack_reason('WORLD_COLLISION', 3)
+        if (self._worker_mode or not target_record.get('local') or
+                self._combat_event_source(event) != 'environment' or
+                reason_id != world_collision):
+            return False
+        damage = max(0, int(event.get('damage', 0) or 0))
+        if damage <= 0:
+            return False
+        feedback_common = getattr(
+            self._runtime, 'battle_feedback_common', None)
+        event_types = getattr(feedback_common, 'BATTLE_EVENT_TYPE', None)
+        if event_types is None:
+            raise RuntimeError('#1513 battle feedback constants are unavailable')
+        callback = getattr(self._avatar, 'onBattleEvents', None)
+        if not callable(callback):
+            raise RuntimeError(
+                '#1513 battle-event feedback boundary is unavailable')
+        callback([{
+            'eventType': int(event_types.RECEIVED_DAMAGE),
+            'targetID': int(target_record['engine_id']),
+            'count': 1,
+            'details': int(event_types.packDamage(damage, reason_id)),
+        }])
+        return True
+
     def _apply_combat_event(self, event, update_state=True):
         source, attack_reason = self._validate_combat_event_contract(event)
         target_key = self._event_entity_key(event, 'target')
@@ -9620,6 +9646,9 @@ class BattleRuntime(object):
                 event, record, attacker_record, attacker_id)
             self._present_combat_feedback(
                 event, record, attacker_record, attack_reason)
+        elif source == 'environment':
+            self._present_environment_feedback(
+                event, record, attack_reason)
         critical = event.get('critical')
         if isinstance(critical, dict):
             canonical = self._critical_state(critical)

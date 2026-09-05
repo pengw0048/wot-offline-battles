@@ -1290,7 +1290,7 @@ class WorldCollisionTests(unittest.TestCase):
             self.assertEqual(9, counts['seams'])
             self.assertEqual(39, counts['ground'])
 
-    def test_airborne_posed_chord_cannot_bypass_slope_cliff(self):
+    def test_airborne_posed_chord_admits_continuous_slope(self):
         gradient = 0.50
         math_module = types.SimpleNamespace(Vector3=_Vector)
 
@@ -1322,15 +1322,14 @@ class WorldCollisionTests(unittest.TestCase):
                 wg_collideSegment=collide,
                 wg_getMatInfoNearPoint=_miss_mat_info_1513)
 
-            self.assertEqual('hard',
+            self.assertEqual('clear',
                 world_collision.check_horizontal_collision(
                     bigworld, math_module, 1, _Vector(), 0.0, velocity,
                     None, True, 0.20, True, commit_enabled=False,
                     pitch=-math.atan(world_gradient)))
-            # Three downward queries establish the first pitched lane's
-            # in-footprint trend and look-ahead top. The first lane is hard,
-            # so the remaining lanes do not pay.
-            self.assertEqual(3, ground_calls[0])
+            # Each lane confirms its in-footprint trend, look-ahead top and
+            # continuous ground profile before accepting the native slope.
+            self.assertEqual(30, ground_calls[0])
 
     @staticmethod
     def _pitched_hull_scene(ground_gradient, wall_z=None, wall_top=None,
@@ -1422,11 +1421,13 @@ class WorldCollisionTests(unittest.TestCase):
     def test_a_pitched_hull_sees_a_wall_standing_on_its_own_slope(self):
         pitch = math.atan(0.40)
         for gradient, hull_pitch in ((0.40, -pitch), (-0.40, pitch)):
-            with self.subTest(gradient=gradient):
-                self.assertEqual(
-                    'hard',
-                    self._pitched_hull_status(
-                        gradient, hull_pitch, 4.0, 1.2))
+            for airborne in (False, True):
+                with self.subTest(gradient=gradient, airborne=airborne):
+                    self.assertEqual(
+                        'hard',
+                        self._pitched_hull_status(
+                            gradient, hull_pitch, 4.0, 1.2,
+                            airborne=airborne))
 
     def test_wall_top_cannot_raise_the_ground_ahead_cap(self):
         """A downward native ray returns the first surface, not terrain."""
@@ -1449,19 +1450,19 @@ class WorldCollisionTests(unittest.TestCase):
     def test_missing_ground_beyond_cliff_cannot_remove_the_pose_cap(self):
         pitch = math.atan(0.40)
 
-        self.assertEqual(
-            'hard',
-            self._pitched_hull_status(
-                0.0, -pitch, 4.0, 1.2, ground_end=5.0))
+        for airborne in (False, True):
+            with self.subTest(airborne=airborne):
+                self.assertEqual(
+                    'hard',
+                    self._pitched_hull_status(
+                        0.0, -pitch, 4.0, 1.2,
+                        airborne=airborne, ground_end=5.0))
 
     def test_the_ground_ahead_cap_admits_every_continuous_slope(self):
         """The cap may only lower a witness, never make terrain a wall.
 
-        A grounded hull following its own slope stays clear in both
-        directions. The airborne rising-slope contact is a separate,
-        deliberate verdict covered by
-        ``test_airborne_posed_chord_cannot_bypass_slope_cliff`` and is
-        unchanged by the cap.
+        A hull following its own slope stays clear in both directions,
+        including while suspension state still reports it airborne.
         """
         for gradient in (0.40, 0.25, 0.0, -0.25, -0.40):
             hull_pitch = -math.atan(gradient)
@@ -1469,8 +1470,6 @@ class WorldCollisionTests(unittest.TestCase):
                 self.assertEqual(
                     'clear',
                     self._pitched_hull_status(gradient, hull_pitch))
-            if gradient > 0.0:
-                continue
             with self.subTest(gradient=gradient, airborne=True):
                 self.assertEqual(
                     'clear',

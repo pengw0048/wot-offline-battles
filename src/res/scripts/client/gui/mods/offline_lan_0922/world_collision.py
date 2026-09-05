@@ -581,13 +581,12 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					_heights = ()
 					_segment = 0.0
 					_gradient_limit = _MAX_DESCENDING_GRADIENT
-					_profile_allowed = not (pose_clamped and airborne)
 					# A normal level-pose wall avoids the seven ground rays. A swept
 					# chord whose endpoint height is clamped at the first hull edge can
 					# meet terrain later, so that bounded case earns the existing profile.
-					if (_profile_allowed and (
+					if (
 							_drivable_surface(col_bot, _gradient_limit) or
-							pose_clamped)):
+							pose_clamped):
 						_heights, _segment = _ground_profile(
 							spaceID, Math, pos, profile_x, profile_z,
 							profile_sin, profile_cos, profile_direction,
@@ -603,10 +602,9 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 							# a small prop. An ascent/descent outside its directional
 							# bound remains solid instead of falling into prop handling.
 							return 'hard' if return_status else True
-					_surface_is_ground = (
-						_profile_allowed and
-						_drivable_surface(col_bot, _gradient_limit))
-					if (_profile_allowed and not _surface_is_ground and
+					_surface_is_ground = _drivable_surface(
+						col_bot, _gradient_limit)
+					if (not _surface_is_ground and
 							pose_clamped and _hit_matches_ground_profile(
 								col_bot, _heights, _segment,
 								profile_x, profile_z,
