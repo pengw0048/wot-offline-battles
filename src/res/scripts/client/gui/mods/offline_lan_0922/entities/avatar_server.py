@@ -500,11 +500,36 @@ class AvatarServerBridge(object):
         return None
 
     def messenger_onActionByClient_chat2(self, action_id, request_id, args):
-        """Forward one exact #1513 fixed battle command to the LAN server."""
+        """Forward one reviewed #1513 Chat2 action to the LAN server."""
         if self._destroyed:
             return False
         return self._battle_radio.handle_client_action(
             action_id, request_id, args)
+
+    def start_team_chat(self):
+        """Initialize both stock arena channels after Avatar GUI startup."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.start_team_chat()
+
+    def close_team_chat(self):
+        """Deinitialize stock arena channels before Avatar GUI teardown."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.close_team_chat()
+
+    def receive_team_chat_ack(self, chat_seq, accepted):
+        """Complete one outgoing stock team-text request."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_chat_ack(chat_seq, accepted)
+
+    def receive_team_chat(self, text, sender_account_dbid):
+        """Present one server-validated teammate text through stock UI."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_team_chat(
+            text, sender_account_dbid)
 
     def receive_team_command_ack(self, command_seq, accepted,
                                  responder_account_dbids=None):
@@ -515,12 +540,12 @@ class AvatarServerBridge(object):
             command_seq, accepted, responder_account_dbids)
 
     def receive_team_command(self, command, sender_account_dbid,
-                             target_id=None, cell_index=None):
+                             target_id=None, cell_index=None, details=None):
         """Present one server-validated teammate command through stock UI."""
         if self._destroyed:
             return False
         return self._battle_radio.receive_command(
-            command, sender_account_dbid, target_id, cell_index)
+            command, sender_account_dbid, target_id, cell_index, details)
 
     def banUnbanUser(self, account_dbid, restriction_type, ban_period,
                      reason, is_ban):

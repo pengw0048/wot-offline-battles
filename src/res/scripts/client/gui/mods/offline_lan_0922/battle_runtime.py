@@ -1254,7 +1254,7 @@ class _LANInputSender(object):
     def send_team_command(self, request):
         owner = self.owner
         if (owner._worker_mode or owner._avatar is None or
-                not owner._battle_live or not isinstance(request, dict)):
+                owner.state != 'running' or not isinstance(request, dict)):
             return False
         target_kind = target_id = None
         stock_id = request.get('stock_target_id')
@@ -1271,7 +1271,15 @@ class _LANInputSender(object):
             target_id = record.get('network_id')
         return owner.client.send_team_command(
             request.get('command'), target_kind=target_kind,
-            target_id=target_id, cell_index=request.get('cell_index'))
+            target_id=target_id, cell_index=request.get('cell_index'),
+            details=request.get('details'))
+
+    def send_team_chat(self, request):
+        owner = self.owner
+        if (owner._worker_mode or owner._avatar is None or
+                owner.state != 'running' or not isinstance(request, dict)):
+            return False
+        return owner.client.send_team_chat(request.get('text'))
 
     def align_aim(self, turret_yaw=0.0, gun_pitch=0.0):
         """Seed the world-space LAN aim from the attached native gun."""
@@ -3191,6 +3199,11 @@ class BattleRuntime(object):
                 self._remember_ram_bot_snapshot(self._last_snapshot)
             self.state = 'running'
             if not self._worker_mode:
+                # Stock __startGUI has registered the battle messenger before
+                # setClientReady reaches this boundary. Initialize channels
+                # after that owner exists and before our shared load barrier.
+                self._run_optional_feature(
+                    'team chat initialization', self._server.start_team_chat)
                 self._bind_local_arcade_camera()
                 self._run_optional_feature(
                     'engine RPM presentation', self._publish_rpm,
@@ -3295,7 +3308,8 @@ class BattleRuntime(object):
         return True
 
     def _radio_message_current(self, message):
-        return (not self._worker_mode and self._avatar is not None and
+        return (self.state == 'running' and not self._worker_mode and
+                self._avatar is not None and
                 self._server is not None and isinstance(message, dict) and
                 message.get('round_id') == self._start_message.get('round_id'))
 
@@ -3325,7 +3339,31 @@ class BattleRuntime(object):
         return self._server.receive_team_command_ack(
             message.get('command_seq'), message.get('accepted'), responders)
 
+    def on_team_chat_ack(self, message):
+        if not self._radio_message_current(message):
+            return False
+        return self._server.receive_team_chat_ack(
+            message.get('chat_seq'), message.get('accepted'))
+
+    def on_team_chat(self, message):
+        if (not self._radio_message_current(message) or
+                message.get('team') != self.client.team):
+            return False
+        issuer = self._radio_identity('human', message.get('issuer_id'))
+        if issuer is None:
+            return False
+        seen = getattr(self, '_team_chat_seen', {})
+        key = (message['round_id'], message['issuer_id'])
+        if message['chat_seq'] <= seen.get(key, 0):
+            return False
+        result = self._server.receive_team_chat(message.get('text'), issuer[1])
+        if result:
+            seen[key] = message['chat_seq']
+            self._team_chat_seen = seen
+        return result
+
     def on_team_command(self, message):
+        from gui.mods.offline_lan_0922.tactical_radio import COMMAND_DETAIL_FIELDS
         if (not self._radio_message_current(message) or
                 message.get('team') != self.client.team):
             return False
@@ -3345,9 +3383,14 @@ class BattleRuntime(object):
         key = (message['round_id'], message['issuer_id'])
         if message['command_seq'] <= seen.get(key, 0):
             return False
+        required, optional = COMMAND_DETAIL_FIELDS.get(
+            message.get('command'), ((), ()))
+        details = dict((field, message[field]) for field in required + optional
+                       if field in message)
+        extra = {'details': details} if details else {}
         result = self._server.receive_team_command(
             message.get('command'), issuer[1], target_id,
-            message.get('cell_index'))
+            message.get('cell_index'), **extra)
         if result:
             seen[key] = message['command_seq']
             self._radio_seen = seen
@@ -21902,13 +21945,21 @@ class BattleRuntime(object):
     def _quiesce_native_presentations(self):
         """Release battle-scoped native visuals before Hangar takes over."""
         cleanup_error = None
+        if self._server is not None:
+            try:
+                # Close channel controllers while the current Avatar and
+                # battle GUI still own them, before onBecomeNonPlayer.
+                self._server.close_team_chat()
+            except Exception as error:
+                cleanup_error = error
         try:
             # BigWorld.target.clear() synchronously reaches stock targetBlur.
             # Run it before any GUI, trigger, edge or remote-entity owner can
             # be retired; PlayerAvatar.onBecomeNonPlayer clears it too late.
             self._runtime.compatibility.clear_target_focus()
         except Exception as error:
-            cleanup_error = error
+            if cleanup_error is None:
+                cleanup_error = error
         try:
             self._release_postmortem_visibility()
         except Exception as error:
@@ -22018,6 +22069,9 @@ class BattleRuntime(object):
         self._unusable_vehicles_reported = set()
         self._records = {}
         self._records_revision += 1
+        self._radio_seen = {}
+        self._radio_terminals = set()
+        self._team_chat_seen = {}
         _release_layout_caches()
         if self._map_create_attempted:
             creator = self._runtime.offline_map_creator

@@ -193,6 +193,7 @@ ROUND_SCOPED_MESSAGE_TYPES = frozenset((
     "track_repair",
     "equipment_intent",
     "team_command",
+    "team_chat",
 ))
 MODERN_VISIBLE_MESSAGE_TYPES = frozenset((
     "input", "fire_intent", "landing_observation", "start_battle",
@@ -203,6 +204,7 @@ MODERN_VISIBLE_MESSAGE_TYPES = frozenset((
     "track_repair",
     "equipment_intent",
     "team_command",
+    "team_chat",
 ))
 # The elected #1513 authority uses the same bounded in-process manager.  The
 # server must never admit more durable launches than a takeover client can
@@ -218,12 +220,18 @@ PROJECTILE_MAX_LIFETIME_MS = 20000
 PLAYER_FIRE_INTENT_MAX_PENDING = 1
 PLAYER_FIRE_INTENT_HISTORY = 64
 TEAM_COMMAND_HISTORY = 64
+TEAM_CHAT_HISTORY = 64
+# The exact #1513 stock text limit is measured in UTF-16 code units.  Keep the
+# LAN admission finite while preserving every accepted Unicode string unchanged.
+TEAM_CHAT_MAX_CHARACTERS = 140
 TEAM_COMMAND_TTL_TICKS = int(15 * TICK_HZ)
 TEAM_COMMAND_MAX_RECIPIENTS = 2
 TEAM_COMMANDS = frozenset((
     "ATTACK", "BACKTOBASE", "HELPME", "FOLLOWME", "TURNBACK",
     "HELPMEEX", "STOP", "ATTACKENEMY", "SUPPORTMEWITHFIRE",
-    "ATTENTIONTOCELL", "POSITIVE", "NEGATIVE",
+    "ATTENTIONTOCELL", "POSITIVE", "NEGATIVE", "SPG_AIM_AREA",
+    "RELOADINGGUN", "RELOADING_CASSETE", "RELOADING_READY",
+    "RELOADING_READY_CASSETE", "RELOADING_UNAVAILABLE",
 ))
 TEAM_COMMAND_ENEMY_TARGETS = frozenset((
     "ATTACKENEMY", "SUPPORTMEWITHFIRE",
@@ -232,6 +240,13 @@ TEAM_COMMAND_ALLY_TARGETS = frozenset((
     "FOLLOWME", "TURNBACK", "HELPMEEX", "STOP",
 ))
 TEAM_COMMAND_CELL_TARGETS = frozenset(("ATTENTIONTOCELL",))
+TEAM_COMMAND_PURE_BROADCAST = frozenset((
+    "POSITIVE", "NEGATIVE", "SPG_AIM_AREA", "RELOADINGGUN",
+    "RELOADING_CASSETE", "RELOADING_READY", "RELOADING_READY_CASSETE",
+    "RELOADING_UNAVAILABLE",
+))
+TEAM_COMMAND_AIM_POINT_LOW = (-5000.0, -5000.0, -5000.0)
+TEAM_COMMAND_AIM_POINT_HIGH = (5000.0, 5000.0, 5000.0)
 # One trigger-edge presentation entry per live Bot identity (1..30).
 PLAYER_PRESENTATION_LEDGER_FIELDS = frozenset((
     "bot_id", "bot_state_revision", "presentation_time_us"))
@@ -1843,6 +1858,17 @@ class Player(_EndpointSendMixin):
         default_factory=OrderedDict, repr=False)
     team_command_acks: OrderedDict = field(
         default_factory=OrderedDict, repr=False)
+    team_command_publications: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
+    team_chat_seq: int = 0
+    team_chat_fingerprints: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
+    team_chat_acks: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
+    team_chat_teams: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
+    team_chat_publications: OrderedDict = field(
+        default_factory=OrderedDict, repr=False)
     combat_fire_elapsed: float = 0.0
     combat_fire_timer: float = 0.0
     fire_attacker_kind: str = ""
@@ -2936,6 +2962,12 @@ class BattleState:
             player.team_command_seq = 0
             player.team_command_fingerprints.clear()
             player.team_command_acks.clear()
+            player.team_command_publications.clear()
+            player.team_chat_seq = 0
+            player.team_chat_fingerprints.clear()
+            player.team_chat_acks.clear()
+            player.team_chat_teams.clear()
+            player.team_chat_publications.clear()
             player.combat_fire_elapsed = 0.0
             player.combat_fire_timer = 0.0
             player.fire_attacker_kind = ""
@@ -4674,22 +4706,44 @@ class BattleState:
             command = acknowledgement.get("command")
             if team not in (1, 2) or command not in TEAM_COMMANDS:
                 return False
+            try:
+                issuer_id = _exact_int(acknowledgement.get("issuer_id"),
+                                       1, PROJECTILE_MAX_ID)
+                sequence = _exact_int(acknowledgement.get("command_seq"),
+                                      1, PROJECTILE_MAX_ID)
+            except ValueError:
+                return False
+            issuer = self.players.get(issuer_id)
+            if (issuer is None or not issuer.connected or
+                    not issuer.participating or issuer.team != team or
+                    acknowledgement.get("round_id") != self.round_id):
+                return False
+            fingerprint = issuer.team_command_fingerprints.get(sequence)
+            cached_ack = issuer.team_command_acks.get(sequence)
+            if (fingerprint is None or cached_ack != acknowledgement):
+                return False
+            if issuer.team_command_publications.get(sequence) == fingerprint:
+                return True
             message = {
                 "type": "team_command",
                 "protocol": PROTOCOL_VERSION,
                 "round_id": self.round_id,
-                "command_seq": acknowledgement.get("command_seq"),
+                "command_seq": sequence,
                 "command": command,
-                "issuer_id": acknowledgement.get("issuer_id"),
+                "issuer_id": issuer_id,
                 "team": team,
             }
-            for field in ("target_kind", "target_id", "cell_index"):
+            for field in ("target_kind", "target_id", "cell_index",
+                          "aim_point", "reload_time", "quantity"):
                 if field in acknowledgement:
                     message[field] = acknowledgement[field]
             recipients = tuple(
                 player for player in self.players.values()
                 if player.connected and player.participating and
                 player.team == team)
+            issuer.team_command_publications[sequence] = fingerprint
+            while len(issuer.team_command_publications) > TEAM_COMMAND_HISTORY:
+                issuer.team_command_publications.popitem(last=False)
         for recipient in recipients:
             if not recipient.offer_reliable(message):
                 self.remove_player(recipient.player_id, expected=recipient)
@@ -4710,13 +4764,23 @@ class BattleState:
             result.append(row)
         return result
 
+    def _team_command_bot_identity_locked(self, bot_id):
+        """Return the roster identity for a message target without requiring life."""
+        for identity in self.bot_manifest:
+            try:
+                if int(identity.get("id", 0)) == int(bot_id):
+                    return identity
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return None
+
     def _team_command_ack(self, player, message, accepted, code,
                           command=None, recipients=(), expires_tick=0):
         """Build the one observable terminal receipt for a radio request."""
         ack = {
             "type": "team_command_ack",
             "protocol": PROTOCOL_VERSION,
-            "round_id": self.round_id,
+            "round_id": message.get("round_id"),
             "command_seq": message.get("command_seq"),
             "accepted": bool(accepted),
             "code": str(code),
@@ -4731,24 +4795,46 @@ class BattleState:
             ack["target_id"] = message["target_id"]
         if "target_kind" in message:
             ack["target_kind"] = message["target_kind"]
-        if "cell_index" in message:
-            ack["cell_index"] = message["cell_index"]
+        for field in ("cell_index", "aim_point", "reload_time", "quantity"):
+            if field in message:
+                ack[field] = message[field]
         return ack
 
-    def submit_team_command(self, player_id, message):
-        """Admit one fixed #1513 team command for a bounded Bot subset.
+    def _team_chat_ack(self, player, message, accepted, code):
+        return {
+            "type": "team_chat_ack",
+            "protocol": PROTOCOL_VERSION,
+            "round_id": message.get("round_id"),
+            "chat_seq": message.get("chat_seq"),
+            "accepted": bool(accepted),
+            "code": str(code),
+        }
 
-        The visible client owns only the command intent.  The server fences
-        its round, sender, target visibility and selected recipients before
-        the native worker's planner sees the resulting short-lived order.
+    @staticmethod
+    def _valid_team_chat_text(value):
+        """Bound plain Unicode without reimplementing stock normalization."""
+        if not isinstance(value, str) or not value or not value.strip():
+            return False
+        try:
+            value.encode("utf-8")
+            utf16_units = len(value.encode("utf-16-le")) // 2
+        except UnicodeError:
+            return False
+        return utf16_units <= TEAM_CHAT_MAX_CHARACTERS
+
+    def submit_team_command(self, player_id, message):
+        """Relay a valid stock command and optionally admit a Bot order.
+
+        Team communication is valid independently from whether any Bot can
+        act on it.  Only a living sender's currently actionable request is
+        copied into the planner-owned, short-lived order set.
         """
         with self.lock:
             player = self.players.get(player_id)
             if player is None or not player.connected:
                 return None
             if (not self._message_round_matches(message) or
-                    not self._combat_accepting() or self.battle_result is not None
-                    or not player.participating or not player.alive):
+                    self.phase != "battle" or not player.participating):
                 return self._team_command_ack(
                     player, message, False, "inactive_round")
             command = message.get("command")
@@ -4758,11 +4844,25 @@ class BattleState:
             base_fields = set(("type", "round_id", "command_seq", "command"))
             if command in TEAM_COMMAND_ENEMY_TARGETS | TEAM_COMMAND_ALLY_TARGETS:
                 expected_fields = base_fields | set(("target_id", "target_kind"))
+                if command == "ATTACKENEMY":
+                    expected_fields = expected_fields | set(("reload_time",))
             elif command in TEAM_COMMAND_CELL_TARGETS:
                 expected_fields = base_fields | set(("cell_index",))
+            elif command == "SPG_AIM_AREA":
+                expected_fields = base_fields | set((
+                    "aim_point", "cell_index", "reload_time"))
+            elif command in ("RELOADINGGUN", "RELOADING_CASSETE"):
+                expected_fields = base_fields | set(("reload_time",))
+                if command == "RELOADING_CASSETE":
+                    expected_fields.add("quantity")
+            elif command == "RELOADING_READY_CASSETE":
+                expected_fields = base_fields | set(("quantity",))
             else:
                 expected_fields = base_fields
-            if set(message) != expected_fields:
+            actual_fields = set(message)
+            if (actual_fields != expected_fields and not
+                    (command == "ATTACKENEMY" and
+                     actual_fields == expected_fields - set(("reload_time",)))):
                 return self._team_command_ack(
                     player, message, False, "invalid_shape", command)
             try:
@@ -4784,9 +4884,35 @@ class BattleState:
                 return self._team_command_ack(
                     player, message, False, "stale_sequence", command)
 
-            bots = self._team_command_bots_locked(player.team)
+            live_bots = self._team_command_bots_locked(player.team)
             target_id = None
             target_marker = None
+            target_kind = None
+            if (command in ("SPG_AIM_AREA", "RELOADINGGUN",
+                            "RELOADING_CASSETE") or
+                    (command == "ATTACKENEMY" and
+                     "reload_time" in message)):
+                try:
+                    reload_time = _bounded_float(
+                        message.get("reload_time"), 0.0, 3600.0,
+                        inclusive_low=command in ("ATTACKENEMY", "SPG_AIM_AREA"))
+                except (TypeError, ValueError, OverflowError):
+                    return self._team_command_ack(
+                        player, message, False, "invalid_reload_time", command)
+            if command in ("RELOADING_CASSETE", "RELOADING_READY_CASSETE"):
+                try:
+                    quantity = _exact_int(message.get("quantity"), 1, 255)
+                except (TypeError, ValueError, OverflowError):
+                    return self._team_command_ack(
+                        player, message, False, "invalid_quantity", command)
+            if command == "SPG_AIM_AREA":
+                try:
+                    aim_point = _bounded_vector(
+                        message.get("aim_point"), TEAM_COMMAND_AIM_POINT_LOW,
+                        TEAM_COMMAND_AIM_POINT_HIGH)
+                except (TypeError, ValueError, OverflowError):
+                    return self._team_command_ack(
+                        player, message, False, "invalid_aim_point", command)
             if command in TEAM_COMMAND_ENEMY_TARGETS:
                 try:
                     target_id = _exact_int(
@@ -4798,42 +4924,46 @@ class BattleState:
                     target = self.players.get(target_id)
                     valid_target = bool(
                         target is not None and target.connected and
-                        target.participating and target.alive)
+                        target.participating and target.team != player.team)
                     target_marker = ("player", target_id)
                     target_kind = "human"
                 elif wire_target_kind == "bot":
-                    target = self.bot_states.get(target_id)
+                    target = self._team_command_bot_identity_locked(target_id)
                     valid_target = bool(
-                        target is not None and target.get("alive"))
+                        target is not None and
+                        int(target.get("team", 0)) != player.team)
                     target_marker = ("bot", target_id)
                     target_kind = "bot"
                 else:
                     target = None
                     valid_target = False
                     target_marker = None
-                if (target_id is None or not valid_target or
-                        int(target.team if wire_target_kind == "human"
-                            else target.get("team", 0)) == player.team):
+                if target_id is None or not valid_target:
                     return self._team_command_ack(
                         player, message, False, "invalid_enemy", command)
-                if target_marker not in self.player_spotted.get(
-                        player.player_id, frozenset()):
-                    return self._team_command_ack(
-                        player, message, False, "enemy_not_visible", command)
             elif command in TEAM_COMMAND_ALLY_TARGETS:
                 try:
                     target_id = _exact_int(
                         message.get("target_id"), 1, PROJECTILE_MAX_ID)
                 except ValueError:
                     target_id = None
-                if message.get("target_kind") != "bot":
+                target_kind = message.get("target_kind")
+                if target_kind == "human":
+                    target = self.players.get(target_id)
+                    valid_target = bool(
+                        target is not None and target.connected and
+                        target.participating and target.team == player.team)
+                elif target_kind == "bot":
+                    target = self._team_command_bot_identity_locked(target_id)
+                    valid_target = bool(
+                        target is not None and
+                        int(target.get("team", 0)) == player.team)
+                else:
+                    valid_target = False
+                if target_id is None or not valid_target:
                     return self._team_command_ack(
                         player, message, False, "invalid_ally", command)
-                bots = [bot for bot in bots if bot["id"] == target_id]
-                if not bots:
-                    return self._team_command_ack(
-                        player, message, False, "invalid_ally", command)
-            elif command in TEAM_COMMAND_CELL_TARGETS:
+            elif command in TEAM_COMMAND_CELL_TARGETS or command == "SPG_AIM_AREA":
                 try:
                     cell_index = _exact_int(message.get("cell_index"), 0, 99)
                 except ValueError:
@@ -4841,46 +4971,69 @@ class BattleState:
                 if cell_index is None:
                     return self._team_command_ack(
                         player, message, False, "invalid_cell", command)
-            if not bots:
-                return self._team_command_ack(
-                    player, message, False, "no_eligible_bot", command)
+            recipients = []
+            expires_tick = 0
+            # Social stock calls are presentation-only.  A dead sender can
+            # still communicate, but it cannot direct the hidden worker.
+            can_order = (player.alive and self._combat_accepting() and
+                         self.battle_result is None and
+                         command not in TEAM_COMMAND_PURE_BROADCAST)
+            if can_order and command in TEAM_COMMAND_ENEMY_TARGETS:
+                if target_kind == "human":
+                    target_live = bool(getattr(target, "alive", False))
+                else:
+                    target_live = bool(
+                        self.bot_states.get(target_id, {}).get("alive"))
+                if (not target_live or target_marker not in
+                        self.player_spotted.get(player.player_id, frozenset())):
+                    can_order = False
+            if can_order:
+                bots = list(live_bots)
+                if command in TEAM_COMMAND_ALLY_TARGETS:
+                    bots = (bots if target_kind == "bot" else [])
+                    bots = [bot for bot in bots if bot["id"] == target_id]
 
-            def sort_key(bot):
-                bot_id = bot["id"]
-                sees_target = target_marker in self.bot_spotted.get(
-                    bot_id, frozenset())
-                return (0 if sees_target else 1,
-                        round(math.hypot(float(bot.get("x", 0.0)) - player.x,
-                                         float(bot.get("z", 0.0)) - player.z), 6),
-                        bot_id)
+                def sort_key(bot):
+                    bot_id = bot["id"]
+                    sees_target = target_marker in self.bot_spotted.get(
+                        bot_id, frozenset())
+                    return (0 if sees_target else 1,
+                            round(math.hypot(float(bot.get("x", 0.0)) - player.x,
+                                             float(bot.get("z", 0.0)) - player.z), 6),
+                            bot_id)
 
-            bots.sort(key=sort_key)
-            recipients = [bot["id"] for bot in bots[:TEAM_COMMAND_MAX_RECIPIENTS]]
-            expires_tick = self.tick + TEAM_COMMAND_TTL_TICKS
-            command_id = "%d:%d:%d" % (
-                self.round_id, player.player_id, sequence)
-            order = {
-                "command_id": command_id,
-                "command_seq": int(sequence),
-                "round_id": int(self.round_id),
-                "command": command,
-                "team": int(player.team),
-                "issuer_id": int(player.player_id),
-                "issued_tick": int(self.tick),
-                "expires_tick": int(expires_tick),
-                "recipient_bot_ids": recipients,
-            }
-            if target_id is not None:
-                order["target_id"] = int(target_id)
-                if command in TEAM_COMMAND_ENEMY_TARGETS:
-                    order["target_kind"] = target_kind
-            if command in TEAM_COMMAND_CELL_TARGETS:
-                order["cell_index"] = int(cell_index)
-            self.team_commands[command_id] = order
-            while len(self.team_commands) > TEAM_COMMAND_HISTORY:
-                unused_id, retired = self.team_commands.popitem(last=False)
-                self._publish_team_command_terminal(
-                    self.players.get(retired['issuer_id']), retired, 'superseded')
+                bots.sort(key=sort_key)
+                recipients = [bot["id"]
+                              for bot in bots[:TEAM_COMMAND_MAX_RECIPIENTS]]
+                if recipients:
+                    expires_tick = self.tick + TEAM_COMMAND_TTL_TICKS
+                    command_id = "%d:%d:%d" % (
+                        self.round_id, player.player_id, sequence)
+                    order = {
+                        "command_id": command_id,
+                        "command_seq": int(sequence),
+                        "round_id": int(self.round_id),
+                        "command": command,
+                        "team": int(player.team),
+                        "issuer_id": int(player.player_id),
+                        "issued_tick": int(self.tick),
+                        "expires_tick": int(expires_tick),
+                        "recipient_bot_ids": recipients,
+                    }
+                    if target_id is not None:
+                        order["target_id"] = int(target_id)
+                        if command in TEAM_COMMAND_ENEMY_TARGETS:
+                            order["target_kind"] = target_kind
+                    if command in TEAM_COMMAND_CELL_TARGETS:
+                        order["cell_index"] = int(cell_index)
+                    self.team_commands[command_id] = order
+                    while len(self.team_commands) > TEAM_COMMAND_HISTORY:
+                        unused_id, retired = self.team_commands.popitem(last=False)
+                        self._publish_team_command_terminal(
+                            self.players.get(retired['issuer_id']), retired,
+                            'superseded')
+                    self._next_bot_planner_tick = min(
+                        self._next_bot_planner_tick, self.tick)
             ack = self._team_command_ack(
                 player, message, True, "accepted", command, recipients,
                 expires_tick)
@@ -4891,9 +5044,100 @@ class BattleState:
                 stale_sequence, unused = player.team_command_fingerprints.popitem(
                     last=False)
                 player.team_command_acks.pop(stale_sequence, None)
-            self._next_bot_planner_tick = min(
-                self._next_bot_planner_tick, self.tick)
             return ack
+
+    def submit_team_chat(self, player_id, message):
+        """Admit one plain stock team-chat line without touching battle state."""
+        with self.lock:
+            player = self.players.get(player_id)
+            if player is None or not player.connected:
+                return None
+            if (not self._message_round_matches(message) or
+                    self.phase != "battle" or not player.participating):
+                return self._team_chat_ack(
+                    player, message, False, "inactive_round")
+            if set(message) != set(("type", "round_id", "chat_seq", "text")):
+                return self._team_chat_ack(
+                    player, message, False, "invalid_shape")
+            try:
+                sequence = _exact_int(message.get("chat_seq"), 1,
+                                      PROJECTILE_MAX_ID)
+            except ValueError:
+                sequence = None
+            text = message.get("text")
+            if sequence is None or not self._valid_team_chat_text(text):
+                return self._team_chat_ack(
+                    player, message, False,
+                    "invalid_sequence" if sequence is None else "invalid_text")
+            fingerprint = self._team_command_fingerprint(message)
+            previous = player.team_chat_fingerprints.get(sequence)
+            if previous is not None:
+                if previous == fingerprint:
+                    return dict(player.team_chat_acks[sequence])
+                return self._team_chat_ack(
+                    player, message, False, "sequence_conflict")
+            if sequence <= player.team_chat_seq:
+                return self._team_chat_ack(
+                    player, message, False, "stale_sequence")
+            ack = self._team_chat_ack(player, message, True, "accepted")
+            player.team_chat_seq = sequence
+            player.team_chat_fingerprints[sequence] = fingerprint
+            player.team_chat_acks[sequence] = dict(ack)
+            player.team_chat_teams[sequence] = int(player.team)
+            while len(player.team_chat_fingerprints) > TEAM_CHAT_HISTORY:
+                stale_sequence, unused = player.team_chat_fingerprints.popitem(
+                    last=False)
+                player.team_chat_acks.pop(stale_sequence, None)
+                player.team_chat_teams.pop(stale_sequence, None)
+            return ack
+
+    def publish_team_chat(self, player_id, acknowledgement):
+        """Reliably relay one admitted plain-text message to its sender's team."""
+        with self.lock:
+            if not acknowledgement or not acknowledgement.get("accepted"):
+                return False
+            try:
+                issuer_id = _exact_int(player_id, 1, PROJECTILE_MAX_ID)
+                sequence = _exact_int(acknowledgement.get("chat_seq"), 1,
+                                      PROJECTILE_MAX_ID)
+            except ValueError:
+                return False
+            issuer = self.players.get(issuer_id)
+            if (issuer is None or not issuer.connected or
+                    not issuer.participating or
+                    acknowledgement.get("round_id") != self.round_id):
+                return False
+            fingerprint = issuer.team_chat_fingerprints.get(sequence)
+            cached_ack = issuer.team_chat_acks.get(sequence)
+            team = issuer.team_chat_teams.get(sequence)
+            if (fingerprint is None or cached_ack != acknowledgement or
+                    team not in (1, 2) or issuer.team != team):
+                return False
+            if issuer.team_chat_publications.get(sequence) == fingerprint:
+                return True
+            text = json.loads(fingerprint).get("text")
+            if not isinstance(text, str):
+                return False
+            message = {
+                "type": "team_chat",
+                "protocol": PROTOCOL_VERSION,
+                "round_id": self.round_id,
+                "chat_seq": sequence,
+                "issuer_id": issuer_id,
+                "team": team,
+                "text": text,
+            }
+            recipients = tuple(
+                player for player in self.players.values()
+                if player.connected and player.participating and
+                player.team == team)
+            issuer.team_chat_publications[sequence] = fingerprint
+            while len(issuer.team_chat_publications) > TEAM_CHAT_HISTORY:
+                issuer.team_chat_publications.popitem(last=False)
+        for recipient in recipients:
+            if not recipient.offer_reliable(message):
+                self.remove_player(recipient.player_id, expected=recipient)
+        return True
 
     @staticmethod
     def _ordinary_bot_burst(fire_seq, shell_index):
@@ -13294,6 +13538,26 @@ class ClientHandler(socketserver.BaseRequestHandler):
                                         player.player_id,
                                         message.get("command"),
                                         message.get("command_seq"),
+                                        acknowledgement.get("code")
+                                        if acknowledgement else "missing"))
+                        elif message_type == "team_chat":
+                            acknowledgement = server.state.submit_team_chat(
+                                player.player_id, message)
+                            if acknowledgement is not None:
+                                if acknowledgement.get("accepted"):
+                                    server.state.publish_team_chat(
+                                        player.player_id, acknowledgement)
+                                player.send(acknowledgement)
+                            if (acknowledgement is None or
+                                    not acknowledgement.get("accepted")):
+                                _server_log_limited(
+                                    "team-chat:%d:%s" % (
+                                        player.player_id,
+                                        acknowledgement.get("code")
+                                        if acknowledgement else "missing"),
+                                    "TEAM CHAT rejected sender=%d seq=%s code=%s" % (
+                                        player.player_id,
+                                        message.get("chat_seq"),
                                         acknowledgement.get("code")
                                         if acknowledgement else "missing"))
                         elif message_type == "landing_observation":

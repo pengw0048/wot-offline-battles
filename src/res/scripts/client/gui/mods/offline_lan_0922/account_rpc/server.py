@@ -293,7 +293,7 @@ class FakeServer(object):
         return True
 
     def messenger_onActionByClient_chat2(self, action_id, request_id, args):
-        """Forward chat2 when a scoped battle-radio adapter is attached."""
+        """Forward Chat2 when a scoped battle adapter is attached."""
         adapter = self._context.get('battle_radio')
         handler = getattr(adapter, 'handle_client_action', None)
         if callable(handler):

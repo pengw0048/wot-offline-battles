@@ -203,6 +203,8 @@ class _BattleRuntime(object):
         self.team_command_acks = []
         self.team_commands = []
         self.team_command_terminals = []
+        self.team_chats = []
+        self.team_chat_acks = []
         self.restore_pending = False
 
     def start(self, config, message=None, lan_client=None,
@@ -236,6 +238,12 @@ class _BattleRuntime(object):
 
     def on_team_command_terminal(self, message):
         self.team_command_terminals.append(message)
+
+    def on_team_chat(self, message):
+        self.team_chats.append(message)
+
+    def on_team_chat_ack(self, message):
+        self.team_chat_acks.append(message)
 
     def stop(self, show_login=True, restore_account=True):
         self.stopped.append(show_login)
@@ -1778,6 +1786,8 @@ class LANSessionTests(unittest.TestCase):
                 'id': 'p1', 'x': 1, 'y': 2, 'z': 3,
                 'vehicle': 'ussr:T-34'}]})
         messages = (
+            ('team_chat', self.battle_runtime.team_chats),
+            ('team_chat_ack', self.battle_runtime.team_chat_acks),
             ('team_command_ack', self.battle_runtime.team_command_acks),
             ('team_command', self.battle_runtime.team_commands),
             ('team_command_terminal',
