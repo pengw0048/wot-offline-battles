@@ -502,6 +502,20 @@ class VehiclePurchaseTests(unittest.TestCase):
         self.assertEqual(1, len(state.snapshot()['vehicles']))
         self.assertEqual(100, state.snapshot()['wallet']['gold'])
 
+    def test_a_new_crew_never_takes_an_inventory_id_the_barracks_holds(self):
+        """A reused id does not break one vehicle, it invalidates the save."""
+        from unittest import mock
+
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 20000
+        snapshot['barracksTankmen'] = {103: b'tman:103'}
+        calls = []
+        state = _state(snapshot)
+        with mock.patch.dict(sys.modules, self._built(calls)):
+            state.buy_vehicle(SECOND_VEHICLE_CD)
+
+        self.assertEqual(104, calls[0]['nextTankmanID'])
+
     def test_buying_a_vehicle_the_account_already_owns_is_refused(self):
         state = _state()
 
@@ -548,6 +562,9 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot = _snapshot()
         second = copy.deepcopy(snapshot['vehicles'][0])
         second['id'] = 10
+        # A crew member belongs to one vehicle, so the second one has its own.
+        second['crew'] = [103, 104]
+        second['tankmen'] = {103: b'tman:103', 104: b'tman:104'}
         second['vehicleTypeCompactDescr'] = SECOND_VEHICLE_CD
         second['eqs'] = [11001, 0, 0]
         second['inventoryItems'][11] = {11001: 1}
@@ -556,15 +573,37 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['vehicleXP'][SECOND_VEHICLE_CD] = 4000
         return snapshot
 
-    def test_a_sale_that_would_keep_the_crew_is_refused_without_barracks(self):
-        """Destroying a crew the player asked to keep is the worse outcome."""
+    def test_a_sale_that_keeps_the_crew_sends_them_to_the_barracks(self):
+        """That is what #1513 offers instead of dismissing them."""
         state = _state(self._two_vehicles())
+
+        state.sell_vehicle(10, dismiss_crew=False)
+
+        snapshot = state.snapshot()
+        self.assertEqual(1, len(snapshot['vehicles']))
+        self.assertEqual(
+            {103: b'tman:103', 104: b'tman:104'},
+            snapshot['barracksTankmen'])
+        self.assertEqual(1000 + 6250, snapshot['wallet']['gold'])
+
+    def test_a_sale_that_keeps_the_crew_is_refused_by_a_full_barracks(self):
+        """#1513's own sell dialog checks the same berths before asking."""
+        snapshot = self._two_vehicles()
+        snapshot['accountBerths'] = 1
+        state = _state(snapshot)
 
         with self.assertRaises(GARAGE.GarageError):
             state.sell_vehicle(10, dismiss_crew=False)
 
         self.assertEqual(2, len(state.snapshot()['vehicles']))
         self.assertEqual(1000, state.snapshot()['wallet']['gold'])
+
+    def test_a_sale_that_dismisses_the_crew_uses_no_berth(self):
+        state = _state(self._two_vehicles())
+
+        state.sell_vehicle(10, dismiss_crew=True)
+
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
 
     def test_the_listed_rounds_are_paid_by_the_count_the_vehicle_carried(self):
         state = _state(self._two_vehicles())

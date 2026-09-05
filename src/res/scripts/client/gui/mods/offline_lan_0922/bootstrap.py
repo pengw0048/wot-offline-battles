@@ -266,6 +266,10 @@ def _validate_restored_garage(snapshot):
         if len(crew_ids) != len(roles):
             raise ValueError('saved crew does not match the vehicle')
         for slot, tankman_id in enumerate(crew_ids):
+            if tankman_id is None:
+                # An unloaded seat is empty, not damaged: #1513 reads it back
+                # as a vehicle whose crew is not full.
+                continue
             tankman = tankmen.TankmanDescr(crew[tankman_id])
             if (int(tankman.nationID) != int(nation_id) or
                     int(tankman.vehicleTypeID) != int(vehicle_type_id) or
@@ -276,6 +280,11 @@ def _validate_restored_garage(snapshot):
         for outfit_data in dict(record.get('outfits') or {}).values():
             outfit_descr, unused_enabled = outfit_data
             customizations.parseOutfitDescr(outfit_descr)
+
+    # A crew member in the barracks is published too, so a descriptor this
+    # client cannot parse has to be caught at the same boundary.
+    for compact_descr in (snapshot.get('barracksTankmen') or {}).values():
+        tankmen.TankmanDescr(compact_descr)
     return True
 
 
@@ -492,6 +501,14 @@ def _next_tankman_id(snapshot):
                 used.append(int(tankman_id))
             except (TypeError, ValueError):
                 continue
+    # A crew member in the barracks still holds their inventory id. Handing it
+    # out twice does not break one vehicle, it makes the whole garage
+    # unrestorable on the next start.
+    for tankman_id in (snapshot.get('barracksTankmen') or ()):
+        try:
+            used.append(int(tankman_id))
+        except (TypeError, ValueError):
+            continue
     return max(used) + 1
 
 

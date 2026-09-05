@@ -111,6 +111,30 @@ class SaveLedgerTest(unittest.TestCase):
             save_ledger.MAX_BALANCE,
             save_ledger.read_balances(self.slot, root=self.root)["gold"])
 
+    def test_a_newer_save_is_read_and_written_without_losing_anything(self):
+        """The client owns this file's schema and every key the launcher
+        does not know. Rebuilding the document instead of editing it would
+        quietly delete whatever the next client version added -- the barracks
+        crew, for one, who exist nowhere else."""
+        state = _state(gold=1000)
+        state["schema"] = 6
+        state["ledger"]["barracks"] = ["dG1hbjoxMDE="]
+        state["ledger"]["somethingNewer"] = {"kept": True}
+        self._write(state)
+
+        self.assertEqual(
+            1000,
+            save_ledger.read_balances(self.slot, root=self.root)["gold"])
+        save_ledger.write_balances(
+            self.slot, {"gold": 4000}, root=self.root,
+            is_running=lambda: False)
+
+        saved = self._read()
+        self.assertEqual(6, saved["schema"])
+        self.assertEqual(["dG1hbjoxMDE="], saved["ledger"]["barracks"])
+        self.assertEqual({"kept": True}, saved["ledger"]["somethingNewer"])
+        self.assertEqual(4000, saved["ledger"]["wallet"]["gold"])
+
     def test_a_running_game_owns_the_file_and_the_edit_is_refused(self):
         self._write(_state())
 

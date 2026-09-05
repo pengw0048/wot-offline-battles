@@ -874,13 +874,14 @@ class AccountRpcTests(unittest.TestCase):
             garage['unlockItemCompactDescrs'].issubset(stats['unlocks']))
 
     def test_incomplete_selected_vehicle_is_rejected_before_hangar_build(self):
-        with self.assertRaisesRegex(ValueError, 'crew and tankmen'):
+        with self.assertRaisesRegex(ValueError, 'one seat per role'):
             account_data.sync_data(
                 selected_vehicle={'id': 9, 'compDescr': b'compact'})
 
     def test_selected_vehicle_relational_contract_rejects_semantic_empties(self):
         cases = (
-            ('crew and tankmen', lambda value: value.update(crew=[])),
+            # An empty seat is legal; a vehicle with no seats at all is not.
+            ('one seat per role', lambda value: value.update(crew=[])),
             ('crew ids must be positive',
              lambda value: (
                  value.update(crew=[-101, 102]),

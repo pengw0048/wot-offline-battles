@@ -192,12 +192,22 @@ class GarageState(object):
         return touched
 
     def _tankman_record(self, tankman_inventory_id):
+        """Return the mapping that holds one crew member's descriptor.
+
+        A crew member is either in a vehicle or in the barracks, and both are
+        trained and taught skills the same way, so the caller gets whichever
+        mapping owns them rather than the vehicle record.
+        """
         wanted = _int(tankman_inventory_id)
         for record in self._records():
             tankmen = record.get('tankmen')
             if isinstance(tankmen, dict) and wanted in tankmen:
                 self._touched.add(_int(record.get('id', 0)))
-                return record, wanted
+                return tankmen, wanted
+        barracks = self._barracks()
+        if wanted in barracks:
+            self._touched_tankmen.add(wanted)
+            return barracks, wanted
         raise GarageError('unknown tankman inventory id %d' % wanted)
 
     def _own(self, record, compact_descr, item_type, count=1):
@@ -364,8 +374,47 @@ class GarageState(object):
     def _next_tankman_id(self):
         used = set()
         for record in self._records():
-            used.update(_int(value) for value in (record.get('crew') or ()))
+            used.update(
+                _int(value) for value in (record.get('crew') or ())
+                if value is not None)
+        # A crew member in the barracks still owns their inventory id, and a
+        # reused one makes the whole restored garage invalid rather than one
+        # vehicle wrong.
+        used.update(_int(value) for value in self._barracks())
         return (max(used) + 1) if used else 100001
+
+    # ---- barracks -------------------------------------------------------
+
+    def _barracks(self):
+        """Return the crew this account owns and no vehicle carries."""
+        barracks = self._snapshot.get('barracksTankmen')
+        if not isinstance(barracks, dict):
+            barracks = {}
+            self._snapshot['barracksTankmen'] = barracks
+        return barracks
+
+    def _berths(self):
+        return _int(self._snapshot.get('accountBerths', 0))
+
+    def free_berths(self):
+        """Return how many more crew members the barracks can hold.
+
+        #1513's ``BarracksSlotsValidator`` counts exactly this before it lets
+        the player unload a crew or sell a vehicle without dismissing one, so
+        a refusal here is the same refusal the client would have made.
+        """
+        return max(0, self._berths() - len(self._barracks()))
+
+    def _to_barracks(self, tankman_id, compact_descr):
+        self._barracks()[_int(tankman_id)] = compact_descr
+        self._touched_tankmen.add(_int(tankman_id))
+
+    def _require_berths(self, needed):
+        needed = _int(needed)
+        if needed > self.free_berths():
+            raise GarageError(
+                'the barracks has %d free berth(s) and %d crew member(s) need '
+                'a place' % (self.free_berths(), needed))
 
     # ---- consumables ----------------------------------------------------
 
@@ -848,7 +897,7 @@ class GarageState(object):
     # ---- crew -----------------------------------------------------------
 
     def add_tankman_skill(self, tankman_inventory_id, skill_index):
-        record, tankman_id = self._tankman_record(tankman_inventory_id)
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
         tankmen = self._tankmen_module()
         names = getattr(tankmen, 'SKILL_NAMES', ())
         try:
@@ -856,41 +905,41 @@ class GarageState(object):
         except (IndexError, TypeError):
             raise GarageError('unknown crew skill index %r' % (skill_index,))
         try:
-            descriptor = tankmen.TankmanDescr(record['tankmen'][tankman_id])
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
             descriptor.addSkill(skill_name)
-            record['tankmen'][tankman_id] = descriptor.makeCompactDescr()
+            rows[tankman_id] = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the crew skill: %s' % error)
         self.revision += 1
-        return record
+        return tankman_id
 
     def drop_tankman_skills(self, tankman_inventory_id):
-        record, tankman_id = self._tankman_record(tankman_inventory_id)
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
         tankmen = self._tankmen_module()
         try:
-            descriptor = tankmen.TankmanDescr(record['tankmen'][tankman_id])
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
             descriptor.dropSkills(1.0, False)
-            record['tankmen'][tankman_id] = descriptor.makeCompactDescr()
+            rows[tankman_id] = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the skill reset: %s' % error)
         self.revision += 1
-        return record
+        return tankman_id
 
     def train_tankman(self, tankman_inventory_id, free_xp):
         """Convert the requested free XP into crew XP at the #1513 rate."""
-        record, tankman_id = self._tankman_record(tankman_inventory_id)
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
         amount = _int(free_xp)
         if amount <= 0:
             raise GarageError('crew training XP must be positive')
         tankmen = self._tankmen_module()
         try:
-            descriptor = tankmen.TankmanDescr(record['tankmen'][tankman_id])
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
             descriptor.addXP(amount * FREE_XP_TO_TANKMAN_XP_RATE)
-            record['tankmen'][tankman_id] = descriptor.makeCompactDescr()
+            rows[tankman_id] = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused crew training: %s' % error)
         self.revision += 1
-        return record
+        return tankman_id
 
     def award_battle_crew_xp(self, vehicle_type_compact_descr, battle_xp,
                              xp_to_tankman_flag):
@@ -915,6 +964,9 @@ class GarageState(object):
         tankmen = self._tankmen_module()
         descriptors = []
         for slot, tankman_id in enumerate(crew_ids):
+            if tankman_id is None:
+                # An empty seat earns nothing; the rest of the crew still do.
+                continue
             try:
                 descriptor = tankmen.TankmanDescr(tankman_rows[tankman_id])
                 total_xp = int(descriptor.totalXP())
@@ -1099,13 +1151,12 @@ class GarageState(object):
         records = self._records()
         if len(records) <= 1:
             raise GarageError('the last garage vehicle cannot be sold')
-        if not dismiss_crew and record.get('crew'):
-            # #1513 offers the crew a barracks place instead of dismissal.
-            # The offline garage has no barracks yet, and destroying a crew
-            # the player asked to keep is worse than refusing the sale.
-            raise GarageError(
-                'the offline garage has no barracks: dismiss the crew to '
-                'sell this vehicle')
+        crew_rows = dict(record.get('tankmen') or {})
+        if not dismiss_crew:
+            # #1513's VehicleSeller adds a BarracksSlotsValidator for exactly
+            # this count when the player keeps the crew, so refusing here is
+            # the refusal the client would already have made.
+            self._require_berths(len(crew_rows))
         compact_descr = _int(record.get('vehicleTypeCompactDescr', 0))
         refund = self._item_refund(compact_descr)
         remaining = [row for row in records
@@ -1127,11 +1178,163 @@ class GarageState(object):
         # The client only drops what the diff names, so a removal has to be
         # announced as loudly as a change.
         self._touched.add(_int(record.get('id', 0)))
-        for tankman_id in (record.get('tankmen') or ()):
-            self._touched_tankmen.add(_int(tankman_id))
+        for tankman_id, tankman_compact_descr in crew_rows.items():
+            if dismiss_crew:
+                self._touched_tankmen.add(_int(tankman_id))
+            else:
+                self._to_barracks(tankman_id, tankman_compact_descr)
         self._pay_back(refund)
         self.revision += 1
         return compact_descr
+
+    # ---- crew placement -------------------------------------------------
+
+    def equip_tankman(self, vehicle_inventory_id, slot, tankman_inventory_id):
+        """Seat one crew member, or send a seat's occupant to the barracks.
+
+        #1513 sends all three cases through ``Inventory.equipTankman``: a
+        tankman id of -1 empties the named seat, and a slot of -1 alongside it
+        empties every seat, which is what the barracks' "unload crew" button
+        does. An occupied target seat is a swap, and its occupant goes to the
+        barracks rather than being destroyed.
+        """
+        record = self._record(vehicle_inventory_id, touch=False)
+        slot = _int(slot)
+        tankman_inventory_id = _int(tankman_inventory_id)
+        crew = list(record.get('crew') or ())
+        rows = dict(record.get('tankmen') or {})
+        roles = self._crew_roles(record)
+        if len(crew) != len(roles):
+            raise GarageError('the vehicle crew does not match its roles')
+
+        if tankman_inventory_id <= 0:
+            if slot >= len(crew):
+                raise GarageError('vehicle has no crew seat %d' % slot)
+            seats = range(len(crew)) if slot < 0 else [slot]
+            leaving = [(index, crew[index]) for index in seats
+                       if crew[index] is not None]
+            if not leaving:
+                raise GarageError('there is no crew member in that seat')
+            self._require_berths(len(leaving))
+            for index, tankman_id in leaving:
+                self._to_barracks(tankman_id, rows.pop(tankman_id))
+                crew[index] = None
+            record['crew'] = crew
+            record['tankmen'] = rows
+            self._touched.add(_int(record.get('id', 0)))
+            self.revision += 1
+            return len(leaving)
+
+        if slot < 0 or slot >= len(crew):
+            raise GarageError('vehicle has no crew seat %d' % slot)
+        barracks = self._barracks()
+        source = None
+        if tankman_inventory_id in barracks:
+            compact_descr = barracks[tankman_inventory_id]
+        else:
+            source = self._seated_record(tankman_inventory_id)
+            if source is None:
+                raise GarageError(
+                    'unknown tankman inventory id %d' % tankman_inventory_id)
+            compact_descr = (rows if source is record
+                             else source['tankmen'])[tankman_inventory_id]
+        self._check_tankman_fits(record, roles, slot, compact_descr)
+        occupant = crew[slot]
+        if occupant == tankman_inventory_id:
+            return tankman_inventory_id
+        # #1513 asks for no berth here because the server is expected to place
+        # whoever is displaced. Offline there is only the barracks, so count
+        # what actually lands in it: the seat's occupant arrives, and the
+        # newcomer leaves only if that is where they were.
+        arriving = (1 if occupant is not None else 0) - (0 if source else 1)
+        if arriving > self.free_berths():
+            raise GarageError(
+                'the barracks has no room for the crew member leaving seat %d'
+                % slot)
+        if occupant is not None:
+            self._to_barracks(occupant, rows.pop(occupant))
+        if source is None:
+            del barracks[tankman_inventory_id]
+        elif source is record:
+            crew[crew.index(tankman_inventory_id)] = None
+            rows.pop(tankman_inventory_id, None)
+        else:
+            source_crew = list(source.get('crew') or ())
+            source_crew[source_crew.index(tankman_inventory_id)] = None
+            source['crew'] = source_crew
+            source['tankmen'].pop(tankman_inventory_id, None)
+            self._touched.add(_int(source.get('id', 0)))
+        rows[tankman_inventory_id] = compact_descr
+        crew[slot] = tankman_inventory_id
+        record['crew'] = crew
+        record['tankmen'] = rows
+        self._touched.add(_int(record.get('id', 0)))
+        self._touched_tankmen.add(tankman_inventory_id)
+        self.revision += 1
+        return tankman_inventory_id
+
+    def _seated_record(self, tankman_inventory_id):
+        wanted = _int(tankman_inventory_id)
+        for record in self._records():
+            rows = record.get('tankmen')
+            if isinstance(rows, dict) and wanted in rows:
+                return record
+        return None
+
+    def dismiss_tankman(self, tankman_inventory_id):
+        """Let one crew member go, from a vehicle seat or from the barracks."""
+        wanted = _int(tankman_inventory_id)
+        barracks = self._barracks()
+        if wanted in barracks:
+            del barracks[wanted]
+            self._touched_tankmen.add(wanted)
+            self.revision += 1
+            return wanted
+        for record in self._records():
+            rows = record.get('tankmen')
+            if not isinstance(rows, dict) or wanted not in rows:
+                continue
+            del rows[wanted]
+            record['crew'] = [None if _int(value or 0) == wanted else value
+                              for value in (record.get('crew') or ())]
+            self._touched.add(_int(record.get('id', 0)))
+            self._touched_tankmen.add(wanted)
+            self.revision += 1
+            return wanted
+        raise GarageError('unknown tankman inventory id %d' % wanted)
+
+    def _crew_roles(self, record):
+        vehicles = self._vehicles_module()
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            return tuple(descriptor.type.crewRoles)
+        except Exception as error:
+            raise GarageError('the client refused the vehicle crew: %s' % error)
+
+    def _check_tankman_fits(self, record, roles, slot, compact_descr):
+        """Refuse a seat this crew member cannot hold without retraining.
+
+        The offline garage has no retraining yet, and its restore boundary
+        requires every seated crew member to match the vehicle's nation, type
+        and role, so a mismatch would make the whole save unrestorable.
+        """
+        tankmen = self._tankmen_module()
+        vehicles = self._vehicles_module()
+        try:
+            descriptor = tankmen.TankmanDescr(compact_descr)
+            vehicle = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            nation_id, vehicle_type_id = vehicle.type.id
+        except Exception as error:
+            raise GarageError('the client refused the crew member: %s' % error)
+        if _int(descriptor.nationID) != _int(nation_id):
+            raise GarageError('this crew member serves another nation')
+        if _int(descriptor.vehicleTypeID) != _int(vehicle_type_id):
+            raise GarageError(
+                'this crew member is trained for another vehicle')
+        if descriptor.role != roles[slot][0]:
+            raise GarageError(
+                'this crew member is a %s and seat %d is for a %s'
+                % (descriptor.role, slot, roles[slot][0]))
 
     @staticmethod
     def _add_money(total, amount):

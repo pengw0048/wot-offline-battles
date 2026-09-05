@@ -87,12 +87,12 @@ def _fitting(context, mutate):
 
     touched = state.touched_vehicles()
     touched_items = state.touched_items()
-    removed_tankmen = state.touched_tankmen()
+    moved_tankmen = state.touched_tankmen()
 
     def publish(on_complete=None):
         diff = data.inventory(
             state.snapshot(), validate=False, only_vehicles=touched,
-            only_items=touched_items, removed_tankmen=removed_tankmen)
+            only_items=touched_items, touched_tankmen=moved_tankmen)
         built = _clock()
         completed = [False]
 
@@ -217,6 +217,24 @@ def _train_tankman(context, args):
         return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
     return _fitting(
         context, lambda state: state.train_tankman(args[1], args[2]))
+
+
+def _equip_tankman(context, args):
+    # Inventory.equipTankman -> _doCmdInt3(CMD_EQUIP_TMAN, vehInvID, slot,
+    # tmanInvID), with tmanInvID -1 for an empty seat.  TankmanUnload sends
+    # slot -1 alongside it to unload the whole crew.
+    if len(args) < 3:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.equip_tankman(
+        args[0], args[1], args[2]))
+
+
+def _dismiss_tankman(context, args):
+    # Inventory.dismissTankman -> _doCmdInt3(CMD_DISMISS_TMAN, tmanInvID,
+    # 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.dismiss_tankman(args[0]))
 
 
 def _buy_item(context, args):
@@ -532,6 +550,8 @@ HANDLERS = {
     commands.CMD_TMAN_ADD_SKILL: _add_tankman_skill,
     commands.CMD_TMAN_DROP_SKILLS: _drop_tankman_skills,
     commands.CMD_TRAINING_TMAN: _train_tankman,
+    commands.CMD_EQUIP_TMAN: _equip_tankman,
+    commands.CMD_DISMISS_TMAN: _dismiss_tankman,
     commands.CMD_BUY_ITEM: _buy_item,
     commands.CMD_UNLOCK: _unlock,
     commands.CMD_EXCHANGE: _exchange,

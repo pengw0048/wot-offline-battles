@@ -30,6 +30,9 @@ OFFLINE_GOLD = 1000000
 OFFLINE_FREE_XP = 100000000
 OFFLINE_GARAGE_SLOTS = 2000
 OFFLINE_BARRACKS_BERTHS = 2000
+# #1513's InventoryRequester defaults a tankman's missing vehicle key to -1,
+# and ItemsRequester treats anything not above zero as "not in a tank".
+BARRACKS_VEHICLE_ID = -1
 # #1513 counts each battle-hero medal in the vehicle dossier's aggregate
 # ``battleHeroes`` record as well as in its own counter.
 BATTLE_HERO_ACHIEVEMENTS = frozenset((
@@ -70,23 +73,26 @@ def _validate_selected_vehicle(vehicle):
         comp_descrs.append(record['compDescr'])
         crew = list(record.get('crew', ()))
         tankmen = dict(record.get('tankmen', {}))
-        tankman_ids.extend(crew)
+        # #1513's ``Vehicle._buildCrew`` walks the crew list slot by slot and
+        # reads ``None`` as an empty seat, so an unloaded crew member leaves a
+        # hole rather than shortening the list.
+        manned = [tankman_id for tankman_id in crew if tankman_id is not None]
+        tankman_ids.extend(manned)
         vehicle_type_compact_descr = record.get(
             'vehicleTypeCompactDescr')
         if vehicle_type_compact_descr is not None:
             vehicle_type_compact_descrs.append(vehicle_type_compact_descr)
 
-        if not crew or not tankmen:
-            raise ValueError(
-                'selected vehicle crew and tankmen must be non-empty')
+        if not crew:
+            raise ValueError('selected vehicle crew must have one seat per role')
         try:
             crew_ids_are_positive = all(
-                int(tankman_id) > 0 for tankman_id in crew)
+                int(tankman_id) > 0 for tankman_id in manned)
         except (TypeError, ValueError):
             crew_ids_are_positive = False
         if not crew_ids_are_positive:
             raise ValueError('selected vehicle crew ids must be positive')
-        if len(crew) != len(tankmen) or set(crew) != set(tankmen):
+        if len(manned) != len(tankmen) or set(manned) != set(tankmen):
             raise ValueError(
                 'selected vehicle crew ids must resolve to tankmen')
 
@@ -137,6 +143,27 @@ def _validate_selected_vehicle(vehicle):
         raise ValueError('vehicle inventory ids must be unique')
     if len(set(comp_descrs)) != len(comp_descrs):
         raise ValueError('vehicle compact descriptors must be unique')
+    barracks = vehicle.get('barracksTankmen')
+    if barracks is not None:
+        if not isinstance(barracks, dict):
+            raise ValueError('barracks tankmen must be a mapping')
+        for tankman_id, compact_descr in barracks.items():
+            try:
+                positive = int(tankman_id) > 0
+            except (TypeError, ValueError):
+                positive = False
+            if not positive:
+                raise ValueError('barracks tankman ids must be positive')
+            if not compact_descr:
+                raise ValueError(
+                    'barracks tankman compact descriptors must be non-empty')
+        berths = int(vehicle.get('accountBerths', OFFLINE_BARRACKS_BERTHS) or 0)
+        if len(barracks) > berths:
+            raise ValueError('the barracks holds more tankmen than it has berths')
+        # A crew member is in exactly one place. The client decides which from
+        # the published ``vehicle`` foreign key, so two claims on one id would
+        # make the garage disagree with itself.
+        tankman_ids.extend(barracks)
     if len(set(tankman_ids)) != len(tankman_ids):
         raise ValueError('tankman inventory ids must be unique')
     if (vehicle_type_compact_descrs and
@@ -191,7 +218,7 @@ def _validate_selected_vehicle(vehicle):
 
 
 def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
-              only_items=None, removed_tankmen=None):
+              only_items=None, touched_tankmen=None):
     """Return every loadable garage vehicle and its relational records.
 
     ``selected_vehicle`` is serialized by ``bootstrap._selected_vehicle``.  It
@@ -202,7 +229,8 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
     ``GarageState`` publishes without paying for it again.
 
     ``only_vehicles`` limits the per-vehicle rows to the ids a fitting touched,
-    and ``only_items`` maps an item type to the owned compact descriptors it
+    ``touched_tankmen`` names the crew ids whose place changed, and
+    ``only_items`` maps an item type to the owned compact descriptors it
     changed.  Either one selects a delta: ``Inventory.synchronize`` merges the
     diff per item type through ``synchronizeDicts``, and an omitted type keeps
     its cache untouched.  This matters because ``ItemsRequester.invalidateCache``
@@ -290,6 +318,20 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         tankman_vehicles.update(dict(
             (tankman_id, vehicle_id) for tankman_id in tankmen))
 
+    # A crew member the account owns but no vehicle carries is in the
+    # barracks. #1513's ``InventoryRequester.__makeTankman`` reads a missing
+    # or non-positive ``vehicle`` foreign key as exactly that, and
+    # ``ItemsRequester`` then builds the Tankman with no vehicle at all.
+    wanted_tankmen = None if not delta else set(
+        int(tankman_id) for tankman_id in (touched_tankmen or ()))
+    for tankman_id, compact_descr in dict(
+            vehicle.get('barracksTankmen') or {}).items():
+        tankman_id = int(tankman_id)
+        if wanted_tankmen is not None and tankman_id not in wanted_tankmen:
+            continue
+        all_tankmen[tankman_id] = compact_descr
+        tankman_vehicles[tankman_id] = BARRACKS_VEHICLE_ID
+
     # The account owns items; a vehicle only carries some of them. The
     # snapshot's top-level catalogue is that account view, and it is the only
     # place a spare module or a bought consumable exists at all, because no
@@ -336,13 +378,13 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
     }
     if delta:
         _publish_removals(values, vehicle_values, records, vehicle,
-                          only_vehicles, only_items, removed_tankmen)
+                          only_vehicles, only_items, touched_tankmen)
         values = _prune_empty(values)
     return {'inventory': values}
 
 
 def _publish_removals(values, vehicle_values, records, vehicle,
-                      only_vehicles, only_items, removed_tankmen):
+                      only_vehicles, only_items, touched_tankmen):
     """Say what the account no longer owns, in the client's own vocabulary.
 
     #1513 merges an inventory diff through ``diff_utils.synchronizeDicts``,
@@ -367,9 +409,22 @@ def _publish_removals(values, vehicle_values, records, vehicle,
             section[vehicle_id] = None
     tankmen = values.get(TANKMAN_ITEM_TYPE)
     if isinstance(tankmen, dict):
-        for tankman_id in (removed_tankmen or ()):
-            tankmen['compDescr'][int(tankman_id)] = None
-            tankmen['vehicle'][int(tankman_id)] = None
+        held = set()
+        for record in records:
+            held.update(
+                int(tankman_id)
+                for tankman_id in (record.get('tankmen') or ()))
+        held.update(
+            int(tankman_id)
+            for tankman_id in (vehicle.get('barracksTankmen') or ()))
+        for tankman_id in (touched_tankmen or ()):
+            tankman_id = int(tankman_id)
+            if tankman_id in held:
+                # Moved, not removed: a crew member the account still holds
+                # was republished above with wherever they now sit.
+                continue
+            tankmen['compDescr'][tankman_id] = None
+            tankmen['vehicle'][tankman_id] = None
     for item_type, wanted in dict(only_items or {}).items():
         item_type = int(item_type)
         if item_type in (VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,

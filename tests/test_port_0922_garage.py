@@ -92,11 +92,18 @@ class _Component(object):
         self.compactDescr = compact_descr
 
 
+# The fixture's only vehicle is nation 0, type 9, with a two-seat crew.
+CREW_ROLES = (('commander',), ('driver',))
+VEHICLE_TYPE_ID = 9
+
+
 class _Descriptor(object):
     def __init__(self, compact_descr):
         self.compact_descr = compact_descr
         self.devices = {}
         self.components = {}
+        self.type = types.SimpleNamespace(
+            id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES)
         # #1513 Vehicle.shellsLayoutIdx reads both compact descriptors.
         self.turret = _Component(7001)
         self.turret.maxAmmo = 45
@@ -165,6 +172,16 @@ class _TankmanDescriptor(object):
         self.skills = [name.decode('ascii')
                        for name in encoded.split(b',') if name]
         self.free_xp = int(xp or 0)
+        # The real descriptor also carries where this crew member belongs,
+        # which is what decides whether a seat will take them.
+        self.nationID = 0
+        self.vehicleTypeID = VEHICLE_TYPE_ID
+        identity = base.rsplit(b':', 1)[-1]
+        try:
+            self.role = CREW_ROLES[
+                (int(identity) - 101) % len(CREW_ROLES)][0]
+        except ValueError:
+            self.role = CREW_ROLES[0][0]
 
     def addSkill(self, name):
         if name in self.skills:
@@ -525,6 +542,182 @@ class GarageStateTests(unittest.TestCase):
             (b'outfit:summer', True),
             data['inventory'][12][2][50001][2])
 
+    # ---- barracks -------------------------------------------------------
+
+    def _two_seat_state(self, berths=4, barracks=None):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = berths
+        if barracks is not None:
+            snapshot['barracksTankmen'] = dict(barracks)
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_unloading_one_seat_leaves_it_empty_and_fills_a_berth(self):
+        """#1513 reads a None crew entry as an empty seat, not a short crew."""
+        state = self._two_seat_state()
+
+        state.equip_tankman(9, 0, -1)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([None, 102], record['crew'])
+        self.assertEqual({102: b'tman:102'}, record['tankmen'])
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+        self.assertEqual(3, state.free_berths())
+
+    def test_a_slot_of_minus_one_unloads_the_whole_crew(self):
+        """That is what the barracks' own unload-crew button sends."""
+        state = self._two_seat_state()
+
+        self.assertEqual(2, state.equip_tankman(9, -1, -1))
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([None, None], record['crew'])
+        self.assertEqual({}, record['tankmen'])
+        self.assertEqual(
+            {101: b'tman:101', 102: b'tman:102'},
+            state.snapshot()['barracksTankmen'])
+
+    def test_a_barracks_without_room_refuses_to_take_a_crew(self):
+        state = self._two_seat_state(berths=1)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_tankman(9, -1, -1)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, 102], record['crew'])
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
+
+    def test_a_crew_member_in_the_barracks_can_take_their_seat_back(self):
+        state = self._two_seat_state()
+        state.equip_tankman(9, 0, -1)
+
+        self.assertEqual(101, state.equip_tankman(9, 0, 101))
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, 102], record['crew'])
+        self.assertEqual(b'tman:101', record['tankmen'][101])
+        self.assertEqual({}, state.snapshot()['barracksTankmen'])
+
+    def test_a_seat_refuses_a_crew_member_trained_for_another_role(self):
+        """Retraining does not exist yet, and the restore checks the role."""
+        state = self._two_seat_state()
+        state.equip_tankman(9, 0, -1)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_tankman(9, 1, 101)
+
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
+    def test_seating_someone_in_a_taken_seat_sends_its_occupant_away(self):
+        state = self._two_seat_state(barracks={201: b'tman:201'})
+
+        state.equip_tankman(9, 0, 201)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([201, 102], record['crew'])
+        self.assertEqual(b'tman:201', record['tankmen'][201])
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
+    def test_a_swap_out_of_the_barracks_needs_no_berth_of_its_own(self):
+        """One crew member leaves the barracks as the other arrives."""
+        state = self._two_seat_state(berths=1, barracks={201: b'tman:201'})
+
+        state.equip_tankman(9, 0, 201)
+
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
+    def _two_vehicle_state(self, berths=4):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = berths
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_crew_member_can_move_straight_from_one_vehicle_to_another(self):
+        state = self._two_vehicle_state()
+
+        state.equip_tankman(9, 0, 201)
+
+        first, second = state.snapshot()['vehicles']
+        self.assertEqual([201, 102], first['crew'])
+        self.assertEqual(b'tman:201', first['tankmen'][201])
+        self.assertEqual([None, 202], second['crew'])
+        self.assertNotIn(201, second['tankmen'])
+        # The seat's own occupant is the one who needed a berth.
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
+    def test_a_full_barracks_refuses_the_move_rather_than_lose_the_occupant(
+            self):
+        state = self._two_vehicle_state(berths=0)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_tankman(9, 0, 201)
+
+        first, second = state.snapshot()['vehicles']
+        self.assertEqual([101, 102], first['crew'])
+        self.assertEqual([201, 202], second['crew'])
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
+
+    def test_dismissing_a_crew_member_in_the_barracks_frees_the_berth(self):
+        state = self._two_seat_state(barracks={201: b'tman:201'})
+
+        state.dismiss_tankman(201)
+
+        self.assertEqual({}, state.snapshot()['barracksTankmen'])
+        self.assertEqual(4, state.free_berths())
+
+    def test_dismissing_a_seated_crew_member_empties_the_seat(self):
+        state = self._two_seat_state()
+
+        state.dismiss_tankman(101)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([None, 102], record['crew'])
+        self.assertNotIn(101, record['tankmen'])
+        self.assertEqual({}, state.snapshot().get('barracksTankmen', {}))
+
+    def test_an_unknown_crew_member_cannot_be_dismissed(self):
+        state = self._two_seat_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.dismiss_tankman(999)
+
+    def test_a_crew_member_in_the_barracks_still_learns_and_trains(self):
+        state = self._two_seat_state()
+        state.equip_tankman(9, 0, -1)
+
+        state.add_tankman_skill(101, 2)
+        state.train_tankman(101, 10)
+
+        # Ten free experience buys ten times as much crew experience.
+        self.assertEqual(
+            b'tman:101|brotherhood#100',
+            state.snapshot()['barracksTankmen'][101])
+
+    def test_an_empty_seat_earns_nothing_and_the_rest_of_the_crew_do(self):
+        state = self._two_seat_state()
+        state.equip_tankman(9, 0, -1)
+
+        state.award_battle_crew_xp(50001, 300, 0)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual({102: b'tman:102|#300'}, record['tankmen'])
+        # The crew member in the barracks fought no battle.
+        self.assertEqual(
+            {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
+
 
 class FittingRequestTests(unittest.TestCase):
 
@@ -838,6 +1031,57 @@ class GaragePersistenceTests(unittest.TestCase):
         snapshot['vehicleTypeCompactDescrs'] = {50001, 50002}
         snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
         return snapshot
+
+    def test_an_unloaded_crew_survives_a_restart_in_the_barracks(self):
+        """A seat left out of the save would be refilled by the next start."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        state = self._state(snapshot)
+        state.equip_tankman(9, 0, -1)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart()
+
+        record = restored['vehicles'][0]
+        self.assertEqual([None, 102], record['crew'])
+        self.assertNotIn(101, record['tankmen'])
+        self.assertEqual(
+            [b'tman:101'], sorted(restored['barracksTankmen'].values()))
+        self.assertEqual(4, restored['accountBerths'])
+
+    def test_a_restored_barracks_never_reuses_a_seated_inventory_id(self):
+        """Two claims on one id make the whole next restore invalid."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        snapshot['barracksTankmen'] = {201: b'tman:201'}
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(snapshot))
+
+        restored = self._restart()
+
+        seated = set(restored['vehicles'][0]['tankmen'])
+        self.assertEqual(set(), seated & set(restored['barracksTankmen']))
+
+    def test_a_save_written_before_the_barracks_restores_without_one(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(snapshot))
+        with io.open(self.path, encoding='utf-8') as stream:
+            import json
+            saved = json.load(stream)
+        del saved['ledger']['barracks']
+        saved['schema'] = 5
+        with io.open(self.path, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(saved))
+
+        restored = self._restart()
+
+        self.assertEqual({}, restored.get('barracksTankmen', {}))
+        self.assertEqual([101, 102], restored['vehicles'][0]['crew'])
 
     def test_the_saved_garage_names_every_vehicle_the_account_owns(self):
         """Startup rebuilds the garage from this list, so it must be whole.
@@ -1271,3 +1515,93 @@ class NarrowInventoryDiffTests(unittest.TestCase):
 
         self.assertEqual(set(self.data.ITEM_TYPE_INDICES),
                          set(full['inventory']))
+
+    def _moved_to_barracks(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=self.vehicles,
+            tankmen_module=self.tankmen)
+        state.equip_tankman(9, 0, -1)
+        return state
+
+    def test_a_crew_member_sent_to_the_barracks_is_moved_not_removed(self):
+        """synchronizeDicts pops the key a diff carries as None.
+
+        Publishing the unloaded crew member that way would delete them from
+        the client's cache; the account still holds them, so the diff has to
+        say where they went instead.
+        """
+        state = self._moved_to_barracks()
+
+        delta = self.data.inventory(
+            state.snapshot(), validate=False,
+            only_vehicles=state.touched_vehicles(), only_items={},
+            touched_tankmen=state.touched_tankmen())
+
+        tankmen = delta['inventory'][self.data.TANKMAN_ITEM_TYPE]
+        self.assertEqual(b'tman:101', tankmen['compDescr'][101])
+        self.assertEqual(
+            self.data.BARRACKS_VEHICLE_ID, tankmen['vehicle'][101])
+        # The seat itself is now empty.
+        vehicle_type = self.data.VEHICLE_ITEM_TYPE
+        self.assertEqual(
+            [None, 102], delta['inventory'][vehicle_type]['crew'][9])
+
+    def test_a_dismissed_crew_member_is_still_removed(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=self.vehicles,
+            tankmen_module=self.tankmen)
+        state.dismiss_tankman(101)
+
+        delta = self.data.inventory(
+            state.snapshot(), validate=False,
+            only_vehicles=state.touched_vehicles(), only_items={},
+            touched_tankmen=state.touched_tankmen())
+
+        tankmen = delta['inventory'][self.data.TANKMAN_ITEM_TYPE]
+        self.assertIsNone(tankmen['compDescr'][101])
+        self.assertIsNone(tankmen['vehicle'][101])
+
+    def test_an_untouched_barracks_stays_out_of_a_delta(self):
+        """Every published descriptor evicts one GUI item."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        snapshot['barracksTankmen'] = {201: b'tman:201'}
+
+        delta = self.data.inventory(
+            snapshot, only_vehicles=set([9]), only_items={})
+
+        tankmen = delta['inventory'][self.data.TANKMAN_ITEM_TYPE]
+        self.assertNotIn(201, tankmen['compDescr'])
+
+    def test_a_full_sync_publishes_the_whole_barracks(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        snapshot['barracksTankmen'] = {201: b'tman:201'}
+
+        full = self.data.inventory(snapshot)
+
+        tankmen = full['inventory'][self.data.TANKMAN_ITEM_TYPE]
+        self.assertEqual(b'tman:201', tankmen['compDescr'][201])
+        self.assertEqual(
+            self.data.BARRACKS_VEHICLE_ID, tankmen['vehicle'][201])
+
+    def test_a_barracks_larger_than_its_berths_is_refused(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 1
+        snapshot['barracksTankmen'] = {201: b'tman:201', 202: b'tman:202'}
+
+        with self.assertRaises(ValueError):
+            self.data.inventory(snapshot)
+
+    def test_one_crew_member_cannot_be_in_a_tank_and_the_barracks_at_once(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        snapshot['barracksTankmen'] = {101: b'tman:101'}
+
+        with self.assertRaises(ValueError):
+            self.data.inventory(snapshot)
+

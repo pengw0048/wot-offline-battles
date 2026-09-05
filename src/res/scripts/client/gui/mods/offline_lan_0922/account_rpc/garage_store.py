@@ -40,8 +40,8 @@ except NameError:
 # crew XP idempotent.  Schema 5 adds the account ledger: the balances, the
 # researched items, the per-vehicle experience and which vehicles are owned.
 # Every earlier readable schema upgrades on the next save.
-SCHEMA = 5
-READABLE_SCHEMAS = (3, 4, SCHEMA)
+SCHEMA = 6
+READABLE_SCHEMAS = (3, 4, 5, SCHEMA)
 STATE_FILE_NAME = 'garage_state.json'
 
 _VEHICLE_INT_KEYS = ('eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx')
@@ -98,6 +98,15 @@ def _ledger_payload(snapshot):
             except (TypeError, ValueError):
                 continue
     unlocks = snapshot.get('unlockItemCompactDescrs')
+    # A crew member in the barracks belongs to no vehicle, so there is no
+    # slot to store them against.  Their inventory id is this client's own
+    # bookkeeping and means nothing to the next one, so only the descriptor
+    # is saved and the restore hands out fresh ids.
+    barracks = []
+    for compact_descr in (snapshot.get('barracksTankmen') or {}).values():
+        encoded = _encode_bytes(compact_descr)
+        if encoded is not None:
+            barracks.append(encoded)
     return {
         'wallet': dict(
             (name, max(0, int(wallet.get(name, 0) or 0)))
@@ -106,6 +115,7 @@ def _ledger_payload(snapshot):
         'unlocks': sorted(int(value) for value in (unlocks or ())),
         'slots': max(0, int(snapshot.get('accountSlots', 0) or 0)),
         'berths': max(0, int(snapshot.get('accountBerths', 0) or 0)),
+        'barracks': sorted(barracks),
     }
 
 
@@ -145,7 +155,27 @@ def _apply_ledger(staged, stored):
         if name in ledger:
             staged[key] = max(_int_value(ledger[name]),
                               int(staged.get(key, 0) or 0))
+    barracks = ledger.get('barracks')
+    if isinstance(barracks, (list, tuple)):
+        staged['barracksTankmen'] = _restored_barracks(staged, barracks)
     return True
+
+
+def _restored_barracks(staged, encoded_descriptors):
+    """Give every saved barracks crew member an id no vehicle is using."""
+    used = set()
+    for record in _records(staged):
+        for tankman_id in (record.get('tankmen') or ()):
+            used.add(_int_value(tankman_id))
+    next_id = (max(used) + 1) if used else 100001
+    restored = {}
+    for encoded in encoded_descriptors:
+        decoded = _decode_bytes(encoded)
+        if not decoded:
+            continue
+        restored[next_id] = decoded
+        next_id += 1
+    return restored
 
 
 def _int_value(value, default=0):
@@ -245,6 +275,12 @@ class GarageStore(object):
             order = list(record.get('crew') or ())
             if isinstance(tankmen, dict):
                 for slot, tankman_id in enumerate(order):
+                    if tankman_id is None:
+                        # An unloaded seat has to be saved as empty; leaving
+                        # it out would let the next start's freshly built
+                        # crew member sit back down.
+                        crew[str(slot)] = None
+                        continue
                     encoded = _encode_bytes(tankmen.get(tankman_id))
                     if encoded is not None:
                         crew[str(slot)] = encoded
@@ -515,8 +551,14 @@ class GarageStore(object):
                     continue
                 if not 0 <= slot < len(order):
                     continue
+                if encoded is None:
+                    tankmen.pop(order[slot], None)
+                    order[slot] = None
+                    record['crew'] = order
+                    changed = True
+                    continue
                 decoded = _decode_bytes(encoded)
-                if decoded:
+                if decoded and order[slot] is not None:
                     tankmen[order[slot]] = decoded
                     changed = True
         mirror_shells_layout(record)

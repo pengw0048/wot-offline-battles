@@ -800,6 +800,21 @@ class BootstrapLifecycleTests(unittest.TestCase):
                    if record['vehicleTypeName'] == 'nation-0:vehicle-11'))
         self.assertFalse(os.path.exists(path))
 
+    def test_a_new_crew_never_takes_an_id_the_barracks_already_holds(self):
+        """A reused id makes the whole restored garage invalid, not one car."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+
+        snapshot = {
+            'vehicles': [{'id': 1, 'tankmen': {100001: b'a', 100002: b'b'}}],
+            'barracksTankmen': {100003: b'c'},
+        }
+
+        self.assertEqual(100004, bootstrap._next_tankman_id(snapshot))
+        del snapshot['barracksTankmen']
+        self.assertEqual(100003, bootstrap._next_tankman_id(snapshot))
+
     def test_a_delivery_the_client_cannot_publish_is_never_written(self):
         """An unpublishable save is discarded whole on the next start.
 

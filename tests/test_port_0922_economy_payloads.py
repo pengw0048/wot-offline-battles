@@ -4,8 +4,9 @@ Every shape asserted here was read out of the shipped client bytecode rather
 than guessed from a parameter name: ``Stats.unlock``,
 ``Stats.__exchange_onGetRate``, ``Stats.__convertToFreeXP_onGetParameters``,
 ``Stats.__slot_onShopSynced``, ``Stats.__berths_onShopSynced``,
-``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced`` and
-``Inventory.__sellItem_onShopSynced``.  The economy suite proves the garage
+``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
+``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman`` and
+``Inventory.dismissTankman``.  The economy suite proves the garage
 transactions; this one proves the payload reaches them with every value in the
 position the client actually sends it.
 """
@@ -150,6 +151,35 @@ class EconomyPayloadTests(unittest.TestCase):
                 'items_from_vehicle': [],
                 'items_from_inventory': []})],
             self._dispatch(commands.CMD_SELL_VEHICLE, ([17, 10, 0, 0, 0],)))
+
+    def test_seating_a_crew_member_carries_the_vehicle_seat_and_tankman(self):
+        # Inventory.equipTankman ->
+        #   _doCmdInt3(CMD_EQUIP_TMAN, vehInvID, slot, tmanInvID)
+        self.assertEqual(
+            [('equip_tankman', (10, 2, 100005), {})],
+            self._dispatch(commands.CMD_EQUIP_TMAN, (10, 2, 100005)))
+
+    def test_unloading_a_seat_sends_minus_one_where_the_tankman_goes(self):
+        # TankmanUnload passes None, which equipTankman turns into -1; a slot
+        # of -1 alongside it unloads the whole crew.
+        self.assertEqual(
+            [('equip_tankman', (10, 3, -1), {})],
+            self._dispatch(commands.CMD_EQUIP_TMAN, (10, 3, -1)))
+        self.assertEqual(
+            [('equip_tankman', (10, -1, -1), {})],
+            self._dispatch(commands.CMD_EQUIP_TMAN, (10, -1, -1)))
+
+    def test_dismissing_a_crew_member_carries_only_their_inventory_id(self):
+        # Inventory.dismissTankman ->
+        #   _doCmdInt3(CMD_DISMISS_TMAN, tmanInvID, 0, 0)
+        self.assertEqual(
+            [('dismiss_tankman', (100005,), {})],
+            self._dispatch(commands.CMD_DISMISS_TMAN, (100005, 0, 0)))
+
+    def test_a_truncated_crew_payload_is_refused_instead_of_guessed(self):
+        for args in ((10, 2), (10,), ()):
+            self._refuse(commands.CMD_EQUIP_TMAN, args)
+        self._refuse(commands.CMD_DISMISS_TMAN, ())
 
     def test_a_truncated_sale_payload_is_refused_instead_of_guessed(self):
         for args in (([17, 10, 1, 2, 10010],), ([17, 10],), ([],), ()):
