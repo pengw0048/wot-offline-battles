@@ -70,6 +70,15 @@ def _contained(root, path, label):
             raise SaveSlotError("%s escapes the saves directory." % label)
     except ValueError:
         raise SaveSlotError("%s escapes the saves directory." % label)
+    # The slot itself must not be a symlink or junction. Resolve the root once
+    # so APPDATA may legitimately be redirected, then require every component
+    # below that root to retain its expected real path.
+    relative = os.path.relpath(absolute_path, absolute_root)
+    expected_real_path = os.path.abspath(
+        os.path.join(os.path.realpath(absolute_root), relative))
+    real_path = os.path.realpath(absolute_path)
+    if os.path.normcase(real_path) != os.path.normcase(expected_real_path):
+        raise SaveSlotError("%s escapes the saves directory." % label)
     return absolute_path
 
 
@@ -136,9 +145,6 @@ def _read_metadata(path):
 
 
 def _write_metadata(path, value):
-    directory = os.path.dirname(path)
-    if directory and not os.path.isdir(directory):
-        os.makedirs(directory)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as stream:
         json.dump(value, stream, indent=2, sort_keys=True, ensure_ascii=False)
@@ -200,7 +206,10 @@ def list_slots(game_root=None, environment=None, root=None):
     for entry in entries:
         if not valid_slot_id(entry) or entry == DEFAULT_SLOT_ID:
             continue
-        directory = os.path.join(root, entry)
+        try:
+            directory = slot_dir(entry, root=root)
+        except SaveSlotError:
+            continue
         if not os.path.isdir(directory):
             continue
         records[entry] = _record(
@@ -277,6 +286,12 @@ def rename_slot(slot_id, name, game_root=None, environment=None, root=None):
     """Change a slot's display name, keeping its directory and state."""
     name = _normalized_name(name)
     record = read_slot(slot_id, game_root, environment, root)
+    if (slot_id == DEFAULT_SLOT_ID and
+            not os.path.isdir(record["path"])):
+        try:
+            os.makedirs(record["path"])
+        except (IOError, OSError) as error:
+            raise SaveSlotError("The save could not be renamed: %s" % error)
     path = os.path.join(record["path"], METADATA_NAME)
     metadata = _read_metadata(path) or {}
     metadata.update({

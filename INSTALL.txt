@@ -130,10 +130,11 @@ Troubleshooting
   again. This restores the default configuration without deleting the garage,
   account progress, vehicle-data overrides or battle results. To reset every
   ordinary offline save manually, delete config.json and server_endpoint.json
-  in mods\configs\offline_lan_0922 and the saves folder under
+  in mods\configs\offline_lan_0922, then delete account_state.json,
+  garage_state.json, postbattle_state.json and the saves folder under
   %APPDATA%\Wargaming.net\WorldOfTanks\offline_lan_0922 while the game is
-  closed, then extract this ZIP again. Vehicle-data overlays are separate and
-  are not removed by that reset.
+  closed. Extract this ZIP again afterwards. Vehicle-data overlays are
+  separate and are not removed by that reset.
 - Bot tracks and road wheels do not turn. A broken enemy track therefore has no
   visual cue; read the damage panel instead.
 - The client is 32-bit but its executable is large-address-aware, so on 64-bit

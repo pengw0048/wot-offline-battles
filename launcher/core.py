@@ -1487,10 +1487,17 @@ def reset_0_9_22_state(game_root, base_dir=None, is_running=None):
     import shutil
     import tempfile
 
+    try:
+        from . import save_slots
+    except ImportError:
+        import save_slots
+
     _require_0_9_22_maintenance_target(game_root, is_running)
     state_root = _relative_path(
         game_root, "mods/configs/offline_lan_0922")
     targets = []
+    fallback_saves_root = os.path.join(
+        state_root, SAVES_DIR_NAME_0_9_22)
     if os.path.isdir(state_root):
         targets = [os.path.join(state_root, name)
                    for name in sorted(os.listdir(state_root))
@@ -1499,9 +1506,31 @@ def reset_0_9_22_state(game_root, base_dir=None, is_running=None):
         # An installation without APPDATA keeps its save slots here instead,
         # so a reset that skipped this directory would leave every earned
         # garage behind and contradict what the confirmation promised.
-        saves_root = os.path.join(state_root, SAVES_DIR_NAME_0_9_22)
-        if os.path.isdir(saves_root) and not os.path.islink(saves_root):
-            targets.append(saves_root)
+        if (os.path.isdir(fallback_saves_root) and
+                not os.path.islink(fallback_saves_root)):
+            targets.append(fallback_saves_root)
+    active_saves_root = save_slots.saves_root(game_root)
+    same_saves_root = (
+        os.path.normcase(os.path.abspath(active_saves_root)) ==
+        os.path.normcase(os.path.abspath(fallback_saves_root)))
+    if not same_saves_root:
+        # The default slot deliberately keeps the old APPDATA-root files for
+        # downgrade safety. A confirmed reset must remove those copies too,
+        # otherwise the next start migrates them straight back into default.
+        active_state_root = os.path.dirname(active_saves_root)
+        if os.path.isdir(active_state_root):
+            targets.extend(
+                os.path.join(active_state_root, name)
+                for name in sorted(os.listdir(active_state_root))
+                if _reset_state_name(name) and
+                os.path.isfile(os.path.join(active_state_root, name)))
+        if os.path.lexists(active_saves_root):
+            if (os.path.islink(active_saves_root) or
+                    not os.path.isdir(active_saves_root)):
+                raise LauncherError(
+                    "The offline saves path is not a regular directory; it "
+                    "was left unchanged.")
+            targets.append(active_saves_root)
     preferences_path = _isolated_0_9_22_preferences_path()
     if preferences_path is not None and os.path.lexists(preferences_path):
         if (os.path.islink(preferences_path) or
@@ -1515,19 +1544,27 @@ def reset_0_9_22_state(game_root, base_dir=None, is_running=None):
     backup_roots = [backup_root]
     moved = []
     try:
-        preferences_backup_root = None
-        if preferences_path is not None and preferences_path in targets:
-            # LOCALAPPDATA and the game can be on different volumes. Keep this
-            # backup beside the profile so both the delete and rollback remain
-            # atomic filesystem replacements.
-            preferences_backup_root = tempfile.mkdtemp(
-                prefix=".wot-offline-reset-",
-                dir=os.path.dirname(preferences_path))
-            backup_roots.append(preferences_backup_root)
+        external_backup_roots = {}
+        absolute_game_root = os.path.abspath(game_root)
+        for target in targets:
+            absolute_target = os.path.abspath(target)
+            try:
+                target_is_external = os.path.commonpath(
+                    (absolute_game_root, absolute_target)) != absolute_game_root
+            except ValueError:
+                target_is_external = True
+            if target_is_external:
+                # APPDATA and the game can be on different volumes. Keep each
+                # external backup beside its target so both the delete and
+                # rollback remain atomic filesystem replacements.
+                external_backup = tempfile.mkdtemp(
+                    prefix=".wot-offline-reset-",
+                    dir=os.path.dirname(target))
+                external_backup_roots[target] = external_backup
+                backup_roots.append(external_backup)
         for index, target in enumerate(targets):
-            target_backup_root = (
-                preferences_backup_root
-                if target == preferences_path else backup_root)
+            target_backup_root = external_backup_roots.get(
+                target, backup_root)
             backup = os.path.join(target_backup_root, str(index))
             os.replace(target, backup)
             moved.append((target, backup))

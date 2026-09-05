@@ -1111,6 +1111,21 @@ class WindowTest(unittest.TestCase):
             wot_launcher.save_slots.DEFAULT_SLOT_ID,
             self.window._save_slot_id)
 
+    def test_a_save_cannot_be_deleted_while_any_game_client_is_running(self):
+        saves_root = self._saves_root()
+        self._new_save()
+        career = self.window._save_slot_id
+
+        with mock.patch.object(core, "game_is_running", return_value=True), \
+                mock.patch.object(
+                    self.window, "_confirm_delete_save_slot") as confirm:
+            self.assertFalse(self.window._delete_save_slot())
+
+        confirm.assert_not_called()
+        self.assertTrue(os.path.isdir(os.path.join(saves_root, career)))
+        self.assertIn(
+            "Close World of Tanks before deleting a save", self._log_text())
+
     def test_a_save_deleted_outside_the_launcher_falls_back_to_the_default(
             self):
         saves_root = self._saves_root()
@@ -1159,6 +1174,22 @@ class WindowTest(unittest.TestCase):
             self.window._save_slot_id)
         self.assertFalse(
             os.path.isdir(saves_root) and os.listdir(saves_root))
+
+    def test_a_save_named_like_the_default_stays_distinguishable(self):
+        self._saves_root()
+        default_label = self.window._t("Default save")
+        self._new_save(name=default_label)
+        custom = self.window._save_slot_id
+
+        labels = tuple(self.window.save_slot_box.cget("values"))
+        unlocked = self.window._t("Fully unlocked")
+        self.assertIn(
+            "%s (%s) - %s" % (
+                default_label, wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                unlocked),
+            labels)
+        self.assertIn(
+            "%s (%s) - %s" % (default_label, custom, unlocked), labels)
 
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(
