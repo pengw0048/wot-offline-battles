@@ -200,6 +200,9 @@ class _BattleRuntime(object):
         self.events = []
         self.rosters = []
         self.observations = []
+        self.team_command_acks = []
+        self.team_commands = []
+        self.team_command_terminals = []
         self.restore_pending = False
 
     def start(self, config, message=None, lan_client=None,
@@ -224,6 +227,15 @@ class _BattleRuntime(object):
 
     def on_bot_observation(self, message):
         self.observations.append(message)
+
+    def on_team_command_ack(self, message):
+        self.team_command_acks.append(message)
+
+    def on_team_command(self, message):
+        self.team_commands.append(message)
+
+    def on_team_command_terminal(self, message):
+        self.team_command_terminals.append(message)
 
     def stop(self, show_login=True, restore_account=True):
         self.stopped.append(show_login)
@@ -1759,6 +1771,24 @@ class LANSessionTests(unittest.TestCase):
         self.emit('bot_observation', dict(current, round_id=6))
 
         self.assertEqual([current], self.battle_runtime.observations)
+
+    def test_only_active_round_team_command_messages_reach_runtime(self):
+        self.emit('battle_start', {
+            'round_id': 7, 'map': '01_karelia', 'players': [{
+                'id': 'p1', 'x': 1, 'y': 2, 'z': 3,
+                'vehicle': 'ussr:T-34'}]})
+        messages = (
+            ('team_command_ack', self.battle_runtime.team_command_acks),
+            ('team_command', self.battle_runtime.team_commands),
+            ('team_command_terminal',
+             self.battle_runtime.team_command_terminals),
+        )
+
+        for kind, received in messages:
+            current = {'type': kind, 'round_id': 7}
+            self.emit(kind, current)
+            self.emit(kind, dict(current, round_id=6))
+            self.assertEqual([current], received)
 
     def test_local_avatar_leave_retires_round_and_waits_for_server_reset(self):
         first = {

@@ -32,6 +32,12 @@ from gui.mods.offline_lan_0922 import tank_collision
 from gui.mods.offline_lan_0922 import vehicle_physics
 
 
+try:
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _STRING_TYPES = (str,)
+
+
 OBSERVATION_SECONDS = 0.40
 # The logical runtime keeps its mature 30 Hz default for engine-free callers.
 # Production hidden workers explicitly select the lower-cost 10 Hz control and
@@ -1902,7 +1908,8 @@ class BotRuntime(object):
                  world_receipt_probe=None, probe_timing_seconds=0.0,
                  water_depth_probe=None, ram_contact_probe=None,
                  bot_equipment_resolver=None,
-                 destructible_body_scan=None, control_seconds=None):
+                 destructible_body_scan=None, control_seconds=None,
+                 incoming_lane_probe=None):
         self.local_player_id = local_player_id
         self.descriptor_resolver = descriptor_resolver or (lambda unused: {})
         self.player_descriptor_resolver = player_descriptor_resolver
@@ -1921,6 +1928,9 @@ class BotRuntime(object):
         # Keeping an explicit seam also makes it impossible for a stale team
         # spot to stand in for a current clear barrel lane.
         self.firing_lane_probe = firing_lane_probe or self.visibility_probe
+        self.incoming_lane_probe = incoming_lane_probe
+        self._incoming_lanes = {}
+        self._incoming_lane_budget = 0
         # Dynamic allied hulls are deliberately outside the cached static-world
         # lane.  Production checks this seam again at every final fire attempt.
         self.friendly_lane_probe = self._adapt_friendly_lane_probe(
@@ -2896,6 +2906,8 @@ class BotRuntime(object):
             self._ballistic_solution_cache = {}
             self._friendly_repositions = {}
             self._shot_los_cache = {}
+            self._incoming_lanes = {}
+            self._incoming_lane_budget = 0
             self._shot_los_deadlines = {}
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
@@ -2991,6 +3003,8 @@ class BotRuntime(object):
             self._visibility_fire = {}
             self._visibility_still = {}
             self._shot_los_cache = {}
+            self._incoming_lanes = {}
+            self._incoming_lane_budget = 0
             self._shot_los_deadlines = {}
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
@@ -3985,12 +3999,16 @@ class BotRuntime(object):
                 if order.get(name) is not None:
                     order[name] = _number(order[name])
             for name in ('id', 'team', 'target_id', 'route_index',
-                         'shell_index', 'cover_id'):
+                         'shell_index'):
                 if order.get(name) is not None:
                     try:
                         order[name] = int(order[name])
                     except (TypeError, ValueError, OverflowError):
                         return False
+            if order.get('cover_id') is not None:
+                cover_id = order['cover_id']
+                if not isinstance(cover_id, _STRING_TYPES) or len(cover_id) > 80:
+                    return False
             accepted[bot_id] = order
         previous = self._server_orders
         changed_ids = set(previous).union(accepted)
@@ -6450,6 +6468,37 @@ class BotRuntime(object):
         bot_state['_route_lane_offset'] = 0.0
         return selected
 
+    def _radio_ground_goal(self, bot_id, position, goal, strategic, grid):
+        """Choose a dry baked point in a requested minimap cell once per order."""
+        area = strategic.get('move_area_bounds')
+        if not getattr(grid, 'prebaked', False) or not isinstance(area, (list, tuple)) or len(area) != 4:
+            return None
+        key = (strategic.get('team_command_id'), tuple(area))
+        own = self.states.get(int(bot_id), {})
+        cached = own.get('_radio_ground_goal')
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        minimum = grid.cell_for((area[0], position[1], area[1]))
+        maximum = grid.cell_for((area[2], position[1], area[3]))
+        candidates = []
+        # This is a bounded pure-data scan of one tenth of each map axis.
+        for z in range(minimum[1], maximum[1] + 1):
+            for x in range(minimum[0], maximum[0] + 1):
+                cell = (x, z)
+                if grid._baked_index(cell) is None:
+                    continue
+                point = grid.point_for(cell, grid._baked_cell_height(cell))
+                if not (area[0] <= point[0] <= area[2] and area[1] <= point[2] <= area[3]):
+                    continue
+                if grid.point_has_baked_hazard(point, BAKED_FATAL_HAZARDS):
+                    continue
+                shallow = grid.point_has_baked_hazard(point, BAKED_SHALLOW_WATER)
+                candidates.append((bool(shallow), _distance(point, goal), cell, point))
+        candidates.sort(key=lambda value: value[:3])
+        result = candidates[0][3] if candidates else None
+        own['_radio_ground_goal'] = (key, result)
+        return result
+
     def _navigation_target(self, bot_id, position, goal, strategic, state):
         mode = strategic.get('combat_mode', 'route')
         stop_at_goal = mode not in ('route', 'advance')
@@ -6457,6 +6506,14 @@ class BotRuntime(object):
             state['navigation_stop_at_target'] = stop_at_goal
             return goal
         grid = getattr(self.navigator, 'grid', None)
+        if strategic.get('move_area_bounds') is not None:
+            grounded = self._radio_ground_goal(bot_id, position, goal, strategic, grid)
+            if grounded is None:
+                # No proved destination is a local unfulfilled order, never an
+                # invented ground height or a whole-round simulation failure.
+                state['navigation_stop_at_target'] = True
+                return position
+            goal = grounded
         now = state.get('now', 0.0)
         route_index = int(strategic.get('route_index', 0))
         if mode == 'base_defense':
@@ -8223,6 +8280,22 @@ class BotRuntime(object):
             if self._shot_los_key(source, target) != key:
                 self._shot_lane_work_set.discard(key)
                 return False
+            # Only this direct-spot-gated queue may inspect incoming geometry.
+            # One extra pair per control callback keeps advisory threat work
+            # bounded independently of the final-shot safety checks.
+            if (self._incoming_lane_budget and
+                    callable(self.incoming_lane_probe)):
+                self._incoming_lane_budget -= 1
+                probe_started = self._probe_started()
+                self._probe_totals[1] += 1
+                try:
+                    incoming = self.incoming_lane_probe(source, target)
+                except Exception:
+                    incoming = None
+                finally:
+                    self._probe_finished(1, probe_started)
+                if incoming is not None:
+                    self._incoming_lanes[key] = (now, bool(incoming))
             # Count identities resolved at service time separately from the
             # native budget. A distant pure-data rejection is still one
             # bounded job even though it consumes no collision ray.
@@ -8409,6 +8482,35 @@ class BotRuntime(object):
         remain complete on every latency-sensitive observation.
         """
         packed = []
+        incoming_by_target = {}
+        maximum_age = SHOT_LANE_REFRESH_SECONDS + self._control_seconds
+        for lane_key, receipt in tuple(self._incoming_lanes.items()):
+            source = self.states.get(lane_key[0])
+            if (source is None or not source.get('alive', True) or
+                    now - receipt[0] > maximum_age):
+                self._incoming_lanes.pop(lane_key, None)
+                continue
+            if receipt[1]:
+                target_key = (int(source.get('team', 0)),) + lane_key[1:]
+                incoming_by_target.setdefault(target_key, []).append(lane_key[0])
+        # A fresh enemy Bot's outgoing receipt already has the required
+        # enemy-muzzle -> own-body direction. Reuse that geometry only when
+        # this team currently observes the enemy below. This avoids another
+        # full-roster native scan and never reverses our own outgoing ray.
+        for lane_key, receipt in self._shot_los_cache.items():
+            enemy_id, target_kind, own_id = lane_key
+            if target_kind != 'bot' or not receipt[1] or now - receipt[0] > maximum_age:
+                continue
+            enemy = self.states.get(enemy_id)
+            own = self.states.get(own_id)
+            if (enemy is None or own is None or
+                    not enemy.get('alive', True) or not own.get('alive', True) or
+                    enemy.get('team') == own.get('team') or
+                    (enemy.get('profile') or {}).get('class_tag') == 'SPG'):
+                continue
+            key = (int(own.get('team', 0)), 'bot', enemy_id)
+            if key in aggregate:
+                incoming_by_target.setdefault(key, []).append(own_id)
         for key in sorted(aggregate):
             row = aggregate[key]
             target_visible, shootable, observed_target = row[:3]
@@ -8451,6 +8553,9 @@ class BotRuntime(object):
                 # means team-spotted without a local firing lane; the server
                 # rejects omission rather than guessing.
                 'shootable_by_bot_ids': sorted(shootable),
+                # Positive evidence only: an absent id is unknown, not safe.
+                'threatened_bot_ids': sorted(set(
+                    incoming_by_target.get(key, ()))) if fresh else [],
                 'x': _number(observed_target.get('x')),
                 'y': _number(observed_target.get('y')),
                 'z': _number(observed_target.get('z')),
@@ -9276,6 +9381,7 @@ class BotRuntime(object):
         """Advance one stable authority substep and preserve its events."""
         publish = bool(self._publish_control_this_step)
         refresh_control = bool(self._refresh_control_this_step)
+        self._incoming_lane_budget = 1 if refresh_control else 0
         step_duration_us = max(
             1, int(round(float(frame_step) * 1000000.0)))
         step_start_time_us = self._sample_time_us
@@ -10399,14 +10505,28 @@ class BotRuntime(object):
                 self._cover_queue[0]
             if now + 1e-9 >= ready_at:
                 del self._cover_queue[0]
+                current_source = self.states.get(int(bot_id))
+                target_key = (source.get('team'), target.get('kind', 'human'),
+                              int(target.get('network_id', 0)))
+                remembered = self._visible_target_poses.get(target_key)
+                current = (current_source is not None and
+                           current_source.get('alive', True) and
+                           current_source.get('team') == source.get('team') and
+                           remembered is not None and
+                           self._team_spot_time_left(target_key, now) > 0.0)
+                if current:
+                    source = _copy_runtime_state(current_source)
+                    target = dict(target)
+                    target.update(remembered)
                 try:
                     self._probe_totals[2] += 1
                     probe_started = self._probe_started()
                     try:
-                        candidates = self.cover_probe(
+                        candidates = (self.cover_probe(
                             source, target, route, allies,
                             (self.navigator.grid.segment_clear
                              if self.navigator is not None else None))
+                                      if current else ())
                     finally:
                         self._probe_finished(2, probe_started)
                 except Exception:

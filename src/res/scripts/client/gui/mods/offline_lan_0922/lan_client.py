@@ -163,7 +163,8 @@ ORDERED_RECEIVE_TYPES = STATE_BARRIER_TYPES | frozenset((
     'battle_receipt', 'fire_intent', 'fire_intent_result',
     'landing_observation_result',
     'player_destructible_contact',
-    'player_destructible_contact_result'))
+    'player_destructible_contact_result', 'team_command',
+    'team_command_ack', 'team_command_terminal'))
 SERVER_STATE_TYPES = frozenset((
     'welcome', 'roster', 'battle_start', 'battle_live', 'start_denied',
     'team_denied', 'team_size_denied', 'bot_tier_mode_denied', 'snapshot',
@@ -171,7 +172,8 @@ SERVER_STATE_TYPES = frozenset((
     'battle_receipt', 'player_destructible_contact'))
 RECOVERABLE_RUNTIME_TYPES = frozenset((
     'snapshot', 'events', 'bot_observation',
-    'landing_observation_result'))
+    'landing_observation_result', 'team_command', 'team_command_ack',
+    'team_command_terminal'))
 
 
 def _monotonic_time():
@@ -1718,6 +1720,8 @@ class LANClient(object):
         self._fire_seq = 0
         self._fire_intent_seq = 0
         self._equipment_intent_seq = 0
+        self._team_command_seq = 0
+        self._team_command_round = None
         self._input_seq = 0
         self._input_seq_round = None
         self._landing_observation_seq = 0
@@ -3285,6 +3289,38 @@ class LANClient(object):
                 return False
             message['human_ram_armors'] = human_ram_armors
         return self._send(message)
+
+    def send_team_command(self, command, target_kind=None, target_id=None,
+                          cell_index=None):
+        from gui.mods.offline_lan_0922.tactical_radio import (
+            COMMAND_IDS_BY_NAME, COMMAND_SPECS)
+        if (not self.ready or self.phase != 'battle' or
+                self.is_bot_authority() or command not in COMMAND_IDS_BY_NAME):
+            return False
+        relation = COMMAND_SPECS[COMMAND_IDS_BY_NAME[command]][1]
+        message = {'type': 'team_command', 'round_id': self.round_id,
+                   'command': command}
+        if relation in ('ally', 'enemy'):
+            target_id = _projectile_int_range(target_id, 1, MAX_PROJECTILE_ID)
+            if target_kind not in ('bot', 'human') or target_id is None:
+                return False
+            message.update(target_kind=target_kind, target_id=target_id)
+        elif relation == 'cell':
+            cell_index = _projectile_int_range(cell_index, 0, 99)
+            if cell_index is None:
+                return False
+            message['cell_index'] = cell_index
+        if self._team_command_round != self.round_id:
+            self._team_command_round = self.round_id
+            self._team_command_seq = 0
+        sequence = self._team_command_seq + 1
+        if sequence > MAX_PROJECTILE_ID:
+            return False
+        message['command_seq'] = sequence
+        if not self._send(message):
+            return False
+        self._team_command_seq = sequence
+        return sequence
 
     def send_bot_observation(self, contacts, affordances=None):
         if not self.is_bot_authority():
@@ -4908,6 +4944,44 @@ class LANClient(object):
                 self.authority_epoch = events_authority_epoch
             if events_server_time is not None:
                 self.server_time_ms = events_server_time
+        elif kind in ('team_command', 'team_command_ack', 'team_command_terminal'):
+            if self._runtime_round_disposition(kind, message, 'invalid team command') is None:
+                return
+            from gui.mods.offline_lan_0922.tactical_radio import (
+                COMMAND_IDS_BY_NAME, COMMAND_SPECS)
+            command = _safe_text(message.get('command'), '', 40)
+            valid = (_projectile_int_range(message.get('command_seq'),
+                                           1, MAX_PROJECTILE_ID) is not None)
+            if kind != 'team_command_ack' or message.get('accepted'):
+                valid = valid and command in COMMAND_IDS_BY_NAME
+            if kind == 'team_command':
+                valid = (valid and message.get('team') == self.team and
+                         _projectile_int_range(message.get('issuer_id'),
+                                               1, MAX_PROJECTILE_ID) is not None)
+                if valid:
+                    relation = COMMAND_SPECS[COMMAND_IDS_BY_NAME[command]][1]
+                    if relation == 'cell':
+                        valid = _projectile_int_range(message.get('cell_index'), 0, 99) is not None
+                    elif relation in ('ally', 'enemy'):
+                        valid = (message.get('target_kind') in ('bot', 'human') and
+                                 _projectile_int_range(message.get('target_id'),
+                                                       1, MAX_PROJECTILE_ID) is not None)
+            else:
+                recipients = message.get('recipient_bot_ids')
+                valid = (valid and isinstance(recipients, (list, tuple)) and
+                         len(recipients) <= 30 and
+                         all(_projectile_int_range(value, 1, MAX_PROJECTILE_ID)
+                             is not None for value in recipients) and
+                         len(set(recipients)) == len(recipients))
+                if kind == 'team_command_ack':
+                    valid = valid and isinstance(message.get('accepted'), bool)
+                else:
+                    valid = valid and message.get('code') in (
+                        'expired', 'issuer_dead', 'issuer_left', 'round_complete',
+                        'superseded')
+            if self.phase != 'battle' or not valid:
+                self._ignore_runtime_payload(kind, 'invalid_team_command', message)
+                return
         elif kind == 'bot_observation':
             round_id = self._runtime_round_disposition(
                 kind, message, 'invalid bot observation message')
@@ -4956,6 +5030,12 @@ class LANClient(object):
                     contact.get('visible_by_player_ids')) and
                 (not bool(contact.get('fresh')) or
                  bool(contact.get('visible'))) and
+                ('threatened_bot_ids' not in contact or (
+                    isinstance(contact.get('threatened_bot_ids'), (list, tuple)) and
+                    all(_projectile_int_range(value, 1, MAX_PROJECTILE_ID) is not None
+                        for value in contact['threatened_bot_ids']) and
+                    len(set(contact['threatened_bot_ids'])) == len(contact['threatened_bot_ids']) and
+                    (bool(contact.get('fresh')) or not contact['threatened_bot_ids']))) and
                 (bool(contact.get('fresh')) or
                  not contact.get('shootable_by_bot_ids'))
                 for contact in (contacts or ()))

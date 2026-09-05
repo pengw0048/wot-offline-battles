@@ -293,7 +293,11 @@ class FakeServer(object):
         return True
 
     def messenger_onActionByClient_chat2(self, action_id, request_id, args):
-        """Accept the enabled #1513 BW_CHAT2 provider's one-way mailbox."""
+        """Forward chat2 when a scoped battle-radio adapter is attached."""
+        adapter = self._context.get('battle_radio')
+        handler = getattr(adapter, 'handle_client_action', None)
+        if callable(handler):
+            return bool(handler(action_id, request_id, args))
         return True
 
     def update_context(self, values):

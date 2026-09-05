@@ -60,6 +60,14 @@ RECENT_ATTACKER_SCORE_BONUS = 140.0
 LOW_HEALTH_BASE_FRACTION = 0.18
 CROSSFIRE_MIN_ANGLE = math.radians(55.0)
 CROSSFIRE_MAX_DISTANCE = 360.0
+TEAM_ORDER_COMMANDS = frozenset((
+    "ATTACK", "BACKTOBASE", "HELPME", "FOLLOWME", "TURNBACK",
+    "HELPMEEX", "STOP", "ATTACKENEMY", "SUPPORTMEWITHFIRE",
+    "ATTENTIONTOCELL", "POSITIVE", "NEGATIVE",
+))
+TEAM_ORDER_ENEMY_COMMANDS = frozenset((
+    "ATTACKENEMY", "SUPPORTMEWITHFIRE",
+))
 
 
 def _number(value, default=0.0):
@@ -248,6 +256,10 @@ class BotPlanner(object):
             previous = self._contacts[observing_team].get(contact_key)
             if visible:
                 position = _point(raw)
+                threatened = raw.get("threatened_bot_ids")
+                threatened = (self._bot_id_list(threatened)
+                              if isinstance(threatened, (list, tuple))
+                              else None)
                 self._contacts[observing_team][contact_key] = {
                     "id": target_id,
                     "target_kind": target_kind,
@@ -261,10 +273,14 @@ class BotPlanner(object):
                     "armor": max(0.0, _number(raw.get("armor"), 0.0)),
                     "shootable_by_bot_ids": self._bot_id_list(
                         raw.get("shootable_by_bot_ids")),
+                    # Positive incoming-fire evidence. None means this pair
+                    # was not sampled; an empty list is still not a global
+                    # proof that the team is safe.
+                    "threatened_bot_ids": threatened,
                 }
                 accepted += 1
                 if accepted_visibility is not None:
-                    accepted_visibility.append({
+                    accepted_contact = {
                         "observing_team": observing_team,
                         "target_kind": target_kind,
                         "target_id": target_id,
@@ -278,10 +294,15 @@ class BotPlanner(object):
                             raw.get("visible_by_player_ids")),
                         "shootable_by_bot_ids": self._bot_id_list(
                             raw.get("shootable_by_bot_ids")),
-                    })
+                    }
+                    if threatened is not None:
+                        accepted_contact["threatened_bot_ids"] = list(
+                            threatened)
+                    accepted_visibility.append(accepted_contact)
             elif previous is not None:
                 previous["visible"] = False
                 previous["shootable_by_bot_ids"] = []
+                previous["threatened_bot_ids"] = []
                 accepted += 1
                 if accepted_visibility is not None:
                     accepted_visibility.append({
@@ -295,6 +316,7 @@ class BotPlanner(object):
                         "visible_by_bot_ids": [],
                         "visible_by_player_ids": [],
                         "shootable_by_bot_ids": [],
+                        "threatened_bot_ids": [],
                     })
         return accepted
 
@@ -374,8 +396,218 @@ class BotPlanner(object):
             accepted += 1
         return accepted
 
+    @staticmethod
+    def _team_orders_by_bot(team_orders, bots):
+        """Index the newest structurally live server-admitted order per Bot."""
+        live = dict((bot["id"], bot) for bot in bots)
+        result = {}
+        if not isinstance(team_orders, (list, tuple)):
+            return result
+        ordered = sorted(
+            (value for value in team_orders if isinstance(value, dict)),
+            key=lambda value: (
+                _integer(value.get("issued_tick")),
+                str(value.get("command_id") or "")))
+        for raw in ordered:
+            command = str(raw.get("command") or "")
+            if (command not in TEAM_ORDER_COMMANDS or
+                    _integer(raw.get("expires_tick")) <=
+                    _integer(raw.get("issued_tick"))):
+                continue
+            recipients = raw.get("recipient_bot_ids")
+            if not isinstance(recipients, (list, tuple)):
+                continue
+            for raw_bot_id in recipients:
+                bot_id = _integer(raw_bot_id)
+                bot = live.get(bot_id)
+                if (bot is None or
+                        bot["team"] != _integer(raw.get("team"))):
+                    continue
+                result[bot_id] = dict(raw)
+        return result
+
+    @staticmethod
+    def _team_order_focus(team_order, bot, contacts):
+        if (not isinstance(team_order, dict) or
+                team_order.get("command") not in
+                TEAM_ORDER_ENEMY_COMMANDS):
+            return None
+        target_kind = str(team_order.get("target_kind") or "")
+        if target_kind == "player":
+            target_kind = "human"
+        target_id = _integer(team_order.get("target_id"))
+        for contact in contacts or ():
+            if ((str(contact.get("target_kind") or ""),
+                 _integer(contact.get("id"))) !=
+                    (target_kind, target_id)):
+                continue
+            if (contact.get("visible") and
+                    bot["id"] in (contact.get(
+                        "shootable_by_bot_ids") or ()) and
+                    BotPlanner._weapon_can_recover(bot)):
+                return contact
+        return None
+
+    @staticmethod
+    def _mark_flank_suppressors(assignments, bots):
+        """Fence each local flank group with an assigned covering shooter."""
+        bot_by_id = dict((bot["id"], bot) for bot in bots)
+        groups = {}
+        for bot_id, contact in assignments.items():
+            bot = bot_by_id.get(bot_id)
+            if (bot is None or contact.get("movement_lease") or
+                    not BotPlanner._weapon_ready(bot)):
+                continue
+            key = (str(contact.get("target_kind") or ""),
+                   _integer(contact.get("id")))
+            groups.setdefault(key, []).append(bot)
+        result = dict(assignments)
+        for key, shooters in groups.items():
+            if len(shooters) < 2:
+                continue
+            contact = assignments[shooters[0]["id"]]
+            tx = _number(contact.get("position", {}).get("x"))
+            tz = _number(contact.get("position", {}).get("z"))
+
+            def hold_key(ally):
+                profile = ally.get("profile") if isinstance(
+                    ally.get("profile"), dict) else {}
+                roles = profile.get("roles") if isinstance(
+                    profile.get("roles"), dict) else {}
+                state = ally.get("state") if isinstance(
+                    ally.get("state"), dict) else {}
+                return (_number(roles.get("flanker")), math.hypot(
+                    _number(state.get("x")) - tx,
+                    _number(state.get("z")) - tz), ally["id"])
+
+            suppressor_id = min(shooters, key=hold_key)["id"]
+            assigned_ids = [ally["id"] for ally in shooters]
+            for ally in shooters:
+                marked = dict(result[ally["id"]])
+                marked["assigned_shooter_ids"] = list(assigned_ids)
+                marked["flank_suppressor_bot_ids"] = [suppressor_id]
+                result[ally["id"]] = marked
+        return result
+
+    @staticmethod
+    def _apply_team_order(order, bot, team_order, players, defense):
+        """Overlay one admitted radio intent without inventing target data."""
+        if not isinstance(team_order, dict):
+            return order
+        command = str(team_order.get("command") or "")
+        if command not in TEAM_ORDER_COMMANDS:
+            return order
+        order["team_command_id"] = str(team_order.get("command_id") or "")
+        order["team_command"] = command
+        if "cell_index" in team_order:
+            order["team_command_cell_index"] = _integer(
+                team_order.get("cell_index"))
+
+        # Radio intent cannot cancel an already selected local survival action
+        # or an urgent base response. The command remains visible in the order
+        # so its bounded admission is observable without claiming execution.
+        protected_modes = (
+            "base_defense", "low_health_retreat", "low_health_defend",
+            "under_fire_withdraw", "under_fire_hold",
+            "crossfire_withdraw", "crossfire_hold", "take_cover",
+            "cover_hold", "cover_peek", "cover_return", "withdraw",
+        )
+        if order.get("combat_mode") in protected_modes:
+            return order
+
+        state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
+        if command == "STOP":
+            order["combat_mode"] = "team_stop"
+            order["move_position"] = _point(state)
+            order["throttle_override"] = 0.0
+            return order
+        if command == "TURNBACK":
+            order["combat_mode"] = "team_turnback"
+            order["move_position"] = dict(order["route_anchor"])
+            order["face_position"] = dict(order["route_anchor"])
+            order["throttle_override"] = None
+            return order
+        if command == "BACKTOBASE":
+            bases = (defense.get("capture_bases")
+                     if isinstance(defense, dict) else None)
+            points = BotPlanner._defense_points(bases, bot["team"])
+            if points:
+                base = min(points, key=lambda value: math.hypot(
+                    value["point"]["x"] - _number(state.get("x")),
+                    value["point"]["z"] - _number(state.get("z"))))
+                order["combat_mode"] = "team_back_to_base"
+                order["move_position"] = dict(base["point"])
+                order["face_position"] = dict(base["point"])
+                order["throttle_override"] = None
+            return order
+        if command == "ATTENTIONTOCELL":
+            raw_bounds = (defense.get("arena_bounds")
+                          if isinstance(defense, dict) else None)
+            try:
+                bounds = tuple(float(value) for value in raw_bounds)
+            except (TypeError, ValueError, OverflowError):
+                bounds = ()
+            cell_index = team_order.get("cell_index")
+            if (len(bounds) == 4 and
+                    all(math.isfinite(value) for value in bounds) and
+                    bounds[0] < bounds[2] and bounds[1] < bounds[3] and
+                    isinstance(cell_index, int) and
+                    not isinstance(cell_index, bool) and
+                    0 <= cell_index <= 99):
+                column, row = divmod(cell_index, 10)
+                cell_width = (bounds[2] - bounds[0]) / 10.0
+                cell_height = (bounds[3] - bounds[1]) / 10.0
+                cell_min_x = bounds[0] + column * cell_width
+                cell_max_x = cell_min_x + cell_width
+                cell_max_z = bounds[3] - row * cell_height
+                cell_min_z = cell_max_z - cell_height
+                point = {
+                    "x": round((cell_min_x + cell_max_x) * 0.5, 3),
+                    # The worker's navigator resolves terrain. Preserve the
+                    # current live altitude instead of guessing target ground.
+                    "y": round(_number(state.get("y")), 3),
+                    "z": round((cell_min_z + cell_max_z) * 0.5, 3),
+                }
+                order["combat_mode"] = "team_attention_cell"
+                order["move_position"] = point
+                order["move_area_bounds"] = [
+                    round(cell_min_x, 3), round(cell_min_z, 3),
+                    round(cell_max_x, 3), round(cell_max_z, 3),
+                ]
+                order["face_position"] = dict(point)
+                order["throttle_override"] = None
+            return order
+        if command in ("HELPME", "HELPMEEX", "FOLLOWME"):
+            issuer_id = _integer(team_order.get("issuer_id"))
+            issuer = next((value for value in (players or ())
+                           if _integer(value.get("id")) == issuer_id and
+                           _integer(value.get("team")) == bot["team"] and
+                           value.get("alive", True) and
+                           value.get("world_pose") is True), None)
+            if issuer is not None:
+                point = _point(issuer)
+                # A tactical escort keeps room for both hulls instead of
+                # continually asking the driver to occupy the human's centre.
+                recipients = team_order.get("recipient_bot_ids") or [bot["id"]]
+                slot = recipients.index(bot["id"]) if bot["id"] in recipients else 0
+                lateral = (slot - (len(recipients) - 1) * 0.5) * 12.0
+                yaw = _number(issuer.get("yaw"))
+                point["x"] += -math.sin(yaw) * 18.0 + math.cos(yaw) * lateral
+                point["z"] += -math.cos(yaw) * 18.0 - math.sin(yaw) * lateral
+                order["combat_mode"] = "team_follow"
+                order["move_position"] = point
+                order["face_position"] = dict(point)
+                order["throttle_override"] = None
+            return order
+        if command == "ATTACK" and order.get("target_id") is None:
+            order["combat_mode"] = "team_attack"
+        # Enemy-target commands retain the ordinary locally proved target and
+        # firing checks. Cell and social commands remain explicit markers for
+        # the worker/UI until a validated world point or response exists.
+        return order
+
     def build_orders(self, manifest, bot_states, players, now,
-                     defense=None):
+                     defense=None, team_orders=None):
         known_targets = self.known_targets(bot_states, players)
         contacts = self._prune_contacts(known_targets, now)
         bots = self._alive_bots(manifest, bot_states)
@@ -387,6 +619,7 @@ class BotPlanner(object):
                          for team in (1, 2))
         capture_targets = dict((team, self._capture_target(defense, team))
                                for team in (1, 2))
+        team_order_by_bot = self._team_orders_by_bot(team_orders, bots)
         orders = []
         for team in (1, 2):
             team_bots = sorted((bot for bot in bots if bot["team"] == team),
@@ -401,6 +634,14 @@ class BotPlanner(object):
             assignments = self._prioritize_base_invaders(
                 team, team_bots, contacts[team], assignments,
                 defenders.get(team, {}), defense)
+            for bot in team_bots:
+                commanded_focus = self._team_order_focus(
+                    team_order_by_bot.get(bot["id"]), bot, contacts[team])
+                if (commanded_focus is not None and
+                        bot["id"] not in defenders.get(team, {})):
+                    assignments[bot["id"]] = commanded_focus
+            assignments = self._mark_flank_suppressors(
+                assignments, team_bots)
             for index, bot in enumerate(team_bots):
                 order = self._order_for(
                     bot, index, len(team_bots), assignments.get(bot["id"]),
@@ -408,7 +649,9 @@ class BotPlanner(object):
                     defenders.get(team, {}).get(bot["id"]), team_axis,
                     team_bots, capture_targets[team],
                     not bool(contacts[team]) and bot["id"] in capture_ids)
-                base = defenders.get(team, {}).get(bot["id"])
+                self._apply_team_order(
+                    order, bot, team_order_by_bot.get(bot["id"]),
+                    players, defense)
                 orders.append(order)
         orders.sort(key=lambda value: value["id"])
         payload = {"orders": orders}
@@ -599,6 +842,33 @@ class BotPlanner(object):
                         (critical.get("destroyed") or ()))
         return not destroyed.intersection((
             "engineHealth", "leftTrackHealth", "rightTrackHealth"))
+
+    @staticmethod
+    def _route_donor_eligible(bot):
+        """Require current pose and mobility for a route reassignment."""
+        state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
+        if state.get("world_pose") is not True:
+            return False
+        critical = state.get("critical")
+        critical = critical if isinstance(critical, dict) else {}
+        destroyed = set(str(value) for value in
+                        (critical.get("destroyed") or ()))
+        return not destroyed.intersection((
+            "engineHealth", "leftTrackHealth", "rightTrackHealth"))
+
+    @staticmethod
+    def _route_line_contributor(bot, contacts):
+        """Count mobility, or proved fire from an immobilized line holder."""
+        if BotPlanner._route_donor_eligible(bot):
+            return True
+        state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
+        if (state.get("world_pose") is not True or
+                not BotPlanner._weapon_ready(bot)):
+            return False
+        return any(
+            contact.get("visible") and
+            bot["id"] in (contact.get("shootable_by_bot_ids") or ())
+            for contact in (contacts or ()))
 
     @staticmethod
     def _defense_points(raw, team):
@@ -1030,6 +1300,62 @@ class BotPlanner(object):
         return limit
 
     @staticmethod
+    def _selected_shell_damage(bot, contact):
+        """Return nominal damage for the descriptor-backed selected round."""
+        profile = bot.get("profile") if isinstance(
+            bot.get("profile"), dict) else {}
+        shells = profile.get("shells")
+        if not isinstance(shells, list) or not shells:
+            return None
+        state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
+        shell_index = BotPlanner._shell_index(
+            profile, contact, BotPlanner._personality(bot["id"]), state)
+        for shell in shells:
+            if _integer(shell.get("index"), -1) != shell_index:
+                continue
+            damage = _number(shell.get("damage"), -1.0)
+            return damage if damage > 0.0 else None
+        return None
+
+    @staticmethod
+    def _reserve_focus(reservations, key, bot, contact):
+        reservation = reservations.setdefault(key, {
+            "count": 0,
+            "nominal_damage": 0.0,
+            "smallest_shot": None,
+            "unknown_damage": False,
+        })
+        damage = BotPlanner._selected_shell_damage(bot, contact)
+        reservation["count"] += 1
+        if damage is None:
+            reservation["unknown_damage"] = True
+            return
+        reservation["nominal_damage"] += damage
+        smallest = reservation.get("smallest_shot")
+        reservation["smallest_shot"] = (
+            damage if smallest is None else min(_number(smallest), damage))
+
+    @staticmethod
+    def _focus_saturated(reservations, key, contact, distance):
+        reservation = reservations.get(key)
+        if not isinstance(reservation, dict):
+            return False
+        count = max(0, _integer(reservation.get("count")))
+        if distance <= CLOSE_THREAT_DISTANCE:
+            return count >= BotPlanner._focus_limit(contact, distance)
+        if reservation.get("unknown_damage"):
+            return count >= BotPlanner._focus_limit(contact, distance)
+        smallest = reservation.get("smallest_shot")
+        if smallest is None or count < 2:
+            return False
+        # Descriptor damage is nominal and the live roll is random. Reserve
+        # one complete additional shot instead of treating the nominal sum as
+        # a guaranteed kill. Projectile physics remains owned by the worker.
+        covered_damage = (_number(reservation.get("nominal_damage")) -
+                          _number(smallest))
+        return covered_damage >= max(1.0, _number(contact.get("health"), 1.0))
+
+    @staticmethod
     def _engagement_range(bot, contact):
         """Keep nearby combat primary without pulling an entire team off-route."""
         profile = bot.get("profile") if isinstance(bot.get("profile"), dict) else {}
@@ -1152,14 +1478,17 @@ class BotPlanner(object):
 
     @staticmethod
     def _ally_support_score(bot, team_bots, focus):
-        """Return nearby and forward ally support on a normalized scale."""
+        """Return nearby support which can currently fire on this contact."""
         bx = _number(bot["state"].get("x"))
         bz = _number(bot["state"].get("z"))
         tx = _number(focus.get("position", {}).get("x"))
         tz = _number(focus.get("position", {}).get("z"))
+        shooters = set(_integer(value) for value in
+                       (focus.get("shootable_by_bot_ids") or ()))
         score = 0.0
         for ally in team_bots or ():
-            if ally["id"] == bot["id"]:
+            if (ally["id"] == bot["id"] or ally["id"] not in shooters or
+                    not BotPlanner._weapon_ready(ally)):
                 continue
             state = ally.get("state") if isinstance(
                 ally.get("state"), dict) else {}
@@ -1180,14 +1509,14 @@ class BotPlanner(object):
 
     @staticmethod
     def _crossfire_risk(bot, contacts):
-        """Estimate multi-direction exposure from current visible headings."""
+        """Estimate exposure only from explicit enemy-to-bot firing lanes."""
         bx = _number(bot["state"].get("x"))
         bz = _number(bot["state"].get("z"))
         bearings = []
         for contact in contacts:
             if (not contact.get("visible") or
-                    bot["id"] not in contact.get(
-                        "shootable_by_bot_ids", ())):
+                    bot["id"] not in (
+                        contact.get("threatened_bot_ids", ()) or ())):
                 continue
             dx = _number(contact.get("position", {}).get("x")) - bx
             dz = _number(contact.get("position", {}).get("z")) - bz
@@ -1195,6 +1524,9 @@ class BotPlanner(object):
             if distance <= 1.0 or distance > CROSSFIRE_MAX_DISTANCE:
                 continue
             bearings.append(math.atan2(dx, dz))
+        if len(bearings) < 2:
+            # Unknown and incomplete pair sampling is not evidence of safety.
+            return None
         best = 0.0
         for first_index, first in enumerate(bearings):
             for second in bearings[first_index + 1:]:
@@ -1472,10 +1804,10 @@ class BotPlanner(object):
                 continue
             contact = previous_candidate[2]
             key = (contact.get("target_kind"), contact["id"])
-            if reservations.get(key, 0) >= self._focus_limit(
-                    contact, previous_candidate[3]):
+            if self._focus_saturated(
+                    reservations, key, contact, previous_candidate[3]):
                 continue
-            reservations[key] = reservations.get(key, 0) + 1
+            self._reserve_focus(reservations, key, bot, contact)
             assigned[bot["id"]] = contact
             if lease_expired:
                 previous["until"] = _number(now) + TARGET_LEASE_SECONDS
@@ -1485,10 +1817,10 @@ class BotPlanner(object):
             if bot["id"] in assigned:
                 continue
             key = (contact.get("target_kind"), contact["id"])
-            if reservations.get(key, 0) >= self._focus_limit(
-                    contact, distance):
+            if self._focus_saturated(
+                    reservations, key, contact, distance):
                 continue
-            reservations[key] = reservations.get(key, 0) + 1
+            self._reserve_focus(reservations, key, bot, contact)
             assigned[bot["id"]] = contact
             self._target_assignments[bot["id"]] = {
                 "target": key,
@@ -1728,6 +2060,8 @@ class BotPlanner(object):
         for bot in bots:
             if str(bot.get("profile", {}).get("class_tag") or "") == "SPG":
                 continue
+            if not self._route_line_contributor(bot, contacts):
+                continue
             assignment = self._route_assignments.get(bot["id"], {})
             route = assignment.get("route") if isinstance(assignment, dict) else None
             if not isinstance(route, dict):
@@ -1759,6 +2093,10 @@ class BotPlanner(object):
             if bot["id"] in protected_ids:
                 continue
             if str(bot.get("profile", {}).get("class_tag") or "") == "SPG":
+                continue
+            # An immobilized tank may still hold a firing lane, so it remains
+            # in counts above. It cannot satisfy a movement reassignment.
+            if not self._route_donor_eligible(bot):
                 continue
             assignment = self._route_assignments.get(bot["id"], {})
             current = assignment.get("route") if isinstance(assignment, dict) else None
@@ -1923,7 +2261,46 @@ class BotPlanner(object):
         return _point(waypoints[max(0, index - 1)])
 
     @staticmethod
-    def _flank_point(bot, contact, desired_range):
+    def _flank_shooters(contact, team_bots):
+        shooter_ids = set(_integer(value) for value in
+                          (contact.get("shootable_by_bot_ids") or ()))
+        assigned_ids = contact.get("assigned_shooter_ids")
+        if isinstance(assigned_ids, (list, tuple)):
+            shooter_ids.intersection_update(
+                _integer(value) for value in assigned_ids)
+        return [ally for ally in (team_bots or ())
+                if ally["id"] in shooter_ids and
+                BotPlanner._weapon_ready(ally)]
+
+    @staticmethod
+    def _should_flank(bot, contact, team_bots):
+        """Keep a firing element in place and move only half the shooters."""
+        shooters = BotPlanner._flank_shooters(contact, team_bots)
+        if len(shooters) < 2:
+            return False
+        if bot["id"] in (contact.get("flank_suppressor_bot_ids") or ()):
+            return False
+        candidates = []
+        for ally in shooters:
+            profile = ally.get("profile") if isinstance(
+                ally.get("profile"), dict) else {}
+            roles = profile.get("roles") if isinstance(
+                profile.get("roles"), dict) else {}
+            initiative = BotPlanner._personality(ally["id"])["initiative"]
+            flanker = _number(roles.get("flanker"))
+            if flanker < 0.68 or initiative <= 0.42:
+                continue
+            candidates.append((flanker, initiative, -ally["id"], ally["id"]))
+        if not candidates:
+            return False
+        moving_count = max(1, len(shooters) // 2)
+        moving_ids = set(value[-1] for value in
+                         sorted(candidates, reverse=True)[:moving_count])
+        return bot["id"] in moving_ids and len(moving_ids) < len(shooters)
+
+    @staticmethod
+    def _flank_point(bot, contact, desired_range, team_bots=None):
+        """Choose the side which opens the widest angle from current guns."""
         bx = _number(bot["state"].get("x"))
         bz = _number(bot["state"].get("z"))
         tx = contact["position"]["x"]
@@ -1931,12 +2308,32 @@ class BotPlanner(object):
         dx, dz = bx - tx, bz - tz
         length = math.hypot(dx, dz) or 1.0
         dx, dz = dx / length, dz / length
-        side = -1.0 if bot["id"] % 2 else 1.0
-        return _point({
-            "x": tx + dx * desired_range * 0.72 + dz * min(95.0, desired_range * 0.38) * side,
-            "y": contact["position"].get("y", 0.0),
-            "z": tz + dz * desired_range * 0.72 - dx * min(95.0, desired_range * 0.38) * side,
-        })
+        offset = min(95.0, desired_range * 0.38)
+        candidates = []
+        for side in (-1.0, 1.0):
+            point = _point({
+                "x": tx + dx * desired_range * 0.72 + dz * offset * side,
+                "y": contact["position"].get("y", 0.0),
+                "z": tz + dz * desired_range * 0.72 - dx * offset * side,
+            })
+            bearing = math.atan2(point["x"] - tx, point["z"] - tz)
+            separations = []
+            for ally in BotPlanner._flank_shooters(contact, team_bots):
+                if ally["id"] == bot["id"]:
+                    continue
+                state = ally.get("state") if isinstance(
+                    ally.get("state"), dict) else {}
+                ally_dx = _number(state.get("x")) - tx
+                ally_dz = _number(state.get("z")) - tz
+                if math.hypot(ally_dx, ally_dz) <= 1.0:
+                    continue
+                ally_bearing = math.atan2(ally_dx, ally_dz)
+                separations.append(abs(
+                    (bearing - ally_bearing + math.pi) %
+                    (math.pi * 2.0) - math.pi))
+            angle = min(separations) if separations else 0.0
+            candidates.append((angle, -side, point))
+        return max(candidates, key=lambda value: value[:2])[2]
 
     @staticmethod
     def _shell_index(profile, contact, personality, state=None):
@@ -2489,7 +2886,8 @@ class BotPlanner(object):
                 order, bot, profile, personality)
             return order
 
-        if crossfire_risk >= 0.35 and support_score < 0.70:
+        if (crossfire_risk is not None and crossfire_risk >= 0.35 and
+                support_score < 0.70):
             self._engage_anchors.pop(bot["id"], None)
             self._combat_states.pop(bot["id"], None)
             if (distance <= fire_range * 1.15 and
@@ -2534,6 +2932,16 @@ class BotPlanner(object):
             return order
 
         self._retreat_states.pop(bot["id"], None)
+        if (distance > close_limit and distance <= fire_range and
+                self._should_flank(bot, focus, team_bots or ())):
+            self._engage_anchors.pop(bot["id"], None)
+            self._combat_states.pop(bot["id"], None)
+            self._cover_states.pop(bot["id"], None)
+            order["combat_mode"] = "flank"
+            order["move_position"] = self._flank_point(
+                bot, focus, desired_range, team_bots or ())
+            order["throttle_override"] = 0.78
+            return order
         advance_score = (
             personality["aggression"] * 0.85 +
             personality["initiative"] * 0.30 +
@@ -2604,11 +3012,6 @@ class BotPlanner(object):
                 self._engage_anchors[bot["id"]] = anchor_state
             order["move_position"] = dict(anchor_state["position"])
             order["throttle_override"] = 0.0
-        elif roles.get("flanker", 0.0) >= 0.68 and personality["initiative"] > 0.42:
-            self._engage_anchors.pop(bot["id"], None)
-            order["combat_mode"] = "flank"
-            order["move_position"] = self._flank_point(bot, focus, desired_range)
-            order["throttle_override"] = 0.78
         else:
             order["combat_mode"] = "engage"
             target_key = (focus.get("target_kind"), focus["id"])

@@ -640,8 +640,64 @@ not inferred from another 0.9.22 build:
 | goodies, vehicle rotation, recycle bin, ranked, badges, New Year | Readable empty caches exist. `groupLocks` contains both directly indexed lists, the ranked helper can directly index an empty `ranked` cache, and `ClientNewYear` plus the New Year controller accept the empty sync/goodie mappings without fabricated event data. |
 | `Shop` / `ShopRequester` / `RefSystem` | Mandatory `sellPriceFactor`; all directly read item/goodie collections; currency-mapped `paidRemovalCost`; exact berth, slot, and free-XP tuple arities; and the four-key disabled referral configuration, including integer `posByXPinTeam = 0`. |
 | `DossierCache` / `DossierRequester` | The stream body is the exact `(revision, dossierChanges)` pair; an empty change list completes synchronization without fabricating dossier data. |
-| `ClientChat` and BW Chat2 | Both client mailboxes exist. Offline chat commands are accepted as one-way no-ops: `CHAT_COMMANDS` indices are never echoed as `CHAT_ACTIONS`, and no malformed partial action is delivered to `ClientChat.onChatAction`. |
+| `ClientChat` and BW Chat2 | The legacy `ClientChat.chatCommandFromClient` mailbox remains a one-way no-op so `CHAT_COMMANDS` indices are never misreported as `CHAT_ACTIONS`. The battle Avatar's BW Chat2 mailbox now translates the reviewed fixed tactical commands to reliable LAN messages and returns validated team broadcasts through the stock Chat2 receive path. |
 | initial server settings / lobby controllers / `ClientRanked` | `file_server`, regional settings, the four-item roaming tuple and the directly indexed two-item `wallet` retain their native shapes; roaming item 3 is the host list consumed by `predefined_hosts`, while `ranked_config` is present and explicitly disabled because `ClientRanked` indexes it directly. `elenSettings` and the server-owned tutorial are explicitly disabled because their exact missing-section defaults start unsupported event-board or tutorial GUI lifecycles. |
+
+The BW Chat2 adapter is limited to the fixed commands present in the reviewed
+archive: `HELPME=23`, `FOLLOWME=24`, `ATTACK=25`, `BACKTOBASE=26`,
+`POSITIVE=27`, `NEGATIVE=28`, `ATTENTIONTOCELL=29`, `ATTACKENEMY=31`,
+`TURNBACK=32`, `HELPMEEX=33`, `SUPPORTMEWITHFIRE=34`, and `STOP=36`. It does
+not add free text, speech recognition, or synthetic SPG and reload-state
+orders. CPython 2.7 marshal and disassembly
+confirm the outgoing chain from `RadialMenu.onAction` through
+`ChatCommandsController` and `BattleChatCommandHandler.send` to
+`Avatar.base.messenger_onActionByClient_chat2(actionID, requestID, args)`, and
+the inverse server path through
+`Avatar.messenger_onActionByServer_chat2(actionID, requestID, args)`. The
+argument mapping has exactly `int32Arg1`, `int64Arg1`, `floatArg1`, `strArg1`,
+and `strArg2`; `int32Arg1` carries the target vehicle entity id or minimap cell,
+while `int64Arg1` carries the sender account DBID on reception.
+
+Targeted commands retain their stock relationship: `FOLLOWME`, `TURNBACK`,
+`HELPMEEX`, and `STOP` address a living ally, while `ATTACKENEMY` and
+`SUPPORTMEWITHFIRE` address a living enemy. `FOLLOWME` asks that ally to follow
+the sender. The four ally-targeted actions retain the stock private filter, so
+only sender and receiver render them after the same-team relay; enemy-targeted
+actions retain their public markers. Every reviewed command has a five-second
+stock cooldown except `ATTENTIONTOCELL`, whose cooldown is 0.5 seconds. The
+adapter resolves the stock BigWorld entity id to a separate LAN identity kind
+and logical id before transmission, then performs the reverse mapping for
+display; account DBIDs are resolved independently and are never assumed to
+equal entity ids. A same-team server broadcast owns the original stock command
+display, marker, and sound. Its acknowledgement closes the stock request and
+may display one assigned Bot's stock `POSITIVE` reply. Expiry, issuer death or
+departure, round completion, and replacement at the bounded command-history
+limit are cancellation terminals, not claims that a Bot completed the order.
+
+The stock BW Chat2 provider enables and flushes its action queue only in battle
+scope, and disables and clears it on scope exit. The stock chat-command
+controller registers its event consumers on `startControl` and removes them on
+`stopControl`. The LAN adapter adds current-Avatar and current-round fences,
+clears pending request identities during Avatar teardown, and ignores duplicate
+or late acknowledgements and relays.
+
+For `ATTENTIONTOCELL`, the exact archive computes
+`cellIndex = column * 10 + row`. With arena bounds
+`(bottomLeft(x, z), upperRight(x, z))`, its stock marker point is
+`x = bottomLeft.x + column * width / 10` and
+`z = upperRight.z - row * height / 10`; this is the cell's northwest boundary,
+with a placeholder `y = 0`. Bot navigation instead targets the center of the
+same proven cell bounds. The worker selects a passable point within that cell,
+preferring dry ground, and obtains its height from the baked navigation data. The stock minimap feedback path creates the cell flash, runs its
+animation, and plays the `minimap_attention` sound.
+
+The candidate inspected during this review contained a loose `scripts.pkg` and
+executable rather than a complete client root. `tools/inspect_client.py`
+therefore rejected it because the required `version.xml`, `paths.xml`, packaged
+archive path, entity definitions, and assets were unavailable. The bytecode
+results above prove the contract of that actual local archive. They do not
+independently prove its regional build identity, native UI rendering, audio,
+or lifecycle behavior on the Chinese HD `0.9.22.0.1 #1513` Windows client.
 
 The controller chain itself was enumerated from `game_control.__init__` and
 `new_year.__init__`. `NewYearController` is invoked first, followed by the

@@ -69,6 +69,14 @@ whose profile changed after it started must be restarted first.
   shared contacts to route, take cover, pick targets and choose ammunition,
   including SPG arcs. Navigation and foliage data ship for all 41 supported
   standard-battle maps.
+- Stock battle commands can direct nearby allied Bots: request help, name a
+  target, ask a Bot to follow or stop, return to base, or ping a minimap cell.
+  At most two Bots accept a general request; a named ally command addresses
+  that Bot. An accepting Bot replies through the stock team-message system.
+  Orders expire after 15 seconds and yield to urgent defense and survival.
+  Minimap requests choose passable ground inside the cell; following Bots
+  leave room behind the player. Native menu, marker and sound presentation
+  still needs acceptance on the supported Windows client.
 - Automatically generated Bot lineups contain no self-propelled artillery.
   Player vehicles and manually assigned Bot lineups remain unrestricted;
   tank destroyers are not artillery and remain in the automatic pool.

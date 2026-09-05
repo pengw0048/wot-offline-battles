@@ -165,7 +165,7 @@ class _CountingPlanner(object):
         self.build_ticks = []
         self.reset_count = 0
 
-    def build_orders(self, *unused_args):
+    def build_orders(self, *unused_args, **unused_kwargs):
         self.build_ticks.append(self.state.tick)
         return {"revision": len(self.build_ticks), "orders": []}
 
@@ -1132,6 +1132,8 @@ class ServerBotTacticsTests(unittest.TestCase):
             _contact(2, -130, 130, [11]),
             _contact(3, 130, 130, [11]),
         ]
+        for contact in contacts:
+            contact['threatened_bot_ids'] = [11]
         players = self._report(planner, contacts)
 
         order = planner.build_orders(
@@ -1141,6 +1143,335 @@ class ServerBotTacticsTests(unittest.TestCase):
         self.assertGreaterEqual(planner._crossfire_risk(
             live_bot, list(planner._contacts[1].values())), 0.35)
         self.assertEqual('crossfire_withdraw', order['combat_mode'])
+
+    def test_outgoing_firing_lanes_do_not_claim_incoming_crossfire(self):
+        planner = BotPlanner()
+        contacts = [
+            _contact(2, -130, 130, [11]),
+            _contact(3, 130, 130, [11]),
+        ]
+        players = self._report(planner, contacts)
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+        live_bot = planner._alive_bots(self.manifest, self.states)[0]
+
+        self.assertIsNone(planner._crossfire_risk(
+            live_bot, list(planner._contacts[1].values())))
+        self.assertNotIn(order['combat_mode'], (
+            'crossfire_withdraw', 'crossfire_hold'))
+
+    def test_support_requires_a_ready_weapon_and_current_firing_lane(self):
+        contact = _contact(2, 0, 380, [12], 'heavyTank')
+        player = {'id': 2, 'team': 2, 'alive': True}
+        manifest = [
+            _bot(12, 1, 0, self.route, 'mediumTank', {'support': 1.0}),
+            _bot(13, 1, 1, self.route, 'mediumTank', {'support': 1.0}),
+        ]
+        for bot in manifest:
+            bot['profile'].update({
+                'dominant_role': 'support', 'desired_range': 200.0,
+                'fire_range': 520.0,
+            })
+
+        for reason in ('no_lane', 'reloading'):
+            with self.subTest(reason=reason):
+                planner = BotPlanner()
+                states = [
+                    _weapon_state(_state(12, 1, 0, 0)),
+                    _weapon_state(_state(13, 1, 5, 0)),
+                ]
+                sample = dict(contact)
+                if reason == 'reloading':
+                    sample['shootable_by_bot_ids'] = [12, 13]
+                    states[1].update({
+                        'reload_time': 8.0,
+                        'ammo_reload_pending': True,
+                    })
+                self.assertEqual(1, planner.report_contacts(
+                    [sample], planner.known_targets(states, [player]), 1.0))
+
+                orders = dict((value['id'], value) for value in
+                              planner.build_orders(
+                                  manifest, states, [player], 1.0)['orders'])
+
+                self.assertEqual('support_hold', orders[12]['combat_mode'])
+
+    def test_focus_capacity_uses_selected_shell_damage_with_a_spare_shot(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(bot_id, 1, bot_id, self.route, 'mediumTank')
+            for bot_id in (11, 12, 13, 14)
+        ]
+        for bot in manifest:
+            bot['profile']['shells'] = [{
+                'index': 0,
+                'kind': 'ARMOR_PIERCING',
+                'penetration': 200.0,
+                'damage': 800.0,
+            }]
+        states = [
+            _weapon_state(_state(bot['id'], 1, 0, 0))
+            for bot in manifest
+        ]
+        contact = _contact(2, 0, 200, [11, 12, 13, 14])
+        contact.update({
+            'health': 1600,
+            'max_health': 2000,
+            'armor': 100.0,
+        })
+        player = {'id': 2, 'team': 2, 'alive': True}
+        self.assertEqual(1, planner.report_contacts(
+            [contact], planner.known_targets(states, [player]), 1.0))
+
+        orders = planner.build_orders(
+            manifest, states, [player], 1.0)['orders']
+
+        self.assertEqual(3, sum(order['target_id'] == 2
+                                for order in orders))
+
+    def test_flanker_uses_ally_geometry_and_leaves_one_shooter_holding(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(12, 1, 0, self.route, 'mediumTank', {
+                'support': 1.0, 'flanker': 0.1,
+            }),
+            _bot(14, 1, 1, self.route, 'mediumTank', {
+                'support': 0.1, 'flanker': 1.0,
+            }),
+        ]
+        for bot in manifest:
+            bot['profile'].update({
+                'dominant_role': 'support', 'desired_range': 160.0,
+                'fire_range': 520.0,
+            })
+        states = [
+            _weapon_state(_state(12, 1, -80, -180)),
+            _weapon_state(_state(14, 1, 0, -230)),
+        ]
+        contact = _contact(2, 0, 0, [12, 14])
+        contact.update({'health': 2000, 'max_health': 2000})
+        player = {'id': 2, 'team': 2, 'alive': True}
+        self.assertEqual(1, planner.report_contacts(
+            [contact], planner.known_targets(states, [player]), 1.0))
+
+        orders = dict((order['id'], order) for order in
+                      planner.build_orders(
+                          manifest, states, [player], 1.0)['orders'])
+
+        self.assertEqual('flank', orders[14]['combat_mode'])
+        self.assertGreater(orders[14]['move_position']['x'], 0.0)
+        self.assertNotEqual('flank', orders[12]['combat_mode'])
+        self.assertTrue(orders[12]['fire_allowed'])
+
+    def test_radio_enemy_focus_still_requires_the_recipient_firing_lane(self):
+        planner = BotPlanner()
+        contacts = [
+            _contact(2, 0, 35, [11]),
+            _contact(3, 0, 180, [11]),
+        ]
+        players = self._report(planner, contacts)
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'ATTACKENEMY',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+            'target_kind': 'player',
+            'target_id': 3,
+        }
+
+        commanded = planner.build_orders(
+            self.manifest, self.states, players, 1.0,
+            team_orders=[team_order])['orders'][0]
+        self.assertEqual(3, commanded['target_id'])
+        self.assertEqual('ATTACKENEMY', commanded['team_command'])
+
+        blocked = dict(contacts[1])
+        blocked['shootable_by_bot_ids'] = []
+        self.assertEqual(1, planner.report_contacts(
+            [blocked], planner.known_targets(self.states, players), 1.1))
+        fallback = planner.build_orders(
+            self.manifest, self.states, players, 1.1,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual(2, fallback['target_id'])
+
+    def test_radio_movement_orders_use_validated_live_positions(self):
+        issuer = {
+            'id': 1, 'team': 1, 'alive': True, 'world_pose': True,
+            'x': 45.0, 'y': 2.0, 'z': 60.0,
+        }
+        base_order = {
+            'command_id': '1:1:1',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+        cases = (
+            ('FOLLOWME', 'team_follow',
+             {'x': 45.0, 'y': 2.0, 'z': 42.0}),
+            ('STOP', 'team_stop',
+             {'x': 0.0, 'y': 0.0, 'z': 0.0}),
+            ('TURNBACK', 'team_turnback',
+             {'x': 0.0, 'y': 0.0, 'z': 0.0}),
+        )
+
+        for command, mode, point in cases:
+            with self.subTest(command=command):
+                planner = BotPlanner()
+                team_order = dict(base_order, command=command)
+                order = planner.build_orders(
+                    self.manifest, self.states, [issuer], 1.0,
+                    team_orders=[team_order])['orders'][0]
+
+                self.assertEqual(mode, order['combat_mode'])
+                self.assertEqual(point, order['move_position'])
+
+    def test_radio_order_cannot_cross_team_or_invalid_tick_window(self):
+        invalid_orders = [{
+            'command_id': '1:1:1',
+            'command': 'STOP',
+            'team': team,
+            'issuer_id': 1,
+            'issued_tick': issued,
+            'expires_tick': expires,
+            'recipient_bot_ids': [11],
+        } for team, issued, expires in ((2, 100, 200), (1, 200, 200))]
+
+        order = BotPlanner().build_orders(
+            self.manifest, self.states, [], 1.0,
+            team_orders=invalid_orders)['orders'][0]
+
+        self.assertEqual('route', order['combat_mode'])
+        self.assertNotIn('team_command', order)
+
+    def test_radio_back_to_base_uses_the_canonical_capture_base(self):
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'BACKTOBASE',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+        defense = {
+            'capture_bases': {
+                '1': [{'id': '1:0', 'x': -25.0, 'y': 0.0, 'z': -450.0}],
+            },
+        }
+
+        order = BotPlanner().build_orders(
+            self.manifest, self.states, [], 1.0, defense,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual('team_back_to_base', order['combat_mode'])
+        self.assertEqual(
+            {'x': -25.0, 'y': 0.0, 'z': -450.0},
+            order['move_position'])
+
+    def test_radio_cell_order_is_forwarded_without_inventing_a_world_point(self):
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'ATTENTIONTOCELL',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+            'cell_index': 38,
+        }
+
+        order = BotPlanner().build_orders(
+            self.manifest, self.states, [], 1.0,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual('ATTENTIONTOCELL', order['team_command'])
+        self.assertEqual(38, order['team_command_cell_index'])
+        self.assertEqual('route', order['combat_mode'])
+
+    def test_radio_cell_order_moves_to_the_proved_grid_cell_center(self):
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'ATTENTIONTOCELL',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+            'cell_index': 38,
+        }
+        defense = {'arena_bounds': [-500.0, -500.0, 500.0, 500.0]}
+
+        order = BotPlanner().build_orders(
+            self.manifest, self.states, [], 1.0, defense,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual('team_attention_cell', order['combat_mode'])
+        self.assertEqual(
+            {'x': -150.0, 'y': 0.0, 'z': -350.0},
+            order['move_position'])
+        self.assertEqual(
+            [-200.0, -400.0, -100.0, -300.0],
+            order['move_area_bounds'])
+
+    def test_radio_does_not_override_local_survival(self):
+        planner = BotPlanner()
+        contact = _contact(2, 0, 150, [11])
+        players = self._report(planner, [contact])
+        self.states[0]['health'] = 100
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'STOP',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual('low_health_retreat', order['combat_mode'])
+        self.assertEqual('STOP', order['team_command'])
+
+    def test_radio_does_not_override_an_urgent_base_responder(self):
+        defense = {
+            'bases': {'1': [
+                {'id': '1:0', 'x': 0.0, 'y': 0.0, 'z': -100.0},
+            ]},
+            'states': {'1': {
+                'points': 20, 'time_left': 60.0,
+                'invaders': 1, 'stopped': False,
+            }},
+            'contributors': {'1': []},
+            'capture_bases': {'1': [
+                {'id': '1:0', 'x': 0.0, 'y': 0.0, 'z': -100.0},
+            ]},
+        }
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'STOP',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+
+        order = BotPlanner().build_orders(
+            self.manifest, self.states, [], 1.0, defense,
+            team_orders=[team_order])['orders'][0]
+
+        self.assertEqual('base_defense', order['combat_mode'])
+        self.assertEqual('STOP', order['team_command'])
 
     def test_nearby_ally_changes_cautious_support_advance_score(self):
         contact = _contact(2, 0, 380, [12, 13], 'heavyTank')
@@ -1696,6 +2027,77 @@ class ServerBotArtilleryTests(unittest.TestCase):
         self.assertEqual('b', orders[13]['route_id'])
         self.assertEqual(1, sum(
             orders[bot_id]['route_id'] == 'b' for bot_id in (12, 14)))
+
+    def test_immobile_line_holders_count_but_cannot_be_route_donors(self):
+        source = _route('source', [
+            (-100, 0, False), (-100, 100, False), (-100, 500, False),
+        ])
+        target = _route('target', [
+            (100, 0, False), (100, 100, False), (100, 500, False),
+        ])
+        enemy = {'id': 2, 'team': 2, 'alive': True}
+        conditions = (
+            ('no_pose', {'world_pose': False}, [11], None),
+            ('engine', {'critical': {'destroyed': ['engineHealth']}},
+             [11], 12),
+            ('left_track', {
+                'critical': {'destroyed': ['leftTrackHealth']}},
+             [11], 12),
+            ('right_track', {
+                'critical': {'destroyed': ['rightTrackHealth']}},
+             [11], 12),
+            ('damaged_engine', {'critical': {
+                'destroyed': [],
+                'devices': [{
+                    'name': 'engineHealth', 'state': 'critical',
+                }],
+            }}, [11], 11),
+            ('damaged_track', {'critical': {
+                'destroyed': [],
+                'devices': [{
+                    'name': 'rightTrackHealth', 'state': 'critical',
+                }],
+            }}, [11], 11),
+            ('track_without_lane', {
+                'critical': {'destroyed': ['leftTrackHealth']}},
+             [], None),
+        )
+
+        for unused_name, state_change, observers, donor_id in conditions:
+            with self.subTest(condition=unused_name):
+                planner = BotPlanner()
+                manifest = [
+                    _bot(11, 1, 0, source, 'mediumTank', {
+                        'support': 1.0, 'flanker': 1.0,
+                    }),
+                    _bot(12, 1, 1, source, 'heavyTank', {
+                        'support': 0.0, 'flanker': 0.0,
+                        'brawler': 1.0,
+                    }),
+                    _bot(13, 1, 2, target, 'mediumTank', {
+                        'support': 0.5,
+                    }),
+                ]
+                states = [
+                    _weapon_state(_state(11, 1, -100, 0)),
+                    _weapon_state(_state(12, 1, -100, 0)),
+                    _weapon_state(_state(13, 1, 100, 0)),
+                ]
+                states[0].update(state_change)
+                contact = _contact(2, 100, 250, observers)
+                self.assertEqual(1, planner.report_contacts(
+                    [contact], planner.known_targets(states, [enemy]), 1.0))
+
+                orders = dict((order['id'], order) for order in
+                              planner.build_orders(
+                                  manifest, states, [enemy], 1.0)['orders'])
+
+                self.assertEqual(
+                    'target' if donor_id == 11 else 'source',
+                    orders[11]['route_id'])
+                self.assertEqual(
+                    'target' if donor_id == 12 else 'source',
+                    orders[12]['route_id'])
 
     def test_rebalance_keeps_scouts_off_an_incompatible_heavy_lane(self):
         planner = BotPlanner()
