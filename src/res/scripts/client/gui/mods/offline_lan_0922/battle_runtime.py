@@ -8534,8 +8534,44 @@ class BattleRuntime(object):
             return None
         return getattr(vehicle, 'appearance', None)
 
-    def _present_hit_impulse(self, event, target_record, direction,
-                             effects_descr):
+    def _decoded_hit_impulse_direction(self, event, target_record):
+        """Return retail's decoded armour-segment direction in world space."""
+        if 'damage_sticker' not in event:
+            return None
+        target = self._server_entity(target_record.get('engine_id'))
+        appearance = getattr(target, 'appearance', None)
+        descriptor = getattr(target, 'typeDescriptor', None)
+        compound = getattr(appearance, 'compoundModel', None)
+        if (target is None or not getattr(target, 'isStarted', False) or
+                descriptor is None or compound is None):
+            return None
+        try:
+            from VehicleEffects import DamageFromShotDecoder
+            component_name, unused_sticker, segment_start, segment_end = \
+                DamageFromShotDecoder.decodeSegment(
+                    event['damage_sticker'], descriptor)
+            if (not component_name or segment_start is None or
+                    segment_end is None or segment_start == segment_end):
+                return None
+            component_node = compound.node(component_name)
+            if component_node is None:
+                return None
+            local_direction = segment_end - segment_start
+            if local_direction.length <= 0.001:
+                return None
+            direction = self._runtime.math.Matrix(
+                component_node).applyVector(local_direction)
+            direction = self._runtime.math.Vector3(direction)
+            if direction.length <= 0.001:
+                return None
+            direction.normalise()
+            return direction
+        except Exception as error:
+            self._warn_optional_failure(
+                'vehicle hit impulse', error, disable=False)
+            return None
+
+    def _present_hit_impulse(self, event, target_record, effects_descr):
         """Present retail's hull shot impulse on one vehicle this shot hit.
 
         Retail reaches ``CompoundAppearance.receiveShotImpulse`` only inside
@@ -8553,13 +8589,24 @@ class BattleRuntime(object):
         impulse = _number(_field(effects_descr, 'targetImpulse', 0.0))
         if impulse <= 0.0:
             return False
+        direction = self._decoded_hit_impulse_direction(
+            event, target_record)
+        if direction is None:
+            return False
         if target_record.get('local'):
-            # The player's own tank is a fully stock, filter-attached entity,
-            # but nothing in this runtime routes retail's server-side
-            # showDamageFromShot to it, so it needs the same presentation.
+            # The matching local stock-animator rebind owns this capability.
+            # Until it is proven, receiveShotImpulse can write through an
+            # unrelated or stale native animator.
+            appearance = self._local_vehicle_appearance()
+            animator = getattr(self, '_local_swinging_animator', None)
+            if (animator is None or
+                    not self._optional_feature_enabled(
+                        'local body swinging') or
+                    getattr(appearance, 'swingingAnimator', None) is not
+                    animator):
+                return False
             presented = present_shot_impulse(
-                self._runtime.math, self._local_vehicle_appearance(),
-                direction, impulse)
+                self._runtime.math, appearance, direction, impulse)
         elif target_record.get('native_remote'):
             present = getattr(
                 self._remote_factory, 'present_hit_impulse', None)
@@ -8659,7 +8706,7 @@ class BattleRuntime(object):
         # failed terrain effect must not swallow the hull reaction.
         self._run_optional_feature(
             'vehicle hit impulse', self._present_hit_impulse,
-            (event, target_record, direction, effects_descr))
+            (event, target_record, effects_descr))
         # Retail presents an HE near-miss through
         # Vehicle.showDamageFromExplosion/armorSplashHit.  Direct hits keep
         # the three protocol outcomes: ricochet, resisted and pierced.
