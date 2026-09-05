@@ -100,7 +100,7 @@ class CombatRulesTests(unittest.TestCase):
 
         factor = combat_rules.sample_penetration_factor(low_roll)
         self.assertEqual(0.75, factor)
-        self.assertEqual([(1.0, 0.1)], draws)
+        self.assertEqual([(1.0, 1.0 / 12.0)], draws)
         self.assertEqual(
             30.0, combat_rules.sampled_piercing(
                 _shot(piercing=(40.0, 40.0)), 10.0, factor, 0.0))
@@ -166,7 +166,7 @@ class CombatRulesTests(unittest.TestCase):
             random_gauss=one_roll)
 
         self.assertEqual(2, result[0])
-        self.assertEqual([(1.0, 0.1)], draws)
+        self.assertEqual([(1.0, 1.0 / 12.0)], draws)
 
     def test_two_caliber_normalization_has_an_exact_boundary(self):
         armor = 60.0
@@ -364,10 +364,10 @@ class CombatRulesTests(unittest.TestCase):
 
         low = combat_rules.damage(
             shot, 2, 100.0,
-            random_gauss=lambda mean, sigma: mean - 2.5 * sigma)
+            random_gauss=lambda mean, sigma: mean - 3.0 * sigma)
         high = combat_rules.damage(
             shot, 2, 100.0,
-            random_gauss=lambda mean, sigma: mean + 2.5 * sigma)
+            random_gauss=lambda mean, sigma: mean + 3.0 * sigma)
 
         self.assertEqual(300, low)
         self.assertEqual(500, high)
@@ -382,10 +382,10 @@ class CombatRulesTests(unittest.TestCase):
                 shot.shell.damage = (400.0, 165.0)
                 low = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_gauss=lambda mean, sigma: mean - 2.5 * sigma)
+                    random_gauss=lambda mean, sigma: mean - 3.0 * sigma)
                 high = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_gauss=lambda mean, sigma: mean + 2.5 * sigma)
+                    random_gauss=lambda mean, sigma: mean + 3.0 * sigma)
 
                 self.assertEqual(300, low)
                 self.assertEqual(500, high)

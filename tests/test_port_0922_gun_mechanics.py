@@ -244,7 +244,7 @@ class GunMechanicsParityTests(unittest.TestCase):
 
         self.assertEqual(2.0, state.reload_time)
 
-    def test_scatter_uses_0922_two_sigma_barrel_plane_distribution(self):
+    def test_scatter_uses_legacy_two_sigma_barrel_plane_distribution(self):
         state = GunState(_descriptor())
         calls = []
 

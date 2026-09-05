@@ -5303,7 +5303,7 @@ class BattleProjectileTests(unittest.TestCase):
                     mock.patch('random.uniform',
                                side_effect=lambda low, high: low), \
                     mock.patch('random.gauss',
-                               side_effect=lambda mean, sigma: mean - 2.5 * sigma), \
+                               side_effect=lambda mean, sigma: mean - 3.0 * sigma), \
                     mock.patch('random.random', return_value=0.0):
                 effect = battle._projectile_direct_effect(
                     meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
@@ -5494,7 +5494,7 @@ class BattleProjectileTests(unittest.TestCase):
                 else:
                     self.assertEqual(potential, effect['potential_damage'])
                 self.assertEqual(
-                    (390.0, 39.0), gaussian.call_args.args)
+                    (390.0, 32.5), gaussian.call_args.args)
 
     def test_overlay_edited_shell_saturates_instead_of_losing_the_shot(self):
         battle, unused_bigworld = _battle()

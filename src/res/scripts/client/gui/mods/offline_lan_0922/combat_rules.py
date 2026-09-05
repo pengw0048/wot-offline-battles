@@ -604,11 +604,15 @@ def he_blast_contact(shot, burst, start, end, collisions, rolled_damage,
 
 
 def sample_shell_value(mean, random_gauss=None):
-    """Reconstruct the publicly described +/-25%, 2.5-sigma shell roll.
+    """Reconstruct the post-8.6 +/-25%, three-sigma shell roll.
 
     WG described penetration and vehicle damage as normal, not uniform:
-    https://wot-news.com/track/post/eu/Overlord/1298631177
+    https://wot-news.com/track/post/ru/HuKoguM/1369231089
+    https://worldoftanks.com/en/news/general-news/86-update-notes/
     https://wot-news.com/track/post/eu/MrConway/1497292760
+    The 8.6 announcement explicitly changes damage/penetration from two to
+    three sigma; the release notes confirm fewer extreme rolls. The older
+    2011 recollection of 2.5 sigma must not override this versioned change.
     Those statements do not specify outlier handling. Conditional resampling
     is an explicit reconstruction choice, not a recovered #1513 server ABI;
     it preserves the normal density inside the stated interval without
@@ -621,7 +625,7 @@ def sample_shell_value(mean, random_gauss=None):
         return 0.0
     sampler = random.gauss if random_gauss is None else random_gauss
     minimum, maximum = mean * 0.75, mean * 1.25
-    sigma = mean * 0.25 / 2.5
+    sigma = mean * 0.25 / 3.0
     while True:
         value = float(sampler(mean, sigma))
         if value != value or abs(value) == float('inf'):

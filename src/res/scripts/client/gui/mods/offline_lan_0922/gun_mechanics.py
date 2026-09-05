@@ -5,8 +5,9 @@ from __future__ import print_function
 The source implementation keeps this state inside ``offline_battle.py``.
 These methods preserve its descriptor reads, bloom/convergence formulas,
 empty-at-countdown start and clip transitions. Shot dispersion uses the
-bounded two-sigma model documented for #1513 instead of the unbounded 0.8.2
-offline approximation.
+bounded two-sigma model described for 8.6 instead of the unbounded 0.8.2
+offline approximation. The later 9.6 central-zone adjustment remains
+unimplemented; the radial probability law is not verified #1513 behaviour.
 """
 
 import math
@@ -515,12 +516,14 @@ class GunState(object):
                 dispersion_angle=None, uniform=None):
         """Scatter inside the current #1513 aiming cone.
 
-        Retail uses a radial normal distribution with the aiming circle as a
-        hard boundary. Since 8.6 the circle is the two-sigma limit and an
-        outlying normal sample is redistributed from the centre to the edge
-        instead of being left outside or piled on its edge. 9.6 subsequently
-        reweighted the innermost zone, but the exact server-side zone table is
-        not present in the #1513 client.
+        The retained radial normal model uses the aiming circle as a hard
+        boundary. In the published 8.6 model the circle is the two-sigma
+        limit and an outlying normal sample is redistributed from the centre
+        to the edge instead of being left outside or piled on its edge. 9.6
+        reweighted the innermost zone from about 16% to 10%. That adjustment
+        is NOT implemented here: the available public diagrams and client
+        resources do not provide its full sampling law. Preserving the cone
+        boundary does not establish retail weak-spot hit probabilities.
 
         The former port added three unbounded ``dispersion / 3`` samples to
         the world axes. About 1.1 percent of its lateral samples landed beyond

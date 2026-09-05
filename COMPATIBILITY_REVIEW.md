@@ -385,18 +385,35 @@ required to release a projectile-synchronized native order.
 
 Shell penetration and vehicle-damage rolls use a reconstruction of the public
 normal-distribution rule. The former uniform draw inside +/-25% overproduced
-both high and low rolls. [Overlord's February 2011 answer](https://wot-news.com/track/post/eu/Overlord/1298631177)
-describes normal damage, penetration and dispersion with a 2.5-sigma interval;
+both high and low rolls. [WG's May 2013 explanation for 8.6](https://wot-news.com/track/post/ru/HuKoguM/1369231089)
+explicitly changes damage and penetration from two to three sigma;
+the [North American 8.6 release notes](https://worldoftanks.com/en/news/general-news/86-update-notes/)
+confirm the reduction of extreme damage and penetration rolls. That entry is
+absent from the European release-notes page. The earlier 2011 recollection
+of 2.5 sigma does not establish the law for a client released after 8.6.
 [MrConway's June 2017 answer](https://wot-news.com/track/post/eu/MrConway/1497292760)
 still explicitly describes nonuniform penetration and damage. Accordingly,
 the shell value has mean equal to its descriptor value, standard deviation
-equal to 10% of that value, and limits of +/-25%. Out-of-interval samples are
-redrawn. **Resampling is an explicit reconstruction choice:** neither public
-answer identifies the outlier algorithm, and the 2011 sigma value is not
-exact #1513 server evidence. No claim of proprietary-server RNG equivalence
+equal to one twelfth of that value, and limits of +/-25%. Out-of-interval
+samples are redrawn. **Resampling is an explicit reconstruction choice:**
+the published three-sigma cutoff does not specify the generator's exact
+outlier algorithm. The versioned announcement and release notes support this
+reconstruction, but do not expose the proprietary #1513 server. No claim of
+proprietary-server RNG equivalence
 follows from local distribution tests. This change covers the armour-damage
 channel even when a track material selects it; the separate devices-damage
 channel and aiming dispersion retain their existing laws.
+
+Aiming dispersion is a separate unresolved version gap. The implemented
+radial two-sigma law follows the [8.6 accuracy explanation](https://worldoftanks.com/en/news/general-news/some-changes-coming-86-update/),
+including uniform radial redistribution of outliers. It gives about 16.3%
+of shots within the innermost tenth of the radius. The [9.6 accuracy update](https://worldoftanks.com/en/news/general-news/9-6-accuracy-changes/)
+reduces central hits; the [retained Russian support explanation](https://lesta.ru/support/ru/products/mt/article/35718/)
+states the historical change from 16% to 10%. The official 3,000-shot diagrams
+do not publish a complete sampling law. The 9.6 reweighting is not implemented;
+the current scatter model must not be described as verified #1513 accuracy.
+Matching the client-owned cone angle and armour preview cannot establish
+matching weak-spot hit probabilities. No guessed ring weights have been added.
 
 One accepted penetration factor remains frozen across range, obstacles,
 ordered vehicle layers and a ricochet continuation. AP/APCR continuations

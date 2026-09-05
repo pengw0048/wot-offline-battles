@@ -1534,7 +1534,7 @@ class TrackWheelDamageTests(unittest.TestCase):
 
     def setUp(self):
         armor_roll = mock.patch(
-            'random.gauss', side_effect=lambda mean, sigma: mean - 2.5 * sigma)
+            'random.gauss', side_effect=lambda mean, sigma: mean - 3.0 * sigma)
         armor_roll.start()
         self.addCleanup(armor_roll.stop)
         self.player = types.SimpleNamespace(

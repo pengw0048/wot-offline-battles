@@ -282,7 +282,7 @@ class SolidHitPipelineTests(unittest.TestCase):
         self.assertEqual(2, effect['shot_result'])
         self.assertEqual(int(DAMAGE_ROLL), effect['damage'])
         self.assertEqual(int(DAMAGE_ROLL), effect['potential_damage'])
-        roll.assert_called_once_with(300.0, 30.0)
+        roll.assert_called_once_with(300.0, 25.0)
         self.assertTrue(effect['structural_armor_hit'])
         self.assertIsNotNone(lan_client._strict_projectile_effect(effect))
         contact = terminal_data['armor_contact']

@@ -23,8 +23,8 @@ def _normal_cdf(value):
 
 
 def _factor_cdf(value):
-    lower, upper = _normal_cdf(-2.5), _normal_cdf(2.5)
-    return (_normal_cdf((value - 1.0) / 0.1) - lower) / (upper - lower)
+    lower, upper = _normal_cdf(-3.0), _normal_cdf(3.0)
+    return (_normal_cdf((value - 1.0) * 12.0) - lower) / (upper - lower)
 
 
 class ShellRandomizationTests(unittest.TestCase):
@@ -42,14 +42,14 @@ class ShellRandomizationTests(unittest.TestCase):
                 self.assertAlmostEqual(expected, observed / len(factors),
                                        delta=0.004)
         # Old uniform sampling gives 20%, whereas the specified normal
-        # interval gives about 38.8%. This catches a flat RNG regression.
+        # interval gives about 45.3%. This catches a flat RNG regression.
         central = sum(0.95 <= value <= 1.05 for value in factors)
-        self.assertGreater(central / len(factors), 0.37)
+        self.assertGreater(central / len(factors), 0.44)
 
     def test_outliers_are_resampled_without_endpoint_pileup(self):
         draws = mock.Mock(side_effect=(0.5, 1.5, 1.02))
         self.assertEqual(1.02, combat_rules.sample_penetration_factor(draws))
-        self.assertEqual([mock.call(1.0, 0.1)] * 3, draws.call_args_list)
+        self.assertEqual([mock.call(1.0, 1.0 / 12.0)] * 3, draws.call_args_list)
         for invalid in (float('inf'), float('nan')):
             with self.assertRaises(ValueError):
                 combat_rules.sample_shell_value(invalid)
@@ -65,7 +65,7 @@ class ShellRandomizationTests(unittest.TestCase):
                                side_effect=(200.0, 600.0, 333.7)) as draw:
             rolled = combat_rules.shell_damage_roll(shot)
         self.assertEqual(333.7, rolled)
-        self.assertEqual([mock.call(400.0, 40.0)] * 3, draw.call_args_list)
+        self.assertEqual([mock.call(400.0, 400.0 / 12.0)] * 3, draw.call_args_list)
         with mock.patch.object(combat_rules.random, 'gauss',
                                side_effect=AssertionError('must reuse roll')):
             self.assertEqual(333, combat_rules.damage(
@@ -75,7 +75,7 @@ class ShellRandomizationTests(unittest.TestCase):
         with mock.patch.object(combat_rules.random, 'gauss',
                                return_value=333.7) as draw:
             self.assertEqual(333.7, device_damage.module_damage_roll(shell, 0))
-        draw.assert_called_once_with(400.0, 40.0)
+        draw.assert_called_once_with(400.0, 400.0 / 12.0)
 
     def test_he_direct_and_splash_damage_draw_from_the_same_distribution(self):
         shot = {'shell': {'damage': (400.0, 165.0),
@@ -86,7 +86,7 @@ class ShellRandomizationTests(unittest.TestCase):
                 damage = (combat_rules.damage(shot, 1, 100.0) if direct else
                           combat_rules.he_splash_damage(shot, 100.0, 0.0))
                 self.assertEqual(70, damage)
-                draw.assert_called_once_with(400.0, 40.0)
+                draw.assert_called_once_with(400.0, 400.0 / 12.0)
 
     def test_type59_track_and_sloped_hull_show_both_probability_errors(self):
         # Descriptor-derived Type 59 values: 20 mm track ignores hit angle,
