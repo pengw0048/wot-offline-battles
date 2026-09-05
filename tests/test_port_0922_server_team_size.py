@@ -272,6 +272,42 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertEqual(2, one.team)
         self.assertEqual(0, one.slot)
 
+    def test_automatic_join_randomizes_an_equal_choice(self):
+        state = BattleState(team1_size=2, team2_size=2)
+
+        with mock.patch(
+                'lan_battle_server.random.choice', return_value=2) as choose:
+            player, error = state.add_player(
+                _Connection(), ('10.0.0.1', 1001), _hello(1))
+
+        self.assertIsNone(error)
+        self.assertEqual(2, player.team)
+        choose.assert_any_call([1, 2])
+
+    def test_waiting_player_can_restore_automatic_team_selection(self):
+        state = BattleState(team1_size=3, team2_size=3)
+        player, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
+        self.assertIsNone(error)
+        teammate, error = state.add_player(
+            _Connection(), ('10.0.0.2', 1002), _hello(2, 1))
+        self.assertIsNone(error)
+        opponent, error = state.add_player(
+            _Connection(), ('10.0.0.3', 1003), _hello(3, 2))
+        self.assertIsNone(error)
+
+        with mock.patch(
+                'lan_battle_server.random.choice', return_value=2) as choose:
+            accepted, error = state.select_team(player.player_id, 0)
+
+        self.assertTrue(accepted)
+        self.assertIsNone(error)
+        self.assertEqual(2, player.team)
+        self.assertEqual(1, player.slot)
+        choose.assert_called_once_with([1, 2])
+        self.assertEqual(1, teammate.team)
+        self.assertEqual(2, opponent.team)
+
     def test_host_can_resize_each_waiting_team_without_restarting(self):
         state = BattleState(team1_size=3, team2_size=4)
         _attach_worker(state)

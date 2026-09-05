@@ -5693,6 +5693,10 @@ class LANClientTests(unittest.TestCase):
         self.assertEqual(
             {'type': 'select_team', 'team': 2},
             client._outbound_queue[-1][1])
+        self.assertTrue(client.select_team(0))
+        self.assertEqual(
+            {'type': 'select_team', 'team': 0},
+            client._outbound_queue[-1][1])
 
     def test_guest_cannot_request_start_or_select_map(self):
         _, client, _, _ = self._client()

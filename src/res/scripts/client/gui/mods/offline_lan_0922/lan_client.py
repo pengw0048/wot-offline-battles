@@ -1932,9 +1932,9 @@ class LANClient(object):
         """Request a waiting-room team; the server owns the capacity check."""
         team = _team_choice(team, None)
         if (not self.ready or self.phase != 'waiting' or
-                team not in (1, 2) or not self.has_team_selection()):
+                team not in (0, 1, 2) or not self.has_team_selection()):
             return False
-        if team == self.team:
+        if team in (1, 2) and team == self.team:
             return True
         return self._send({'type': 'select_team', 'team': team})
 
@@ -4482,7 +4482,7 @@ class LANClient(object):
             team_sizes = _team_sizes(
                 message.get('team_sizes'), None, self.team_sizes)
             if (round_id is None or round_id != self.round_id or
-                    team not in (1, 2) or
+                    team not in (0, 1, 2) or
                     code not in ('team_full', 'invalid_team', 'not_waiting') or
                     team_sizes is None):
                 self.last_error = 'invalid team_denied message'
