@@ -30,6 +30,13 @@ def valued_element(value_type, value, children):
                              children=children))
 
 
+def _gold_price(amount):
+    """One <price><gold/></price> the way #1513 ships a premium vehicle."""
+    return valued_element(
+        packed.TYPE_STRING, str(amount).encode("ascii"),
+        [(b"gold", scalar(packed.TYPE_STRING, b""))])
+
+
 def child(parent, name):
     encoded = name.encode("utf-8")
     return next(value for current, value in parent.children
@@ -228,14 +235,23 @@ class VehicleOverlayTest(unittest.TestCase):
                 (b"shortUserString", scalar(
                     packed.TYPE_STRING, b"#ussr_vehicles:R11_MS-1_short")),
                 (b"tags", scalar(packed.TYPE_STRING, b"lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 1)),
+                (b"price", scalar(packed.TYPE_INTEGER, 0)),
             ])),
             (b"R12_Test", element([
                 (b"tags", scalar(
                     packed.TYPE_STRING, b"secret lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 8)),
+                # A gold price is one number under a <gold/> marker, exactly
+                # as the client reads it, and this one the shop never sold.
+                (b"price", _gold_price(12500)),
+                (b"notInShop", scalar(packed.TYPE_STRING, b"true")),
             ])),
             (b"Observer", element([
                 (b"tags", scalar(
                     packed.TYPE_STRING, b"secret observer lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 4)),
+                (b"price", _gold_price(750)),
             ])),
         ])
         return {
@@ -710,6 +726,58 @@ class VehicleOverlayTest(unittest.TestCase):
         self.assertEqual(
             b"0 -8 1 -8", self._value(
                 self.SIEGE_MODE, siege_pitch["fieldPath"]))
+
+    def test_the_roster_carries_the_shop_price_the_client_discards(self):
+        """items.vehicles parses these and then resets _g_prices to None."""
+        choices = vehicle_overlays.list_vehicle_choices(self.game)
+        ms1 = next(choice for choice in choices
+                   if choice["vehicle"] == "R11_MS-1")
+
+        self.assertNotIn("gold", ms1)
+
+        with zipfile.ZipFile(os.path.join(
+                    self.game, *vehicle_overlays.SOURCE_PACKAGE.split("/")), "r") as archive:
+            counts = dict((info.filename, 1) for info in archive.infolist())
+            roster = vehicle_overlays._vehicle_roster_from_archive(
+                archive, counts)
+        by_name = dict((record["vehicle"], record) for record in roster)
+
+        self.assertEqual(0, by_name["R11_MS-1"]["gold"])
+        self.assertEqual(0, by_name["R11_MS-1"]["credits"])
+        self.assertEqual(1, by_name["R11_MS-1"]["level"])
+        self.assertFalse(by_name["R11_MS-1"]["notInShop"])
+        self.assertEqual(12500, by_name["R12_Test"]["gold"])
+        self.assertEqual(0, by_name["R12_Test"]["credits"])
+        self.assertEqual(8, by_name["R12_Test"]["level"])
+        self.assertTrue(by_name["R12_Test"]["notInShop"])
+
+    def test_the_gold_shop_lists_every_vehicle_priced_in_gold(self):
+        rows = vehicle_overlays.list_gold_vehicles(self.game)
+
+        # Highest tier first, which is the order a shop is read in.
+        self.assertEqual(
+            ["ussr:R12_Test", "ussr:Observer"],
+            [row["name"] for row in rows])
+        self.assertEqual(12500, rows[0]["gold"])
+        self.assertEqual(8, rows[0]["level"])
+        self.assertTrue(rows[0]["notInShop"])
+        self.assertFalse(rows[1]["notInShop"])
+
+    def test_the_gold_shop_offers_what_the_editor_refuses_to_touch(self):
+        """A vehicle the data editor will not rewrite is still ownable.
+
+        ``selectable`` keeps native construction hazards out of an editor that
+        changes a vehicle's data.  Buying one is a different question, and the
+        client answers it when it builds the record.
+        """
+        choices = vehicle_overlays.list_vehicle_choices(self.game)
+
+        self.assertNotIn(
+            "Observer", [choice["vehicle"] for choice in choices])
+        self.assertIn(
+            "Observer",
+            [row["vehicle"]
+             for row in vehicle_overlays.list_gold_vehicles(self.game)])
 
     def test_vehicle_browser_resolves_shared_topology_and_impact(self):
         choices = vehicle_overlays.list_vehicle_choices(self.game)

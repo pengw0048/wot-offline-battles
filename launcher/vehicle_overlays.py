@@ -26,6 +26,7 @@ import zipfile
 
 try:
     import packed_xml
+    import vehicle_prices
 except ImportError:
     # Source checkouts run the launcher from ``launcher``.  The packaged build
     # adds this same tools directory to PyInstaller's analysis path.
@@ -35,6 +36,7 @@ except ImportError:
     if _TOOLS_ROOT not in sys.path:
         sys.path.insert(0, _TOOLS_ROOT)
     import packed_xml
+    import vehicle_prices
 
 try:
     from . import core
@@ -770,6 +772,54 @@ def list_vehicle_choices(game_root):
     return choices
 
 
+def list_gold_vehicles(game_root):
+    """List every vehicle the installed client prices in gold.
+
+    #1513 ships 196 of them and marks 145 ``notInShop``: reward and event
+    tanks the retail shop never sold and that no tech tree leads to. Offline
+    they are exactly as reachable as the rest, which is why this reads the
+    whole roster rather than the shop's own subset.
+
+    The ``selectable`` filter the vehicle editor uses is deliberately not
+    applied. It keeps native construction hazards out of an editor that
+    rewrites a vehicle's data; owning one is a different question, and the
+    client answers it when it builds the record.
+    """
+    status, package_path = _require_target(game_root)
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            counts = {}
+            for info in archive.infolist():
+                counts[info.filename] = counts.get(info.filename, 0) + 1
+            roster = _vehicle_roster_from_archive(archive, counts)
+    except VehicleOverlayError:
+        raise
+    except (IOError, OSError, KeyError, TypeError, ValueError,
+            zipfile.BadZipFile) as error:
+        raise VehicleOverlayError(
+            "The original vehicle roster is unreadable: %s" % error)
+    translators = {}
+    vehicles = []
+    for record in roster:
+        if record["gold"] <= 0:
+            continue
+        nation = record["nation"]
+        if nation not in translators:
+            translators[nation] = _vehicle_translations(
+                status["path"], nation)
+        vehicles.append({
+            "nation": nation,
+            "vehicle": record["vehicle"],
+            "name": "%s:%s" % (nation, record["vehicle"]),
+            "label": _vehicle_label(record, translators[nation]),
+            "level": record["level"],
+            "gold": record["gold"],
+            "notInShop": record["notInShop"],
+        })
+    return sorted(vehicles, key=lambda row: (
+        -row["level"], row["nation"], row["vehicle"]))
+
+
 def _vehicle_translations(game_root, nation):
     """Load one stock vehicle catalog, falling back to internal names."""
     relative = "res/text/LC_MESSAGES/%s_vehicles.mo" % nation
@@ -877,6 +927,13 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
                             _scalar_text(values[0]))
                     except VehicleOverlayError:
                         pass
+            price = vehicle_prices.read_price(value.value)
+            level = 0
+            level_values = [child for name, child in value.value.children
+                            if name == b"level"]
+            if len(level_values) == 1:
+                level = vehicle_prices.number(
+                    vehicle_prices.text(level_values[0].value))
             record = {
                 "nation": roster_nation,
                 "vehicle": vehicle,
@@ -884,6 +941,12 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
                 "tags": tuple(tags.split()),
                 "userString": user_strings.get("userString", ""),
                 "shortUserString": user_strings.get("shortUserString", ""),
+                "level": level,
+                # The shop price the client parses at startup and then
+                # discards, in the client's own two currencies.
+                "credits": price[0] if price else 0,
+                "gold": price[1] if price else 0,
+                "notInShop": bool(price[2]) if price else False,
             }
             # ``secret`` hides vehicles from the retail tech tree, but it is
             # not a data-safety boundary for this local editor. Keep only

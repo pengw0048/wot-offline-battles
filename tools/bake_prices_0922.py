@@ -27,6 +27,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import vehicle_prices
 from packed_xml import read_packed_xml, TYPE_ELEMENT
 
 
@@ -157,55 +158,14 @@ def _text(value):
             if isinstance(value, bytes) else str(value))
 
 
-def _children(element):
-    for name, value in (element.children or ()):
-        name = _text(name)
-        # The packed dictionary carries the XML namespace declarations too.
-        if ':' in name:
-            continue
-        yield name, value
-
-
-def _element(value):
-    return (value.value
-            if value is not None and value.value_type == TYPE_ELEMENT
-            else None)
-
-
-def _own_text(element):
-    return _text(getattr(element.value, 'value', b'')).strip()
-
-
-def _number(text):
-    if not text:
-        return 0
-    return int(round(float(text)))
-
-
-def _read_price(section):
-    """Return ``(credits, gold, not_in_shop)`` for one definition section.
-
-    ``<price>`` is a credit amount, unless it carries a ``<gold/>`` marker in
-    which case the same number is a gold amount. This is exactly how #1513
-    decides that a vehicle is premium while reading ``list.xml``.
-    """
-    price = None
-    not_in_shop = False
-    for name, value in _children(section):
-        if name == 'price':
-            nested = _element(value)
-            amount = _number(
-                _own_text(nested) if nested is not None else _text(value.value))
-            is_gold = nested is not None and any(
-                child == 'gold' for child, unused in _children(nested))
-            price = (0, amount, False) if is_gold else (amount, 0, False)
-        elif name == 'notInShop':
-            raw = value.value
-            not_in_shop = (raw is True or
-                           _text(raw).strip().lower() in ('true', '1'))
-    if price is None:
-        return None
-    return (price[0], price[1], not_in_shop)
+# The price rule is shared with the launcher, which reads the installed
+# client to build the same catalogue for its gold vehicle shop. The two must
+# agree, so neither of them owns it.
+_children = vehicle_prices.children
+_element = vehicle_prices.element
+_own_text = vehicle_prices.own_text
+_number = vehicle_prices.number
+_read_price = vehicle_prices.read_price
 
 
 def _record(table, key, price, conflicts):
