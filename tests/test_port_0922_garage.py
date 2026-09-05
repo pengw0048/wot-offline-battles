@@ -2211,6 +2211,86 @@ class GaragePersistenceTests(unittest.TestCase):
         # already-damaged vehicle.
         self.assertEqual((1200, 400), snapshot['vehicles'][0]['repair'])
 
+    def _settling_snapshot(self, credits_amount=100000):
+        """A vehicle with all three refill switches on and one consumable."""
+        snapshot = self._matching_snapshot()
+        snapshot['wallet']['credits'] = credits_amount
+        snapshot['shopItemPrices'][11001] = {'credits': 3000}
+        snapshot['inventoryItems'][11] = {11001: 1}
+        record = snapshot['vehicles'][0]
+        # AccountCommands.VEHICLE_SETTINGS_FLAG: XP_TO_TMAN 1, AUTO_REPAIR 2,
+        # AUTO_LOAD 4, AUTO_EQUIP 8.  A fresh garage vehicle carries all four.
+        record['settings'] = 15
+        record['eqs'] = [11001, 0, 0]
+        record['eqsLayout'] = [11001, 0, 0]
+        record['inventoryItems'][11] = {11001: 1}
+        return snapshot
+
+    def test_a_battle_repairs_reloads_and_restocks_what_it_can(self):
+        """Retail settles all three switches at the end of a battle."""
+        snapshot = self._settling_snapshot()
+        vehicles, tankmen = _modules()
+
+        self._store().apply_battle_crew_xp(
+            snapshot, 'server:11:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles, shells_fired={0: 12},
+            equipment_used=[11001], auto_settings=(2, 4, 8))
+
+        record = snapshot['vehicles'][0]
+        self.assertEqual((0, 1000), tuple(record['repair']))
+        self.assertEqual([20010, 30, 20011, 15], list(record['shells']))
+        self.assertEqual([11001, 0, 0], list(record['eqs']))
+        # A 1200-credit repair, twelve rounds at 100 and one 3000 consumable.
+        self.assertEqual(
+            100000 - 1200 - 1200 - 3000, snapshot['wallet']['credits'])
+
+    def test_a_battle_leaves_the_switches_the_player_turned_off_alone(self):
+        snapshot = self._settling_snapshot()
+        snapshot['vehicles'][0]['settings'] = 1
+        vehicles, tankmen = _modules()
+
+        self._store().apply_battle_crew_xp(
+            snapshot, 'server:12:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles, shells_fired={0: 12},
+            equipment_used=[11001], auto_settings=(2, 4, 8))
+
+        record = snapshot['vehicles'][0]
+        self.assertEqual((1200, 400), tuple(record['repair']))
+        self.assertEqual([20010, 18, 20011, 15], list(record['shells']))
+        self.assertEqual([0, 0, 0], list(record['eqs']))
+        self.assertEqual(100000, snapshot['wallet']['credits'])
+
+    def test_an_account_that_cannot_pay_keeps_the_battle_settlement(self):
+        """A refused refill is what the player sees, not a failed battle."""
+        snapshot = self._settling_snapshot(credits_amount=1500)
+        vehicles, tankmen = _modules()
+
+        result = self._store().apply_battle_crew_xp(
+            snapshot, 'server:13:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles, shells_fired={0: 12},
+            equipment_used=[11001], auto_settings=(2, 4, 8))
+
+        self.assertTrue(result['applied'])
+        record = snapshot['vehicles'][0]
+        # The repair fits; the rounds and the consumable no longer do.
+        self.assertEqual((0, 1000), tuple(record['repair']))
+        self.assertEqual([20010, 18, 20011, 15], list(record['shells']))
+        self.assertEqual([0, 0, 0], list(record['eqs']))
+        self.assertEqual(300, snapshot['wallet']['credits'])
+
+    def test_a_battle_reports_the_depot_rows_it_moved(self):
+        """The client only drops what the pushed diff names."""
+        snapshot = self._settling_snapshot()
+        vehicles, tankmen = _modules()
+
+        result = self._store().apply_battle_crew_xp(
+            snapshot, 'server:14:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles, shells_fired={0: 12},
+            equipment_used=[11001], auto_settings=(2, 4, 8))
+
+        self.assertEqual([20010, 20011], result['touched_items'][10])
+        self.assertEqual([11001], result['touched_items'][11])
+
     def test_a_receipt_without_a_health_reading_bills_nothing(self):
         """A receipt written before the settlement existed stays readable."""
         snapshot = copy.deepcopy(SNAPSHOT)

@@ -231,6 +231,55 @@ class AccountRpcTests(unittest.TestCase):
         self.assertEqual(600, update['stats']['vehTypeXP'][50001])
         self.assertEqual(1, self.player.dossier_resyncs)
 
+    def test_postbattle_progress_publishes_the_depot_rows_it_moved(self):
+        """A battle spends rounds and consumables and may buy them back.
+
+        ``synchronizeDicts`` merges what the diff names and leaves the rest of
+        the cache alone, so a push that carried only the vehicle would leave
+        the client showing ammunition the account no longer has.
+        """
+        class Store(object):
+            def progress(self):
+                return {'battles': 1, 'wins': 1}
+
+        vehicles_module = types.ModuleType('items.vehicles')
+        vehicles_module.VehicleDescr = lambda typeName=None: (
+            types.SimpleNamespace(type=types.SimpleNamespace(id=(0, 1))))
+        vehicles_module.makeIntCompactDescrByID = (
+            lambda unused_type, unused_nation, unused_vehicle: 50001)
+        vehicles_module.getVehicleType = lambda compact_descr: (
+            types.SimpleNamespace(unlocksDescrs=()))
+        items_module = types.ModuleType('items')
+        items_module.vehicles = vehicles_module
+        touched_items = {10: set([20010]), 11: set([11001])}
+        server = FakeServer(
+            lambda: self.player,
+            lambda delay, fn: self.pending.append((delay, fn)), {
+                'selected_vehicle': {
+                    'vehicleTypeCompactDescrs': [50001],
+                    'wallet': {'credits': 700, 'gold': 5, 'freeXP': 30},
+                    'vehicleXP': {50001: 600},
+                    'inventoryItems': {
+                        10: {20010: 18, 20011: 15}, 11: {},
+                    },
+                },
+                'postbattle_store': Store(),
+                'postbattle_touched_items': touched_items,
+            })
+        with mock.patch.dict(sys.modules, {
+                'items': items_module, 'items.vehicles': vehicles_module}):
+            self.assertTrue(server.publish_postbattle_progress())
+            self._run()
+
+        update = pickle.loads(self.player.updates[-1])
+        self.assertEqual({20010: 18}, update['inventory'][10])
+        # A count that reached zero is published as a removal, which is the
+        # only thing synchronizeDicts reads as "drop this".
+        self.assertEqual({11001: None}, update['inventory'][11])
+        # The push consumed them, so a later one does not repeat them.
+        self.assertEqual(set(), touched_items[10])
+        self.assertEqual(set(), touched_items[11])
+
     def test_stats_update_does_not_run_the_inventory_refresh_fallback(self):
         with mock.patch(
                 'gui.mods.offline_lan_0922.account_rpc.server.'

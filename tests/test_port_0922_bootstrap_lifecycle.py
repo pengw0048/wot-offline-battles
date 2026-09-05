@@ -1386,9 +1386,14 @@ class BootstrapLifecycleTests(unittest.TestCase):
                                      vehicle_type_cd, xp, xp_flag,
                                      tankmen_module=None, rewards=None,
                                      health=None, vehicles_module=None,
-                                     shells_fired=None, equipment_used=None):
+                                     shells_fired=None, equipment_used=None,
+                                     auto_settings=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
+                # The vehicle's own repair/reload/restock switches are settled
+                # inside the same transaction, so their flag values travel
+                # with the receipt.
+                switches.append(auto_settings)
                 # The crew award, the earnings it was banked beside and the
                 # damage and rounds the same battle spent share one
                 # transaction, so the applier must pass all of them.
@@ -1402,6 +1407,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         settled = []
         spent = []
         consumed = []
+        switches = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -1425,6 +1431,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
         self.assertEqual([{'xp': 100}], banked)
+        self.assertEqual([(2, 4, 8)], switches)
         self.assertEqual([40], settled)
         self.assertEqual([{0: 12}], spent)
         self.assertEqual([[11001]], consumed)

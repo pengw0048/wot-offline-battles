@@ -122,6 +122,48 @@ def _ledger_payload(snapshot):
     }
 
 
+def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
+    """Repair, reload and restock the vehicle its own settings ask for.
+
+    #1513 publishes the three switches per vehicle in ``settings`` and a fresh
+    garage vehicle starts with all of them on.  Retail settles all three when
+    the account can pay and silently leaves the vehicle as it is when it
+    cannot, which is what the player sees in the hangar either way, so each
+    one is attempted on its own and a refusal is not an error.
+    """
+    if not auto_settings:
+        return
+    repair_flag, load_flag, equip_flag = auto_settings
+    for record in state.snapshot().get('vehicles') or ():
+        if int(record.get('id', 0)) != int(vehicle_id):
+            continue
+        try:
+            settings = int(record.get('settings', 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if settings & int(repair_flag or 0):
+            try:
+                state.repair_vehicle(vehicle_id)
+            except garage_error:
+                pass
+        if settings & int(load_flag or 0):
+            layout = (record.get('shellsLayout') or {}).get(
+                tuple(record.get('shellsLayoutIdx') or ()))
+            if layout:
+                try:
+                    state.equip_shells(vehicle_id, list(layout))
+                except garage_error:
+                    pass
+        if settings & int(equip_flag or 0):
+            layout = list(record.get('eqsLayout') or ())
+            if any(layout):
+                try:
+                    state.equip_equipments(vehicle_id, layout)
+                except garage_error:
+                    pass
+        return
+
+
 def _floor_account_stock(snapshot):
     """Own at least what the garage already holds.
 
@@ -394,7 +436,8 @@ class GarageStore(object):
                              vehicle_type_compact_descr, battle_xp,
                              xp_to_tankman_flag, tankmen_module=None,
                              rewards=None, health=None, vehicles_module=None,
-                             shells_fired=None, equipment_used=None):
+                             shells_fired=None, equipment_used=None,
+                             auto_settings=None):
         """Apply and persist one battle's whole settlement exactly once.
 
         The compact crew descriptors, the earnings, the damage the battle did
@@ -413,7 +456,8 @@ class GarageStore(object):
                 result['applied'] = False
                 return result
 
-        from gui.mods.offline_lan_0922.account_rpc.garage import GarageState
+        from gui.mods.offline_lan_0922.account_rpc.garage import (
+            GarageError, GarageState)
         staged = copy.deepcopy(snapshot)
         state = GarageState(staged, tankmen_module=tankmen_module,
                             vehicles_module=vehicles_module)
@@ -435,6 +479,13 @@ class GarageStore(object):
             result['earnings'] = state.award_battle_earnings(
                 vehicle_type_compact_descr, rewards,
                 accelerated=bool(result['accelerated']))
+        _settle_automatically(
+            state, int(result['vehicle_id']), auto_settings, GarageError)
+        # Every other field of this result is plain JSON, and the store hands
+        # it straight to a caller that may well write it down.
+        result['touched_items'] = dict(
+            (int(item_type), sorted(int(value) for value in items))
+            for item_type, items in state.touched_items().items())
         staged = state.snapshot()
         marker = {
             'receipt_id': receipt_id,

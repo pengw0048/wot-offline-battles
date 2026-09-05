@@ -137,6 +137,7 @@ def _bind_battle_progress(context):
         # PostBattleStore always exposes this transaction boundary.
         return False
     touched = context.setdefault('postbattle_touched_vehicles', set())
+    touched_items = context.setdefault('postbattle_touched_items', {})
 
     def apply(receipt):
         from AccountCommands import VEHICLE_SETTINGS_FLAG
@@ -161,9 +162,18 @@ def _bind_battle_progress(context):
             tankmen_module=tankmen, rewards=receipt['rewards'],
             health=receipt.get('health'), vehicles_module=vehicles,
             shells_fired=receipt.get('shells_fired'),
-            equipment_used=receipt.get('equipment_used'))
+            equipment_used=receipt.get('equipment_used'),
+            auto_settings=(VEHICLE_SETTINGS_FLAG.AUTO_REPAIR,
+                           VEHICLE_SETTINGS_FLAG.AUTO_LOAD,
+                           VEHICLE_SETTINGS_FLAG.AUTO_EQUIP))
         context['selected_vehicle'] = snapshot
         touched.add(int(result['vehicle_id']))
+        # The depot changed too: a battle spends rounds and consumables, and
+        # the vehicle's own switches may have bought them back.  The client
+        # only drops what the diff names.
+        for item_type, items in (result.get('touched_items') or {}).items():
+            touched_items.setdefault(int(item_type), set()).update(
+                int(compact_descr) for compact_descr in items)
         return result
 
     binder(apply)

@@ -175,16 +175,29 @@ class FakeServer(object):
             'credits', 'freeXP', 'vehTypeXP', 'dossier'))}
         touched = self._context.get('postbattle_touched_vehicles')
         touched = set(touched or ())
-        if touched:
+        # A battle spends rounds and consumables, and the vehicle's own
+        # switches may already have bought them back.  Publishing the vehicle
+        # without the depot would leave the client showing stock it no longer
+        # has until the next fitting happened to name it.
+        touched_items = dict(
+            (int(item_type), set(items)) for item_type, items in
+            (self._context.get('postbattle_touched_items') or {}).items())
+        if touched or touched_items:
             diff.update(data.inventory(
                 self._context.get('selected_vehicle'), validate=False,
-                only_vehicles=touched, only_items={}))
+                only_vehicles=touched, only_items=touched_items))
 
         def resync_dossiers(player):
             shared_touched = self._context.get(
                 'postbattle_touched_vehicles')
             if shared_touched is not None:
                 shared_touched.difference_update(touched)
+            shared_items = self._context.get('postbattle_touched_items')
+            if isinstance(shared_items, dict):
+                for item_type, items in touched_items.items():
+                    published = shared_items.get(item_type)
+                    if published is not None:
+                        published.difference_update(items)
             resync = getattr(player, 'resyncDossiers', None)
             if callable(resync):
                 resync()
