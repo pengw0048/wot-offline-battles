@@ -647,6 +647,12 @@ def _suspension_wheel_radius(chassis, config, spring_spacing):
 	return max(0.125, float(spring_spacing) * 0.5)
 
 
+def suspension_trial_excluded(descriptor):
+	'''Return whether exact #1513 uses hydraulic hull-aiming suspension.'''
+	return bool(_value(
+		descriptor, 'isPitchHullAimingAvailable', False))
+
+
 def derive_suspension_params(descriptor):
 	'''Build the ten-spring rigid-body trial for one tank.
 
@@ -662,8 +668,7 @@ def derive_suspension_params(descriptor):
 	native solver owns them and no #1513 process is given them, so those are
 	an explicit trial projection and are the reason this remains a trial.
 	'''
-	if bool(_value(
-			descriptor, 'isPitchHullAimingAvailable', False)):
+	if suspension_trial_excluded(descriptor):
 		# Exact #1513 initVehiclePhysicsClient gives pitch-hull-aiming tanks a
 		# zero hard ratio and installs mode-specific suspensionSpringsLength
 		# caches on both descriptors.  This trial owns neither that native hull
@@ -876,6 +881,102 @@ def suspension_pseudo_world_points(params, position, yaw):
 	return tuple(result)
 
 
+def ground_normal(gradient_x, gradient_z):
+	'''Return the upward unit normal of ``y = gx*x + gz*z + c``.'''
+	try:
+		gradient_x = float(gradient_x)
+		gradient_z = float(gradient_z)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if any(math.isnan(value) or math.isinf(value)
+			for value in (gradient_x, gradient_z)):
+		return None
+	# Scale before normalising so large but finite gradients cannot overflow
+	# their squared length into a zero or non-finite up component.
+	scale = max(1.0, abs(gradient_x), abs(gradient_z))
+	local_x = gradient_x / scale
+	local_y = 1.0 / scale
+	local_z = gradient_z / scale
+	length = math.sqrt(
+		local_x * local_x + local_y * local_y + local_z * local_z)
+	if length <= 0.0 or math.isnan(length) or math.isinf(length):
+		return None
+	normal = (-local_x / length, local_y / length, -local_z / length)
+	if normal[1] <= 0.0:
+		return None
+	return normal
+
+
+def sampled_ground_plane(front_y, rear_y, right_y, left_y, center_y,
+		yaw, length, width, maximum_residual):
+	'''Fit one ground plane from five actual suspension-height samples.
+
+	The residual is measured across the fixed hull footprint. It is not an
+	allowance paid once per simulation tick, so render cadence cannot grow it.
+	'''
+	if None in (front_y, rear_y, right_y, left_y, center_y):
+		return None
+	try:
+		front_y = float(front_y)
+		rear_y = float(rear_y)
+		right_y = float(right_y)
+		left_y = float(left_y)
+		center_y = float(center_y)
+		yaw = float(yaw)
+		length = float(length)
+		width = float(width)
+		maximum_residual = float(maximum_residual)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	values = (front_y, rear_y, right_y, left_y, center_y,
+		yaw, length, width, maximum_residual)
+	if (any(math.isnan(value) or math.isinf(value) for value in values) or
+			length <= 0.0 or width <= 0.0 or maximum_residual < 0.0):
+		return None
+	long_mid = (front_y + rear_y) * 0.5
+	side_mid = (right_y + left_y) * 0.5
+	residual = max(
+		abs(long_mid - side_mid), abs(center_y - long_mid),
+		abs(center_y - side_mid))
+	if residual > maximum_residual:
+		return None
+	height_forward = (front_y - rear_y) / length
+	height_right = (right_y - left_y) / width
+	sine, cosine = math.sin(yaw), math.cos(yaw)
+	gradient_x = height_forward * sine + height_right * cosine
+	gradient_z = height_forward * cosine - height_right * sine
+	normal = ground_normal(gradient_x, gradient_z)
+	if normal is None:
+		return None
+	slope_tangent = math.hypot(height_forward, height_right)
+	if math.isnan(slope_tangent) or math.isinf(slope_tangent):
+		return None
+	downhill_x = -gradient_x
+	downhill_z = -gradient_z
+	downhill_length = math.hypot(downhill_x, downhill_z)
+	if downhill_length > 0.001:
+		downhill_x /= downhill_length
+		downhill_z /= downhill_length
+	else:
+		downhill_x = downhill_z = 0.0
+	return {
+		'center_y': center_y,
+		'gradient_x': gradient_x,
+		'gradient_z': gradient_z,
+		'normal': normal,
+		'pitch': -math.atan2(front_y - rear_y, length),
+		# BigWorld applies YPR as yaw, pitch and then roll. Dividing by the
+		# pitched right-axis length keeps this Euler pose on the fitted plane.
+		'roll': math.atan2(
+			height_right,
+			math.hypot(1.0, height_forward)),
+		'slope_tangent': slope_tangent,
+		'up_cosine': normal[1],
+		'downhill': (downhill_x, 0.0, downhill_z),
+		'residual': residual,
+	}
+
+
 def suspension_ground_plane(params, ground_heights,
 		maximum_residual=None):
 	'''Fit terrain gradients from contacted springs, not body attitude.
@@ -971,12 +1072,16 @@ def suspension_world_ground_plane(params, ground_heights, position, yaw,
 	if any(math.isnan(value) or math.isinf(value) for value in (
 			center_y, gradient_x, gradient_z, max_residual)):
 		return None
+	normal = ground_normal(gradient_x, gradient_z)
+	if normal is None:
+		return None
 	return {
 		'center_x': center_x,
 		'center_z': center_z,
 		'center_y': center_y,
 		'gradient_x': gradient_x,
 		'gradient_z': gradient_z,
+		'normal': normal,
 		'max_residual': max_residual,
 		'contact_count': int(local_plane['contact_count']),
 	}
@@ -1001,6 +1106,56 @@ def suspension_plane_height(plane, x, z):
 	if math.isnan(height) or math.isinf(height):
 		return None
 	return height
+
+
+def landing_impact_speed(world_velocity, support_normal):
+	'''Return closing speed along one trustworthy upward support normal.
+
+	If the plane normal or either horizontal velocity component is unavailable,
+	the established vertical-only fall observation remains authoritative.
+	'''
+	try:
+		velocity_y = float(world_velocity[1])
+	except (IndexError, TypeError, ValueError, OverflowError):
+		return 0.0
+	vertical = (max(0.0, -velocity_y)
+		if not math.isnan(velocity_y) and not math.isinf(velocity_y) else 0.0)
+	try:
+		velocity_x = float(world_velocity[0])
+		velocity_z = float(world_velocity[2])
+	except (IndexError, TypeError, ValueError, OverflowError):
+		return vertical
+	if support_normal is None:
+		return vertical
+	try:
+		normal_x = float(support_normal[0])
+		normal_y = float(support_normal[1])
+		normal_z = float(support_normal[2])
+	except (IndexError, TypeError, ValueError, OverflowError):
+		return vertical
+	components = (normal_x, normal_y, normal_z)
+	if (any(math.isnan(value) or math.isinf(value)
+			for value in components) or normal_y <= 0.0):
+		return vertical
+	scale = max(abs(normal_x), abs(normal_y), abs(normal_z))
+	if scale <= 0.0:
+		return vertical
+	scaled_x = normal_x / scale
+	scaled_y = normal_y / scale
+	scaled_z = normal_z / scale
+	length = math.sqrt(
+		scaled_x * scaled_x + scaled_y * scaled_y + scaled_z * scaled_z)
+	if length <= 0.0 or math.isnan(length) or math.isinf(length):
+		return vertical
+	if any(math.isnan(value) or math.isinf(value) for value in (
+			velocity_x, velocity_y, velocity_z)):
+		return vertical
+	closing = -(
+		velocity_x * scaled_x + velocity_y * scaled_y +
+		velocity_z * scaled_z) / length
+	if math.isnan(closing) or math.isinf(closing):
+		return vertical
+	return max(0.0, closing)
 
 
 def suspension_ground_planes_continuous(

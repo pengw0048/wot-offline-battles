@@ -2645,6 +2645,11 @@ class BotRuntime(object):
             self._suspension_param_failures += 1
             self._report_suspension_trial('inactive: no descriptor')
             return None
+        if vehicle_physics.suspension_trial_excluded(descriptor):
+            self._suspension_params[bot_id] = None
+            self._report_suspension_trial(
+                'excluded: #1513 hydraulic suspension')
+            return None
         try:
             params = vehicle_physics.derive_suspension_params(descriptor)
         except (AttributeError, IndexError, KeyError, RuntimeError,
@@ -6088,8 +6093,9 @@ class BotRuntime(object):
         self._turn_speeds[state['id']] = 0.0
         return damage
 
-    def _apply_bot_landing_impact(self, state, vertical_speed):
-        """Combine retained lateral velocity with the vertical impact."""
+    def _apply_bot_landing_impact(
+            self, state, impact_speed, normal_impact=False):
+        """Retain airborne skid and apply legacy or normal impact speed."""
         lateral_x = state.get('air_lateral_x', 0.0)
         lateral_z = state.get('air_lateral_z', 0.0)
         lateral_speed = math.sqrt(
@@ -6099,8 +6105,9 @@ class BotRuntime(object):
                 state.get('slide_speed', 0.0), lateral_speed)
         state['air_lateral_x'] = 0.0
         state['air_lateral_z'] = 0.0
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed + lateral_speed * lateral_speed)
+        if not normal_impact:
+            impact_speed = math.sqrt(
+                impact_speed * impact_speed + lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
 
     @staticmethod
@@ -6266,9 +6273,13 @@ class BotRuntime(object):
             state['push_z'] = 0.0
             state['vertical_speed'] = 0.0
             state['airborne'] = False
+            accepted_plane = state.get('_suspension_ground_plane')
             # The rejected contact layer is unrelated to the restored pose.
-            # Drop its plane and contact history without re-arming spawn snap.
+            # Drop its contact history without replacing the last accepted
+            # support plane with the rejected upper layer.
             self._reset_bot_suspension_state(state)
+            if accepted_plane is not None:
+                state['_suspension_ground_plane'] = accepted_plane
             self._turn_speeds[bot_id] = 0.0
             self._invalidate_realised_motion(
                 bot_id, (_number(state.get('yaw'))
@@ -6300,11 +6311,24 @@ class BotRuntime(object):
             state.pop('_suspension_ground_plane', None)
         if (before_airborne and not state['airborne'] and
                 before_vertical_speed < 0.0):
-            impact_speed = solved.get('impact_speed')
-            if impact_speed is None:
-                impact_speed = before_vertical_speed
+            impact_vertical = solved.get('impact_speed')
+            if impact_vertical is None:
+                impact_vertical = before_vertical_speed
+            impact_speed = max(0.0, -float(impact_vertical))
+            if motion_pose is not None and float(step) > 0.0:
+                velocity = (
+                    (float(position[0]) - float(motion_pose[0])) /
+                    float(step),
+                    float(impact_vertical),
+                    (float(position[2]) - float(motion_pose[2])) /
+                    float(step),
+                )
+                normal = (current_plane.get('normal')
+                          if isinstance(current_plane, dict) else None)
+                impact_speed = vehicle_physics.landing_impact_speed(
+                    velocity, normal)
             self._apply_bot_landing_impact(
-                state, impact_speed)
+                state, impact_speed, normal_impact=True)
         elif not before_airborne and state['airborne']:
             self._turn_speeds[bot_id] = 0.0
             state['rotation_dir'] = 0
@@ -6323,17 +6347,25 @@ class BotRuntime(object):
                     suspension_motion_pose)
             except (AttributeError, IndexError, KeyError, RuntimeError,
                     TypeError, ValueError, OverflowError,
-                    ZeroDivisionError):
-                # Contain a bad native sample or numerical state to this Bot.
-                # The established centre-support path is the safe trial
-                # fallback; no guessed suspension geometry is introduced.
+                    ZeroDivisionError) as error:
+                # A failing tick cannot be finished by a second vertical
+                # authority. Restore it completely, retire the optional trial,
+                # and let the next tick begin on the mature legacy path.
                 self._suspension_params[int(state['id'])] = None
                 self._suspension_param_failures += 1
+                self._report_suspension_trial('retired: %s' % (error,))
                 self._restore_bot_suspension_state(
                     state, suspension_snapshot)
                 if tick_pose is not None:
                     state['x'], state['y'], state['z'] = tick_pose
                 self._reset_bot_suspension_state(state)
+                state['speed'] = 0.0
+                state['movement_dir'] = 0
+                state['rotation_dir'] = 0
+                state['push_x'] = 0.0
+                state['push_z'] = 0.0
+                self._turn_speeds[int(state['id'])] = 0.0
+                return True
         highest, centre = self._terrain_support(state)
         # Front/rear hits keep a bot supported across a narrow ditch, but use
         # their real CoM distance below so a remote valley floor cannot pull
@@ -10999,14 +11031,18 @@ class BotRuntime(object):
         slope_candidates = []
         support_blocked_by_id = {}
         settled_poses = {}
+        ballistic_ticks = {}
         for state in ordered_states:
             if state.get('alive', True) and state['id'] in integrated:
                 attempted_yaw = attempted_yaws.get(
                     state['id'], state.get('yaw', 0.0))
+                was_airborne = bool(state.get('airborne', False))
                 support_blocked = self._update_vertical_motion(
                     state, frame_step,
                     tick_poses[state['id']], attempted_yaw)
                 support_blocked_by_id[state['id']] = bool(support_blocked)
+                ballistic_ticks[state['id']] = bool(
+                    was_airborne or state.get('airborne', False))
                 settled_poses[state['id']] = _position(state)
                 slope_candidates.append(state)
         # Ram vertical overlap and native plate proof must use this slice's
@@ -11057,7 +11093,9 @@ class BotRuntime(object):
                     self._update_vertical_motion(
                         state, 0.0, rollback_pose, attempted_yaw,
                         suspension_motion_pose=settled))
-            if not support_blocked_by_id.get(bot_id, False):
+            if (not support_blocked_by_id.get(bot_id, False) and
+                    not ballistic_ticks.get(bot_id, False) and
+                    not state.get('airborne', False)):
                 self._guard_realised_pose(
                     state, tick_poses[bot_id], tick_safe[bot_id],
                     attempted_yaw,

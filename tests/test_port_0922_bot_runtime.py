@@ -3981,14 +3981,237 @@ class BotRuntimeTests(unittest.TestCase):
 
         impacts = []
         runtime._apply_bot_landing_impact = (
-            lambda unused_state, speed: impacts.append(speed) or 0)
+            lambda unused_state, speed, normal_impact=False:
+            impacts.append((speed, normal_impact)) or 0)
         enabled[0] = True
         state['y'] = 0.05
         state['vertical_speed'] = -8.0
         runtime._update_vertical_motion(state, 0.1)
 
         self.assertFalse(state['airborne'])
-        self.assertEqual([-8.0], impacts)
+        self.assertEqual([(8.0, True)], impacts)
+
+    def test_ten_spring_bot_landing_uses_sampled_plane_normal(self):
+        runtime, state, unused_calls = self._suspension_case(
+            lambda x, unused_z: -0.1 * x)
+        state.update({
+            'x': 1.0, 'y': -0.1, 'airborne': True,
+            'vertical_speed': -1.0,
+        })
+        impacts = []
+        runtime._apply_bot_landing_impact = (
+            lambda unused_state, speed, normal_impact=False:
+            impacts.append((speed, normal_impact)) or 0)
+        solved = {
+            'height': -0.1,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+            'impact_speed': -1.0,
+        }
+        original = self.module.vehicle_physics.damper_suspension_step
+        self.module.vehicle_physics.damper_suspension_step = (
+            lambda *unused, **unused_kwargs: solved)
+        try:
+            blocked = runtime._update_vertical_motion(
+                state, 0.1, (0.0, 0.0, 0.0), 0.0,
+                suspension_motion_pose=(0.0, 0.0, 0.0))
+        finally:
+            self.module.vehicle_physics.damper_suspension_step = original
+
+        # (10, -1, 0) is tangent to y = -0.1*x, so it closes at zero.
+        self.assertFalse(blocked)
+        self.assertEqual([(0.0, True)], impacts)
+
+    def test_ten_spring_bot_tangent_landing_is_stable_across_tick_rates(self):
+        for frame_rate in (120.0, 60.0, 30.0, 20.0, 10.0):
+            with self.subTest(frame_rate=frame_rate):
+                dt = 1.0 / frame_rate
+                runtime, state, unused_calls = self._suspension_case(
+                    lambda x, z: -0.5 * x + 0.25 * z)
+                state.update({
+                    'x': 8.0 * dt, 'y': -3.0 * dt,
+                    'z': 4.0 * dt, 'airborne': True,
+                    'vertical_speed': -3.0,
+                })
+                impacts = []
+                runtime._apply_bot_landing_impact = (
+                    lambda unused_state, speed, normal_impact=False:
+                    impacts.append((speed, normal_impact)) or 0)
+                solved = {
+                    'height': -3.0 * dt,
+                    'vertical_velocity': 0.0,
+                    'pitch': 0.0,
+                    'pitch_velocity': 0.0,
+                    'roll': 0.0,
+                    'roll_velocity': 0.0,
+                    'contact_count': 10,
+                    'airborne': False,
+                    'left_flying': False,
+                    'right_flying': False,
+                    'impact_speed': -3.0,
+                }
+                original = self.module.vehicle_physics.damper_suspension_step
+                self.module.vehicle_physics.damper_suspension_step = (
+                    lambda *unused, **unused_kwargs: solved)
+                try:
+                    blocked = runtime._update_vertical_motion(
+                        state, dt, (0.0, 0.0, 0.0), 0.0,
+                        suspension_motion_pose=(0.0, 0.0, 0.0))
+                finally:
+                    self.module.vehicle_physics.damper_suspension_step = \
+                        original
+
+                self.assertFalse(blocked)
+                self.assertEqual(1, len(impacts))
+                self.assertAlmostEqual(0.0, impacts[0][0], places=12)
+                self.assertTrue(impacts[0][1])
+
+    def test_ten_spring_bot_landing_without_plane_uses_vertical_speed(self):
+        runtime, state, unused_calls = self._suspension_case(
+            lambda unused_x, unused_z: 0.0)
+        state.update({
+            'y': 0.0, 'airborne': True, 'vertical_speed': -5.0,
+        })
+        impacts = []
+        runtime._apply_bot_landing_impact = (
+            lambda unused_state, speed, normal_impact=False:
+            impacts.append((speed, normal_impact)) or 0)
+        runtime._suspension_world_ground_plane = (
+            lambda *unused: None)
+        solved = {
+            'height': 0.0,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+            'impact_speed': -5.0,
+        }
+        original = self.module.vehicle_physics.damper_suspension_step
+        self.module.vehicle_physics.damper_suspension_step = (
+            lambda *unused, **unused_kwargs: solved)
+        try:
+            blocked = runtime._update_vertical_motion(
+                state, 0.1, (0.0, 0.0, 0.0), 0.0,
+                suspension_motion_pose=(0.0, 0.0, 0.0))
+        finally:
+            self.module.vehicle_physics.damper_suspension_step = original
+
+        self.assertFalse(blocked)
+        self.assertEqual([(5.0, True)], impacts)
+
+    def test_bot_landing_keeps_legacy_lateral_law_out_of_normal_verdict(self):
+        runtime, state, unused_calls = self._suspension_case(
+            lambda unused_x, unused_z: 0.0)
+        impacts = []
+        runtime._apply_bot_fall_damage = (
+            lambda unused_state, speed: impacts.append(speed) or 0)
+        legacy_state = dict(state, air_lateral_x=9.0, air_lateral_z=0.0)
+        normal_state = dict(state, air_lateral_x=9.0, air_lateral_z=0.0)
+
+        runtime._apply_bot_landing_impact(legacy_state, 6.0)
+        runtime._apply_bot_landing_impact(
+            normal_state, 6.0, normal_impact=True)
+
+        self.assertAlmostEqual(math.sqrt(117.0), impacts[0])
+        self.assertEqual(6.0, impacts[1])
+        self.assertEqual(9.0, legacy_state['slide_speed'])
+        self.assertEqual(9.0, normal_state['slide_speed'])
+
+    def test_airborne_bot_keeps_the_pose_physics_gave_it(self):
+        """A baked ground graph cannot roll back a ballistic hull."""
+        edge = 6.0
+
+        def ground(unused_x, z, unused_hint):
+            return 0.0 if float(z) < edge else -40.0
+
+        def suspension_ground(
+                unused_x, z, minimum_y, maximum_y,
+                flat_maximum_y=None):
+            del flat_maximum_y
+            height = 0.0 if float(z) < edge else -40.0
+            if minimum_y - 0.01 <= height <= maximum_y + 0.01:
+                return height
+            return None
+
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'move_position': (0.0, 0.0, 400.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        runtime = self.module.BotRuntime(
+            1,
+            descriptor_resolver=lambda unused: _suspension_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=ground, physics_ground_probe=ground,
+            suspension_ground_probe=suspension_ground,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        runtime.navigator = None
+        state = runtime.states[11]
+        state.update(
+            x=0.0, y=0.0, z=0.0, yaw=0.0, speed=12.0,
+            grounded_once=True)
+        original_decision_seconds = self.module.DECISION_SECONDS
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.DECISION_SECONDS = 2.0
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda unused_graph, unused_pose, **unused_kwargs:
+            not state.get('airborne', False))
+        try:
+            for frame in range(12):
+                runtime.update(0.1, 1.0 + (frame + 1) * 0.1)
+                if state['airborne']:
+                    break
+        finally:
+            self.module.DECISION_SECONDS = original_decision_seconds
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        self.assertTrue(state['airborne'])
+        self.assertGreater(state['z'], edge)
+        self.assertLess(state['vertical_speed'], 0.0)
+        self.assertLess(state['y'], 0.0)
+
+    def test_landing_bot_keeps_the_pose_physics_gave_it(self):
+        """The baked ground graph cannot undo an airborne landing tick."""
+        runtime, state, unused_calls = self._full_suspension_case(
+            lambda unused_x, unused_z: 0.0)
+        state.update({
+            'y': 0.05, 'vertical_speed': -8.0, 'airborne': True,
+        })
+        pose_checks = []
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+
+        def pose_safe(unused_graph, pose, **unused_kwargs):
+            pose_checks.append(tuple(pose))
+            return len(pose_checks) == 1
+
+        self.module.prebaked_navigation.pose_is_safe = pose_safe
+        try:
+            runtime.update(0.1, 1.1)
+        finally:
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        self.assertFalse(state['airborne'])
+        self.assertLess(abs(state['y']), 0.05)
+        # Only the pre-integration snapshot is classified. A second call
+        # would be the baked realised-pose rollback this transition forbids.
+        self.assertEqual(1, len(pose_checks))
 
     def test_flat_five_metre_suspension_landing_reports_once_without_torque(self):
         runtime, state, unused_calls = self._suspension_case(
@@ -4001,7 +4224,8 @@ class BotRuntimeTests(unittest.TestCase):
         })
         impacts = []
         runtime._apply_bot_landing_impact = (
-            lambda unused_state, speed: impacts.append(speed) or 0)
+            lambda unused_state, speed, normal_impact=False:
+            impacts.append(speed) or 0)
         maximum_attitude = 0.0
 
         for unused_tick in range(180):
@@ -4014,7 +4238,7 @@ class BotRuntimeTests(unittest.TestCase):
                 abs(state['suspension_roll_velocity']))
 
         self.assertEqual(1, len(impacts))
-        self.assertLessEqual(impacts[0], -9.0)
+        self.assertGreaterEqual(impacts[0], 9.0)
         self.assertLess(maximum_attitude, 1.0e-7)
         self.assertFalse(state['airborne'])
         self.assertAlmostEqual(0.0, state['y'], places=5)
@@ -4068,7 +4292,7 @@ class BotRuntimeTests(unittest.TestCase):
         runtime.update(0.1, 1.1)
 
         # Ram separation X/Z is retained, but the unproved upper layer never
-        # becomes ground on either frame.
+        # replaces the previously accepted flat support on either frame.
         self.assertAlmostEqual(5.0, first_pose[0], places=6)
         self.assertAlmostEqual(0.0, first_pose[1], places=6)
         self.assertAlmostEqual(0.0, first_pose[2], places=6)
@@ -4077,7 +4301,8 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(0.0, state['z'], places=6)
         self.assertFalse(state['airborne'])
         self.assertTrue(state['grounded_once'])
-        self.assertNotIn('_suspension_ground_plane', state)
+        self.assertAlmostEqual(
+            0.0, state['_suspension_ground_plane']['center_y'])
         self.assertEqual(0.0, state['speed'])
 
     def test_sampled_inclined_high_support_cannot_lift_grounded_bot(self):
@@ -4095,10 +4320,31 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(0.0, state['speed'])
         self.assertNotIn('_suspension_ground_plane', state)
 
-    def test_suspension_query_failure_falls_back_for_only_that_bot(self):
+    def test_rejected_high_support_keeps_the_last_accepted_plane(self):
+        support = [(0.0, 1.0)]
+        runtime, state, unused_calls = self._suspension_case(
+            lambda unused_x, unused_z: support[0])
+
+        self.assertFalse(runtime._update_vertical_motion(state, 0.1))
+        accepted_plane = dict(state['_suspension_ground_plane'])
+
+        support[0] = (0.8, 0.98)
+        self.assertTrue(runtime._update_vertical_motion(
+            state, 0.1, (0.0, 0.0, 0.0), 0.0))
+
+        self.assertEqual(accepted_plane, state['_suspension_ground_plane'])
+        self.assertNotIn('_spring_ground_memory', state)
+        self.assertNotIn('_pseudo_ground_memory', state)
+
+        support[0] = (0.0, 1.0)
+        self.assertFalse(runtime._update_vertical_motion(state, 0.1))
+        self.assertFalse(state['airborne'])
+        self.assertTrue(state['grounded_once'])
+
+    def test_suspension_query_failure_rolls_back_then_uses_legacy(self):
         runtime, state, unused_calls = self._suspension_case(
             lambda unused_x, unused_z: 0.0)
-        state.update(pitch=0.2, terrain_pitch=0.2, roll=-0.1)
+        state.update(x=1.0, pitch=0.2, terrain_pitch=0.2, roll=-0.1)
         runtime._suspension_ground_probe = (
             lambda *unused: (_ for _ in ()).throw(
                 RuntimeError('native query failed')))
@@ -4107,15 +4353,56 @@ class BotRuntimeTests(unittest.TestCase):
         blocked = runtime._update_vertical_motion(
             state, 0.1, (0.0, 0.0, 0.0), 0.0)
 
-        self.assertFalse(blocked)
+        self.assertTrue(blocked)
         self.assertIsNone(runtime._suspension_params[state['id']])
         self.assertEqual(
             1, runtime.diagnostic_totals()['suspension_param_failures'])
-        self.assertAlmostEqual(0.25, state['y'])
+        self.assertAlmostEqual(0.0, state['x'])
+        self.assertAlmostEqual(0.0, state['y'])
         self.assertAlmostEqual(0.2, state['pitch'])
         self.assertAlmostEqual(-0.1, state['roll'])
         self.assertNotIn('_spring_ground_memory', state)
         self.assertNotIn('_suspension_ground_plane', state)
+
+        self.assertFalse(runtime._update_vertical_motion(state, 0.1))
+
+        self.assertAlmostEqual(0.25, state['y'])
+
+    def test_suspension_solver_failure_rolls_back_then_uses_legacy(self):
+        runtime, state, unused_calls = self._suspension_case(
+            lambda unused_x, unused_z: 0.0)
+        state.update(
+            x=1.0, vertical_speed=-2.0, pitch=0.2, terrain_pitch=0.2,
+            roll=-0.1)
+        legacy_calls = []
+        runtime._physics_ground_probe = (
+            lambda *unused: legacy_calls.append(1) or 0.25)
+        original = self.module.vehicle_physics.damper_suspension_step
+
+        def fail(*unused, **unused_kwargs):
+            raise ValueError('solver failed')
+
+        self.module.vehicle_physics.damper_suspension_step = fail
+        try:
+            blocked = runtime._update_vertical_motion(
+                state, 0.1, (0.0, 0.0, 0.0), 0.0)
+        finally:
+            self.module.vehicle_physics.damper_suspension_step = original
+
+        self.assertTrue(blocked)
+        self.assertEqual([], legacy_calls)
+        self.assertAlmostEqual(0.0, state['x'])
+        self.assertAlmostEqual(0.0, state['y'])
+        self.assertAlmostEqual(-2.0, state['vertical_speed'])
+        self.assertAlmostEqual(0.2, state['pitch'])
+        self.assertAlmostEqual(-0.1, state['roll'])
+        self.assertIsNone(runtime._suspension_params[state['id']])
+
+        self.assertFalse(runtime._update_vertical_motion(state, 0.1))
+
+        self.assertEqual([1], legacy_calls)
+        self.assertAlmostEqual(0.25, state['y'])
+        self.assertAlmostEqual(0.0, state['vertical_speed'])
 
     def test_missing_suspension_descriptor_is_localized_to_legacy_support(self):
         runtime = self.module.BotRuntime(
@@ -4149,7 +4436,10 @@ class BotRuntimeTests(unittest.TestCase):
 
         self.assertEqual([], calls)
         self.assertEqual(
-            1, runtime.diagnostic_totals()['suspension_param_failures'])
+            0, runtime.diagnostic_totals()['suspension_param_failures'])
+        self.assertIn(
+            'excluded: #1513 hydraulic suspension',
+            runtime._suspension_trial_reports)
         self.assertEqual(0.0, state['y'])
 
     def test_suspension_pose_guard_discards_rejected_contact_history(self):
