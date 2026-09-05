@@ -856,7 +856,9 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertFalse(player.participating)
         self.assertIs(worker, state.simulation_worker)
         self.assertEqual('battle', state.phase)
-        self.assertEqual(2, state.battle_result['winner'])
+        # The room assigns the human a random team, so the surviving side is
+        # whichever team the only human is not on.
+        self.assertEqual(3 - int(player.team), state.battle_result['winner'])
         self.assertEqual('team_eliminated', state.battle_result['reason'])
         receipts = [
             receipt for receipt in state.result_receipts.values()
@@ -918,7 +920,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertFalse(reset)
         self.assertIs(worker, state.simulation_worker)
         self.assertIsNotNone(state.battle_result)
-        self.assertEqual(2, state.battle_result['winner'])
+        self.assertEqual(3 - int(player.team), state.battle_result['winner'])
         self.assertEqual('team_eliminated',
                          state.battle_result['reason'])
         receipt = next(
