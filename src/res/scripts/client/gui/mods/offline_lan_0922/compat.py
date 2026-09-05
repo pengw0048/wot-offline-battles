@@ -8,6 +8,9 @@ try:
 except ImportError:
     import pickle as _pickle
 
+from gui.mods.offline_lan_0922.entities.remote_vehicle import (
+    close_stock_presentation_extras, stop_ground_effects)
+
 
 OFFLINE_SERVER_ADDRESS = 'offline-lan.local:0'
 _OFFLINE_ACCOUNT_NAME = 'offline_account'
@@ -561,6 +564,7 @@ class OfflineCompatibility(object):
         self._original_compound_getattribute = None
         self._original_compound_deactivate = None
         self._original_compound_models_refresh = None
+        self._original_compound_effects_lod = None
         self._compound_models_refresh_code = None
         self._original_connect = None
         self._original_disconnect = None
@@ -603,6 +607,7 @@ class OfflineCompatibility(object):
         self._compound_getattribute_wrapper = None
         self._compound_deactivate_wrapper = None
         self._compound_models_refresh_wrapper = None
+        self._compound_effects_lod_wrapper = None
         self._vehicle_starting_visual = None
         self._vehicle_starting_wg_physics = None
         self._vehicle_syncing_gun_angles = None
@@ -977,6 +982,12 @@ class OfflineCompatibility(object):
                     'func_code', getattr(
                         self._original_compound_models_refresh,
                         '__code__', None))
+            self._original_compound_effects_lod = (
+                compound_type.__dict__.get(
+                    '_CompoundAppearance__updateEffectsLOD',
+                    getattr(
+                        compound_type,
+                        '_CompoundAppearance__updateEffectsLOD', None)))
         self._original_connect = runtime.bigworld.connect
         self._original_disconnect = runtime.bigworld.disconnect
         self._original_server_time = runtime.bigworld.serverTime
@@ -1418,6 +1429,12 @@ class OfflineCompatibility(object):
             show(False)
             if change_visibility is not None:
                 change_visibility(False)
+            # startVisual has just run activate(), which attached the ground
+            # occlusion decals and started the dust/exhaust selectors.  Close
+            # those two stock surfaces on the same edge; neither follows the
+            # compound draw flags.
+            if appearance is not None:
+                close_stock_presentation_extras(appearance, False)
             stop_visual(int(vehicle.id), False)
             return True
 
@@ -2138,6 +2155,33 @@ class OfflineCompatibility(object):
                     else:
                         delattr(runtime.bigworld, 'player')
 
+        def compound_effects_lod(appearance, distance_from_player):
+            """Keep an undrawn LAN remote out of the stock effects LOD.
+
+            Exact #1513 ``CompoundAppearance.__updateEffectsLOD`` enables
+            ground dust within 100 m and exhaust within 200 m of
+            ``BigWorld.camera()`` and reads no draw flag, so a hidden enemy
+            keeps emitting both.  ``__onPeriodicTimer`` calls it every 0.25 s
+            for every living vehicle, which is why stopping the selectors once
+            on the runtime's hide edge is not sufficient on its own.
+
+            An SPG aiming camera makes the leak obvious: it sits over the aim
+            point rather than over the player, so unspotted enemies anywhere
+            near that point fall inside both LOD radii.
+            """
+            original = compatibility._original_compound_effects_lod
+            if not compatibility._battle_active:
+                return original(appearance, distance_from_player)
+            try:
+                vehicle = compatibility._original_compound_getattribute(
+                    appearance, '_CompoundAppearance__vehicle')
+            except (AttributeError, ReferenceError):
+                vehicle = None
+            if vehicle is not None and undrawn_lan_remote(vehicle):
+                stop_ground_effects(appearance)
+                return None
+            return original(appearance, distance_from_player)
+
         def compound_models_refresh(appearance, model_state, resource_list):
             original = compatibility._original_compound_models_refresh
             if not compatibility._battle_active:
@@ -2395,6 +2439,7 @@ class OfflineCompatibility(object):
         self._compound_getattribute_wrapper = compound_getattribute
         self._compound_deactivate_wrapper = compound_deactivate
         self._compound_models_refresh_wrapper = compound_models_refresh
+        self._compound_effects_lod_wrapper = compound_effects_lod
         self._connect_wrapper = connect
         self._disconnect_wrapper = disconnect
         self._server_time_wrapper = server_time
@@ -2468,6 +2513,9 @@ class OfflineCompatibility(object):
                 if self._original_compound_models_refresh is not None:
                     compound_type._CompoundAppearance__onModelsRefresh = (
                         compound_models_refresh)
+                if self._original_compound_effects_lod is not None:
+                    compound_type._CompoundAppearance__updateEffectsLOD = (
+                        compound_effects_lod)
             runtime.bigworld.connect = connect
             runtime.bigworld.disconnect = disconnect
             runtime.bigworld.serverTime = server_time
@@ -2715,6 +2763,13 @@ class OfflineCompatibility(object):
                 self._compound_models_refresh_wrapper):
             compound_type._CompoundAppearance__onModelsRefresh = (
                 self._original_compound_models_refresh)
+        if (compound_type is not None and
+                self._original_compound_effects_lod is not None and
+                compound_type.__dict__.get(
+                    '_CompoundAppearance__updateEffectsLOD') is
+                self._compound_effects_lod_wrapper):
+            compound_type._CompoundAppearance__updateEffectsLOD = (
+                self._original_compound_effects_lod)
         if (compound_type is not None and
                 self._original_compound_deactivate is not None and
                 compound_type.__dict__.get('deactivate') is

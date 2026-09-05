@@ -2002,6 +2002,90 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertIs(stock_start_visual,
                       vehicle_type.__dict__['startVisual'])
 
+    def test_stock_effects_lod_cannot_restart_a_hidden_lan_remote(self):
+        """The 0.25 s effects timer must not undo the spotting gate.
+
+        Exact #1513 ``CompoundAppearance.__onPeriodicTimer`` calls
+        ``__updateEffectsLOD`` every 0.25 s for every living vehicle, and that
+        method enables ground dust within 100 m and exhaust within 200 m of
+        ``BigWorld.camera()`` without reading any draw flag.  An SPG aiming
+        camera sits over its aim point rather than over the player, so an
+        unspotted enemy under that camera kept both effects running.
+        """
+        compatibility_module = _load_port_source('compat')
+        runtime, operations = self._runtime()
+        appearance_type = (
+            runtime.compound_appearance_module.CompoundAppearance)
+        method_name = '_CompoundAppearance__updateEffectsLOD'
+        original = appearance_type.__dict__[method_name]
+        vehicle_type = runtime.vehicle_module.Vehicle
+
+        class Selector(object):
+            def __init__(self, flags):
+                self.flags = flags
+                self.enabled = False
+
+            def settingsFlags(self):
+                return self.flags
+
+            def start(self):
+                self.enabled = True
+
+            def stop(self):
+                self.enabled = False
+
+        class EffectManager(object):
+            def __init__(self):
+                self._CustomEffectManager__selectors = [
+                    Selector(appearance_type.SETTING_DUST),
+                    Selector(appearance_type.SETTING_EXHAUST)]
+
+            def enable(self, enable, flags):
+                for selector in self._CustomEffectManager__selectors:
+                    if selector.settingsFlags() == flags:
+                        if enable:
+                            selector.start()
+                        else:
+                            selector.stop()
+
+            def running(self):
+                return [selector.flags
+                        for selector in self._CustomEffectManager__selectors
+                        if selector.enabled]
+
+        manager = EffectManager()
+        enemy = vehicle_type()
+        enemy.id = 11
+        enemy._offlineNativeRemote = True
+        enemy._offlineNativeDrawVisible = False
+        appearance = appearance_type(None)
+        appearance.customEffectManager = manager
+        appearance._CompoundAppearance__vehicle = enemy
+
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+
+        # Outside a battle the stock LOD owns the decision unchanged.
+        getattr(appearance, method_name)(10.0)
+        self.assertIn(('compound_effects_lod', 10.0), operations)
+        self.assertEqual([1, 2], manager.running())
+
+        compatibility.configure_battle(player_team=1)
+        operations[:] = []
+        getattr(appearance, method_name)(10.0)
+        self.assertEqual([], operations)
+        self.assertEqual([], manager.running())
+
+        # A drawn remote keeps the exact stock behaviour, including the
+        # ceiling that leaves dust off and exhaust on between 100 and 200 m.
+        enemy._offlineNativeDrawVisible = True
+        getattr(appearance, method_name)(150.0)
+        self.assertEqual([('compound_effects_lod', 150.0)], operations)
+        self.assertEqual([2], manager.running())
+
+        compatibility.fini()
+        self.assertIs(original, appearance_type.__dict__[method_name])
+
     def test_compatibility_does_not_replace_stock_vehicle_filters(self):
         compatibility_module = _load_port_source('compat')
         runtime, operations = self._runtime()
@@ -2876,10 +2960,31 @@ class OfflineCompatibilityTests(unittest.TestCase):
                     start_point, end_point, False, False)
 
         class CompoundAppearance(object):
+            # Exact #1513 ``EffectSettings`` selector flags.
+            SETTING_DUST = 1
+            SETTING_EXHAUST = 2
+            # Exact #1513 ``__updateEffectsLOD`` camera-distance ceilings.
+            LOD_DISTANCE_EXHAUST = 200.0
+            LOD_DISTANCE_TRAIL_PARTICLES = 100.0
+
             def __init__(self, vehicle_filter):
                 self._CompoundAppearance__filter = vehicle_filter
+                self._CompoundAppearance__vehicle = None
+                self.customEffectManager = None
                 self._arena_callback = lambda *unused: None
                 self._camera_callback = lambda *unused: None
+
+            def __updateEffectsLOD(self, distanceFromPlayer):
+                operations.append(
+                    ('compound_effects_lod', distanceFromPlayer))
+                if not self.customEffectManager:
+                    return
+                self.customEffectManager.enable(
+                    distanceFromPlayer <=
+                    self.LOD_DISTANCE_TRAIL_PARTICLES, self.SETTING_DUST)
+                self.customEffectManager.enable(
+                    distanceFromPlayer <= self.LOD_DISTANCE_EXHAUST,
+                    self.SETTING_EXHAUST)
 
             def __onModelsRefresh(self, model_state, resource_list):
                 operations.append(

@@ -702,6 +702,28 @@ EXPECTED_ABI = {
         'CompoundAppearance.addDamageSticker': (
             'self', 'code', 'componentName', 'stickerID',
             'segStart', 'segEnd'),
+        'CompoundAppearance.__onPeriodicTimer': ('self',),
+        'CompoundAppearance.__updateEffectsLOD': (
+            'self', 'distanceFromPlayer'),
+        'CompoundAppearance.__attachSplodge': ('self', 'splodge'),
+    },
+    'scripts/client/CustomEffectManager.pyc': {
+        'CustomEffectManager.enable': ('self', 'enable', 'settingsFlags'),
+        'CustomEffectManager.activate': ('self',),
+        'CustomEffectManager.deactivate': ('self',),
+    },
+    'scripts/client/CustomEffect.pyc': {
+        'MainSelectorBase.settingsFlags': ('self',),
+        'MainSelectorBase.start': ('self',),
+        'MainSelectorBase.stop': ('self',),
+        'MainSelectorBase.update': ('self', 'args'),
+        'MainCustomSelector.settingsFlags': ('self',),
+        'ExhaustMainSelector.settingsFlags': ('self',),
+    },
+    'scripts/client/vehicle_systems/components/vehicleDecal.pyc': {
+        'VehicleDecal.attach': ('self',),
+        'VehicleDecal.detach': ('self',),
+        'VehicleDecal.__attach': ('self',),
     },
     'scripts/client/vehicle_systems/components/highlighter.pyc': {
         'Highlighter.deactivate': ('self',),
@@ -1655,6 +1677,58 @@ EXPECTED_CODE_NAMES = {
             'BigWorld', 'player', 'inputHandler',
             'removeVehicleFromCameraCollider', 'arena',
             'onPeriodChange', 'onCameraChanged'),
+        # The periodic timer is the only stock owner of the effects LOD, and
+        # it neither reads a draw flag nor stops for an undrawn vehicle.
+        'CompoundAppearance.__onPeriodicTimer': (
+            'BigWorld', 'camera', 'position', 'isAlive',
+            '_CompoundAppearance__updateEffectsLOD',
+            'customEffectManager', 'update'),
+        'CompoundAppearance.__updateEffectsLOD': (
+            'customEffectManager', 'isUnderwater', 'BigWorld',
+            'wg_isVehicleDustEnabled', 'enable', 'EffectSettings',
+            'SETTING_DUST', 'SETTING_EXHAUST'),
+        'CompoundAppearance.__attachSplodge': (
+            '_CompoundAppearance__compoundModel', 'node', 'TankPartNames',
+            'HULL', '_CompoundAppearance__splodge', 'attach'),
+    },
+    'scripts/client/CustomEffectManager.pyc': {
+        'CustomEffectManager.enable': (
+            '_CustomEffectManager__selectors', 'settingsFlags', 'start',
+            'stop'),
+        # deactivate also clears the manager's vehicle, so it is a teardown
+        # rather than a reversible hide for one unspotted enemy.
+        'CustomEffectManager.deactivate': (
+            '_CustomEffectManager__selectors', 'stop',
+            '_CustomEffectManager__vehicle'),
+    },
+    'scripts/client/CustomEffect.pyc': {
+        'MainSelectorBase.start': ('_enabled',),
+        'MainSelectorBase.stop': (
+            '_enabled', '_activeEffectId', 'enable', '_effectNodes',
+            'values', 'deactivate'),
+        'MainSelectorBase.update': ('_enabled', '_effectSelector'),
+        'MainCustomSelector.settingsFlags': (
+            'EffectSettings', 'SETTING_DUST'),
+        'ExhaustMainSelector.settingsFlags': (
+            'EffectSettings', 'SETTING_EXHAUST'),
+    },
+    'scripts/client/vehicle_systems/components/vehicleDecal.pyc': {
+        'VehicleDecal.attach': (
+            '_VehicleDecal__attached', '_VehicleDecal__appearance',
+            '_VehicleDecal__attach'),
+        'VehicleDecal.detach': (
+            '_VehicleDecal__attached', '_VehicleDecal__chassisDecals',
+            '_VehicleDecal__chassisParent', 'detach',
+            '_VehicleDecal__hullDecals', '_VehicleDecal__hullParent',
+            '_VehicleDecal__turretDecals', '_VehicleDecal__turretParent'),
+        # __attach resolves the same hull node __attachSplodge uses, which is
+        # how the runtime finds it again after closing the draw pass.
+        'VehicleDecal.__attach': (
+            '_VehicleDecal__appearance', 'compoundModel', 'root',
+            '_VehicleDecal__chassisParent', 'node', 'TankPartNames', 'HULL',
+            '_VehicleDecal__hullParent', 'TURRET',
+            '_VehicleDecal__turretParent', 'attach',
+            '_VehicleDecal__attached'),
     },
     'scripts/client/vehicle_systems/components/highlighter.pyc': {
         'Highlighter.deactivate': (
@@ -1942,6 +2016,15 @@ EXPECTED_GLOBALS = {
     'scripts/common/physics_shared.pyc': {
         'WEIGHT_SCALE': 0.001,
     },
+    'scripts/client/vehicle_systems/CompoundAppearance.pyc': {
+        # The effects LOD runs on this cadence and measures the camera, not
+        # the player, so an SPG aiming camera enables both effects around its
+        # aim point regardless of spotting.
+        '_PERIODIC_TIME': 0.25,
+        '_LOD_DISTANCE_EXHAUST': 200.0,
+        '_LOD_DISTANCE_TRAIL_PARTICLES': 100.0,
+        'MAX_DISTANCE': 500,
+    },
     'scripts/common/AccountCommands.pyc': {
         'RES_FAILURE': -1,
         'RES_SUCCESS': 0,
@@ -1961,6 +2044,21 @@ EXPECTED_GLOBALS = {
 
 
 EXPECTED_CLASS_CONSTANTS = {
+    'scripts/client/CustomEffect.pyc': {
+        'EffectSettings': {
+            'SETTINGS_NO': 0,
+            'SETTING_DUST': 1,
+            'SETTING_EXHAUST': 2,
+        },
+    },
+    'scripts/client/vehicle_systems/tankStructure.pyc': {
+        'TankPartNames': {
+            'CHASSIS': 'chassis',
+            'HULL': 'hull',
+            'TURRET': 'turret',
+            'GUN': 'gun',
+        },
+    },
     'scripts/client/AvatarInputHandler/aih_constants.pyc': {
         'CTRL_MODE_NAME': {
             'STRATEGIC': 'strategic',

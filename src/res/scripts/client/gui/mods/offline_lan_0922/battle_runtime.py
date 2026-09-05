@@ -3581,6 +3581,11 @@ class BattleRuntime(object):
                     previous, '_offlineLANPresentation', False)):
                 previous._postmortem_visible = False
         self._spectated_engine_id = int(engine_id)
+        # The entity AOI is now centred on a different vehicle.  Re-evaluate
+        # the retained spotting memory on the next frame instead of leaving
+        # the new viewpoint's neighbourhood hidden for the rest of the current
+        # 0.10 s HUD period.
+        self._next_spotting_time = 0.0
         return True
 
     def _fallback_postmortem_viewpoint(self, excluded_engine_id):
@@ -9802,6 +9807,25 @@ class BattleRuntime(object):
             # camera must fall back to the immutable canonical launch point.
             return None
 
+    def _shot_muzzle_drawn(self, record):
+        """Whether the stock muzzle effect belongs to a drawable shooter.
+
+        Exact #1513 ``Vehicle.showShooting`` for a remote is only
+        ``extra.stopFor`` followed by ``extra.startFor``: it starts the shoot
+        extra on ``appearance.boundEffects`` and guards on ``isStarted`` and
+        the siege state alone.  Retail never delivers that event for a vehicle
+        the client cannot see, while this runtime receives every LAN shot, so
+        an unspotted enemy fired a visible muzzle flash and its shot sound
+        over a hidden hull.  This is the same node-bound surface the fire
+        extra already closes on the hide edge.
+
+        The projectile keeps its own owner, so the tracer of a blind shot
+        still flies and still resolves.
+        """
+        if record.get('local'):
+            return True
+        return bool(record.get('spot_visible', True))
+
     def _show_shot(self, event, update_state=True):
         key = self._event_entity_key(event, 'attacker')
         if key is None:
@@ -9891,7 +9915,8 @@ class BattleRuntime(object):
                     burst_count = 1
                 burst_count = max(1, burst_count)
                 if (visual_admitted and self._optional_feature_enabled(
-                        'shot muzzle presentation')):
+                        'shot muzzle presentation') and
+                        self._shot_muzzle_drawn(record)):
                     self._run_optional_feature(
                         'shot muzzle presentation', entity.showShooting,
                         args=(burst_count, False))
@@ -19853,25 +19878,50 @@ class BattleRuntime(object):
         # should be guessed through a fallback.
         return current in (modes.STRATEGIC, modes.ARTY)
 
+    def _presentation_origin(self):
+        """Return the position the client's entity AOI is centred on.
+
+        Retail centres the vehicle AOI on the vehicle the player is attached
+        to, and a dead player is attached to whichever ally the postmortem
+        camera currently observes.  This runtime stops integrating the local
+        tank the moment it dies, so ``_local_position`` freezes at the wreck.
+        Keeping the AOI there hid the observed ally itself, and every vehicle
+        near it, whenever the wreck was more than 565 m away.
+        """
+        engine_id = self._spectated_engine_id
+        if engine_id is None:
+            return self._local_position
+        local_id = (int(self._server.vehicle_id)
+                    if self._server is not None else 0)
+        if int(engine_id) == local_id:
+            return self._local_position
+        try:
+            entity = self._server_entity(engine_id)
+        except ReferenceError:
+            entity = None
+        if entity is None:
+            return self._local_position
+        return _xyz(entity.position)
+
     def _spot_presentation_visibility(
             self, entity, remembered, was_model_visible=False):
         """Return ``(model, team knowledge)`` for one spotted enemy.
 
         The minimap follows team spotting memory.  The ordinary world model
-        and 3D marker remain bounded by the 565 m entity AOI, except that an
-        SPG in either of its aiming cameras must be able to aim at every
-        team-spotted target in its shell range.  The exemption covers the
-        whole aiming slice so switching between those cameras cannot make an
-        engaged target disappear.  Exact #1513 keeps an already-present entity
-        for the additional five-metre ``CIRCULAR_AOI_MARGIN`` to prevent
-        boundary flicker.
+        and 3D marker remain bounded by the 565 m entity AOI around the
+        currently observed vehicle, except that an SPG in either of its aiming
+        cameras must be able to aim at every team-spotted target in its shell
+        range.  The exemption covers the whole aiming slice so switching
+        between those cameras cannot make an engaged target disappear.  Exact
+        #1513 keeps an already-present entity for the additional five-metre
+        ``CIRCULAR_AOI_MARGIN`` to prevent boundary flicker.
         """
         remembered = bool(remembered)
         aoi_radius = spotting.VEHICLE_AOI_RADIUS
         if was_model_visible:
             aoi_radius += spotting.VEHICLE_AOI_HYSTERESIS_MARGIN
         within_aoi = _distance_2d(
-            self._local_position, _xyz(entity.position)) <= aoi_radius
+            self._presentation_origin(), _xyz(entity.position)) <= aoi_radius
         model_visible = remembered and (
             within_aoi or self._spg_aiming_view_active())
         return model_visible, remembered

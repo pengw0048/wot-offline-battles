@@ -14,7 +14,7 @@ import math
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _RemoteShotPresenter, _blend_angle, _component_aim_angles,
-    set_model_attachment_visibility)
+    close_stock_presentation_extras, set_model_attachment_visibility)
 
 
 _MINIMUM_KEYFRAME_SECONDS = 0.001
@@ -42,6 +42,10 @@ def set_draw_visibility(entity, visible):
     # keeps drawing over a hidden tank.  Gate the attachments too.
     set_model_attachment_visibility(
         getattr(appearance, 'compoundModel', None), visible)
+    # That flag is one unproven native property.  Close the two stock owners
+    # it would have covered directly as well: the ground occlusion decals and
+    # the camera-distance dust/exhaust selectors.
+    close_stock_presentation_extras(appearance, visible)
     return True
 
 
