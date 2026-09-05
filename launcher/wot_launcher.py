@@ -20,14 +20,34 @@ if __package__ in (None, ""):
     import core
     import error_reports
     import i18n
+    import gold_shop
+    import save_ledger
     import save_slots
     import vehicle_editor_ui
     import vehicle_overlays
 else:
     from . import (
-        bot_lineup_profiles, bot_lineup_ui, core, error_reports, i18n,
-        save_slots, vehicle_editor_ui, vehicle_overlays)
+        bot_lineup_profiles, bot_lineup_ui, core, error_reports, gold_shop,
+        i18n, save_ledger, save_slots, vehicle_editor_ui, vehicle_overlays)
 
+
+# The three balances a save carries, in the order the panel shows them.
+_BALANCE_LABELS = {
+    "credits": "Credits",
+    "gold": "Gold",
+    "freeXP": "Free experience",
+}
+
+_SHOP_HELP = (
+    "Every vehicle this client prices in gold, including the reward tanks "
+    "the game's own shop never sold. A bought vehicle arrives the next time "
+    "the game starts this save. Close the game before buying.")
+# Only a client can name a saved vehicle, so a save written before records
+# carried names says nothing about what it owns.  Selling into it would take
+# the gold for a vehicle the client already holds.
+_SHOP_UNREADABLE = (
+    "This save does not yet list the vehicles it owns. Start the game once "
+    "on it and the shop can sell to it again.")
 
 LAUNCHER_VERSION = "0.6.7"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
@@ -115,6 +135,52 @@ _CHINESE = {
     "New save": "新建存档",
     "Rename save": "重命名存档",
     "Save name:": "存档名称：",
+    "Account": "账号",
+    "Credits": "银币",
+    "Gold": "金币",
+    "Free experience": "自由经验",
+    "Apply balances": "应用余额",
+    "Reload": "重新读取",
+    "These are the selected save's balances. Gold cannot be earned offline, "
+    "so this is where a save gets it. Close the game before changing them.":
+        "这是当前选中存档的余额。离线状态下无法赚取金币，因此金币在这里设置。"
+        "修改前请先关闭游戏。",
+    "Start this save in the game once before changing its balances.":
+        "请先在游戏里启动一次该存档，然后再修改余额。",
+    "Balances saved: %s": "余额已保存：%s",
+    "The balances could not be saved: %s": "余额保存失败：%s",
+    "The balances could not be read: %s": "余额读取失败：%s",
+    "A balance must be a whole number.": "余额必须是整数。",
+    "Shop": "商店",
+    "Gold vehicle": "金币坦克",
+    "Buy vehicle": "购买坦克",
+    "Every vehicle this client prices in gold, including the reward tanks the "
+    "game's own shop never sold. A bought vehicle arrives the next time the "
+    "game starts this save. Close the game before buying.":
+        "这个客户端里所有标价金币的坦克，包括游戏商店从来不卖的奖励车。"
+        "买下的坦克会在下次用该存档进入游戏时到账。购买前请先关闭游戏。",
+    "This save does not yet list the vehicles it owns. Start the game once "
+    "on it and the shop can sell to it again.":
+        "这个存档还没有记录自己拥有哪些坦克。用它进一次游戏，商店就能继续卖了。",
+    "owned": "已拥有",
+    "bought": "已购买",
+    "%s - tier %d - %d gold": "%s - %d级 - %d金币",
+    "%s - tier %d - %d gold (%s)": "%s - %d级 - %d金币（%s）",
+    "The gold vehicles could not be listed: %s": "金币坦克列表读取失败：%s",
+    "Select a vehicle to buy.": "请先选择要购买的坦克。",
+    "Bought %s. It arrives the next time the game starts this save.":
+        "已购买 %s，下次用该存档进入游戏时到账。",
+    "The vehicle could not be bought: %s": "购买失败：%s",
+    "New account": "新账号",
+    "Fully unlocked": "全解锁",
+    "Save type": "存档类型",
+    "Start '%s' as a new World of Tanks account?\n\n"
+    "Yes: the tier 1 starter tanks, 100000 credits and an empty tech tree. "
+    "Everything else is researched and bought in the garage.\n\n"
+    "No: every vehicle, module and consumable is already owned.":
+        "把存档“%s”作为全新的坦克世界账号开始吗？\n\n"
+        "是：只有一级初始坦克、100000 银币，科技树全部未解锁，其余全部在车库里研发和购买。\n\n"
+        "否：所有坦克、模块和消耗品一开始就已拥有。",
     "Delete save?": "删除存档？",
     "Delete save '%s'? Its garage, crew, account settings and battle "
     "results are removed permanently.":
@@ -553,10 +619,14 @@ class LauncherWindow(object):
         self.tools_tabs = self._ttk.Notebook(frame)
         self.tools_tabs.grid(row=3, column=0, sticky="we", pady=(0, 8))
         self.save_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.account_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.shop_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.tools_tabs.add(self.save_panel, text="")
+        self.tools_tabs.add(self.account_panel, text="")
+        self.tools_tabs.add(self.shop_panel, text="")
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
@@ -596,6 +666,65 @@ class LauncherWindow(object):
         self.save_help_label.grid(
             row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.save_panel.grid_columnconfigure(1, weight=1)
+
+        # Gold is the one currency an offline account can never earn, so the
+        # amount a save has is a decision rather than a result.
+        self.balance_entries = {}
+        self.balance_labels = {}
+        for row, name in enumerate(save_ledger.CURRENCIES):
+            label = tk.Label(self.account_panel, text="")
+            label.grid(row=row, column=0, sticky="w", pady=(0, 4))
+            self.balance_labels[name] = label
+            entry = tk.Entry(self.account_panel, width=16)
+            entry.grid(row=row, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
+            self.balance_entries[name] = entry
+        account_actions = tk.Frame(self.account_panel)
+        account_actions.grid(
+            row=len(save_ledger.CURRENCIES), column=0, columnspan=2,
+            sticky="we", pady=(6, 0))
+        self.apply_balances_button = tk.Button(
+            account_actions, text="", command=self._apply_balances)
+        self.apply_balances_button.pack(side="left", fill="x", expand=True)
+        self.reload_balances_button = tk.Button(
+            account_actions, text="", command=self._refresh_balances)
+        self.reload_balances_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.account_help_label = tk.Label(
+            self.account_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.account_help_label.grid(
+            row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
+            sticky="we", pady=(8, 0))
+        self.account_panel.grid_columnconfigure(1, weight=1)
+
+        # 145 of the 196 vehicles #1513 prices in gold are marked notInShop:
+        # reward tanks the retail shop never sold and no tech tree leads to.
+        # This is the only place a player can reach them.
+        self._gold_offers = []
+        self._gold_offer_by_label = {}
+        self.gold_vehicle_label = tk.Label(self.shop_panel, text="")
+        self.gold_vehicle_label.grid(row=0, column=0, sticky="w")
+        self.gold_vehicle = tk.StringVar(value="")
+        self.gold_vehicle_box = self._ttk.Combobox(
+            self.shop_panel, textvariable=self.gold_vehicle, values=(),
+            state="readonly", width=48)
+        self.gold_vehicle_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        shop_actions = tk.Frame(self.shop_panel)
+        shop_actions.grid(
+            row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.buy_gold_vehicle_button = tk.Button(
+            shop_actions, text="", command=self._buy_gold_vehicle)
+        self.buy_gold_vehicle_button.pack(side="left", fill="x", expand=True)
+        self.refresh_gold_shop_button = tk.Button(
+            shop_actions, text="", command=self._refresh_gold_shop)
+        self.refresh_gold_shop_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.shop_help_label = tk.Label(
+            self.shop_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.shop_help_label.grid(
+            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self.shop_panel.grid_columnconfigure(1, weight=1)
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
             settings.get("bot_lineup_profiles"))
@@ -766,6 +895,20 @@ class LauncherWindow(object):
             "Each save keeps its own garage, crew, account settings and "
             "battle results. The selected save is the one the game starts "
             "with."))
+        self.tools_tabs.tab(self.account_panel, text=self._t("Account"))
+        for name, label in self.balance_labels.items():
+            label.config(text=self._t(_BALANCE_LABELS[name]))
+        self.apply_balances_button.config(text=self._t("Apply balances"))
+        self.reload_balances_button.config(text=self._t("Reload"))
+        self.account_help_label.config(text=self._t(
+            "These are the selected save's balances. Gold cannot be earned "
+            "offline, so this is where a save gets it. Close the game before "
+            "changing them."))
+        self.tools_tabs.tab(self.shop_panel, text=self._t("Shop"))
+        self.gold_vehicle_label.config(text=self._t("Gold vehicle"))
+        self.buy_gold_vehicle_button.config(text=self._t("Buy vehicle"))
+        self.refresh_gold_shop_button.config(text=self._t("Reload"))
+        self.shop_help_label.config(text=self._t(_SHOP_HELP))
         self._refresh_save_slots()
         self.tools_tabs.tab(
             self.vehicle_panel, text=self._t("Vehicle modifier"))
@@ -1001,7 +1144,11 @@ class LauncherWindow(object):
         same_name = sum(
             1 for row in self._save_slot_records
             if display_name(row) == name)
-        return "%s (%s)" % (name, record["id"]) if same_name > 1 else name
+        if same_name > 1:
+            name = "%s (%s)" % (name, record["id"])
+        return "%s - %s" % (name, self._t(
+            "New account" if record.get("mode") == save_slots.MODE_NEW_ACCOUNT
+            else "Fully unlocked"))
 
     def _refresh_save_slots(self, status=None):
         game_root = (status or {}).get("path") or self.game_root.get().strip()
@@ -1038,6 +1185,11 @@ class LauncherWindow(object):
             state=("disabled"
                    if self._save_slot_id == save_slots.DEFAULT_SLOT_ID
                    else "normal"))
+        # The balances and what they can buy belong to the selected save, so
+        # both follow it.
+        if hasattr(self, "balance_entries"):
+            self._refresh_balances(status)
+            self._refresh_gold_shop(status)
         return tuple(values)
 
     def _save_slot_selected(self, unused_event=None):
@@ -1055,6 +1207,172 @@ class LauncherWindow(object):
 
         return simpledialog.askstring(
             self._t(title), self._t("Save name:"), initialvalue=current)
+
+    def _refresh_balances(self, status=None):
+        """Show the selected save's balances, or say why there are none.
+
+        A save that has never been started has no balances yet: the client
+        writes them the first time it builds that save's garage, from the
+        account type the save was created as.
+        """
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            balances = save_ledger.read_balances(
+                self._save_slot_id, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            if hasattr(self, "log_view"):
+                self._log("The balances could not be read: %s" % error)
+            balances = None
+        editable = balances is not None
+        for name, entry in self.balance_entries.items():
+            entry.config(state="normal")
+            entry.delete(0, "end")
+            if editable:
+                entry.insert(0, str(balances.get(name, 0)))
+            else:
+                entry.config(state="disabled")
+        state = "normal" if editable else "disabled"
+        self.apply_balances_button.config(state=state)
+        return editable
+
+    def _apply_balances(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        wanted = {}
+        for name, entry in self.balance_entries.items():
+            raw = entry.get().strip()
+            if not raw:
+                continue
+            try:
+                wanted[name] = int(raw)
+            except ValueError:
+                self._log("A balance must be a whole number.")
+                return False
+        if not wanted:
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            balances = save_ledger.write_balances(
+                self._save_slot_id, wanted, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            self._log("The balances could not be saved: %s" % error)
+            self._refresh_balances()
+            return False
+        self._refresh_balances()
+        self._log("Balances saved: %s" % ", ".join(
+            "%s %d" % (self._t(_BALANCE_LABELS[name]), balances[name])
+            for name in save_ledger.CURRENCIES))
+        return True
+
+    def _gold_offer_label(self, offer):
+        """Return one shop row: what it is, what it costs, and its state."""
+        if offer["owned"]:
+            state = self._t("owned")
+        elif offer["pending"]:
+            state = self._t("bought")
+        else:
+            state = ""
+        if state:
+            return self._t("%s - tier %d - %d gold (%s)") % (
+                offer["label"], offer["level"], offer["gold"], state)
+        return self._t("%s - tier %d - %d gold") % (
+            offer["label"], offer["level"], offer["gold"])
+
+    def _gold_catalogue(self, game_root):
+        """Return the client's gold vehicles, read once per game folder.
+
+        Reading them opens the client's package and parses every nation's
+        roster, and nothing about an installed client changes while the
+        launcher runs.
+        """
+        cached_root, cached = getattr(self, "_gold_catalogue_cache", (None, None))
+        if cached is not None and cached_root == game_root:
+            return cached
+        catalogue = vehicle_overlays.list_gold_vehicles(game_root)
+        self._gold_catalogue_cache = (game_root, catalogue)
+        return catalogue
+
+    def _refresh_gold_shop(self, status=None):
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            offers = gold_shop.list_offers(
+                self._save_slot_id, game_root or None,
+                catalogue=self._gold_catalogue(game_root or None))
+        except (gold_shop.GoldShopError, save_slots.SaveSlotError,
+                vehicle_overlays.VehicleOverlayError) as error:
+            if hasattr(self, "log_view"):
+                self._log("The gold vehicles could not be listed: %s" % error)
+            offers = []
+        self._gold_offers = offers
+        self._gold_offer_by_label = {}
+        values = []
+        for offer in offers:
+            label = self._gold_offer_label(offer)
+            self._gold_offer_by_label[label] = offer["name"]
+            values.append(label)
+        self.gold_vehicle_box.config(values=tuple(values))
+        if self.gold_vehicle.get() not in self._gold_offer_by_label:
+            self.gold_vehicle.set(values[0] if values else "")
+        # A save that does not name its vehicles cannot be sold to: see
+        # gold_shop.unnamed_vehicles.  Say so where the offers are, rather
+        # than only when a purchase is refused.
+        try:
+            unreadable = bool(gold_shop.unnamed_vehicles(
+                self._save_slot_id, game_root or None))
+        except (gold_shop.GoldShopError, save_slots.SaveSlotError):
+            unreadable = False
+        self.shop_help_label.config(
+            text=self._t(_SHOP_UNREADABLE if unreadable else _SHOP_HELP))
+        self.buy_gold_vehicle_button.config(
+            state=("normal" if values and not unreadable else "disabled"))
+        return tuple(values)
+
+    def _buy_gold_vehicle(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        name = self._gold_offer_by_label.get(self.gold_vehicle.get())
+        if name is None:
+            self._log("Select a vehicle to buy.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            bought = gold_shop.buy_vehicle(
+                self._save_slot_id, name, game_root or None)
+        except (gold_shop.GoldShopError, save_slots.SaveSlotError,
+                vehicle_overlays.VehicleOverlayError) as error:
+            self._log("The vehicle could not be bought: %s" % error)
+            return False
+        self._refresh_balances()
+        self._refresh_gold_shop()
+        self._log(
+            "Bought %s. It arrives the next time the game starts this save."
+            % bought["label"])
+        return True
+
+    def _ask_save_slot_mode(self, name):
+        """Ask which account a new save starts from, or None to cancel.
+
+        The two modes are the whole difference between the historical garage
+        and a career, so the choice is made once, when the save is created,
+        and never changes afterwards.
+        """
+        from tkinter import messagebox
+
+        answer = messagebox.askyesnocancel(
+            self._t("Save type"),
+            self._t(
+                "Start '%s' as a new World of Tanks account?\n\n"
+                "Yes: the tier 1 starter tanks, 100000 credits and an empty "
+                "tech tree. Everything else is researched and bought in the "
+                "garage.\n\n"
+                "No: every vehicle, module and consumable is already owned.")
+            % name)
+        if answer is None:
+            return None
+        return (save_slots.MODE_NEW_ACCOUNT if answer
+                else save_slots.MODE_UNLOCKED)
 
     def _confirm_delete_save_slot(self, label):
         from tkinter import messagebox
@@ -1079,9 +1397,12 @@ class LauncherWindow(object):
         raw_name = self._ask_save_slot_name("New save")
         if raw_name is None:
             return False
+        mode = self._ask_save_slot_mode(raw_name.strip() or self._t("New save"))
+        if mode is None:
+            return False
         try:
             record = save_slots.create_slot(
-                raw_name, save_slots.MODE_UNLOCKED, game_root or None)
+                raw_name, mode, game_root or None)
         except save_slots.SaveSlotError as error:
             self._log("Could not create the save: %s" % error)
             return False

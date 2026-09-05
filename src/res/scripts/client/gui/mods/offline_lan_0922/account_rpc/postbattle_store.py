@@ -126,6 +126,32 @@ def _receipt(value):
     # is safer than silently applying an untrusted server value.
     if rewards['repair_cost'] or rewards['ammo_cost']:
         raise ValueError('offline service costs must be zero')
+    shells_fired = {}
+    raw_fired = value.get('shells_fired')
+    if raw_fired is not None:
+        if not isinstance(raw_fired, dict) or len(raw_fired) > 10:
+            raise ValueError('battle receipt ammunition is invalid')
+        for index, count in raw_fired.items():
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                raise ValueError('battle receipt ammunition is invalid')
+            count = _int(count)
+            if not 0 <= index <= 9 or not 0 <= count <= 100000:
+                raise ValueError('battle receipt ammunition is invalid')
+            if count:
+                shells_fired[index] = count
+    equipment_used = []
+    raw_used = value.get('equipment_used')
+    if raw_used is not None:
+        if not isinstance(raw_used, (list, tuple)) or len(raw_used) > 3:
+            raise ValueError('battle receipt consumables are invalid')
+        for compact_descr in raw_used:
+            compact_descr = _int(compact_descr)
+            if compact_descr < 1:
+                raise ValueError('battle receipt consumables are invalid')
+            if compact_descr not in equipment_used:
+                equipment_used.append(compact_descr)
     public_results = []
     raw_public = value.get('public_results')
     if raw_public is None:
@@ -251,9 +277,17 @@ def _receipt(value):
         'premature_leave': bool(value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
-        # The personal row owns the medal list; mirroring it here keeps the
-        # durable progress transaction from re-deriving the roster.
+        # The personal row owns the medal list and the health the battle left;
+        # mirroring both here keeps the durable progress transaction from
+        # re-deriving the roster to find them.
         'achievements': list(personal['achievements']),
+        'health': personal['health'],
+        # By the shell's index in the gun's own shot order: only the client
+        # can turn that into a shell, and only the client owns its price.
+        'shells_fired': shells_fired,
+        # Consumables come by compact descriptor, which the client does send
+        # with the mounted equipment.
+        'equipment_used': equipment_used,
         'public_results': public_results,
         'interactions': interactions,
     }

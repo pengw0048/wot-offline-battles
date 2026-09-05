@@ -29,6 +29,20 @@ class Result(object):
         self.wait_for_before_response = bool(wait_for_before_response)
 
 
+# AccountCommands.BUY_VEHICLE_FLAG in #1513, read from the shipped bytecode:
+# NONE = 0, CREW = 1, SHELLS = 16.  Shop.buyVehicle folds the two optional
+# extras into one flag word before sending them.
+BUY_VEHICLE_FLAG_CREW = 1
+BUY_VEHICLE_FLAG_SHELLS = 16
+
+
+def _int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _garage(context):
     """Return the mutable garage, promoting the immutable snapshot once."""
     state = context.get('garage')
@@ -38,7 +52,7 @@ def _garage(context):
     return state
 
 
-def _fitting(context, mutate):
+def _fitting(context, mutate, extension=None):
     """Apply one fitting mutation and push the resulting inventory diff.
 
     #1513 refreshes the garage from ``PlayerAccount.update``, which unpickles
@@ -53,9 +67,12 @@ def _fitting(context, mutate):
     state.touched_vehicles()
     state.touched_items()
     try:
-        mutate(state)
+        outcome = mutate(state)
     except garage.GarageError as error:
         return Result(commands.RES_FAILURE, str(error))
+    # A few #1513 callbacks read a value out of the response's ext dictionary
+    # rather than re-reading the inventory, so the mutation can name one.
+    ext = None if extension is None else extension(outcome)
     context['selected_vehicle'] = state.snapshot()
     mutated = _clock()
     store = context.get('garage_store')
@@ -68,16 +85,17 @@ def _fitting(context, mutate):
     push = context.get('push_update')
     if not callable(push):
         _report_fitting_cost(started, mutated, saved, saved, None)
-        return Result(commands.RES_SUCCESS)
+        return Result(commands.RES_SUCCESS, ext=ext)
     push_and_wait = context.get('push_update_and_wait')
 
     touched = state.touched_vehicles()
     touched_items = state.touched_items()
+    moved_tankmen = state.touched_tankmen()
 
     def publish(on_complete=None):
         diff = data.inventory(
             state.snapshot(), validate=False, only_vehicles=touched,
-            only_items=touched_items)
+            only_items=touched_items, touched_tankmen=moved_tankmen)
         built = _clock()
         completed = [False]
 
@@ -96,7 +114,7 @@ def _fitting(context, mutate):
         _report_fitting_cost(started, mutated, saved, built, diff)
 
     return Result(
-        commands.RES_SUCCESS, before_response=publish,
+        commands.RES_SUCCESS, ext=ext, before_response=publish,
         wait_for_before_response=True)
 
 
@@ -139,8 +157,9 @@ def _equip_optional_device(context, args):
     values = list(args[0] if args else ())
     if len(values) < 4:
         return Result(commands.RES_FAILURE, 'INVALID_DEVICE_REQUEST')
+    paid_removal = bool(_int(values[4])) if len(values) > 4 else False
     return _fitting(context, lambda state: state.equip_optional_device(
-        values[1], values[2], values[3]))
+        values[1], values[2], values[3], paid_removal=paid_removal))
 
 
 def _equip_component(context, args):
@@ -204,11 +223,87 @@ def _train_tankman(context, args):
         context, lambda state: state.train_tankman(args[1], args[2]))
 
 
+def _equip_tankman(context, args):
+    # Inventory.equipTankman -> _doCmdInt3(CMD_EQUIP_TMAN, vehInvID, slot,
+    # tmanInvID), with tmanInvID -1 for an empty seat.  TankmanUnload sends
+    # slot -1 alongside it to unload the whole crew.
+    if len(args) < 3:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.equip_tankman(
+        args[0], args[1], args[2]))
+
+
+def _dismiss_tankman(context, args):
+    # Inventory.dismissTankman -> _doCmdInt3(CMD_DISMISS_TMAN, tmanInvID,
+    # 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.dismiss_tankman(args[0]))
+
+
+def _retrain_tankman(context, args):
+    # Inventory.__respecTman_onShopSynced -> _doCmdInt4(CMD_TMAN_RESPEC,
+    #   shopRev, tmanInvID, tmanCostTypeIdx, vehTypeCompDescr).
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.retrain_tankman(
+        args[1], args[2], args[3]))
+
+
+def _retrain_crew(context, args):
+    # Inventory.__multiRespecTman_onShopSynced -> _doCmdIntArr(
+    #   CMD_TMAN_MULTI_RESPEC,
+    #   [shopRev, vehTypeCompDescr, tmanInvID, costIdx, ...]).
+    values = list(args[0] if args else ())
+    if len(values) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context, lambda state: state.retrain_crew(values[1], values[2:]))
+
+
+def _return_crew(context, args):
+    # Inventory.returnCrew -> _doCmdInt3(CMD_RETURN_CREW, vehInvID, 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.return_crew(args[0]))
+
+
+def _repair(context, args):
+    # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_REPAIR_REQUEST')
+    return _fitting(context, lambda state: state.repair_vehicle(args[0]))
+
+
+def _buy_tankman(context, args):
+    # Shop.buyTankman -> _doCmdInt4(CMD_BUY_TMAN, cacheRev, vehTypeCompDescr,
+    # roleIdx, tmanCostTypeIdx), where roleIdx is tankmen.SKILL_INDICES[role].
+    # Its callback reads ext['tmanInvID'], so the response has to carry it.
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context,
+        lambda state: state.buy_tankman(args[1], args[2], args[3]),
+        extension=lambda tankman_id: {'tmanInvID': int(tankman_id)})
+
+
+def _buy_and_equip_tankman(context, args):
+    # Shop.buyAndEquipTankman -> _doCmdInt4(CMD_BUY_AND_EQUIP_TMAN, cacheRev,
+    # vehInvID, slot, tmanCostTypeIdx).
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context,
+        lambda state: state.buy_and_equip_tankman(args[1], args[2], args[3]))
+
+
 def _buy_item(context, args):
     # _doCmdInt4: (cacheRev, intCompactDescr, count, goldForCredits)
     if len(args) < 3:
         return Result(commands.RES_FAILURE, 'INVALID_PURCHASE_REQUEST')
-    return _fitting(context, lambda state: state.buy_item(args[1], args[2]))
+    gold_for_credits = bool(_int(args[3])) if len(args) > 3 else False
+    return _fitting(context, lambda state: state.buy_item(
+        args[1], args[2], gold_for_credits=gold_for_credits))
 
 
 def _buy_and_equip_item(context, args):
@@ -219,6 +314,93 @@ def _buy_and_equip_item(context, args):
     gun_compact_descr = values[5] if len(values) > 5 else 0
     return _fitting(context, lambda state: state.buy_and_equip_item(
         values[2], values[1], values[3], gun_compact_descr))
+
+
+def _unlock(context, args):
+    # Stats.unlock -> _doCmdInt3(CMD_UNLOCK, vehTypeCompDescr, unlockIdx, 0).
+    if len(args) < 2:
+        return Result(commands.RES_FAILURE, 'INVALID_RESEARCH_REQUEST')
+    return _fitting(
+        context, lambda state: state.unlock(args[0], args[1]))
+
+
+def _buy_vehicle(context, args):
+    # Shop.buyVehicle -> _doCmdIntArr(CMD_BUY_VEHICLE,
+    # [cacheRev, typeCompDescr, flags, tmanCostTypeIdx, rentPeriod]).
+    values = list(args[0] if args else ())
+    if len(values) < 3:
+        return Result(commands.RES_FAILURE, 'INVALID_PURCHASE_REQUEST')
+    flags = _int(values[2])
+    rent_period = values[4] if len(values) > 4 else 0
+    tman_cost_type_index = values[3] if len(values) > 3 else 0
+    return _fitting(context, lambda state: state.buy_vehicle(
+        values[1],
+        buy_shells=bool(flags & BUY_VEHICLE_FLAG_SHELLS),
+        recruit_crew=bool(flags & BUY_VEHICLE_FLAG_CREW),
+        tman_cost_type_index=tman_cost_type_index,
+        rent_period=rent_period))
+
+
+def _sell_vehicle(context, args):
+    # Inventory.__sellVehicle_onShopSynced -> _doCmdIntArr(CMD_SELL_VEHICLE,
+    # [shopRev, vehInvID, isCrewDismiss, len(itemsFromVehicle)]
+    # + itemsFromVehicle + [len(itemsFromInventory)] + itemsFromInventory).
+    # The two lists carry the intCDs of the mounted and stored items the sell
+    # dialog offered to sell along with the vehicle.
+    values = list(args[0] if args else ())
+    if len(values) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_SALE_REQUEST')
+    from_vehicle_count = _int(values[3])
+    tail = 4 + from_vehicle_count
+    if from_vehicle_count < 0 or len(values) < tail + 1:
+        return Result(commands.RES_FAILURE, 'INVALID_SALE_REQUEST')
+    items_from_vehicle = [_int(value) for value in values[4:tail]]
+    from_inventory_count = _int(values[tail])
+    end = tail + 1 + from_inventory_count
+    if from_inventory_count < 0 or len(values) < end:
+        return Result(commands.RES_FAILURE, 'INVALID_SALE_REQUEST')
+    items_from_inventory = [_int(value) for value in values[tail + 1:end]]
+    return _fitting(context, lambda state: state.sell_vehicle(
+        values[1], dismiss_crew=bool(_int(values[2])),
+        items_from_vehicle=items_from_vehicle,
+        items_from_inventory=items_from_inventory))
+
+
+def _sell_item(context, args):
+    # Inventory.__sellItem_onShopSynced -> _doCmdInt4(CMD_SELL_ITEM, shopRev,
+    # itemTypeIdx, itemInvID, count).  ModuleSeller passes the item's intCD as
+    # the inventory id, so the third value is the compact descriptor itself.
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_SALE_REQUEST')
+    return _fitting(
+        context, lambda state: state.sell_item(args[2], args[3]))
+
+
+def _exchange(context, args):
+    # Stats.exchange -> _doCmdInt3(CMD_EXCHANGE, shopRev, gold, 0).
+    if len(args) < 2:
+        return Result(commands.RES_FAILURE, 'INVALID_EXCHANGE_REQUEST')
+    return _fitting(context, lambda state: state.exchange_gold(args[1]))
+
+
+def _convert_free_xp(context, args):
+    # Stats.convertToFreeXP -> _doCmdIntArr(CMD_FREE_XP_CONV,
+    # [shopRev, xp, useDiscount] + vehTypeCompDescrs).
+    values = list(args[0] if args else ())
+    if len(values) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_EXCHANGE_REQUEST')
+    return _fitting(context, lambda state: state.convert_to_free_xp(
+        values[3:], values[1]))
+
+
+def _buy_slot(context, args):
+    # Stats.buySlot -> _doCmdInt3(CMD_BUY_SLOT, shopRev, 0, 0).
+    return _fitting(context, lambda state: state.buy_slot())
+
+
+def _buy_berths(context, args):
+    # Stats.buyBerths -> _doCmdInt3(CMD_BUY_BERTHS, shopRev, 0, 0).
+    return _fitting(context, lambda state: state.buy_berths())
 
 
 def _vehicle_settings(context, args):
@@ -428,7 +610,23 @@ HANDLERS = {
     commands.CMD_TMAN_ADD_SKILL: _add_tankman_skill,
     commands.CMD_TMAN_DROP_SKILLS: _drop_tankman_skills,
     commands.CMD_TRAINING_TMAN: _train_tankman,
+    commands.CMD_EQUIP_TMAN: _equip_tankman,
+    commands.CMD_DISMISS_TMAN: _dismiss_tankman,
+    commands.CMD_REPAIR: _repair,
+    commands.CMD_TMAN_RESPEC: _retrain_tankman,
+    commands.CMD_TMAN_MULTI_RESPEC: _retrain_crew,
+    commands.CMD_RETURN_CREW: _return_crew,
+    commands.CMD_BUY_TMAN: _buy_tankman,
+    commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,
     commands.CMD_BUY_ITEM: _buy_item,
+    commands.CMD_UNLOCK: _unlock,
+    commands.CMD_EXCHANGE: _exchange,
+    commands.CMD_FREE_XP_CONV: _convert_free_xp,
+    commands.CMD_BUY_SLOT: _buy_slot,
+    commands.CMD_BUY_BERTHS: _buy_berths,
+    commands.CMD_BUY_VEHICLE: _buy_vehicle,
+    commands.CMD_SELL_VEHICLE: _sell_vehicle,
+    commands.CMD_SELL_ITEM: _sell_item,
     commands.CMD_BUY_AND_EQUIP_ITEM: _buy_and_equip_item,
     commands.CMD_VEH_SETTINGS: _vehicle_settings,
     commands.CMD_VEH_APPLY_STYLE: _apply_style,

@@ -62,6 +62,26 @@ unlocked. Each vehicle arrives with its top chassis, turret, gun, engine, radio
 and fuel tank, plus an automatic fire extinguisher, a large first aid kit and a
 large repair kit. Every item costs nothing.
 
+A complex optional device is destroyed when you take it off, unless you pay
+the removal price -- the same choice the game gives you.
+
+Shells are spent in battle and cost credits to replace, and so is each
+consumable you use, so resupplying after a battle is part of what it cost you.
+
+A battle leaves your tank as damaged as it ended, and repairing it costs
+credits. The garage shows the damage and the repair button pays for it. The
+damage is saved, so restarting the game does not repair anything.
+
+Recruit crew members from the three schools the game offers. In a new-account
+save the 75% school costs 20000 credits and the 100% school costs 200 gold; in
+a fully unlocked save all three are free.
+
+Sell a vehicle and its crew can go to the barracks instead of being dismissed,
+as long as there are free berths. A crew member in the barracks can take a seat
+again in a vehicle of the type they were trained for. Retraining moves a crew
+member to another vehicle, at the same three schools, one at a time or the
+whole crew at once.
+
 Change modules, optional devices, consumables, shells, camouflage and crew
 skills as you like. Each change is written to the selected save, so the garage
 survives a restart. Crew skills, optional devices and consumables move the same
@@ -76,6 +96,24 @@ save is the one the game starts with. Saves live in
 %APPDATA%\Wargaming.net\WorldOfTanks\offline_lan_0922\saves\<save>\. A save you
 made in an older build keeps working: its files move into the default save the
 first time this build starts.
+
+When you create a save the Launcher asks which account it starts from, and the
+answer cannot be changed later. "Fully unlocked" is the garage this mod always
+had: every vehicle, module and consumable already owned. "New account" starts
+like a real World of Tanks account: the tier 1 starter tanks, 100000 credits,
+30 garage slots, and an unresearched tech tree. You earn credits and experience
+in battle and research and buy everything else in the garage, at the prices
+this client ships.
+
+The Account tab shows the selected save's credits, gold and free experience and
+lets you set them. Gold cannot be earned offline, so that is where a save gets
+it. Start a save in the game once before editing it, and close the game first.
+
+The Shop tab sells every vehicle the client prices in gold, including the
+reward tanks the game's own shop never sold. Buying one takes gold from the
+selected save; the tank appears in the garage the next time the game starts
+that save. A save from an older version must be started once before the shop
+can sell to it, because only the game can tell the launcher what it owns.
 
 Vehicle data profiles are not part of a save. They change the client's shared
 vehicle catalogue for a whole room, so they stay with the installation.

@@ -20,16 +20,61 @@ ITEM_TYPE_INDICES = tuple(range(1, 13))
 REQUIRED_VEHICLE_COMPONENT_TYPES = (2, 3, 4, 5, 6, 7)
 # Account-wide artefacts: owned once and mountable on any vehicle.
 ARTEFACT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
+# items/vehicles.py uses this literal for IS_CLIENT while reading the
+# vehicle list, so a sale returns half of what an item cost.
+OFFLINE_SELL_PRICE_FACTOR = 0.5
+# Offline policy, not a #1513 value. See shop().
+OFFLINE_GOLD_EXCHANGE_RATE = 400
 OFFLINE_CREDITS = 100000000
 OFFLINE_GOLD = 1000000
 OFFLINE_FREE_XP = 100000000
 OFFLINE_GARAGE_SLOTS = 2000
 OFFLINE_BARRACKS_BERTHS = 2000
+# #1513's InventoryRequester defaults a tankman's missing vehicle key to -1,
+# and ItemsRequester treats anything not above zero as "not in a tank".
+BARRACKS_VEHICLE_ID = -1
 # #1513 counts each battle-hero medal in the vehicle dossier's aggregate
 # ``battleHeroes`` record as well as in its own counter.
 BATTLE_HERO_ACHIEVEMENTS = frozenset((
     'warrior', 'invader', 'sniper', 'sniper2', 'mainGun', 'defender',
     'steelwall', 'supporter', 'scout', 'evileye'))
+
+
+DEFAULT_TANKMAN_COSTS = (
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 50,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False,
+    },
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 75,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': False,
+    },
+    {
+        'credits': 0, 'gold': 0, 'roleLevel': 100,
+        'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0, 'isPremium': True,
+    },
+)
+
+
+def _device_removal_cost(vehicle):
+    """Return what taking a complex optional device off costs.
+
+    ``OptionalDevice.getRemovalPrice`` reads this for anything the client's
+    own descriptor marks as not ``removable``; the account charges the same.
+    """
+    cost = vehicle.get('deviceRemovalCost')
+    if not isinstance(cost, dict):
+        return {'gold': 0}
+    return dict((str(currency), int(amount))
+                for currency, amount in cost.items())
+
+
+def _tankman_costs(vehicle):
+    """Return the account's three recruitment choices, positionally."""
+    costs = vehicle.get('tankmanCosts')
+    if not isinstance(costs, (list, tuple)) or len(costs) != 3:
+        return DEFAULT_TANKMAN_COSTS
+    return tuple(dict(cost) for cost in costs)
 
 
 def _vehicle_records(vehicle):
@@ -65,23 +110,26 @@ def _validate_selected_vehicle(vehicle):
         comp_descrs.append(record['compDescr'])
         crew = list(record.get('crew', ()))
         tankmen = dict(record.get('tankmen', {}))
-        tankman_ids.extend(crew)
+        # #1513's ``Vehicle._buildCrew`` walks the crew list slot by slot and
+        # reads ``None`` as an empty seat, so an unloaded crew member leaves a
+        # hole rather than shortening the list.
+        manned = [tankman_id for tankman_id in crew if tankman_id is not None]
+        tankman_ids.extend(manned)
         vehicle_type_compact_descr = record.get(
             'vehicleTypeCompactDescr')
         if vehicle_type_compact_descr is not None:
             vehicle_type_compact_descrs.append(vehicle_type_compact_descr)
 
-        if not crew or not tankmen:
-            raise ValueError(
-                'selected vehicle crew and tankmen must be non-empty')
+        if not crew:
+            raise ValueError('selected vehicle crew must have one seat per role')
         try:
             crew_ids_are_positive = all(
-                int(tankman_id) > 0 for tankman_id in crew)
+                int(tankman_id) > 0 for tankman_id in manned)
         except (TypeError, ValueError):
             crew_ids_are_positive = False
         if not crew_ids_are_positive:
             raise ValueError('selected vehicle crew ids must be positive')
-        if len(crew) != len(tankmen) or set(crew) != set(tankmen):
+        if len(manned) != len(tankmen) or set(manned) != set(tankmen):
             raise ValueError(
                 'selected vehicle crew ids must resolve to tankmen')
 
@@ -90,8 +138,12 @@ def _validate_selected_vehicle(vehicle):
             if not isinstance(value, (tuple, list)) or len(value) != 2:
                 raise ValueError(
                     'selected vehicle %s must contain two values' % key)
-        if record['repair'][1] <= 0:
-            raise ValueError('selected vehicle health must be positive')
+        # ``repair`` is (outstanding cost, remaining health).  #1513's own
+        # ``Vehicle.modelState`` reads a health of 0 beside a bill as
+        # DESTROYED and a negative one as EXPLODED, so neither is a damaged
+        # snapshot -- both are a vehicle waiting to be repaired.
+        if int(record['repair'][0]) < 0:
+            raise ValueError('selected vehicle repair cost cannot be negative')
         for key in ('eqs', 'eqsLayout'):
             value = record.get(key)
             if not isinstance(value, (tuple, list)) or len(value) != 3:
@@ -132,6 +184,27 @@ def _validate_selected_vehicle(vehicle):
         raise ValueError('vehicle inventory ids must be unique')
     if len(set(comp_descrs)) != len(comp_descrs):
         raise ValueError('vehicle compact descriptors must be unique')
+    barracks = vehicle.get('barracksTankmen')
+    if barracks is not None:
+        if not isinstance(barracks, dict):
+            raise ValueError('barracks tankmen must be a mapping')
+        for tankman_id, compact_descr in barracks.items():
+            try:
+                positive = int(tankman_id) > 0
+            except (TypeError, ValueError):
+                positive = False
+            if not positive:
+                raise ValueError('barracks tankman ids must be positive')
+            if not compact_descr:
+                raise ValueError(
+                    'barracks tankman compact descriptors must be non-empty')
+        berths = int(vehicle.get('accountBerths', OFFLINE_BARRACKS_BERTHS) or 0)
+        if len(barracks) > berths:
+            raise ValueError('the barracks holds more tankmen than it has berths')
+        # A crew member is in exactly one place. The client decides which from
+        # the published ``vehicle`` foreign key, so two claims on one id would
+        # make the garage disagree with itself.
+        tankman_ids.extend(barracks)
     if len(set(tankman_ids)) != len(tankman_ids):
         raise ValueError('tankman inventory ids must be unique')
     if (vehicle_type_compact_descrs and
@@ -186,7 +259,7 @@ def _validate_selected_vehicle(vehicle):
 
 
 def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
-              only_items=None):
+              only_items=None, touched_tankmen=None):
     """Return every loadable garage vehicle and its relational records.
 
     ``selected_vehicle`` is serialized by ``bootstrap._selected_vehicle``.  It
@@ -197,7 +270,8 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
     ``GarageState`` publishes without paying for it again.
 
     ``only_vehicles`` limits the per-vehicle rows to the ids a fitting touched,
-    and ``only_items`` maps an item type to the owned compact descriptors it
+    ``touched_tankmen`` names the crew ids whose place changed, and
+    ``only_items`` maps an item type to the owned compact descriptors it
     changed.  Either one selects a delta: ``Inventory.synchronize`` merges the
     diff per item type through ``synchronizeDicts``, and an omitted type keeps
     its cache untouched.  This matters because ``ItemsRequester.invalidateCache``
@@ -251,6 +325,9 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         # A missing lastCrew record means that no historical crew is stored.
         # An empty per-vehicle list is not equivalent in #1513: the crew
         # operations popover treats presence as a real history entry.
+        remembered = record.get('lastCrew')
+        if isinstance(remembered, (list, tuple)) and remembered:
+            vehicle_values['lastCrew'][vehicle_id] = list(remembered)
 
         outfits = record.get('outfits')
         vehicle_type = record.get('vehicleTypeCompactDescr')
@@ -285,12 +362,35 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         tankman_vehicles.update(dict(
             (tankman_id, vehicle_id) for tankman_id in tankmen))
 
-    # Optional devices and equipment are owned by the account, not by one
-    # vehicle, so they arrive in the snapshot's top-level catalogue.
+    # A crew member the account owns but no vehicle carries is in the
+    # barracks. #1513's ``InventoryRequester.__makeTankman`` reads a missing
+    # or non-positive ``vehicle`` foreign key as exactly that, and
+    # ``ItemsRequester`` then builds the Tankman with no vehicle at all.
+    wanted_tankmen = None if not delta else set(
+        int(tankman_id) for tankman_id in (touched_tankmen or ()))
+    for tankman_id, compact_descr in dict(
+            vehicle.get('barracksTankmen') or {}).items():
+        tankman_id = int(tankman_id)
+        if wanted_tankmen is not None and tankman_id not in wanted_tankmen:
+            continue
+        all_tankmen[tankman_id] = compact_descr
+        tankman_vehicles[tankman_id] = BARRACKS_VEHICLE_ID
+
+    # The account owns items; a vehicle only carries some of them. The
+    # snapshot's top-level catalogue is that account view, and it is the only
+    # place a spare module or a bought consumable exists at all, because no
+    # vehicle carries one. Publishing it alongside the per-vehicle counts is
+    # what puts a purchase in the player's depot.
+    #
+    # Ammunition is part of that view: a battle spends rounds and a resupply
+    # is paid for, so a shell's account count is real stock rather than a
+    # high-water mark.
     for item_type, items in dict(
             vehicle.get('inventoryItems', {})).items():
         item_type = int(item_type)
-        if item_type not in ARTEFACT_ITEM_TYPES:
+        if item_type not in values or item_type in (
+                VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,
+                CUSTOMIZATION_ITEM_TYPE):
             continue
         wanted = _wanted_items(only_items, item_type)
         target = values[item_type]
@@ -320,8 +420,74 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         CUSTOMIZATION_UNLOCKS: {},
     }
     if delta:
+        _publish_removals(values, vehicle_values, records, vehicle,
+                          only_vehicles, only_items, touched_tankmen)
         values = _prune_empty(values)
     return {'inventory': values}
+
+
+def _publish_removals(values, vehicle_values, records, vehicle,
+                      only_vehicles, only_items, touched_tankmen):
+    """Say what the account no longer owns, in the client's own vocabulary.
+
+    #1513 merges an inventory diff through ``diff_utils.synchronizeDicts``,
+    which pops a cached key when the diff carries that key with the value
+    ``None``. Leaving a sold vehicle, a dismissed crew member or an item whose
+    count reached zero out of the diff is therefore not a removal at all: the
+    client's cache keeps it. Only a delta can remove anything; a full sync
+    replaces the cache outright.
+
+    A removal is decided by the account, never by the diff: an item the
+    account still owns but that this publication had no reason to carry is
+    left alone, so a publication rule can never delete a player's property by
+    saying nothing about it.
+    """
+    owned = dict(vehicle.get('inventoryItems', {}))
+    live = set(int(record.get('id', 1)) for record in records)
+    for vehicle_id in (only_vehicles or ()):
+        vehicle_id = int(vehicle_id)
+        if vehicle_id in live:
+            continue
+        for section in vehicle_values.values():
+            section[vehicle_id] = None
+    tankmen = values.get(TANKMAN_ITEM_TYPE)
+    if isinstance(tankmen, dict):
+        held = set()
+        for record in records:
+            held.update(
+                int(tankman_id)
+                for tankman_id in (record.get('tankmen') or ()))
+        held.update(
+            int(tankman_id)
+            for tankman_id in (vehicle.get('barracksTankmen') or ()))
+        for tankman_id in (touched_tankmen or ()):
+            tankman_id = int(tankman_id)
+            if tankman_id in held:
+                # Moved, not removed: a crew member the account still holds
+                # was republished above with wherever they now sit.
+                continue
+            tankmen['compDescr'][tankman_id] = None
+            tankmen['vehicle'][tankman_id] = None
+    for item_type, wanted in dict(only_items or {}).items():
+        item_type = int(item_type)
+        if item_type in (VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,
+                         CUSTOMIZATION_ITEM_TYPE):
+            continue
+        section = values.get(item_type)
+        if not isinstance(section, dict):
+            continue
+        still_owned = dict(owned.get(item_type, {}))
+        for compact_descr in (wanted or ()):
+            if _int_count(still_owned.get(compact_descr)) > 0:
+                continue
+            section.setdefault(compact_descr, None)
+
+
+def _int_count(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _wanted_items(only_items, item_type):
@@ -335,11 +501,41 @@ def _prune_empty(values):
     """Drop the sections a delta did not change."""
     pruned = {}
     for item_type, section in values.items():
+        # ``None`` is the client's removal marker, not an empty section.
         section = dict((key, value)
-                       for key, value in section.items() if value)
+                       for key, value in section.items()
+                       if value or value is None)
         if section:
             pruned[item_type] = section
     return pruned
+
+
+def _elite_vehicles(vehicle_types, unlocks):
+    """Return the owned vehicles whose whole research list is unlocked.
+
+    #1513 marks a vehicle elite when nothing it leads to is left to research.
+    Deriving it means a career's tech tree is honest and a sandbox stays fully
+    elite because its unlock set already covers the catalogue, instead of the
+    garage asserting eliteness for every vehicle it publishes.
+    """
+    try:
+        from items import vehicles
+    except ImportError:
+        return set(vehicle_types)
+    elite = set()
+    for compact_descr in vehicle_types:
+        try:
+            vehicle_type = vehicles.getVehicleType(int(compact_descr))
+            descriptors = tuple(
+                getattr(vehicle_type, 'unlocksDescrs', ()) or ())
+        except Exception:
+            # A vehicle whose type cannot be read is a presentation problem,
+            # not a reason to withhold the rest of the account.
+            continue
+        if all(int(tuple(row)[1]) in unlocks
+               for row in descriptors if len(tuple(row)) >= 2):
+            elite.add(compact_descr)
+    return elite
 
 
 def stats(selected_vehicle=None, postbattle_progress=None):
@@ -353,36 +549,42 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             if record.get('vehicleTypeCompactDescr') is not None)
     unlocks = set(vehicle.get('unlockItemCompactDescrs', ()))
     unlocks.update(vehicle_types)
+    # The garage owns the balances: research spends vehicle experience and a
+    # purchase spends credits, so the same file that records what the player
+    # has must record what it cost. ``postbattle_progress`` keeps the battle
+    # counters its own consumers read.
     progress = (postbattle_progress
                 if isinstance(postbattle_progress, dict) else {})
-    earned_credits = max(0, int(progress.get('credits', 0) or 0))
-    earned_free_xp = max(0, int(progress.get('freeXP', 0) or 0))
+    wallet = vehicle.get('wallet')
+    wallet = wallet if isinstance(wallet, dict) else {}
+    balances = dict(
+        (name, max(0, int(wallet.get(name, default) or 0)))
+        for name, default in (('credits', OFFLINE_CREDITS),
+                              ('gold', OFFLINE_GOLD),
+                              ('freeXP', OFFLINE_FREE_XP)))
     vehicle_xp = dict((compact_descr, 0) for compact_descr in vehicle_types)
-    try:
-        from items import vehicles
-        for type_name, row in (progress.get('vehicles') or {}).items():
-            descriptor = vehicles.VehicleDescr(typeName=str(type_name))
-            nation_id, vehicle_type_id = descriptor.type.id
-            compact_descr = vehicles.makeIntCompactDescrByID(
-                'vehicle', nation_id, vehicle_type_id)
-            vehicle_xp[int(compact_descr)] = max(
-                0, int(row.get('xp', 0) or 0))
-    except Exception:
-        # Native lookup is presentation-only; persisted progress remains
-        # available for the next sync when the vehicle cache is ready.
-        pass
+    saved_xp = vehicle.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        for compact_descr, experience in saved_xp.items():
+            try:
+                vehicle_xp[int(compact_descr)] = max(0, int(experience or 0))
+            except (TypeError, ValueError):
+                continue
+    elite = _elite_vehicles(vehicle_types, unlocks)
     return {
         'account': {
             'clanDBID': 0, 'attrs': 0, 'premiumExpiryTime': 0,
             'autoBanTime': 0, 'globalRating': 0,
         },
         'stats': {
-            'credits': OFFLINE_CREDITS + earned_credits,
-            'gold': OFFLINE_GOLD,
+            'credits': balances['credits'],
+            'gold': balances['gold'],
             'crystal': 0,
-            'freeXP': OFFLINE_FREE_XP + earned_free_xp,
-            'slots': OFFLINE_GARAGE_SLOTS,
-            'berths': OFFLINE_BARRACKS_BERTHS,
+            'freeXP': balances['freeXP'],
+            'slots': max(0, int(
+                vehicle.get('accountSlots', OFFLINE_GARAGE_SLOTS) or 0)),
+            'berths': max(0, int(
+                vehicle.get('accountBerths', OFFLINE_BARRACKS_BERTHS) or 0)),
             'accOnline': 0, 'accOffline': 0,
             'freeTMenLeft': 0, 'freeVehiclesLeft': 0,
             'vehicleSellsLeft': 0, 'captchaTriesLeft': 0,
@@ -400,7 +602,7 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             'vehTypeLocks': {}, 'restrictions': {},
             'globalVehicleLocks': {}, 'refSystem': {'referrals': {}},
             'unlocks': unlocks,
-            'eliteVehicles': set(vehicle_types),
+            'eliteVehicles': elite,
             'multipliedXPVehs': set(),
         },
         'cache': {
@@ -466,7 +668,8 @@ def shop(revision=0, selected_vehicle=None):
     nation_count = max(1, int(vehicle.get('shopNationCount', 16)))
     empty_items = {
         'itemPrices': item_prices,
-        'notInShopItems': set(),
+        'notInShopItems': set(
+            vehicle.get('notInShopItems', ()) or ()),
         'vehiclesNotToBuy': set(),
         'vehiclesRentPrices': {},
         'vehiclesToSellForGold': set(),
@@ -492,13 +695,13 @@ def shop(revision=0, selected_vehicle=None):
         'rev': int(revision) + 1,
         'prevRev': int(revision),
         'crystalExchangeRate': 0,
-        'sellPriceFactor': 0.5,
+        'sellPriceFactor': OFFLINE_SELL_PRICE_FACTOR,
         'items': dict(empty_items),
         'defaults': {
             'items': dict(empty_items),
             'freeXPToTManXPRate': 10,
             'goodies': dict(empty_goodies),
-            'paidRemovalCost': {'gold': 0},
+            'paidRemovalCost': _device_removal_cost(vehicle),
             # #1513 OptionalDevice.getRemovalPrice uses a separate Money
             # value for optional devices tagged ``deluxe``.
             'paidDeluxeRemovalCost': {'crystal': 0},
@@ -523,25 +726,11 @@ def shop(revision=0, selected_vehicle=None):
                 'credits': 0, 'gold': 0, 'xpReuseFraction': 1.0,
             },
         },
-        # The three native recruitment choices are positional.  Keep their
-        # complete descriptor dictionaries even though offline prices are 0.
-        'tankmanCost': (
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 50,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': False,
-            },
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 75,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': False,
-            },
-            {
-                'credits': 0, 'gold': 0, 'roleLevel': 100,
-                'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
-                'isPremium': True,
-            },
-        ),
+        # The three native recruitment choices are positional: the recruit
+        # window prices them from here and sends back the index.  The account
+        # carries the same table, so what the window shows is what the garage
+        # charges.
+        'tankmanCost': _tankman_costs(vehicle),
         'premiumCost': {},
         # RefSystem.__update indexes posByXPinTeam directly.  Once this dict is
         # non-empty, its #1513 helpers also index the other three values, so
@@ -561,10 +750,14 @@ def shop(revision=0, selected_vehicle=None):
         'dailyXPFactor': 1,
         'changeRoleCost': 0,
         'freeXPToTManXPRate': 10,
-        'exchangeRate': 0,
-        'exchangeRateForShellsAndEqs': 0,
-        'isEnabledBuyingGoldShellsForCredits': False,
-        'isEnabledBuyingGoldEqsForCredits': False,
+        # Offline policy, not a #1513 value: the gold exchange rate is
+        # server state the client never receives. 400 credits per gold is the
+        # long-published retail rate and the one the garage's own dialogs
+        # were written around.
+        'exchangeRate': OFFLINE_GOLD_EXCHANGE_RATE,
+        'exchangeRateForShellsAndEqs': OFFLINE_GOLD_EXCHANGE_RATE,
+        'isEnabledBuyingGoldShellsForCredits': True,
+        'isEnabledBuyingGoldEqsForCredits': True,
     }
 
 

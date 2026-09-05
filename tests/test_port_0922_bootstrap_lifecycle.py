@@ -1,6 +1,11 @@
 import importlib.util
+import json
+import os
+import re
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -12,16 +17,59 @@ PACKAGE_ROOT = (ROOT / 'src' / 'res' / 'scripts' /
 BOOTSTRAP = PACKAGE_ROOT / 'bootstrap.py'
 
 
-def _real_module(name):
+def _real_module(name, module_name=None):
+    module_name = module_name or ('gui.mods.offline_lan_0922.' + name)
     spec = importlib.util.spec_from_file_location(
-        'gui.mods.offline_lan_0922.' + name, PACKAGE_ROOT / (name + '.py'))
+        module_name, PACKAGE_ROOT / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
 
+def port_config_write_json(path, value, durable=True):
+    """The exact durable-replacement contract config.write_json provides."""
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    temporary = path + '.tmp'
+    with open(temporary, 'w', encoding='utf-8') as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    os.replace(temporary, path)
+
+
+_ECONOMY_MODULES = {}
+
+
+def _economy_modules(package_stubs):
+    """Load the modules that import the stubbed package at module level.
+
+    ``economy`` imports the generated catalogue and ``launcher_inbox`` imports
+    the port configuration, so the module objects bootstrap captures are the
+    real ones only if both are executed while the stub package is installed.
+    The result is cached: the catalogue is a few hundred kilobytes of literals
+    and every test that loads bootstrap would otherwise re-execute it.
+    """
+    if not _ECONOMY_MODULES:
+        with mock.patch.dict(sys.modules, package_stubs):
+            _ECONOMY_MODULES['gui.mods.offline_lan_0922.price_catalogue'] = (
+                _real_module('price_catalogue'))
+            _ECONOMY_MODULES[
+                'gui.mods.offline_lan_0922.account_rpc.economy'] = (
+                    _real_module(
+                        'account_rpc/economy',
+                        'gui.mods.offline_lan_0922.account_rpc.economy'))
+            _ECONOMY_MODULES['gui.mods.offline_lan_0922.launcher_inbox'] = (
+                _real_module('launcher_inbox'))
+    return dict(_ECONOMY_MODULES)
+
+
+ACCOUNT_DATA = _real_module(
+    'account_rpc/data', 'gui.mods.offline_lan_0922.account_rpc.data')
 VEHICLE_BLACKLIST = _real_module('vehicle_blacklist')
 VEHICLE_CONFIGURATION = _real_module('vehicle_configuration')
+VEHICLE_RECORDS = _real_module('vehicle_records')
 
 
 MAX_SKILL_LEVEL = 100
@@ -185,6 +233,11 @@ class _AppLoader(object):
         return self.lobby
 
 
+# One shell every gun in this harness fires, so the built garage exercises the
+# case a real client is full of: several vehicles carrying the same round.
+SHARED_SHELL = 19999
+
+
 def _package(name):
     module = types.ModuleType(name)
     module.__path__ = []
@@ -192,7 +245,15 @@ def _package(name):
 
 
 class BootstrapLifecycleTests(unittest.TestCase):
-    def _load(self):
+    # The nine #1513 vehicles that cost nothing and that no research leads
+    # to: the tier 1 starters every new account owns.
+    STARTER_NAMES = {
+        'ussr:R11_MS-1': (0, 11),
+        'germany:G12_Ltraktor': (0, 12),
+        'usa:A01_T1_Cunningham': (1, 7),
+    }
+
+    def _load(self, save_mode=None, starters=None):
         events = []
         callbacks = _Callbacks()
         spaces = types.SimpleNamespace(
@@ -216,6 +277,21 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'vehicle': 'ussr:R11_MS-1'}
         config_module.client_mode = lambda unused_config: (
             config_module.PLAYER_MODE)
+        config_module.SAVE_MODE_UNLOCKED = 'unlocked'
+        config_module.SAVE_MODE_NEW_ACCOUNT = 'new_account'
+        config_module.save_slot_mode = lambda: (
+            save_mode or config_module.SAVE_MODE_UNLOCKED)
+        config_module.ACTIVE_SAVE_SLOT = object()
+        # No inbox file exists unless a test writes one, so the launcher
+        # delivery path is a no-op for every other test.
+        inbox_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inbox_root, True)
+        config_module.save_slot_state_path = (
+            lambda file_name, slot=None, user_data_dir=None:
+            os.path.join(inbox_root, file_name))
+        config_module.save_slot_dir = (
+            lambda slot=None, user_data_dir=None: inbox_root)
+        config_module.write_json = port_config_write_json
         state_module = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc.state')
         state_module.AccountState = types.SimpleNamespace
@@ -246,6 +322,17 @@ class BootstrapLifecycleTests(unittest.TestCase):
         def _part(compact_descr, level, guns=None):
             part = types.SimpleNamespace(
                 compactDescr=compact_descr, level=level)
+            # A gun's own shot order is what a saved rack is checked against
+            # and what a battle receipt counts rounds by, and it agrees with
+            # getDefaultAmmoForGun below.  SHARED_SHELL is fired by every gun
+            # here, because a real nation's guns share their shells and the
+            # account has to own one lot of them per vehicle.
+            part.shots = (
+                types.SimpleNamespace(
+                    shell=types.SimpleNamespace(
+                        compactDescr=compact_descr + 10000)),
+                types.SimpleNamespace(
+                    shell=types.SimpleNamespace(compactDescr=SHARED_SHELL)))
             if guns is not None:
                 part.guns = guns
             return part
@@ -330,8 +417,28 @@ class BootstrapLifecycleTests(unittest.TestCase):
         attempted_type_ids = []
 
         def vehicle_descr(**kwargs):
+            if 'compactDescr' in kwargs:
+                # #1513 rebuilds the whole vehicle from its stored descriptor,
+                # which is how a restored garage is checked before it is
+                # published.
+                match = re.match(
+                    r'^vehicle-(\d+)-(\d+)$',
+                    kwargs['compactDescr'].decode('ascii'))
+                if match is None:
+                    raise KeyError(kwargs['compactDescr'])
+                return descriptors[(int(match.group(1)),
+                                    int(match.group(2)))]
             if 'typeName' in kwargs:
-                return descriptors[(0, 11)]
+                # #1513 resolves a 'nation:vehicle' name and raises for one it
+                # does not ship.  The configured vehicle keeps its own name so
+                # every existing test still starts from it.
+                name = str(kwargs['typeName'])
+                if name == 'ussr:R11_MS-1':
+                    return descriptors[(0, 11)]
+                match = re.match(r'^nation-(\d+):vehicle-(\d+)$', name)
+                if match is None:
+                    raise KeyError(name)
+                return descriptors[(int(match.group(1)), int(match.group(2)))]
             type_id = tuple(kwargs['typeID'])
             attempted_type_ids.append(type_id)
             return descriptors[type_id]
@@ -343,6 +450,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     1: {7: object(), 8: object(), 9: object()},
                     2: {1: object(), 2: object(), 3: object(), 4: object()},
                 }.get(nation_id, {})
+
+            def getIDsByName(self, name):
+                # #1513 raises for a name it does not know; the price index
+                # relies on that to skip a catalogue entry this client lacks.
+                if starters and name in starters:
+                    return starters[name]
+                raise KeyError(name)
 
         customization = types.SimpleNamespace(
             paints={12001: types.SimpleNamespace(compactDescr=12001)},
@@ -373,17 +487,36 @@ class BootstrapLifecycleTests(unittest.TestCase):
         crew_skill_masks = []
         vehicles = types.SimpleNamespace(
             VehicleDescr=vehicle_descr,
-            getDefaultAmmoForGun=lambda gun: [gun.compactDescr + 10000, 20],
+            getDefaultAmmoForGun=lambda gun: [
+                gun.compactDescr + 10000, 20, SHARED_SHELL, 5],
             makeIntCompactDescrByID=lambda unused_name, nation_id, type_id: (
                 90000 + nation_id * 1000 + type_id),
             g_list=_VehicleList(),
             attemptedTypeIDs=attempted_type_ids,
             crewTypeIDs=crew_type_ids,
+            getUnlocksSources=lambda: {},
+            # The real #1513 call inverts makeIntCompactDescrByID, and the
+            # ownership resolver reads the id it returns.
+            getVehicleType=lambda compact_descr: types.SimpleNamespace(
+                id=((int(compact_descr) - 90000) // 1000,
+                    (int(compact_descr) - 90000) % 1000),
+                unlocksDescrs=(), autounlockedItems=()),
             g_cache=types.SimpleNamespace(
                 customization20=lambda: customization,
                 optionalDevices=lambda: optional_devices,
+                optionalDeviceIDs=lambda: {},
                 equipmentIDs=lambda: equipment_ids,
-                equipments=lambda: equipments))
+                equipments=lambda: equipments,
+                # The exact #1513 name-to-id maps the price index walks. This
+                # fake ships no shared component catalogue, so the index only
+                # prices the vehicles and artefacts it does define.
+                chassisIDs=lambda unused_nation: {},
+                turretIDs=lambda unused_nation: {},
+                gunIDs=lambda unused_nation: {},
+                engineIDs=lambda unused_nation: {},
+                fuelTankIDs=lambda unused_nation: {},
+                radioIDs=lambda unused_nation: {},
+                shellIDs=lambda unused_nation: {}))
 
         def generate_tankmen(nation_id, vehicle_type_id, roles,
                              is_premium, role_level, skills_mask, is_preview):
@@ -419,8 +552,15 @@ class BootstrapLifecycleTests(unittest.TestCase):
         }
         items.tankmen = tankmen
         items.vehicles = vehicles
+        items.customizations = types.SimpleNamespace(
+            parseOutfitDescr=lambda descriptor: descriptor)
         nations = types.ModuleType('nations')
-        nations.NAMES = tuple('nation-%d' % index for index in range(9))
+        # The price index reads a real catalogue keyed on the real nation
+        # names, so a career harness has to answer to them.
+        nations.NAMES = (
+            ('ussr', 'germany', 'usa', 'china', 'france', 'uk', 'japan',
+             'czech', 'sweden') if starters else
+            tuple('nation-%d' % index for index in range(9)))
         # The exact #1513 scripts/common/AccountCommands.pyc values.
         account_commands = types.ModuleType('AccountCommands')
         account_commands.VEHICLE_SETTINGS_FLAG = types.SimpleNamespace(
@@ -437,6 +577,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 'gui.mods.offline_lan_0922'),
             'gui.mods.offline_lan_0922.account_rpc': _package(
                 'gui.mods.offline_lan_0922.account_rpc'),
+            'gui.mods.offline_lan_0922.account_rpc.data': ACCOUNT_DATA,
             'gui.mods.offline_lan_0922.account_rpc.postbattle_store': (
                 postbattle_module),
             'gui.mods.offline_lan_0922.account_rpc.state': state_module,
@@ -449,11 +590,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.vehicle_blacklist': VEHICLE_BLACKLIST,
             'gui.mods.offline_lan_0922.vehicle_configuration': (
                 VEHICLE_CONFIGURATION),
+            'gui.mods.offline_lan_0922.vehicle_records': VEHICLE_RECORDS,
             'gui.app_loader': app_loader_module,
             'gui.app_loader.settings': settings_module,
             'items': items,
             'nations': nations,
         }
+        modules.update(_economy_modules(modules))
         name = 'test_offline_lan_0922_bootstrap_lifecycle'
         spec = importlib.util.spec_from_file_location(name, BOOTSTRAP)
         module = importlib.util.module_from_spec(spec)
@@ -466,6 +609,532 @@ class BootstrapLifecycleTests(unittest.TestCase):
                      'commander_sixthSense', 'commander_eagleEye',
                      'driver_virtuoso', 'driver_smoothDriving',
                      'gunner_smoothTurret', 'loader_intuition')
+
+    def _build(self, **kwargs):
+        """Build one startup garage through the real bootstrap."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        with mock.patch.dict(sys.modules, modules):
+            return bootstrap, bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+    def _career(self):
+        return self._build(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+
+    def _with_saved_garage(self, owned, **kwargs):
+        """Build a garage against a save that owns exactly ``owned``."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        store = types.SimpleNamespace(
+            owned_vehicle_types=lambda: list(owned),
+            owned_vehicle_names=lambda: [],
+            mark_dirty=lambda: None,
+            flush=lambda snapshot: True,
+            apply=lambda snapshot, validator=None: False)
+        with mock.patch.dict(sys.modules, modules):
+            with mock.patch.object(bootstrap, '_garage_store', lambda: store):
+                with mock.patch.object(
+                        bootstrap, '_restore_garage', lambda snapshot: False):
+                    return bootstrap._selected_vehicle(
+                        {'vehicle': 'ussr:R11_MS-1'})
+
+    def test_a_sold_vehicle_does_not_come_back_in_a_fully_unlocked_save(self):
+        """The seed is what a save starts from, not a standing guarantee."""
+        unused_bootstrap, everything = self._build()
+        owned = sorted(everything['vehicleTypeCompactDescrs'])
+        # 90011 is the configured vehicle; sell one of the others.
+        sold = [compact_descr for compact_descr in owned
+                if compact_descr != 90011][0]
+        kept = [compact_descr for compact_descr in owned
+                if compact_descr != sold]
+
+        snapshot = self._with_saved_garage(kept)
+
+        self.assertEqual(set(kept), set(snapshot['vehicleTypeCompactDescrs']))
+        self.assertEqual(len(kept), len(snapshot['vehicles']))
+
+    def test_a_career_that_bought_a_vehicle_keeps_it(self):
+        unused_bootstrap, career = self._career()
+        bought = sorted(career['vehicleTypeCompactDescrs']) + [90012]
+
+        snapshot = self._with_saved_garage(
+            bought, save_mode='new_account', starters=self.STARTER_NAMES)
+
+        self.assertIn(90012, snapshot['vehicleTypeCompactDescrs'])
+
+    def test_a_save_naming_a_vehicle_this_client_lacks_still_starts(self):
+        snapshot = self._with_saved_garage([90011, 99999])
+
+        self.assertEqual({90011}, set(snapshot['vehicleTypeCompactDescrs']))
+
+    def test_a_save_written_before_names_gains_them_on_the_next_start(self):
+        """The launcher cannot resolve a compact descriptor on its own."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+
+        class _Store(object):
+            def __init__(self):
+                self.dirty = False
+                self.flushed = None
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return []
+
+            def mark_dirty(self):
+                self.dirty = True
+
+            def flush(self, candidate):
+                self.flushed = candidate
+                return True
+
+        store = _Store()
+        bootstrap._store = store
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            with mock.patch.object(
+                    bootstrap, '_validate_restored_garage', return_value=True):
+                self.assertTrue(bootstrap._restore_garage(snapshot))
+
+        self.assertTrue(store.dirty)
+        self.assertIs(snapshot, store.flushed)
+        self.assertEqual(
+            ['nation-0:vehicle-11', 'nation-0:vehicle-12',
+             'nation-1:vehicle-7'],
+            sorted(record['vehicleTypeName']
+                   for record in snapshot['vehicles']))
+
+    def test_a_save_that_already_names_its_vehicles_is_not_rewritten(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+
+        class _Store(object):
+            def __init__(self, names):
+                self.dirty = False
+                self.names = names
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return list(self.names)
+
+            def mark_dirty(self):
+                self.dirty = True
+
+            def flush(self, candidate):
+                raise AssertionError('nothing had to be migrated')
+
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            bootstrap._store = _Store([
+                record['vehicleTypeName'] for record in snapshot['vehicles']])
+            with mock.patch.object(
+                    bootstrap, '_validate_restored_garage', return_value=True):
+                self.assertTrue(bootstrap._restore_garage(snapshot))
+
+        self.assertFalse(bootstrap._store.dirty)
+
+    # A save that owns only the configured vehicle, so a purchase has
+    # somewhere to land.
+    OWNED_ONE = ('nation-0:vehicle-11', 90011)
+
+    def _with_inbox(self, names, owned=(OWNED_ONE,), validator=None, **kwargs):
+        """Start a client with the launcher's shop having bought ``names``."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        inbox = modules['gui.mods.offline_lan_0922.launcher_inbox']
+        path = inbox.inbox_path()
+        modules['gui.mods.offline_lan_0922.config'].write_json(
+            path, {'schema': inbox.SCHEMA, 'vehicles': list(names)})
+
+        class _Store(object):
+            def __init__(self):
+                self.flushed = None
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return [name for name, unused in owned]
+
+            def owned_vehicle_types(self):
+                return [compact_descr for unused, compact_descr in owned]
+
+            def mark_dirty(self):
+                pass
+
+            def flush(self, candidate):
+                self.flushed = candidate
+                return True
+
+        store = _Store()
+        bootstrap._store = store
+        if validator is None:
+            patch = mock.patch.object(
+                bootstrap, '_validate_restored_garage', return_value=True)
+        else:
+            patch = mock.patch.object(
+                bootstrap, '_validate_restored_garage', side_effect=validator)
+        with mock.patch.dict(sys.modules, modules):
+            with patch:
+                snapshot = bootstrap._selected_vehicle(
+                    {'vehicle': 'ussr:R11_MS-1'})
+        return snapshot, store, path, inbox
+
+    def test_a_vehicle_the_launcher_sold_arrives_in_the_garage(self):
+        """The launcher takes the gold; only a client can build the record."""
+        snapshot, store, path, inbox = self._with_inbox(
+            ['nation-0:vehicle-12'])
+
+        self.assertEqual(
+            ['nation-0:vehicle-11', 'nation-0:vehicle-12'],
+            sorted(record['vehicleTypeName']
+                   for record in snapshot['vehicles']))
+        # 90012 is makeIntCompactDescrByID for nation 0, type 12.
+        self.assertIn(90012, snapshot['vehicleTypeCompactDescrs'])
+        self.assertIn(90012, snapshot['unlockItemCompactDescrs'])
+        self.assertEqual(0, snapshot['vehicleXP'][90012])
+        # A delivery that is never written is delivered again next start,
+        # against an inbox entry that is already gone.
+        self.assertIs(snapshot, store.flushed)
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_delivered_vehicle_arrives_stock_and_without_consumables(self):
+        snapshot, unused_store, unused_path, unused_inbox = self._with_inbox(
+            ['nation-0:vehicle-12'])
+
+        record = next(row for row in snapshot['vehicles']
+                      if row['vehicleTypeName'] == 'nation-0:vehicle-12')
+        self.assertEqual([0, 0, 0], list(record['eqs']))
+        # The stock half of the (0, 12) fixture, base 3000, and nothing above.
+        self.assertEqual(
+            {3002, 3003, 3004, 3005, 3006, 3007},
+            set(compact_descr
+                for item_type in range(2, 8)
+                for compact_descr in record['inventoryItems'][item_type]))
+
+    def test_a_vehicle_the_save_already_owns_is_not_delivered_twice(self):
+        snapshot, unused_store, path, unused_inbox = self._with_inbox(
+            ['nation-0:vehicle-11'])
+
+        self.assertEqual(
+            1, sum(1 for record in snapshot['vehicles']
+                   if record['vehicleTypeName'] == 'nation-0:vehicle-11'))
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_new_crew_never_takes_an_id_the_barracks_already_holds(self):
+        """A reused id makes the whole restored garage invalid, not one car."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+
+        snapshot = {
+            'vehicles': [{'id': 1, 'tankmen': {100001: b'a', 100002: b'b'}}],
+            'barracksTankmen': {100003: b'c'},
+        }
+
+        self.assertEqual(100004, bootstrap._next_tankman_id(snapshot))
+        del snapshot['barracksTankmen']
+        self.assertEqual(100003, bootstrap._next_tankman_id(snapshot))
+
+    def test_a_delivery_the_client_cannot_publish_is_never_written(self):
+        """An unpublishable save is discarded whole on the next start.
+
+        One vehicle the shop sold must never cost the player everything else
+        the save holds, so a record that fails the restore boundary is built
+        on a detached copy and thrown away with the copy.
+        """
+        def refuse(candidate):
+            names = [record.get('vehicleTypeName')
+                     for record in candidate['vehicles']]
+            if 'nation-0:vehicle-12' in names:
+                raise ValueError('saved vehicle has no loaded ammunition')
+            return True
+
+        snapshot, store, path, inbox = self._with_inbox(
+            ['nation-0:vehicle-12'], validator=refuse)
+
+        self.assertEqual(
+            ['nation-0:vehicle-11'],
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertNotIn(90012, snapshot['vehicleTypeCompactDescrs'])
+        self.assertNotIn(90012, snapshot['vehicleXP'])
+        self.assertIsNone(store.flushed)
+        # The player paid for it in the launcher, so it keeps waiting.
+        self.assertEqual(['nation-0:vehicle-12'], inbox.pending_vehicles(path))
+
+    def test_a_vehicle_this_client_cannot_build_stays_pending(self):
+        """The player already paid for it in the launcher.
+
+        ``nation-2:vehicle-2`` is tagged premiumIGR in the fixture: a vehicle
+        the client can name and refuses to put in a standard battle garage.
+        """
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-2:vehicle-2'])
+
+        self.assertNotIn(
+            'nation-2:vehicle-2',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-2:vehicle-2'], inbox.pending_vehicles(path))
+
+    def test_a_name_this_client_does_not_ship_stays_pending(self):
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-9:vehicle-99'])
+
+        self.assertEqual(1, len(snapshot['vehicles']))
+        self.assertEqual(
+            ['nation-9:vehicle-99'], inbox.pending_vehicles(path))
+
+    def test_one_refused_vehicle_does_not_hold_up_the_others(self):
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-2:vehicle-2', 'nation-0:vehicle-12'])
+
+        self.assertIn(
+            'nation-0:vehicle-12',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-2:vehicle-2'], inbox.pending_vehicles(path))
+
+    def test_a_hidden_worker_never_delivers_a_launcher_purchase(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        inbox = modules['gui.mods.offline_lan_0922.launcher_inbox']
+        path = inbox.inbox_path()
+        modules['gui.mods.offline_lan_0922.config'].write_json(
+            path, {'schema': inbox.SCHEMA,
+                   'vehicles': ['nation-0:vehicle-12']})
+
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertIn(
+            'nation-0:vehicle-12',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-0:vehicle-12'], inbox.pending_vehicles(path))
+
+    def test_a_hidden_worker_never_reads_the_visible_client_save(self):
+        """The worker owns no garage store and must not open that file."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        opened = []
+
+        def store():
+            opened.append(True)
+            return types.SimpleNamespace(owned_vehicle_types=lambda: [90011])
+
+        with mock.patch.dict(sys.modules, modules):
+            with mock.patch.object(bootstrap, '_garage_store', store):
+                snapshot = bootstrap._selected_vehicle(
+                    {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertEqual([], opened)
+        self.assertEqual(
+            {90011, 90012, 91007},
+            set(snapshot['vehicleTypeCompactDescrs']))
+
+    def test_a_new_account_owns_only_the_free_starter_vehicles(self):
+        """A retail account can research nothing until it owns a vehicle.
+
+        The starters are the only vehicles no research leads to, and #1513
+        prices them at nothing, so they are the whole garage a new account
+        begins with.
+        """
+        unused_bootstrap, snapshot = self._career()
+
+        # The same id arithmetic the fake client's makeIntCompactDescrByID
+        # uses, so ownership is asserted against the starter list itself.
+        expected = set(
+            90000 + nation_id * 1000 + vehicle_type_id
+            for nation_id, vehicle_type_id in self.STARTER_NAMES.values())
+        self.assertEqual(expected, set(snapshot['vehicleTypeCompactDescrs']))
+        self.assertEqual(
+            len(self.STARTER_NAMES), len(snapshot['vehicles']))
+        self.assertEqual('new_account', snapshot['saveMode'])
+
+    def test_a_new_account_starts_with_the_settled_balance_and_garage(self):
+        unused_bootstrap, snapshot = self._career()
+
+        self.assertEqual(100000, snapshot['wallet']['credits'])
+        self.assertEqual(0, snapshot['wallet']['gold'])
+        self.assertEqual(0, snapshot['wallet']['freeXP'])
+        self.assertEqual(30, snapshot['accountSlots'])
+        self.assertEqual(30, snapshot['accountBerths'])
+        # The recruit window prices the three schools from this table and the
+        # garage charges from it, so a career pays and a sandbox does not.
+        self.assertEqual(
+            [0, 20000, 0],
+            [cost['credits'] for cost in snapshot['tankmanCosts']])
+        self.assertEqual(
+            [0, 0, 200], [cost['gold'] for cost in snapshot['tankmanCosts']])
+
+    def test_a_sandbox_recruits_for_nothing(self):
+        unused_bootstrap, snapshot = self._build()
+
+        self.assertEqual(
+            [0, 0, 0], [cost['credits'] for cost in snapshot['tankmanCosts']])
+        self.assertEqual(
+            [50, 75, 100],
+            [cost['roleLevel'] for cost in snapshot['tankmanCosts']])
+
+    def test_a_new_account_has_a_tech_tree_left_to_research(self):
+        """The sandbox unlocks the catalogue; a career must not."""
+        unused_bootstrap, career = self._career()
+        unused_sandbox_bootstrap, sandbox = self._build()
+
+        self.assertLess(
+            len(career['unlockItemCompactDescrs']),
+            len(sandbox['unlockItemCompactDescrs']))
+        # Every vehicle it does own is researched, or it could not be fitted.
+        self.assertTrue(
+            set(career['vehicleTypeCompactDescrs']).issubset(
+                career['unlockItemCompactDescrs']))
+        # The shop still prices everything, because the player has to be able
+        # to see what the rest of the tree costs.
+        self.assertLess(
+            len(career['unlockItemCompactDescrs']),
+            len(career['shopItemPrices']))
+
+    def _restorable(self, **kwargs):
+        """A freshly built garage plus the module graph it was built with."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+        return bootstrap, snapshot, modules
+
+    def test_the_shop_publishes_the_baked_price_of_every_item(self):
+        """The garage builder must not throw the baked catalogue away.
+
+        Every price the player is charged comes from this mapping, so a
+        builder that rebuilt it empty would publish the whole shop at no cost
+        and hand out vehicles, modules and consumables for nothing.
+        """
+        starters = dict(self.STARTER_NAMES)
+        # R04_T-34 costs 356700 credits in the baked #1513 catalogue, and
+        # this harness's nation 0 is ussr.
+        starters['ussr:R04_T-34'] = (0, 12)
+        unused_bootstrap, snapshot = self._build(
+            save_mode='new_account', starters=starters)
+
+        self.assertEqual(
+            {'credits': 356700}, snapshot['shopItemPrices'][90012])
+
+    def _assert_depot_covers_the_garage(self, snapshot):
+        """The account must own at least what its vehicles already hold.
+
+        ``account_rpc.garage`` adds a round, a consumable and an optional
+        device up across every vehicle to decide what a resupply has to buy.
+        A depot below that sum lets one lot of them be loaded into two tanks,
+        and a depot above it charges for rounds already in the rack.
+        """
+        for item_type in (9, 10, 11):
+            totals = {}
+            for record in snapshot['vehicles']:
+                for compact_descr, count in record['inventoryItems'].get(
+                        item_type, {}).items():
+                    totals[compact_descr] = totals.get(
+                        compact_descr, 0) + int(count)
+            published = snapshot['inventoryItems'].get(item_type, {})
+            for compact_descr, total in totals.items():
+                self.assertGreaterEqual(
+                    int(published.get(compact_descr, 0)), total,
+                    'item type %d, %d' % (item_type, compact_descr))
+
+    def test_a_new_account_owns_what_its_garage_holds(self):
+        unused_bootstrap, career = self._career()
+
+        self._assert_depot_covers_the_garage(career)
+
+    def test_a_fully_unlocked_save_owns_what_its_garage_holds(self):
+        unused_bootstrap, sandbox = self._build()
+
+        self._assert_depot_covers_the_garage(sandbox)
+
+    def test_a_delivered_vehicle_leaves_the_depot_covering_the_garage(self):
+        snapshot, unused_store, unused_path, unused_inbox = self._with_inbox(
+            ['nation-0:vehicle-12'], save_mode='new_account',
+            starters=self.STARTER_NAMES)
+
+        self._assert_depot_covers_the_garage(snapshot)
+
+    def test_a_rack_a_battle_emptied_still_restores(self):
+        """A last round fired must not cost the player the whole save."""
+        bootstrap, snapshot, modules = self._restorable(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+        record = snapshot['vehicles'][0]
+        shells = list(record['shells'])
+        for index in range(1, len(shells), 2):
+            shells[index] = 0
+        record['shells'] = shells
+        record['inventoryItems'][10] = dict(
+            (shells[index], 0) for index in range(0, len(shells), 2))
+
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(bootstrap._validate_restored_garage(snapshot))
+
+    def test_a_rack_the_mounted_gun_cannot_fire_is_still_refused(self):
+        """The rule beside it still rejects a rack from another fitting."""
+        bootstrap, snapshot, modules = self._restorable(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+        record = snapshot['vehicles'][0]
+        record['shells'] = [999999, 1]
+        record['inventoryItems'][10] = {999999: 1}
+        snapshot['shopItemPrices'][999999] = {'credits': 0}
+        snapshot['unlockItemCompactDescrs'].add(999999)
+
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(ValueError):
+                bootstrap._validate_restored_garage(snapshot)
+
+    def test_a_new_account_buys_its_own_consumables_and_devices(self):
+        """Retail hands a new player no equipment, only the tanks."""
+        unused_bootstrap, snapshot = self._career()
+
+        for item_type in (9, 11):
+            self.assertFalse(snapshot['inventoryItems'].get(item_type))
+        for record in snapshot['vehicles']:
+            self.assertEqual([0, 0, 0], list(record['eqs']))
+        # The shop still has to know what they cost.
+        self.assertTrue(snapshot['optionalDeviceCount'] > 0)
+        self.assertTrue(snapshot['equipmentCount'] > 0)
+
+    def test_a_new_account_arrives_stock_rather_than_fully_fitted(self):
+        """Retail sells the stock fitting; the top modules are researched."""
+        unused_bootstrap, career = self._career()
+        unused_sandbox_bootstrap, sandbox = self._build()
+
+        def modules(snapshot):
+            record = snapshot['vehicles'][0]
+            return set(
+                compact_descr
+                for item_type in range(2, 8)
+                for compact_descr in record['inventoryItems'].get(item_type, {}))
+
+        stock = modules(career)
+        self.assertEqual({2002, 2003, 2004, 2005, 2006, 2007}, stock)
+        self.assertTrue(stock < modules(sandbox))
+        # A career owns only the ammunition its stock gun fires.
+        self.assertEqual(
+            {12004, SHARED_SHELL},
+            set(career['vehicles'][0]['inventoryItems'][10]))
 
     def test_session_log_distinguishes_visible_and_worker_builds(self):
         (bootstrap, unused_callbacks, unused_compatibility,
@@ -556,7 +1225,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         tankmen = modules['items'].tankmen
         descriptor = _TankmanDescr(
             b'0:11:commander|repair,camouflage|0')
-        descriptor.freeXP = bootstrap._new_skill_xp(
+        descriptor.freeXP = VEHICLE_RECORDS._new_skill_xp(
             tankmen, descriptor, 2, choices=6) + 1
         compact_descr = descriptor.makeCompactDescr()
         snapshot = {
@@ -671,13 +1340,17 @@ class BootstrapLifecycleTests(unittest.TestCase):
         }
 
         class _Store(object):
-            def __init__(self):
+            def __init__(self, names=()):
                 self.dirty = False
                 self.flushed = None
+                self.names = list(names)
 
             def apply(self, candidate, validator=None):
                 validator(candidate)
                 return True
+
+            def owned_vehicle_names(self):
+                return list(self.names)
 
             def mark_dirty(self):
                 self.dirty = True
@@ -711,11 +1384,30 @@ class BootstrapLifecycleTests(unittest.TestCase):
         class _GarageStore(object):
             def apply_battle_crew_xp(self, snapshot, receipt_id,
                                      vehicle_type_cd, xp, xp_flag,
-                                     tankmen_module=None):
+                                     tankmen_module=None, rewards=None,
+                                     health=None, vehicles_module=None,
+                                     shells_fired=None, equipment_used=None,
+                                     auto_settings=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
+                # The vehicle's own repair/reload/restock switches are settled
+                # inside the same transaction, so their flag values travel
+                # with the receipt.
+                switches.append(auto_settings)
+                # The crew award, the earnings it was banked beside and the
+                # damage and rounds the same battle spent share one
+                # transaction, so the applier must pass all of them.
+                banked.append(rewards)
+                settled.append(health)
+                spent.append(shells_fired)
+                consumed.append(equipment_used)
                 return {'vehicle_id': 1, 'applied': True}
 
+        banked = []
+        settled = []
+        spent = []
+        consumed = []
+        switches = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -731,10 +1423,18 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 'vehicle': 'ussr:R11_MS-1',
                 'receipt_id': 'server:1:1',
                 'rewards': {'xp': 100},
+                'health': 40,
+                'shells_fired': {0: 12},
+                'equipment_used': [11001],
             })
 
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
+        self.assertEqual([{'xp': 100}], banked)
+        self.assertEqual([(2, 4, 8)], switches)
+        self.assertEqual([40], settled)
+        self.assertEqual([{0: 12}], spent)
+        self.assertEqual([[11001]], consumed)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
 
@@ -792,13 +1492,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
         # The top modules are mounted, not the stock ones: base 2000 gives
         # the stock parts 2002-2007 and the top parts 2012-2017.
         self.assertEqual((2013, 2014), selected['shellsLayoutIdx'])
-        self.assertEqual([12014, 20], selected['shells'])
+        self.assertEqual([12014, 20, SHARED_SHELL, 5], selected['shells'])
         # The loaded rows contain only each mounted top gun, but the
         # account-level catalogue must also retain every alternate gun's
         # ammunition so a saved stock-gun fitting can close prices/unlocks on
         # the next startup.
         self.assertEqual(
-            {12004, 12014, 13004, 13014, 14004, 14014},
+            {12004, 12014, 13004, 13014, 14004, 14014, SHARED_SHELL},
             set(selected['inventoryItems'][10]))
         # 9 is optionalDevice and 11 is equipment: account-wide catalogues
         # the garage needs before it can offer a mount.

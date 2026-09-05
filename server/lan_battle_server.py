@@ -982,6 +982,38 @@ def _write_json_atomic(path, value):
             pass
 
 
+def _valid_shells_fired(value):
+    """Report whether one receipt's rounds-fired section is well formed.
+
+    The key is the shell's index in the gun's own shot order and the value is
+    how many rounds of it the battle drew.  A receipt written before this
+    section existed has none, which reads as a battle that fired nothing.
+    """
+    if not isinstance(value, dict) or len(value) > 10:
+        return False
+    for index, count in value.items():
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return False
+        if (not 0 <= index <= 9 or isinstance(count, bool) or
+                not isinstance(count, int) or not 0 <= count <= 100000):
+            return False
+    return True
+
+
+def _valid_equipment_used(value):
+    """Report whether one receipt's consumables-used section is well formed."""
+    if not isinstance(value, (list, tuple)) or len(value) > 3:
+        return False
+    for compact_descr in value:
+        if (isinstance(compact_descr, bool) or
+                not isinstance(compact_descr, int) or
+                not 1 <= compact_descr <= 2 ** 31 - 1):
+            return False
+    return True
+
+
 def _persisted_result_receipt(value):
     """Return a plain bounded receipt loaded from disk, or raise ValueError."""
     if (not isinstance(value, dict) or
@@ -1014,6 +1046,8 @@ def _persisted_result_receipt(value):
     stats = value.get("stats")
     rewards = value.get("rewards")
     stat_names = RECEIPT_STAT_NAMES
+    # repair_cost and ammo_cost stay zero for good: a receipt states what the
+    # battle did, and only the client can price it.
     reward_names = ("credits", "xp", "free_xp", "repair_cost", "ammo_cost")
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         raise ValueError("invalid persisted battle receipt summary")
@@ -1028,6 +1062,16 @@ def _persisted_result_receipt(value):
             raise ValueError("invalid persisted battle receipt statistic")
     if rewards["repair_cost"] or rewards["ammo_cost"]:
         raise ValueError("offline service costs must be zero")
+    fired = value.get("shells_fired")
+    if fired is None:
+        value["shells_fired"] = {}
+    elif not _valid_shells_fired(fired):
+        raise ValueError("invalid persisted battle receipt ammunition")
+    used = value.get("equipment_used")
+    if used is None:
+        value["equipment_used"] = []
+    elif not _valid_equipment_used(used):
+        raise ValueError("invalid persisted battle receipt consumables")
     public_rows = value.get("public_results")
     if not isinstance(public_rows, list) or not 1 <= len(public_rows) <= 30:
         raise ValueError("invalid persisted public result roster")
@@ -6805,7 +6849,19 @@ class BattleState:
                     (shooter_id, shot_seq), None)
                 self.bot_last_projectile_launch_time_us[shooter_id] = (
                     launch_time_us)
-            self._statistics_row(shooter_kind, shooter_id)["shots_fired"] += 1
+            statistics = self._statistics_row(shooter_kind, shooter_id)
+            statistics["shots_fired"] += 1
+            # A pending shell change is applied above, so the round actually
+            # drawn is the shooter's resolved index rather than the one the
+            # launch message carried.
+            fired_index = str(max(0, min(9, int(
+                shooter.shell_index if shooter_kind == "player"
+                else shell_index))))
+            # The key is a string because this row is broadcast as JSON, which
+            # would turn an integer key into one anyway and make the row stop
+            # round-tripping.
+            statistics["shells_fired"][fired_index] = (
+                statistics["shells_fired"].get(fired_index, 0) + 1)
             self.projectile_revision += 1
 
             horizontal = math.hypot(velocity[0], velocity[2])
@@ -8625,6 +8681,21 @@ class BattleState:
                     "public_results": public_results,
                     "interactions": self._receipt_interactions(
                         ("player", player_id)),
+                    # What the battle consumed, as facts rather than a bill:
+                    # the server cannot price a shell, because the item
+                    # definitions live in the client.  The key is the shell's
+                    # index in the gun's own shot order, which is what the
+                    # client sent with every fire intent.
+                    "shells_fired": dict(
+                        (str(index), int(count))
+                        for index, count in sorted(
+                            self._statistics_row(
+                                "player", player_id)["shells_fired"].items())
+                        if int(count) > 0),
+                    "equipment_used": sorted(
+                        int(compact_descr) for compact_descr in
+                        self._statistics_row(
+                            "player", player_id)["equipment_used"]),
                 }
                 receipt_id = receipt["receipt_id"]
                 # One account may finish another arena before an earlier ACK
@@ -10221,6 +10292,11 @@ class BattleState:
                 if not self._clear_vehicle_stun(("player", player_id)):
                     raise RuntimeError("canonical medkit stun clear diverged")
             player.equipment_revision += 1
+            consumed = _exact_int(
+                equipment.contract.get("compactDescr"), 1, 2 ** 31 - 1)
+            if consumed is not None:
+                self._statistics_row(
+                    "player", player_id)["equipment_used"][str(consumed)] = 1
             return self._finish_equipment_intent(
                 player, intent_seq, True, "")
 
@@ -10757,6 +10833,16 @@ class BattleState:
                 # Cool-Headed (``ironMan``) wants bounces in a row, so the
                 # live streak and its best value are both round state.
                 "deflection_streak": 0, "best_deflection_streak": 0,
+                # Rounds fired, by the shell's index in the gun's own shot
+                # order.  The client sends that index with every fire intent
+                # and can turn it back into a shell, which the server cannot:
+                # only the client owns the item definitions.
+                "shells_fired": {},
+                # Consumables activated, by compact descriptor, which the
+                # client does send with the mounted equipment.  #1513 consumes
+                # one of each however many times it was activated, so this is
+                # a set rather than a count.
+                "equipment_used": {},
             }
             self.vehicle_statistics[key] = row
         elif not row["team"]:
