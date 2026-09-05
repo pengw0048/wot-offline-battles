@@ -3021,6 +3021,8 @@ class OfflineCompatibilityTests(unittest.TestCase):
             def __onModelsRefresh(self, model_state, resource_list):
                 operations.append(
                     ('compound_refresh_before', model_state, resource_list))
+                if getattr(self, 'deactivate_during_refresh', False):
+                    self.deactivate(False)
                 replacement = getattr(self, 'replacement_filter', None)
                 if replacement is not None:
                     self._CompoundAppearance__filter = replacement
@@ -4409,12 +4411,20 @@ class OfflineCompatibilityTests(unittest.TestCase):
         operations[:] = []
         replacement = VehicleFilter('replacement')
         appearance.replacement_filter = replacement
+        detached = object()
+        disabled = object()
+        appearance._offlineSplodgeDetach = detached
+        appearance._offlineSplodgeDisabled = disabled
+        appearance.deactivate_during_refresh = True
         getattr(appearance, method_name)('offline', {'offline': True})
         self.assertEqual(
             [('compound_refresh_before', 'offline', {'offline': True}),
+             ('compound_deactivate', False),
              ('compound_refresh_after',)],
             operations)
         self.assertIsNone(compatibility._compound_refreshing_models)
+        self.assertIs(detached, appearance._offlineSplodgeDetach)
+        self.assertIs(disabled, appearance._offlineSplodgeDisabled)
         self.assertIs(replacement, appearance.nested_filter)
         self.assertIs(
             replacement,
@@ -4483,11 +4493,15 @@ class OfflineCompatibilityTests(unittest.TestCase):
         runtime.bigworld._player = None
         appearance = appearance_type(object())
         appearance.fail_deactivate = True
+        appearance._offlineSplodgeDetach = object()
+        appearance._offlineSplodgeDisabled = object()
 
         with self.assertRaisesRegex(
                 RuntimeError, 'compound deactivate failed'):
             appearance.deactivate(False)
 
+        self.assertIsNone(appearance._offlineSplodgeDetach)
+        self.assertIsNone(appearance._offlineSplodgeDisabled)
         self.assertNotIn('player', runtime.bigworld.__dict__)
         self.assertIs(original_player,
                       runtime.bigworld.__class__.__dict__['player'])

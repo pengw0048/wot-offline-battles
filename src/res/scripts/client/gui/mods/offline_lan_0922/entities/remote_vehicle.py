@@ -81,6 +81,29 @@ def set_model_attachment_visibility(model, visible):
 # One line per process for each stock surface the runtime could not reach.
 _ground_effect_gate_reported = False
 _ground_decal_gate_reported = False
+_ground_effect_failure_reported = False
+_ground_decal_failure_reported = False
+
+
+def _report_ground_gate_failure(kind, error):
+    """Log one bounded failure for an optional stock presentation owner."""
+    global _ground_effect_failure_reported, _ground_decal_failure_reported
+    if kind == 'effects':
+        if _ground_effect_failure_reported:
+            return False
+        _ground_effect_failure_reported = True
+    else:
+        if _ground_decal_failure_reported:
+            return False
+        _ground_decal_failure_reported = True
+    try:
+        message = ' '.join(str(error).split())[:240]
+    except Exception:
+        message = error.__class__.__name__
+    sys.stdout.write(
+        '[Offline LAN 0.9.22] hidden vehicle ground %s gate degraded: %s\n' %
+        (kind, message or error.__class__.__name__))
+    return True
 
 
 def stop_ground_effects(appearance):
@@ -118,10 +141,24 @@ def stop_ground_effects(appearance):
                 'selector list; hidden vehicle dust and exhaust may still '
                 'draw\n')
         return False
+    reached = False
+    try:
+        selectors = tuple(selectors)
+    except Exception as error:
+        _report_ground_gate_failure('effects', error)
+        return False
     for selector in selectors:
-        if getattr(selector, '_enabled', True):
+        try:
+            if not getattr(selector, '_enabled', True):
+                reached = True
+                continue
             selector.stop()
-    return True
+            reached = True
+        except Exception as error:
+            # One broken native selector must not leave the other selector,
+            # the decal gate or the whole visibility edge unprocessed.
+            _report_ground_gate_failure('effects', error)
+    return reached
 
 
 def set_ground_decal_visibility(appearance, visible):
@@ -146,29 +183,127 @@ def set_ground_decal_visibility(appearance, visible):
         return False
     visible = bool(visible)
     reached = False
-    decal = getattr(appearance, '_CompoundAppearance__chassisDecal', None)
-    hull_node = getattr(decal, '_VehicleDecal__hullParent', None)
-    splodge = getattr(appearance, '_CompoundAppearance__splodge', None)
-    detached_from = getattr(appearance, '_offlineSplodgeParent', None)
-    if splodge is not None:
-        if visible and detached_from is not None:
-            detached_from.attach(splodge)
-            appearance._offlineSplodgeParent = None
+    attempted = False
+    try:
+        model = getattr(appearance, 'compoundModel', None)
+        decal = getattr(
+            appearance, '_CompoundAppearance__chassisDecal', None)
+        hull_node = getattr(decal, '_VehicleDecal__hullParent', None)
+        splodge = getattr(
+            appearance, '_CompoundAppearance__splodge', None)
+        detached = getattr(appearance, '_offlineSplodgeDetach', None)
+        disabled = getattr(appearance, '_offlineSplodgeDisabled', None)
+    except Exception as error:
+        _report_ground_gate_failure('decal', error)
+        return False
+
+    if disabled is not None:
+        try:
+            disabled_matches = (
+                disabled[0] is model and disabled[1] is splodge)
+            reused_disabled_splodge = (
+                not disabled_matches and disabled[1] is splodge)
+        except (IndexError, TypeError):
+            disabled_matches = False
+            reused_disabled_splodge = False
+        if not disabled_matches:
+            if (reused_disabled_splodge and model is not None and
+                    splodge is not None):
+                # A failed native operation can have partially committed.
+                # Replacing the compound does not make the retained Splodge's
+                # owner knowable again, so carry the fence into this model
+                # generation until stock supplies a new Splodge object.
+                disabled = (model, splodge)
+                appearance._offlineSplodgeDisabled = disabled
+            else:
+                appearance._offlineSplodgeDisabled = None
+                disabled = None
+
+    if detached is not None:
+        try:
+            detached_matches = (
+                detached[0] is model and detached[1] is splodge and
+                (hull_node is None or detached[2] is hull_node))
+            reused_splodge = (
+                not detached_matches and detached[1] is splodge)
+        except (IndexError, TypeError):
+            detached_matches = False
+            reused_splodge = False
+        if not detached_matches:
+            # Never dereference the retired hull node after a compound model
+            # refresh.  #1513 can retain the same Splodge while replacing its
+            # compound, in which case its ownership in the new generation is
+            # unknowable and native attach/detach must stay disabled.
+            appearance._offlineSplodgeDetach = None
+            detached = None
+            if reused_splodge and model is not None and splodge is not None:
+                disabled = (model, splodge)
+                appearance._offlineSplodgeDisabled = disabled
+
+    splodge_disabled = disabled is not None
+    if not splodge_disabled and splodge is not None:
+        if visible and detached is not None:
+            attempted = True
+            # Publish the unknown state before a native call that may
+            # synchronously re-enter Python or mutate before raising.
+            appearance._offlineSplodgeDetach = None
+            appearance._offlineSplodgeDisabled = (model, splodge)
+            try:
+                detached[2].attach(splodge)
+            except Exception as error:
+                # A native attach may have partially committed.  Do not retry
+                # an operation whose idempotence cannot be proved.
+                _report_ground_gate_failure('decal', error)
+            else:
+                appearance._offlineSplodgeDisabled = None
+                reached = True
+        elif not visible and detached is None and hull_node is not None:
+            attempted = True
+            appearance._offlineSplodgeDisabled = (model, splodge)
+            try:
+                hull_node.detach(splodge)
+            except Exception as error:
+                _report_ground_gate_failure('decal', error)
+            else:
+                appearance._offlineSplodgeDisabled = None
+                appearance._offlineSplodgeDetach = (
+                    model, splodge, hull_node)
+                reached = True
+        elif detached is not None:
             reached = True
-        elif not visible and detached_from is None and hull_node is not None:
-            hull_node.detach(splodge)
-            appearance._offlineSplodgeParent = hull_node
+    elif splodge_disabled:
+        attempted = True
+
+    try:
+        change = getattr(decal, 'attach' if visible else 'detach', None)
+        if callable(change):
+            attempted = True
+            change()
             reached = True
-    change = getattr(decal, 'attach' if visible else 'detach', None)
-    if callable(change):
-        change()
-        reached = True
-    if not reached and not _ground_decal_gate_reported:
+    except Exception as error:
+        _report_ground_gate_failure('decal', error)
+    if not reached and not attempted and not _ground_decal_gate_reported:
         _ground_decal_gate_reported = True
         sys.stdout.write(
             '[Offline LAN 0.9.22] compound appearance exposes no ground '
             'decal owner; a hidden vehicle may still cast its occlusion '
             'decal\n')
+    return reached
+
+
+def clear_ground_decal_visibility_state(appearance):
+    """Release cached node wrappers when one appearance is retired."""
+    if appearance is None:
+        return False
+    reached = False
+    for name in ('_offlineSplodgeDetach', '_offlineSplodgeDisabled'):
+        try:
+            if getattr(appearance, name, None) is not None:
+                setattr(appearance, name, None)
+                reached = True
+        except Exception:
+            # Teardown must not dereference or recover a retired native node.
+            pass
     return reached
 
 

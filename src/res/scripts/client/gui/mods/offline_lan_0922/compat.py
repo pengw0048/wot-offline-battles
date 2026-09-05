@@ -9,8 +9,8 @@ except ImportError:
     import pickle as _pickle
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
-    close_stock_presentation_extras, set_ground_decal_visibility,
-    stop_ground_effects)
+    clear_ground_decal_visibility_state, close_stock_presentation_extras,
+    set_ground_decal_visibility, stop_ground_effects)
 
 
 OFFLINE_SERVER_ADDRESS = 'offline-lan.local:0'
@@ -2101,8 +2101,18 @@ class OfflineCompatibility(object):
 
         def compound_deactivate(appearance, stopEffects=True):
             original = compatibility._original_compound_deactivate
+            def call_original():
+                try:
+                    return original(appearance, stopEffects)
+                finally:
+                    # A nested model refresh needs the old generation token
+                    # so its retained Splodge cannot be mistaken for a child
+                    # of the replacement compound.  Final teardown does not.
+                    if (compatibility._compound_refreshing_models is not
+                            appearance):
+                        clear_ground_decal_visibility_state(appearance)
             if not compatibility._battle_active:
-                return original(appearance, stopEffects)
+                return call_original()
             try:
                 player = runtime.bigworld.player()
             except ReferenceError:
@@ -2114,7 +2124,7 @@ class OfflineCompatibility(object):
                 except ReferenceError:
                     handler = None
             if handler is not None:
-                return original(appearance, stopEffects)
+                return call_original()
 
             # PlayerAvatar.__destroyGUI clears inputHandler before its later
             # Vehicle.stopVisual loop.  CompoundAppearance.deactivate still
@@ -2127,9 +2137,9 @@ class OfflineCompatibility(object):
                 try:
                     player.inputHandler = fallback
                 except Exception:
-                    return original(appearance, stopEffects)
+                    return call_original()
                 try:
-                    return original(appearance, stopEffects)
+                    return call_original()
                 finally:
                     if getattr(player, 'inputHandler', None) is fallback:
                         player.inputHandler = None
@@ -2148,7 +2158,7 @@ class OfflineCompatibility(object):
 
             runtime.bigworld.player = collider_owner
             try:
-                return original(appearance, stopEffects)
+                return call_original()
             finally:
                 if runtime.bigworld.player is collider_owner:
                     if had_player:
