@@ -9810,17 +9810,28 @@ class BattleRuntime(object):
     def _shot_muzzle_drawn(self, record):
         """Whether the stock muzzle effect belongs to a drawable shooter.
 
-        Exact #1513 ``Vehicle.showShooting`` for a remote is only
-        ``extra.stopFor`` followed by ``extra.startFor``: it starts the shoot
-        extra on ``appearance.boundEffects`` and guards on ``isStarted`` and
-        the siege state alone.  Retail never delivers that event for a vehicle
-        the client cannot see, while this runtime receives every LAN shot, so
-        an unspotted enemy fired a visible muzzle flash and its shot sound
-        over a hidden hull.  This is the same node-bound surface the fire
-        extra already closes on the hide edge.
+        Exact #1513 ``scripts/entity_defs/Vehicle.def`` declares
+        ``showShooting`` under ``ClientMethods``: it is a cell-to-client RPC
+        on the Vehicle entity, and that entity carries ``IsManualAoI`` with
+        the ``receiveVisibilityUpdate``/``onDetectedByEnemy``/
+        ``onConcealedFromEnemy`` cell methods that drive its membership.  A
+        retail client that has not spotted an enemy is not in that AoI and
+        never receives the call at all.  ``Vehicle.showShooting`` itself
+        guards only on ``isStarted`` and the siege state, and its ``shoot``
+        extra is ``ShowShooting``, whose ``_start`` plays ``gunDescr.effects``
+        through ``EffectsListPlayer`` bound to the vehicle's own compound
+        model - the muzzle flash, its smoke and the gun sound.
 
-        The projectile keeps its own owner, so the tracer of a blind shot
-        still flies and still resolves.
+        This runtime receives every LAN shot instead, so an unspotted enemy
+        was firing that whole effect list over a hidden hull. Skip it, which
+        reproduces the retail delivery rule.
+
+        The tracer is a different entity: ``Avatar.def`` declares
+        ``showTracer``/``stopTracer`` under its own ``ClientMethods``, and the
+        player's Avatar is always in its own AoI, which is why retail still
+        draws the tracer of a shot from a vehicle it cannot see. The runtime's
+        projectile keeps its own owner and is untouched here, so a blind shot
+        still draws its tracer, still resolves and still damages.
         """
         if record.get('local'):
             return True

@@ -1,4 +1,6 @@
+import ast
 import importlib.util
+import io
 import os
 import unittest
 
@@ -255,6 +257,51 @@ class ClientAbiProjectileAuditTests(unittest.TestCase):
 
         self.assertFalse(
             AUDIT._matches_unknown_projectile_explosion_branch(instructions))
+
+
+class ClientAbiAuditTableTests(unittest.TestCase):
+    """The expectation tables are dict literals: a repeated key is silent.
+
+    A duplicated member or member entry keeps only the last value, so an
+    earlier expectation stops being checked without any error.  That has
+    already dropped real #1513 contract coverage once, so assert it here
+    instead of noticing it as a changed ``checked*`` count.
+    """
+
+    @staticmethod
+    def _duplicate_keys():
+        source = io.open(TOOL_PATH, encoding='utf-8').read()
+        duplicates = []
+        for node in ast.parse(source).body:
+            if (not isinstance(node, ast.Assign) or
+                    not isinstance(node.value, ast.Dict) or
+                    not isinstance(node.targets[0], ast.Name)):
+                continue
+            table = node.targets[0].id
+            if not table.startswith('EXPECTED_'):
+                continue
+            for prefix, mapping in [((), node.value)] + [
+                    ((key,), value)
+                    for key, value in zip(node.value.keys, node.value.values)
+                    if isinstance(value, ast.Dict)]:
+                seen = {}
+                for key_node in mapping.keys:
+                    try:
+                        key = ast.literal_eval(key_node)
+                    except ValueError:
+                        continue
+                    label = '.'.join(
+                        [table] +
+                        [ast.literal_eval(item) for item in prefix] + [str(key)])
+                    if key in seen:
+                        duplicates.append(
+                            '%s (lines %d and %d)' %
+                            (label, seen[key], key_node.lineno))
+                    seen[key] = key_node.lineno
+        return duplicates
+
+    def test_expectation_tables_have_no_shadowed_keys(self):
+        self.assertEqual([], self._duplicate_keys())
 
 
 if __name__ == '__main__':

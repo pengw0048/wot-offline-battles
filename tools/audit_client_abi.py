@@ -720,6 +720,10 @@ EXPECTED_ABI = {
         'MainCustomSelector.settingsFlags': ('self',),
         'ExhaustMainSelector.settingsFlags': ('self',),
     },
+    'scripts/client/vehicle_extras.pyc': {
+        'ShowShooting._start': ('self', 'data', 'burstCount'),
+        'ShowShooting._cleanup': ('self', 'data'),
+    },
     'scripts/client/vehicle_systems/components/vehicleDecal.pyc': {
         'VehicleDecal.attach': ('self',),
         'VehicleDecal.detach': ('self',),
@@ -1281,11 +1285,6 @@ EXPECTED_CODE_NAMES = {
         'CombatSelectedArea.relocate': (
             '_CombatSelectedArea__matrix', 'setRotateYPR', 'translation'),
     },
-    'scripts/client/AvatarPositionControl.pyc': {
-        'AvatarPositionControl.switchViewpoint': (
-            '_AvatarPositionControl__avatar', 'cell',
-            'switchViewPointOrBindToVehicle'),
-    },
     'scripts/client/AvatarInputHandler/PostmortemDelay.pyc': {
         'PostmortemDelay.start': (
             'BigWorld', 'player', 'playerVehicleID',
@@ -1416,6 +1415,11 @@ EXPECTED_CODE_NAMES = {
             'segmentMayHitEntity'),
     },
     'scripts/client/vehicle_extras.pyc': {
+        # The shoot extra is the muzzle effect list: it plays gunDescr.effects
+        # through EffectsListPlayer bound to the vehicle's own compound model.
+        'ShowShooting._start': (
+            'typeDescriptor', 'gun', 'effects', 'EffectsListPlayer',
+            'appearance', 'compoundModel', '_ShowShooting__doShot'),
         'Fire._start': (
             'appearance', 'isUnderwater', '_Fire__playEffect',
             'switchFireVibrations'),
@@ -1509,6 +1513,9 @@ EXPECTED_CODE_NAMES = {
         'VehicleMarker.isAlive': ('isAlive',),
     },
     'scripts/client/AvatarPositionControl.pyc': {
+        'AvatarPositionControl.switchViewpoint': (
+            '_AvatarPositionControl__avatar', 'cell',
+            'switchViewPointOrBindToVehicle'),
         'ConsistentMatrices.__setTarget': (
             '_ConsistentMatrices__attachedVehicleMatrix', 'target',
             'onVehicleMatrixBindingChanged'),
@@ -1613,8 +1620,6 @@ EXPECTED_CODE_NAMES = {
             'getDescByFilename'),
         'DestructiblesManager.onChunkLoad': (
             '_DestructiblesManager__loadedChunkIDs',),
-        '_DestructiblesAnimator.showFall': (
-            'spaceID', 'chunkID', 'destrIndex'),
         'AreaDestructibles.set_fallenTrees': (
             'orderDestructibleDestroy', 'DESTR_TYPE_TREE'),
         'AreaDestructibles.set_fallenColumns': (
@@ -1960,8 +1965,29 @@ EXPECTED_PACKED_XML_PATH_VALUES = {
             (1, 'OBJECT_ID'), (1, 'UINT8'), (1, 'INT32'), (1, 'ARRAY')),
         ('ClientMethods', 'updateVehicleMiscStatus', 'Arg', 'of'): (
             (1, 'FLOAT32'),),
+        # The tracer is an Avatar client method, not a Vehicle one.  The
+        # player's own Avatar is always in its own AoI, so retail still draws
+        # the tracer of a shot fired by a vehicle the client cannot see.
+        ('ClientMethods', 'showTracer', 'Arg'): (
+            (1, 'OBJECT_ID'), (1, 'SHOT_ID'), (5, '\x04\xe3\x8b'),
+            (1, 'UINT8'), (1, 'VECTOR3'), (1, 'VECTOR3'), (1, 'FLOAT32'),
+            (1, 'FLOAT32')),
+        ('ClientMethods', 'stopTracer', 'Arg'): (
+            (1, 'SHOT_ID'), (1, 'VECTOR3')),
     },
     'scripts/entity_defs/Vehicle.def': {
+        # showShooting is a cell->client entity RPC on the Vehicle, and the
+        # Vehicle entity owns a manual AoI whose membership the spotting cell
+        # methods below drive.  A client that has not spotted an enemy is not
+        # in that AoI and never receives the call, which is why retail draws
+        # no muzzle effect and plays no gun sound for an unspotted shooter.
+        ('ClientMethods', 'showShooting', 'Arg'): ((1, 'UINT8'),),
+        ('IsManualAoI',): ((4, True),),
+        ('CellMethods', 'receiveVisibilityUpdate', 'Arg'): (
+            (1, 'OBJECT_ID'), (5, '\x04\xe3\x8b'), (5, '\x04\xe3\x8b')),
+        ('CellMethods', 'onDetectedByEnemy', 'Arg'): (
+            (1, 'OBJECT_ID'), (5, '\x04\xe3\x8b')),
+        ('CellMethods', 'onConcealedFromEnemy', 'Arg'): ((1, 'OBJECT_ID'),),
         ('Properties', 'damageStickers', 'Type'): (
             (1, 'ARRAY'),),
         ('Properties', 'damageStickers', 'Type', 'of'): (

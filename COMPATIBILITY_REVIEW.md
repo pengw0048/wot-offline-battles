@@ -1092,16 +1092,28 @@ idempotent, so the steady-state cost is a flag read. Which of these layers
 draws the artefact a tester photographs is still an exact-Windows question; all
 of them are now closed together.
 
-The stock shoot extra is the same kind of surface. Exact #1513
-`Vehicle.showShooting` for a remote is only `extra.stopFor` followed by
-`extra.startFor`, guarded by `isStarted` and the siege state and by nothing
-about visibility; the `isPlayerVehicle` branches around it are the local
-waiting-for-shot handshake. Retail never delivers that event for a vehicle the
-client cannot see, while this runtime receives every LAN shot, so the runtime
-skips the muzzle presentation for a remote whose draw pass is closed. The
-projectile keeps its own owner, so a blind shot still flies, still resolves and
-still damages; this matches the impact-effect gate the runtime already applies
-to a terminal event on an unspotted target.
+The muzzle effect is the same class of leak, and the entity definitions say
+why. `scripts/entity_defs/Vehicle.def` declares `showShooting` under
+`ClientMethods`, so it is a cell-to-client RPC on the Vehicle entity, and that
+entity carries `IsManualAoI` together with the `receiveVisibilityUpdate`,
+`onDetectedByEnemy` and `onConcealedFromEnemy` cell methods that drive its
+membership. A retail client that has not spotted an enemy is not in that AoI
+and never receives the call. `Vehicle.showShooting` itself guards only on
+`isStarted` and the siege state - the `isPlayerVehicle` branches around it are
+the local waiting-for-shot handshake - and the `shoot` extra it starts is
+`ShowShooting`, whose `_start` plays `gunDescr.effects` through
+`EffectsListPlayer` bound to the vehicle's own compound model: the muzzle
+flash, its smoke and the gun sound. This runtime receives every LAN shot
+instead, so the runtime skips that presentation for a remote whose draw pass is
+closed, which reproduces the retail delivery rule.
+
+The tracer is a different entity and must not follow it. `Avatar.def` declares
+`showTracer` and `stopTracer` under its own `ClientMethods`, and the player's
+Avatar is always inside its own AoI, so retail still draws the tracer of a shot
+fired by a vehicle the client cannot see. The runtime's projectile keeps its own
+owner, so a blind shot still draws its tracer, still resolves and still damages;
+this also matches the impact-effect gate the runtime already applies to a
+terminal event on an unspotted target.
 
 The entity AOI that owns the world model follows the observed vehicle, not the
 player's own hull. The local integrator stops the moment the player dies, so
