@@ -145,10 +145,15 @@ EXPECTED_ABI = {
         'prepareCompoundAssembler': (
             'vehicleDesc', 'modelStateName', 'spaceID',
             'isTurretDetached'),
+        'createSwingingAnimator': (
+            'vehicleDesc', 'basisMatrix', 'worldMProv', 'lodLink'),
         'setupTurretRotations': ('appearance',),
         'assembleRecoil': ('appearance', 'lodLink'),
         'assembleWaterSensor': (
             'vehicleDesc', 'appearance', 'lodStateLink'),
+    },
+    'scripts/client/vehicle_systems/vehicle_assembler.pyc': {
+        '_assembleSwinging': ('appearance', 'lodLink'),
     },
     'scripts/client/OfflineEntity.pyc': {
         'OfflineEntity.__init__': ('self',),
@@ -696,6 +701,9 @@ EXPECTED_ABI = {
         'CompoundAppearance.changeVisibility': ('self', 'modelVisible'),
         'CompoundAppearance.changeDrawPassVisibility': (
             'self', 'visibilityMask'),
+        'CompoundAppearance.changeEngineMode': (
+            'self', 'mode', 'forceSwinging'),
+        'CompoundAppearance.stopSwinging': ('self',),
         'CompoundAppearance.deactivate': ('self', 'stopEffects'),
         'CompoundAppearance.addCrashedTrack': ('self', 'isLeft'),
         'CompoundAppearance.delCrashedTrack': ('self', 'isLeft'),
@@ -1103,6 +1111,10 @@ EXPECTED_CODE_NAMES = {
         'Engine.__init__': ('fireStartingChance',),
     },
     'scripts/client/vehicle_systems/model_assembler.pyc': {
+        'createSwingingAnimator': (
+            'Vehicular', 'SwingingAnimator', 'setupPitchSwinging',
+            'setupRollSwinging', 'setupShotSwinging', 'maxMovementSpeed',
+            'lodSetting', 'worldMatrix'),
         'setupTurretRotations': (
             'compoundModel', 'node', 'turretMatrix', 'gunMatrix'),
         'assembleRecoil': (
@@ -1110,6 +1122,12 @@ EXPECTED_CODE_NAMES = {
         'assembleWaterSensor': (
             'turretPositions', 'topRightCarryingPoint', 'Vehicular',
             'WaterSensor', 'sensorPlaneLink', 'onUnderWaterSwitch'),
+    },
+    'scripts/client/vehicle_systems/vehicle_assembler.pyc': {
+        '_assembleSwinging': (
+            'compoundModel', 'createSwingingAnimator', 'typeDescriptor',
+            'node', 'TankPartNames', 'HULL', 'localMatrix',
+            'swingingAnimator', 'filter', 'placingCompensationMatrix'),
     },
     'scripts/client/Account.pyc': {
         'PlayerAccount.onBecomePlayer': (
@@ -1678,6 +1696,13 @@ EXPECTED_CODE_NAMES = {
             'BigWorld', 'ColorPassBit', 'compoundModel', 'visible',
             'skipColorPass', 'showStickers',
             '_CompoundAppearance__crashedTracksCtrl', 'setVisible'),
+        # #1513 accepts ``forceSwinging`` but only forwards the engine mode to
+        # the native track-scroll controller. It no longer arms the animator.
+        'CompoundAppearance.changeEngineMode': (
+            '_CompoundAppearance__engineMode',
+            '_CompoundAppearance__trackScrollCtl', 'setMode'),
+        'CompoundAppearance.stopSwinging': (
+            'swingingAnimator', 'accelSwingingPeriod'),
         'CompoundAppearance.deactivate': (
             'BigWorld', 'player', 'inputHandler',
             'removeVehicleFromCameraCollider', 'arena',

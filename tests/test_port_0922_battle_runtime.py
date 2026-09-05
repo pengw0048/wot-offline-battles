@@ -19,8 +19,8 @@ sys.path.insert(0, str(CLIENT_SCRIPTS))
 from gui.mods.offline_lan_0922.battle_runtime import (
     BattleRuntime, ENGINE_MODE_IDLE, ENGINE_MODE_OFF, ENGINE_MODE_RUNNING,
     FRAME_SECONDS, _FrameDiagnostics, _LANInputSender,
-    _MOVEMENT_BACKWARD, _MOVEMENT_ROTATE_LEFT, _MOVEMENT_ROTATE_RIGHT,
-    _engine_rotation)
+    _MOVEMENT_BACKWARD, _MOVEMENT_FORWARD, _MOVEMENT_ROTATE_LEFT,
+    _MOVEMENT_ROTATE_RIGHT, _engine_rotation)
 from gui.mods.offline_lan_0922 import battle_runtime as \
     battle_runtime_module
 from gui.mods.offline_lan_0922 import bot_runtime, combat_rules, \
@@ -2132,6 +2132,7 @@ def _runtime():
             setupTurretRotations=setup_turret_rotations,
             setupVehicleFashion=lambda fashion, descriptor, crashed: True,
             createVehicleFilter=lambda descriptor: _VehicleFilter()),
+        tank_part_names=types.SimpleNamespace(HULL='hull'),
         offline_map_creator=_OfflineMap(bigworld, app_loader),
         call_with_standard_gameplay_mask=call_with_standard_gameplay_mask,
         res_mgr=res_mgr,
@@ -26461,7 +26462,9 @@ class LocalBodySwingingTests(unittest.TestCase):
         if animator:
             entity.appearance.swingingAnimator = types.SimpleNamespace(
                 placingCompensationMatrix=_Matrix(),
-                worldMatrix=entity.matrix)
+                worldMatrix=entity.matrix,
+                accelSwingingPeriod=0.0,
+                accelSwingingDirection=0.0)
         runtime.bigworld.entities[10] = entity
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = types.SimpleNamespace(
@@ -26525,6 +26528,109 @@ class LocalBodySwingingTests(unittest.TestCase):
         battle._update_local_presentation(entity, 0.1)
 
         self.assertEqual([], writes)
+
+    def test_stock_movement_edges_select_the_retired_period_and_direction(self):
+        parameters = BattleRuntime._local_acceleration_swing_parameters
+
+        self.assertEqual((2.0, -1.0), parameters(_MOVEMENT_FORWARD, 0))
+        self.assertEqual((2.0, 1.0), parameters(_MOVEMENT_BACKWARD, 0))
+        self.assertEqual((2.0, 0.0), parameters(0, _MOVEMENT_FORWARD))
+        self.assertEqual(
+            (1.0, 0.0), parameters(_MOVEMENT_ROTATE_LEFT, 0))
+        self.assertEqual(
+            (1.0, 0.0), parameters(0, _MOVEMENT_ROTATE_RIGHT))
+        self.assertIsNone(parameters(
+            _MOVEMENT_FORWARD | _MOVEMENT_ROTATE_LEFT,
+            _MOVEMENT_FORWARD))
+
+    def test_movement_edges_arm_the_live_stock_animator(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        swinging = entity.appearance.swingingAnimator
+        swinging.accelSwingingPeriod = 0.4
+        stream = io.StringIO()
+
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._update_local_acceleration_swinging(
+                entity, _MOVEMENT_FORWARD))
+            swinging.accelSwingingPeriod = 1.4
+            self.assertTrue(battle._update_local_acceleration_swinging(
+                entity, 0))
+
+        self.assertEqual(2.0, swinging.accelSwingingPeriod)
+        self.assertEqual(0.0, swinging.accelSwingingDirection)
+        self.assertEqual(2, stream.getvalue().count('SWING_ARM'))
+        self.assertIn('direction=-1.0', stream.getvalue())
+
+    def test_a_shorter_turn_edge_does_not_truncate_an_active_window(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        swinging = entity.appearance.swingingAnimator
+        swinging.accelSwingingPeriod = 1.5
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            self.assertTrue(battle._update_local_acceleration_swinging(
+                entity, _MOVEMENT_ROTATE_RIGHT))
+
+        self.assertEqual(1.5, swinging.accelSwingingPeriod)
+        self.assertEqual(0.0, swinging.accelSwingingDirection)
+
+    def test_an_animator_refresh_cannot_arm_the_retired_owner(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        retired = entity.appearance.swingingAnimator
+        replacement = types.SimpleNamespace(
+            placingCompensationMatrix=_Matrix(), worldMatrix=entity.matrix,
+            accelSwingingPeriod=0.0, accelSwingingDirection=0.0)
+        entity.appearance.swingingAnimator = replacement
+
+        self.assertFalse(battle._update_local_acceleration_swinging(
+            entity, _MOVEMENT_FORWARD))
+
+        self.assertEqual(0.0, retired.accelSwingingPeriod)
+        self.assertEqual(0.0, replacement.accelSwingingPeriod)
+
+    def test_engine_mode_edge_wires_input_to_the_stock_animator(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        battle._sender.forward = 1.0
+        stream = io.StringIO()
+
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._update_local_tracks(entity))
+
+        swinging = entity.appearance.swingingAnimator
+        self.assertEqual(2.0, swinging.accelSwingingPeriod)
+        self.assertEqual(-1.0, swinging.accelSwingingDirection)
+        self.assertIn('SWING_ARM', stream.getvalue())
+
+    def test_cross_frame_probe_reports_hull_motion_against_the_root(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        swinging = entity.appearance.swingingAnimator
+        hull = _Matrix()
+
+        class _HullModel(object):
+            def node(self, name):
+                self.last_name = name
+                return hull
+
+        compound = _HullModel()
+        entity.appearance.compoundModel = compound
+        stream = io.StringIO()
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._update_local_acceleration_swinging(
+                entity, _MOVEMENT_FORWARD))
+            hull.pitch = math.radians(0.5)
+            swinging.accelSwingingPeriod = 1.95
+            self.assertTrue(battle._sample_local_acceleration_swinging(
+                entity, 0.05))
+
+        output = stream.getvalue()
+        self.assertEqual('hull', compound.last_name)
+        self.assertEqual(2, output.count('SWING_FRAME'))
+        self.assertIn('sample=1 elapsed=0.050 period=1.950', output)
+        self.assertIn('delta_ypr_deg=(0.000, 0.500, 0.000)', output)
 
     def test_second_bind_setter_failure_rolls_back_and_disables_feature(self):
         battle, entity = self._battle()
@@ -26631,6 +26737,8 @@ class LocalBodySwingingTests(unittest.TestCase):
 
         self.assertIs(native_compensation, swinging.placingCompensationMatrix)
         self.assertIs(native_world, swinging.worldMatrix)
+        self.assertEqual(0.0, swinging.accelSwingingPeriod)
+        self.assertEqual(0.0, swinging.accelSwingingDirection)
         self.assertIsNone(battle._local_swinging_animator)
 
     def test_detach_does_not_write_a_retired_animator_after_refresh(self):

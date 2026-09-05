@@ -1208,8 +1208,18 @@ object itself changed. `__prepareSystemsForDamagedVehicle` clears
 is recorded rather than raised. No stock Python code in the package writes
 `accelSwingingDirection`, and this build's `changeEngineMode` no longer arms
 acceleration swing; `stopSwinging` is the only remaining Python writer of
-`accelSwingingPeriod`. Which owner arms that swing in #1513 is unresolved and
-is not ported here.
+`accelSwingingPeriod`. The exact executable nevertheless exposes both fields
+as writable floats. Its native animator reads root translation across updates,
+derives acceleration, gates its sign with `accelSwingingDirection`, and runs
+the shipped pitch/roll response while a positive `accelSwingingPeriod` counts
+down. This reversible experiment restores only the retired stock input-edge
+law: two seconds for a forward, reverse, or stop transition, one second for a
+stationary steering transition, and directions `-1`, `1`, and `0` for forward,
+reverse, and neutral respectively. Sparse `SWING_ARM` and `SWING_FRAME` lines
+record the live period/direction plus copied-root and stock-HULL orientation
+across the window. Static inspection proves the property and owner contracts;
+only exact Windows acceptance can prove that the native HULL output is visible
+and that its magnitude feels correct.
 
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an

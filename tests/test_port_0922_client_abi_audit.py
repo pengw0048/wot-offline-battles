@@ -74,6 +74,45 @@ def _unknown_projectile_explosion_fixture():
 
 
 class ClientAbiProjectileAuditTests(unittest.TestCase):
+    def test_stock_swinging_animator_contract_is_pinned(self):
+        appearance_member = \
+            'scripts/client/vehicle_systems/CompoundAppearance.pyc'
+        model_member = 'scripts/client/vehicle_systems/model_assembler.pyc'
+        vehicle_member = \
+            'scripts/client/vehicle_systems/vehicle_assembler.pyc'
+        appearance = AUDIT.EXPECTED_ABI[appearance_member]
+        self.assertEqual(
+            ('self', 'mode', 'forceSwinging'),
+            appearance['CompoundAppearance.changeEngineMode'])
+        self.assertEqual(
+            ('self',), appearance['CompoundAppearance.stopSwinging'])
+        self.assertEqual(
+            ('vehicleDesc', 'basisMatrix', 'worldMProv', 'lodLink'),
+            AUDIT.EXPECTED_ABI[model_member]['createSwingingAnimator'])
+        self.assertEqual(
+            ('appearance', 'lodLink'),
+            AUDIT.EXPECTED_ABI[vehicle_member]['_assembleSwinging'])
+
+        self.assertTrue({
+            'SwingingAnimator', 'setupPitchSwinging', 'setupRollSwinging',
+            'setupShotSwinging', 'maxMovementSpeed', 'lodSetting',
+            'worldMatrix',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[model_member][
+            'createSwingingAnimator']))
+        self.assertTrue({
+            'TankPartNames', 'HULL', 'localMatrix', 'swingingAnimator',
+            'placingCompensationMatrix',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[vehicle_member][
+            '_assembleSwinging']))
+        self.assertTrue({
+            '_CompoundAppearance__trackScrollCtl', 'setMode',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[appearance_member][
+            'CompoundAppearance.changeEngineMode']))
+        self.assertEqual(
+            ('swingingAnimator', 'accelSwingingPeriod'),
+            AUDIT.EXPECTED_CODE_NAMES[appearance_member][
+                'CompoundAppearance.stopSwinging'])
+
     def test_initial_enemy_shadow_gate_is_pinned(self):
         vehicle = AUDIT.EXPECTED_ABI['scripts/client/Vehicle.pyc']
         appearance = AUDIT.EXPECTED_ABI[

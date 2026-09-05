@@ -235,6 +235,16 @@ _MOVEMENT_ROTATE_LEFT = 4
 _MOVEMENT_ROTATE_RIGHT = 8
 _MOVEMENT_CRUISE_CONTROL50 = 16
 _MOVEMENT_CRUISE_CONTROL25 = 32
+# The retired stock acceleration-swing owner used these two exact windows.
+# #1513 still exposes the same animator period/direction properties, but its
+# ``CompoundAppearance.changeEngineMode`` no longer writes them.  Keep this
+# trial local to the copied player pose until the exact Windows client proves
+# the native result.
+LOCAL_ACCEL_SWING_MOVE_SECONDS = 2.0
+LOCAL_ACCEL_SWING_ROTATE_SECONDS = 1.0
+LOCAL_ACCEL_SWING_REPORT_LIMIT = 12
+LOCAL_ACCEL_SWING_PROBE_TIMES = (
+    0.0, 0.05, 0.10, 0.20, 0.40, 0.80, 1.20, 1.80, 2.10)
 # VehicleGunRotator.__isOutOfLimits uses this exact #1513 angular epsilon
 # when deciding whether a limited-traverse gun is already on either stop.
 GUN_TRAVERSE_LIMIT_EPSILON = 1.0e-5
@@ -1196,6 +1206,7 @@ def _load_runtime():
     from items import vehicles
     from vehicle_systems import camouflages
     from vehicle_systems import model_assembler
+    from vehicle_systems.tankStructure import TankPartNames
 
     class Runtime(object):
         pass
@@ -1228,6 +1239,7 @@ def _load_runtime():
     runtime.math = Math
     runtime.camouflages = camouflages
     runtime.model_assembler = model_assembler
+    runtime.tank_part_names = TankPartNames
     runtime.nations = nations
     runtime.offline_map_creator = g_offlineMapCreator
     runtime.call_with_standard_gameplay_mask = \
@@ -1560,6 +1572,10 @@ class BattleRuntime(object):
         self._local_swinging_restore = None
         self._local_placing_compensation = None
         self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -1848,6 +1864,10 @@ class BattleRuntime(object):
         self._local_swinging_restore = None
         self._local_placing_compensation = None
         self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -5705,6 +5725,8 @@ class BattleRuntime(object):
         if restore is None:
             return False
         swinging, compensation, world = restore
+        self._local_swinging_probe = None
+        self._local_swinging_move_flags = 0
         appearance = getattr(entity, 'appearance', None)
         if (not getattr(entity, 'isStarted', False) or
                 getattr(appearance, 'swingingAnimator', None) is not
@@ -5715,6 +5737,17 @@ class BattleRuntime(object):
             self._local_swinging_restore = None
             return False
         try:
+            # This trial is the sole writer that can arm the #1513 animator.
+            # Clear its finite window before returning the matrix providers;
+            # direction has no effect while the period is zero, but resetting
+            # both makes repeated attach/detach cycles deterministic.
+            swinging.accelSwingingPeriod = 0.0
+            swinging.accelSwingingDirection = 0.0
+        except Exception as error:
+            # A cosmetic native setter must not prevent restoration of the
+            # stock provider pair during battle teardown.
+            self._report_local_body_swinging(False, error)
+        try:
             swinging.placingCompensationMatrix = compensation
             swinging.worldMatrix = world
         except Exception as error:
@@ -5723,6 +5756,164 @@ class BattleRuntime(object):
             raise
         self._local_swinging_animator = None
         self._local_swinging_restore = None
+        return True
+
+    @staticmethod
+    def _local_acceleration_swing_parameters(flags, previous_flags):
+        """Return the retired stock period/direction for one flag edge.
+
+        Exact #1513 retains writable ``accelSwingingPeriod`` and
+        ``accelSwingingDirection`` fields, but its Python
+        ``CompoundAppearance.changeEngineMode`` ignores ``forceSwinging``.
+        The last stock Python owner used a two-second window for a forward,
+        reverse or stop edge and a one-second window for a stationary turn
+        edge.  This experiment restores only that input law while leaving the
+        native animator responsible for amplitude, damping and HULL output.
+        """
+        flags = int(flags)
+        previous_flags = int(previous_flags)
+        move_mask = _MOVEMENT_FORWARD | _MOVEMENT_BACKWARD
+        rotate_mask = _MOVEMENT_ROTATE_LEFT | _MOVEMENT_ROTATE_RIGHT
+        if (flags & move_mask) ^ (previous_flags & move_mask):
+            if flags & _MOVEMENT_FORWARD:
+                direction = -1.0
+            elif flags & _MOVEMENT_BACKWARD:
+                direction = 1.0
+            else:
+                direction = 0.0
+            return LOCAL_ACCEL_SWING_MOVE_SECONDS, direction
+        if (not flags & move_mask and
+                ((flags & rotate_mask) ^
+                 (previous_flags & rotate_mask))):
+            return LOCAL_ACCEL_SWING_ROTATE_SECONDS, 0.0
+        return None
+
+    def _local_hull_swing_snapshot(self, entity):
+        """Read the stock HULL node and copied root for a bounded probe."""
+        appearance = getattr(entity, 'appearance', None)
+        compound = getattr(appearance, 'compoundModel', None)
+        part_names = getattr(self._runtime, 'tank_part_names', None)
+        hull_name = getattr(part_names, 'HULL', None)
+        if compound is None or hull_name is None:
+            raise RuntimeError('#1513 HULL diagnostic boundary is unavailable')
+        node = compound.node(hull_name)
+        if node is None:
+            raise RuntimeError('#1513 HULL node is unavailable')
+        hull = self._runtime.math.Matrix(node)
+        root = self._runtime.math.Matrix(self._local_body_pose())
+        root_ypr = tuple(_number(getattr(root, name))
+                         for name in ('yaw', 'pitch', 'roll'))
+        hull_ypr = tuple(_number(getattr(hull, name))
+                         for name in ('yaw', 'pitch', 'roll'))
+        delta_ypr = tuple(_angle_delta(root_ypr[index], hull_ypr[index])
+                          for index in range(3))
+        return root_ypr, hull_ypr, delta_ypr
+
+    def _sample_local_acceleration_swinging(self, entity, elapsed):
+        """Log sparse cross-frame HULL output for one movement transition."""
+        probe = self._local_swinging_probe
+        if probe is None:
+            return False
+        try:
+            probe['elapsed'] += max(0.0, float(elapsed))
+            times = LOCAL_ACCEL_SWING_PROBE_TIMES
+            index = int(probe['next'])
+            if index >= len(times) or probe['elapsed'] + 1.0e-9 < times[index]:
+                return False
+            # A capped physics step can cross two early sample times. Emit one
+            # current native observation and advance past every elapsed mark.
+            while (index + 1 < len(times) and
+                   probe['elapsed'] + 1.0e-9 >= times[index + 1]):
+                index += 1
+            animator = probe['animator']
+            if (animator is not self._local_swinging_animator or
+                    getattr(getattr(entity, 'appearance', None),
+                            'swingingAnimator', None) is not animator):
+                self._local_swinging_probe = None
+                return False
+            root_ypr, hull_ypr, delta_ypr = \
+                self._local_hull_swing_snapshot(entity)
+            period = _number(animator.accelSwingingPeriod)
+            direction = _number(animator.accelSwingingDirection)
+            root_degrees = tuple(math.degrees(value) for value in root_ypr)
+            hull_degrees = tuple(math.degrees(value) for value in hull_ypr)
+            delta_degrees = tuple(math.degrees(value) for value in delta_ypr)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_FRAME event=%d sample=%d '
+                'elapsed=%.3f period=%.3f direction=%.1f '
+                'root_ypr_deg=(%.3f, %.3f, %.3f) '
+                'hull_ypr_deg=(%.3f, %.3f, %.3f) '
+                'delta_ypr_deg=(%.3f, %.3f, %.3f)\n' % (
+                    probe['event'], index, probe['elapsed'], period,
+                    direction, root_degrees[0], root_degrees[1],
+                    root_degrees[2], hull_degrees[0], hull_degrees[1],
+                    hull_degrees[2], delta_degrees[0], delta_degrees[1],
+                    delta_degrees[2]))
+            probe['next'] = index + 1
+            if probe['next'] >= len(times):
+                self._local_swinging_probe = None
+            return True
+        except Exception as error:
+            # Diagnostics are observational. Losing a HULL read never retires
+            # the animator that the player is actively evaluating.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_FRAME event=%d error=%r\n' % (
+                    probe.get('event', 0), str(error)))
+            self._local_swinging_probe = None
+            return False
+
+    def _update_local_acceleration_swinging(self, entity, flags):
+        """Arm the live stock animator from an exact movement-flag edge."""
+        flags = int(flags)
+        previous_flags = int(self._local_swinging_move_flags)
+        self._local_swinging_move_flags = flags
+        parameters = self._local_acceleration_swing_parameters(
+            flags, previous_flags)
+        if parameters is None:
+            return False
+        appearance = getattr(entity, 'appearance', None)
+        animator = getattr(appearance, 'swingingAnimator', None)
+        if (animator is None or animator is not self._local_swinging_animator or
+                not self._optional_feature_enabled('local body swinging')):
+            return False
+        requested_period, direction = parameters
+        previous_period = float(animator.accelSwingingPeriod)
+        previous_direction = float(animator.accelSwingingDirection)
+        try:
+            # Match the former stock write order: direction changes on every
+            # qualifying edge, while a shorter request never truncates an
+            # already-active native swing window.
+            animator.accelSwingingDirection = direction
+            if requested_period > previous_period:
+                animator.accelSwingingPeriod = requested_period
+        except Exception:
+            try:
+                animator.accelSwingingDirection = previous_direction
+                animator.accelSwingingPeriod = previous_period
+            except Exception:
+                pass
+            raise
+        active_period = float(animator.accelSwingingPeriod)
+        self._local_swinging_event_seq += 1
+        event = self._local_swinging_event_seq
+        if self._local_swinging_events_reported < \
+                LOCAL_ACCEL_SWING_REPORT_LIMIT:
+            self._local_swinging_events_reported += 1
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_ARM event=%d previous_flags=%d '
+                'flags=%d requested=%.1f before=%.3f active=%.3f '
+                'direction=%.1f\n' % (
+                    event, previous_flags, flags, requested_period,
+                    previous_period, active_period, direction))
+            self._local_swinging_probe = {
+                'event': event,
+                'animator': animator,
+                'elapsed': 0.0,
+                'next': 0,
+            }
+            self._sample_local_acceleration_swinging(entity, 0.0)
+        else:
+            self._local_swinging_probe = None
         return True
 
     def _update_local_presentation(self, entity, dt=0.0):
@@ -5771,6 +5962,7 @@ class BattleRuntime(object):
         self._run_optional_feature(
             'local body swinging', self._bind_local_body_swinging,
             (entity, self._local_model))
+        self._sample_local_acceleration_swinging(entity, dt)
         self._run_optional_feature(
             'local track animation', self._update_local_tracks, (entity,))
         return position
@@ -5854,6 +6046,10 @@ class BattleRuntime(object):
             entity.engineMode = mode
             change_mode(mode, True)
             self._local_engine_mode = mode
+            self._run_optional_feature(
+                'local acceleration swinging',
+                self._update_local_acceleration_swinging,
+                (entity, mode[1]))
         if not alive:
             return False
         params = self._local_physics
@@ -5901,6 +6097,10 @@ class BattleRuntime(object):
         self._local_swinging_restore = None
         self._local_placing_compensation = None
         self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -21971,6 +22171,10 @@ class BattleRuntime(object):
         self._local_swinging_restore = None
         self._local_placing_compensation = None
         self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
