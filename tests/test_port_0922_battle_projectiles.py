@@ -1124,7 +1124,7 @@ class BattleProjectileTests(unittest.TestCase):
                         int(shell_kind == 'HIGH_EXPLOSIVE'),
                         battle._projectile_splash_effects.call_count)
 
-    def test_track_only_contact_blasts_hull_for_he_but_not_solid_shot(self):
+    def test_track_only_contact_cannot_invent_hull_damage(self):
         for shell_kind in ('HIGH_EXPLOSIVE', 'ARMOR_PIERCING'):
             with self.subTest(shell=shell_kind):
                 battle, unused_world, target_key, state = (
@@ -1155,16 +1155,13 @@ class BattleProjectileTests(unittest.TestCase):
                         mock.patch.object(
                             critical_damage, 'propose_explosion',
                             side_effect=critical), \
-                        mock.patch.object(combat_rules.random, 'uniform',
-                                          side_effect=lambda a, b: (a + b) / 2):
+                        mock.patch.object(combat_rules.random, 'gauss',
+                                          side_effect=lambda mean, unused_sigma: mean):
                     effect = battle._projectile_direct_effect(
                         meta, state, terminal_data)
 
                 self.assertEqual(1, effect['shot_result'])
-                if shell_kind == 'HIGH_EXPLOSIVE':
-                    self.assertGreater(effect['damage'], 0)
-                else:
-                    self.assertEqual(0, effect['damage'])
+                self.assertEqual(0, effect['damage'])
 
     def test_native_factory_exposes_unblended_projectile_matrix(self):
         canonical_matrix = object()
@@ -2710,6 +2707,20 @@ class BattleProjectileTests(unittest.TestCase):
         # -0.04 s: exactly 0.9 m behind the uncompensated authority pose.
         self.assertEqual(1, len(poses))
         self.assertAlmostEqual(-0.4, poses[0]['z'], places=6)
+        terminal_data = battle._projectile_terminal_data['player:7:1']
+        self.assertNotEqual(
+            tuple(terminal_data['query'][0]),
+            terminal_data['trajectory_query']['start'])
+        self.assertEqual(
+            (0.0, 1.0, 0.0),
+            terminal_data['trajectory_query']['start'])
+        self.assertEqual(
+            (10.0, 1.0, 0.0),
+            terminal_data['trajectory_query']['end'])
+        self.assertEqual(
+            (0.0, 0.1),
+            (terminal_data['trajectory_query']['absolute_start'],
+             terminal_data['trajectory_query']['absolute_end']))
 
         # The candidate keeps advancing along its own historical timeline for
         # the rest of the flight.  It is never frozen at the displayed pose,
@@ -4300,6 +4311,54 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(10.5, sampled.call_args[0][1])
         self.assertEqual(7.0, sampled.call_args[0][3])
 
+    def test_ricochet_scene_uses_the_current_segment_penetration(self):
+        battle, unused_bigworld = _battle()
+
+        class _Destructibles(object):
+            def __init__(self):
+                self.calls = 0
+
+            def shot_world_distance(self, *unused_args):
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        'piercing_loss': 10.0,
+                        'loss_distance': 0.5,
+                        'continue_from': 1.0,
+                    }
+                return {
+                    'piercing_loss': 0.0,
+                    'world_distance': 999999.0,
+                }
+
+        battle._destructibles = _Destructibles()
+        state = {
+            'start': (0.0, 0.0, 0.0),
+            'payload': {
+                'range_origin': (0.0, 0.0, 0.0),
+                'base_penetration_multiplier': 0.75,
+            },
+        }
+        shot = {
+            'piercingPower': (100.0, 100.0),
+            'maxDistance': 100.0,
+            'shell': {'kind': 'ARMOR_PIERCING'},
+        }
+
+        scene = battle._resolve_shot_scene(
+            _Vector((0.0, 0.0, 0.0)), _Vector((2.0, 0.0, 0.0)),
+            _Vector((1.0, 0.0, 0.0)), shot,
+            penetration_factor=1.0, initial_piercing_loss=70.0,
+            projectile_state=state)
+
+        # The first ricochet retains 75 penetration before the old 70 and new
+        # 10 losses. It therefore stops at this destructible. Reusing the
+        # original 100 penetration would incorrectly leave 20 and trace on.
+        self.assertEqual(1, battle._destructibles.calls)
+        self.assertTrue(scene['stopped_by_destructible'])
+        self.assertEqual(0.5, scene['world_distance'])
+        self.assertEqual(80.0, scene['piercing_loss'])
+
     def test_nonimpact_resolution_sends_no_impact_position(self):
         battle, unused_bigworld = _battle()
         meta = battle._projectile_wire_meta(_event())
@@ -4700,8 +4759,8 @@ class BattleProjectileTests(unittest.TestCase):
                 mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
-                    combat_rules.random, 'uniform',
-                    side_effect=lambda low, high: (low + high) / 2.0), \
+                    combat_rules.random, 'gauss',
+                    side_effect=lambda mean, unused_sigma: mean), \
                 mock.patch.object(
                     critical_damage, 'propose_direct',
                     side_effect=lambda unused_target, unused_collisions,
@@ -4768,6 +4827,244 @@ class BattleProjectileTests(unittest.TestCase):
             0.75,
             resolved.call_args.kwargs['base_penetration_multiplier'])
         critical.assert_not_called()
+
+    def test_ap_and_apcr_ricochet_carry_screen_loss_from_actual_plate(self):
+        for shell_kind in ('ARMOR_PIERCING', 'ARMOR_PIERCING_CR'):
+            with self.subTest(shell_kind=shell_kind):
+                battle, unused_bigworld = _battle()
+                source = battle._server_entity(41)
+                target = types.SimpleNamespace(
+                    id=55, isStarted=True,
+                    typeDescriptor=types.SimpleNamespace(),
+                    position=_Vector((6.0, 1.0, 0.0)),
+                    isAlive=lambda: True)
+                battle._records['bot:17'] = {
+                    'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+                    'local': False, 'ready': True,
+                    'state': {'health': 1000, 'alive': True}}
+                battle._server_entity = lambda entity_id: (
+                    source if entity_id == 41 else
+                    target if entity_id == 55 else None)
+                event = _event()
+                event['source_shot']['shell']['kind'] = shell_kind
+                event['source_shot']['shell']['caliber'] = 105.0
+                event['source_shot']['piercingPower'] = [220.0, 220.0]
+                meta = battle._projectile_wire_meta(event)
+                battle._projectile_meta[meta['projectile_id']] = meta
+                screen = types.SimpleNamespace(
+                    dist=5.0, hitAngleCos=1.0,
+                    matInfo=types.SimpleNamespace(
+                        armor=20.0, vehicleDamageFactor=0.0),
+                    compName='vehicleChassis')
+                hull = types.SimpleNamespace(
+                    dist=6.0, hitAngleCos=math.cos(math.radians(75.0)),
+                    matInfo=types.SimpleNamespace(
+                        armor=155.0, vehicleDamageFactor=1.0),
+                    compName='vehicleHull')
+                evidence = types.SimpleNamespace(
+                    collision=hull,
+                    worldNormal=_Vector((-1.0, 0.0, 0.0)))
+                battle._projectile_terminal_data[meta['projectile_id']] = {
+                    'target_key': 'bot:17',
+                    'collisions': [screen, hull],
+                    'collision_evidence': [evidence],
+                    # Native collision space may be offset from the visual
+                    # world trajectory for a swept moving-target sample.
+                    'query': (_Vector((100.0, 1.0, 0.0)),
+                              _Vector((110.0, 1.0, 0.0))),
+                    'trajectory_query': {
+                        'start': (0.0, 1.0, 0.0),
+                        'end': (12.0, 1.0, 0.0),
+                        'absolute_start': 0.0,
+                        'absolute_end': 1.2,
+                    },
+                    'impact': (6.0, 1.0, 0.0),
+                    'piercing_loss': 0.0,
+                    'penetration_factor': 1.0,
+                }
+                state = {
+                    'key': meta['projectile_id'],
+                    'start': (0.0, 1.0, 0.0),
+                    'position': (6.0, 1.0, 0.0),
+                    'velocity': (10.0, 0.0, 0.0),
+                    'gravity': (0.0, -0.000001, 0.0),
+                    'elapsed': 0.6,
+                    'distance': 6.0,
+                    'payload': {'range_origin': (0.0, 0.0, 0.0)},
+                }
+                sender = mock.Mock(side_effect=(False, True))
+                battle.client.send_projectile_ricochet = sender
+
+                # A rejected write retains one byte-equivalent proposal for
+                # retry instead of remapping the plate against newer state.
+                self.assertFalse(battle._projectile_terminal(
+                    state, {'reason': 'impact'}))
+                first = sender.call_args_list[0]
+                meta['awaiting_ricochet'] = False
+                self.assertTrue(battle._submit_projectile_ricochet(meta))
+
+                self.assertEqual(first, sender.call_args_list[1])
+                args = first.args
+                kwargs = first.kwargs
+                self.assertEqual(720, args[3])
+                self.assertAlmostEqual(7.2, args[4][0])
+                self.assertAlmostEqual(7.198, args[5][0], places=5)
+                self.assertLess(args[6][0], 0.0)
+                self.assertEqual(0.75, args[7])
+                self.assertEqual(0, args[8]['shot_result'])
+                self.assertEqual(6.0, args[8]['x'])
+                self.assertAlmostEqual(7.2, kwargs['checked_distance'])
+                self.assertEqual(20.0, kwargs['piercing_loss'])
+
+    def test_ricochet_without_a_screen_keeps_the_existing_frontier(self):
+        battle, unused_bigworld = _battle()
+        source = battle._server_entity(41)
+        target = types.SimpleNamespace(
+            id=55, isStarted=True, typeDescriptor=types.SimpleNamespace(),
+            position=_Vector((6.0, 1.0, 0.0)), isAlive=lambda: True)
+        battle._records['bot:17'] = {
+            'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 1000, 'alive': True}}
+        battle._server_entity = lambda entity_id: (
+            source if entity_id == 41 else
+            target if entity_id == 55 else None)
+        event = _event()
+        event['source_shot']['shell']['caliber'] = 105.0
+        meta = battle._projectile_wire_meta(event)
+        meta['piercing_loss'] = 3.0
+        battle._projectile_meta[meta['projectile_id']] = meta
+        hull = types.SimpleNamespace(
+            dist=5.0, hitAngleCos=math.cos(math.radians(75.0)),
+            matInfo=types.SimpleNamespace(
+                armor=155.0, vehicleDamageFactor=1.0),
+            compName='vehicleHull')
+        battle._projectile_terminal_data[meta['projectile_id']] = {
+            'target_key': 'bot:17', 'collisions': [hull],
+            'collision_evidence': [types.SimpleNamespace(
+                collision=hull,
+                worldNormal=_Vector((-1.0, 0.0, 0.0)))],
+            'query': (_Vector((100.0, 1.0, 0.0)),
+                      _Vector((110.0, 1.0, 0.0))),
+            'trajectory_query': {
+                'start': (0.0, 1.0, 0.0),
+                'end': (12.0, 1.0, 0.0),
+                'absolute_start': 0.0,
+                'absolute_end': 1.2,
+            },
+            'impact': (6.0, 1.0, 0.0),
+            'piercing_loss': 3.0,
+            'penetration_factor': 1.0,
+        }
+        state = {
+            'key': meta['projectile_id'],
+            'start': (0.0, 1.0, 0.0),
+            'position': (6.0, 1.0, 0.0),
+            'velocity': (10.0, 0.0, 0.0),
+            'gravity': (0.0, -0.000001, 0.0),
+            'elapsed': 0.6, 'distance': 6.0,
+            'payload': {'range_origin': (0.0, 0.0, 0.0)},
+        }
+
+        self.assertTrue(battle._projectile_terminal(
+            state, {'reason': 'impact'}))
+
+        args, kwargs = battle.client.ricochets[0]
+        self.assertEqual(600, args[3])
+        self.assertEqual([6.0, 1.0, 0.0], args[4])
+        self.assertAlmostEqual(5.998, args[5][0], places=5)
+        self.assertEqual(6.0, kwargs['checked_distance'])
+        self.assertEqual(3.0, kwargs['piercing_loss'])
+
+    def test_extended_plate_maps_past_the_query_and_obeys_both_limits(self):
+        for limit, continues in ((None, True), ('range', False),
+                                 ('time', False)):
+            with self.subTest(limit=limit):
+                battle, unused_bigworld = _battle()
+                source = battle._server_entity(41)
+                target = types.SimpleNamespace(
+                    id=55, isStarted=True,
+                    typeDescriptor=types.SimpleNamespace(),
+                    position=_Vector((9.0, 0.0, 0.0)),
+                    isAlive=lambda: True)
+                battle._records['bot:17'] = {
+                    'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+                    'local': False, 'ready': True,
+                    'state': {'health': 1000, 'alive': True}}
+                battle._server_entity = lambda entity_id: (
+                    source if entity_id == 41 else
+                    target if entity_id == 55 else None)
+                event = _event()
+                event['source_shot']['shell']['caliber'] = 105.0
+                event['source_shot']['piercingPower'] = [220.0, 220.0]
+                if limit == 'range':
+                    event['maxDistance'] = 13.0
+                    event['source_shot']['maxDistance'] = 13.0
+                if limit == 'time':
+                    event['max_time_ms'] = 1400
+                meta = battle._projectile_wire_meta(event)
+                battle._projectile_meta[meta['projectile_id']] = meta
+                screen = types.SimpleNamespace(
+                    dist=0.9, hitAngleCos=1.0,
+                    matInfo=types.SimpleNamespace(
+                        armor=20.0, vehicleDamageFactor=0.0),
+                    compName='vehicleChassis')
+                hull = types.SimpleNamespace(
+                    dist=1.4, hitAngleCos=math.cos(math.radians(75.0)),
+                    matInfo=types.SimpleNamespace(
+                        armor=155.0, vehicleDamageFactor=1.0),
+                    compName='vehicleHull')
+                evidence = (
+                    types.SimpleNamespace(
+                        collision=screen, worldNormal=None),
+                    types.SimpleNamespace(
+                        collision=hull,
+                        worldNormal=_Vector((-1.0, 0.0, 0.0))))
+                battle._projectile_vehicle_collisions = mock.Mock(
+                    return_value=((screen, hull), evidence))
+                battle._projectile_terminal_data[meta['projectile_id']] = {
+                    'target_key': 'bot:17', 'collisions': [screen],
+                    'collision_evidence': [evidence[0]],
+                    'query': (_Vector((0.0, 0.0, 0.0)),
+                              _Vector((1.0, 0.0, 0.0))),
+                    'trajectory_query': {
+                        'start': (0.0, 0.0, 0.0),
+                        'end': (10.0, 0.0, 0.0),
+                        'absolute_start': 0.0,
+                        'absolute_end': 1.0,
+                    },
+                    'impact': (9.0, 0.0, 0.0),
+                    'piercing_loss': 0.0,
+                    'penetration_factor': 1.0,
+                }
+                state = {
+                    'key': meta['projectile_id'],
+                    'start': (0.0, 0.0, 0.0),
+                    'position': (9.0, 0.0, 0.0),
+                    'velocity': (10.0, 0.0, 0.0),
+                    'gravity': (0.0, -0.000001, 0.0),
+                    'elapsed': 0.9, 'distance': 9.0,
+                    'payload': {'range_origin': (0.0, 0.0, 0.0)},
+                }
+
+                self.assertTrue(battle._projectile_terminal(
+                    state, {'reason': 'impact'}))
+
+                self.assertEqual(1, battle._projectile_vehicle_collisions.
+                                 call_count)
+                if continues:
+                    self.assertEqual(1, len(battle.client.ricochets))
+                    self.assertEqual([], battle.client.resolutions)
+                    args, kwargs = battle.client.ricochets[0]
+                    self.assertEqual(1400, args[3])
+                    self.assertAlmostEqual(14.0, args[4][0])
+                    self.assertAlmostEqual(13.998, args[5][0], places=5)
+                    self.assertAlmostEqual(14.0,
+                                           kwargs['checked_distance'])
+                    self.assertEqual(20.0, kwargs['piercing_loss'])
+                else:
+                    self.assertEqual([], battle.client.ricochets)
+                    self.assertEqual(1, len(battle.client.resolutions))
 
     def test_ap_direct_hit_requeries_the_full_late_hit_trace_budget(self):
         battle, unused_bigworld = _battle()
@@ -5005,6 +5302,8 @@ class BattleProjectileTests(unittest.TestCase):
                         combat_rules, 'damage', return_value=0), \
                     mock.patch('random.uniform',
                                side_effect=lambda low, high: low), \
+                    mock.patch('random.gauss',
+                               side_effect=lambda mean, sigma: mean - 3.0 * sigma), \
                     mock.patch('random.random', return_value=0.0):
                 effect = battle._projectile_direct_effect(
                     meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
@@ -5067,7 +5366,7 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(390, effect['damage'])
         battle._projectile_frozen_target.assert_called_once_with(
             target, collision_pose)
-        self.assertIs(frozen_descriptor, nominal.call_args.args[1])
+        nominal.assert_not_called()
         self.assertIs(frozen_target, critical.call_args.args[0])
 
     def test_he_direct_hit_uses_the_finite_explosion_cone(self):
@@ -5107,7 +5406,9 @@ class BattleProjectileTests(unittest.TestCase):
                 combat_rules, 'resolve_armor_contact',
                 return_value={'result': 1}), \
                 mock.patch.object(
-                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                    battle, '_projectile_he_blast_contact', return_value={
+                        'damage': 200, 'collisions': (collision,),
+                        'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     combat_rules, 'damage', return_value=200), \
                 mock.patch.object(
@@ -5174,8 +5475,8 @@ class BattleProjectileTests(unittest.TestCase):
                             combat_rules, 'he_nominal_armor',
                             return_value=100.0), \
                         mock.patch.object(
-                            combat_rules.random, 'uniform',
-                            return_value=312.7) as uniform, \
+                            combat_rules.random, 'gauss',
+                            return_value=312.7) as gaussian, \
                         mock.patch.object(
                             critical_damage, 'propose_direct',
                             side_effect=lambda unused_target,
@@ -5193,7 +5494,7 @@ class BattleProjectileTests(unittest.TestCase):
                 else:
                     self.assertEqual(potential, effect['potential_damage'])
                 self.assertEqual(
-                    (390.0 * 0.75, 390.0 * 1.25), uniform.call_args.args)
+                    (390.0, 32.5), gaussian.call_args.args)
 
     def test_overlay_edited_shell_saturates_instead_of_losing_the_shot(self):
         battle, unused_bigworld = _battle()
@@ -5207,7 +5508,9 @@ class BattleProjectileTests(unittest.TestCase):
             'state': {'health': 1000, 'alive': True}}
         battle._server_entity = lambda entity_id: (
             source if entity_id == 41 else target if entity_id == 55 else None)
-        meta = battle._projectile_wire_meta(_event())
+        event = _event()
+        event['source_shot']['shell']['damage'] = [8000.0, 165.0]
+        meta = battle._projectile_wire_meta(event)
         collision = types.SimpleNamespace(
             dist=10.0, hitAngleCos=1.0, matInfo=object(), compName='hull')
         terminal = {
@@ -5224,7 +5527,7 @@ class BattleProjectileTests(unittest.TestCase):
                 mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
-                    combat_rules.random, 'uniform', return_value=9000.0):
+                    combat_rules.random, 'gauss', return_value=9000.0):
             effect = battle._projectile_direct_effect(
                 meta, {'start': (0.0, 1.0, 0.0), 'distance': 10.0},
                 terminal)
@@ -5257,15 +5560,17 @@ class BattleProjectileTests(unittest.TestCase):
         meta = battle._projectile_wire_meta(event)
 
         with mock.patch.object(
-                combat_rules, 'he_splash_damage', return_value=90), \
+                battle, '_projectile_he_blast_contact', return_value={
+                    'damage': 90, 'collisions': (),
+                    'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     critical_damage, 'propose_explosion',
                     return_value=(90, None, None)):
             effects = battle._projectile_splash_effects(
                 meta, (9.0, 1.0, 0.0), 'player:7')
 
-        # Splash rolls its own distance-attenuated quantity and the server
-        # excludes splash from blocked damage, so it publishes no roll.
+        # The server excludes splash from blocked damage, so it publishes no
+        # potential-damage statistic.
         self.assertEqual(1, len(effects))
         self.assertEqual(90, effects[0]['damage'])
         self.assertNotIn('potential_damage', effects[0])

@@ -6642,12 +6642,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
             11, descriptor, _Vector(), (0.0, 0.0, 0.0),
             {'health': 500})
 
-        with mock.patch.object(
-                combat_rules, 'he_hull_armor',
-                side_effect=AssertionError('global hull fallback used')):
-            armor = battle._native_ram_vehicle_armor(
-                vehicle, vehicle.matrix, _Vector(0.0, 0.0, 3.5),
-                (0.0, -1.0))
+        armor = battle._native_ram_vehicle_armor(
+            vehicle, vehicle.matrix, _Vector(0.0, 0.0, 3.5),
+            (0.0, -1.0))
 
         self.assertIsNone(armor)
 

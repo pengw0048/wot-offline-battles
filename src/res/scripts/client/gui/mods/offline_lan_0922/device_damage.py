@@ -516,6 +516,12 @@ def module_damage_roll(shell, index=1):
     dmg = shell_damage_base(shell, index)
     if dmg is None:
         return None
+    if index == 0:
+        # Track materials may explicitly select the armour-damage channel.
+        # Keep its distribution identical to vehicle HP damage. Public RNG
+        # descriptions do not establish the separate devices-channel law.
+        from gui.mods.offline_lan_0922 import combat_rules
+        return combat_rules.sample_shell_value(dmg)
     lo = dmg * (1.0 - DAMAGE_RANDOMIZATION)
     hi = dmg * (1.0 + DAMAGE_RANDOMIZATION)
     return random.uniform(lo, hi)

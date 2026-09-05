@@ -76,7 +76,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.penetration(
             _shot(piercing=(200.0, 100.0), maximum=500.0),
             500.0, 1.0, 1.0,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         self.assertEqual(0.0, result[2])
@@ -100,7 +100,7 @@ class CombatRulesTests(unittest.TestCase):
 
         factor = combat_rules.sample_penetration_factor(low_roll)
         self.assertEqual(0.75, factor)
-        self.assertEqual([(0.75, 1.25)], draws)
+        self.assertEqual([(1.0, 1.0 / 12.0)], draws)
         self.assertEqual(
             30.0, combat_rules.sampled_piercing(
                 _shot(piercing=(40.0, 40.0)), 10.0, factor, 0.0))
@@ -112,7 +112,7 @@ class CombatRulesTests(unittest.TestCase):
                 dist=10.0, hitAngleCos=1.0, matInfo=hull,
                 compName='vehicleHull'),),
             pierce_loss=5.0, penetration_factor=factor,
-            random_uniform=lambda unused_low, unused_high: self.fail(
+            random_gauss=lambda unused_low, unused_high: self.fail(
                 'vehicle resolution must not draw penetration again'))
 
         self.assertEqual(2, result[0])
@@ -163,10 +163,10 @@ class CombatRulesTests(unittest.TestCase):
             _shot(piercing=(100.0, 100.0)), 50.0,
             (_collision(5.0, 1.0, screen, 'vehicleChassis'),
              _collision(5.2, 1.0, hull)),
-            random_uniform=one_roll)
+            random_gauss=one_roll)
 
         self.assertEqual(2, result[0])
-        self.assertEqual([(0.75, 1.25)], draws)
+        self.assertEqual([(1.0, 1.0 / 12.0)], draws)
 
     def test_two_caliber_normalization_has_an_exact_boundary(self):
         armor = 60.0
@@ -240,7 +240,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.penetration(
             _shot(kind='HOLLOW_CHARGE', piercing=(400.0, 400.0)),
             50.0, 60.0, 0.30,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(2, result[0])
 
@@ -355,7 +355,7 @@ class CombatRulesTests(unittest.TestCase):
 
         value = combat_rules.damage(
             shot, 1, 100.0,
-            random_uniform=lambda low, high: (low + high) * 0.5)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(70, value)
 
@@ -364,10 +364,10 @@ class CombatRulesTests(unittest.TestCase):
 
         low = combat_rules.damage(
             shot, 2, 100.0,
-            random_uniform=lambda minimum, unused_maximum: minimum)
+            random_gauss=lambda mean, sigma: mean - 3.0 * sigma)
         high = combat_rules.damage(
             shot, 2, 100.0,
-            random_uniform=lambda unused_minimum, maximum: maximum)
+            random_gauss=lambda mean, sigma: mean + 3.0 * sigma)
 
         self.assertEqual(300, low)
         self.assertEqual(500, high)
@@ -382,10 +382,10 @@ class CombatRulesTests(unittest.TestCase):
                 shot.shell.damage = (400.0, 165.0)
                 low = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_uniform=lambda minimum, unused_maximum: minimum)
+                    random_gauss=lambda mean, sigma: mean - 3.0 * sigma)
                 high = combat_rules.damage(
                     shot, 2, 100.0,
-                    random_uniform=lambda unused_minimum, maximum: maximum)
+                    random_gauss=lambda mean, sigma: mean + 3.0 * sigma)
 
                 self.assertEqual(300, low)
                 self.assertEqual(500, high)
@@ -400,7 +400,7 @@ class CombatRulesTests(unittest.TestCase):
 
         result = combat_rules.resolve_hull_hit(
             _shot(piercing=(120.0, 120.0)), 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         # The 90 mm shell triggers the two-calibre normalization rule on the
@@ -601,7 +601,7 @@ class CombatRulesTests(unittest.TestCase):
         result = combat_rules.resolve_hull_hit(
             _shot(piercing=(160.0, 160.0)), 50.0, collisions,
             pierce_loss=50.0,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual(1, result[0])
         self.assertEqual(70.0, result[3])
@@ -615,10 +615,10 @@ class CombatRulesTests(unittest.TestCase):
         shot = _shot(piercing=(160.0, 160.0), damage=240.0)
         clear = combat_rules.resolve_hull_hit(
             shot, 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0)
+            random_gauss=lambda mean, unused_sigma: mean)
         crossed = combat_rules.resolve_hull_hit(
             shot, 50.0, collisions,
-            random_uniform=lambda unused_low, unused_high: 1.0,
+            random_gauss=lambda mean, unused_sigma: mean,
             pierce_loss=25.0)
 
         self.assertEqual(2, clear[0])
@@ -626,10 +626,10 @@ class CombatRulesTests(unittest.TestCase):
         self.assertEqual(
             combat_rules.damage(
                 shot, clear[0], 50.0,
-                random_uniform=lambda unused_low, unused_high: 1.0),
+                random_gauss=lambda mean, unused_sigma: mean),
             combat_rules.damage(
                 shot, crossed[0], 50.0,
-                random_uniform=lambda unused_low, unused_high: 1.0))
+                random_gauss=lambda mean, unused_sigma: mean))
 
     def test_collision_adapter_rejects_incomplete_1513_result(self):
         collision = types.SimpleNamespace(
@@ -777,13 +777,13 @@ class CombatRulesTests(unittest.TestCase):
             kind='HIGH_EXPLOSIVE', damage=400.0,
             explosion_radius=10.0)
 
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
         center = combat_rules.he_splash_damage(
-            shot, 0.0, 0.0, random_uniform=uniform)
+            shot, 0.0, 0.0, random_gauss=mean_roll)
         middle = combat_rules.he_splash_damage(
-            shot, 50.0, 0.5, random_uniform=uniform)
+            shot, 50.0, 0.5, random_gauss=mean_roll)
         edge = combat_rules.he_splash_damage(
-            shot, 0.0, 1.0, random_uniform=uniform)
+            shot, 0.0, 1.0, random_gauss=mean_roll)
 
         self.assertTrue(combat_rules.is_he(shot))
         self.assertEqual(10.0, combat_rules.he_radius(shot))
@@ -794,16 +794,16 @@ class CombatRulesTests(unittest.TestCase):
     def test_spall_liner_scales_the_he_armour_absorption_term(self):
         shot = _shot(
             kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
 
         bare = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform)
+            shot, 50.0, 0.0, random_gauss=mean_roll)
         lined = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform, spall_coefficient=1.5)
+            shot, 50.0, 0.0, random_gauss=mean_roll, spall_coefficient=1.5)
         direct_bare = combat_rules.damage(
-            shot, 1, 50.0, random_uniform=uniform)
+            shot, 1, 50.0, random_gauss=mean_roll)
         direct_lined = combat_rules.damage(
-            shot, 1, 50.0, random_uniform=uniform, spall_coefficient=1.5)
+            shot, 1, 50.0, random_gauss=mean_roll, spall_coefficient=1.5)
 
         # 400 * 0.5 - 1.3 * 50 * spall
         self.assertEqual(135, bare)
@@ -814,13 +814,13 @@ class CombatRulesTests(unittest.TestCase):
     def test_he_absorption_ignores_an_absent_or_invalid_spall_factor(self):
         shot = _shot(
             kind='HIGH_EXPLOSIVE', damage=400.0, explosion_radius=10.0)
-        uniform = lambda low, high: (low + high) * 0.5
+        mean_roll = lambda mean, unused_sigma: mean
         baseline = combat_rules.he_splash_damage(
-            shot, 50.0, 0.0, random_uniform=uniform)
+            shot, 50.0, 0.0, random_gauss=mean_roll)
 
         for value in (None, 'x', float('nan'), float('inf'), 0.0, -2.0, 0.5):
             self.assertEqual(baseline, combat_rules.he_splash_damage(
-                shot, 50.0, 0.0, random_uniform=uniform,
+                shot, 50.0, 0.0, random_gauss=mean_roll,
                 spall_coefficient=value), value)
 
     def test_spall_coefficient_reads_the_1513_descriptor_default(self):
@@ -848,12 +848,12 @@ class CombatRulesTests(unittest.TestCase):
 
         value = combat_rules.he_splash_damage(
             shot, 50.0, 0.5,
-            random_uniform=lambda low, high: (low + high) * 0.5)
+            random_gauss=lambda mean, unused_sigma: mean)
 
         self.assertEqual((0.6, 1.0, 0.2), combat_rules.he_factors(shot))
         self.assertEqual(110, value)
 
-    def test_he_hull_armor_reads_native_1513_component_attributes(self):
+    def test_he_missing_contact_does_not_borrow_descriptor_armor(self):
         material = types.SimpleNamespace(
             armor=35.0, vehicleDamageFactor=1.0)
 
@@ -865,7 +865,123 @@ class CombatRulesTests(unittest.TestCase):
 
         descriptor = types.SimpleNamespace(hull=Hull())
 
-        self.assertEqual(35.0, combat_rules._offh_he_hull_armor(descriptor))
+        self.assertIsNone(combat_rules.he_nominal_armor((), descriptor))
+
+    def test_he_blast_stops_at_first_structural_plate_not_weaker_backside(self):
+        first = _material(100.0)
+        weaker_backside = _material(10.0)
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (_collision(2.0, 1.0, weaker_backside),
+             _collision(1.0, 1.0, first)), 400.0)
+
+        self.assertIs(first, result['collision'].matInfo)
+        self.assertEqual(100.0, result['nominal_armor'])
+        self.assertEqual(56, result['damage'])
+        self.assertEqual((1.0, 0.0, 0.0), result['point'])
+
+    def test_he_blast_accepts_zero_armour_structural_contact(self):
+        collision = _collision(0.0, 1.0, _material(0.0))
+
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (collision,), 400.0)
+
+        self.assertEqual(0.0, result['nominal_armor'])
+        self.assertEqual(200, result['damage'])
+        self.assertEqual((collision,), result['collisions'])
+
+    def test_he_blast_requires_native_structural_evidence(self):
+        shot = _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                     explosion_radius=10.0)
+        external = _collision(0.0, 1.0, _material(20.0, 0.0))
+        missing_material = _collision(1.0, 1.0, None)
+
+        self.assertIsNone(combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (external, missing_material), 400.0))
+        self.assertIsNone(combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (), 400.0))
+
+    def test_he_blast_missing_armour_is_not_a_zero_armour_plate(self):
+        collision = _collision(1.0, 1.0, types.SimpleNamespace(
+            vehicleDamageFactor=1.0))
+        self.assertIsNone(combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', explosion_radius=4.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (4.0, 0.0, 0.0),
+            (collision,), 400.0))
+
+    def test_he_blast_uses_structural_point_distance_after_external_screen(self):
+        screen = _collision(0.001, 1.0, _material(20.0, 0.0),
+                            'vehicleChassis')
+        hull = _collision(5.0, 1.0, _material(0.0), 'vehicleHull')
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (hull, screen), 400.0)
+
+        self.assertEqual(5.0, result['distance'])
+        self.assertEqual(130, result['damage'])
+        self.assertEqual((screen, hull), result['collisions'])
+
+    def test_he_blast_allows_upstream_query_start_and_tolerance_backstep(self):
+        hull = _collision(4.9995, 1.0, _material(0.0))
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (5.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (hull,), 400.0)
+
+        self.assertAlmostEqual(0.0005, result['distance'])
+        self.assertEqual((1.0, 0.0, 0.0), result['direction'])
+
+    def test_he_blast_rejects_structural_hit_outside_radius(self):
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=4.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (_collision(4.001, 1.0, _material(0.0)),), 400.0)
+
+        self.assertIsNone(result)
+
+    def test_he_blast_reuses_caller_roll_without_random_sampling(self):
+        original_uniform = combat_rules.random.uniform
+        combat_rules.random.uniform = lambda *unused: self.fail(
+            'HE contact must use the caller-owned rolled damage')
+        try:
+            result = combat_rules.he_blast_contact(
+                _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                      explosion_radius=10.0),
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                (10.0, 0.0, 0.0),
+                (_collision(0.0, 1.0, _material(0.0)),), 321.0)
+        finally:
+            combat_rules.random.uniform = original_uniform
+
+        self.assertEqual(160, result['damage'])
+
+    def test_he_blast_material_can_opt_out_of_spall_liner(self):
+        lined = _collision(0.0, 1.0, _material(50.0))
+        opt_out = _collision(
+            0.0, 1.0, _material(50.0, useAntifragmentationLining=False))
+        shot = _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                     explosion_radius=10.0)
+
+        lined_result = combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (lined,), 400.0, 1.5)
+        opt_out_result = combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (opt_out,), 400.0, 1.5)
+
+        self.assertEqual(102, lined_result['damage'])
+        self.assertEqual(135, opt_out_result['damage'])
 
 
 if __name__ == '__main__':
