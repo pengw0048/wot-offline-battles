@@ -885,6 +885,10 @@ def _local_launch_record(state, launch_time_us=None):
     }
     if 'shot_origin' in state:
         result['shot_origin'] = state['shot_origin']
+    if 'shells_before_shot' in state:
+        # Fadin's medal reads the shell total this round was drawn from, and
+        # only this worker knows it.
+        result['shells_before_shot'] = int(state['shells_before_shot'])
     if class_tag == 'SPG':
         for name in (
                 'shot_velocity', 'shot_gravity',
@@ -8889,6 +8893,10 @@ class BotRuntime(object):
         if not ammo_state.consume_loaded(continuing):
             raise RuntimeError(
                 'bot ammunition changed during atomic burst')
+        # Fadin's medal reads the shell total this round was drawn from.
+        # ``remaining`` is already debited here, so restore the fired round
+        # rather than sampling the inventory at an unrelated moment.
+        state['shells_before_shot'] = sum(ammo_state.remaining) + 1
         if final_round and ammo_state.loaded_shell_requires_full_reload():
             gun_state.require_full_reload()
         state['fire_seq'] = shot_seq

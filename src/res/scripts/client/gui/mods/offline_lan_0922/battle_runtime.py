@@ -29,7 +29,7 @@ from gui.mods.offline_lan_0922.entities.avatar_server import AvatarServerBridge
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
-    NativeRemoteVehicleFactory, set_draw_visibility
+    NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     PROJECTILE_VISUAL_START_MAX_DIFF, RemoteVehicleFactory,
     _collide_vehicle_evidence_at_matrix,
@@ -1512,6 +1512,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -1799,6 +1800,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -7346,11 +7348,16 @@ class BattleRuntime(object):
             'aim_yaw', 'gun_pitch', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
             'speed', 'shot_origin', 'shot_direction', 'dispersion_angle',
             'presentation_ledger'}
+        # The shell total this trigger was drawn from, which the server relays
+        # untouched from the client that owns the ammunition.  A trigger that
+        # never reported one is still legal.
+        optional = {'shells_before_shot'}
         transport_fields = {
             '_client_received_time', '_client_dispatch_delay'}
         if (not isinstance(message, dict) or
                 not required.issubset(message) or
-                not set(message).issubset(required | transport_fields)):
+                not set(message).issubset(
+                    required | optional | transport_fields)):
             raise RuntimeError('worker fire intent is malformed')
         try:
             player_id = int(message['player_id'])
@@ -8554,6 +8561,121 @@ class BattleRuntime(object):
             return False
         return True
 
+    _HIT_IMPULSE_REPORT_LIMIT = 16
+
+    def _local_vehicle_appearance(self):
+        """Return the player's own stock appearance while it is still live."""
+        lookup = getattr(self._runtime.bigworld, 'entity', None)
+        if not callable(lookup):
+            return None
+        vehicle = lookup(int(getattr(self._avatar, 'playerVehicleID', 0) or 0))
+        if vehicle is None or not bool(getattr(vehicle, 'isStarted', False)):
+            return None
+        return getattr(vehicle, 'appearance', None)
+
+    def _decoded_hit_impulse_direction(self, event, target_record):
+        """Return retail's decoded armour-segment direction in world space."""
+        if 'damage_sticker' not in event:
+            return None
+        target = self._server_entity(target_record.get('engine_id'))
+        appearance = getattr(target, 'appearance', None)
+        descriptor = getattr(target, 'typeDescriptor', None)
+        compound = getattr(appearance, 'compoundModel', None)
+        if (target is None or not getattr(target, 'isStarted', False) or
+                descriptor is None or compound is None):
+            return None
+        try:
+            from VehicleEffects import DamageFromShotDecoder
+            component_name, unused_sticker, segment_start, segment_end = \
+                DamageFromShotDecoder.decodeSegment(
+                    event['damage_sticker'], descriptor)
+            if (not component_name or segment_start is None or
+                    segment_end is None or segment_start == segment_end):
+                return None
+            component_node = compound.node(component_name)
+            if component_node is None:
+                return None
+            local_direction = segment_end - segment_start
+            if local_direction.length <= 0.001:
+                return None
+            direction = self._runtime.math.Matrix(
+                component_node).applyVector(local_direction)
+            direction = self._runtime.math.Vector3(direction)
+            if direction.length <= 0.001:
+                return None
+            direction.normalise()
+            return direction
+        except Exception as error:
+            self._warn_optional_failure(
+                'vehicle hit impulse', error, disable=False)
+            return None
+
+    def _present_hit_impulse(self, event, target_record, effects_descr):
+        """Present retail's hull shot impulse on one vehicle this shot hit.
+
+        Retail reaches ``CompoundAppearance.receiveShotImpulse`` only inside
+        ``Vehicle.showDamageFromShot``'s decoded direct-hit branch, so an HE
+        near miss presents ``armorSplashHit`` with no hull reaction at all.
+        The impulse is the shot effect group's own ``targetImpulse``: retail
+        scales it by neither damage nor calibre.
+        """
+        state = target_record.get('state') or {}
+        if event.get('splash', False) or event.get('dead', False):
+            return False
+        if not bool(state.get('alive', True)) or int(
+                state.get('health', 1) or 0) <= 0:
+            return False
+        impulse = _number(_field(effects_descr, 'targetImpulse', 0.0))
+        if impulse <= 0.0:
+            return False
+        direction = self._decoded_hit_impulse_direction(
+            event, target_record)
+        if direction is None:
+            return False
+        if target_record.get('local'):
+            # The matching local stock-animator rebind owns this capability.
+            # Until it is proven, receiveShotImpulse can write through an
+            # unrelated or stale native animator.
+            appearance = self._local_vehicle_appearance()
+            animator = getattr(self, '_local_swinging_animator', None)
+            if (animator is None or
+                    not self._optional_feature_enabled(
+                        'local body swinging') or
+                    getattr(appearance, 'swingingAnimator', None) is not
+                    animator):
+                return False
+            presented = present_shot_impulse(
+                self._runtime.math, appearance, direction, impulse)
+        elif target_record.get('native_remote'):
+            present = getattr(
+                self._remote_factory, 'present_hit_impulse', None)
+            if not callable(present):
+                return False
+            presented = present(
+                int(target_record['engine_id']), direction, impulse)
+        else:
+            # The compound-only fallback owns no stock swinging animator.
+            return False
+        self._report_hit_impulse(target_record, direction, impulse, presented)
+        return bool(presented)
+
+    def _report_hit_impulse(self, target_record, direction, impulse,
+                            presented):
+        """Log the first hull impulses of the round and their arguments."""
+        if self._hit_impulse_reports >= self._HIT_IMPULSE_REPORT_LIMIT:
+            return False
+        self._hit_impulse_reports += 1
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] IMPULSE id=%s local=%s dir=(%.3f, %.3f, '
+            '%.3f) impulse=%.1f presented=%s\n' % (
+                target_record.get('engine_id'),
+                bool(target_record.get('local')),
+                _number(getattr(direction, 'x', 0.0)),
+                _number(getattr(direction, 'y', 0.0)),
+                _number(getattr(direction, 'z', 0.0)),
+                impulse, bool(presented)))
+        return True
+
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
         """Port the mature 0.8.2 hit feedback through exact #1513 APIs."""
@@ -8619,6 +8741,11 @@ class BattleRuntime(object):
             raise RuntimeError('combat shell effects index is unavailable')
         effects_descr = self._runtime.vehicles.g_cache.shotEffects[
             effects_index]
+        # Retail rocks the hull before it spawns the armour effect, and a
+        # failed terrain effect must not swallow the hull reaction.
+        self._run_optional_feature(
+            'vehicle hit impulse', self._present_hit_impulse,
+            (event, target_record, effects_descr))
         # Retail presents an HE near-miss through
         # Vehicle.showDamageFromExplosion/armorSplashHit.  Direct hits keep
         # the three protocol outcomes: ricochet, resisted and pierced.
@@ -12630,7 +12757,8 @@ class BattleRuntime(object):
     def _projectile_effect(self, record, damage, result, impact,
                            critical, hull_damage, critical_delta,
                            target_position=None, damage_sticker=None,
-                           potential_damage=None):
+                           potential_damage=None,
+                           structural_armor_hit=None):
         target_kind = record.get('kind')
         if target_kind == 'human':
             target_kind = 'player'
@@ -12654,6 +12782,11 @@ class BattleRuntime(object):
             # the validator drop the whole terminal.
             effect['potential_damage'] = max(
                 0, min(5000, int(potential_damage)))
+        if structural_armor_hit is not None:
+            # Sturdy excludes tracks, screens and other external modules.
+            # Preserve the exact armour contact layer already chosen by the
+            # worker instead of trying to reconstruct it on the server.
+            effect['structural_armor_hit'] = bool(structural_armor_hit)
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
@@ -12794,7 +12927,10 @@ class BattleRuntime(object):
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
             damage_sticker=damage_sticker,
-            potential_damage=potential_damage)
+            potential_damage=potential_damage,
+            structural_armor_hit=(
+                contact is not None and
+                contact.get('layer') == 'structural'))
 
     def _projectile_splash_effects(self, meta, impact, direct_key):
         source = self._projectile_source_entity(meta)
@@ -18133,20 +18269,29 @@ class BattleRuntime(object):
     def _report_bot_tracks(self, vehicle, left, right, mode, now):
         """Log what the scroll controller actually holds.
 
-        ``leftContact``/``rightContact`` still reading the constructor's
-        ``True`` and ``leftScroll``/``rightScroll`` still reading ``0.0`` mean
-        the controller's 20 Hz updater never ran, which is what a filter with
-        no owning entity looks like from Python.
+        ``fed`` is the authoritative belt speed this runtime computed, which
+        is not always what reaches the controller: a hidden compound is
+        settled to zero on its hide edge and an unchanged feed is
+        deduplicated.  ``wrote`` and ``outcome`` name the effective write, so
+        ``leftScroll``/``rightScroll`` reading ``0.0`` stays attributable
+        rather than looking like a native failure.  A zero readback with
+        ``outcome=engine and python`` and the constructor's ``True`` contacts
+        is the real defect: the controller's 20 Hz updater never ran, which is
+        what a filter with no owning entity looks like from Python.
         """
         if self._track_report_time is not None and (
                 now - self._track_report_time) < TRACK_REPORT_SECONDS:
             return False
         self._track_report_time = now
+        feed_state = getattr(vehicle, 'track_feed_state', None)
+        written, outcome, hidden, engine_owned = (
+            feed_state() if callable(feed_state)
+            else (None, 'unavailable', None, None))
         sys.stdout.write(
             '[Offline LAN 0.9.22] bot tracks id=%s mode=%r fed=(%.3f, %.3f) '
-            'scroll=%r error=%r\n' % (
-                vehicle.bw_entity_id, mode, left, right,
-                vehicle.track_scroll_readback(),
+            'wrote=%r outcome=%s hidden=%s engine=%s scroll=%r error=%r\n' % (
+                vehicle.bw_entity_id, mode, left, right, written, outcome,
+                hidden, engine_owned, vehicle.track_scroll_readback(),
                 self._remote_factory.track_animation_error))
         return True
 
@@ -19109,6 +19254,7 @@ class BattleRuntime(object):
             'burst_count': state.get('burst_count'),
             'launch_time_us': launch_time_us,
             'launch_pose': launch_pose,
+            'shells_before_shot': state.get('shells_before_shot'),
         }
         self._bot_launch_payloads[(bot_id, shot_seq)] = (args, kwargs)
         accepted = sender(*args, **kwargs)
@@ -21066,10 +21212,17 @@ class BattleRuntime(object):
         trigger_wall = _PROFILE_CLOCK()
         if not self._sender.send_current():
             return self._reject_local_fire('input_send_failed')
+        # Read the ammunition before the local gun consumes this round, so
+        # the count the server freezes includes the shell being fired.
+        try:
+            shells_before_shot = sum(int(value) for value in state.ammo)
+        except (AttributeError, TypeError, ValueError):
+            shells_before_shot = None
         intent_seq = sender(
             shell_index, list(_xyz(shot_origin)),
             list(_xyz(shot_direction)), dispersion_angle,
-            presentation_ledger, trigger_server_time_ms)
+            presentation_ledger, trigger_server_time_ms,
+            shells_before_shot)
         if not intent_seq:
             return self._reject_local_fire('intent_send_failed')
         self._local_fire_intent = {
@@ -21673,6 +21826,7 @@ class BattleRuntime(object):
         self._bot_pose_times = {}
         self._bot_yaw_rates = {}
         self._track_report_time = None
+        self._hit_impulse_reports = 0
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0

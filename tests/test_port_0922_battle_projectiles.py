@@ -495,7 +495,12 @@ class BattleProjectileTests(unittest.TestCase):
 
     def test_half_even_player_preinstall_matches_real_server_echo(self):
         half_even_edge = 0.0078125
-        launch_server_time_ms = 15000
+        # The trigger is frozen at the server's own receipt tick, so derive
+        # it from the countdown instead of restating one countdown's value.
+        prebattle_ticks = int(round(
+            server_runtime.PREBATTLE_SECONDS * server_runtime.TICK_HZ))
+        launch_server_time_ms = int(round(
+            prebattle_ticks * 1000.0 / server_runtime.TICK_HZ))
         source_shot = {
             'speed': 100.0,
             'gravity': 9.81,
@@ -533,8 +538,7 @@ class BattleProjectileTests(unittest.TestCase):
         server = server_runtime.BattleState(map_name='04_himmelsdorf')
         server.client_build = server_runtime.CLIENT_BUILD_0922
         server.phase = 'battle'
-        server.tick = int(round(
-            server_runtime.PREBATTLE_SECONDS * server_runtime.TICK_HZ))
+        server.tick = prebattle_ticks
         server.round_id = 9
         server.authority_epoch = 1
         server.bot_authority_id = (
@@ -4692,7 +4696,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact',
-                return_value={'result': 2}), \
+                return_value={'result': 2, 'layer': 'external'}), \
                 mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
@@ -4710,6 +4714,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(390, effect['damage'])
         self.assertEqual(2, effect['shot_result'])
+        self.assertIs(False, effect['structural_armor_hit'])
         self.assertEqual(
             [390.0, 150.0], critical.call_args.args[5]['damage'])
         self.assertFalse(critical.call_args.kwargs['deadeye'])
@@ -4744,6 +4749,7 @@ class BattleProjectileTests(unittest.TestCase):
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact', return_value={
                     'result': 0, 'component': 'hull', 'distance': 10.0,
+                    'layer': 'structural',
                 }) as resolved, mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
@@ -4756,6 +4762,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(0, effect['damage'])
         self.assertEqual(0, effect['shot_result'])
+        self.assertIs(True, effect['structural_armor_hit'])
         self.assertEqual((1.0, 0.0, 0.0), terminal['world_normal'])
         self.assertEqual(
             0.75,

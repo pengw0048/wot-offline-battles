@@ -777,6 +777,30 @@ class ProjectileWireTests(unittest.TestCase):
             4, 'player:7:3', 0, 'impact', 10,
             [0.0, 0.0, 0.0], self.effect('player', 8), [splash]))
 
+    def test_structural_armor_metadata_is_optional_and_soft(self):
+        client = self.active_worker_client()
+        direct = self.effect('player', 8)
+        direct['structural_armor_hit'] = True
+
+        self.assertTrue(client.send_projectile_resolve(
+            4, 'player:7:1', 150, 'impact', 180,
+            [11.0, 2.0, 3.0], direct, []))
+        message = wire_copy(client._outbound_queue[-1][1])
+        self.assertIs(True, message['direct']['structural_armor_hit'])
+
+        # This bit cannot own an admitted projectile. If a future or damaged
+        # worker sends a non-boolean value, retain the terminal and count it
+        # conservatively as an external-module contact.
+        for invalid in (1, 'structural', None, []):
+            with self.subTest(structural_armor_hit=invalid):
+                self.assertTrue(client.send_projectile_resolve(
+                    4, 'player:7:2', 150, 'impact', 180,
+                    [11.0, 2.0, 3.0],
+                    dict(direct, structural_armor_hit=invalid), []))
+                message = wire_copy(client._outbound_queue[-1][1])
+                self.assertIs(
+                    False, message['direct']['structural_armor_hit'])
+
     def test_first_ricochet_wire_keeps_the_blocked_damage_roll(self):
         client = self.active_worker_client()
         direct = self.effect('bot', 17, 11.0)

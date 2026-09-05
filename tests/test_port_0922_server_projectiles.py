@@ -33,6 +33,7 @@ from lan_battle_server import (  # noqa: E402
 )
 from gui.mods.offline_lan_0922 import vehicle_physics
 from effective_params_fixture import effective_params
+import lan_battle_server as lan_server_module
 
 
 class _Socket(object):
@@ -1354,6 +1355,150 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         enabled.players[1].vehicle = 'sweden:S22_Strv_S1'
         enabled.players[1].siege_state = SIEGE_ENABLED
         self.assertTrue(_launch_authority(enabled, _launch()))
+
+    @staticmethod
+    def _armed_bot(state, bot_id=16):
+        state.bot_states[bot_id] = {
+            'id': bot_id, 'team': 2, 'vehicle': 'ussr:R11_MS-1',
+            'health': 500, 'max_health': 500, 'alive': True,
+            'display_health': 500, 'fire_seq': 0,
+        }
+        state.bot_pending_projectile_launches.add((bot_id, 1))
+
+    def test_a_reported_shell_inventory_is_admitted_and_frozen(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=1)))
+
+        self.assertIs(True, state.last_shell_shots['1:b:16:1'])
+
+    def test_a_zero_shell_report_cannot_award_the_last_shell(self):
+        # A shot was drawn from at least one shell, so zero fails the bound.
+        # The shot itself is already admitted and must still resolve, so the
+        # bad achievement input is contained to itself rather than destroying
+        # a legal launch.
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=0)))
+
+        self.assertEqual({}, state.last_shell_shots)
+        self.assertIn('1:b:16:1', state.projectiles)
+
+    def test_two_shells_before_the_shot_is_not_a_last_shell(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=2)))
+
+        self.assertIs(False, state.last_shell_shots['1:b:16:1'])
+
+    def test_a_launch_with_shells_left_is_not_a_last_shell(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=7)))
+
+        self.assertIs(False, state.last_shell_shots['1:b:16:1'])
+
+    @staticmethod
+    def _ignite_player_with_projectile(state, last_shell):
+        projectile_id = '1:p:1:1'
+        self_launch = _launch()
+        if not _launch_authority(state, self_launch):
+            raise AssertionError('projectile launch failed')
+        state.last_shell_shots[projectile_id] = bool(last_shell)
+        target = state.players[2]
+        target.health = 5
+        target.max_health = 1000
+        target.critical = {
+            'devices': [], 'destroyed': [], 'crew_ko': [],
+            'crew_roster': ['commander'], 'fire': False,
+            'ammo_rack_death': False, 'events': [],
+        }
+        critical = dict(target.critical)
+        critical.update({
+            'fire': True,
+            'events': [{'kind': 'fire', 'state': True, 'cause': 'shot'}],
+        })
+        direct = _effect(
+            damage=0, critical=critical,
+            critical_target_base_revision=0,
+            critical_target_ack_seq=0, hull_damage=0,
+            critical_delta={
+                'devices': [], 'crew_ko': [], 'ignite': True,
+            })
+        if not state.resolve_projectile(
+                SIMULATION_WORKER_AUTHORITY_ID,
+                _resolve(projectile_id, direct=direct)):
+            raise AssertionError(state.last_projectile_resolve_reject)
+        return target
+
+    def test_last_shell_fire_that_burns_the_final_enemy_awards_fadin(self):
+        state = _state()
+        target = self._ignite_player_with_projectile(state, True)
+        self.assertEqual(
+            ('player', 1),
+            state.last_shell_fire_sources[('player', 2)])
+
+        with mock.patch.object(
+                lan_server_module.player_critical_mechanics,
+                'advance_fire', return_value={
+                    'damage': 5, 'critical': target.critical,
+                    'fire_elapsed': 1.0, 'fire_timer': 0.0,
+                }):
+            state._tick_player_fire(1.0)
+
+        self.assertFalse(target.alive)
+        self.assertIn(('player', 1), state.last_shell_finishers)
+        self.assertNotIn(('player', 2), state.last_shell_fire_sources)
+
+    def test_non_last_shell_fire_does_not_award_fadin(self):
+        state = _state()
+        target = self._ignite_player_with_projectile(state, False)
+        self.assertNotIn(('player', 2), state.last_shell_fire_sources)
+
+        with mock.patch.object(
+                lan_server_module.player_critical_mechanics,
+                'advance_fire', return_value={
+                    'damage': 5, 'critical': target.critical,
+                    'fire_elapsed': 1.0, 'fire_timer': 0.0,
+                }):
+            state._tick_player_fire(1.0)
+
+        self.assertFalse(target.alive)
+        self.assertEqual(set(), state.last_shell_finishers)
+
+    def test_extinguished_fire_discards_last_shell_lineage(self):
+        state = _state()
+        target = self._ignite_player_with_projectile(state, True)
+        target.critical = dict(target.critical, fire=False)
+
+        state._tick_player_fire(1.0)
+
+        self.assertNotIn(('player', 2), state.last_shell_fire_sources)
+
+    def test_an_unknown_launch_field_is_still_rejected(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertFalse(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    unexpected_field=1)))
 
     def test_modern_player_launch_is_atomic_and_idempotent(self):
         state = _state()
@@ -2963,6 +3108,33 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(900, victim.health)
         self.assertEqual(
             420, state._statistics_row('player', 2)['damage_blocked'])
+
+    def test_sturdy_counts_only_structural_low_health_deflections(self):
+        cases = (
+            ('structural', True, 1),
+            ('external', False, 0),
+            ('missing', None, 0),
+            ('malformed', 'structural', 0),
+        )
+        for label, structural, expected in cases:
+            with self.subTest(layer=label):
+                state = _state()
+                self.assertTrue(_launch_authority(state, _launch()))
+                victim = state.players[2]
+                victim.health = 50
+                direct = _effect(damage=0, shot_result=0)
+                if structural is not None:
+                    direct['structural_armor_hit'] = structural
+
+                self.assertTrue(state.ricochet_projectile(
+                    SIMULATION_WORKER_AUTHORITY_ID,
+                    _ricochet('1:p:1:1', direct=direct)))
+
+                row = state._statistics_row('player', 2)
+                self.assertEqual(1, row['deflected_hits_received'])
+                self.assertEqual(
+                    expected, row['deflected_hits_at_low_health'])
+                self.assertIn('1:p:1:1', state.projectiles)
 
     def test_splash_never_credits_blocked_damage(self):
         # Player 4 shares team 2 with the direct victim, so only the splash

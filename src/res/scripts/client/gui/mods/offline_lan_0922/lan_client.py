@@ -9,6 +9,8 @@ import time
 import uuid
 
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
+from gui.mods.offline_lan_0922.battle_achievements import (
+    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
@@ -1120,10 +1122,11 @@ def _strict_projectile_effect(value):
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
     damage_sticker_fields = frozenset(('damage_sticker',))
     potential_fields = frozenset(('potential_damage',))
+    structural_fields = frozenset(('structural_armor_hit',))
     keys = set(value)
     if not required.issubset(keys) or not keys.issubset(
             required | critical_fields | stun_fields | target_pose_fields |
-            damage_sticker_fields | potential_fields):
+            damage_sticker_fields | potential_fields | structural_fields):
         return None
     kind = value.get('target_kind')
     target_id = _projectile_int_range(
@@ -1141,6 +1144,7 @@ def _strict_projectile_effect(value):
     has_target_pose = bool(keys & target_pose_fields)
     has_damage_sticker = 'damage_sticker' in value
     has_potential_damage = 'potential_damage' in value
+    has_structural_armor_hit = 'structural_armor_hit' in value
     expected = (required |
                 (critical_fields if has_critical else frozenset()) |
                 (stun_fields if has_stun else frozenset()) |
@@ -1148,6 +1152,8 @@ def _strict_projectile_effect(value):
                 (damage_sticker_fields if has_damage_sticker else
                  frozenset()) |
                 (potential_fields if has_potential_damage else frozenset()))
+    expected |= (structural_fields if has_structural_armor_hit else
+                 frozenset())
     if (kind not in ('player', 'bot') or target_id is None or
             damage is None or shot_result is None or
             any(component is None for component in position) or
@@ -1205,6 +1211,11 @@ def _strict_projectile_effect(value):
         if potential_damage is None:
             return None
         result['potential_damage'] = potential_damage
+    if has_structural_armor_hit:
+        # This field only affects an optional achievement counter. A missing
+        # or malformed value must not discard an otherwise valid terminal.
+        result['structural_armor_hit'] = (
+            value.get('structural_armor_hit') is True)
     if has_target_pose:
         target_position = []
         for axis in ('x', 'y', 'z'):
@@ -1438,15 +1449,14 @@ def _valid_battle_receipt(message):
         return False
     stats = message.get('stats')
     rewards = message.get('rewards')
-    stat_names = (
-        'shots', 'direct_hits', 'piercings', 'damage', 'damage_received',
-        'damage_blocked', 'assist_track', 'assist_radio', 'assist_stun',
-        'kills', 'spotted', 'capture_points', 'dropped_capture_points')
+    stat_names = RECEIPT_STAT_NAMES
     reward_names = ('credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost')
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         return False
-    if any(_exact_int(stats.get(name)) is None or
-           _exact_int(stats.get(name)) < 0 for name in stat_names):
+    # Statistics added after a receipt was recorded default to zero, exactly
+    # as the durable store treats them.
+    if any(_exact_int(stats.get(name, 0)) is None or
+           _exact_int(stats.get(name, 0)) < 0 for name in stat_names):
         return False
     if any(_exact_int(rewards.get(name)) is None or
            _exact_int(rewards.get(name)) < 0 for name in reward_names):
@@ -1488,9 +1498,17 @@ def _valid_battle_receipt(message):
                 bool(killer_kind) != bool(killer_id) or
                 not isinstance(row_stats, dict)):
             return False
-        if any(_exact_int(row_stats.get(stat_name)) is None or
-               _exact_int(row_stats.get(stat_name)) < 0
+        if any(_exact_int(row_stats.get(stat_name, 0)) is None or
+               _exact_int(row_stats.get(stat_name, 0)) < 0
                for stat_name in stat_names):
+            return False
+        # Receipts recorded before offline achievements shipped omit the list.
+        achievements = row.get('achievements', [])
+        if (not isinstance(achievements, list) or
+                len(achievements) > len(AWARDABLE_ACHIEVEMENTS) or
+                len(set(achievements)) != len(achievements) or
+                any(name not in AWARDABLE_ACHIEVEMENTS
+                    for name in achievements)):
             return False
         seen.add(identity)
         row_teams[identity] = row_team
@@ -2591,7 +2609,7 @@ class LANClient(object):
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
                          dispersion_angle, presentation_ledger,
-                         trigger_server_time_ms):
+                         trigger_server_time_ms, shells_before_shot=None):
         """Queue one ordered trigger input without damage or ballistics."""
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
@@ -2630,6 +2648,13 @@ class LANClient(object):
                 'presentation_ledger': parsed_ledger,
                 'trigger_server_time_ms': parsed_trigger_time,
             }
+            # The client owns its ammunition, so Fadin's medal needs the
+            # shell total standing at the trigger edge, this round included.
+            # A shot that happened was drawn from at least one shell, so
+            # zero is not a smaller count, it is an invalid report.
+            parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
+            if parsed_shells is not None:
+                message['shells_before_shot'] = parsed_shells
             if not self._send(message):
                 return None
             self._fire_intent_seq = sequence
@@ -2696,7 +2721,8 @@ class LANClient(object):
             splash_radius, authority_epoch=None, penetration_factor=1.0,
             source_shot=None, fire_intent_seq=None, fire_input_seq=None,
             burst_group_seq=None, burst_index=None, burst_count=None,
-            launch_time_us=None, launch_pose=None):
+            launch_time_us=None, launch_pose=None,
+            shells_before_shot=None):
         """Enqueue one immutable projectile launch and return its shot seq."""
         if not self.ready or self.phase != 'battle':
             return None
@@ -2802,6 +2828,13 @@ class LANClient(object):
             if parsed_intent_seq is not None:
                 message['fire_intent_seq'] = parsed_intent_seq
                 message['fire_input_seq'] = parsed_input_seq
+            # The worker owns Bot ammunition, so it is the only producer that
+            # can report the shell total this shot was drawn from.
+            # A shot that happened was drawn from at least one shell, so
+            # zero is not a smaller count, it is an invalid report.
+            parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
+            if parsed_shells is not None:
+                message['shells_before_shot'] = parsed_shells
             if not self._send(message):
                 return None
             return parsed_seq
@@ -3034,9 +3067,10 @@ class LANClient(object):
             'target_kind', 'target_id', 'damage', 'shot_result',
             'x', 'y', 'z'}
         # A bounce is the archetypal blocked-damage contact, so a continuing
-        # shell still publishes its potential-damage roll and decal identity.
-        # Critical, stun and splash tokens stay forbidden on this wire.
-        direct_optional = {'damage_sticker', 'potential_damage'}
+        # shell still publishes its potential-damage roll, decal identity and
+        # armour layer. Critical, stun and splash tokens stay forbidden here.
+        direct_optional = {
+            'damage_sticker', 'potential_damage', 'structural_armor_hit'}
         if (parsed_epoch is None or parsed_epoch != _exact_int(
                 self.authority_epoch) or parsed_projectile_id is None or
                 parsed_base is None or parsed_time is None or
