@@ -9831,7 +9831,6 @@ class BattleRuntime(object):
                 'trigger': float(pending.get('sent_wall', now_wall)),
                 'shown': None,
                 'cursor_logs': 0,
-                'moving_logged': False,
             })
         self._local_fire_intent = None
         return True
@@ -9994,9 +9993,9 @@ class BattleRuntime(object):
                         ('_offlineLANShotMaxDistance',
                          event.get('maxDistance')),
                         ('_offlineLANProjectileID', projectile_id),
-                        # RemoteVehicle.showShooting still owns the muzzle and
-                        # recoil call.  The factory-backed controlled tracer
-                        # above is the sole flight owner.
+                        # RemoteVehicle.showShooting owns muzzle and recoil.
+                        # The factory-backed native tracer above is the sole
+                        # cosmetic flight owner.
                         ('_offlineLANCanonicalTracerOwned', True)):
                     setattr(entity, name, value)
                     transient_names.append(name)
@@ -10065,7 +10064,7 @@ class BattleRuntime(object):
         if self._projectile_epoch == epoch:
             return True
         # An authority epoch fences every projectile presentation as well as
-        # its simulator state.  Drop the old controlled tracers without using
+        # its simulator state.  Drop the old native tracers without using
         # their terminal path: a worker handoff is neither a hit nor a miss
         # and must not emit impact feedback or a world explosion.
         self._reset_projectile_visuals()
@@ -11033,7 +11032,7 @@ class BattleRuntime(object):
 
     def _ensure_projectile_visual(self, normalized, now,
                                   visual_start=None):
-        """Create one tracer and monotonically extend its confirmed frontier."""
+        """Start one native visual per segment, independent of cursor cadence."""
         if self._worker_mode:
             return False
         if self._remote_factory is None or not isinstance(normalized, dict):
@@ -11042,10 +11041,9 @@ class BattleRuntime(object):
         if projectile_id in self._projectile_visual_terminals:
             return False
         confirmed_elapsed = self._projectile_visual_age(normalized)
-        existing_visual = self._projectile_visual_meta.get(
-            projectile_id)
-        if (existing_visual is not None and
-                int(existing_visual.get('ricochet_count', 0)) !=
+        visual = self._projectile_visual_meta.get(projectile_id)
+        if (visual is not None and
+                int(visual.get('ricochet_count', 0)) !=
                 normalized['ricochet_count']):
             meta = self._projectile_meta.get(projectile_id)
             if meta is not None:
@@ -11053,79 +11051,39 @@ class BattleRuntime(object):
             self._stop_projectile_visual(
                 projectile_id, {
                     'impact': list(normalized['segment_origin']),
-                    'resolved_time_ms': normalized[
-                        'segment_start_time_ms'],
+                    'resolved_time_ms': normalized['segment_start_time_ms'],
                 })
-            existing_visual = None
-        elif existing_visual is not None:
-            # Snapshots may be duplicated or arrive after an older one.  They
-            # can only move the display fence forward and must never relaunch
-            # a tracer that this canonical segment already owns. A failed
-            # initial creation owns no resource, so it may retry at the newest
-            # confirmed pose without manufacturing an unconfirmed flight.
-            existing_visual['confirmed_elapsed'] = max(
-                float(existing_visual.get('confirmed_elapsed', 0.0)),
-                confirmed_elapsed)
+            visual = None
+        elif visual is not None:
+            # Only a failed initial creation may try the newest checked pose.
+            # A running (or naturally expired) native tracer owns its complete
+            # visual flight until the worker sends a terminal or ricochet.
             timeline = self._fire_timeline.get(str(projectile_id))
-            if (timeline is not None and
-                    timeline.get('shown') is not None and
+            if (timeline is not None and timeline.get('shown') is not None and
                     int(timeline.get('cursor_logs', 0)) < 8):
-                timeline['cursor_logs'] = int(
-                    timeline.get('cursor_logs', 0)) + 1
-                wall = _PROFILE_CLOCK()
+                timeline['cursor_logs'] = int(timeline.get('cursor_logs', 0)) + 1
                 sys.stdout.write(
                     '[Offline LAN 0.9.22] FIRE CURSOR projectile=%s '
-                    'confirmed_ms=%.0f display_ms=%.0f '
+                    'confirmed_ms=%.0f native_started=%d '
                     'since_trigger_ms=%.0f\n' % (
-                        projectile_id,
-                        existing_visual['confirmed_elapsed'] * 1000.0,
-                        float(existing_visual.get(
-                            'display_elapsed', 0.0)) * 1000.0,
-                        max(0.0, wall - timeline['trigger']) * 1000.0))
-            if (existing_visual.get('active', False) and
-                    existing_visual.get('first_frontier_pending', False)):
-                if existing_visual['confirmed_elapsed'] <= 0.0:
-                    return True
-                return self._catch_up_first_projectile_frontier(
-                    projectile_id, existing_visual, now)
-            if (existing_visual.get('active', False) or
-                    not existing_visual.get('admitted', True) or
-                    not existing_visual.get('launch_retryable', False)):
-                return bool(existing_visual.get('active', False))
-
+                        projectile_id, confirmed_elapsed * 1000.0,
+                        int(bool(visual.get('active'))),
+                        max(0.0, _PROFILE_CLOCK() -
+                            timeline['trigger']) * 1000.0))
+            if (visual.get('active', False) or
+                    not visual.get('admitted', True)):
+                return bool(visual.get('active', False))
         descriptor = self._projectile_source_descriptor(normalized)
         if descriptor is None:
             return False
-        gravity = normalized['gravity']
-        if existing_visual is None:
-            display_elapsed = confirmed_elapsed
+        if visual is None:
             visual = {
                 'origin': tuple(normalized['segment_origin']),
                 'velocity': tuple(normalized['segment_velocity']),
-                'gravity': gravity,
-                'segment_start_time_ms': normalized[
-                    'segment_start_time_ms'],
+                'gravity': normalized['gravity'],
+                'segment_start_time_ms': normalized['segment_start_time_ms'],
                 'ricochet_count': normalized['ricochet_count'],
-                'display_elapsed': display_elapsed,
-                'confirmed_elapsed': confirmed_elapsed,
-                'last_frame': float(now),
                 'active': False,
-                'launch_retryable': True,
-                'first_frontier_pending': bool(
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0),
-                'visual_start': (
-                    tuple(visual_start) if
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0 and
-                    visual_start is not None else None),
-                'first_frontier_min_distance_sq': (
-                    sum((float(visual_start[index]) -
-                         float(normalized['segment_origin'][index])) ** 2
-                        for index in range(3)) if
-                    normalized['ricochet_count'] == 0 and
-                    confirmed_elapsed <= 0.0 and
-                    visual_start is not None else 0.0),
             }
             self._projectile_visual_meta[projectile_id] = visual
             record = self._records.get('%s:%s' % (
@@ -11133,201 +11091,51 @@ class BattleRuntime(object):
             attacker_id = int(record.get('engine_id', 0) or 0) \
                 if record is not None else 0
             if attacker_id <= 0:
-                # Presentation attribution survives a disconnected shooter;
-                # its canonical network id is still stable for this shot.
                 attacker_id = int(normalized['shooter_id'])
             visual['attacker_id'] = attacker_id
             visual['admitted'] = self._admit_projectile_visual(
                 attacker_id, projectile_id, now)
-        else:
-            visual = existing_visual
-            display_elapsed = float(visual['confirmed_elapsed'])
-            visual['display_elapsed'] = display_elapsed
-            visual['last_frame'] = float(now)
-            attacker_id = int(visual['attacker_id'])
-            if display_elapsed > 0.0:
-                # A failed zero-age creation owns no native tracer. Retry at
-                # the confirmed trajectory pose instead of a stale muzzle.
-                visual['first_frontier_pending'] = False
-                visual['visual_start'] = None
-                visual['first_frontier_min_distance_sq'] = 0.0
-
-        admitted = bool(visual.get('admitted', True))
-        if not admitted:
+        if (not visual.get('admitted', True) or
+                not self._optional_feature_enabled('projectile visual launch')):
             return False
-        if not self._optional_feature_enabled('projectile visual launch'):
-            return False
+        # A late first snapshot starts at its checked trajectory pose. Once
+        # installed, stock PyBallisticsSimulator advances the motor locally;
+        # checked_through_ms is no longer a per-frame presentation fence.
+        gravity = normalized['gravity']
         reference_origin = trajectory_position(
             normalized['segment_origin'], normalized['segment_velocity'],
-            (0.0, -gravity, 0.0), display_elapsed)
+            (0.0, -gravity, 0.0), confirmed_elapsed)
         reference_velocity = (
             normalized['segment_velocity'][0],
-            normalized['segment_velocity'][1] - gravity * display_elapsed,
+            normalized['segment_velocity'][1] - gravity * confirmed_elapsed,
             normalized['segment_velocity'][2])
+        if confirmed_elapsed > 0.0 or normalized['ricochet_count']:
+            visual_start = None
         try:
             visual['active'] = bool(
                 self._remote_factory.play_projectile_tracer(
-                descriptor, normalized['shell_index'],
-                normalized['segment_origin'],
-                normalized['segment_velocity'], gravity, max(
-                    0.001, normalized['max_distance'] -
-                    normalized['checked_distance']),
-                attacker_id, projectile_id, reference_origin,
-                reference_velocity,
-                is_ricochet=bool(normalized['ricochet_count']),
-                visual_start=visual.get('visual_start')))
-            visual['launch_retryable'] = not visual['active']
+                    descriptor, normalized['shell_index'],
+                    normalized['segment_origin'],
+                    normalized['segment_velocity'], gravity, max(
+                        0.001, normalized['max_distance'] -
+                        normalized['checked_distance']),
+                    visual['attacker_id'], projectile_id, reference_origin,
+                    reference_velocity,
+                    is_ricochet=bool(normalized['ricochet_count']),
+                    visual_start=visual_start))
+            timeline = self._fire_timeline.get(str(projectile_id))
+            if visual['active'] and timeline is not None:
+                # This records the hand-off, not the unobserved native frame
+                # at which a particle first becomes visible on Windows.
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] FIRE TRACER STARTED '
+                    'projectile=%s since_trigger_ms=%.0f path=native\n' % (
+                        projectile_id, max(0.0, _PROFILE_CLOCK() -
+                            timeline['trigger']) * 1000.0))
             return visual['active']
         except Exception as error:
-            self._warn_optional_failure(
-                'projectile visual launch', error)
+            self._warn_optional_failure('projectile visual launch', error)
             return False
-
-    def _catch_up_first_projectile_frontier(self, projectile_id, visual,
-                                             now):
-        """Move a muzzle-started tracer once its safe cursor clears the bridge."""
-        if (not visual.get('active', False) or
-                not visual.get('first_frontier_pending', False)):
-            return bool(visual.get('active', False))
-        confirmed_elapsed = max(
-            0.0, float(visual.get('confirmed_elapsed', 0.0)))
-        if confirmed_elapsed <= 0.0:
-            visual['last_frame'] = max(
-                float(visual.get('last_frame', now)), float(now))
-            return True
-        callback = getattr(
-            self._remote_factory, 'update_projectile_visual', None)
-        if (not callable(callback) or not self._optional_feature_enabled(
-                'projectile visual update')):
-            return True
-        position, velocity = self._projectile_visual_pose(
-            visual, confirmed_elapsed)
-        origin = visual['origin']
-        confirmed_distance_sq = sum(
-            (float(position[index]) - float(origin[index])) ** 2
-            for index in range(3))
-        if (confirmed_distance_sq + 1.0e-9 < float(visual.get(
-                'first_frontier_min_distance_sq', 0.0))):
-            # A very fast tank and a very early worker receipt can put the
-            # first safe cursor behind the current-muzzle bridge. Keep the
-            # tracer at that muzzle until the canonical path is at least as
-            # far from the stale launch origin; never visibly snap back to it.
-            visual['last_frame'] = max(
-                float(visual.get('last_frame', now)), float(now))
-            return True
-        try:
-            visible = bool(callback(
-                projectile_id, position, velocity=velocity))
-        except Exception as error:
-            self._warn_optional_failure(
-                'projectile visual update', error)
-            visible = False
-        if not visible:
-            visual['active'] = False
-            visual['launch_retryable'] = False
-            return False
-        visual['display_elapsed'] = confirmed_elapsed
-        visual['last_frame'] = float(now)
-        visual['first_frontier_pending'] = False
-        visual['visual_start'] = None
-        visual['first_frontier_min_distance_sq'] = 0.0
-        timeline = self._fire_timeline.get(str(projectile_id))
-        if (timeline is not None and timeline.get('shown') is not None and
-                not timeline.get('moving_logged', False)):
-            timeline['moving_logged'] = True
-            wall = _PROFILE_CLOCK()
-            sys.stdout.write(
-                '[Offline LAN 0.9.22] FIRE TRACER MOVING '
-                'projectile=%s since_trigger_ms=%.0f '
-                'since_shown_ms=%.0f confirmed_ms=%.0f\n' % (
-                    projectile_id,
-                    max(0.0, wall - timeline['trigger']) * 1000.0,
-                    max(0.0, wall - timeline['shown']) * 1000.0,
-                    confirmed_elapsed * 1000.0))
-        return True
-
-    @staticmethod
-    def _projectile_visual_pose(visual, elapsed=None):
-        """Return the controlled position and velocity at one segment age."""
-        if elapsed is None:
-            elapsed = float(visual.get('display_elapsed', 0.0))
-        gravity = float(visual['gravity'])
-        position = trajectory_position(
-            visual['origin'], visual['velocity'],
-            (0.0, -gravity, 0.0), elapsed)
-        velocity = (
-            visual['velocity'][0],
-            visual['velocity'][1] - gravity * elapsed,
-            visual['velocity'][2])
-        return position, velocity
-
-    def _advance_projectile_visuals(self, now):
-        """Advance visible tracers without crossing a confirmed worker cursor."""
-        if (self._worker_mode or self._remote_factory is None or
-                not self._projectile_visual_meta or
-                not self._optional_feature_enabled(
-                    'projectile visual update')):
-            return False
-        callback = getattr(
-            self._remote_factory, 'update_projectile_visual', None)
-        if not callable(callback):
-            return False
-        frame = float(now)
-        advanced = False
-        for projectile_id, visual in tuple(
-                self._projectile_visual_meta.items()):
-            if (not visual.get('active', False) or
-                    not visual.get('admitted', True)):
-                continue
-            previous_frame = float(visual.get('last_frame', frame))
-            if visual.get('first_frontier_pending', False):
-                if self._catch_up_first_projectile_frontier(
-                        projectile_id, visual, frame):
-                    advanced = advanced or not visual.get(
-                        'first_frontier_pending', False)
-                continue
-            dt = max(0.0, frame - previous_frame)
-            visual['last_frame'] = max(previous_frame, frame)
-            previous_elapsed = max(
-                0.0, float(visual.get('display_elapsed', 0.0)))
-            confirmed_elapsed = max(
-                previous_elapsed,
-                float(visual.get('confirmed_elapsed', previous_elapsed)))
-            display_elapsed = min(
-                previous_elapsed + dt, confirmed_elapsed)
-            visual['display_elapsed'] = display_elapsed
-            position, velocity = self._projectile_visual_pose(
-                visual, display_elapsed)
-            try:
-                visible = bool(callback(
-                    projectile_id, position, velocity=velocity))
-            except Exception as error:
-                self._warn_optional_failure(
-                    'projectile visual update', error)
-                visible = False
-            if not visible:
-                # A lost native resource must not be recreated from a later
-                # snapshot at a different point in the same segment.
-                visual['active'] = False
-                visual['launch_retryable'] = False
-                continue
-            if display_elapsed > previous_elapsed:
-                timeline = self._fire_timeline.get(str(projectile_id))
-                if (timeline is not None and
-                        timeline.get('shown') is not None and
-                        not timeline.get('moving_logged', False)):
-                    timeline['moving_logged'] = True
-                    wall = _PROFILE_CLOCK()
-                    sys.stdout.write(
-                        '[Offline LAN 0.9.22] FIRE TRACER MOVING '
-                        'projectile=%s since_trigger_ms=%.0f '
-                        'since_shown_ms=%.0f confirmed_ms=%.0f\n' % (
-                            projectile_id,
-                            max(0.0, wall - timeline['trigger']) * 1000.0,
-                            max(0.0, wall - timeline['shown']) * 1000.0,
-                            confirmed_elapsed * 1000.0))
-            advanced = advanced or display_elapsed > previous_elapsed
-        return advanced
 
     def _reset_projectile_visuals(self):
         """Fence an epoch change without manufacturing terminal feedback."""
@@ -11955,7 +11763,6 @@ class BattleRuntime(object):
         self._projectile_perf = {}
         self._projectile_scan_count = 0
         self._projectile_candidate_count = 0
-        self._advance_projectile_visuals(now)
         if self._projectiles is None:
             return False
         self._flush_pending_projectile_resolutions()

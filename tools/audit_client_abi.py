@@ -165,6 +165,7 @@ EXPECTED_ABI = {
             'refVelocity', 'startPoint', 'maxDistance', 'attackerID',
             'tracerCameraPos'),
         'ProjectileMover.hide': ('self', 'shotID', 'endPoint'),
+        'ProjectileMover.hold': ('self', 'shotID'),
         'ProjectileMover.explode': (
             'self', 'shotID', 'effectsDescr', 'effectMaterial', 'endPoint',
             'velocityDir'),
@@ -175,6 +176,9 @@ EXPECTED_ABI = {
         'ProjectileMover.__killProjectile': (
             'self', 'shotID', 'position', 'impactVelDir'),
         'ProjectileMover.__delProjectile': ('self', 'shotID'),
+        'ProjectileMover.__deleteProjectile': ('self', 'shotID'),
+        'ProjectileMover.__onCameraChanged': (
+            'self', 'cameraName', 'currentVehicleId'),
         'segmentMayHitEntity': ('entity', 'startPoint', 'endPoint'),
         'collideEntities': (
             'startPoint', 'endPoint', 'entities', 'skipGun'),
@@ -966,6 +970,9 @@ EXPECTED_CODE_LITERALS = {
             'showExplosion', 'fireMissedTrigger', 'autoScaleProjectile',
             'attackerID', 'effectsData', 'flying', 'isPlayerVehicle',
             'isArtillery'),
+        'ProjectileMover.hide': ('fireMissedTrigger', 'showExplosion'),
+        'ProjectileMover.__deleteProjectile': ('fireMissedTrigger',),
+        'ProjectileMover.__onCameraChanged': ('sniper',),
         'ProjectileMover.explode': (
             'artilleryID', 'effectsDescr', 'effectMaterial', 'attackerID',
             'fireMissedTrigger', 'showExplosion'),
@@ -1364,12 +1371,35 @@ EXPECTED_CODE_NAMES = {
             'dist', 'hitAngleCos', 'matInfo', 'compName'),
     },
     'scripts/client/ProjectileMover.pyc': {
+        'ProjectileMover.__init__': (
+            '_ProjectileMover__projectiles', 'PyBallisticsSimulator',
+            '_ProjectileMover__killProjectile',
+            '_ProjectileMover__deleteProjectile', 'setFixedBallisticsParams',
+            '_ProjectileMover__PROJECTILE_HIDING_TIME',
+            '_ProjectileMover__PROJECTILE_TIME_AFTER_DEATH',
+            '_ProjectileMover__AUTO_SCALE_DISTANCE', 'SERVER_TICK_LENGTH',
+            'inputHandler', 'onCameraChanged'),
         'ProjectileMover.add': (
             'distTo', '_ProjectileMover__START_POINT_MAX_DIFF',
             'salvo', 'addProjectile', '_ProjectileMover__ballistics',
             'BigWorld', 'Model', 'player', 'addModel', 'addMotor',
             'visible', 'visibleAttachments', 'attachTo', 'FlockManager',
             'getManager', 'onProjectile'),
+        'ProjectileMover.hide': (
+            '_ProjectileMover__projectiles', 'pop',
+            '_ProjectileMover__delProjectile',
+            '_ProjectileMover__notifyProjectileHit',
+            '_ProjectileMover__ballistics', 'hideProjectile'),
+        'ProjectileMover.hold': (
+            '_ProjectileMover__ballistics', 'holdProjectile'),
+        'ProjectileMover.setSpaceID': (
+            '_ProjectileMover__ballistics', 'setVariableBallisticsParams'),
+        'ProjectileMover.__deleteProjectile': (
+            '_ProjectileMover__projectiles', 'get',
+            '_ProjectileMover__delProjectile', 'TriggersManager',
+            'fireTrigger', 'PLAYER_SHOT_MISSED'),
+        'ProjectileMover.__onCameraChanged': (
+            '_ProjectileMover__ballistics', 'setBallisticsAutoScale'),
         'ProjectileMover.explode': (
             'TriggersManager', 'g_manager', 'fireTrigger', 'TRIGGER_TYPE',
             'PLAYER_SHOT_MISSED',
