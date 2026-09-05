@@ -621,6 +621,35 @@ class InputLedgerFireTests(unittest.TestCase):
         self.assertEqual(results_before, len(self.results))
         self.assertEqual(gun_before, self._gun_state(player))
 
+    def test_a_reported_shell_inventory_is_relayed_not_rejected(self):
+        state, player = self._armed_state()
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, intent_seq=1, shells_before_shot=1)))
+
+        relay = player.pending_fire_intents[1]
+        self.assertEqual(1, relay['shells_before_shot'])
+        self.assertEqual('fire_intent', self.relayed[-1]['type'])
+
+    def test_a_trigger_without_a_shell_inventory_still_launches(self):
+        state, player = self._armed_state()
+        intent = _fire_intent(state, intent_seq=1)
+        intent.pop('shells_before_shot', None)
+
+        self.assertTrue(state.submit_fire_intent(1, intent))
+
+        self.assertIsNone(
+            player.pending_fire_intents[1]['shells_before_shot'])
+
+    def test_an_unknown_fire_intent_field_is_still_rejected(self):
+        state, unused_player = self._armed_state()
+
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, intent_seq=1, unexpected_field=1)))
+
+        self.assertEqual(
+            'fire_intent_wire_shape', self.results[-1]['reason'])
+
     def test_fire_bound_to_the_last_valid_input_still_launches(self):
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))

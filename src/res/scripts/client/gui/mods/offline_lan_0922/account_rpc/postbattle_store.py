@@ -20,6 +20,8 @@ except ImportError:
     import pickle as _pickle
 
 from gui.mods.offline_lan_0922 import config as port_config
+from gui.mods.offline_lan_0922.battle_achievements import (
+    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
 
 
 try:
@@ -119,10 +121,8 @@ def _receipt(value):
     raw_rewards = value.get('rewards')
     if not isinstance(raw_stats, dict) or not isinstance(raw_rewards, dict):
         raise ValueError('battle receipt summary is invalid')
-    stats = dict((name, max(0, _int(raw_stats.get(name)))) for name in (
-        'shots', 'direct_hits', 'piercings', 'damage', 'damage_received',
-        'damage_blocked', 'assist_track', 'assist_radio', 'assist_stun',
-        'kills', 'spotted', 'capture_points', 'dropped_capture_points'))
+    stats = dict((name, max(0, _int(raw_stats.get(name))))
+                 for name in RECEIPT_STAT_NAMES)
     rewards = dict((name, max(0, _int(raw_rewards.get(name)))) for name in (
         'credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost'))
     # Offline battles never debit service costs.  Rejecting a positive debit
@@ -172,6 +172,14 @@ def _receipt(value):
             raise ValueError('battle receipt public row is invalid')
         row_stats = dict((name, max(0, _int(raw_row_stats.get(name))))
                          for name in stats)
+        # Receipts stored before offline achievements shipped have no list.
+        raw_achievements = raw.get('achievements', [])
+        if (not isinstance(raw_achievements, (list, tuple)) or
+                len(raw_achievements) > len(AWARDABLE_ACHIEVEMENTS) or
+                len(set(raw_achievements)) != len(raw_achievements) or
+                any(name not in AWARDABLE_ACHIEVEMENTS
+                    for name in raw_achievements)):
+            raise ValueError('battle receipt achievements are invalid')
         public_results.append({
             'actor_kind': actor_kind, 'actor_id': actor_id,
             'name': row_name, 'vehicle': row_vehicle, 'team': row_team,
@@ -179,6 +187,7 @@ def _receipt(value):
             'killer_kind': killer_kind, 'killer_id': killer_id,
             'is_team_killer': raw['is_team_killer'], 'xp': xp,
             'stats': row_stats,
+            'achievements': sorted(raw_achievements),
         })
         seen.add(identity)
     personal_rows = [row for row in public_results
@@ -245,6 +254,9 @@ def _receipt(value):
         'premature_leave': bool(value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
+        # The personal row owns the medal list; mirroring it here keeps the
+        # durable progress transaction from re-deriving the roster.
+        'achievements': list(personal['achievements']),
         'public_results': public_results,
         'interactions': interactions,
     }
@@ -310,16 +322,63 @@ def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
     return details.pack()
 
 
+def _achievement_counts(value):
+    """Return one medal-counter map safe to hand the #1513 dossier builder.
+
+    Persisted progress is optional state a player can edit or a partial write
+    can corrupt.  Only names this build awards survive, and only as positive
+    whole counts, because the native dossier block coerces with ``int`` and a
+    bad value there breaks the account snapshot the garage is built from.
+    """
+    if not isinstance(value, dict):
+        return {}
+    counts = {}
+    for name in AWARDABLE_ACHIEVEMENTS:
+        count = value.get(name)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            continue
+        counts[name] = count
+    return counts
+
+
+def _achievement_records(names, record_db_ids=None):
+    """Return sorted ``(name, database id)`` pairs for awarded medals.
+
+    A name the pinned client does not register is dropped rather than packed;
+    the results window indexes ``DB_ID_TO_RECORD`` and would raise on it.
+    """
+    if not names:
+        return []
+    if record_db_ids is None:
+        from dossiers2.custom.records import RECORD_DB_IDS
+        record_db_ids = RECORD_DB_IDS
+    result = []
+    for name in sorted(names):
+        db_id = record_db_ids.get(('achievements', name))
+        if db_id is not None:
+            result.append((name, int(db_id)))
+    return sorted(result, key=lambda row: row[1])
+
+
+def _achievement_db_ids(names, record_db_ids=None):
+    return [db_id for unused_name, db_id in _achievement_records(
+        names, record_db_ids=record_db_ids)]
+
+
 def pack_battle_result(receipt, packers=None, replay_types=None,
-                       interaction_details_type=None):
+                       interaction_details_type=None, record_db_ids=None,
+                       achievement_counts=None):
     """Build the four-tuple consumed by #1513 ``BattleResultsCache``.
 
     Every compact list comes from the stock packer.  Supplying ``packers`` is
     only a test seam for proving which packer receives which stock field names.
+    ``achievement_counts`` carries the account's post-battle total for each
+    medal, which #1513 renders as the counter on the results badge.
     """
     receipt = _receipt(receipt)
     if packers is None:
         import battle_results_shared as packers
+    counts = achievement_counts if isinstance(achievement_counts, dict) else {}
     stats = receipt['stats']
     rewards = receipt['rewards']
     account_dbid = 1
@@ -342,6 +401,8 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'spotted': stats['spotted'],
         'capturePoints': stats['capture_points'],
         'droppedCapturePoints': stats['dropped_capture_points'],
+        'directHitsReceived': stats['hits_received'],
+        'potentialDamageReceived': stats['potential_damage_received'],
         'deathReason': receipt['death_reason'],
         'killerID': 0,
         'credits': rewards['credits'],
@@ -429,6 +490,14 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     vehicle['killerID'] = identity_to_vehicle_id.get((
         personal_public['killer_kind'], personal_public['killer_id']), 0)
     vehicle['isTeamKiller'] = personal_public['is_team_killer']
+    # ``achievements`` drives the team table ribbon; ``dossierPopUps`` drives
+    # the personal results medals, and #1513 shows its value as the counter.
+    vehicle['achievements'] = _achievement_db_ids(
+        personal_public['achievements'], record_db_ids=record_db_ids)
+    vehicle['dossierPopUps'] = [
+        (db_id, max(1, _int(counts.get(name, 1), 1)))
+        for name, db_id in _achievement_records(
+            personal_public['achievements'], record_db_ids=record_db_ids)]
     vehicle_full_packed = packers.VEH_FULL_RESULTS.pack(vehicle)
 
     players = {}
@@ -459,10 +528,15 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
             'spotted': row_stats['spotted'],
             'capturePoints': row_stats['capture_points'],
             'droppedCapturePoints': row_stats['dropped_capture_points'],
+            'directHitsReceived': row_stats['hits_received'],
+            'potentialDamageReceived': row_stats['potential_damage_received'],
             'deathReason': row['death_reason'],
             'killerID': identity_to_vehicle_id.get(killer_identity, 0),
             'isTeamKiller': row['is_team_killer'],
             'xp': row['xp'],
+            # #1513 renders one medal ribbon per team row from this list.
+            'achievements': _achievement_db_ids(
+                row['achievements'], record_db_ids=record_db_ids),
         }
         public_avatar = {
             # Regular offline battles have no avatar-only combat.  Team
@@ -525,7 +599,7 @@ class PostBattleStore(object):
         return {
             'credits': 0, 'freeXP': 0, 'battles': 0, 'wins': 0,
             'losses': 0,
-            'damage': 0, 'kills': 0, 'vehicles': {},
+            'damage': 0, 'kills': 0, 'achievements': {}, 'vehicles': {},
         }
 
     @property
@@ -575,7 +649,7 @@ class PostBattleStore(object):
         return True
 
     def result(self, arena_unique_id, packers=None, replay_types=None,
-               interaction_details_type=None):
+               interaction_details_type=None, record_db_ids=None):
         arena_unique_id = _int(arena_unique_id, -1)
         receipt = self._pending.get(str(arena_unique_id))
         if receipt is None:
@@ -589,7 +663,9 @@ class PostBattleStore(object):
             return None
         return pack_battle_result(
             receipt, packers=packers, replay_types=replay_types,
-            interaction_details_type=interaction_details_type)
+            interaction_details_type=interaction_details_type,
+            record_db_ids=record_db_ids,
+            achievement_counts=self._progress.get('achievements', {}))
 
     def service_message_data(self, arena_unique_id):
         """Return the exact BattleResultsFormatter input summary."""
@@ -670,7 +746,7 @@ class PostBattleStore(object):
         vehicles = progress['vehicles']
         row = vehicles.setdefault(receipt['vehicle'], {
             'xp': 0, 'battles': 0, 'wins': 0, 'losses': 0,
-            'damage': 0, 'kills': 0,
+            'damage': 0, 'kills': 0, 'achievements': {},
         })
         if vehicle_xp is None:
             vehicle_xp = rewards['xp']
@@ -682,6 +758,15 @@ class PostBattleStore(object):
             receipt['winner'] != receipt['team'])
         row['damage'] += stats['damage']
         row['kills'] += stats['kills']
+        # #1513 counts every medal in both the account and the vehicle
+        # dossier; the results badge renders the account total.
+        account_medals = _achievement_counts(progress.get('achievements'))
+        vehicle_medals = _achievement_counts(row.get('achievements'))
+        progress['achievements'] = account_medals
+        row['achievements'] = vehicle_medals
+        for name in receipt['achievements']:
+            account_medals[name] = account_medals.get(name, 0) + 1
+            vehicle_medals[name] = vehicle_medals.get(name, 0) + 1
         for target_name, source_name in (
                 ('shots', 'shots'), ('directHits', 'direct_hits'),
                 ('piercings', 'piercings'), ('spotted', 'spotted'),
@@ -753,11 +838,19 @@ class PostBattleStore(object):
             self._progress.setdefault(
                 'losses', max(0, int(self._progress.get('battles', 0)) -
                               int(self._progress.get('wins', 0))))
+            # Files written before offline achievements shipped have no
+            # medal counters; an empty map is the correct starting total.
+            # A corrupt or hand-edited counter must not reach the dossier
+            # builder, so only known names with positive whole counts survive.
+            self._progress['achievements'] = _achievement_counts(
+                self._progress.get('achievements'))
             for row in self._progress.get('vehicles', {}).values():
                 if isinstance(row, dict):
                     row.setdefault(
                         'losses', max(0, int(row.get('battles', 0)) -
                                       int(row.get('wins', 0))))
+                    row['achievements'] = _achievement_counts(
+                        row.get('achievements'))
         except (IOError, OSError, TypeError, ValueError):
             # Keep a corrupt optional cache from preventing an offline login.
             self._pending = {}

@@ -712,6 +712,116 @@ OfflineMapCreator.destroy()
   -> if local player is room host, open the next TrainingSettingsWindow
 ```
 
+## Post-battle achievements
+
+Wargaming's battle server, not the client, decides which medals a battle
+awards, so `res/packages/scripts.pkg` ships the thresholds without the
+predicates. `scripts/common/arena_achievements.py` of `#1513` holds
+`ACHIEVEMENT_CONDITIONS`, and `getAchievementCondition` only consults
+`ACHIEVEMENT_CONDITIONS_EXT` when `ARENA_BONUS_TYPE_CAPS.checkAny` accepts the
+arena bonus type. That build answers `False` for every bonus type, so the
+regular battles this product packs (`bonusType` 1) use the base table. Those
+numbers are copied verbatim into
+`src/res/scripts/client/gui/mods/offline_lan_0922/battle_achievements.py`; the
+predicates around them combine one exact constant with the documented shape of
+the medal. The full table holds 62 entries across every mode this build ever
+shipped, so `scripts/item_defs/achievements.xml` selects the subset that
+matters: each achievement there carries a `mode`, and only `mode="random"`
+belongs to the battles this product packs.
+
+A threshold is not an award rule. The rest of each rule is in the client's own
+description text, `res/text/LC_MESSAGES/achievements.mo`, where every medal
+carries a `<name>_descr` summary and a `<name>_condition` clause list. Those
+clauses decide the class fences, the friendly-fire exclusions, the win and
+survival requirements and the tier floors that no constant carries: Cold-Blooded
+ships only a distance and a kill count while its description also demands
+light-tank victims and a Tier IV gun, and Rock Solid's constant bounds the
+rammer's speed while its description also requires the victim to have been
+faster. Each predicate quotes the clause it enforces, so the code and the
+client cannot drift apart.
+
+The same text settles two questions a threshold cannot. Cool-Headed has no
+survival clause, so a vehicle that dies still keeps a ten-bounce run. The
+Billotte family says "击毁数将在受到所有伤害后计算" — frags are counted after
+all damage is received — which makes the final totals the rule and rules out
+any per-event ordering requirement.
+
+`UNAWARDED_ACHIEVEMENTS` in the same module records every medal this product
+deliberately does not award and why, so no later change closes a gap by
+inventing a coefficient. Every one of those reasons comes from the pinned
+client rather than from documentation:
+
+- `gui/shared/gui_items/dossier/factories.pyc` registers `sniper` and
+  `medalWittmann` as `DeprecatedAchievement`, whose `checkIsValid` returns
+  `validators.alreadyAchieved`. The client itself treats both as historical
+  and will not accept a newly earned one.
+- `alaric` and `lumberjack` have conditions and record IDs but no entry at all
+  in `item_defs/achievements.xml`, and no name, description or condition in
+  `achievements.mo` either. They were cancelled before release and no account
+  has ever held one.
+
+The deprecation is stated in the text as well: Sniper reads "从0.8.11版本后将
+无法获得" and Bölter's Medal "从0.8.0版本后将无法获得".
+
+The remaining three are product decisions, not missing data: the two platoon
+medals have no platoon to award to, and Mark of Mastery needs the per-vehicle
+experience distributions retail computes.
+
+The LAN server owns the decision. `_finish_battle` freezes the complete public
+roster first, awards from it, and stores the resulting names on every roster
+row, humans and Bots alike. The three consumers of that wire field — the
+server's persisted-receipt validator, the client receiver and the durable
+post-battle store — accept only names from that table, and a receipt written
+before achievements shipped still loads with an empty list.
+
+| Producer | Exact consumer contract covered |
+| --- | --- |
+| `VEH_FULL_RESULTS.achievements` / `VEH_PUBLIC_RESULTS.achievements` | Record database IDs from `dossiers2.custom.records.RECORD_DB_IDS`. `gui/battle_results/reusable/shared.py` maps each one through `DB_ID_TO_RECORD`, so a name the pinned client does not register is dropped before packing rather than raising inside the results window. |
+| `VEH_FULL_RESULTS.dossierPopUps` | `makeAchievementFromPersonal` reads `(recordDBID, value)` pairs for the personal results medals. `AchievementBlock.setRecord` renders `value` as the badge counter for every non-series achievement, so the value carried is the account's running total after the battle. |
+| `VEH_FULL_RESULTS` / `VEH_PUBLIC_RESULTS` `directHitsReceived`, `potentialDamageReceived` | The results screen shows both columns, and Steel Wall reads them. The server accumulates the hit count and each hit's `potential_damage` where it already resolves the shot. |
+| `VehicleInteractionDetails.crits` | `gui/shared/crits_mask_parser.py` reads bits 0-7 as critically damaged devices, 12-23 as destroyed devices and 24-31 as destroyed crew, indexed by `VEHICLE_DEVICE_TYPE_NAMES` and `VEHICLE_TANKMAN_TYPE_NAMES`. Both server track devices map onto the single `track` slot and each numbered crew role onto its base type. The field is a mask, so distinct modules accumulate with `or` and a repeated crit stays one bit. |
+| vehicle and account `achievements` dossier blocks | `getVehicleDossierDescr` and `getAccountDossierDescr` carry one counter per medal plus the aggregate `battleHeroes`. An unregistered name raises `KeyError` inside the native block, so the writer skips it. `StatsRequester.accountDossier` reads the `stats` cache key `dossier`, which the account snapshot and the post-battle diff now publish. |
+
+Two statistics the server never recorded are now canonical round state, because
+`#1513` displays both and the conditions read them: each vehicle's own
+accumulated `capturePoints`, and the `droppedCapturePoints` credited to the
+enemy whose damage reset a capture. Without them Invader and Defender could
+never be awarded and both results columns stayed at zero.
+
+`spotted` is a detection count, not a sighting count. A vehicle is detected
+when it becomes visible to a team that could not see it a moment earlier, and
+every direct observer on that team at that instant detected it. The statistic
+counts distinct enemies per observer, so re-acquiring a target that observer
+already revealed adds nothing, while an enemy that goes dark and reappears
+credits whoever finds it that time. This replaces a count of every enemy the
+vehicle had ever directly seen, which had no team fence and could never drop.
+Patrol Duty (`scout`) reads the same number, and earned experience moves with
+it.
+
+Ammunition belongs to whoever owns the gun, so Fadin's medal takes the shell
+total from the producer rather than inferring it. The visible client puts
+`shells_before_shot` on its fire intent, read before the local gun debits the
+round; the worker puts the same field on a Bot launch, computed from the
+inventory it has just debited. The server freezes the flag on the projectile
+and awards the medal only when that shot also left no living enemy.
+
+That one optional field crosses four exact contracts on its way, and each had
+to be widened for it: the fire-intent key set in `submit_fire_intent`, the
+`launch_projectile` allowlist, the worker's `on_fire_intent` relay check, and
+`_local_launch_record`, the projection that decides which Bot fields reach the
+launch publisher at all. The first three reject an unknown field outright; the
+fourth drops it silently, which would have left Bots unable to earn the medal
+with nothing to show for it. Each of the three rejecting validators has a test
+that an unknown field is still refused.
+
+Battle-hero medals go to one actor per battle, ordered by the medal's own
+metric and broken by earned experience, which is Wargaming's documented
+tie-break. Bots are ordinary participants and can take one.
+
+This is static and pure-data coverage. It proves which fields reach the native
+packers with which values; only acceptance on the exact Windows client can show
+the results window rendering those ribbons, counters and tooltips.
+
 ## Stock map-selection lifecycle
 
 Before the local Account creates the lobby, a chain-safe adapter intercepts the

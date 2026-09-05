@@ -25,6 +25,11 @@ OFFLINE_GOLD = 1000000
 OFFLINE_FREE_XP = 100000000
 OFFLINE_GARAGE_SLOTS = 2000
 OFFLINE_BARRACKS_BERTHS = 2000
+# #1513 counts each battle-hero medal in the vehicle dossier's aggregate
+# ``battleHeroes`` record as well as in its own counter.
+BATTLE_HERO_ACHIEVEMENTS = frozenset((
+    'warrior', 'invader', 'sniper', 'sniper2', 'mainGun', 'defender',
+    'steelwall', 'supporter', 'scout', 'evileye'))
 
 
 def _vehicle_records(vehicle):
@@ -385,6 +390,7 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             # starts the stock lobby tutorial/hints lifecycle even though this
             # account cannot persist its tutorial actions on a retail server.
             'denunciationsLeft': 0, 'tutorialsCompleted': 33553532,
+            'dossier': account_dossier(progress),
             'battlesTillCaptcha': 0, 'dailyPlayHours': [0],
             # Full daily/weekly periods disable parental-control blocking in
             # the native #1513 GameSessionController.  Zero means no allowed
@@ -570,6 +576,57 @@ def _vehicle_type_compact_descr(type_name):
         'vehicle', nation_id, vehicle_type_id))
 
 
+def _write_achievements(dossier, counts):
+    """Store earned medal counters in the exact #1513 dossier block.
+
+    The block's record layout is fixed by the pinned client, so a name it
+    does not carry is skipped rather than allowed to raise inside the native
+    dossier builder.  ``battleHeroes`` mirrors stock's aggregate counter.
+    """
+    if not isinstance(counts, dict) or not counts:
+        return
+    block = dossier['achievements']
+    heroes = 0
+    for name in sorted(counts):
+        value = counts.get(name)
+        # Optional persisted state reaches here, so a counter that is not a
+        # positive whole number is dropped rather than coerced.  ``bool`` is
+        # an ``int`` subclass and is not a count.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            continue
+        if name in BATTLE_HERO_ACHIEVEMENTS:
+            heroes += value
+        try:
+            block[name] = value
+        except (KeyError, TypeError, ValueError):
+            continue
+    if heroes:
+        try:
+            block['battleHeroes'] = heroes
+        except (KeyError, TypeError, ValueError):
+            pass
+
+
+def account_dossier(postbattle_progress=None, dossier_factory=None):
+    """Return the account dossier compact descriptor #1513 reads.
+
+    ``StatsRequester.accountDossier`` of the pinned client reads the ``stats``
+    cache key ``dossier``; the lobby profile builds its achievements page from
+    it.  An account with no medals keeps the stock empty-string value.
+    """
+    progress = (postbattle_progress
+                if isinstance(postbattle_progress, dict) else {})
+    counts = progress.get('achievements')
+    if not isinstance(counts, dict) or not counts:
+        return ''
+    if dossier_factory is None:
+        from dossiers2.custom.builders import getAccountDossierDescr
+        dossier_factory = getAccountDossierDescr
+    dossier = dossier_factory('')
+    _write_achievements(dossier, counts)
+    return dossier.makeCompDescr()
+
+
 def dossiers(revision=0, max_change_time=0, postbattle_progress=None,
              dossier_factory=None, vehicle_type_resolver=None):
     """Return exact native-built vehicle dossier rows for #1513 cache."""
@@ -619,6 +676,7 @@ def dossiers(revision=0, max_change_time=0, postbattle_progress=None,
                 'damageAssistedStun'):
             block2[field_name] = max(
                 0, int(stats.get(field_name, 0) or 0))
+        _write_achievements(dossier, stats.get('achievements'))
         rows.append((resolver(type_name), change_time,
                      dossier.makeCompDescr()))
     # This cache version describes our dossier row schema, not battle count.
