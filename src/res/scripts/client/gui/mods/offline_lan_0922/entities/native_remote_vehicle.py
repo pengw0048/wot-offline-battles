@@ -11,6 +11,7 @@ fallback for diagnostics and clients that cannot provide the pinned ABI.
 from __future__ import print_function
 
 import math
+import sys
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _RemoteShotPresenter, _blend_angle, _component_aim_angles,
@@ -45,6 +46,52 @@ def set_draw_visibility(entity, visible):
     return True
 
 
+def present_shot_impulse(math_module, appearance, direction, impulse):
+    """Feed one retail hull shot impulse through a stock CompoundAppearance.
+
+    Exact #1513 ``Vehicle.showDamageFromShot`` passes the first decoded hit
+    point's world-space axis and ``shotEffects[effectsIndex]['targetImpulse']``
+    to ``CompoundAppearance.receiveShotImpulse(dir, impulse)``.  That method
+    skips a damaged model, forwards to ``swingingAnimator.receiveShotImpulse``
+    and to ``CrashedTracksController.receiveShotImpulse``, which is a no-op in
+    this build.  The native animator method only accumulates ``dir * impulse``
+    into its own shot-swinging vector, so a live stock animator is the whole
+    requirement: it reads no filter, physics body, node or model.  Stock
+    dereferences ``swingingAnimator`` without a guard, so a missing animator
+    must be rejected here instead of raising inside stock code.
+    """
+    if appearance is None or getattr(
+            appearance, 'swingingAnimator', None) is None:
+        return False
+    receive = getattr(appearance, 'receiveShotImpulse', None)
+    if not callable(receive):
+        return False
+    try:
+        impulse = float(impulse)
+        if hasattr(direction, 'x'):
+            values = [float(direction.x), float(direction.y),
+                      float(direction.z)]
+        else:
+            values = [float(direction[index]) for index in range(3)]
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+            OverflowError):
+        return False
+    if impulse <= 0.0 or math.isnan(impulse) or math.isinf(impulse):
+        return False
+    if any(math.isnan(value) or math.isinf(value) for value in values):
+        return False
+    length = math.sqrt(sum(value * value for value in values))
+    if length <= 1.0e-6:
+        return False
+    # Retail's direction is a hit component's transformed unit axis and the
+    # native accumulator scales it by the impulse.  Normalise this runtime's
+    # contact direction rather than rejecting a denormalised one, so the
+    # rocking magnitude stays the retail impulse.
+    receive(math_module.Vector3(values[0] / length, values[1] / length,
+                                values[2] / length), impulse)
+    return True
+
+
 class _AimTarget(object):
 
     def __init__(self, math_module):
@@ -58,8 +105,9 @@ class _NativeRemoteState(object):
 
     def __init__(self, bigworld, math_module, compatibility, data_links,
                  position, rotation, interpolate_motion=True,
-                 authority_geometry=False):
+                 authority_geometry=False, capability_report=None):
         self._bigworld = bigworld
+        self._capability_report = capability_report
         self._math = math_module
         self._compatibility = compatibility
         self._data_links = data_links
@@ -110,8 +158,11 @@ class _NativeRemoteState(object):
         self.track_mode = None
         self._track_feed = None
         self._track_feed_hidden = False
+        self.track_outcome = 'never fed'
+        self.track_written = None
         self.presentation_capabilities = {}
         self.presentation_errors = {}
+        self._capabilities_changed = False
 
     def _write_matrix(self, matrix):
         matrix.setRotateYPR((self.yaw, self.pitch, self.roll))
@@ -362,6 +413,8 @@ class _NativeRemoteState(object):
             return False
 
     def _record_capability(self, name, available, error=None):
+        if self.presentation_capabilities.get(name) is not bool(available):
+            self._capabilities_changed = True
         self.presentation_capabilities[name] = bool(available)
         if error is None:
             self.presentation_errors.pop(name, None)
@@ -373,6 +426,31 @@ class _NativeRemoteState(object):
                 self.presentation_capabilities
             entity._offlinePresentationErrors = self.presentation_errors
         return bool(available)
+
+    def _publish_capabilities(self):
+        """Report the binding outcome once each set of records is complete.
+
+        ``_bind_stock_motion`` fills five records one at a time, so reporting
+        every write would publish partial sets.  Call this at the two stable
+        points instead: after the initial rebind and after the first belt
+        write settles the engine-owned record.
+        """
+        # update_tracks reaches this on every belt write, so the steady
+        # state must cost one boolean test rather than a dict sort.
+        if not self._capabilities_changed:
+            return False
+        self._capabilities_changed = False
+        if not callable(self._capability_report):
+            return False
+        try:
+            return bool(self._capability_report(self))
+        except Exception:
+            # update_tracks runs under an optional-feature guard that retires
+            # belt animation for the whole round on an exception.  A failed
+            # diagnostic write must never cost the presentation, and it
+            # cannot report its own failure, so stop reporting instead.
+            self._capability_report = None
+            return False
 
     def _read_vehicle_speed(self):
         return float(self.speed)
@@ -412,7 +490,11 @@ class _NativeRemoteState(object):
 
         swinging = getattr(appearance, 'swingingAnimator', None)
         if swinging is not None:
+            restore = None
             try:
+                restore = (
+                    swinging.placingCompensationMatrix,
+                    swinging.worldMatrix)
                 # CompoundAppearance initially binds this to the entity's
                 # native filter matrices.  Our model is driven by a copied
                 # LAN MatrixAnimation whose root already contains the
@@ -424,6 +506,19 @@ class _NativeRemoteState(object):
                 swinging.worldMatrix = self.provider
                 self._record_capability('body_swinging', True)
             except Exception as error:
+                rollback_errors = []
+                if restore is not None:
+                    for name, value in (
+                            ('placingCompensationMatrix', restore[0]),
+                            ('worldMatrix', restore[1])):
+                        try:
+                            setattr(swinging, name, value)
+                        except Exception as rollback_error:
+                            rollback_errors.append('%s: %s' % (
+                                name, rollback_error))
+                if rollback_errors:
+                    error = RuntimeError('%s; rollback failed: %s' % (
+                        error, '; '.join(rollback_errors)))
                 self._record_capability('body_swinging', False, error)
         else:
             self._record_capability(
@@ -469,6 +564,7 @@ class _NativeRemoteState(object):
             'stock_suspension', suspension is not None,
             None if suspension is not None else
             'stock suspension is unavailable')
+        self._publish_capabilities()
         return bool(engine_ready or swinging is not None or
                     wheels is not None or suspension is not None)
 
@@ -536,6 +632,7 @@ class _NativeRemoteState(object):
         entity.settle_motion = self.settle_motion
         entity.update_tracks = self.update_tracks
         entity.track_scroll_readback = self.track_scroll_readback
+        entity.track_feed_state = self.track_feed_state
         entity.model.matrix = self.provider
         self._publish_pose()
         appearance = entity.appearance
@@ -627,9 +724,25 @@ class _NativeRemoteState(object):
             entity._gun_pitch = raw_gun_pitch
         return True
 
+    def present_hit_impulse(self, direction, impulse):
+        """Rock the hull like retail, only while stock still owns the model."""
+        if not self._engine_owns_entity():
+            # Once BigWorld releases the PyEntity, reading ``appearance`` can
+            # already dereference freed native memory.
+            return False
+        if self.presentation_capabilities.get('body_swinging') is not True:
+            # This runtime rebinds the stock animator's world matrix to the
+            # copied LAN provider.  Without that proven rebind the animator
+            # is either absent or still swinging around a stale spawn pose.
+            return False
+        return present_shot_impulse(
+            self._math, getattr(self.entity, 'appearance', None),
+            direction, impulse)
+
     def update_tracks(self, left, right, mode):
         entity = self.entity
         if entity is None:
+            self.track_outcome = 'detached'
             return False
         if not self._engine_owns_entity():
             # Once BigWorld releases the PyEntity, even reading a component
@@ -640,9 +753,11 @@ class _NativeRemoteState(object):
             self.presentation_errors.setdefault(
                 'engine_owned_track_motion',
                 'BigWorld no longer owns the Vehicle entity')
+            self.track_outcome = 'not engine owned'
             return False
         appearance = getattr(entity, 'appearance', None)
         if appearance is None:
+            self.track_outcome = 'no appearance'
             return False
         left = float(left)
         right = float(right)
@@ -654,6 +769,9 @@ class _NativeRemoteState(object):
         hidden = not bool(getattr(entity, '_offlineNativeDrawVisible', True))
         if hidden:
             if self._track_feed_hidden:
+                # The belts are already settled behind a hidden compound, so
+                # the caller's authoritative speed is deliberately not fed.
+                self.track_outcome = 'hidden and settled'
                 return False
             self._track_feed_hidden = True
             left = 0.0
@@ -673,6 +791,7 @@ class _NativeRemoteState(object):
         feed = (round(left, 3), round(right, 3), tuple(mode),
                 left_contact, right_contact)
         if feed == self._track_feed:
+            self.track_outcome = 'deduplicated'
             return bool(self.presentation_capabilities.get(
                 'engine_owned_track_motion'))
         native_updated = False
@@ -697,6 +816,7 @@ class _NativeRemoteState(object):
             self._record_capability(
                 'engine_owned_track_motion', False,
                 'Appearance/filter ownership or movementInfo is unavailable')
+        self._publish_capabilities()
         if not hidden and mode != self.track_mode:
             appearance.changeEngineMode(mode, True)
             self.track_mode = mode
@@ -709,7 +829,24 @@ class _NativeRemoteState(object):
         # allowed to retry instead of becoming a permanent false success.
         if native_updated:
             self._track_feed = feed
+        self.track_written = (left, right)
+        self.track_outcome = ('hidden and settling' if hidden else
+                              ('engine and python' if native_updated
+                               else 'python only'))
         return bool(native_updated)
+
+    def track_feed_state(self):
+        """Report what the last belt update actually wrote, and why.
+
+        ``_update_bot_tracks`` logs the authoritative feed it computed, which
+        is not what reaches the controller on a hide edge or a deduplicated
+        sample.  Publishing the effective write and its outcome keeps a zero
+        readback attributable instead of looking like a native failure.
+        """
+        return (self.track_written, self.track_outcome,
+                bool(self._track_feed_hidden),
+                self.presentation_capabilities.get(
+                    'engine_owned_track_motion'))
 
     def track_scroll_readback(self):
         if self.track_scroll is None:
@@ -765,9 +902,32 @@ class NativeRemoteVehicleFactory(object):
         self._failed_creates = set()
         self._descriptors = {}
         self._hit_testers = {}
+        self._reported_capabilities = set()
         self.track_animation_error = None
         self._shot_presenter = _RemoteShotPresenter(
             bigworld, math_module, model_assembler, self._space_id)
+
+    def report_capabilities(self, state):
+        """Log each distinct stock presentation binding result once a round.
+
+        ``_bind_stock_motion`` records whether the stock engine audition,
+        swinging animator, LOD position, wheels animator and suspension were
+        rebound to the copied LAN pose, and ``update_tracks`` adds the
+        engine-owned belt write.  Nothing consumed those records, so a real
+        battle could not show which stock components were live.  One line per
+        distinct outcome keeps a full lineup readable.
+        """
+        capabilities = state.presentation_capabilities
+        signature = tuple(sorted(capabilities.items()))
+        if not signature or signature in self._reported_capabilities:
+            return False
+        self._reported_capabilities.add(signature)
+        errors = dict(state.presentation_errors)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] PRESENTATION %s%s\n' % (
+                ' '.join('%s=%s' % (name, value) for name, value in signature),
+                '' if not errors else ' errors=%r' % (errors,)))
+        return True
 
     def prepare_descriptor(self, descriptor):
         # Stock Vehicle.prerequisites/CompoundAppearance own BSP references.
@@ -792,7 +952,8 @@ class NativeRemoteVehicleFactory(object):
             self._bigworld, self._math, self._compatibility,
             self._data_links, position, rotation,
             interpolate_motion=self._interpolate_motion,
-            authority_geometry=self._authority_geometry)
+            authority_geometry=self._authority_geometry,
+            capability_report=self.report_capabilities)
         self._vehicles[int(entity_id)] = None
         try:
             self._binding.arena_vehicle_added(entity_id, {
@@ -878,6 +1039,12 @@ class NativeRemoteVehicleFactory(object):
         if state is None or state.entity is None:
             return False
         return state.update_siege_pose()
+
+    def present_hit_impulse(self, entity_id, direction, impulse):
+        state = self._states.get(int(entity_id))
+        if state is None or state.entity is None:
+            return False
+        return state.present_hit_impulse(direction, impulse)
 
     def request_wreck(self, unused_entity_id):
         # Vehicle.onHealthChanged owns stock damaged-model replacement.
