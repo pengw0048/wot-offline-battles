@@ -323,6 +323,36 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual(0, self.session._team_status()['preferred'])
         self.assertEqual('Requesting a random team...', self.statuses[-1])
 
+    def test_random_waiting_player_is_not_reported_on_either_team(self):
+        self.client.team = 0
+        self.client.slot = -1
+        self.client.roster = [
+            {'id': 'p1', 'team': 0, 'slot': -1},
+            {'id': 'p2', 'team': 2, 'slot': 0},
+        ]
+
+        status = self.session._team_status()
+
+        self.assertIsNone(status['team'])
+        self.assertEqual(0, status['preferred'])
+        self.assertEqual({1: 0, 2: 1}, status['counts'])
+
+    def test_full_team_denial_restores_random_selection(self):
+        self.client.ready = True
+        self.client.phase = 'waiting'
+        self.client.team = 0
+        self.client.slot = -1
+        self.session.state = 'waiting'
+
+        self.assertTrue(self.session.select_team(1))
+        self.assertEqual(1, self.session._team_status()['preferred'])
+
+        self.emit('team_denied', {'code': 'team_full', 'team': 1})
+
+        self.assertEqual(0, self.session._team_status()['preferred'])
+        self.assertEqual(0, self.saved_room_states[-1]['team'])
+        self.assertIn('Choose the other team or Random', self.statuses[-1])
+
     def test_host_changes_team_sizes_without_restarting_the_session(self):
         self.client.ready = True
         self.client.phase = 'waiting'

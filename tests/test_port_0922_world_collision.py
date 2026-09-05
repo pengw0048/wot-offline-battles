@@ -755,6 +755,7 @@ class WorldCollisionTests(unittest.TestCase):
                         bigworld, math_module, 1, _Vector(), 0.0, velocity,
                         descriptor, False, 0.04,
                         motion_yaw=motion_yaw))
+                self.assertEqual(15, len(horizontal_calls))
                 lower_rays = [
                     (start, end) for start, end in horizontal_calls
                     if abs(start.y - 0.6) < 0.001]
@@ -957,6 +958,791 @@ class WorldCollisionTests(unittest.TestCase):
 
         self.assertFalse(blocked)
         self.assertTrue(horizontal_calls)
+
+    def test_hull_pitch_keeps_lower_rays_above_rising_terrain_seam(self):
+        gradient = 0.20
+        seam_normal = _Vector(0.0, 0.0, -1.0)
+
+        def collide(unused_space, start, end, unused_mask):
+            if abs(start.y - end.y) > 10.0:
+                return (_Vector(start.x, gradient * start.z, start.z),)
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            denominator = delta_y - gradient * delta_z
+            if abs(denominator) <= 1.0e-9:
+                return None
+            progress = (gradient * start.z - start.y) / denominator
+            if not 0.0 <= progress <= 1.0:
+                return None
+            return (_Vector(
+                start.x, start.y + delta_y * progress,
+                start.z + delta_z * progress), seam_normal, 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertTrue(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04))
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04, pitch=-math.atan(gradient)))
+
+    def test_clamped_long_lookahead_still_admits_continuous_slope(self):
+        gradient = 0.20
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, world_gradient in (
+                (20.0, gradient), (-20.0, -gradient)):
+            counts = {'ground': 0, 'horizontal': 0}
+
+            def collide(unused_space, start, end, unused_mask):
+                if abs(start.y - end.y) > 10.0:
+                    counts['ground'] += 1
+                    ground_y = world_gradient * start.z
+                    if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
+                        return (_Vector(start.x, ground_y, start.z),)
+                    return None
+                counts['horizontal'] += 1
+                delta_y = end.y - start.y
+                delta_z = end.z - start.z
+                denominator = delta_y - world_gradient * delta_z
+                if abs(denominator) <= 1.0e-9:
+                    return None
+                progress = (world_gradient * start.z - start.y) / denominator
+                if not 0.0 <= progress <= 1.0:
+                    return None
+                return (_Vector(
+                    start.x, start.y + delta_y * progress,
+                    start.z + delta_z * progress),
+                    _Vector(0.0, 0.0, -1.0), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                None, False, 0.20,
+                pitch=-math.atan(world_gradient)))
+            self.assertEqual(9, counts['horizontal'])
+            self.assertEqual(33, counts['ground'])
+
+    def test_exact_top_rejects_wall_hidden_by_coarse_profile(self):
+        gradient = 0.20
+        wall_z = 6.813
+        wall_bottom = gradient * wall_z
+        wall_top = wall_bottom + 0.61
+        exact_wall_queries = [0]
+        wall_hits = []
+
+        def collide(unused_space, start, end, unused_mask):
+            if abs(start.y - end.y) > 10.0:
+                at_wall = abs(start.z - wall_z) <= 1.0e-6
+                if at_wall:
+                    exact_wall_queries[0] += 1
+                top_y = wall_top if at_wall else gradient * start.z
+                if min(start.y, end.y) <= top_y <= max(start.y, end.y):
+                    return (_Vector(start.x, top_y, start.z),)
+                return None
+            candidates = []
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            terrain_denominator = delta_y - gradient * delta_z
+            if abs(terrain_denominator) > 1.0e-9:
+                progress = (
+                    gradient * start.z - start.y) / terrain_denominator
+                if 0.0 <= progress <= 1.0:
+                    candidates.append((progress, _Vector(
+                        start.x, start.y + delta_y * progress,
+                        start.z + delta_z * progress)))
+            if abs(delta_z) > 1.0e-9:
+                progress = (wall_z - start.z) / delta_z
+                if 0.0 <= progress <= 1.0:
+                    hit_y = start.y + delta_y * progress
+                    if wall_bottom <= hit_y <= wall_top:
+                        wall_hits.append(hit_y)
+                        candidates.append((progress, _Vector(
+                            start.x, hit_y, wall_z)))
+            if not candidates:
+                return None
+            unused_progress, point = min(candidates, key=lambda row: row[0])
+            return point, _Vector(0.0, 0.0, -1.0), 0
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertEqual('hard',
+            world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 35.0,
+                None, False, 0.20, True, commit_enabled=False,
+                pitch=-math.atan(gradient)))
+        self.assertEqual(1, exact_wall_queries[0])
+        self.assertTrue(wall_hits)
+        self.assertAlmostEqual(0.130194, wall_hits[0] - wall_bottom,
+                               places=5)
+
+    def test_level_point_six_one_wall_needs_no_ground_queries(self):
+        wall_z = 6.813
+        wall_top = 0.61
+        ground_queries = [0]
+
+        def collide(unused_space, start, end, unused_mask):
+            if abs(start.y - end.y) > 10.0:
+                ground_queries[0] += 1
+                return (_Vector(start.x, 0.0, start.z),)
+            delta_z = end.z - start.z
+            if abs(delta_z) <= 1.0e-9:
+                return None
+            progress = (wall_z - start.z) / delta_z
+            if not 0.0 <= progress <= 1.0:
+                return None
+            hit_y = start.y + (end.y - start.y) * progress
+            if not 0.0 <= hit_y <= wall_top:
+                return None
+            return (_Vector(start.x, hit_y, wall_z),
+                    _Vector(0.0, 0.0, -1.0), 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertEqual('hard',
+            world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 35.0,
+                None, False, 0.20, True, commit_enabled=False))
+        self.assertEqual(0, ground_queries[0])
+
+    def test_exact_ground_top_uses_one_millimetre_epsilon(self):
+        point = _Vector(1.0, 2.0, 3.0)
+        top_y = [point.y]
+        calls = []
+
+        def collide(unused_space, start, end, unused_mask):
+            calls.append((start, end))
+            return (_Vector(start.x, top_y[0], start.z),)
+
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = collide
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        collision = (point, _Vector(0.0, 0.0, -1.0), 0)
+
+        with mock.patch.dict(sys.modules, {'BigWorld': bigworld}):
+            top_y[0] = point.y + world_collision._GROUND_HIT_EPSILON
+            self.assertTrue(world_collision._hit_matches_exact_ground_top(
+                1, math_module, _Vector(), collision, 10.0))
+            top_y[0] += 1.0e-6
+            self.assertFalse(world_collision._hit_matches_exact_ground_top(
+                1, math_module, _Vector(), collision, 10.0))
+
+        self.assertEqual(2, len(calls))
+
+    def test_exact_top_filter_skips_broken_skin_to_terrain(self):
+        gradient = 0.20
+        profile_look = 3.5 + 20.0 * 0.20 + 0.20
+        profile_segment = profile_look / 6.0
+        profile_samples = [
+            profile_segment * index for index in range(7)]
+        filtered_queries = []
+
+        def reject_broken(*hit):
+            return tuple(hit[2:4]) != (37, 22)
+
+        def collide(unused_space, start, end, unused_mask, *callbacks):
+            if abs(start.y - end.y) > 10.0:
+                terrain_y = gradient * start.z
+                is_profile_sample = any(
+                    abs(start.z - sample) <= 1.0e-6
+                    for sample in profile_samples)
+                if not is_profile_sample:
+                    if callbacks:
+                        filtered_queries.append((start, end, callbacks[0]))
+                        if not callbacks[0](75, 0, 37, 22):
+                            return (_Vector(start.x, terrain_y, start.z),)
+                    return (_Vector(start.x, terrain_y + 0.40, start.z),)
+                return (_Vector(start.x, terrain_y, start.z),)
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            denominator = delta_y - gradient * delta_z
+            if abs(denominator) <= 1.0e-9:
+                return None
+            progress = (gradient * start.z - start.y) / denominator
+            if not 0.0 <= progress <= 1.0:
+                return None
+            return (_Vector(
+                start.x, start.y + delta_y * progress,
+                start.z + delta_z * progress),
+                _Vector(0.0, 0.0, -1.0), 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        with mock.patch.object(
+                world_collision, 'ground_collision_filter',
+                return_value=reject_broken) as filter_factory:
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 20.0,
+                None, False, 0.20, pitch=-math.atan(gradient)))
+
+        # Nine conservative lane-cap samples, three exact-top probes and three
+        # seven-sample ground profiles all hide a destructible skin that has
+        # already been marked broken.
+        self.assertEqual(33, filter_factory.call_count)
+        self.assertEqual(9, len(filtered_queries))
+        self.assertTrue(all(row[2] is reject_broken
+                            for row in filtered_queries))
+
+    def test_ground_profile_filter_skips_broken_skin_to_terrain(self):
+        gradient = 0.20
+        profile_look = 3.5 + 20.0 * 0.20 + 0.20
+        broken_z = profile_look / 6.0 * 2.0
+        broken_queries = {'raw': 0, 'filtered': 0}
+
+        def reject_broken(*hit):
+            return tuple(hit[2:4]) != (37, 22)
+
+        def collide(unused_space, start, end, unused_mask, *callbacks):
+            if abs(start.y - end.y) > 10.0:
+                terrain_y = gradient * start.z
+                if abs(start.z - broken_z) <= 1.0e-6:
+                    if callbacks:
+                        broken_queries['filtered'] += 1
+                        if not callbacks[0](75, 0, 37, 22):
+                            return (_Vector(start.x, terrain_y, start.z),)
+                    else:
+                        broken_queries['raw'] += 1
+                    return (_Vector(start.x, terrain_y + 2.0, start.z),)
+                return (_Vector(start.x, terrain_y, start.z),)
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            denominator = delta_y - gradient * delta_z
+            if abs(denominator) <= 1.0e-9:
+                return None
+            progress = (gradient * start.z - start.y) / denominator
+            if not 0.0 <= progress <= 1.0:
+                return None
+            return (_Vector(
+                start.x, start.y + delta_y * progress,
+                start.z + delta_z * progress),
+                _Vector(0.0, 1.0, -gradient), 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        with mock.patch.object(
+                world_collision, 'ground_collision_filter',
+                return_value=reject_broken):
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 20.0,
+                None, False, 0.20, pitch=-math.atan(gradient)))
+
+        self.assertEqual(0, broken_queries['raw'])
+        self.assertGreater(broken_queries['filtered'], 0)
+
+    def test_raised_chords_ignore_matching_long_slope_seams(self):
+        gradient = 0.50
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, world_gradient in (
+                (20.0, gradient), (-20.0, -gradient)):
+            counts = {'ground': 0, 'horizontal': 0, 'seams': 0}
+
+            def collide(unused_space, start, end, unused_mask):
+                if abs(start.y - end.y) > 10.0:
+                    counts['ground'] += 1
+                    ground_y = world_gradient * start.z
+                    if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
+                        return (_Vector(start.x, ground_y, start.z),)
+                    return None
+                counts['horizontal'] += 1
+                delta_y = end.y - start.y
+                delta_z = end.z - start.z
+                denominator = delta_y - world_gradient * delta_z
+                if abs(denominator) <= 1.0e-9:
+                    return None
+                progress = (world_gradient * start.z - start.y) / denominator
+                if not 0.0 <= progress <= 1.0:
+                    return None
+                counts['seams'] += 1
+                return (_Vector(
+                    start.x, start.y + delta_y * progress,
+                    start.z + delta_z * progress),
+                    _Vector(0.0, 0.0, -1.0), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                None, False, 0.20,
+                pitch=-math.atan(world_gradient)))
+            self.assertEqual(9, counts['horizontal'])
+            self.assertEqual(9, counts['seams'])
+            self.assertEqual(39, counts['ground'])
+
+    def test_airborne_posed_chord_admits_continuous_slope(self):
+        gradient = 0.50
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, world_gradient in (
+                (20.0, gradient), (-20.0, -gradient)):
+            ground_calls = [0]
+
+            def collide(unused_space, start, end, unused_mask):
+                if abs(start.y - end.y) > 10.0:
+                    ground_calls[0] += 1
+                    ground_y = world_gradient * start.z
+                    if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
+                        return (_Vector(start.x, ground_y, start.z),)
+                    return None
+                delta_y = end.y - start.y
+                delta_z = end.z - start.z
+                denominator = delta_y - world_gradient * delta_z
+                if abs(denominator) <= 1.0e-9:
+                    return None
+                progress = (world_gradient * start.z - start.y) / denominator
+                if not 0.0 <= progress <= 1.0:
+                    return None
+                return (_Vector(
+                    start.x, start.y + delta_y * progress,
+                    start.z + delta_z * progress),
+                    _Vector(0.0, 1.0, -world_gradient), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertEqual('clear',
+                world_collision.check_horizontal_collision(
+                    bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                    None, True, 0.20, True, commit_enabled=False,
+                    pitch=-math.atan(world_gradient)))
+            # Each lane confirms its in-footprint trend, look-ahead top and
+            # continuous ground profile before accepting the native slope.
+            self.assertEqual(30, ground_calls[0])
+
+    @staticmethod
+    def _pitched_hull_scene(ground_gradient, wall_z=None, wall_top=None,
+                            wall_end=None, ground_end=None):
+        """Build one collide() over a constant-gradient ground plus a wall."""
+        def ground_at(z):
+            return ground_gradient * z
+
+        def collide(unused_space, start, end, unused_mask, *unused):
+            if abs(start.y - end.y) > 10.0:
+                tops = []
+                if ground_end is None or start.z <= ground_end:
+                    tops.append(ground_at(start.z))
+                if (wall_z is not None and wall_end is not None and
+                        min(wall_z, wall_end) <= start.z <=
+                        max(wall_z, wall_end)):
+                    tops.append(wall_top)
+                if tops:
+                    height = max(tops)
+                    if min(start.y, end.y) <= height <= max(start.y, end.y):
+                        return (_Vector(start.x, height, start.z),)
+                return None
+            steps = 64
+            for index in range(steps + 1):
+                fraction = float(index) / steps
+                z = start.z + (end.z - start.z) * fraction
+                y = start.y + (end.y - start.y) * fraction
+                if ((ground_end is None or z <= ground_end) and
+                        y <= ground_at(z)):
+                    length = math.sqrt(
+                        1.0 + ground_gradient * ground_gradient)
+                    return (_Vector(start.x, y, z),
+                            _Vector(0.0, 1.0 / length,
+                                    -ground_gradient / length), 0)
+            if wall_z is None:
+                return None
+            delta_z = end.z - start.z
+            if abs(delta_z) <= 1.0e-9:
+                return None
+            fraction = (wall_z - start.z) / delta_z
+            if not 0.0 <= fraction <= 1.0:
+                return None
+            y = start.y + (end.y - start.y) * fraction
+            if not ground_at(wall_z) <= y <= wall_top:
+                return None
+            return (_Vector(start.x, y, wall_z),
+                    _Vector(0.0, 0.0, -1.0), 0)
+
+        return collide
+
+    def _pitched_hull_status(self, ground_gradient, hull_pitch,
+                             wall_z=None, wall_height=None, airborne=False,
+                             wall_end=None, ground_end=None, velocity=20.0):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        wall_top = (None if wall_z is None else
+                    ground_gradient * wall_z + wall_height)
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=self._pitched_hull_scene(
+                ground_gradient, wall_z, wall_top,
+                wall_end=wall_end, ground_end=ground_end),
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        return world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, velocity,
+            None, airborne, 0.10, True, pitch=hull_pitch)
+
+    def test_a_pitched_hull_still_sees_a_wall_on_level_ground(self):
+        """A transiently pitched hull must not lift its lowest witness.
+
+        A hull is pitched for a moment on every crest and every suspension
+        stroke while the ground it is driving on to is flat. Posing the lane
+        along the hull plane through the whole look-ahead segment sailed the
+        0.6 m witness over a fully exposed wall the level hull always saw.
+        """
+        pitch = math.atan(0.40)
+        for hull_pitch in (-pitch, pitch):
+            for wall_height in (0.8, 1.0, 1.2):
+                for wall_z in (3.0, 4.0, 5.0):
+                    with self.subTest(pitch=hull_pitch, top=wall_height,
+                                      z=wall_z):
+                        self.assertEqual(
+                            'hard',
+                            self._pitched_hull_status(
+                                0.0, hull_pitch, wall_z, wall_height))
+                        self.assertEqual(
+                            'hard',
+                            self._pitched_hull_status(
+                                0.0, 0.0, wall_z, wall_height))
+
+    def test_a_pitched_hull_sees_a_wall_standing_on_its_own_slope(self):
+        pitch = math.atan(0.40)
+        for gradient, hull_pitch in ((0.40, -pitch), (-0.40, pitch)):
+            for airborne in (False, True):
+                with self.subTest(gradient=gradient, airborne=airborne):
+                    self.assertEqual(
+                        'hard',
+                        self._pitched_hull_status(
+                            gradient, hull_pitch, 4.0, 1.2,
+                            airborne=airborne))
+
+    def test_wall_top_cannot_raise_the_ground_ahead_cap(self):
+        """A downward native ray returns the first surface, not terrain."""
+        pitch = math.atan(0.40)
+
+        for gradient, hull_pitch, wall_z, wall_end, velocity in (
+                (0.0, -pitch, 4.0, 5.7, 20.0),
+                (0.40, -pitch, 4.0, 5.7, 20.0),
+                (-0.40, pitch, 4.0, 5.7, 20.0),
+                (0.0, pitch, -4.0, -5.7, -20.0),
+                (-0.40, pitch, -4.0, -5.7, -20.0),
+                (0.40, -pitch, -4.0, -5.7, -20.0)):
+            with self.subTest(gradient=gradient, velocity=velocity):
+                self.assertEqual(
+                    'hard',
+                    self._pitched_hull_status(
+                        gradient, hull_pitch, wall_z, 1.2,
+                        wall_end=wall_end, velocity=velocity))
+
+    def test_missing_ground_beyond_cliff_cannot_remove_the_pose_cap(self):
+        pitch = math.atan(0.40)
+
+        for airborne in (False, True):
+            with self.subTest(airborne=airborne):
+                self.assertEqual(
+                    'hard',
+                    self._pitched_hull_status(
+                        0.0, -pitch, 4.0, 1.2,
+                        airborne=airborne, ground_end=5.0))
+
+    def test_the_ground_ahead_cap_admits_every_continuous_slope(self):
+        """The cap may only lower a witness, never make terrain a wall.
+
+        A hull following its own slope stays clear in both directions,
+        including while suspension state still reports it airborne.
+        """
+        for gradient in (0.40, 0.25, 0.0, -0.25, -0.40):
+            hull_pitch = -math.atan(gradient)
+            with self.subTest(gradient=gradient):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(gradient, hull_pitch))
+            with self.subTest(gradient=gradient, airborne=True):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(
+                        gradient, hull_pitch, airborne=True))
+
+    def test_an_obstacle_below_the_witness_stays_drivable(self):
+        """Keep the port's own 0.6 m witness law on a raised plateau.
+
+        ``main`` reports hard for a wall flush with the terrain only because
+        its level lane runs 0.8 m below the plateau surface. An obstacle that
+        protrudes less than the witness height is drivable here, exactly as a
+        kerb on level ground always has been.
+        """
+        for wall_height in (0.0, 0.1):
+            with self.subTest(height=wall_height):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(
+                        0.0, 0.0, 4.0, wall_height))
+
+    def test_pitch_does_not_lift_lookahead_over_wall_beyond_hull(self):
+        wall_top = 1.75
+        pitch = math.atan(0.40)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, hull_pitch, wall_z in (
+                (20.0, -pitch, 4.5), (-20.0, pitch, -4.5)):
+            for airborne in (False, True):
+                calls = []
+
+                def collide(unused_space, start, end, unused_mask):
+                    calls.append((start, end))
+                    if abs(start.y - end.y) > 10.0:
+                        ground_y = (0.40 * min(start.z, 3.5)
+                                    if velocity > 0.0 else
+                                    -0.40 * max(start.z, -3.5))
+                        if (min(start.y, end.y) <= ground_y <=
+                                max(start.y, end.y)):
+                            return (_Vector(start.x, ground_y, start.z),)
+                        return None
+                    delta_z = end.z - start.z
+                    if abs(delta_z) <= 1.0e-9:
+                        return None
+                    progress = (wall_z - start.z) / delta_z
+                    if not 0.0 <= progress <= 1.0:
+                        return None
+                    hit_y = start.y + (end.y - start.y) * progress
+                    if not 0.0 <= hit_y <= wall_top:
+                        return None
+                    return (_Vector(start.x, hit_y, wall_z),
+                            _Vector(0.0, 0.0, -1.0), 0)
+
+                bigworld = types.SimpleNamespace(
+                    wg_collideSegment=collide,
+                    wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+                self.assertEqual('hard',
+                    world_collision.check_horizontal_collision(
+                        bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                        None, airborne, 0.10, True, pitch=hull_pitch))
+                self.assertTrue(calls)
+                ground_calls = [
+                    call for call in calls
+                    if abs(call[0].y - call[1].y) > 10.0]
+                # A pitched lane always buys its in-footprint ground trend and
+                # the look-ahead top, airborne included: an airborne hull is
+                # exactly the pose that used to lift its lowest witness over a
+                # wall it was about to land into.
+                self.assertTrue(ground_calls)
+                lane_calls = [
+                    call for call in calls
+                    if abs(call[0].y - call[1].y) <= 10.0]
+                unused_start, end = lane_calls[0]
+                footprint_end = 3.5 if velocity > 0.0 else -3.5
+                pose_y = world_collision._hull_pose_y(hull_pitch, 0.0)
+                # The plateau beyond the crest sits at 1.4 m, so the
+                # ground-ahead cap of 1.4 + 0.6 is above the clamped hull-edge
+                # height and this lane keeps its posed endpoint.
+                expected_end_y = (
+                    0.6 * pose_y[1] + footprint_end * pose_y[2])
+                self.assertAlmostEqual(expected_end_y, end.y)
+                self.assertAlmostEqual(
+                    5.7 if velocity > 0.0 else -5.7, end.z)
+
+    def test_pitched_upper_chord_hits_suspended_beam_after_crest(self):
+        beam_bottom = 1.95
+        beam_top = 2.15
+        pitch = math.atan(0.40)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, hull_pitch, wall_z in (
+                (20.0, -pitch, 4.5), (-20.0, pitch, -4.5)):
+            def collide(unused_space, start, end, unused_mask):
+                delta_z = end.z - start.z
+                if abs(delta_z) <= 1.0e-9:
+                    return None
+                progress = (wall_z - start.z) / delta_z
+                if not 0.0 <= progress <= 1.0:
+                    return None
+                hit_y = start.y + (end.y - start.y) * progress
+                if not beam_bottom <= hit_y <= beam_top:
+                    return None
+                return (_Vector(start.x, hit_y, wall_z),
+                        _Vector(0.0, 0.0, -1.0), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertEqual('hard',
+                world_collision.check_horizontal_collision(
+                    bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                    None, True, 0.10, True, commit_enabled=False,
+                    pitch=hull_pitch))
+
+    def test_roll_lateral_chord_does_not_pass_low_side_wall(self):
+        roll = math.atan(0.40)
+        wall_top = 1.10
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, motion_yaw, hull_roll, wall_x in (
+                (20.0, math.pi / 2.0, roll, 1.7),
+                (-20.0, math.pi * 1.5, -roll, -1.7)):
+            def collide(unused_space, start, end, unused_mask):
+                delta_x = end.x - start.x
+                if abs(delta_x) <= 1.0e-9:
+                    return None
+                progress = (wall_x - start.x) / delta_x
+                if not 0.0 <= progress <= 1.0:
+                    return None
+                hit_y = start.y + (end.y - start.y) * progress
+                if not 0.0 <= hit_y <= wall_top:
+                    return None
+                hit_z = start.z + (end.z - start.z) * progress
+                return (_Vector(wall_x, hit_y, hit_z),
+                        _Vector(-math.sin(motion_yaw), 0.0,
+                                -math.cos(motion_yaw)), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertEqual('hard',
+                world_collision.check_horizontal_collision(
+                    bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                    None, True, 0.10, True, commit_enabled=False,
+                    motion_yaw=motion_yaw, roll=hull_roll))
+
+    def test_diagonal_lookahead_does_not_pitch_over_low_wall(self):
+        pitch = math.atan(0.40)
+        ahead = 20.0 * 0.10 + 0.20
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        for velocity, motion_yaw, hull_pitch in (
+                (20.0, 0.65, -pitch),
+                (-20.0, 0.65 + math.pi, pitch)):
+            direction_x = math.sin(motion_yaw)
+            direction_z = math.cos(motion_yaw)
+            center_front = min(
+                1.5 / abs(direction_x), 3.5 / abs(direction_z))
+            wall_u = center_front + 0.80
+            start_u = -0.5
+            end_u = center_front + ahead
+            local_start = (
+                direction_x * start_u, direction_z * start_u)
+            local_end = (
+                direction_x * center_front,
+                direction_z * center_front)
+            pose_y = world_collision._hull_pose_y(hull_pitch, 0.0)
+
+            def posed_y(local):
+                return (0.6 * pose_y[1] + local[0] * pose_y[0] +
+                        local[1] * pose_y[2])
+
+            progress = (wall_u - start_u) / (end_u - start_u)
+            clamped_y = (posed_y(local_start) +
+                         (posed_y(local_end) - posed_y(local_start)) *
+                         progress)
+            extrapolated_local = (
+                direction_x * wall_u, direction_z * wall_u)
+            wall_top = (clamped_y + posed_y(extrapolated_local)) * 0.5
+
+            def collide(unused_space, start, end, unused_mask):
+                start_projection = (start.x * direction_x +
+                                    start.z * direction_z)
+                end_projection = (end.x * direction_x +
+                                  end.z * direction_z)
+                delta = end_projection - start_projection
+                if abs(delta) <= 1.0e-9:
+                    return None
+                hit_progress = (wall_u - start_projection) / delta
+                if not 0.0 <= hit_progress <= 1.0:
+                    return None
+                hit_y = start.y + (end.y - start.y) * hit_progress
+                if not 0.0 <= hit_y <= wall_top:
+                    return None
+                hit_x = start.x + (end.x - start.x) * hit_progress
+                hit_z = start.z + (end.z - start.z) * hit_progress
+                return (_Vector(hit_x, hit_y, hit_z),
+                        _Vector(-direction_x, 0.0, -direction_z), 0)
+
+            bigworld = types.SimpleNamespace(
+                wg_collideSegment=collide,
+                wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+            self.assertEqual('hard',
+                world_collision.check_horizontal_collision(
+                    bigworld, math_module, 1, _Vector(), 0.0, velocity,
+                    None, True, 0.10, True, commit_enabled=False,
+                    motion_yaw=motion_yaw, pitch=hull_pitch))
+
+    def test_hull_roll_poses_lanes_without_adding_native_rays(self):
+        calls = []
+
+        def collide(unused_space, start, end, unused_mask):
+            calls.append((start, end))
+            return None
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04))
+        level_ray_count = len(calls)
+        self.assertEqual(9, level_ray_count)
+        calls[:] = []
+
+        roll = 0.20
+        self.assertFalse(world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 5.0,
+            None, False, 0.04, roll=roll))
+        self.assertEqual(level_ray_count, len(calls))
+        lower_rays = calls[::3]
+        self.assertEqual(3, len(lower_rays))
+        for (start, end), local_right in zip(
+                lower_rays, (-1.5, 0.0, 1.5)):
+            expected_y = (0.6 * math.cos(roll) +
+                          local_right * math.sin(roll))
+            self.assertAlmostEqual(expected_y, start.y)
+            self.assertAlmostEqual(expected_y, end.y)
+            self.assertAlmostEqual(local_right, start.x)
+            self.assertAlmostEqual(local_right, end.x)
+            self.assertAlmostEqual(-0.5, start.z)
+            self.assertAlmostEqual(3.9, end.z)
+
+    def test_posed_ray_composes_roll_before_pitch(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        pos = _Vector(4.0, 7.0, 9.0)
+        local_start = (1.4, -2.3)
+        local_end = (-0.8, 3.1)
+        pitch = 0.31
+        roll = -0.22
+        height = 0.85
+
+        pose_y = world_collision._hull_pose_y(pitch, roll)
+        start, end = world_collision._posed_ray(
+            math_module, pos, 2.0, 3.0, 5.0, 6.0,
+            local_start, local_end, height, pose_y)
+
+        def expected_y(local):
+            return (pos.y + math.cos(pitch) * (
+                local[0] * math.sin(roll) +
+                height * math.cos(roll)) -
+                local[1] * math.sin(pitch))
+
+        self.assertAlmostEqual(expected_y(local_start), start.y)
+        self.assertAlmostEqual(expected_y(local_end), end.y)
+        self.assertEqual((2.0, 3.0), (start.x, start.z))
+        self.assertEqual((5.0, 6.0), (end.x, end.z))
 
     def test_gradually_descending_ground_remains_drivable(self):
         horizontal_calls = []

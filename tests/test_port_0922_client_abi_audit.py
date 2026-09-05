@@ -1,4 +1,6 @@
+import ast
 import importlib.util
+import io
 import os
 import unittest
 
@@ -72,6 +74,45 @@ def _unknown_projectile_explosion_fixture():
 
 
 class ClientAbiProjectileAuditTests(unittest.TestCase):
+    def test_stock_swinging_animator_contract_is_pinned(self):
+        appearance_member = \
+            'scripts/client/vehicle_systems/CompoundAppearance.pyc'
+        model_member = 'scripts/client/vehicle_systems/model_assembler.pyc'
+        vehicle_member = \
+            'scripts/client/vehicle_systems/vehicle_assembler.pyc'
+        appearance = AUDIT.EXPECTED_ABI[appearance_member]
+        self.assertEqual(
+            ('self', 'mode', 'forceSwinging'),
+            appearance['CompoundAppearance.changeEngineMode'])
+        self.assertEqual(
+            ('self',), appearance['CompoundAppearance.stopSwinging'])
+        self.assertEqual(
+            ('vehicleDesc', 'basisMatrix', 'worldMProv', 'lodLink'),
+            AUDIT.EXPECTED_ABI[model_member]['createSwingingAnimator'])
+        self.assertEqual(
+            ('appearance', 'lodLink'),
+            AUDIT.EXPECTED_ABI[vehicle_member]['_assembleSwinging'])
+
+        self.assertTrue({
+            'SwingingAnimator', 'setupPitchSwinging', 'setupRollSwinging',
+            'setupShotSwinging', 'maxMovementSpeed', 'lodSetting',
+            'worldMatrix',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[model_member][
+            'createSwingingAnimator']))
+        self.assertTrue({
+            'TankPartNames', 'HULL', 'localMatrix', 'swingingAnimator',
+            'placingCompensationMatrix',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[vehicle_member][
+            '_assembleSwinging']))
+        self.assertTrue({
+            '_CompoundAppearance__trackScrollCtl', 'setMode',
+        }.issubset(AUDIT.EXPECTED_CODE_NAMES[appearance_member][
+            'CompoundAppearance.changeEngineMode']))
+        self.assertEqual(
+            ('swingingAnimator', 'accelSwingingPeriod'),
+            AUDIT.EXPECTED_CODE_NAMES[appearance_member][
+                'CompoundAppearance.stopSwinging'])
+
     def test_initial_enemy_shadow_gate_is_pinned(self):
         vehicle = AUDIT.EXPECTED_ABI['scripts/client/Vehicle.pyc']
         appearance = AUDIT.EXPECTED_ABI[
@@ -255,6 +296,51 @@ class ClientAbiProjectileAuditTests(unittest.TestCase):
 
         self.assertFalse(
             AUDIT._matches_unknown_projectile_explosion_branch(instructions))
+
+
+class ClientAbiAuditTableTests(unittest.TestCase):
+    """The expectation tables are dict literals: a repeated key is silent.
+
+    A duplicated member or member entry keeps only the last value, so an
+    earlier expectation stops being checked without any error.  That has
+    already dropped real #1513 contract coverage once, so assert it here
+    instead of noticing it as a changed ``checked*`` count.
+    """
+
+    @staticmethod
+    def _duplicate_keys():
+        source = io.open(TOOL_PATH, encoding='utf-8').read()
+        duplicates = []
+        for node in ast.parse(source).body:
+            if (not isinstance(node, ast.Assign) or
+                    not isinstance(node.value, ast.Dict) or
+                    not isinstance(node.targets[0], ast.Name)):
+                continue
+            table = node.targets[0].id
+            if not table.startswith('EXPECTED_'):
+                continue
+            for prefix, mapping in [((), node.value)] + [
+                    ((key,), value)
+                    for key, value in zip(node.value.keys, node.value.values)
+                    if isinstance(value, ast.Dict)]:
+                seen = {}
+                for key_node in mapping.keys:
+                    try:
+                        key = ast.literal_eval(key_node)
+                    except ValueError:
+                        continue
+                    label = '.'.join(
+                        [table] +
+                        [ast.literal_eval(item) for item in prefix] + [str(key)])
+                    if key in seen:
+                        duplicates.append(
+                            '%s (lines %d and %d)' %
+                            (label, seen[key], key_node.lineno))
+                    seen[key] = key_node.lineno
+        return duplicates
+
+    def test_expectation_tables_have_no_shadowed_keys(self):
+        self.assertEqual([], self._duplicate_keys())
 
 
 if __name__ == '__main__':

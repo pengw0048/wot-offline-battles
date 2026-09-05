@@ -1174,7 +1174,7 @@ class ProjectileWireTests(unittest.TestCase):
             'bot_authority_id': None, 'authority_status': 'idle',
             'authority_epoch': 2,
             'players': [{
-                'id': 7, 'outfits': {},
+                'id': 7, 'team': 0, 'slot': -1, 'outfits': {},
                 'effective_params': effective_params(),
                 'equipment_states': [], 'equipment_revision': 0,
                 'equipment_intent_seq': 0,

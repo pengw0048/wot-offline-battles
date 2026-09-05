@@ -65,10 +65,11 @@ POINTER_TICK_SECONDS = 0.03
 RANDOM_MAP_OPTION = 'server_random'
 
 _HOST_CONTROLS = ('previous', 'map', 'next', 'start')
-_TEAM_SELECT_CONTROLS = ('team1', 'team_random', 'team2')
+_TEAM_SELECT_CONTROLS = ('team1', 'team2', 'team_random')
 _TEAM_SELECT_ACTIONS = {
     'team1': 1, 'team_random': 0, 'team2': 2,
 }
+_TEAM_CAPACITY_LABELS = ('team1_capacity', 'team2_capacity')
 _TEAM_SIZE_CONTROLS = (
     'team1_down', 'team1_up', 'team2_down', 'team2_up')
 _TEAM_SIZE_ACTIONS = {
@@ -386,14 +387,14 @@ class WaitingRoomUI(object):
         make_control('map', (0.0, 0.04, CONTROL_Z), 1.15, 0.16)
         make_control('next', (0.72, 0.04, CONTROL_Z), 0.20, 0.16)
         make_control('team1_down', (-0.82, -0.18, CONTROL_Z), 0.12, 0.14)
-        make_control('team1', (-0.52, -0.18, CONTROL_Z), 0.42, 0.14)
         make_control('team1_up', (-0.22, -0.18, CONTROL_Z), 0.12, 0.14)
-        make_control('team_random', (0.0, -0.18, CONTROL_Z), 0.26, 0.14)
         make_control('team2_down', (0.22, -0.18, CONTROL_Z), 0.12, 0.14)
-        make_control('team2', (0.52, -0.18, CONTROL_Z), 0.42, 0.14)
         make_control('team2_up', (0.82, -0.18, CONTROL_Z), 0.12, 0.14)
-        make_control('start', (0.0, -0.48, CONTROL_Z), 1.20, 0.20)
-        make_control('close', (0.0, -0.82, CONTROL_Z), 0.50, 0.16)
+        make_control('team1', (-0.52, -0.38, CONTROL_Z), 0.42, 0.14)
+        make_control('team2', (0.0, -0.38, CONTROL_Z), 0.42, 0.14)
+        make_control('team_random', (0.52, -0.38, CONTROL_Z), 0.42, 0.14)
+        make_control('start', (0.0, -0.58, CONTROL_Z), 1.20, 0.20)
+        make_control('close', (0.0, -0.90, CONTROL_Z), 0.50, 0.16)
         make_label('title', 'LAN WAITING ROOM', (-0.86, 0.82, 0.0), 1.72,
                    0.12, colour=(232, 244, 255, 255))
         make_label('room', '', (-0.86, 0.62, 0.0), 1.72, 0.11)
@@ -414,23 +415,27 @@ class WaitingRoomUI(object):
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team1_down', '-', (-0.82, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team1', 'TEAM 1', (-0.52, -0.18, 0.0), 0.40, 0.09,
-                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('team1_capacity', '', (-0.52, -0.18, 0.0), 0.40, 0.09,
+                   anchor='CENTER', colour=(232, 244, 255, 255))
         make_label('team1_up', '+', (-0.22, -0.18, 0.0), 0.10, 0.09,
-                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team_random', 'RANDOM', (0.0, -0.18, 0.0), 0.24, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team2_down', '-', (0.22, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team2', 'TEAM 2', (0.52, -0.18, 0.0), 0.40, 0.09,
-                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('team2_capacity', '', (0.52, -0.18, 0.0), 0.40, 0.09,
+                   anchor='CENTER', colour=(232, 244, 255, 255))
         make_label('team2_up', '+', (0.82, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('start', 'START BATTLE', (0.0, -0.48, 0.0), 1.16, 0.11,
+        make_label('team1', 'TEAM 1', (-0.52, -0.38, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('close', 'LEAVE', (0.0, -0.82, 0.0), 0.46, 0.10,
+        make_label('team2', 'TEAM 2', (0.0, -0.38, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('message', '', (-0.86, -0.66, 0.0), 1.72, 0.10,
+        make_label('team_random', 'RANDOM', (0.52, -0.38, 0.0), 0.40, 0.09,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('start', 'START BATTLE', (0.0, -0.58, 0.0), 1.16, 0.11,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('close', 'LEAVE', (0.0, -0.90, 0.0), 0.46, 0.10,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('message', '', (-0.86, -0.75, 0.0), 1.72, 0.10,
                    colour=(184, 205, 222, 255))
         # Component construction is fallible on the native client. Commit the
         # installed state only after the complete graph exists.
@@ -904,12 +909,10 @@ class WaitingRoomUI(object):
         self._set_text('tier', 'BOT TIER: %s%s' % (
             friendly_bot_tier_mode(shown_tier_mode),
             '...' if self._pending_bot_tier_mode is not None else ''))
-        current_team = team_status.get('team')
-        preferred_team = team_status.get('preferred', current_team)
+        preferred_team = team_status.get('preferred', 0)
         self._set_text('team_random', 'RANDOM%s' % (
             ' (ON)' if preferred_team == 0 else ''))
         sizes = team_status.get('sizes') or {}
-        counts = team_status.get('counts') or {}
         for team in (1, 2):
             size = int(sizes.get(team, sizes.get(str(team), 15)))
             pending = self._pending_team_sizes.get(team)
@@ -917,12 +920,12 @@ class WaitingRoomUI(object):
                 self._pending_team_sizes.pop(team, None)
                 pending = None
             shown_size = pending if pending is not None else size
-            label = 'TEAM %d  %d/%d%s%s' % (
-                team, int(counts.get(team, 0)),
-                shown_size,
-                '  (YOU)' if current_team == team else '',
-                '...' if pending is not None else '')
-            self._set_text('team%d' % team, label)
+            self._set_text('team%d_capacity' % team,
+                           'TEAM %d SIZE: %d%s' % (
+                               team, shown_size,
+                               '...' if pending is not None else ''))
+            self._set_text('team%d' % team, 'TEAM %d%s' % (
+                team, '  (YOU)' if preferred_team == team else ''))
         lines = str(self._status() or '').splitlines()
         self._set_text('room', lines[0] if lines else '')
         self._set_text('players', lines[1] if len(lines) > 1 else '')
@@ -943,6 +946,8 @@ class WaitingRoomUI(object):
             label = self._labels.get(role)
             if label is not None:
                 self._set(label, 'visible', visible)
+        for role in _TEAM_CAPACITY_LABELS:
+            self._set(self._labels[role], 'visible', team_supported)
         for role in ('title', 'room', 'players', 'tier', 'map', 'message'):
             self._set(self._labels[role], 'visible', True)
         self._paint()
