@@ -5,6 +5,7 @@ wiring and the guard paths are covered.
 """
 
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -43,6 +44,30 @@ class _Widget(object):
 
     def cget(self, name):
         return self.options.get(name)
+
+
+class _Entry(_Widget):
+    """The real Entry keeps its own text, which the balance panel reads."""
+
+    def __init__(self, master=None, **options):
+        _Widget.__init__(self, master, **options)
+        self.text = ""
+
+    def insert(self, index, value):
+        position = len(self.text) if index == "end" else int(index)
+        self.text = self.text[:position] + str(value) + self.text[position:]
+
+    def delete(self, first, last=None):
+        first = 0 if first == "end" else int(first)
+        if last is None:
+            self.text = self.text[:first] + self.text[first + 1:]
+        elif last == "end":
+            self.text = self.text[:first]
+        else:
+            self.text = self.text[:first] + self.text[int(last):]
+
+    def get(self):
+        return self.text
 
 
 class _Text(_Widget):
@@ -129,7 +154,7 @@ class _FakeTk(object):
     Frame = _Widget
     LabelFrame = _Widget
     Label = _Widget
-    Entry = _Widget
+    Entry = _Entry
     Button = _Widget
     Checkbutton = _Widget
     Radiobutton = _Widget
@@ -1190,6 +1215,115 @@ class WindowTest(unittest.TestCase):
             labels)
         self.assertIn(
             "%s (%s) - %s" % (default_label, custom, unlocked), labels)
+
+    def _write_ledger(self, slot_id, saves_root, **balances):
+        directory = os.path.join(saves_root, slot_id)
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        wallet = {"credits": 0, "gold": 0, "freeXP": 0}
+        wallet.update(balances)
+        path = os.path.join(directory, "garage_state.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({
+                "schema": 5,
+                "vehicles": {"50001": {"compDescr": "AAA="}},
+                "ledger": {"wallet": wallet, "unlocks": [50001]},
+            }, stream)
+        return path
+
+    def test_the_panel_shows_the_selected_saves_balances(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root,
+            credits=250000, gold=1500, freeXP=90)
+
+        self.assertTrue(self.window._refresh_balances())
+
+        self.assertEqual(
+            "250000", self.window.balance_entries["credits"].get())
+        self.assertEqual("1500", self.window.balance_entries["gold"].get())
+        self.assertEqual("90", self.window.balance_entries["freeXP"].get())
+
+    def test_a_save_that_never_ran_cannot_be_edited_yet(self):
+        """The client writes a save's first balances, not the launcher."""
+        self._saves_root()
+
+        self.assertFalse(self.window._refresh_balances())
+
+        self.assertEqual(
+            "disabled", self.window.apply_balances_button.cget("state"))
+        self.assertEqual(
+            "disabled", self.window.balance_entries["gold"].cget("state"))
+
+    def test_applying_a_balance_writes_it_into_the_save(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root,
+            credits=100000)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "12500")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            wallet = json.load(stream)["ledger"]["wallet"]
+        self.assertEqual(12500, wallet["gold"])
+        self.assertEqual(100000, wallet["credits"])
+        self.assertIn("Balances saved", self._log_text())
+
+    def test_a_running_game_keeps_its_own_balances(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=7)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "999")
+
+        with mock.patch.object(core, "game_is_running", return_value=True):
+            self.assertFalse(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            self.assertEqual(
+                7, json.load(stream)["ledger"]["wallet"]["gold"])
+        self.assertIn("Close World of Tanks", self._log_text())
+        # The panel goes back to what the save actually holds.
+        self.assertEqual("7", self.window.balance_entries["gold"].get())
+
+    def test_a_balance_that_is_not_a_number_is_refused(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=7)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "lots")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            self.assertEqual(
+                7, json.load(stream)["ledger"]["wallet"]["gold"])
+        self.assertIn("whole number", self._log_text())
+
+    def test_the_balances_follow_the_selected_save(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=1)
+        self._new_save()
+        career = self.window._save_slot_id
+        self._write_ledger(career, saves_root, gold=22222)
+
+        self.window._refresh_save_slots()
+        self.assertEqual("22222", self.window.balance_entries["gold"].get())
+
+        self.window.save_slot.set("%s - %s" % (
+            self.window._t("Default save"),
+            self.window._t("Fully unlocked")))
+        self.window._save_slot_selected()
+
+        self.assertEqual("1", self.window.balance_entries["gold"].get())
 
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(

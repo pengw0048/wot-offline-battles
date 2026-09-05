@@ -85,6 +85,10 @@ like a real World of Tanks account: the tier 1 starter tanks, 100000 credits,
 in battle and research and buy everything else in the garage, at the prices
 this client ships.
 
+The Account tab shows the selected save's credits, gold and free experience and
+lets you set them. Gold cannot be earned offline, so that is where a save gets
+it. Start a save in the game once before editing it, and close the game first.
+
 Vehicle data profiles are not part of a save. They change the client's shared
 vehicle catalogue for a whole room, so they stay with the installation.
 

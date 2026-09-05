@@ -63,6 +63,13 @@ vehicles, modules, ammunition and consumables are researched and bought in the
 garage at this client's own prices. Gold is spent but not earned, so premium
 vehicles and gold ammunition are paid for out of the gold the launcher grants.
 
+The launcher's Account tab shows the selected save's credits, gold and free
+experience and lets a player set them. Gold is the one currency an offline
+account can never earn -- there is no store to buy it from and no battle that
+pays it -- so this is where a save gets it. A save has no balances until the
+game has started it once, and the game must be closed while they are changed,
+because the client owns the same file.
+
 Vehicle data profiles are deliberately not part of a save: they change
 the client catalogue for a whole room, so they belong to the installation.
 

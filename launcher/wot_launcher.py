@@ -20,14 +20,22 @@ if __package__ in (None, ""):
     import core
     import error_reports
     import i18n
+    import save_ledger
     import save_slots
     import vehicle_editor_ui
     import vehicle_overlays
 else:
     from . import (
         bot_lineup_profiles, bot_lineup_ui, core, error_reports, i18n,
-        save_slots, vehicle_editor_ui, vehicle_overlays)
+        save_ledger, save_slots, vehicle_editor_ui, vehicle_overlays)
 
+
+# The three balances a save carries, in the order the panel shows them.
+_BALANCE_LABELS = {
+    "credits": "Credits",
+    "gold": "Gold",
+    "freeXP": "Free experience",
+}
 
 LAUNCHER_VERSION = "0.6.7"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
@@ -115,6 +123,22 @@ _CHINESE = {
     "New save": "新建存档",
     "Rename save": "重命名存档",
     "Save name:": "存档名称：",
+    "Account": "账号",
+    "Credits": "银币",
+    "Gold": "金币",
+    "Free experience": "自由经验",
+    "Apply balances": "应用余额",
+    "Reload": "重新读取",
+    "These are the selected save's balances. Gold cannot be earned offline, "
+    "so this is where a save gets it. Close the game before changing them.":
+        "这是当前选中存档的余额。离线状态下无法赚取金币，因此金币在这里设置。"
+        "修改前请先关闭游戏。",
+    "Start this save in the game once before changing its balances.":
+        "请先在游戏里启动一次该存档，然后再修改余额。",
+    "Balances saved: %s": "余额已保存：%s",
+    "The balances could not be saved: %s": "余额保存失败：%s",
+    "The balances could not be read: %s": "余额读取失败：%s",
+    "A balance must be a whole number.": "余额必须是整数。",
     "New account": "新账号",
     "Fully unlocked": "全解锁",
     "Save type": "存档类型",
@@ -563,10 +587,12 @@ class LauncherWindow(object):
         self.tools_tabs = self._ttk.Notebook(frame)
         self.tools_tabs.grid(row=3, column=0, sticky="we", pady=(0, 8))
         self.save_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.account_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.tools_tabs.add(self.save_panel, text="")
+        self.tools_tabs.add(self.account_panel, text="")
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
@@ -606,6 +632,36 @@ class LauncherWindow(object):
         self.save_help_label.grid(
             row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.save_panel.grid_columnconfigure(1, weight=1)
+
+        # Gold is the one currency an offline account can never earn, so the
+        # amount a save has is a decision rather than a result.
+        self.balance_entries = {}
+        self.balance_labels = {}
+        for row, name in enumerate(save_ledger.CURRENCIES):
+            label = tk.Label(self.account_panel, text="")
+            label.grid(row=row, column=0, sticky="w", pady=(0, 4))
+            self.balance_labels[name] = label
+            entry = tk.Entry(self.account_panel, width=16)
+            entry.grid(row=row, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
+            self.balance_entries[name] = entry
+        account_actions = tk.Frame(self.account_panel)
+        account_actions.grid(
+            row=len(save_ledger.CURRENCIES), column=0, columnspan=2,
+            sticky="we", pady=(6, 0))
+        self.apply_balances_button = tk.Button(
+            account_actions, text="", command=self._apply_balances)
+        self.apply_balances_button.pack(side="left", fill="x", expand=True)
+        self.reload_balances_button = tk.Button(
+            account_actions, text="", command=self._refresh_balances)
+        self.reload_balances_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.account_help_label = tk.Label(
+            self.account_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.account_help_label.grid(
+            row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
+            sticky="we", pady=(8, 0))
+        self.account_panel.grid_columnconfigure(1, weight=1)
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
             settings.get("bot_lineup_profiles"))
@@ -776,6 +832,15 @@ class LauncherWindow(object):
             "Each save keeps its own garage, crew, account settings and "
             "battle results. The selected save is the one the game starts "
             "with."))
+        self.tools_tabs.tab(self.account_panel, text=self._t("Account"))
+        for name, label in self.balance_labels.items():
+            label.config(text=self._t(_BALANCE_LABELS[name]))
+        self.apply_balances_button.config(text=self._t("Apply balances"))
+        self.reload_balances_button.config(text=self._t("Reload"))
+        self.account_help_label.config(text=self._t(
+            "These are the selected save's balances. Gold cannot be earned "
+            "offline, so this is where a save gets it. Close the game before "
+            "changing them."))
         self._refresh_save_slots()
         self.tools_tabs.tab(
             self.vehicle_panel, text=self._t("Vehicle modifier"))
@@ -1052,6 +1117,9 @@ class LauncherWindow(object):
             state=("disabled"
                    if self._save_slot_id == save_slots.DEFAULT_SLOT_ID
                    else "normal"))
+        # The balances belong to the selected save, so they follow it.
+        if hasattr(self, "balance_entries"):
+            self._refresh_balances(status)
         return tuple(values)
 
     def _save_slot_selected(self, unused_event=None):
@@ -1069,6 +1137,63 @@ class LauncherWindow(object):
 
         return simpledialog.askstring(
             self._t(title), self._t("Save name:"), initialvalue=current)
+
+    def _refresh_balances(self, status=None):
+        """Show the selected save's balances, or say why there are none.
+
+        A save that has never been started has no balances yet: the client
+        writes them the first time it builds that save's garage, from the
+        account type the save was created as.
+        """
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            balances = save_ledger.read_balances(
+                self._save_slot_id, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            if hasattr(self, "log_view"):
+                self._log("The balances could not be read: %s" % error)
+            balances = None
+        editable = balances is not None
+        for name, entry in self.balance_entries.items():
+            entry.config(state="normal")
+            entry.delete(0, "end")
+            if editable:
+                entry.insert(0, str(balances.get(name, 0)))
+            else:
+                entry.config(state="disabled")
+        state = "normal" if editable else "disabled"
+        self.apply_balances_button.config(state=state)
+        return editable
+
+    def _apply_balances(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        wanted = {}
+        for name, entry in self.balance_entries.items():
+            raw = entry.get().strip()
+            if not raw:
+                continue
+            try:
+                wanted[name] = int(raw)
+            except ValueError:
+                self._log("A balance must be a whole number.")
+                return False
+        if not wanted:
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            balances = save_ledger.write_balances(
+                self._save_slot_id, wanted, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            self._log("The balances could not be saved: %s" % error)
+            self._refresh_balances()
+            return False
+        self._refresh_balances()
+        self._log("Balances saved: %s" % ", ".join(
+            "%s %d" % (self._t(_BALANCE_LABELS[name]), balances[name])
+            for name in save_ledger.CURRENCIES))
+        return True
 
     def _ask_save_slot_mode(self, name):
         """Ask which account a new save starts from, or None to cancel.
