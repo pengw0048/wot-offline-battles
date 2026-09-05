@@ -185,8 +185,8 @@ def _hull_pose_endpoint(local_start, local_end, half_width,
 		start_forward + delta_forward * fraction)
 
 
-def _lane_ground_ahead(spaceID, Math, pos, x, z, look):
-	"""Return the native ground top under one lane's look-ahead endpoint."""
+def _ground_top(spaceID, Math, pos, x, z, look):
+	"""Return the first native top below one world-space point."""
 	import BigWorld
 	try:
 		probe_down = max(
@@ -203,6 +203,48 @@ def _lane_ground_ahead(spaceID, Math, pos, x, z, look):
 		return None
 
 
+def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
+		footprint_x, footprint_z, end_x, end_z, look):
+	"""Conservatively extend the ground observed inside the hull footprint.
+
+	A downward ``wg_collideSegment`` returns the first surface, which can be a
+	wall or roof rather than terrain.  The look-ahead endpoint can also lie past
+	a cliff and return no hit.  Both shapes must not lift a pitched lane over the
+	obstacle.  The lane start and its footprint edge are still under the current
+	hull, so extend that witnessed ground trend and accept the endpoint top only
+	when it is lower.
+	"""
+	import math
+	start_ground = _ground_top(
+		spaceID, Math, pos, start_x, start_z, look)
+	footprint_ground = _ground_top(
+		spaceID, Math, pos, footprint_x, footprint_z, look)
+	end_ground = _ground_top(spaceID, Math, pos, end_x, end_z, look)
+	try:
+		inside_length = math.sqrt(
+			(float(footprint_x) - float(start_x)) ** 2 +
+			(float(footprint_z) - float(start_z)) ** 2)
+		full_length = math.sqrt(
+			(float(end_x) - float(start_x)) ** 2 +
+			(float(end_z) - float(start_z)) ** 2)
+		if (start_ground is not None and footprint_ground is not None and
+				inside_length > 1.0e-6):
+			extrapolated = (float(start_ground) +
+				(float(footprint_ground) - float(start_ground)) *
+				full_length / inside_length)
+			return (extrapolated if end_ground is None else
+				min(float(end_ground), extrapolated))
+		inside_tops = [float(value) for value in (
+			start_ground, footprint_ground) if value is not None]
+		if inside_tops:
+			inside_top = min(inside_tops)
+			return (inside_top if end_ground is None else
+				min(float(end_ground), inside_top))
+		return None if end_ground is None else float(end_ground)
+	except (TypeError, ValueError, OverflowError):
+		return None
+
+
 def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
 		height, pose_y, ground_ahead=None):
 	"""Rotate one copied collision lane with the authoritative hull pose.
@@ -214,10 +256,11 @@ def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
 	the ground it is about to reach: on level ground a transiently nose-up
 	hull passed straight over a fully exposed 1.2 m wall.
 
-	``ground_ahead`` is the native ground top under that endpoint.  The lane
-	never ends higher than ``height`` above the ground it is travelling on to,
-	and never higher than the hull plane at its own leading edge, so the pose
-	can only ever lower this witness.
+	``ground_ahead`` is a conservative continuation of the ground witnessed
+	inside the hull footprint, bounded by the native top under the endpoint.
+	The lane never ends higher than ``height`` above that estimate, and never
+	higher than the hull plane at its own leading edge, so the pose can only ever
+	lower this witness.
 	"""
 	right_y, up_y, forward_y = pose_y
 	start_y = (float(pos.y) + float(local_start[0]) * right_y +
@@ -503,12 +546,17 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				(abs(local_end[0] - ray_local_end[0]) > 1.0e-9 or
 				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
 			# Only the pitch term lifts a lane along its own travel, so only
-			# a pitched lane pays one downward query for the ground it is
-			# travelling on to.  A level or purely rolled hull keeps the
+			# a pitched lane samples the ground witnessed inside its footprint
+			# and at look-ahead.  A level or purely rolled hull keeps the
 			# shipped lane geometry and its exact ray count.
+			footprint_x = (pos.x + cos_y * local_end[0] +
+				sin_y * local_end[1])
+			footprint_z = (pos.z - sin_y * local_end[0] +
+				cos_y * local_end[1])
 			_ground_ahead = (
-				_lane_ground_ahead(
-					spaceID, Math, pos, x2, z2, target_len)
+				_lane_ground_ahead(spaceID, Math, pos,
+					x1, z1, footprint_x, footprint_z,
+					x2, z2, target_len)
 				if pose_y[2] else None)
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
