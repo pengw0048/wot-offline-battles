@@ -2910,6 +2910,34 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             vehicle_id, _Vector(0.0, 0.0, 1.0), 350.0))
         self.assertEqual(1, vehicle.appearance.receiveShotImpulse.call_count)
 
+    def test_remote_swinging_second_setter_failure_rolls_back_first(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        native_compensation = object()
+        native_world = object()
+
+        class _FailingWorldAnimator(object):
+            def __init__(self):
+                object.__setattr__(
+                    self, 'placingCompensationMatrix', native_compensation)
+                object.__setattr__(self, 'worldMatrix', native_world)
+
+            def __setattr__(self, name, value):
+                if name == 'worldMatrix' and value is state.provider:
+                    raise RuntimeError('world provider rejected')
+                object.__setattr__(self, name, value)
+
+        swinging = _FailingWorldAnimator()
+        vehicle.appearance.swingingAnimator = swinging
+
+        state._bind_stock_motion()
+
+        self.assertIs(
+            native_compensation, swinging.placingCompensationMatrix)
+        self.assertIs(native_world, swinging.worldMatrix)
+        self.assertFalse(state.presentation_capabilities['body_swinging'])
+
     def test_direct_hit_uses_decoded_armour_axis_for_remote_impulse(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
             self._swinging_native_factory()

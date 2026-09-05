@@ -490,7 +490,11 @@ class _NativeRemoteState(object):
 
         swinging = getattr(appearance, 'swingingAnimator', None)
         if swinging is not None:
+            restore = None
             try:
+                restore = (
+                    swinging.placingCompensationMatrix,
+                    swinging.worldMatrix)
                 # CompoundAppearance initially binds this to the entity's
                 # native filter matrices.  Our model is driven by a copied
                 # LAN MatrixAnimation whose root already contains the
@@ -502,6 +506,19 @@ class _NativeRemoteState(object):
                 swinging.worldMatrix = self.provider
                 self._record_capability('body_swinging', True)
             except Exception as error:
+                rollback_errors = []
+                if restore is not None:
+                    for name, value in (
+                            ('placingCompensationMatrix', restore[0]),
+                            ('worldMatrix', restore[1])):
+                        try:
+                            setattr(swinging, name, value)
+                        except Exception as rollback_error:
+                            rollback_errors.append('%s: %s' % (
+                                name, rollback_error))
+                if rollback_errors:
+                    error = RuntimeError('%s; rollback failed: %s' % (
+                        error, '; '.join(rollback_errors)))
                 self._record_capability('body_swinging', False, error)
         else:
             self._record_capability(
