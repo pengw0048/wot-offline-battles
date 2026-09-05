@@ -34,6 +34,7 @@
       "globalRating"
     ],
     "statsDirectKeys": [
+      "dossier",
       "credits",
       "gold",
       "crystal",

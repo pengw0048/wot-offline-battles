@@ -78,6 +78,11 @@ whose profile changed after it started must be restarted first.
 - A LAN match is one shared battle: lineups, countdown, orders, projectiles,
   health, critical damage, destructibles, capture and results stay
   synchronized through the room's mandatory hidden simulation worker.
+- The results screen awards battle heroes and historical medals from the
+  client's own achievement thresholds, and both the vehicle and the account
+  dossier keep counting them. Medals whose award condition needs data this
+  reconstruction does not own, including Mark of Mastery, are listed in
+  `battle_achievements.py` rather than guessed.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,

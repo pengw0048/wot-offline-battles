@@ -172,7 +172,7 @@ class FakeServer(object):
         # belongs exclusively to the initial full sync.
         stats = snapshot['stats']
         diff = {'stats': dict((name, stats[name]) for name in (
-            'credits', 'freeXP', 'vehTypeXP'))}
+            'credits', 'freeXP', 'vehTypeXP', 'dossier'))}
         touched = self._context.get('postbattle_touched_vehicles')
         touched = set(touched or ())
         if touched:

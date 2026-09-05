@@ -712,6 +712,51 @@ OfflineMapCreator.destroy()
   -> if local player is room host, open the next TrainingSettingsWindow
 ```
 
+## Post-battle achievements
+
+Wargaming's battle server, not the client, decides which medals a battle
+awards, so `res/packages/scripts.pkg` ships the thresholds without the
+predicates. `scripts/common/arena_achievements.py` of `#1513` holds
+`ACHIEVEMENT_CONDITIONS`, and `getAchievementCondition` only consults
+`ACHIEVEMENT_CONDITIONS_EXT` when `ARENA_BONUS_TYPE_CAPS.checkAny` accepts the
+arena bonus type. That build answers `False` for every bonus type, so the
+regular battles this product packs (`bonusType` 1) use the base table. Those
+numbers are copied verbatim into
+`src/res/scripts/client/gui/mods/offline_lan_0922/battle_achievements.py`; the
+predicates around them combine one exact constant with the documented shape of
+the medal. `UNAWARDED_ACHIEVEMENTS` in the same module records every medal this
+product deliberately does not award and the input it would need, so no later
+change closes a gap by inventing a coefficient.
+
+The LAN server owns the decision. `_finish_battle` freezes the complete public
+roster first, awards from it, and stores the resulting names on every roster
+row, humans and Bots alike. The three consumers of that wire field — the
+server's persisted-receipt validator, the client receiver and the durable
+post-battle store — accept only names from that table, and a receipt written
+before achievements shipped still loads with an empty list.
+
+| Producer | Exact consumer contract covered |
+| --- | --- |
+| `VEH_FULL_RESULTS.achievements` / `VEH_PUBLIC_RESULTS.achievements` | Record database IDs from `dossiers2.custom.records.RECORD_DB_IDS`. `gui/battle_results/reusable/shared.py` maps each one through `DB_ID_TO_RECORD`, so a name the pinned client does not register is dropped before packing rather than raising inside the results window. |
+| `VEH_FULL_RESULTS.dossierPopUps` | `makeAchievementFromPersonal` reads `(recordDBID, value)` pairs for the personal results medals. `AchievementBlock.setRecord` renders `value` as the badge counter for every non-series achievement, so the value carried is the account's running total after the battle. |
+| `VEH_FULL_RESULTS` / `VEH_PUBLIC_RESULTS` `directHitsReceived`, `potentialDamageReceived` | The results screen shows both columns, and Steel Wall reads them. The server accumulates the hit count and each hit's `potential_damage` where it already resolves the shot. |
+| `VehicleInteractionDetails.crits` | `gui/shared/crits_mask_parser.py` reads bits 0-7 as critically damaged devices, 12-23 as destroyed devices and 24-31 as destroyed crew, indexed by `VEHICLE_DEVICE_TYPE_NAMES` and `VEHICLE_TANKMAN_TYPE_NAMES`. Both server track devices map onto the single `track` slot and each numbered crew role onto its base type. The field is a mask, so distinct modules accumulate with `or` and a repeated crit stays one bit. |
+| vehicle and account `achievements` dossier blocks | `getVehicleDossierDescr` and `getAccountDossierDescr` carry one counter per medal plus the aggregate `battleHeroes`. An unregistered name raises `KeyError` inside the native block, so the writer skips it. `StatsRequester.accountDossier` reads the `stats` cache key `dossier`, which the account snapshot and the post-battle diff now publish. |
+
+Two statistics the server never recorded are now canonical round state, because
+`#1513` displays both and the conditions read them: each vehicle's own
+accumulated `capturePoints`, and the `droppedCapturePoints` credited to the
+enemy whose damage reset a capture. Without them Invader and Defender could
+never be awarded and both results columns stayed at zero.
+
+Battle-hero medals go to one actor per battle, ordered by the medal's own
+metric and broken by earned experience, which is Wargaming's documented
+tie-break. Bots are ordinary participants and can take one.
+
+This is static and pure-data coverage. It proves which fields reach the native
+packers with which values; only acceptance on the exact Windows client can show
+the results window rendering those ribbons, counters and tooltips.
+
 ## Stock map-selection lifecycle
 
 Before the local Account creates the lobby, a chain-safe adapter intercepts the

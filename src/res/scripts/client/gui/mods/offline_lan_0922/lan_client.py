@@ -9,6 +9,8 @@ import time
 import uuid
 
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
+from gui.mods.offline_lan_0922.battle_achievements import (
+    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
@@ -1438,15 +1440,14 @@ def _valid_battle_receipt(message):
         return False
     stats = message.get('stats')
     rewards = message.get('rewards')
-    stat_names = (
-        'shots', 'direct_hits', 'piercings', 'damage', 'damage_received',
-        'damage_blocked', 'assist_track', 'assist_radio', 'assist_stun',
-        'kills', 'spotted', 'capture_points', 'dropped_capture_points')
+    stat_names = RECEIPT_STAT_NAMES
     reward_names = ('credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost')
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         return False
-    if any(_exact_int(stats.get(name)) is None or
-           _exact_int(stats.get(name)) < 0 for name in stat_names):
+    # Statistics added after a receipt was recorded default to zero, exactly
+    # as the durable store treats them.
+    if any(_exact_int(stats.get(name, 0)) is None or
+           _exact_int(stats.get(name, 0)) < 0 for name in stat_names):
         return False
     if any(_exact_int(rewards.get(name)) is None or
            _exact_int(rewards.get(name)) < 0 for name in reward_names):
@@ -1488,9 +1489,17 @@ def _valid_battle_receipt(message):
                 bool(killer_kind) != bool(killer_id) or
                 not isinstance(row_stats, dict)):
             return False
-        if any(_exact_int(row_stats.get(stat_name)) is None or
-               _exact_int(row_stats.get(stat_name)) < 0
+        if any(_exact_int(row_stats.get(stat_name, 0)) is None or
+               _exact_int(row_stats.get(stat_name, 0)) < 0
                for stat_name in stat_names):
+            return False
+        # Receipts recorded before offline achievements shipped omit the list.
+        achievements = row.get('achievements', [])
+        if (not isinstance(achievements, list) or
+                len(achievements) > len(AWARDABLE_ACHIEVEMENTS) or
+                len(set(achievements)) != len(achievements) or
+                any(name not in AWARDABLE_ACHIEVEMENTS
+                    for name in achievements)):
             return False
         seen.add(identity)
         row_teams[identity] = row_team

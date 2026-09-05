@@ -47,6 +47,8 @@ from vehicle_overlay_store import (
     VehicleOverlayStoreError,
 )
 from gui.mods.offline_lan_0922 import tank_collision
+from gui.mods.offline_lan_0922.battle_achievements import (
+    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES, award_battle_achievements)
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922 import equipment_mechanics
@@ -362,6 +364,26 @@ CRITICAL_CREW_NAMES = frozenset((
     "commander", "driver", "gunner1", "gunner2", "loader1",
     "loader2", "radioman1", "radioman2",
 ))
+# #1513 ``items.vehicles.VEHICLE_DEVICE_TYPE_NAMES`` and
+# ``VEHICLE_TANKMAN_TYPE_NAMES`` positions, which the client's crits mask
+# parser indexes.  Both server track devices map onto the single "track" slot
+# and every numbered crew role onto its base type, exactly as retail packs it.
+CRIT_DEVICE_INDICES = {
+    "engineHealth": 0, "ammoBayHealth": 1, "fuelTankHealth": 2,
+    "radioHealth": 3, "leftTrackHealth": 4, "rightTrackHealth": 4,
+    "gunHealth": 5, "turretRotatorHealth": 6, "surveyingDeviceHealth": 7,
+}
+CRIT_TANKMAN_INDICES = {
+    "commander": 0, "driver": 1, "radioman1": 2, "radioman2": 2,
+    "gunner1": 3, "gunner2": 3, "loader1": 4, "loader2": 4,
+}
+# The #1513 vehicle-class tags several historical medals restrict on.
+VEHICLE_CLASS_TAGS = frozenset((
+    "lightTank", "mediumTank", "heavyTank", "AT-SPG", "SPG"))
+# ``arena_achievements.ACHIEVEMENT_CONDITIONS['sniper2']['sniperDistance']``
+# and ``['sturdy']['minHealth']`` of the pinned client.
+SNIPER_SHOT_DISTANCE = 300.0
+SPARTAN_HEALTH_PERCENT = 10.0
 CRITICAL_STATES = frozenset(("normal", "critical", "destroyed"))
 CRITICAL_CAUSES = frozenset((
     "shot", "explosion", "repair", "fire", "drowning", "ramming"))
@@ -973,14 +995,14 @@ def _persisted_result_receipt(value):
         raise ValueError("invalid persisted battle receipt leave state")
     stats = value.get("stats")
     rewards = value.get("rewards")
-    stat_names = (
-        "shots", "direct_hits", "piercings", "damage", "damage_received",
-        "damage_blocked", "assist_track", "assist_radio", "assist_stun",
-        "kills", "spotted", "capture_points", "dropped_capture_points",
-    )
+    stat_names = RECEIPT_STAT_NAMES
     reward_names = ("credits", "xp", "free_xp", "repair_cost", "ammo_cost")
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         raise ValueError("invalid persisted battle receipt summary")
+    # A receipt persisted before a statistic existed keeps its zero default;
+    # the durable store applies the same rule.
+    for name in stat_names:
+        stats.setdefault(name, 0)
     for mapping, names in ((stats, stat_names), (rewards, reward_names)):
         if any(isinstance(mapping.get(name), bool) or
                not isinstance(mapping.get(name), int) or
@@ -1020,6 +1042,8 @@ def _persisted_result_receipt(value):
                 not isinstance(row.get("is_team_killer"), bool) or
                 not isinstance(row.get("stats"), dict)):
             raise ValueError("invalid persisted public result row")
+        for name in stat_names:
+            row["stats"].setdefault(name, 0)
         if any(isinstance(row["stats"].get(name), bool) or
                not isinstance(row["stats"].get(name), int) or
                row["stats"].get(name) < 0 for name in stat_names):
@@ -1030,6 +1054,15 @@ def _persisted_result_receipt(value):
                 isinstance(killer_id, bool) or not isinstance(killer_id, int) or
                 killer_id < 0 or bool(killer_kind) != bool(killer_id)):
             raise ValueError("invalid persisted public result killer")
+        # Receipts written before offline achievements shipped have no list.
+        achievements = row.get("achievements", [])
+        if (not isinstance(achievements, list) or
+                len(achievements) > len(AWARDABLE_ACHIEVEMENTS) or
+                len(set(achievements)) != len(achievements) or
+                any(name not in AWARDABLE_ACHIEVEMENTS
+                    for name in achievements)):
+            raise ValueError("invalid persisted public result achievements")
+        row["achievements"] = sorted(achievements)
         seen.add(identity)
         row_teams[identity] = row["team"]
         if identity == ("player", value["player_id"]):
@@ -1263,6 +1296,67 @@ def _critical_discrete_state(value):
         bool(value.get("fire", False)),
         bool(value.get("ammo_rack_death", False)),
     )
+
+
+def _popcount(mask):
+    return bin(int(mask) & 0xffffffff).count("1")
+
+
+def _crits_mask(previous, current):
+    """Return the #1513 ``crits`` bits this transition newly set.
+
+    ``scripts/client/gui/shared/crits_mask_parser.py`` of build #1513 reads
+    bits 0-7 as critically damaged devices, bits 12-23 as destroyed devices
+    and bits 24-31 as destroyed crew, indexed by ``VEHICLE_DEVICE_TYPE_NAMES``
+    and ``VEHICLE_TANKMAN_TYPE_NAMES`` from ``battle_results_shared``.
+    """
+    if not isinstance(current, dict):
+        return 0
+    previous = previous if isinstance(previous, dict) else {}
+    mask = 0
+
+    def device_states(value):
+        return dict(
+            (str(record.get("name", "")), str(record.get("state", "")))
+            for record in value.get("devices") or ()
+            if isinstance(record, dict))
+
+    old_devices = device_states(previous)
+    old_destroyed = set(str(name) for name in previous.get("destroyed") or ())
+    for name, state in device_states(current).items():
+        index = CRIT_DEVICE_INDICES.get(name)
+        if index is None:
+            continue
+        if state == "critical" and old_devices.get(name) != "critical":
+            mask |= 1 << index
+    for name in (set(str(name) for name in current.get("destroyed") or ()) -
+                 old_destroyed):
+        index = CRIT_DEVICE_INDICES.get(name)
+        if index is not None:
+            mask |= 1 << (12 + index)
+    for name in (set(str(name) for name in current.get("crew_ko") or ()) -
+                 set(str(name) for name in previous.get("crew_ko") or ())):
+        index = CRIT_TANKMAN_INDICES.get(name)
+        if index is not None:
+            mask |= 1 << (24 + index)
+    return mask
+
+
+def _capture_key_actor(key):
+    """Invert ``_capture_vehicle_key`` back into an actor identity."""
+    prefix, unused, raw_id = str(key).partition(":")
+    return ("player" if prefix == "human" else "bot", int(raw_id))
+
+
+def _shot_distance(record, proposal):
+    """Return the metres between the muzzle pose and the impact pose."""
+    origin = record.get("range_origin") or ()
+    pose = proposal.get("pose") or ()
+    if len(origin) < 3 or len(pose) < 3:
+        return 0.0
+    return math.sqrt(sum(
+        (float(pose[index]) - float(origin[index])) ** 2
+        for index in range(3)))
 
 
 def _critical_damage_transition(previous, current):
@@ -1898,6 +1992,7 @@ class BattleState:
         self.human_ram_probe_fingerprints = OrderedDict()
         self.vehicle_statistics = {}
         self.vehicle_interactions = {}
+        self._reset_achievement_tracking()
         self.round_participants = {}
         self.track_immobilisers = {}
         self.player_spotted = {}
@@ -2910,6 +3005,7 @@ class BattleState:
         self.human_ram_probe_fingerprints = OrderedDict()
         self.vehicle_statistics = {}
         self.vehicle_interactions = {}
+        self._reset_achievement_tracking()
         self.round_participants = {}
         self.track_immobilisers = {}
         self.player_spotted = {}
@@ -3177,6 +3273,7 @@ class BattleState:
                 "team": int(participant.team),
                 "alive": bool(participant.alive),
                 "health": int(participant.health),
+                "max_health": int(participant.max_health),
                 "death_reason": int(participant.death_reason),
                 "death_attacker_kind": str(
                     participant.death_attacker_kind or ""),
@@ -4418,6 +4515,7 @@ class BattleState:
             self.bot_spotted[int(bot_id)] = spotted
             reporter = ("bot", int(bot_id))
             for target in spotted:
+                self._record_first_spot(reporter, target)
                 interaction = self._statistics_interaction(reporter, target)
                 if interaction["spotted"]:
                     continue
@@ -4436,6 +4534,7 @@ class BattleState:
             self.player_spotted[int(player_id)] = spotted
             reporter = ("player", int(player_id))
             for target in spotted:
+                self._record_first_spot(reporter, target)
                 interaction = self._statistics_interaction(reporter, target)
                 if interaction["spotted"]:
                     continue
@@ -7307,7 +7406,9 @@ class BattleState:
 
         if (applied > 0 or _critical_damage_transition(
                 critical_before, admitted_critical)):
-            self._drop_capture_for_vehicle(target_kind, target_id)
+            self._drop_capture_for_vehicle(
+                target_kind, target_id,
+                attacker=(record["shooter_kind"], record["shooter_id"]))
         if record["shooter_kind"] == "player":
             event_kind = "hit" if target_kind == "player" else "bot_hit"
             attacker_key = "attacker"
@@ -7367,27 +7468,53 @@ class BattleState:
         if enemy_hit and proposal["splash"]:
             self._increment_interaction(
                 shooter, victim, "explosion_hits")
+        crits_mask = _crits_mask(critical_before, admitted_critical)
+        crits = _popcount(crits_mask)
+        if enemy_hit and crits_mask:
+            victim_state = self._statistics_row(*victim)
+            victim_state["crits_received_mask"] |= crits_mask
+            self._or_interaction(shooter, victim, "crits", crits_mask)
         if not proposal["splash"] and enemy_hit:
             self._increment_interaction(
                 shooter, victim, "direct_hits")
             row = self._statistics_row(*shooter)
             row["shots_hit"] += 1
+            victim_row = self._statistics_row(*victim)
+            victim_row["hits_received"] += 1
+            victim_row["potential_damage_received"] += max(
+                0, int(proposal["potential_damage"]))
+            if applied > 0 or crits:
+                row["hits_with_damage"] += 1
+            if _shot_distance(record, proposal) >= SNIPER_SHOT_DISTANCE:
+                row["sniper_damage_dealt"] += applied
             if proposal["shot_result"] == 2:
                 row["shots_penetrated"] += 1
                 self._increment_interaction(
                     shooter, victim, "piercings")
             elif blocked_damage:
-                self._statistics_row(*victim)[
-                    "damage_blocked"] += blocked_damage
+                victim_row["damage_blocked"] += blocked_damage
                 self._increment_interaction(
                     victim, shooter, "damage_blocked", blocked_damage)
+            if applied > 0 or blocked_damage:
+                victim_row["damaging_hits_received"] += 1
+            deflected = False
             if proposal["shot_result"] == 0:
+                deflected = True
                 self._increment_interaction(
                     victim, shooter, "ricochets_received")
             elif proposal["shot_result"] == 1 and applied <= 0:
+                deflected = True
                 self._increment_interaction(
                     victim, shooter,
                     "no_damage_direct_hits_received")
+            if deflected:
+                victim_row["deflected_hits_received"] += 1
+                # The Spartan medal asks for a bounced shot taken while the
+                # vehicle was already below its health threshold, so the
+                # health at this hit is the only usable moment.
+                maximum = self._vehicle_max_health(victim)
+                if health * 100 <= SPARTAN_HEALTH_PERCENT * maximum:
+                    victim_row["deflected_hits_at_low_health"] += 1
         if was_alive and not alive:
             if target_kind == "player":
                 target.death_attacker_kind = record["shooter_kind"]
@@ -7398,7 +7525,9 @@ class BattleState:
             self._record_frag(
                 record["shooter_kind"], record["shooter_id"],
                 proposal["target_team"], target_kind, target_id,
-                attacker_team=int(record["team"]))
+                attacker_team=int(record["team"]),
+                projectile_id=record["projectile_id"],
+                distance=_shot_distance(record, proposal))
             self._clear_vehicle_stun(victim)
         elif proposal["stun_end_server_time_ms"]:
             self._set_canonical_stun(
@@ -7902,7 +8031,9 @@ class BattleState:
                 bot_terminal = self._apply_bot_terminal_critical(bot)
             self._commit_external_bot_combat(bot, bot_combat_before)
             if applied_bot > 0:
-                self._drop_capture_for_vehicle("bot", bot_id)
+                self._drop_capture_for_vehicle(
+                    "bot", bot_id,
+                    attacker=(target_kind, target_id))
             bot_event = {
                 "kind": ("bot_bot_hit" if target_kind == "bot"
                          else "bot_hit"),
@@ -7943,7 +8074,8 @@ class BattleState:
                 self._commit_external_bot_combat(
                     target, target_combat_before)
                 if applied_target > 0:
-                    self._drop_capture_for_vehicle("bot", target_id)
+                    self._drop_capture_for_vehicle(
+                        "bot", target_id, attacker=("bot", bot_id))
                 target_event = {
                     "kind": "bot_bot_hit", "attacker_bot": bot_id,
                     "target_bot": target_id, "damage": applied_target,
@@ -7969,7 +8101,8 @@ class BattleState:
                 target.display_health = target.health
                 target.death_reason = reason if not target.alive else 0
                 if applied_target > 0:
-                    self._drop_capture_for_vehicle("player", target_id)
+                    self._drop_capture_for_vehicle(
+                        "player", target_id, attacker=("bot", bot_id))
                 target_event = {
                     "kind": "bot_human_hit", "attacker_bot": bot_id,
                     "target": target_id, "damage": applied_target,
@@ -8077,7 +8210,134 @@ class BattleState:
                 row.get("capture_points", 0))),
             "dropped_capture_points": max(0, int(
                 row.get("dropped_capture_points", 0))),
+            "hits_received": max(0, int(row.get("hits_received", 0))),
+            "potential_damage_received": max(0, int(
+                row.get("potential_damage_received", 0))),
+            "crits_received": _popcount(row.get("crits_received_mask", 0)),
         }
+
+    def _catalogued_vehicle(self, vehicle):
+        """Return one client catalog row for this vehicle name, or None."""
+        for player_id in sorted(self.vehicle_catalogs):
+            for entry in self.vehicle_catalogs.get(player_id, ()):
+                if entry.get("name") == vehicle:
+                    return entry
+        return None
+
+    def _result_vehicle_class(self, vehicle):
+        """Return the #1513 class tag of one catalogued vehicle, or ''."""
+        entry = self._catalogued_vehicle(vehicle)
+        for tag in (entry or {}).get("tags", ()):
+            if tag in VEHICLE_CLASS_TAGS:
+                return tag
+        return ""
+
+    def _achievement_vehicle_tier(self, vehicle):
+        """Return a catalogued tier, or 0 when this client never listed it.
+
+        ``_result_vehicle_tier`` defaults an unknown vehicle to tier 1 so
+        rewards stay bounded.  A medal must not read that guess as a real
+        tier, or every kill would look like a higher-tier kill.
+        """
+        entry = self._catalogued_vehicle(vehicle)
+        if entry is None:
+            return 0
+        return max(1, min(10, int(entry.get("level", 1))))
+
+    def _achievement_actor_rows(self, winner, public_results):
+        """Project frozen public rows plus round state into award inputs."""
+        kills_by_actor = {}
+        vehicles = {}
+        for row in public_results:
+            vehicles[(row["actor_kind"], row["actor_id"])] = row["vehicle"]
+        tiers = {}
+        classes = {}
+
+        def described(identity):
+            if identity not in tiers:
+                vehicle = vehicles.get(identity, "")
+                tiers[identity] = self._achievement_vehicle_tier(vehicle)
+                classes[identity] = self._result_vehicle_class(vehicle)
+            return tiers[identity], classes[identity]
+
+        for record in self.kill_records:
+            actor = (record["actor_kind"], record["actor_id"])
+            victim = (record["victim_kind"], record["victim_id"])
+            if victim not in vehicles:
+                continue
+            victim_tier, victim_class = described(victim)
+            kills_by_actor.setdefault(actor, []).append({
+                "victim_kind": victim[0], "victim_id": victim[1],
+                "victim_tier": victim_tier, "victim_class": victim_class,
+                "death_reason": record["death_reason"],
+                "distance": record["distance"],
+                "defended_base": record["defended_base"],
+            })
+
+        actors = []
+        for row in public_results:
+            identity = (row["actor_kind"], row["actor_id"])
+            statistics = self._statistics_row(*identity)
+            tier, vehicle_class = described(identity)
+            actors.append({
+                "actor_kind": identity[0], "actor_id": identity[1],
+                "team": int(row["team"]),
+                "vehicle": row["vehicle"],
+                "tier": tier,
+                "vehicle_class": vehicle_class,
+                "max_health": self._vehicle_max_health(identity),
+                "health": int(row["health"]),
+                "survived": int(row["death_reason"]) < 0,
+                "won": int(winner) == int(row["team"]),
+                "xp": int(row["xp"]),
+                "stats": dict(row["stats"]),
+                "kills": kills_by_actor.get(identity, []),
+                "damaged_targets": sorted(
+                    self.damaged_targets.get(identity, ())),
+                "first_spotted": int(statistics.get("first_spotted", 0)),
+                "exclusive_spot_assists": len(
+                    self.exclusive_spot_assists.get(identity, ())),
+                "ever_spotted": identity in self.ever_spotted_targets,
+                "crits_received": _popcount(
+                    statistics.get("crits_received_mask", 0)),
+                "hits_received": int(statistics.get("hits_received", 0)),
+                "damaging_hits_received": int(
+                    statistics.get("damaging_hits_received", 0)),
+                "deflected_hits_received": int(
+                    statistics.get("deflected_hits_received", 0)),
+                "deflected_hits_at_low_health": int(
+                    statistics.get("deflected_hits_at_low_health", 0)),
+                "potential_damage_received": int(
+                    statistics.get("potential_damage_received", 0)),
+                "sniper_damage": int(
+                    statistics.get("sniper_damage_dealt", 0)),
+                "hits_with_damage": int(
+                    statistics.get("hits_with_damage", 0)),
+                "best_multi_kill_shot": int(
+                    self.best_multi_kill_shot.get(identity, 0)),
+                "lone_stand_enemies": int(
+                    self.lone_stand_enemies.get(identity, 0)),
+                "captured_base": int(
+                    row["stats"].get("capture_points", 0)) > 0,
+            })
+        return actors
+
+    def _vehicle_max_health(self, identity):
+        if identity[0] == "player":
+            player = self.players.get(int(identity[1]))
+            if player is not None:
+                return max(1, int(player.max_health))
+            participant = self._frozen_player_participant(identity[1])
+            if participant is not None:
+                return max(1, int(participant.get("max_health", 1) or 1))
+            return 1
+        state = self.bot_states.get(int(identity[1]))
+        if state is not None:
+            return max(1, int(state.get("max_health", 1) or 1))
+        for entry in self.bot_manifest:
+            if int(entry.get("id", 0)) == int(identity[1]):
+                return max(1, int(entry.get("max_health", 1) or 1))
+        return 1
 
     def _result_vehicle_tier(self, vehicle, preferred_player_id=None):
         catalog_ids = []
@@ -8214,6 +8474,14 @@ class BattleState:
                     "team_killer": bool(player.team_killer),
                 } for player in self.players.values()]
             public_results = self._public_result_roster(winner, participants)
+            awards = award_battle_achievements({
+                "actors": self._achievement_actor_rows(
+                    winner, public_results),
+                "base_captured_team": self.base_captured_team,
+            })
+            for row in public_results:
+                row["achievements"] = sorted(awards.get(
+                    (row["actor_kind"], row["actor_id"]), ()))
             public_by_player = dict(
                 (row["actor_id"], row) for row in public_results
                 if row["actor_kind"] == "player")
@@ -8366,6 +8634,7 @@ class BattleState:
         for state in self.bot_states.values():
             if state.get("alive") and state.get("team") in (1, 2):
                 alive_teams.add(int(state["team"]))
+        self._record_lone_stands()
         if alive_teams == {1, 2}:
             return False
         winner = next(iter(alive_teams)) if len(alive_teams) == 1 else 0
@@ -9944,7 +10213,8 @@ class BattleState:
             player.display_health = player.health
             player.death_reason = 1 if not player.alive else 0
             if damage > 0:
-                self._drop_capture_for_vehicle("player", player.player_id)
+                self._drop_capture_for_vehicle(
+                    "player", player.player_id, attacker=attacker)
             self._record_damage(
                 attacker, ("player", player.player_id), damage,
                 critical_before)
@@ -10121,6 +10391,113 @@ class BattleState:
             return None
         return state["attacker_kind"], state["attacker_id"]
 
+    def _reset_achievement_tracking(self):
+        """Clear the per-round inputs #1513 achievement conditions read."""
+        # target -> the first actor that ever directly detected it.
+        self.first_spotters = {}
+        # every vehicle any enemy ever directly detected.
+        self.ever_spotted_targets = set()
+        # actor -> targets it damaged while it was their only direct spotter.
+        self.exclusive_spot_assists = {}
+        # actor -> every enemy it damaged.
+        self.damaged_targets = {}
+        # one row per enemy kill, in the order the server admitted them.
+        self.kill_records = []
+        # projectile id -> kills that single shot caused.
+        self.projectile_kill_counts = {}
+        # actor -> the largest kill count one of its shots caused.
+        self.best_multi_kill_shot = {}
+        # actor -> enemies alive when it became its team's last survivor.
+        self.lone_stand_enemies = {}
+        # base team -> the actors currently inside that team's base circle.
+        self.capture_invaders = {1: set(), 2: set()}
+        self.base_captured_team = 0
+
+    def _record_first_spot(self, reporter, target):
+        """Remember the first detector and that this target was ever seen."""
+        reporter = (str(reporter[0]), int(reporter[1]))
+        target = (str(target[0]), int(target[1]))
+        reporter_team = self._vehicle_team(*reporter)
+        target_team = self._vehicle_team(*target)
+        if not target_team or reporter_team == target_team:
+            return
+        self.ever_spotted_targets.add(target)
+        if target not in self.first_spotters:
+            self.first_spotters[target] = reporter
+            self._statistics_row(*reporter)["first_spotted"] += 1
+
+    def _direct_spotters(self, target):
+        """Return every enemy observer that directly sees ``target``.
+
+        A reported spot set can contain same-team entries, so this applies the
+        same team fence ``_radio_assisters`` uses; a teammate is not a spotter.
+        """
+        target = (str(target[0]), int(target[1]))
+        target_team = self._vehicle_team(*target)
+        result = []
+        for reporter_id, spotted in self.player_spotted.items():
+            reporter = ("player", int(reporter_id))
+            if target in spotted and self._vehicle_team(
+                    *reporter) != target_team:
+                result.append(reporter)
+        for bot_id, spotted in self.bot_spotted.items():
+            reporter = ("bot", int(bot_id))
+            if target in spotted and self._vehicle_team(
+                    *reporter) != target_team:
+                result.append(reporter)
+        return result
+
+    def _record_kill(self, attacker, victim, death_reason,
+                     projectile_id=None, distance=None):
+        """Freeze one enemy kill with the facts #1513 medals ask about."""
+        attacker = (str(attacker[0]), int(attacker[1]))
+        victim = (str(victim[0]), int(victim[1]))
+        self.kill_records.append({
+            "actor_kind": attacker[0], "actor_id": attacker[1],
+            "victim_kind": victim[0], "victim_id": victim[1],
+            "death_reason": int(death_reason),
+            "distance": (None if distance is None else
+                         round(float(distance), 3)),
+            # De Langlade's medal counts enemies destroyed while they were
+            # inside the defender's own base circle.
+            "defended_base": victim in self.capture_invaders.get(
+                self._vehicle_team(*attacker), set()),
+        })
+        if projectile_id is not None:
+            # Projectile identities are opaque strings, not integers.
+            key = str(projectile_id)
+            count = int(self.projectile_kill_counts.get(key, 0)) + 1
+            self.projectile_kill_counts[key] = count
+            self.best_multi_kill_shot[attacker] = max(
+                int(self.best_multi_kill_shot.get(attacker, 0)), count)
+
+    def _record_lone_stands(self):
+        """Capture the Kolobanov moment for each new last survivor."""
+        alive = {1: [], 2: []}
+        roster = {1: 0, 2: 0}
+        for player in self.players.values():
+            team = int(player.team)
+            if team not in alive or not player.connected:
+                continue
+            roster[team] += 1
+            if player.participating and player.alive:
+                alive[team].append(("player", int(player.player_id)))
+        for state in self.bot_states.values():
+            team = int(state.get("team", 0))
+            if team not in alive:
+                continue
+            roster[team] += 1
+            if state.get("alive"):
+                alive[team].append(("bot", int(state["id"])))
+        for team in (1, 2):
+            # A team that never had a second vehicle cannot leave one behind.
+            if len(alive[team]) != 1 or roster[team] < 2:
+                continue
+            survivor = alive[team][0]
+            enemies = len(alive[3 - team])
+            self.lone_stand_enemies[survivor] = max(
+                int(self.lone_stand_enemies.get(survivor, 0)), enemies)
+
     def _statistics_row(self, kind, vehicle_id):
         """Return this round's mutable statistics row for one vehicle."""
         key = (str(kind), int(vehicle_id))
@@ -10134,6 +10511,16 @@ class BattleState:
                 "damage_blocked": 0, "damage_assisted_track": 0,
                 "damage_assisted_radio": 0, "damage_assisted_stun": 0,
                 "kills": 0,
+                "capture_points": 0, "dropped_capture_points": 0,
+                # Battle-result fidelity fields.  #1513 shows every one of
+                # these on the results screen and Wargaming's achievement
+                # conditions read them, so they are canonical round state
+                # rather than presentation-only counters.
+                "potential_damage_received": 0, "hits_received": 0,
+                "damaging_hits_received": 0, "deflected_hits_received": 0,
+                "crits_received_mask": 0, "hits_with_damage": 0,
+                "sniper_damage_dealt": 0, "first_spotted": 0,
+                "deflected_hits_at_low_health": 0,
             }
             self.vehicle_statistics[key] = row
         elif not row["team"]:
@@ -10163,6 +10550,15 @@ class BattleState:
         interaction = self._statistics_interaction(actor, target)
         interaction[name] = max(minimum, min(
             maximum, int(interaction.get(name, 0)) + int(amount)))
+        return interaction[name]
+
+    def _or_interaction(self, actor, target, name, mask):
+        """Merge one bitmask field.  #1513 reads ``crits`` as a mask, so
+        distinct modules accumulate and a repeated crit stays one bit."""
+        minimum, maximum = RESULT_INTERACTION_LIMITS[name]
+        interaction = self._statistics_interaction(actor, target)
+        interaction[name] = max(minimum, min(
+            maximum, int(interaction.get(name, 0)) | int(mask)))
         return interaction[name]
 
     def _receipt_interactions(self, actor):
@@ -10231,10 +10627,18 @@ class BattleState:
         if not attacker_row["team"] and attacker_team in (1, 2):
             attacker_row["team"] = attacker_team
         attacker_row["damage_dealt"] += damage
+        self.damaged_targets.setdefault(attacker, set()).add(target)
         self._increment_interaction(
             attacker, target, "damage", damage)
         self._increment_interaction(
             target, attacker, "damage_received", damage)
+        # #1513's Patrol Duty (``evileye``) counts enemies damaged while the
+        # awarded vehicle was their only direct spotter.  Record that here,
+        # where the exact live spotter set is still known.
+        spotters = self._direct_spotters(target)
+        if len(spotters) == 1 and spotters[0] != attacker:
+            self.exclusive_spot_assists.setdefault(
+                spotters[0], set()).add(target)
         credits = []
         holder = self.track_immobilisers.get(target)
         if (holder is not None and holder != attacker and
@@ -10271,7 +10675,8 @@ class BattleState:
         return None
 
     def _record_frag(self, attacker_kind, attacker_id, victim_team,
-                     victim_kind, victim_id, attacker_team=None):
+                     victim_kind, victim_id, attacker_team=None,
+                     projectile_id=None, distance=None):
         """Apply the shared +1 enemy / -1 ally frag and team-killer law."""
         if (attacker_kind == victim_kind and
                 int(attacker_id) == int(victim_id)):
@@ -10335,6 +10740,8 @@ class BattleState:
             minimum, maximum = RESULT_INTERACTION_LIMITS["death_reason"]
             interaction["death_reason"] = max(
                 minimum, min(maximum, int(reason)))
+            self._record_kill(
+                attacker, victim, int(reason), projectile_id, distance)
         self.pending_events.append({
             "kind": "vehicle_statistics",
             "actor_kind": attacker_kind,
@@ -10648,9 +11055,13 @@ class BattleState:
         first.death_reason = 2 if not first.alive else 0
         second.death_reason = 2 if not second.alive else 0
         if damage_first > 0:
-            self._drop_capture_for_vehicle("player", first.player_id)
+            self._drop_capture_for_vehicle(
+                "player", first.player_id,
+                attacker=("player", second.player_id))
         if damage_second > 0:
-            self._drop_capture_for_vehicle("player", second.player_id)
+            self._drop_capture_for_vehicle(
+                "player", second.player_id,
+                attacker=("player", first.player_id))
         episode = int(self.human_ram_episode_seq.get(pair, 0)) + 1
         self.human_ram_episode_seq[pair] = episode
         operation_id = "%d:%d:%d:%d" % (
@@ -10854,8 +11265,12 @@ class BattleState:
         return "%s:%d" % ("human" if kind == "player" else "bot",
                            int(vehicle_id))
 
-    def _drop_capture_for_vehicle(self, kind, vehicle_id):
-        """Drop only one damaged vehicle's accumulated capture points."""
+    def _drop_capture_for_vehicle(self, kind, vehicle_id, attacker=None):
+        """Drop only one damaged vehicle's accumulated capture points.
+
+        ``attacker`` credits the enemy that caused the drop with #1513's
+        ``droppedCapturePoints``, which the Defender medal reads.
+        """
         key = self._capture_vehicle_key(kind, vehicle_id)
         dropped_total = 0
         for base_team in (1, 2):
@@ -10871,6 +11286,13 @@ class BattleState:
             state["time_left"] = (
                 float(max(0, 100 - state["points"])) / float(rate)
                 if rate > 0 else 0.0)
+        if dropped_total and attacker is not None:
+            attacker = (str(attacker[0]), int(attacker[1]))
+            target_team = self._vehicle_team(str(kind), int(vehicle_id))
+            if (attacker != (str(kind), int(vehicle_id)) and
+                    self._vehicle_team(*attacker) != target_team):
+                self._statistics_row(*attacker)[
+                    "dropped_capture_points"] += dropped_total
         return dropped_total
 
     def _update_capture(self):
@@ -10938,6 +11360,8 @@ class BattleState:
                 key for key, x, z in vehicles[invading_team]
                 if any((x - bx) ** 2 + (z - bz) ** 2 <= 2500.0
                        for bx, bz in normalized)))
+            self.capture_invaders[base_team] = set(
+                _capture_key_actor(key) for key in invader_keys)
             state = self.rules_state['bases'][str(base_team)]
             previous = dict(state)
             contributors = self.capture_contributors[base_team]
@@ -10963,6 +11387,11 @@ class BattleState:
                         (cursor + offset) % len(invader_keys)]
                     contributors[vehicle_id] = int(
                         contributors.get(vehicle_id, 0) or 0) + 1
+                    # #1513 reports each vehicle's own accumulated capture
+                    # points; the Invader medal reads exactly this total.
+                    self._statistics_row(
+                        *_capture_key_actor(vehicle_id))[
+                            "capture_points"] += 1
                 self.capture_cursors[base_team] = (
                     cursor + budget) % len(invader_keys)
             elif not invader_keys:
@@ -10977,6 +11406,7 @@ class BattleState:
                 if rate > 0 else 0.0)
             changed = changed or state != previous
             if state['points'] >= 100:
+                self.base_captured_team = invading_team
                 self._finish_battle(
                     invading_team, 'base captured', base_team)
                 break
