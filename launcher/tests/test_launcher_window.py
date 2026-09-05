@@ -1028,7 +1028,8 @@ class WindowTest(unittest.TestCase):
         self._saves_root()
 
         self.assertEqual(
-            (self.window._t("Default save"),),
+            ("%s - %s" % (self.window._t("Default save"),
+                          self.window._t("Fully unlocked")),),
             tuple(self.window.save_slot_box.cget("values")))
         self.assertEqual(
             wot_launcher.save_slots.DEFAULT_SLOT_ID,
@@ -1038,16 +1039,30 @@ class WindowTest(unittest.TestCase):
         self.assertFalse(self.window._delete_save_slot())
         self.assertIn("default save cannot be deleted", self._log_text())
 
+    _CANCELLED = None
+
+    def _new_save(self, name="Career",
+                  mode=wot_launcher.save_slots.MODE_UNLOCKED):
+        """Create one save the way the two dialogs would.
+
+        ``mode=None`` is the player cancelling the save-type question.
+        """
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value=name):
+            with mock.patch.object(
+                    self.window, "_ask_save_slot_mode", return_value=mode):
+                return self.window._new_save_slot()
+
     def test_a_new_save_becomes_the_selected_one_and_is_remembered(self):
         saves_root = self._saves_root()
-        with mock.patch.object(
-                self.window, "_ask_save_slot_name", return_value="Career"):
-            self.assertTrue(self.window._new_save_slot())
+        self.assertTrue(self._new_save())
 
         self.assertNotEqual(
             wot_launcher.save_slots.DEFAULT_SLOT_ID,
             self.window._save_slot_id)
-        self.assertEqual("Career", self.window.save_slot.get())
+        self.assertEqual(
+            "Career - %s" % self.window._t("Fully unlocked"),
+            self.window.save_slot.get())
         self.assertTrue(os.path.isdir(
             os.path.join(saves_root, self.window._save_slot_id)))
         self.assertEqual(
@@ -1058,12 +1073,12 @@ class WindowTest(unittest.TestCase):
 
     def test_selecting_another_save_records_it_for_the_next_launch(self):
         self._saves_root()
-        with mock.patch.object(
-                self.window, "_ask_save_slot_name", return_value="Career"):
-            self.window._new_save_slot()
+        self._new_save()
         career = self.window._save_slot_id
 
-        self.window.save_slot.set(self.window._t("Default save"))
+        self.window.save_slot.set("%s - %s" % (
+            self.window._t("Default save"),
+            self.window._t("Fully unlocked")))
         self.assertTrue(self.window._save_slot_selected())
         self.assertEqual(
             wot_launcher.save_slots.DEFAULT_SLOT_ID,
@@ -1072,15 +1087,14 @@ class WindowTest(unittest.TestCase):
             wot_launcher.save_slots.DEFAULT_SLOT_ID,
             core.load_settings().get("save_slot"))
 
-        self.window.save_slot.set("Career")
+        self.window.save_slot.set(
+            "Career - %s" % self.window._t("Fully unlocked"))
         self.assertTrue(self.window._save_slot_selected())
         self.assertEqual(career, self.window._save_slot_id)
 
     def test_deleting_the_selected_save_returns_to_the_default(self):
         saves_root = self._saves_root()
-        with mock.patch.object(
-                self.window, "_ask_save_slot_name", return_value="Career"):
-            self.window._new_save_slot()
+        self._new_save()
         career = self.window._save_slot_id
 
         with mock.patch.object(
@@ -1100,9 +1114,7 @@ class WindowTest(unittest.TestCase):
     def test_a_save_deleted_outside_the_launcher_falls_back_to_the_default(
             self):
         saves_root = self._saves_root()
-        with mock.patch.object(
-                self.window, "_ask_save_slot_name", return_value="Career"):
-            self.window._new_save_slot()
+        self._new_save()
         shutil.rmtree(os.path.join(saves_root, self.window._save_slot_id))
 
         self.window._refresh_save_slots()
@@ -1113,17 +1125,40 @@ class WindowTest(unittest.TestCase):
 
     def test_saves_with_the_same_name_stay_distinguishable(self):
         self._saves_root()
-        with mock.patch.object(
-                self.window, "_ask_save_slot_name", return_value="Career"):
-            self.window._new_save_slot()
-            first = self.window._save_slot_id
-            self.window._new_save_slot()
-            second = self.window._save_slot_id
+        self._new_save()
+        first = self.window._save_slot_id
+        self._new_save()
+        second = self.window._save_slot_id
 
         labels = tuple(self.window.save_slot_box.cget("values"))
+        unlocked = self.window._t("Fully unlocked")
         self.assertEqual(3, len(labels))
-        self.assertIn("Career (%s)" % first, labels)
-        self.assertIn("Career (%s)" % second, labels)
+        self.assertIn("Career (%s) - %s" % (first, unlocked), labels)
+        self.assertIn("Career (%s) - %s" % (second, unlocked), labels)
+
+    def test_a_career_save_is_created_and_labelled_as_a_new_account(self):
+        """The save type is the whole difference between the two garages."""
+        self._saves_root()
+        self.assertTrue(self._new_save(
+            mode=wot_launcher.save_slots.MODE_NEW_ACCOUNT))
+
+        record = self.window._selected_save_slot_record()
+        self.assertEqual(
+            wot_launcher.save_slots.MODE_NEW_ACCOUNT, record["mode"])
+        self.assertEqual(
+            "Career - %s" % self.window._t("New account"),
+            self.window.save_slot.get())
+
+    def test_cancelling_the_save_type_creates_nothing(self):
+        saves_root = self._saves_root()
+
+        self.assertFalse(self._new_save(mode=self._CANCELLED))
+
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertFalse(
+            os.path.isdir(saves_root) and os.listdir(saves_root))
 
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(

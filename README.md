@@ -52,7 +52,18 @@ its own garage, crew, account settings and battle results under
 `%APPDATA%/Wargaming.net/WorldOfTanks/offline_lan_0922/saves/<save>/`, and the
 selected save is written into the client configuration when the game starts.
 State written by a build without saves moves into the default save on the next
-start. Vehicle data profiles are deliberately not part of a save: they change
+start.
+
+A new save is created as one of two accounts, and the choice is permanent. A
+fully unlocked save is the historical garage: every vehicle, module and
+consumable is already owned. A new account starts the way a real World of Tanks
+account does, with the tier 1 starter tanks, 100000 credits, 30 garage slots
+and nothing else researched; credits and experience are earned in battle, and
+vehicles, modules, ammunition and consumables are researched and bought in the
+garage at this client's own prices. Gold is spent but not earned, so premium
+vehicles and gold ammunition are paid for out of the gold the launcher grants.
+
+Vehicle data profiles are deliberately not part of a save: they change
 the client catalogue for a whole room, so they belong to the installation.
 
 The launcher's Tools tab can also edit vehicle data directly. A vehicle data

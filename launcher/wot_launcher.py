@@ -115,6 +115,16 @@ _CHINESE = {
     "New save": "新建存档",
     "Rename save": "重命名存档",
     "Save name:": "存档名称：",
+    "New account": "新账号",
+    "Fully unlocked": "全解锁",
+    "Save type": "存档类型",
+    "Start '%s' as a new World of Tanks account?\n\n"
+    "Yes: the tier 1 starter tanks, 100000 credits and an empty tech tree. "
+    "Everything else is researched and bought in the garage.\n\n"
+    "No: every vehicle, module and consumable is already owned.":
+        "把存档“%s”作为全新的坦克世界账号开始吗？\n\n"
+        "是：只有一级初始坦克、100000 银币，科技树全部未解锁，其余全部在车库里研发和购买。\n\n"
+        "否：所有坦克、模块和消耗品一开始就已拥有。",
     "Delete save?": "删除存档？",
     "Delete save '%s'? Its garage, crew, account settings and battle "
     "results are removed permanently.":
@@ -998,7 +1008,11 @@ class LauncherWindow(object):
         same_name = sum(
             1 for row in self._save_slot_records
             if row["name"] == record["name"])
-        return "%s (%s)" % (name, record["id"]) if same_name > 1 else name
+        if same_name > 1:
+            name = "%s (%s)" % (name, record["id"])
+        return "%s - %s" % (name, self._t(
+            "New account" if record.get("mode") == save_slots.MODE_NEW_ACCOUNT
+            else "Fully unlocked"))
 
     def _refresh_save_slots(self, status=None):
         game_root = (status or {}).get("path") or self.game_root.get().strip()
@@ -1053,6 +1067,29 @@ class LauncherWindow(object):
         return simpledialog.askstring(
             self._t(title), self._t("Save name:"), initialvalue=current)
 
+    def _ask_save_slot_mode(self, name):
+        """Ask which account a new save starts from, or None to cancel.
+
+        The two modes are the whole difference between the historical garage
+        and a career, so the choice is made once, when the save is created,
+        and never changes afterwards.
+        """
+        from tkinter import messagebox
+
+        answer = messagebox.askyesnocancel(
+            self._t("Save type"),
+            self._t(
+                "Start '%s' as a new World of Tanks account?\n\n"
+                "Yes: the tier 1 starter tanks, 100000 credits and an empty "
+                "tech tree. Everything else is researched and bought in the "
+                "garage.\n\n"
+                "No: every vehicle, module and consumable is already owned.")
+            % name)
+        if answer is None:
+            return None
+        return (save_slots.MODE_NEW_ACCOUNT if answer
+                else save_slots.MODE_UNLOCKED)
+
     def _confirm_delete_save_slot(self, label):
         from tkinter import messagebox
 
@@ -1076,9 +1113,12 @@ class LauncherWindow(object):
         raw_name = self._ask_save_slot_name("New save")
         if raw_name is None:
             return False
+        mode = self._ask_save_slot_mode(raw_name.strip() or self._t("New save"))
+        if mode is None:
+            return False
         try:
             record = save_slots.create_slot(
-                raw_name, save_slots.MODE_UNLOCKED, game_root or None)
+                raw_name, mode, game_root or None)
         except save_slots.SaveSlotError as error:
             self._log("Could not create the save: %s" % error)
             return False

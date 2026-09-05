@@ -77,6 +77,14 @@ save is the one the game starts with. Saves live in
 made in an older build keeps working: its files move into the default save the
 first time this build starts.
 
+When you create a save the Launcher asks which account it starts from, and the
+answer cannot be changed later. "Fully unlocked" is the garage this mod always
+had: every vehicle, module and consumable already owned. "New account" starts
+like a real World of Tanks account: the tier 1 starter tanks, 100000 credits,
+30 garage slots, and an unresearched tech tree. You earn credits and experience
+in battle and research and buy everything else in the garage, at the prices
+this client ships.
+
 Vehicle data profiles are not part of a save. They change the client's shared
 vehicle catalogue for a whole room, so they stay with the installation.
 

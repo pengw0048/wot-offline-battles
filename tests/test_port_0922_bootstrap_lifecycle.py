@@ -219,7 +219,15 @@ def _package(name):
 
 
 class BootstrapLifecycleTests(unittest.TestCase):
-    def _load(self):
+    # The nine #1513 vehicles that cost nothing and that no research leads
+    # to: the tier 1 starters every new account owns.
+    STARTER_NAMES = {
+        'ussr:R11_MS-1': (0, 11),
+        'germany:G12_Ltraktor': (0, 12),
+        'usa:A01_T1_Cunningham': (1, 7),
+    }
+
+    def _load(self, save_mode=None, starters=None):
         events = []
         callbacks = _Callbacks()
         spaces = types.SimpleNamespace(
@@ -246,7 +254,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         config_module.SAVE_MODE_UNLOCKED = 'unlocked'
         config_module.SAVE_MODE_NEW_ACCOUNT = 'new_account'
         config_module.save_slot_mode = lambda: (
-            config_module.SAVE_MODE_UNLOCKED)
+            save_mode or config_module.SAVE_MODE_UNLOCKED)
         state_module = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc.state')
         state_module.AccountState = types.SimpleNamespace
@@ -375,10 +383,12 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     2: {1: object(), 2: object(), 3: object(), 4: object()},
                 }.get(nation_id, {})
 
-            def getIDsByName(self, unused_name):
+            def getIDsByName(self, name):
                 # #1513 raises for a name it does not know; the price index
                 # relies on that to skip a catalogue entry this client lacks.
-                raise KeyError(unused_name)
+                if starters and name in starters:
+                    return starters[name]
+                raise KeyError(name)
 
         customization = types.SimpleNamespace(
             paints={12001: types.SimpleNamespace(compactDescr=12001)},
@@ -470,7 +480,12 @@ class BootstrapLifecycleTests(unittest.TestCase):
         items.tankmen = tankmen
         items.vehicles = vehicles
         nations = types.ModuleType('nations')
-        nations.NAMES = tuple('nation-%d' % index for index in range(9))
+        # The price index reads a real catalogue keyed on the real nation
+        # names, so a career harness has to answer to them.
+        nations.NAMES = (
+            ('ussr', 'germany', 'usa', 'china', 'france', 'uk', 'japan',
+             'czech', 'sweden') if starters else
+            tuple('nation-%d' % index for index in range(9)))
         # The exact #1513 scripts/common/AccountCommands.pyc values.
         account_commands = types.ModuleType('AccountCommands')
         account_commands.VEHICLE_SETTINGS_FLAG = types.SimpleNamespace(
@@ -518,6 +533,96 @@ class BootstrapLifecycleTests(unittest.TestCase):
                      'commander_sixthSense', 'commander_eagleEye',
                      'driver_virtuoso', 'driver_smoothDriving',
                      'gunner_smoothTurret', 'loader_intuition')
+
+    def _build(self, **kwargs):
+        """Build one startup garage through the real bootstrap."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        with mock.patch.dict(sys.modules, modules):
+            return bootstrap, bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+    def _career(self):
+        return self._build(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+
+    def test_a_new_account_owns_only_the_free_starter_vehicles(self):
+        """A retail account can research nothing until it owns a vehicle.
+
+        The starters are the only vehicles no research leads to, and #1513
+        prices them at nothing, so they are the whole garage a new account
+        begins with.
+        """
+        unused_bootstrap, snapshot = self._career()
+
+        # The same id arithmetic the fake client's makeIntCompactDescrByID
+        # uses, so ownership is asserted against the starter list itself.
+        expected = set(
+            90000 + nation_id * 1000 + vehicle_type_id
+            for nation_id, vehicle_type_id in self.STARTER_NAMES.values())
+        self.assertEqual(expected, set(snapshot['vehicleTypeCompactDescrs']))
+        self.assertEqual(
+            len(self.STARTER_NAMES), len(snapshot['vehicles']))
+        self.assertEqual('new_account', snapshot['saveMode'])
+
+    def test_a_new_account_starts_with_the_settled_balance_and_garage(self):
+        unused_bootstrap, snapshot = self._career()
+
+        self.assertEqual(100000, snapshot['wallet']['credits'])
+        self.assertEqual(0, snapshot['wallet']['gold'])
+        self.assertEqual(0, snapshot['wallet']['freeXP'])
+        self.assertEqual(30, snapshot['accountSlots'])
+        self.assertEqual(30, snapshot['accountBerths'])
+
+    def test_a_new_account_has_a_tech_tree_left_to_research(self):
+        """The sandbox unlocks the catalogue; a career must not."""
+        unused_bootstrap, career = self._career()
+        unused_sandbox_bootstrap, sandbox = self._build()
+
+        self.assertLess(
+            len(career['unlockItemCompactDescrs']),
+            len(sandbox['unlockItemCompactDescrs']))
+        # Every vehicle it does own is researched, or it could not be fitted.
+        self.assertTrue(
+            set(career['vehicleTypeCompactDescrs']).issubset(
+                career['unlockItemCompactDescrs']))
+        # The shop still prices everything, because the player has to be able
+        # to see what the rest of the tree costs.
+        self.assertLess(
+            len(career['unlockItemCompactDescrs']),
+            len(career['shopItemPrices']))
+
+    def test_a_new_account_buys_its_own_consumables_and_devices(self):
+        """Retail hands a new player no equipment, only the tanks."""
+        unused_bootstrap, snapshot = self._career()
+
+        for item_type in (9, 11):
+            self.assertFalse(snapshot['inventoryItems'].get(item_type))
+        for record in snapshot['vehicles']:
+            self.assertEqual([0, 0, 0], list(record['eqs']))
+        # The shop still has to know what they cost.
+        self.assertTrue(snapshot['optionalDeviceCount'] > 0)
+        self.assertTrue(snapshot['equipmentCount'] > 0)
+
+    def test_a_new_account_arrives_stock_rather_than_fully_fitted(self):
+        """Retail sells the stock fitting; the top modules are researched."""
+        unused_bootstrap, career = self._career()
+        unused_sandbox_bootstrap, sandbox = self._build()
+
+        def modules(snapshot):
+            record = snapshot['vehicles'][0]
+            return set(
+                compact_descr
+                for item_type in range(2, 8)
+                for compact_descr in record['inventoryItems'].get(item_type, {}))
+
+        stock = modules(career)
+        self.assertEqual({2002, 2003, 2004, 2005, 2006, 2007}, stock)
+        self.assertTrue(stock < modules(sandbox))
+        # A career owns only the ammunition its stock gun fires.
+        self.assertEqual(
+            {12004}, set(career['vehicles'][0]['inventoryItems'][10]))
 
     def test_session_log_distinguishes_visible_and_worker_builds(self):
         (bootstrap, unused_callbacks, unused_compatibility,
