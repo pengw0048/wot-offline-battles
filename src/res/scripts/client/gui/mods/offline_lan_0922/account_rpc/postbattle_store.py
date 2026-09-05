@@ -251,9 +251,11 @@ def _receipt(value):
         'premature_leave': bool(value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
-        # The personal row owns the medal list; mirroring it here keeps the
-        # durable progress transaction from re-deriving the roster.
+        # The personal row owns the medal list and the health the battle left;
+        # mirroring both here keeps the durable progress transaction from
+        # re-deriving the roster to find them.
         'achievements': list(personal['achievements']),
+        'health': personal['health'],
         'public_results': public_results,
         'interactions': interactions,
     }

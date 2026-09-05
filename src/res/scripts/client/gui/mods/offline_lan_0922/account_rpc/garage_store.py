@@ -44,7 +44,10 @@ SCHEMA = 6
 READABLE_SCHEMAS = (3, 4, 5, SCHEMA)
 STATE_FILE_NAME = 'garage_state.json'
 
-_VEHICLE_INT_KEYS = ('eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx')
+# ``repair`` is (outstanding cost, remaining health): a vehicle a battle left
+# damaged has to come back damaged, or a restart would be a free repair.
+_VEHICLE_INT_KEYS = (
+    'eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx', 'repair')
 _ARTEFACT_ITEM_TYPES = (9, 10, 11)
 _CUSTOMIZATION_SEASONS = (1, 2, 4, 8, 15)
 MAX_BATTLE_RECEIPTS = 512
@@ -352,13 +355,14 @@ class GarageStore(object):
     def apply_battle_crew_xp(self, snapshot, receipt_id,
                              vehicle_type_compact_descr, battle_xp,
                              xp_to_tankman_flag, tankmen_module=None,
-                             rewards=None):
-        """Apply and persist one crew award exactly once.
+                             rewards=None, health=None, vehicles_module=None):
+        """Apply and persist one battle's whole settlement exactly once.
 
-        The compact crew descriptors and their receipt marker share one JSON
-        replacement.  A receipt retried after a disconnect therefore either
-        applies the whole award or observes the durable marker; it can never
-        add the XP twice.
+        The compact crew descriptors, the earnings, the damage the battle did
+        and their receipt marker share one JSON replacement.  A receipt
+        retried after a disconnect therefore either applies the whole
+        settlement or observes the durable marker; it can never award the XP
+        twice, and it can never bill the same damage twice either.
         """
         receipt_id = str(receipt_id or '')[:96]
         if not receipt_id:
@@ -372,9 +376,13 @@ class GarageStore(object):
 
         from gui.mods.offline_lan_0922.account_rpc.garage import GarageState
         staged = copy.deepcopy(snapshot)
-        state = GarageState(staged, tankmen_module=tankmen_module)
+        state = GarageState(staged, tankmen_module=tankmen_module,
+                            vehicles_module=vehicles_module)
         result = state.award_battle_crew_xp(
             vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
+        if health is not None:
+            result['repair'] = state.settle_battle_damage(
+                vehicle_type_compact_descr, health)
         if rewards is not None:
             # The crew award and the credits it was earned beside share one
             # JSON replacement, so a retried receipt can never bank one

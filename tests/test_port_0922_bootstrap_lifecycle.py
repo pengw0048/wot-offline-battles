@@ -1256,15 +1256,19 @@ class BootstrapLifecycleTests(unittest.TestCase):
         class _GarageStore(object):
             def apply_battle_crew_xp(self, snapshot, receipt_id,
                                      vehicle_type_cd, xp, xp_flag,
-                                     tankmen_module=None, rewards=None):
+                                     tankmen_module=None, rewards=None,
+                                     health=None, vehicles_module=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
-                # The crew award and the earnings it was banked beside share
-                # one transaction, so the applier must pass both.
+                # The crew award, the earnings it was banked beside and the
+                # damage the same battle did share one transaction, so the
+                # applier must pass all three.
                 banked.append(rewards)
+                settled.append(health)
                 return {'vehicle_id': 1, 'applied': True}
 
         banked = []
+        settled = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -1280,11 +1284,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 'vehicle': 'ussr:R11_MS-1',
                 'receipt_id': 'server:1:1',
                 'rewards': {'xp': 100},
+                'health': 40,
             })
 
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
         self.assertEqual([{'xp': 100}], banked)
+        self.assertEqual([40], settled)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
 

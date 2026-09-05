@@ -63,6 +63,14 @@ vehicles, modules, ammunition and consumables are researched and bought in the
 garage at this client's own prices. Gold is spent but not earned, so premium
 vehicles and gold ammunition are paid for out of the gold the launcher grants.
 
+A battle leaves the vehicle as damaged as it ended: the client's own
+inventory carries the outstanding repair cost beside the remaining health, so
+the garage shows the tank destroyed or damaged and the maintenance panel
+offers the repair. The bill comes out of the client's own repair formula --
+one health point costs what that vehicle charges per point -- and it has to be
+paid before the tank can fight again. A save keeps the damage across a
+restart, because a restart is not a free repair.
+
 Crew members are recruited from the same three schools the game offers, at
 50%, 75% or 100% of their role: free, 20000 credits and 200 gold in a career,
 and free in a fully unlocked save. A recruit goes to the barracks or straight

@@ -931,8 +931,10 @@ class AccountRpcTests(unittest.TestCase):
             ('crew ids must resolve',
              lambda value: value['tankmen'].pop(102)),
             ('lock must contain two', lambda value: value.update(lock=0)),
-            ('health must be positive',
-             lambda value: value.update(repair=(0, 0))),
+            # A health of 0 is a destroyed vehicle waiting for repair, which
+            # #1513 renders; a negative bill is nothing it can render.
+            ('repair cost cannot be negative',
+             lambda value: value.update(repair=(-1, 100))),
             ('eqs must contain three', lambda value: value.update(eqs=[])),
             ('descriptor/count pairs',
              lambda value: value.update(shells=[10010])),

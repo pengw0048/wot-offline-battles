@@ -125,8 +125,12 @@ def _validate_selected_vehicle(vehicle):
             if not isinstance(value, (tuple, list)) or len(value) != 2:
                 raise ValueError(
                     'selected vehicle %s must contain two values' % key)
-        if record['repair'][1] <= 0:
-            raise ValueError('selected vehicle health must be positive')
+        # ``repair`` is (outstanding cost, remaining health).  #1513's own
+        # ``Vehicle.modelState`` reads a health of 0 beside a bill as
+        # DESTROYED and a negative one as EXPLODED, so neither is a damaged
+        # snapshot -- both are a vehicle waiting to be repaired.
+        if int(record['repair'][0]) < 0:
+            raise ValueError('selected vehicle repair cost cannot be negative')
         for key in ('eqs', 'eqsLayout'):
             value = record.get(key)
             if not isinstance(value, (tuple, list)) or len(value) != 3:

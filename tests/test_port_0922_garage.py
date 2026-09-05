@@ -54,7 +54,8 @@ SNAPSHOT = {
         'compDescr': b'veh:9',
         'crew': [101, 102],
         'tankmen': {101: b'tman:101', 102: b'tman:102'},
-        'repair': (0, 100),
+        # (outstanding repair cost, remaining health), at _Descriptor's max.
+        'repair': (0, 1000),
         'lock': (0, 0),
         'shells': [10010, 20, 10011, 10],
         'shellsLayout': {(7001, 7002): [10010, 20, 10011, 10]},
@@ -102,8 +103,11 @@ class _Descriptor(object):
         self.compact_descr = compact_descr
         self.devices = {}
         self.components = {}
+        # getMaxRepairCost's hull term is maxHealth * type.repairCost, so one
+        # health point costs type.repairCost.
+        self.maxHealth = 1000
         self.type = types.SimpleNamespace(
-            id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES)
+            id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES, repairCost=2.0)
         # #1513 Vehicle.shellsLayoutIdx reads both compact descriptors.
         self.turret = _Component(7001)
         self.turret.maxAmmo = 45
@@ -884,6 +888,66 @@ class GarageStateTests(unittest.TestCase):
             b'tman:new:driver#100',
             state.snapshot()['barracksTankmen'][103])
 
+    # ---- damage and repair ----------------------------------------------
+
+    def _damaged_state(self, credits_amount=100000):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {
+            'credits': credits_amount, 'gold': 0, 'freeXP': 0}
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_battle_leaves_the_repair_bill_the_client_reads(self):
+        """invData['repair'] is (outstanding cost, remaining health)."""
+        state = self._damaged_state()
+
+        # 400 of 1000 health left: 600 points at 2 credits each.
+        self.assertEqual((1200, 400), state.settle_battle_damage(50001, 400))
+        self.assertEqual((1200, 400), state.snapshot()['vehicles'][0]['repair'])
+
+    def test_a_destroyed_vehicle_comes_back_at_zero_health(self):
+        """Vehicle.modelState reads 0 health beside a bill as DESTROYED."""
+        state = self._damaged_state()
+
+        self.assertEqual((2000, 0), state.settle_battle_damage(50001, 0))
+
+    def test_an_untouched_vehicle_owes_nothing(self):
+        state = self._damaged_state()
+
+        self.assertEqual((0, 1000), state.settle_battle_damage(50001, 1000))
+
+    def test_a_stale_receipt_cannot_heal_past_the_maximum(self):
+        state = self._damaged_state()
+
+        self.assertEqual((0, 1000), state.settle_battle_damage(50001, 9999))
+
+    def test_repairing_pays_the_bill_and_restores_the_health(self):
+        state = self._damaged_state()
+        state.settle_battle_damage(50001, 400)
+
+        self.assertEqual(1200, state.repair_vehicle(9))
+
+        self.assertEqual((0, 1000), state.snapshot()['vehicles'][0]['repair'])
+        self.assertEqual(100000 - 1200, state.snapshot()['wallet']['credits'])
+
+    def test_an_account_that_cannot_pay_leaves_the_vehicle_broken(self):
+        """isBroken is the bill alone, and a broken tank cannot fight."""
+        state = self._damaged_state(credits_amount=100)
+        state.settle_battle_damage(50001, 400)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.repair_vehicle(9)
+
+        self.assertEqual((1200, 400), state.snapshot()['vehicles'][0]['repair'])
+        self.assertEqual(100, state.snapshot()['wallet']['credits'])
+
+    def test_a_vehicle_that_needs_nothing_is_not_repaired_twice(self):
+        state = self._damaged_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.repair_vehicle(9)
+
 
 class FittingRequestTests(unittest.TestCase):
 
@@ -1199,6 +1263,34 @@ class GaragePersistenceTests(unittest.TestCase):
         snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
         return snapshot
 
+    def test_a_damaged_vehicle_comes_back_damaged(self):
+        """A restart that repaired the tank would be a free repair."""
+        state = self._state()
+        state.settle_battle_damage(50001, 400)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart()
+
+        self.assertEqual([1200, 400], list(restored['vehicles'][0]['repair']))
+
+    def test_a_save_written_before_the_repair_state_restores_undamaged(self):
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(copy.deepcopy(SNAPSHOT)))
+        import json
+        with io.open(self.path, encoding='utf-8') as stream:
+            saved = json.load(stream)
+        for stored in saved['vehicles'].values():
+            stored.pop('repair', None)
+        with io.open(self.path, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(saved))
+
+        restored = self._restart()
+
+        self.assertEqual((0, 1000), restored['vehicles'][0]['repair'])
+
     def test_an_unloaded_crew_survives_a_restart_in_the_barracks(self):
         """A seat left out of the save would be refilled by the next start."""
         snapshot = copy.deepcopy(SNAPSHOT)
@@ -1472,6 +1564,38 @@ class GaragePersistenceTests(unittest.TestCase):
             restarted['vehicles'][0]['tankmen'][101]).totalXP())
         self.assertEqual(100, _TankmanDescriptor(
             restarted['vehicles'][0]['tankmen'][102]).totalXP())
+
+    def test_a_retried_receipt_bills_the_same_damage_only_once(self):
+        """The award, the earnings and the damage share one transaction."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        vehicles, tankmen = _modules()
+        store = self._store()
+
+        first = store.apply_battle_crew_xp(
+            snapshot, 'server:8:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles)
+        duplicate = store.apply_battle_crew_xp(
+            snapshot, 'server:8:1', 50001, 100, 1, tankmen_module=tankmen,
+            health=400, vehicles_module=vehicles)
+
+        self.assertTrue(first['applied'])
+        self.assertEqual((1200, 400), first['repair'])
+        self.assertFalse(duplicate['applied'])
+        # The second application must not settle a second time against the
+        # already-damaged vehicle.
+        self.assertEqual((1200, 400), snapshot['vehicles'][0]['repair'])
+
+    def test_a_receipt_without_a_health_reading_bills_nothing(self):
+        """A receipt written before the settlement existed stays readable."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        unused_vehicles, tankmen = _modules()
+        store = self._store()
+
+        result = store.apply_battle_crew_xp(
+            snapshot, 'server:9:1', 50001, 100, 1, tankmen_module=tankmen)
+
+        self.assertNotIn('repair', result)
+        self.assertEqual((0, 1000), snapshot['vehicles'][0]['repair'])
 
     def test_schema_three_garage_upgrades_without_losing_the_loadout(self):
         state = self._state()

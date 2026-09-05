@@ -157,7 +157,8 @@ def _bind_battle_progress(context):
         result = garage_store.apply_battle_crew_xp(
             snapshot, receipt['receipt_id'], vehicle_type_cd,
             receipt['rewards']['xp'], VEHICLE_SETTINGS_FLAG.XP_TO_TMAN,
-            tankmen_module=tankmen, rewards=receipt['rewards'])
+            tankmen_module=tankmen, rewards=receipt['rewards'],
+            health=receipt.get('health'), vehicles_module=vehicles)
         context['selected_vehicle'] = snapshot
         touched.add(int(result['vehicle_id']))
         return result
@@ -173,8 +174,9 @@ def _restore_garage(snapshot):
     migrated = [0]
 
     def validate(staged):
-        from items import tankmen
+        from items import tankmen, vehicles
         migrated[0] = _migrate_saved_crew_skill_slots(staged, tankmen)
+        _clamp_saved_repair(staged, vehicles)
         return _validate_restored_garage(staged)
 
     try:
@@ -206,6 +208,33 @@ def _restore_garage(snapshot):
                     '[Offline LAN 0.9.22] named %d saved vehicle(s) for the '
                     'launcher\n' % unnamed)
     return restored
+
+
+def _clamp_saved_repair(snapshot, vehicles):
+    """Keep a saved repair state inside what this client's vehicle can be.
+
+    A save is written against one catalogue and restored against another, so
+    the health it recorded can exceed the maximum this client's vehicle has.
+    That is a stale number, not a damaged save: repairing it is right and
+    throwing the whole career away over it is not.
+    """
+    for record in (snapshot.get('vehicles') or ()):
+        if not isinstance(record, dict):
+            continue
+        value = record.get('repair')
+        if not isinstance(value, (tuple, list)) or len(value) != 2:
+            continue
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            maximum = int(descriptor.maxHealth)
+            bill = max(0, int(value[0]))
+            health = int(value[1])
+        except Exception:
+            continue
+        if health >= maximum:
+            record['repair'] = (0, maximum)
+        else:
+            record['repair'] = (bill, health)
 
 
 def _validate_restored_garage(snapshot):

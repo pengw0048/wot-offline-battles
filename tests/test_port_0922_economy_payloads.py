@@ -6,7 +6,7 @@ than guessed from a parameter name: ``Stats.unlock``,
 ``Stats.__slot_onShopSynced``, ``Stats.__berths_onShopSynced``,
 ``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
 ``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman``,
-``Inventory.dismissTankman``, ``Shop.buyTankman`` and
+``Inventory.dismissTankman``, ``Inventory.repair``, ``Shop.buyTankman`` and
 ``Shop.buyAndEquipTankman``.  The economy suite proves the garage
 transactions; this one proves the payload reaches them with every value in the
 position the client actually sends it.
@@ -159,6 +159,13 @@ class EconomyPayloadTests(unittest.TestCase):
                 'items_from_vehicle': [],
                 'items_from_inventory': []})],
             self._dispatch(commands.CMD_SELL_VEHICLE, ([17, 10, 0, 0, 0],)))
+
+    def test_repairing_carries_nothing_but_the_vehicle(self):
+        # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0)
+        self.assertEqual(
+            [('repair_vehicle', (10,), {})],
+            self._dispatch(commands.CMD_REPAIR, (10, 0, 0)))
+        self._refuse(commands.CMD_REPAIR, ())
 
     def test_recruiting_carries_the_vehicle_type_the_role_and_the_school(self):
         # Shop.buyTankman -> _doCmdInt4(CMD_BUY_TMAN, cacheRev,

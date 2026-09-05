@@ -1028,6 +1028,73 @@ class GarageState(object):
             'vehicleXP': _int(vehicle_xp.get(key, 0)),
         }
 
+    # ---- damage and repair ----------------------------------------------
+
+    def settle_battle_damage(self, vehicle_type_compact_descr, health):
+        """Record what one battle left of a vehicle, and what it will cost.
+
+        #1513 keeps both in one inventory field: ``invData['repair']`` is
+        ``(outstanding repair cost, remaining health)``.  ``Vehicle.modelState``
+        reads a health of 0 with a bill as DESTROYED and a negative one as
+        EXPLODED, and ``Vehicle.isBroken`` is the bill alone, so the pair is
+        the whole contract.
+
+        The bill comes out of ``VehicleDescriptor.getMaxRepairCost``, whose
+        hull term is ``maxHealth * type.repairCost``: one health point costs
+        ``type.repairCost``, so losing some costs that much per point.  The
+        rest of that formula prices destroyed modules, and the battle receipt
+        does not say which modules were destroyed, so none are charged.
+        """
+        record = self._record_by_vehicle_type(vehicle_type_compact_descr)
+        descriptor = self._descriptor(record)
+        maximum = _int(getattr(descriptor, 'maxHealth', 0))
+        if maximum <= 0:
+            raise GarageError('the vehicle has no maximum health')
+        health = _int(health)
+        if health >= maximum:
+            # Untouched, or healed past its own maximum by a stale receipt.
+            record['repair'] = (0, maximum)
+            self.revision += 1
+            return record['repair']
+        try:
+            per_point = float(getattr(descriptor.type, 'repairCost', 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            per_point = 0.0
+        lost = maximum - max(health, 0)
+        record['repair'] = (max(0, int(round(per_point * lost))), health)
+        self.revision += 1
+        return record['repair']
+
+    def repair_vehicle(self, vehicle_inventory_id):
+        """Pay one vehicle's outstanding repair bill and put it back together."""
+        record = self._record(vehicle_inventory_id, touch=False)
+        descriptor = self._descriptor(record)
+        maximum = _int(getattr(descriptor, 'maxHealth', 0))
+        if maximum <= 0:
+            raise GarageError('the vehicle has no maximum health')
+        bill, health = self._repair_state(record)
+        if bill <= 0 and health >= maximum:
+            raise GarageError('this vehicle does not need repairing')
+        self._charge({'credits': bill})
+        record['repair'] = (0, maximum)
+        self._touched.add(_int(record.get('id', 0)))
+        self.revision += 1
+        return bill
+
+    @staticmethod
+    def _repair_state(record):
+        value = record.get('repair')
+        if not isinstance(value, (tuple, list)) or len(value) != 2:
+            return 0, 0
+        return _int(value[0]), _int(value[1])
+
+    def _descriptor(self, record):
+        vehicles = self._vehicles_module()
+        try:
+            return vehicles.VehicleDescr(compactDescr=record['compDescr'])
+        except Exception as error:
+            raise GarageError('the client refused the vehicle: %s' % error)
+
     # ---- purchases, sales and research ----------------------------------
 
     def sell_item(self, compact_descr, count=1):

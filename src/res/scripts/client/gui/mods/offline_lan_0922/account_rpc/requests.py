@@ -240,6 +240,13 @@ def _dismiss_tankman(context, args):
     return _fitting(context, lambda state: state.dismiss_tankman(args[0]))
 
 
+def _repair(context, args):
+    # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_REPAIR_REQUEST')
+    return _fitting(context, lambda state: state.repair_vehicle(args[0]))
+
+
 def _buy_tankman(context, args):
     # Shop.buyTankman -> _doCmdInt4(CMD_BUY_TMAN, cacheRev, vehTypeCompDescr,
     # roleIdx, tmanCostTypeIdx), where roleIdx is tankmen.SKILL_INDICES[role].
@@ -577,6 +584,7 @@ HANDLERS = {
     commands.CMD_TRAINING_TMAN: _train_tankman,
     commands.CMD_EQUIP_TMAN: _equip_tankman,
     commands.CMD_DISMISS_TMAN: _dismiss_tankman,
+    commands.CMD_REPAIR: _repair,
     commands.CMD_BUY_TMAN: _buy_tankman,
     commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,
     commands.CMD_BUY_ITEM: _buy_item,
