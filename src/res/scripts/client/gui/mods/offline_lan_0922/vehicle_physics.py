@@ -1662,24 +1662,34 @@ def slope_cohesion(ny):
 
 
 def slope_slide_speed(cur, slope_tan, dt):
-	'''Advance passive slope slide along the fall line.
-
-	The contrib trial reduces side hold over its two-point normal-y curve. This
-	is intentionally cheap, but native equivalence and gameplay feel are not yet
-	proved. The caller applies only the cross-heading component so longitudinal
-	drive and this lateral slip do not double-count.
-	'''
+	'''Advance the existing passive slope slide along the fall line.'''
 	theta = math.atan(slope_tan)
-	hold_tangent = (
-		SLIDE_HOLD_TAN * lateral_slope_grip(math.cos(theta)))
 	# Lateral fall-line hold: tracks resist SIDEWAYS slip only up to SLIDE_HOLD_TAN
 	# (gentler than the brake COHESION), so a hull cannot perch across a steep bank
 	# it is only leaning on. Past it, slip down the excess.
-	if slope_tan <= hold_tangent:
+	if slope_tan <= SLIDE_HOLD_TAN:
 		cur -= COHESION * GRAVITY * dt   # holds: kill any residual slide fast
 		return cur if cur > 0.0 else 0.0
 	# accelerate by the grip-excess, minus a track drag proportional to slide
 	# speed -> settles at a natural terrain-dependent terminal, not a flat cap.
+	cur += (GRAVITY * (
+		math.sin(theta) - SLIDE_HOLD_TAN * math.cos(theta)) -
+		SLIDE_DRAG * cur) * dt
+	if cur < 0.0:
+		cur = 0.0
+	elif cur > SLIDE_MAX:
+		cur = SLIDE_MAX
+	return cur
+
+
+def suspension_slope_slide_speed(cur, slope_tan, dt):
+	'''Apply the contrib trial's unproved lateral-grip projection.'''
+	theta = math.atan(slope_tan)
+	hold_tangent = (
+		SLIDE_HOLD_TAN * lateral_slope_grip(math.cos(theta)))
+	if slope_tan <= hold_tangent:
+		cur -= COHESION * GRAVITY * dt
+		return cur if cur > 0.0 else 0.0
 	cur += (GRAVITY * (
 		math.sin(theta) - hold_tangent * math.cos(theta)) -
 		SLIDE_DRAG * cur) * dt

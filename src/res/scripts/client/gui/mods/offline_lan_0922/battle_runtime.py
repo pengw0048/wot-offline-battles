@@ -17902,8 +17902,9 @@ class BattleRuntime(object):
             self._local_air_lateral = (
                 lateral_x * 0.995, lateral_z * 0.995)
             return position
-        self._local_slide_speed = vehicle_physics.slope_slide_speed(
-            self._local_slide_speed, self._local_slope_tangent, dt)
+        self._local_slide_speed = (
+            vehicle_physics.suspension_slope_slide_speed(
+                self._local_slide_speed, self._local_slope_tangent, dt))
         cross_x, cross_z = math.cos(yaw), -math.sin(yaw)
         slide_dot = (self._local_downhill[0] * cross_x +
                      self._local_downhill[2] * cross_z)

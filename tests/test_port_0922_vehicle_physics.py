@@ -518,11 +518,21 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
             0.55, vehicle_physics.lateral_slope_grip(midpoint_y))
         self.assertEqual(
             0.0,
-            vehicle_physics.slope_slide_speed(
+            vehicle_physics.suspension_slope_slide_speed(
                 0.0, math.tan(math.radians(24.0)), 0.1))
         self.assertGreater(
-            vehicle_physics.slope_slide_speed(
+            vehicle_physics.suspension_slope_slide_speed(
                 0.0, math.tan(math.radians(25.0)), 0.1),
+            0.0)
+
+    def test_contrib_side_grip_does_not_change_the_legacy_fallback(self):
+        tangent = math.tan(math.radians(25.0))
+
+        self.assertEqual(
+            0.0, vehicle_physics.slope_slide_speed(0.0, tangent, 0.1))
+        self.assertGreater(
+            vehicle_physics.suspension_slope_slide_speed(
+                0.0, tangent, 0.1),
             0.0)
 
 
