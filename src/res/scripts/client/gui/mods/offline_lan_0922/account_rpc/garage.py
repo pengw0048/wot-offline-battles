@@ -454,6 +454,50 @@ class GarageState(object):
         self._barracks()[_int(tankman_id)] = compact_descr
         self._touched_tankmen.add(_int(tankman_id))
 
+    @staticmethod
+    def _remember_last_crew(record, seats):
+        """Record who was sitting where, so the crew can be sent back.
+
+        #1513's crew operations popover reads ``lastCrew`` as one inventory id
+        per seat and offers to put each of them back.  It is deliberately not
+        saved: the ids are this client's own bookkeeping, and a restart
+        rebuilds the garage with new ones, so a saved list would point at
+        nobody.
+        """
+        remembered = list(record.get('lastCrew') or ())
+        crew = list(record.get('crew') or ())
+        while len(remembered) < len(crew):
+            remembered.append(None)
+        for index in seats:
+            if 0 <= index < len(crew):
+                remembered[index] = crew[index]
+        record['lastCrew'] = remembered[:len(crew)]
+
+    def return_crew(self, vehicle_inventory_id):
+        """Put the crew that was in this vehicle back where it was.
+
+        Only a crew member the account still holds and who still fits the seat
+        comes back; anyone else is left where they are, which is what the
+        popover shows the player before they press it.
+        """
+        record = self._record(vehicle_inventory_id, touch=False)
+        remembered = list(record.get('lastCrew') or ())
+        if not remembered:
+            raise GarageError('this vehicle has no crew to send back')
+        returned = []
+        for slot, tankman_id in enumerate(remembered):
+            if tankman_id is None:
+                continue
+            try:
+                self.equip_tankman(
+                    vehicle_inventory_id, slot, _int(tankman_id))
+            except GarageError:
+                continue
+            returned.append(_int(tankman_id))
+        if not returned:
+            raise GarageError('none of this crew can be sent back')
+        return returned
+
     def _require_berths(self, needed):
         needed = _int(needed)
         if needed > self.free_berths():
@@ -1450,6 +1494,8 @@ class GarageState(object):
             if not leaving:
                 raise GarageError('there is no crew member in that seat')
             self._require_berths(len(leaving))
+            self._remember_last_crew(
+                record, [index for index, unused in leaving])
             for index, tankman_id in leaving:
                 self._to_barracks(tankman_id, rows.pop(tankman_id))
                 crew[index] = None
@@ -1486,6 +1532,7 @@ class GarageState(object):
                 'the barracks has no room for the crew member leaving seat %d'
                 % slot)
         if occupant is not None:
+            self._remember_last_crew(record, [slot])
             self._to_barracks(occupant, rows.pop(occupant))
         if source is None:
             del barracks[tankman_inventory_id]
@@ -1720,8 +1767,13 @@ class GarageState(object):
             if not isinstance(rows, dict) or wanted not in rows:
                 continue
             del rows[wanted]
+            crew = list(record.get('crew') or ())
+            self._remember_last_crew(
+                record,
+                [index for index, value in enumerate(crew)
+                 if _int(value or 0) == wanted])
             record['crew'] = [None if _int(value or 0) == wanted else value
-                              for value in (record.get('crew') or ())]
+                              for value in crew]
             self._touched.add(_int(record.get('id', 0)))
             self._touched_tankmen.add(wanted)
             self.revision += 1

@@ -261,6 +261,13 @@ def _retrain_crew(context, args):
         context, lambda state: state.retrain_crew(values[1], values[2:]))
 
 
+def _return_crew(context, args):
+    # Inventory.returnCrew -> _doCmdInt3(CMD_RETURN_CREW, vehInvID, 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.return_crew(args[0]))
+
+
 def _repair(context, args):
     # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0).
     if len(args) < 1:
@@ -608,6 +615,7 @@ HANDLERS = {
     commands.CMD_REPAIR: _repair,
     commands.CMD_TMAN_RESPEC: _retrain_tankman,
     commands.CMD_TMAN_MULTI_RESPEC: _retrain_crew,
+    commands.CMD_RETURN_CREW: _return_crew,
     commands.CMD_BUY_TMAN: _buy_tankman,
     commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,
     commands.CMD_BUY_ITEM: _buy_item,

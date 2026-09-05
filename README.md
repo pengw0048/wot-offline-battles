@@ -90,8 +90,11 @@ The barracks holds the crew members no vehicle is carrying. Selling a vehicle
 can send its crew there instead of dismissing them, a seat can be unloaded and
 filled again, and a crew member can move straight from one tank to another;
 whoever leaves a seat needs a free berth, which is the same check the game's
-own dialogs make before they offer the choice. A crew member can only take a
-seat in the vehicle they were trained for, and retraining -- at the same three
+own dialogs make before they offer the choice. A vehicle remembers the crew that
+left it, so the game's own "return crew" button puts them back where they
+were -- until the game is restarted, because the inventory ids a return works
+by are rebuilt from the save rather than stored in it. A crew member can only
+take a seat in the vehicle they were trained for, and retraining -- at the same three
 schools, one crew member or a whole crew at a time -- is how they change
 vehicle. The client works out the role level they keep, so the loss is the
 game's own.

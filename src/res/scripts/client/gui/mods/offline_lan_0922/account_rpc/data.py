@@ -325,6 +325,9 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         # A missing lastCrew record means that no historical crew is stored.
         # An empty per-vehicle list is not equivalent in #1513: the crew
         # operations popover treats presence as a real history entry.
+        remembered = record.get('lastCrew')
+        if isinstance(remembered, (list, tuple)) and remembered:
+            vehicle_values['lastCrew'][vehicle_id] = list(remembered)
 
         outfits = record.get('outfits')
         vehicle_type = record.get('vehicleTypeCompactDescr')

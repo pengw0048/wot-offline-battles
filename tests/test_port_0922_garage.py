@@ -1232,6 +1232,54 @@ class GarageStateTests(unittest.TestCase):
 
         self.assertEqual(200, state.snapshot()['inventoryItems'][9][9002])
 
+    # ---- sending a crew back ---------------------------------------------
+
+    def test_a_crew_unloaded_to_the_barracks_can_be_sent_back(self):
+        """The popover reads lastCrew as one inventory id per seat."""
+        state = self._two_seat_state()
+        state.equip_tankman(9, -1, -1)
+
+        self.assertEqual([101, 102], state.return_crew(9))
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([101, 102], record['crew'])
+        self.assertEqual({}, state.snapshot()['barracksTankmen'])
+
+    def test_only_the_seat_that_emptied_is_remembered(self):
+        state = self._two_seat_state()
+        state.equip_tankman(9, 1, -1)
+
+        self.assertEqual(
+            [None, 102], list(state.snapshot()['vehicles'][0]['lastCrew']))
+
+    def test_a_vehicle_that_never_lost_a_crew_has_nobody_to_send_back(self):
+        state = self._two_seat_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.return_crew(9)
+
+    def test_a_dismissed_crew_member_cannot_be_sent_back(self):
+        state = self._two_seat_state()
+        state.dismiss_tankman(101)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.return_crew(9)
+
+        self.assertEqual(
+            [101, None], list(state.snapshot()['vehicles'][0]['lastCrew']))
+
+    def test_a_crew_member_who_took_another_seat_comes_back_from_it(self):
+        """The popover works out where each of them is before it offers."""
+        state = self._two_vehicle_state()
+        state.equip_tankman(9, 0, -1)
+        state.equip_tankman(10, 0, 101)
+
+        self.assertEqual([101], state.return_crew(9))
+
+        first, second = state.snapshot()['vehicles']
+        self.assertEqual([101, 102], first['crew'])
+        self.assertEqual([None, 202], second['crew'])
+
 
 class FittingRequestTests(unittest.TestCase):
 

@@ -7,6 +7,7 @@ than guessed from a parameter name: ``Stats.unlock``,
 ``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
 ``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman``,
 ``Inventory.dismissTankman``, ``Inventory.repair``,
+``Inventory.returnCrew``,
 ``Inventory.__equipOptionDevice_onShopSynced``,
 ``Inventory.__respecTman_onShopSynced``,
 ``Inventory.__multiRespecTman_onShopSynced``, ``Shop.buyTankman`` and
@@ -203,6 +204,13 @@ class EconomyPayloadTests(unittest.TestCase):
             self._refuse(commands.CMD_TMAN_RESPEC, args)
         for args in (([17, 50002, 100005],), ([17],), ([],), ()):
             self._refuse(commands.CMD_TMAN_MULTI_RESPEC, args)
+
+    def test_sending_a_crew_back_carries_nothing_but_the_vehicle(self):
+        # Inventory.returnCrew -> _doCmdInt3(CMD_RETURN_CREW, vehInvID, 0, 0)
+        self.assertEqual(
+            [('return_crew', (10,), {})],
+            self._dispatch(commands.CMD_RETURN_CREW, (10, 0, 0)))
+        self._refuse(commands.CMD_RETURN_CREW, ())
 
     def test_repairing_carries_nothing_but_the_vehicle(self):
         # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0)
