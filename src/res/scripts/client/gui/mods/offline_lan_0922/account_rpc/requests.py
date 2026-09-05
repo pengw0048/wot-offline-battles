@@ -240,6 +240,26 @@ def _dismiss_tankman(context, args):
     return _fitting(context, lambda state: state.dismiss_tankman(args[0]))
 
 
+def _retrain_tankman(context, args):
+    # Inventory.__respecTman_onShopSynced -> _doCmdInt4(CMD_TMAN_RESPEC,
+    #   shopRev, tmanInvID, tmanCostTypeIdx, vehTypeCompDescr).
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.retrain_tankman(
+        args[1], args[2], args[3]))
+
+
+def _retrain_crew(context, args):
+    # Inventory.__multiRespecTman_onShopSynced -> _doCmdIntArr(
+    #   CMD_TMAN_MULTI_RESPEC,
+    #   [shopRev, vehTypeCompDescr, tmanInvID, costIdx, ...]).
+    values = list(args[0] if args else ())
+    if len(values) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(
+        context, lambda state: state.retrain_crew(values[1], values[2:]))
+
+
 def _repair(context, args):
     # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0).
     if len(args) < 1:
@@ -585,6 +605,8 @@ HANDLERS = {
     commands.CMD_EQUIP_TMAN: _equip_tankman,
     commands.CMD_DISMISS_TMAN: _dismiss_tankman,
     commands.CMD_REPAIR: _repair,
+    commands.CMD_TMAN_RESPEC: _retrain_tankman,
+    commands.CMD_TMAN_MULTI_RESPEC: _retrain_crew,
     commands.CMD_BUY_TMAN: _buy_tankman,
     commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,
     commands.CMD_BUY_ITEM: _buy_item,

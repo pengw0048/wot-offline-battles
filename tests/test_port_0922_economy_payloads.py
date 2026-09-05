@@ -6,7 +6,9 @@ than guessed from a parameter name: ``Stats.unlock``,
 ``Stats.__slot_onShopSynced``, ``Stats.__berths_onShopSynced``,
 ``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
 ``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman``,
-``Inventory.dismissTankman``, ``Inventory.repair``, ``Shop.buyTankman`` and
+``Inventory.dismissTankman``, ``Inventory.repair``,
+``Inventory.__respecTman_onShopSynced``,
+``Inventory.__multiRespecTman_onShopSynced``, ``Shop.buyTankman`` and
 ``Shop.buyAndEquipTankman``.  The economy suite proves the garage
 transactions; this one proves the payload reaches them with every value in the
 position the client actually sends it.
@@ -159,6 +161,29 @@ class EconomyPayloadTests(unittest.TestCase):
                 'items_from_vehicle': [],
                 'items_from_inventory': []})],
             self._dispatch(commands.CMD_SELL_VEHICLE, ([17, 10, 0, 0, 0],)))
+
+    def test_retraining_carries_the_tankman_the_school_and_the_vehicle(self):
+        # Inventory.__respecTman_onShopSynced -> _doCmdInt4(CMD_TMAN_RESPEC,
+        #   shopRev, tmanInvID, tmanCostTypeIdx, vehTypeCompDescr)
+        self.assertEqual(
+            [('retrain_tankman', (100005, 1, 50002), {})],
+            self._dispatch(commands.CMD_TMAN_RESPEC, (17, 100005, 1, 50002)))
+
+    def test_retraining_a_crew_carries_the_vehicle_then_flat_pairs(self):
+        # Inventory.__multiRespecTman_onShopSynced -> _doCmdIntArr(
+        #   CMD_TMAN_MULTI_RESPEC,
+        #   [shopRev, vehTypeCompDescr, tmanInvID, costIdx, ...])
+        self.assertEqual(
+            [('retrain_crew', (50002, [100005, 1, 100006, 0]), {})],
+            self._dispatch(
+                commands.CMD_TMAN_MULTI_RESPEC,
+                ([17, 50002, 100005, 1, 100006, 0],)))
+
+    def test_a_truncated_retraining_payload_is_refused_instead_of_guessed(self):
+        for args in ((17, 100005, 1), (17,), ()):
+            self._refuse(commands.CMD_TMAN_RESPEC, args)
+        for args in (([17, 50002, 100005],), ([17],), ([],), ()):
+            self._refuse(commands.CMD_TMAN_MULTI_RESPEC, args)
 
     def test_repairing_carries_nothing_but_the_vehicle(self):
         # Inventory.repair -> _doCmdInt3(CMD_REPAIR, vehInvID, 0, 0)

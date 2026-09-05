@@ -1569,6 +1569,72 @@ class GarageState(object):
             raise GarageError('%r is not a crew role' % (role,))
         return role
 
+    def retrain_tankman(self, tankman_inventory_id, cost_type_index,
+                        vehicle_type_compact_descr):
+        """Retrain one crew member for another vehicle, at one of the schools.
+
+        ``TankmanDescr.respecialize`` is the client's own implementation of
+        this: it takes the school's minimum role level and its two role-level
+        losses, works out for itself whether the new vehicle is the same class
+        and applies the right one.  So the garage supplies the numbers the
+        recruit window already showed and lets the client do the arithmetic.
+        """
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
+        cost = self._tankman_cost(cost_type_index)
+        compact_descr = _int(vehicle_type_compact_descr)
+        if compact_descr not in self._unlocks():
+            raise GarageError(
+                'vehicle type %d is not researched' % compact_descr)
+        nation_id, vehicle_type_id, unused_roles = self._vehicle_type_crew(
+            compact_descr)
+        seat = self._seated_record(tankman_id)
+        if seat is not None:
+            seated_type = _int(seat.get('vehicleTypeCompactDescr', 0))
+            if seated_type != compact_descr:
+                # A seated crew member has to match their vehicle's nation,
+                # type and role or the next restore rejects the whole garage.
+                raise GarageError(
+                    'unload this crew member before retraining them for '
+                    'another vehicle')
+        tankmen = self._tankmen_module()
+        try:
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
+            if _int(descriptor.nationID) != nation_id:
+                raise GarageError('this crew member serves another nation')
+            descriptor.respecialize(
+                vehicle_type_id, _int(cost.get('roleLevel', 0)),
+                float(cost.get('baseRoleLoss', 0.0) or 0.0),
+                float(cost.get('classChangeRoleLoss', 0.0) or 0.0),
+                bool(cost.get('isPremium', False)))
+            retrained = descriptor.makeCompactDescr()
+        except GarageError:
+            raise
+        except Exception as error:
+            raise GarageError('the client refused the retraining: %s' % error)
+        # Charge only once the client has produced the retrained crew member,
+        # so a refusal never costs the player anything.
+        self._charge(cost)
+        rows[tankman_id] = retrained
+        self.revision += 1
+        return tankman_id
+
+    def retrain_crew(self, vehicle_type_compact_descr, choices):
+        """Retrain several crew members for one vehicle in one command.
+
+        #1513's crew operations popover sends the whole crew as flat
+        tankman/school pairs, so the whole list is checked before any of it is
+        charged: a crew half retrained is worse than one not retrained.
+        """
+        pairs = [_int(value) for value in (choices or ())]
+        if len(pairs) % 2:
+            raise GarageError(
+                'crew retraining needs tankman/school pairs')
+        retrained = []
+        for index in range(0, len(pairs), 2):
+            retrained.append(self.retrain_tankman(
+                pairs[index], pairs[index + 1], vehicle_type_compact_descr))
+        return retrained
+
     def _seated_record(self, tankman_inventory_id):
         wanted = _int(tankman_inventory_id)
         for record in self._records():
@@ -1610,9 +1676,10 @@ class GarageState(object):
     def _check_tankman_fits(self, record, roles, slot, compact_descr):
         """Refuse a seat this crew member cannot hold without retraining.
 
-        The offline garage has no retraining yet, and its restore boundary
-        requires every seated crew member to match the vehicle's nation, type
-        and role, so a mismatch would make the whole save unrestorable.
+        The restore boundary requires every seated crew member to match their
+        vehicle's nation, type and role, so a mismatch would make the whole
+        save unrestorable.  Retraining is how a crew member changes vehicle;
+        a seat is not.
         """
         tankmen = self._tankmen_module()
         vehicles = self._vehicles_module()
@@ -1626,7 +1693,8 @@ class GarageState(object):
             raise GarageError('this crew member serves another nation')
         if _int(descriptor.vehicleTypeID) != _int(vehicle_type_id):
             raise GarageError(
-                'this crew member is trained for another vehicle')
+                'this crew member is trained for another vehicle: retrain '
+                'them first')
         if descriptor.role != roles[slot][0]:
             raise GarageError(
                 'this crew member is a %s and seat %d is for a %s'

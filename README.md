@@ -85,8 +85,11 @@ The barracks holds the crew members no vehicle is carrying. Selling a vehicle
 can send its crew there instead of dismissing them, a seat can be unloaded and
 filled again, and a crew member can move straight from one tank to another;
 whoever leaves a seat needs a free berth, which is the same check the game's
-own dialogs make before they offer the choice. Retraining does not exist yet,
-so a crew member can only take a seat in the vehicle they were trained for.
+own dialogs make before they offer the choice. A crew member can only take a
+seat in the vehicle they were trained for, and retraining -- at the same three
+schools, one crew member or a whole crew at a time -- is how they change
+vehicle. The client works out the role level they keep, so the loss is the
+game's own.
 
 The launcher's Account tab shows the selected save's credits, gold and free
 experience and lets a player set them. Gold is the one currency an offline

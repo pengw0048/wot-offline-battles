@@ -75,7 +75,9 @@ a fully unlocked save all three are free.
 
 Sell a vehicle and its crew can go to the barracks instead of being dismissed,
 as long as there are free berths. A crew member in the barracks can take a seat
-again in a vehicle of the type they were trained for.
+again in a vehicle of the type they were trained for. Retraining moves a crew
+member to another vehicle, at the same three schools, one at a time or the
+whole crew at once.
 
 Change modules, optional devices, consumables, shells, camouflage and crew
 skills as you like. Each change is written to the selected save, so the garage

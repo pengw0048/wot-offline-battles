@@ -180,6 +180,10 @@ class _TankmanDescriptor(object):
         # which is what decides whether a seat will take them.
         self.nationID = 0
         self.vehicleTypeID = VEHICLE_TYPE_ID
+        base, _, retrained = base.partition(b'@')
+        self.compact_descr = base
+        if retrained:
+            self.vehicleTypeID = int(retrained)
         identity = base.rsplit(b':', 1)[-1]
         try:
             self.role = CREW_ROLES[
@@ -198,12 +202,23 @@ class _TankmanDescriptor(object):
     def addXP(self, amount):
         self.free_xp += int(amount)
 
+    def respecialize(self, new_vehicle_type_id, min_role_level,
+                     vehicle_change_loss, class_change_loss, becomes_premium):
+        # The real one works the loss out from the two rates and the vehicle
+        # tags; the fake only has to record that it was asked, with what.
+        self.vehicleTypeID = int(new_vehicle_type_id)
+        self.role_level = int(min_role_level)
+        self.losses = (vehicle_change_loss, class_change_loss)
+        self.premium = bool(becomes_premium)
+
     def totalXP(self):
         return self.free_xp
 
     def makeCompactDescr(self):
-        result = self.compact_descr + b'|' + ','.join(
-            self.skills).encode('ascii')
+        result = self.compact_descr
+        if self.vehicleTypeID != VEHICLE_TYPE_ID:
+            result += b'@%d' % self.vehicleTypeID
+        result += b'|' + ','.join(self.skills).encode('ascii')
         return result if not self.free_xp else (
             result + b'#' + str(self.free_xp).encode('ascii'))
 
@@ -216,8 +231,12 @@ def _modules():
     vehicles = types.SimpleNamespace(
         VehicleDescr=lambda compactDescr: _Descriptor(compactDescr),
         getDefaultAmmoForGun=lambda gun: [20010, 30, 20011, 15],
+        # The fixture's own vehicle is 50001; anything else is a different
+        # type, which is what makes a retraining observable.
         getVehicleType=lambda compact_descr: types.SimpleNamespace(
-            id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES),
+            id=(0, VEHICLE_TYPE_ID if compact_descr == 50001
+                else compact_descr % 1000),
+            crewRoles=CREW_ROLES),
         getTypeOfCompactDescr=item_type)
     # #1513's own table, out of items/components/skills_constants.pyc: the
     # five roles come first and every command sends an index into it.
@@ -1066,6 +1085,74 @@ class GarageStateTests(unittest.TestCase):
             100000 - 3000 - 3000, snapshot['wallet']['credits'])
         self.assertEqual(
             {20010: 60, 20011: 30}, snapshot['inventoryItems'][10])
+
+    # ---- retraining ------------------------------------------------------
+
+    def test_retraining_asks_the_client_for_the_school_the_player_chose(self):
+        """TankmanDescr.respecialize is the client's own implementation."""
+        state = self._recruiting_state(unlocks=(50001, 50002))
+        state.equip_tankman(9, 0, -1)
+
+        state.retrain_tankman(101, 1, 50002)
+
+        # 50002 is in-nation type 2 for this fixture.
+        self.assertEqual(
+            b'tman:101@2|', state.snapshot()['barracksTankmen'][101])
+        self.assertEqual(
+            100000 - 20000, state.snapshot()['wallet']['credits'])
+
+    def test_a_seated_crew_member_is_not_retrained_out_of_their_seat(self):
+        """The restore boundary needs every seated crew member to match."""
+        state = self._recruiting_state(unlocks=(50001, 50002))
+
+        with self.assertRaises(self.garage.GarageError):
+            state.retrain_tankman(101, 1, 50002)
+
+        self.assertEqual(
+            b'tman:101', state.snapshot()['vehicles'][0]['tankmen'][101])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_retraining_for_the_vehicle_they_are_already_in_is_allowed(self):
+        state = self._recruiting_state()
+
+        state.retrain_tankman(101, 2, 50001)
+
+        self.assertEqual(
+            1000 - 200, state.snapshot()['wallet']['gold'])
+
+    def test_a_vehicle_the_account_has_not_researched_trains_nobody(self):
+        state = self._recruiting_state()
+        state.equip_tankman(9, 0, -1)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.retrain_tankman(101, 1, 50002)
+
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_an_account_that_cannot_pay_retrains_nobody(self):
+        state = self._recruiting_state(credits_amount=100)
+        state.equip_tankman(9, 0, -1)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.retrain_tankman(101, 1, 50001)
+
+        self.assertEqual(
+            b'tman:101', state.snapshot()['barracksTankmen'][101])
+
+    def test_a_whole_crew_is_retrained_in_one_command(self):
+        state = self._recruiting_state()
+
+        state.retrain_crew(50001, [101, 0, 102, 0])
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual(b'tman:101|', record['tankmen'][101])
+        self.assertEqual(b'tman:102|', record['tankmen'][102])
+
+    def test_a_malformed_crew_retraining_is_refused(self):
+        state = self._recruiting_state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.retrain_crew(50001, [101, 0, 102])
 
 
 class FittingRequestTests(unittest.TestCase):
