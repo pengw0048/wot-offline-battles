@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import json
 import os
+import re
 
 
 try:
@@ -50,12 +51,28 @@ PLAYER_MODE = 'player'
 SIMULATION_WORKER_MODE = 'simulation_worker'
 CLIENT_MODES = frozenset((PLAYER_MODE, SIMULATION_WORKER_MODE))
 
+# One save slot owns every file that records what this player has earned.
+# ``vehicle_profiles.json`` deliberately stays outside a slot: a vehicle data
+# profile modifies the shared client catalogue for a whole room, so it belongs
+# to the installation rather than to one player's progress.
+SAVES_DIR_NAME = 'saves'
+DEFAULT_SAVE_SLOT = 'default'
+SAVE_METADATA_FILE_NAME = 'save.json'
+SAVE_MODE_UNLOCKED = 'unlocked'
+SAVE_MODE_NEW_ACCOUNT = 'new_account'
+SAVE_MODES = frozenset((SAVE_MODE_UNLOCKED, SAVE_MODE_NEW_ACCOUNT))
+# A slot id becomes one directory name, so keep it to characters that need no
+# escaping on Windows and cannot walk out of the saves root.
+_SAVE_SLOT_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
+
 DEFAULT_CONFIG = {
-    'schema': 2,
+    'schema': 3,
     'enabled': True,
     # The normal package remains a player client. A separate copied game
     # directory may opt into the native-space simulation worker explicitly.
     'client_mode': PLAYER_MODE,
+    # The launcher owns which save slot this installation plays.
+    'save_slot': DEFAULT_SAVE_SLOT,
     'host': '127.0.0.1',
     'port': 28782,
     'name': 'Player',
@@ -212,6 +229,9 @@ def _load_config_file(path):
             config.get('client_mode') not in CLIENT_MODES):
         raise ValueError(
             'client_mode must be player or simulation_worker')
+    if not valid_save_slot(config.get('save_slot')):
+        raise ValueError(
+            'save_slot must be 1-64 characters of A-Z, a-z, 0-9, _ or -')
     if not isinstance(config.get('vehicle'), string_types) or not config['vehicle']:
         raise ValueError('vehicle must be a non-empty string')
     if not isinstance(config.get('name'), string_types) or not config['name']:
@@ -386,6 +406,85 @@ def migrate_legacy_user_file(path, legacy_path):
 
 # Backward-compatible private name for older extracted packages.
 _write = write_json
+
+
+class _ActiveSaveSlot(object):
+    """Default marker: resolve this path from the active save slot.
+
+    ``None`` already means "keep this store in memory" for the hidden worker,
+    so a store cannot use it to mean "use the normal location" as well.
+    """
+
+    def __repr__(self):
+        return 'ACTIVE_SAVE_SLOT'
+
+
+ACTIVE_SAVE_SLOT = _ActiveSaveSlot()
+
+
+def valid_save_slot(value):
+    return bool(isinstance(value, string_types) and
+                _SAVE_SLOT_ID.match(value))
+
+
+_active_save_slot = DEFAULT_SAVE_SLOT
+
+
+def active_save_slot():
+    """Return the slot ``load`` last resolved from ``config.json``."""
+    return _active_save_slot
+
+
+def set_active_save_slot(value):
+    global _active_save_slot
+    if not valid_save_slot(value):
+        raise ValueError(
+            'save_slot must be 1-64 characters of A-Z, a-z, 0-9, _ or -')
+    _active_save_slot = str(value)
+    return _active_save_slot
+
+
+def saves_root(user_data_dir=None):
+    return os.path.join(
+        USER_DATA_DIR if user_data_dir is None else user_data_dir,
+        SAVES_DIR_NAME)
+
+
+def save_slot_dir(slot=None, user_data_dir=None):
+    slot = active_save_slot() if slot is None else slot
+    if not valid_save_slot(slot):
+        raise ValueError(
+            'save_slot must be 1-64 characters of A-Z, a-z, 0-9, _ or -')
+    return os.path.join(saves_root(user_data_dir), str(slot))
+
+
+def save_slot_state_path(file_name, slot=None, user_data_dir=None):
+    """Return one state file's path inside a save slot.
+
+    Every earned-progress file moved under ``saves/<slot>/`` at config schema
+    3.  Older packages wrote the same names one directory higher, and older
+    ones still wrote them beside ``config.json``, so the default slot adopts
+    whichever of those an upgrading installation still has.  A slot the player
+    created later must start empty, so it never inherits them.
+    """
+    path = os.path.join(
+        save_slot_dir(slot, user_data_dir), str(file_name))
+    if (active_save_slot() if slot is None else slot) != DEFAULT_SAVE_SLOT:
+        return path
+    if user_data_dir is not None:
+        legacy_dirs = (user_data_dir,)
+    else:
+        legacy_dirs = (USER_DATA_DIR, LEGACY_USER_DATA_DIR)
+    for legacy_dir in legacy_dirs:
+        migrated = migrate_legacy_user_file(
+            path, os.path.join(legacy_dir, str(file_name)))
+        if migrated != path:
+            # The copy failed.  Reading the old file in place keeps a saved
+            # garage usable instead of silently starting an empty slot.
+            return migrated
+        if os.path.isfile(path):
+            return path
+    return path
 
 
 def format_endpoint(host, port):
@@ -611,4 +710,7 @@ def load(path=CONFIG_PATH, endpoint_path=None, environ=None):
         save_endpoint(base_endpoint[0], base_endpoint[1], endpoint_path)
     config['host'], config['port'] = _environment_endpoint(
         config['host'], config['port'], environ)
+    # Every state store resolves its path from the active slot, so publish the
+    # loaded choice before the first store is constructed.
+    set_active_save_slot(config['save_slot'])
     return config

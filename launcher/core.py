@@ -470,7 +470,8 @@ def _read_json(path):
     return value if isinstance(value, dict) else None
 
 
-def write_0_9_22_settings(game_root, mode, host, port, name=None):
+def write_0_9_22_settings(game_root, mode, host, port, name=None,
+                          save_slot=None):
     config_dir = os.path.join(game_root, "mods", "configs", "offline_lan_0922")
     endpoint_path = os.path.join(config_dir, "server_endpoint.json")
     _write_json(endpoint_path, {
@@ -478,20 +479,35 @@ def write_0_9_22_settings(game_root, mode, host, port, name=None):
         "host": host,
         "port": int(port),
     })
+    try:
+        from . import save_slots
+    except ImportError:
+        import save_slots
+
     written = [endpoint_path]
-    if name:
+    if save_slot is not None and not save_slots.valid_slot_id(save_slot):
+        raise LauncherError("This save cannot be selected.")
+    if name or save_slot:
         config_path = os.path.join(config_dir, "config.json")
         config = _read_json(config_path)
         if config is not None:
-            config["name"] = name
+            if name:
+                config["name"] = name
+            if save_slot:
+                # The client resolves its garage, post-battle results, and
+                # account settings from this field, so the selected save takes
+                # effect for the run this launch starts.
+                config["save_slot"] = save_slot
             _write_json(config_path, config)
             written.append(config_path)
     return written
 
 
-def write_settings(game_root, port_version, mode, host, port, name=None):
+def write_settings(game_root, port_version, mode, host, port, name=None,
+                   save_slot=None):
     if port_version == PORT_0_9_22:
-        return write_0_9_22_settings(game_root, mode, host, port, name)
+        return write_0_9_22_settings(
+            game_root, mode, host, port, name, save_slot)
     raise LauncherError("This game folder is not a supported client.")
 
 
@@ -521,6 +537,11 @@ _MUTABLE_STATE_0_9_22 = (
     "garage_state.json",
     "postbattle_state.json",
 )
+
+# Where save slots live below the user data directory.  It matches the client's
+# ``config.SAVES_DIR_NAME`` and only ever appears inside the game folder when
+# the installation has no APPDATA to use instead.
+SAVES_DIR_NAME_0_9_22 = "saves"
 
 # Directories the launcher replaces as one unit, the files of its own package
 # it removes from a shared directory, and the members it writes only when they
@@ -1278,6 +1299,11 @@ def install_client_mod(game_root, port_version, base_dir=None, force=False):
 def _valid_0_9_22_config(path):
     """Match the startup-fatal part of the client config contract."""
     try:
+        from . import save_slots
+    except ImportError:
+        import save_slots
+
+    try:
         with open(path, "rb") as stream:
             value = json.load(stream)
         if not isinstance(value, dict):
@@ -1294,6 +1320,11 @@ def _valid_0_9_22_config(path):
             if name in value and (not isinstance(value[name], str) or
                                   not value[name]):
                 return False
+        # The client refuses to start on an unusable save id, so startup
+        # repair has to recognise the same fatal value and quarantine it.
+        if "save_slot" in value and not save_slots.valid_slot_id(
+                value["save_slot"]):
+            return False
         for name in ("physics_tuning", "he_tuning"):
             if name in value and not isinstance(value[name], dict):
                 return False
@@ -1465,6 +1496,12 @@ def reset_0_9_22_state(game_root, base_dir=None, is_running=None):
                    for name in sorted(os.listdir(state_root))
                    if _reset_state_name(name) and
                    os.path.isfile(os.path.join(state_root, name))]
+        # An installation without APPDATA keeps its save slots here instead,
+        # so a reset that skipped this directory would leave every earned
+        # garage behind and contradict what the confirmation promised.
+        saves_root = os.path.join(state_root, SAVES_DIR_NAME_0_9_22)
+        if os.path.isdir(saves_root) and not os.path.islink(saves_root):
+            targets.append(saves_root)
     preferences_path = _isolated_0_9_22_preferences_path()
     if preferences_path is not None and os.path.lexists(preferences_path):
         if (os.path.islink(preferences_path) or
