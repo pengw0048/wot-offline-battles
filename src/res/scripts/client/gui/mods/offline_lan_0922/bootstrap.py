@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import copy
 import os
 import sys
 import time
@@ -359,6 +360,141 @@ def _owned_vehicle_types(vehicles, nations, career, prices,
     return set(_starter_vehicle_types(vehicles, nations, prices))
 
 
+def _deliver_launcher_purchases(snapshot, vehicles, tankmen, settings):
+    """Build the vehicles the launcher's gold shop already charged for.
+
+    The launcher takes the gold and leaves the names, because only a client
+    can produce a garage record.  A name this client refuses stays pending and
+    says why: the player has already paid for it, and a build that fails today
+    may succeed once the reason is understood.
+    """
+    from gui.mods.offline_lan_0922 import launcher_inbox
+    from items import ITEM_TYPE_INDICES
+
+    try:
+        path = launcher_inbox.inbox_path()
+        pending = launcher_inbox.pending_vehicles(path)
+    except Exception as error:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] launcher purchases could not be read: %s\n'
+            % error)
+        return 0
+    if not pending:
+        return 0
+    owned = set(
+        str(record.get('vehicleTypeName') or '')
+        for record in (snapshot.get('vehicles') or ()))
+    delivered = []
+    unbuilt = []
+    for name in pending:
+        if name in owned:
+            # The launcher refuses to sell a vehicle a save already owns, so
+            # this is a duplicate rather than a purchase. The entry is settled
+            # either way: a second copy is not what the player bought.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the purchased vehicle %s is already in '
+                'this garage\n' % name)
+            continue
+        # Build on a detached copy, exactly as a restore does. A record this
+        # client can build but cannot publish would otherwise be flushed, and
+        # the next start discards an unpublishable save whole -- one refused
+        # vehicle would cost the player the entire career.
+        staged = copy.deepcopy(snapshot)
+        try:
+            _build_purchased_vehicle(
+                staged, vehicles, tankmen, ITEM_TYPE_INDICES, settings, name)
+        except Exception as error:
+            unbuilt.append(name)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] this client cannot build the purchased '
+                'vehicle %s, it stays pending: %s\n' % (name, error))
+            continue
+        try:
+            _validate_restored_garage(staged)
+        except Exception as error:
+            unbuilt.append(name)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the purchased vehicle %s does not make '
+                'a publishable garage, it stays pending: %s\n'
+                % (name, error))
+            continue
+        snapshot.clear()
+        snapshot.update(staged)
+        owned.add(name)
+        delivered.append(name)
+    if delivered:
+        # A delivered vehicle that is never flushed is delivered again on the
+        # next start, against an inbox entry that is already gone.
+        store = _garage_store()
+        if store is not None:
+            store.mark_dirty()
+            store.flush(snapshot)
+        for name in delivered:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] delivered the purchased vehicle %s\n'
+                % name)
+    try:
+        launcher_inbox.keep_pending(unbuilt, path)
+    except Exception as error:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] launcher purchases could not be cleared: '
+            '%s\n' % error)
+    return len(delivered)
+
+
+def _build_purchased_vehicle(snapshot, vehicles, tankmen, item_type_indices,
+                             settings, name):
+    """Own one more vehicle, stock, exactly as a shop purchase arrives."""
+    descriptor = vehicles.VehicleDescr(typeName=str(name))
+    built = vehicle_records.build_record(
+        vehicles, tankmen, item_type_indices, tuple(descriptor.type.id),
+        _next_inventory_id(snapshot), _next_tankman_id(snapshot), settings,
+        [0, 0, 0], top_modules=False, own_researchable_modules=False)
+    record = built['record']
+    snapshot.setdefault('vehicles', []).append(record)
+    compact_descr = int(built['vehicleTypeCompactDescr'])
+    published = snapshot.setdefault('vehicleTypeCompactDescrs', set())
+    if isinstance(published, set):
+        published.add(compact_descr)
+    unlocks = snapshot.setdefault('unlockItemCompactDescrs', set())
+    if isinstance(unlocks, set):
+        unlocks.add(compact_descr)
+        unlocks.update(economy.autounlocked_items(vehicles, compact_descr))
+    prices = snapshot.setdefault('shopItemPrices', {})
+    for item_type, items in record['inventoryItems'].items():
+        for item_compact_descr, count in items.items():
+            owned_items = snapshot.setdefault(
+                'inventoryItems', {}).setdefault(int(item_type), {})
+            owned_items[item_compact_descr] = max(
+                int(owned_items.get(item_compact_descr, 0)), int(count))
+            prices.setdefault(item_compact_descr, {'credits': 0})
+            if isinstance(unlocks, set):
+                unlocks.add(int(item_compact_descr))
+    prices.setdefault(compact_descr, {'credits': 0})
+    snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
+    return compact_descr
+
+
+def _next_inventory_id(snapshot):
+    used = [int(record.get('id', 0))
+            for record in (snapshot.get('vehicles') or ())
+            if isinstance(record, dict)]
+    return (max(used) if used else 0) + 1
+
+
+def _next_tankman_id(snapshot):
+    used = [100000]
+    for record in (snapshot.get('vehicles') or ()):
+        if not isinstance(record, dict):
+            continue
+        for tankman_id in (record.get('tankmen') or ()):
+            try:
+                used.append(int(tankman_id))
+            except (TypeError, ValueError):
+                continue
+    return max(used) + 1
+
+
 def _selected_vehicle(config, restore_saved=True):
     try:
         import nations
@@ -547,6 +683,8 @@ def _selected_vehicle(config, restore_saved=True):
         # never over the current client's catalogue.
         if restore_saved:
             _restore_garage(result)
+            _deliver_launcher_purchases(
+                result, vehicles, tankmen, default_settings)
         return result
     except Exception:
         # _run_once owns startup error reporting.  Returning an empty snapshot

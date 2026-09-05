@@ -1,6 +1,11 @@
 import importlib.util
+import json
+import os
+import re
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -22,17 +27,29 @@ def _real_module(name, module_name=None):
     return module
 
 
+def port_config_write_json(path, value, durable=True):
+    """The exact durable-replacement contract config.write_json provides."""
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    temporary = path + '.tmp'
+    with open(temporary, 'w', encoding='utf-8') as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    os.replace(temporary, path)
+
+
 _ECONOMY_MODULES = {}
 
 
 def _economy_modules(package_stubs):
-    """Load the price catalogue and the economy against the package stubs.
+    """Load the modules that import the stubbed package at module level.
 
-    ``economy`` imports the generated catalogue at module level so the module
-    object bootstrap captures is the real one, which means both have to be
-    executed while the stub package is installed.  The result is cached: the
-    catalogue is a few hundred kilobytes of literals and every test that loads
-    bootstrap would otherwise re-execute it.
+    ``economy`` imports the generated catalogue and ``launcher_inbox`` imports
+    the port configuration, so the module objects bootstrap captures are the
+    real ones only if both are executed while the stub package is installed.
+    The result is cached: the catalogue is a few hundred kilobytes of literals
+    and every test that loads bootstrap would otherwise re-execute it.
     """
     if not _ECONOMY_MODULES:
         with mock.patch.dict(sys.modules, package_stubs):
@@ -43,6 +60,8 @@ def _economy_modules(package_stubs):
                     _real_module(
                         'account_rpc/economy',
                         'gui.mods.offline_lan_0922.account_rpc.economy'))
+            _ECONOMY_MODULES['gui.mods.offline_lan_0922.launcher_inbox'] = (
+                _real_module('launcher_inbox'))
     return dict(_ECONOMY_MODULES)
 
 
@@ -255,6 +274,17 @@ class BootstrapLifecycleTests(unittest.TestCase):
         config_module.SAVE_MODE_NEW_ACCOUNT = 'new_account'
         config_module.save_slot_mode = lambda: (
             save_mode or config_module.SAVE_MODE_UNLOCKED)
+        config_module.ACTIVE_SAVE_SLOT = object()
+        # No inbox file exists unless a test writes one, so the launcher
+        # delivery path is a no-op for every other test.
+        inbox_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inbox_root, True)
+        config_module.save_slot_state_path = (
+            lambda file_name, slot=None, user_data_dir=None:
+            os.path.join(inbox_root, file_name))
+        config_module.save_slot_dir = (
+            lambda slot=None, user_data_dir=None: inbox_root)
+        config_module.write_json = port_config_write_json
         state_module = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc.state')
         state_module.AccountState = types.SimpleNamespace
@@ -370,7 +400,16 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         def vehicle_descr(**kwargs):
             if 'typeName' in kwargs:
-                return descriptors[(0, 11)]
+                # #1513 resolves a 'nation:vehicle' name and raises for one it
+                # does not ship.  The configured vehicle keeps its own name so
+                # every existing test still starts from it.
+                name = str(kwargs['typeName'])
+                if name == 'ussr:R11_MS-1':
+                    return descriptors[(0, 11)]
+                match = re.match(r'^nation-(\d+):vehicle-(\d+)$', name)
+                if match is None:
+                    raise KeyError(name)
+                return descriptors[(int(match.group(1)), int(match.group(2)))]
             type_id = tuple(kwargs['typeID'])
             attempted_type_ids.append(type_id)
             return descriptors[type_id]
@@ -557,7 +596,11 @@ class BootstrapLifecycleTests(unittest.TestCase):
          unused_app_loader, unused_spaces, unused_events,
          modules) = self._load(**kwargs)
         store = types.SimpleNamespace(
-            owned_vehicle_types=lambda: list(owned))
+            owned_vehicle_types=lambda: list(owned),
+            owned_vehicle_names=lambda: [],
+            mark_dirty=lambda: None,
+            flush=lambda snapshot: True,
+            apply=lambda snapshot, validator=None: False)
         with mock.patch.dict(sys.modules, modules):
             with mock.patch.object(bootstrap, '_garage_store', lambda: store):
                 with mock.patch.object(
@@ -667,6 +710,174 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 self.assertTrue(bootstrap._restore_garage(snapshot))
 
         self.assertFalse(bootstrap._store.dirty)
+
+    # A save that owns only the configured vehicle, so a purchase has
+    # somewhere to land.
+    OWNED_ONE = ('nation-0:vehicle-11', 90011)
+
+    def _with_inbox(self, names, owned=(OWNED_ONE,), validator=None, **kwargs):
+        """Start a client with the launcher's shop having bought ``names``."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        inbox = modules['gui.mods.offline_lan_0922.launcher_inbox']
+        path = inbox.inbox_path()
+        modules['gui.mods.offline_lan_0922.config'].write_json(
+            path, {'schema': inbox.SCHEMA, 'vehicles': list(names)})
+
+        class _Store(object):
+            def __init__(self):
+                self.flushed = None
+
+            def apply(self, candidate, validator=None):
+                return True
+
+            def owned_vehicle_names(self):
+                return [name for name, unused in owned]
+
+            def owned_vehicle_types(self):
+                return [compact_descr for unused, compact_descr in owned]
+
+            def mark_dirty(self):
+                pass
+
+            def flush(self, candidate):
+                self.flushed = candidate
+                return True
+
+        store = _Store()
+        bootstrap._store = store
+        if validator is None:
+            patch = mock.patch.object(
+                bootstrap, '_validate_restored_garage', return_value=True)
+        else:
+            patch = mock.patch.object(
+                bootstrap, '_validate_restored_garage', side_effect=validator)
+        with mock.patch.dict(sys.modules, modules):
+            with patch:
+                snapshot = bootstrap._selected_vehicle(
+                    {'vehicle': 'ussr:R11_MS-1'})
+        return snapshot, store, path, inbox
+
+    def test_a_vehicle_the_launcher_sold_arrives_in_the_garage(self):
+        """The launcher takes the gold; only a client can build the record."""
+        snapshot, store, path, inbox = self._with_inbox(
+            ['nation-0:vehicle-12'])
+
+        self.assertEqual(
+            ['nation-0:vehicle-11', 'nation-0:vehicle-12'],
+            sorted(record['vehicleTypeName']
+                   for record in snapshot['vehicles']))
+        # 90012 is makeIntCompactDescrByID for nation 0, type 12.
+        self.assertIn(90012, snapshot['vehicleTypeCompactDescrs'])
+        self.assertIn(90012, snapshot['unlockItemCompactDescrs'])
+        self.assertEqual(0, snapshot['vehicleXP'][90012])
+        # A delivery that is never written is delivered again next start,
+        # against an inbox entry that is already gone.
+        self.assertIs(snapshot, store.flushed)
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_delivered_vehicle_arrives_stock_and_without_consumables(self):
+        snapshot, unused_store, unused_path, unused_inbox = self._with_inbox(
+            ['nation-0:vehicle-12'])
+
+        record = next(row for row in snapshot['vehicles']
+                      if row['vehicleTypeName'] == 'nation-0:vehicle-12')
+        self.assertEqual([0, 0, 0], list(record['eqs']))
+        # The stock half of the (0, 12) fixture, base 3000, and nothing above.
+        self.assertEqual(
+            {3002, 3003, 3004, 3005, 3006, 3007},
+            set(compact_descr
+                for item_type in range(2, 8)
+                for compact_descr in record['inventoryItems'][item_type]))
+
+    def test_a_vehicle_the_save_already_owns_is_not_delivered_twice(self):
+        snapshot, unused_store, path, unused_inbox = self._with_inbox(
+            ['nation-0:vehicle-11'])
+
+        self.assertEqual(
+            1, sum(1 for record in snapshot['vehicles']
+                   if record['vehicleTypeName'] == 'nation-0:vehicle-11'))
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_delivery_the_client_cannot_publish_is_never_written(self):
+        """An unpublishable save is discarded whole on the next start.
+
+        One vehicle the shop sold must never cost the player everything else
+        the save holds, so a record that fails the restore boundary is built
+        on a detached copy and thrown away with the copy.
+        """
+        def refuse(candidate):
+            names = [record.get('vehicleTypeName')
+                     for record in candidate['vehicles']]
+            if 'nation-0:vehicle-12' in names:
+                raise ValueError('saved vehicle has no loaded ammunition')
+            return True
+
+        snapshot, store, path, inbox = self._with_inbox(
+            ['nation-0:vehicle-12'], validator=refuse)
+
+        self.assertEqual(
+            ['nation-0:vehicle-11'],
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertNotIn(90012, snapshot['vehicleTypeCompactDescrs'])
+        self.assertNotIn(90012, snapshot['vehicleXP'])
+        self.assertIsNone(store.flushed)
+        # The player paid for it in the launcher, so it keeps waiting.
+        self.assertEqual(['nation-0:vehicle-12'], inbox.pending_vehicles(path))
+
+    def test_a_vehicle_this_client_cannot_build_stays_pending(self):
+        """The player already paid for it in the launcher.
+
+        ``nation-2:vehicle-2`` is tagged premiumIGR in the fixture: a vehicle
+        the client can name and refuses to put in a standard battle garage.
+        """
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-2:vehicle-2'])
+
+        self.assertNotIn(
+            'nation-2:vehicle-2',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-2:vehicle-2'], inbox.pending_vehicles(path))
+
+    def test_a_name_this_client_does_not_ship_stays_pending(self):
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-9:vehicle-99'])
+
+        self.assertEqual(1, len(snapshot['vehicles']))
+        self.assertEqual(
+            ['nation-9:vehicle-99'], inbox.pending_vehicles(path))
+
+    def test_one_refused_vehicle_does_not_hold_up_the_others(self):
+        snapshot, unused_store, path, inbox = self._with_inbox(
+            ['nation-2:vehicle-2', 'nation-0:vehicle-12'])
+
+        self.assertIn(
+            'nation-0:vehicle-12',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-2:vehicle-2'], inbox.pending_vehicles(path))
+
+    def test_a_hidden_worker_never_delivers_a_launcher_purchase(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        inbox = modules['gui.mods.offline_lan_0922.launcher_inbox']
+        path = inbox.inbox_path()
+        modules['gui.mods.offline_lan_0922.config'].write_json(
+            path, {'schema': inbox.SCHEMA,
+                   'vehicles': ['nation-0:vehicle-12']})
+
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertIn(
+            'nation-0:vehicle-12',
+            [record['vehicleTypeName'] for record in snapshot['vehicles']])
+        self.assertEqual(
+            ['nation-0:vehicle-12'], inbox.pending_vehicles(path))
 
     def test_a_hidden_worker_never_reads_the_visible_client_save(self):
         """The worker owns no garage store and must not open that file."""

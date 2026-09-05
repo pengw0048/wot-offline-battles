@@ -70,6 +70,19 @@ pays it -- so this is where a save gets it. A save has no balances until the
 game has started it once, and the game must be closed while they are changed,
 because the client owns the same file.
 
+The Shop tab sells every vehicle this client prices in gold: 196 of them, and
+145 are reward or event tanks the game's own shop never sold and that no tech
+tree leads to. A purchase takes the gold out of the selected save and leaves
+the vehicle waiting; the next time the game starts that save, the client builds
+it into the garage, stock and with a crew, exactly as a shop purchase arrives.
+A vehicle this client cannot build stays waiting and says why in the client
+log, so a purchase is never silently lost.
+
+Only the client can name a saved vehicle, so a save written before this
+version says nothing about what it owns. The shop refuses to sell to such a
+save until the game has started it once; otherwise it would charge gold for a
+vehicle the save already has.
+
 Vehicle data profiles are deliberately not part of a save: they change
 the client catalogue for a whole room, so they belong to the installation.
 

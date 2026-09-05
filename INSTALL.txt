@@ -89,6 +89,12 @@ The Account tab shows the selected save's credits, gold and free experience and
 lets you set them. Gold cannot be earned offline, so that is where a save gets
 it. Start a save in the game once before editing it, and close the game first.
 
+The Shop tab sells every vehicle the client prices in gold, including the
+reward tanks the game's own shop never sold. Buying one takes gold from the
+selected save; the tank appears in the garage the next time the game starts
+that save. A save from an older version must be started once before the shop
+can sell to it, because only the game can tell the launcher what it owns.
+
 Vehicle data profiles are not part of a save. They change the client's shared
 vehicle catalogue for a whole room, so they stay with the installation.
 

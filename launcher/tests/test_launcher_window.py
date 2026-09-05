@@ -1216,17 +1216,22 @@ class WindowTest(unittest.TestCase):
         self.assertIn(
             "%s (%s) - %s" % (default_label, custom, unlocked), labels)
 
-    def _write_ledger(self, slot_id, saves_root, **balances):
+    def _write_ledger(self, slot_id, saves_root, vehicles=None, **balances):
         directory = os.path.join(saves_root, slot_id)
         if not os.path.isdir(directory):
             os.makedirs(directory)
         wallet = {"credits": 0, "gold": 0, "freeXP": 0}
         wallet.update(balances)
+        if vehicles is None:
+            # A save the game has started names every vehicle it owns; the
+            # shop reads those names to know what it must not sell twice.
+            vehicles = {
+                "50001": {"compDescr": "AAA=", "name": "ussr:R11_MS-1"}}
         path = os.path.join(directory, "garage_state.json")
         with open(path, "w", encoding="utf-8") as stream:
             json.dump({
                 "schema": 5,
-                "vehicles": {"50001": {"compDescr": "AAA="}},
+                "vehicles": vehicles,
                 "ledger": {"wallet": wallet, "unlocks": [50001]},
             }, stream)
         return path
@@ -1324,6 +1329,160 @@ class WindowTest(unittest.TestCase):
         self.window._save_slot_selected()
 
         self.assertEqual("1", self.window.balance_entries["gold"].get())
+
+    _GOLD_VEHICLES = [
+        {"nation": "germany", "vehicle": "G51_Lowe",
+         "name": "germany:G51_Lowe", "label": "Lowe", "level": 8,
+         "gold": 12500, "notInShop": False},
+        {"nation": "china", "vehicle": "Ch01_Type59",
+         "name": "china:Ch01_Type59", "label": "Type 59", "level": 8,
+         "gold": 11500, "notInShop": True},
+    ]
+
+    def _with_shop(self):
+        patch = mock.patch.object(
+            wot_launcher.vehicle_overlays, "list_gold_vehicles",
+            return_value=[dict(row) for row in self._GOLD_VEHICLES])
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.window._gold_catalogue_cache = (None, None)
+
+    def test_the_shop_lists_every_gold_vehicle_with_its_price(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertEqual(
+            ("Lowe - tier 8 - 12500 gold", "Type 59 - tier 8 - 11500 gold"),
+            values)
+        self.assertEqual(
+            "normal", self.window.buy_gold_vehicle_button.cget("state"))
+
+    def test_buying_takes_the_gold_and_queues_the_vehicle(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window._buy_gold_vehicle())
+
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        with open(os.path.join(directory, "launcher_inbox.json"),
+                  encoding="utf-8") as stream:
+            self.assertEqual(
+                ["germany:G51_Lowe"], json.load(stream)["vehicles"])
+        self.assertEqual("7500", self.window.balance_entries["gold"].get())
+        self.assertIn("Bought Lowe", self._log_text())
+        # The row now says the vehicle is waiting for the game.
+        self.assertIn(
+            "Lowe - tier 8 - 12500 gold (bought)",
+            tuple(self.window.gold_vehicle_box.cget("values")))
+
+    def test_a_vehicle_the_save_cannot_afford_is_refused(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=100)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        self.assertIn("could not be bought", self._log_text())
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        self.assertFalse(os.path.exists(
+            os.path.join(directory, "launcher_inbox.json")))
+
+    def test_a_running_game_keeps_the_gold(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=True):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        self.assertIn("Close World of Tanks", self._log_text())
+        self.assertEqual(
+            20000,
+            wot_launcher.save_ledger.read_balances(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["gold"])
+
+    def test_a_vehicle_the_save_owns_is_shown_as_owned(self):
+        saves_root = self._saves_root()
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        with open(os.path.join(directory, "garage_state.json"), "w",
+                  encoding="utf-8") as stream:
+            json.dump({
+                "schema": 5,
+                "vehicles": {"1": {"name": "germany:G51_Lowe"}},
+                "ledger": {"wallet": {
+                    "credits": 0, "gold": 20000, "freeXP": 0}},
+            }, stream)
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertIn("Lowe - tier 8 - 12500 gold (owned)", values)
+
+    def test_a_save_that_does_not_name_its_vehicles_cannot_buy(self):
+        """Such a save cannot say what it owns, so the shop must not sell."""
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000,
+            vehicles={"50001": {"compDescr": "AAA="}})
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertEqual(2, len(values))
+        self.assertEqual(
+            "disabled", self.window.buy_gold_vehicle_button.cget("state"))
+        self.assertEqual(
+            wot_launcher._SHOP_UNREADABLE,
+            self.window.shop_help_label.cget("text"))
+
+        self.window.gold_vehicle.set(values[0])
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        self.assertFalse(os.path.exists(
+            os.path.join(directory, "launcher_inbox.json")))
+        self.assertEqual(
+            20000,
+            wot_launcher.save_ledger.read_balances(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["gold"])
+
+    def test_the_client_package_is_read_once_for_the_whole_session(self):
+        """Reading it opens a 50 MB archive and parses ten rosters."""
+        self._saves_root()
+        with mock.patch.object(
+                wot_launcher.vehicle_overlays, "list_gold_vehicles",
+                return_value=[dict(row) for row in self._GOLD_VEHICLES]) as read:
+            self.window._gold_catalogue_cache = (None, None)
+            self.window._refresh_gold_shop()
+            self.window._refresh_gold_shop()
+            self.window._refresh_gold_shop()
+
+        self.assertEqual(1, read.call_count)
 
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(
