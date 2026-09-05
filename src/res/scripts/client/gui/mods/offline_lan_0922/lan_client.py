@@ -351,6 +351,17 @@ def _team_sizes(value, legacy=None, default=None):
     return result
 
 
+def _valid_player_assignment(value, allow_pending=False):
+    """Accept one assigned slot, or the paired waiting-room sentinel."""
+    if not isinstance(value, dict):
+        return False
+    team = _exact_int(value.get('team'))
+    slot = _exact_int(value.get('slot'))
+    if allow_pending and team == 0 and slot == -1:
+        return True
+    return team in (1, 2) and slot is not None and 0 <= slot < 15
+
+
 def _valid_player_siege_contract(player):
     if not isinstance(player, dict):
         return False
@@ -1971,9 +1982,8 @@ class LANClient(object):
                 self.max_health = max_health
             team = _exact_int(entry.get('team'))
             slot = _exact_int(entry.get('slot'))
-            if team in (1, 2):
+            if _valid_player_assignment(entry, allow_pending=True):
                 self.team = team
-            if slot is not None and 0 <= slot < 15:
                 self.slot = slot
             # Roster and battle-start rows have already crossed the static
             # player-input boundary.  Preserve those canonical objects rather
@@ -4142,8 +4152,10 @@ class LANClient(object):
                 message.get('bot_tier_mode'), self.bot_tier_mode, 32)
             if (player_id is None or state_revision is None or
                     state_revision < 0 or host_player_id is None or
-                    host_player_id <= 0 or team not in (1, 2) or
-                    round_id is None or slot is None or not 0 <= slot < 15 or
+                    host_player_id <= 0 or
+                    not _valid_player_assignment(
+                        message, allow_pending=True) or
+                    round_id is None or
                     max_health is None or max_health <= 0 or
                     authority_epoch is None or
                     ('server_time_ms' in message and
@@ -4250,6 +4262,11 @@ class LANClient(object):
             player_equipment_contract = all(
                 _valid_player_equipment_contract(value, required=True)
                 for value in players or ())
+            player_assignments_valid = bool(
+                players is not None and all(
+                    _valid_player_assignment(
+                        value, allow_pending=phase == 'waiting')
+                    for value in players))
             ledger_required = self.has_projectile_ledger()
             if (phase not in ('waiting', 'loading', 'battle') or not map_name or
                     players is None or not player_outfits_valid or
@@ -4257,6 +4274,7 @@ class LANClient(object):
                     not player_siege_contract or
                     not player_gun_checkpoint_contract or
                     not player_equipment_contract or
+                    not player_assignments_valid or
                     team_sizes is None or
                     bot_tier_mode not in BOT_TIER_MODES or
                     host_player_id not in player_ids or
@@ -4371,6 +4389,9 @@ class LANClient(object):
             player_equipment_contract = all(
                 _valid_player_equipment_contract(value, required=True)
                 for value in players or ())
+            player_assignments_valid = bool(
+                players is not None and all(
+                    _valid_player_assignment(value) for value in players))
             local_ids = set(_exact_int(value.get('id')) for value in players or ())
             host_player_id = _exact_int(message.get('host_player_id'))
             authority_epoch = _projectile_int_range(
@@ -4389,6 +4410,7 @@ class LANClient(object):
                     not player_siege_contract or
                     not player_gun_checkpoint_contract or
                     not player_equipment_contract or
+                    not player_assignments_valid or
                     team_sizes is None or
                     self.player_id not in local_ids or
                     host_player_id not in local_ids or

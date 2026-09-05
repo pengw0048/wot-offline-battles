@@ -1161,10 +1161,77 @@ its projectile model, while the fire extra attaches through
 native compound exposes it as writable, stops the fire extra on the hide edge,
 settles native belt speed immediately, and stops feeding later belt/engine
 presentation while hidden. Static package inspection does not prove that
-`PyCompoundModel` inherits the plain model's `visibleAttachments` property or
-identify the native dust emitter, so those two surfaces still require exact
-Windows runtime acceptance; the runtime logs once when the attachment gate is
-absent or read-only.
+`PyCompoundModel` inherits the plain model's `visibleAttachments` property, so
+that one flag still requires exact Windows runtime acceptance; the runtime logs
+once when the attachment gate is absent or read-only.
+
+Windows playtesting in an SPG aiming camera then reported a ground shadow and
+exhaust under an unspotted enemy, and exact #1513 bytecode names both owners.
+`CompoundAppearance.__onPeriodicTimer` runs every `_PERIODIC_TIME` (0.25 s) for
+a living vehicle and calls `__updateEffectsLOD`, which enables the
+`CustomEffectManager` dust selector within `_LOD_DISTANCE_TRAIL_PARTICLES`
+(100 m) and the exhaust selector within `_LOD_DISTANCE_EXHAUST` (200 m) of
+`BigWorld.camera()`. Neither test reads a draw flag, and the distance is
+measured from the camera rather than the player, so a strategic or arty camera
+parked over its aim point enables both effects for every hidden enemy beneath
+it. `CustomEffectManager.deactivate` is not a usable hide because it also
+clears the manager's vehicle; its selector loop is, and
+`MainSelectorBase.update` returns immediately once a selector is stopped. The
+port therefore stops both selectors on the hide edge and wraps
+`__updateEffectsLOD` in the existing compat install/uninstall discipline so the
+periodic timer cannot restart them for an undrawn LAN remote. Only two selector
+classes override `settingsFlags`, `MainCustomSelector` for `SETTING_DUST` and
+`ExhaustMainSelector` for `SETTING_EXHAUST`, so stopping every selector is the
+complete gate.
+
+The second owner is the ground occlusion geometry. `CompoundAppearance.activate`
+attaches its `VehicleDecal` to the compound root, hull and turret nodes, and
+`__setupModels` attaches a `BigWorld.Splodge` built from `chassis.AODecals[0]`
+to the hull node whenever `MAX_DISTANCE` (500) is positive. Both are node
+attachments carrying `maps/spots/TankOcclusion/TankOcclusionMap.dds`, so they
+are exactly what the unproven `visibleAttachments` flag would have covered.
+`VehicleDecal.attach`/`detach` are the exact stock pair and both are idempotent
+through the decal's own `__attached` flag; `__attach` resolves the hull node as
+`compoundModel.node(TankPartNames.HULL)`, which is the same node
+`__attachSplodge` used, so the runtime reads it from the decal before detaching
+and re-attaches the splodge to it on the reveal edge. `VehicleDecal.__reattach`
+restores every decal when `onSettingsChanged` sees a new `SHADOWS_QUALITY`,
+which is outside any spotting edge, so the wrapped `__updateEffectsLOD` re-
+asserts the decal gate on the same bounded cadence; both stock calls are
+idempotent, so the steady-state cost is a flag read. Which of these layers
+draws the artefact a tester photographs is still an exact-Windows question; all
+of them are now closed together.
+
+The muzzle effect is the same class of leak, and the entity definitions say
+why. `scripts/entity_defs/Vehicle.def` declares `showShooting` under
+`ClientMethods`, so it is a cell-to-client RPC on the Vehicle entity, and that
+entity carries `IsManualAoI` together with the `receiveVisibilityUpdate`,
+`onDetectedByEnemy` and `onConcealedFromEnemy` cell methods that drive its
+membership. A retail client that has not spotted an enemy is not in that AoI
+and never receives the call. `Vehicle.showShooting` itself guards only on
+`isStarted` and the siege state - the `isPlayerVehicle` branches around it are
+the local waiting-for-shot handshake - and the `shoot` extra it starts is
+`ShowShooting`, whose `_start` plays `gunDescr.effects` through
+`EffectsListPlayer` bound to the vehicle's own compound model: the muzzle
+flash, its smoke and the gun sound. This runtime receives every LAN shot
+instead, so the runtime skips that presentation for a remote whose draw pass is
+closed, which reproduces the retail delivery rule.
+
+The tracer is a different entity and must not follow it. `Avatar.def` declares
+`showTracer` and `stopTracer` under its own `ClientMethods`, and the player's
+Avatar is always inside its own AoI, so retail still draws the tracer of a shot
+fired by a vehicle the client cannot see. The runtime's projectile keeps its own
+owner, so a blind shot still draws its tracer, still resolves and still damages;
+this also matches the impact-effect gate the runtime already applies to a
+terminal event on an unspotted target.
+
+The entity AOI that owns the world model follows the observed vehicle, not the
+player's own hull. The local integrator stops the moment the player dies, so
+`_local_position` freezes at the wreck; centring the 565 m AOI there hid the
+ally the postmortem camera had just switched to, and every vehicle around it,
+whenever the wreck was far away. The runtime resolves the AOI origin from the
+currently spectated entity instead and re-evaluates spotting on the next frame
+after a viewpoint switch.
 
 Authority Bot snapshots also retain the retired predecessor's no-rewind rule:
 the client that integrates a Bot never reapplies its older server echo pose,
@@ -1234,6 +1301,35 @@ code, normalises its contact direction, and presents no impulse for a splash,
 killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
 camera shake is not ported. Whether the resulting rocking magnitude matches
 retail still needs exact Windows acceptance.
+
+The same animator needs that rebind on the player's own tank.
+`CompoundAppearance.activate` is the only stock writer of
+`swingingAnimator.placingCompensationMatrix` and `swingingAnimator.worldMatrix`
+in the pinned package: it copies the compensation off the native vehicle filter
+and links the animator to the compound root's matrix provider object that
+exists at that moment. This port replaces that root with the copied pose after
+the native lifecycle completes, so both stock links go stale on the player
+vehicle exactly as they do on a native remote. The port repeats the same two
+writes against the live provider, with an identity compensation because the
+copied pose already carries authoritative terrain pitch and roll, restores the
+stock pair when it detaches, and re-asserts the pair only when the animator
+object itself changed. `__prepareSystemsForDamagedVehicle` clears
+`swingingAnimator`, so a missing animator is a normal damaged-model state and
+is recorded rather than raised. No stock Python code in the package writes
+`accelSwingingDirection`, and this build's `changeEngineMode` no longer arms
+acceleration swing; `stopSwinging` is the only remaining Python writer of
+`accelSwingingPeriod`. The exact executable nevertheless exposes both fields
+as writable floats. Its native animator reads root translation across updates,
+derives acceleration, gates its sign with `accelSwingingDirection`, and runs
+the shipped pitch/roll response while a positive `accelSwingingPeriod` counts
+down. This reversible experiment restores only the retired stock input-edge
+law: two seconds for a forward, reverse, or stop transition, one second for a
+stationary steering transition, and directions `-1`, `1`, and `0` for forward,
+reverse, and neutral respectively. Sparse `SWING_ARM` and `SWING_FRAME` lines
+record the live period/direction plus copied-root and stock-HULL orientation
+across the window. Static inspection proves the property and owner contracts;
+only exact Windows acceptance can prove that the native HULL output is visible
+and that its magnitude feels correct.
 
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an

@@ -1200,8 +1200,12 @@ class LANSession(object):
             team = player.get('team')
             if team in counts:
                 counts[team] += 1
+        current_team = getattr(self.client, 'team', None)
+        if (current_team == 0 and
+                getattr(self.client, 'slot', None) == -1):
+            current_team = None
         return {
-            'team': getattr(self.client, 'team', None),
+            'team': current_team,
             'preferred': self._room_preferences.get('team', 0),
             'sizes': sizes,
             'counts': counts,
@@ -2171,10 +2175,12 @@ class LANSession(object):
             actual_team = getattr(self.client, 'team', None)
             if team in (1, 2) and actual_team in (1, 2):
                 self._remember_team(actual_team)
+            elif (team in (1, 2) and actual_team == 0 and
+                  getattr(self.client, 'slot', None) == -1):
+                self._remember_team(0)
             if code == 'team_full':
                 self._status_notifier(
-                    'Team %s is full. Choose the other team or wait for a '
-                    'slot.' % team)
+                    'Team %s is full. Choose the other team or Random.' % team)
             else:
                 self._status_notifier(
                     'The LAN server refused the team selection (%s).' %

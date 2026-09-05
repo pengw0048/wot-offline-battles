@@ -1778,6 +1778,7 @@ class Player(_EndpointSendMixin):
     vehicle: str = "ussr:R11_MS-1"
     team: int = 1
     slot: int = 0
+    requested_team: Optional[int] = None
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
@@ -2428,6 +2429,63 @@ class BattleState:
     def _spawn_z_for(team):
         return -35.0 if team == 1 else 35.0
 
+    @staticmethod
+    def _requested_team_for_player(player):
+        """Return the waiting-room choice retained across rounds."""
+        requested = getattr(player, "requested_team", None)
+        if requested in (0, 1, 2):
+            return requested
+        return player.team if player.team in (1, 2) else 0
+
+    def _waiting_assignment_plan(self, players):
+        """Plan valid start slots without exposing random choices early."""
+        players = sorted(players, key=lambda participant: participant.player_id)
+        if len(players) > sum(self.team_sizes.values()):
+            return None
+        occupied = {1: set(), 2: set()}
+        plan = []
+        automatic = []
+        for participant in players:
+            requested = self._requested_team_for_player(participant)
+            if requested == 0:
+                automatic.append(participant)
+                continue
+            available = [
+                slot for slot in range(self.team_sizes[requested])
+                if slot not in occupied[requested]]
+            if not available:
+                return None
+            slot = (participant.slot if participant.team == requested and
+                    participant.slot in available else available[0])
+            occupied[requested].add(slot)
+            plan.append((participant, requested, slot))
+        for participant in automatic:
+            candidates = [
+                team for team in (1, 2)
+                if len(occupied[team]) < self.team_sizes[team]]
+            if not candidates:
+                return None
+            smallest = min(len(occupied[team]) for team in candidates)
+            candidates = [
+                team for team in candidates
+                if len(occupied[team]) == smallest]
+            team = random.choice(candidates)
+            slot = next(
+                value for value in range(self.team_sizes[team])
+                if value not in occupied[team])
+            occupied[team].add(slot)
+            plan.append((participant, team, slot))
+        return plan
+
+    def _apply_waiting_assignment_plan(self, plan):
+        for participant, team, slot in plan:
+            participant.team = team
+            participant.slot = slot
+            participant.x, participant.z, participant.yaw = self._spawn_for(
+                slot, team)
+            participant.y = 0.0
+            participant.aim_yaw = participant.yaw
+
     def _unique_name(self, requested, address, player_id):
         fallback = "Player%d" % player_id
         base = _safe_name(requested, fallback)
@@ -2509,8 +2567,13 @@ class BattleState:
             if (self.client_build is not None and
                     client_build != self.client_build):
                 return None, "incompatible_client_build"
+            connected_players = [
+                participant for participant in self.players.values()
+                if participant.connected]
             if len(self.players) >= self.max_players:
                 return None, "full"
+            if len(connected_players) >= sum(self.team_sizes.values()):
+                return None, "team_full"
             if self.client_build is None:
                 map_pool = MAP_POOL
                 if (self.map_option not in (None, "", "random", DEFAULT_MAP) and
@@ -2519,30 +2582,28 @@ class BattleState:
                 self.client_build = client_build
                 self.map_name = self._choose_map(map_pool)
             occupied = {
-                team: {player.slot for player in self.players.values()
-                       if player.connected and player.team == team}
+                team: {
+                    participant.slot for participant in connected_players
+                    if (self._requested_team_for_player(participant) == team and
+                        participant.team == team)
+                }
                 for team in (1, 2)}
-            available = {
-                team: [slot for slot in range(self.team_sizes[team])
-                       if slot not in occupied[team]]
-                for team in (1, 2)}
-            candidates = ([requested_team] if requested_team in (1, 2)
-                          else [team for team in (1, 2)
-                                if available[team]])
             if (requested_team in (1, 2) and
-                    not available[requested_team]):
+                    len(occupied[requested_team]) >=
+                    self.team_sizes[requested_team]):
                 return None, "team_full"
-            if not candidates:
-                return None, "team_full"
-            smallest_team = min(len(occupied[value]) for value in candidates)
-            balanced = [value for value in candidates
-                        if len(occupied[value]) == smallest_team]
-            team = (random.choice(balanced) if requested_team == 0
-                    else balanced[0])
-            slot = available[team][0]
+            if requested_team in (1, 2):
+                team = requested_team
+                slot = next(
+                    value for value in range(self.team_sizes[team])
+                    if value not in occupied[team])
+                x, z, yaw = self._spawn_for(slot, team)
+            else:
+                team = 0
+                slot = -1
+                x, z, yaw = 0.0, 0.0, 0.0
             player_id = self.next_id
             self.next_id += 1
-            x, z, yaw = self._spawn_for(slot, team)
             player = Player(
                 player_id=player_id,
                 conn=conn,
@@ -2552,6 +2613,7 @@ class BattleState:
                     hello.get("vehicle"), "ussr:R11_MS-1"),
                 team=team,
                 slot=slot,
+                requested_team=requested_team,
                 x=x,
                 z=z,
                 yaw=yaw,
@@ -2581,42 +2643,38 @@ class BattleState:
                 team = _requested_team(requested_team)
             except ValueError:
                 return False, "invalid_team"
-            if team in (1, 2) and team == player.team:
+            current_choice = self._requested_team_for_player(player)
+            if team == current_choice:
+                return True, None
+            if team == 0:
+                player.requested_team = 0
+                player.team = 0
+                player.slot = -1
+                player.x = 0.0
+                player.y = 0.0
+                player.z = 0.0
+                player.yaw = 0.0
+                player.aim_yaw = 0.0
+                self.state_revision += 1
                 return True, None
             occupied = {
                 candidate: {
                     participant.slot for participant in self.players.values()
                     if (participant.connected and
                         participant.player_id != player_id and
-                        participant.team == candidate)
+                        self._requested_team_for_player(participant) ==
+                        candidate and participant.team == candidate)
                 }
                 for candidate in (1, 2)
             }
-            available = {
-                candidate: [
-                    slot for slot in range(self.team_sizes[candidate])
-                    if slot not in occupied[candidate]]
-                for candidate in (1, 2)
-            }
-            candidates = ([team] if team in (1, 2)
-                          else [candidate for candidate in (1, 2)
-                                if available[candidate]])
-            if team in (1, 2) and not available[team]:
+            available = [
+                slot for slot in range(self.team_sizes[team])
+                if slot not in occupied[team]]
+            if not available:
                 return False, "team_full"
-            if not candidates:
-                return False, "team_full"
-            if team == 0:
-                smallest_team = min(
-                    len(occupied[candidate]) for candidate in candidates)
-                candidates = [
-                    candidate for candidate in candidates
-                    if len(occupied[candidate]) == smallest_team]
-                team = random.choice(candidates)
-            slots = available[team]
-            if team == player.team:
-                return True, None
+            player.requested_team = team
             player.team = team
-            player.slot = slots[0]
+            player.slot = available[0]
             player.x, player.z, player.yaw = self._spawn_for(
                 player.slot, player.team)
             player.y = 0.0
@@ -2644,10 +2702,17 @@ class BattleState:
 
             participants = sorted(
                 (participant for participant in self.players.values()
-                 if participant.connected and participant.team == team),
+                 if (participant.connected and
+                     self._requested_team_for_player(participant) == team)),
                 key=lambda participant: (
                     participant.slot, participant.player_id))
-            if len(participants) > size:
+            connected_count = sum(
+                1 for participant in self.players.values()
+                if participant.connected)
+            resized_total = (
+                size + self.team_sizes[2 if team == 1 else 1])
+            if (len(participants) > size or
+                    connected_count > resized_total):
                 return False, "team_occupied"
             if self.team_sizes[team] == size:
                 return True, None
@@ -2668,7 +2733,7 @@ class BattleState:
             occupied_slots = {
                 (participant.team, participant.slot)
                 for participant in self.players.values()
-                if participant.connected
+                if participant.connected and participant.team in (1, 2)
             }
             self.bot_roster = self._new_bot_roster(occupied_slots)
             self.state_revision += 1
@@ -2989,10 +3054,19 @@ class BattleState:
             player.gun_checkpoints.clear()
             player.pose_time_us = None
             player.pose_history.clear()
-            player.x, player.z, player.yaw = self._spawn_for(
-                player.slot, player.team)
-            player.y = 0.0
-            player.aim_yaw = player.yaw
+            if self._requested_team_for_player(player) == 0:
+                player.team = 0
+                player.slot = -1
+                player.x = 0.0
+                player.y = 0.0
+                player.z = 0.0
+                player.yaw = 0.0
+                player.aim_yaw = 0.0
+            else:
+                player.x, player.z, player.yaw = self._spawn_for(
+                    player.slot, player.team)
+                player.y = 0.0
+                player.aim_yaw = player.yaw
             player.pitch = 0.0
             player.roll = 0.0
             player.up_cosine = 1.0
@@ -3012,7 +3086,7 @@ class BattleState:
         self.next_id = max([player.player_id for player in self.players.values()] or [0]) + 1
         occupied_slots = {
             (player.team, player.slot) for player in self.players.values()
-            if player.connected}
+            if player.connected and player.team in (1, 2)}
         self.bot_roster = self._new_bot_roster(occupied_slots)
         self.bot_authority_id = None
         self.authority_epoch = 0
@@ -3224,11 +3298,16 @@ class BattleState:
                         return None, "invalid_map"
                     self.map_name = requested_map
             connected = [p for p in self.players.values() if p.connected]
+            for participant in connected:
+                if not self._install_player_equipments(participant):
+                    return None, "invalid_player_critical_profile"
+            assignment_plan = self._waiting_assignment_plan(connected)
+            if assignment_plan is None:
+                return None, "team_full"
+            self._apply_waiting_assignment_plan(assignment_plan)
             self.round_start_time = int(time.time())
             for participant in connected:
                 participant.participating = True
-                if not self._install_player_equipments(participant):
-                    return None, "invalid_player_critical_profile"
             self._freeze_round_participants(connected)
             occupied_slots = {(p.team, p.slot) for p in connected}
             self.bot_roster = self._new_bot_roster(occupied_slots)
@@ -12056,6 +12135,7 @@ class BattleState:
 
     @staticmethod
     def _public_player(player, include_outfits=True):
+        assigned = player.team in (1, 2) and 0 <= player.slot < 15
         result = {
             "id": player.player_id,
             "name": player.name,
@@ -12063,10 +12143,13 @@ class BattleState:
             "vehicle_compact_descr": player.vehicle_compact_descr,
             "team": player.team,
             "slot": player.slot,
+            "requested_team": BattleState._requested_team_for_player(player),
             "participating": bool(player.participating),
             "world_pose": player.client_position,
-            "spawn_x": BattleState._spawn_x_for(player.slot),
-            "spawn_z": BattleState._spawn_z_for(player.team),
+            "spawn_x": (BattleState._spawn_x_for(player.slot)
+                        if assigned else 0.0),
+            "spawn_z": (BattleState._spawn_z_for(player.team)
+                        if assigned else 0.0),
             "x": round(player.x, 4),
             "y": round(player.y, 4),
             "z": round(player.z, 4),
@@ -12789,6 +12872,8 @@ class ClientHandler(socketserver.BaseRequestHandler):
                             player.effective_params),
                         "team": player.team,
                         "slot": player.slot,
+                        "requested_team":
+                            server.state._requested_team_for_player(player),
                         "max_health": player.max_health,
                         "map": server.state.map_name,
                         "map_pool": list(server.state._active_map_pool()),

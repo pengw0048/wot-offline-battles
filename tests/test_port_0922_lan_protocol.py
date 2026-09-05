@@ -275,6 +275,7 @@ class LanProtocolTests(unittest.TestCase):
             'bot_authority_id': -1,
             'players': [dict(
                 _player_equipment_contract(), id=1,
+                team=1, slot=0,
                 vehicle='germany:G01_PzI', max_health=150,
                 vehicle_compact_descr='cHpp',
                 effective_params=effective_params())]})
@@ -1114,6 +1115,7 @@ class LanProtocolTests(unittest.TestCase):
             'bot_authority_id': -1,
             'players': [dict(
                 _player_equipment_contract(), id=1,
+                team=1, slot=0,
                 effective_params=effective_params())]})
         live = {
             'type': 'battle_live', 'protocol': 5, 'round_id': 7,

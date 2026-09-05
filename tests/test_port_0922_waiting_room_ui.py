@@ -272,26 +272,79 @@ class WaitingRoomTests(unittest.TestCase):
             'team': 1, 'sizes': {1: 2, 2: 5},
             'counts': {1: 1, 2: 3}, 'supported': True, 'preferred': 1,
         }
+
+        def select(team):
+            selected.append(team)
+            team_state['preferred'] = team
+            return True
+
         room = self.module.WaitingRoomUI(
             self._request_start, lambda: list(self.pool),
             status=lambda: self.status, host=lambda: False,
-            surface=self.surface,
-            request_team=lambda team: selected.append(team) or True,
+            surface=self.surface, request_team=select,
             team_status=lambda: dict(team_state))
 
         self.assertTrue(room.open())
         self.assertTrue(room._controls['team1'].properties['visible'])
-        self.assertTrue(room._controls['team_random'].properties['visible'])
         self.assertTrue(room._controls['team2'].properties['visible'])
-        self.assertIn('1/2', room._labels['team1'].properties['text'])
-        self.assertIn('(YOU)', room._labels['team1'].properties['text'])
-        self.assertIn('3/5', room._labels['team2'].properties['text'])
+        self.assertTrue(room._controls['team_random'].properties['visible'])
+        self.assertTrue(
+            room._labels['team1_capacity'].properties['visible'])
+        self.assertTrue(
+            room._labels['team2_capacity'].properties['visible'])
+        self.assertEqual(
+            'TEAM 1 SIZE: 2',
+            room._labels['team1_capacity'].properties['text'])
+        self.assertEqual(
+            'TEAM 2 SIZE: 5',
+            room._labels['team2_capacity'].properties['text'])
+        self.assertEqual('TEAM 1  (YOU)',
+                         room._labels['team1'].properties['text'])
+        self.assertEqual('TEAM 2', room._labels['team2'].properties['text'])
+        self.assertEqual(
+            'RANDOM', room._labels['team_random'].properties['text'])
         self.assertTrue(room.activate('team2'))
-        self.assertEqual([2], selected)
         self.assertTrue(room.activate('team_random'))
-        self.assertEqual([2, 0], selected)
+        self.assertTrue(room.activate('team1'))
+        self.assertEqual([2, 0, 1], selected)
 
-    def test_random_team_choice_has_a_visible_selected_state(self):
+    def test_capacity_and_team_selection_use_separate_rows(self):
+        team_state = {
+            'team': 1, 'sizes': {1: 2, 2: 5},
+            'counts': {1: 1, 2: 3}, 'supported': True, 'preferred': 1,
+            'size_supported': True,
+        }
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, request_team=lambda team: True,
+            request_team_size=lambda team, size: True,
+            team_status=lambda: dict(team_state))
+
+        self.assertTrue(room.open())
+        capacity_y = room._labels[
+            'team1_capacity'].properties['position'][1]
+        self.assertEqual(
+            capacity_y,
+            room._labels['team2_capacity'].properties['position'][1])
+        for role in self.module._TEAM_SIZE_CONTROLS:
+            self.assertEqual(
+                capacity_y, room._controls[role].properties['position'][1])
+        selection_y = room._controls['team1'].properties['position'][1]
+        for role in self.module._TEAM_SELECT_CONTROLS:
+            self.assertEqual(
+                selection_y, room._controls[role].properties['position'][1])
+        self.assertGreater(capacity_y, selection_y)
+        self.assertGreater(
+            selection_y, room._controls['start'].properties['position'][1])
+        self.assertLess(
+            room._controls['team1'].properties['position'][0],
+            room._controls['team2'].properties['position'][0])
+        self.assertLess(
+            room._controls['team2'].properties['position'][0],
+            room._controls['team_random'].properties['position'][0])
+
+    def test_random_team_choice_hides_the_internal_assignment(self):
         selected = []
         team_state = {
             'team': 2, 'sizes': {1: 2, 2: 2},
@@ -310,13 +363,22 @@ class WaitingRoomTests(unittest.TestCase):
             team_status=lambda: dict(team_state))
 
         self.assertTrue(room.open())
-        self.assertIn('(ON)', room._labels['team_random'].properties['text'])
-        self.assertIn('(YOU)', room._labels['team2'].properties['text'])
+        self.assertEqual(
+            'RANDOM (ON)', room._labels['team_random'].properties['text'])
+        self.assertEqual('TEAM 1', room._labels['team1'].properties['text'])
+        self.assertEqual('TEAM 2', room._labels['team2'].properties['text'])
+        self.assertNotIn(
+            '1/2', room._labels['team1_capacity'].properties['text'])
+        self.assertNotIn(
+            '1/2', room._labels['team2_capacity'].properties['text'])
         self.assertTrue(room.activate('team2'))
         self.assertEqual([2], selected)
-        self.assertNotIn('(ON)', room._labels['team_random'].properties['text'])
+        self.assertEqual(
+            'RANDOM', room._labels['team_random'].properties['text'])
+        self.assertEqual(
+            'TEAM 2  (YOU)', room._labels['team2'].properties['text'])
 
-    def test_host_can_adjust_both_team_sizes_without_an_extra_row(self):
+    def test_host_can_adjust_both_team_sizes_on_the_capacity_row(self):
         requested = []
         team_state = {
             'team': 1, 'sizes': {1: 2, 2: 5},
@@ -340,7 +402,9 @@ class WaitingRoomTests(unittest.TestCase):
         # for the roster echo between every step.
         self.assertTrue(room.activate('team2_up'))
         self.assertEqual([(1, 1), (2, 6), (2, 7)], requested)
-        self.assertIn('3/7', room._labels['team2'].properties['text'])
+        self.assertEqual(
+            'TEAM 2 SIZE: 7...',
+            room._labels['team2_capacity'].properties['text'])
 
     def test_host_can_cycle_the_bot_tier_preset(self):
         requested = []
@@ -373,8 +437,20 @@ class WaitingRoomTests(unittest.TestCase):
             team_status=lambda: dict(team_state))
 
         self.assertTrue(room.open())
-        self.assertIn('1/4', room._labels['team1'].properties['text'])
-        self.assertIn('2/6', room._labels['team2'].properties['text'])
+        self.assertEqual(
+            'TEAM 1 SIZE: 4',
+            room._labels['team1_capacity'].properties['text'])
+        self.assertEqual(
+            'TEAM 2 SIZE: 6',
+            room._labels['team2_capacity'].properties['text'])
+        self.assertTrue(
+            room._labels['team1_capacity'].properties['visible'])
+        self.assertTrue(
+            room._labels['team2_capacity'].properties['visible'])
+        self.assertEqual(
+            'RANDOM (ON)', room._labels['team_random'].properties['text'])
+        self.assertNotIn('(YOU)', room._labels['team1'].properties['text'])
+        self.assertNotIn('(YOU)', room._labels['team2'].properties['text'])
         for role in self.module._TEAM_SIZE_CONTROLS:
             self.assertFalse(room._controls[role].properties['visible'])
             self.assertFalse(room.activate(role))
@@ -397,6 +473,9 @@ class WaitingRoomTests(unittest.TestCase):
         self.assertEqual({1: 4}, room._pending_team_sizes)
         self.assertTrue(room.reject_team_size(1, 'Refused.'))
         self.assertEqual({}, room._pending_team_sizes)
+        self.assertEqual(
+            'TEAM 1 SIZE: 3',
+            room._labels['team1_capacity'].properties['text'])
         self.assertEqual('Refused.', self._label_for(room, 'message'))
 
     @staticmethod

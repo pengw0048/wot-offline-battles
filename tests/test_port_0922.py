@@ -345,7 +345,7 @@ class PortSourceTests(unittest.TestCase):
         build_script = (PORT_ROOT / 'build_for_client.sh').read_text(
             encoding='utf-8')
 
-        self.assertEqual('0.6.7', packager.MOD_VERSION)
+        self.assertEqual('0.6.8', packager.MOD_VERSION)
         self.assertEqual(packager.MOD_VERSION, package.PORT_VERSION)
         self.assertEqual(packager.MOD_VERSION, meta_version)
         self.assertIn(
@@ -470,7 +470,7 @@ class PortSourceTests(unittest.TestCase):
                 config_path.parent / packager.BUILD_IDENTITY_FILENAME
             ).read_text(encoding='utf-8'))
             self.assertEqual(1, identity['schema'])
-            self.assertEqual('0.6.7', identity['semanticVersion'])
+            self.assertEqual('0.6.8', identity['semanticVersion'])
             self.assertRegex(
                 identity['buildIdentity'],
                 r'^local-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
@@ -2002,6 +2002,120 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertIs(stock_start_visual,
                       vehicle_type.__dict__['startVisual'])
 
+    def test_stock_effects_lod_cannot_restart_a_hidden_lan_remote(self):
+        """The 0.25 s effects timer must not undo the spotting gate.
+
+        Exact #1513 ``CompoundAppearance.__onPeriodicTimer`` calls
+        ``__updateEffectsLOD`` every 0.25 s for every living vehicle, and that
+        method enables ground dust within 100 m and exhaust within 200 m of
+        ``BigWorld.camera()`` without reading any draw flag.  An SPG aiming
+        camera sits over its aim point rather than over the player, so an
+        unspotted enemy under that camera kept both effects running.
+        """
+        compatibility_module = _load_port_source('compat')
+        runtime, operations = self._runtime()
+        appearance_type = (
+            runtime.compound_appearance_module.CompoundAppearance)
+        method_name = '_CompoundAppearance__updateEffectsLOD'
+        original = appearance_type.__dict__[method_name]
+        vehicle_type = runtime.vehicle_module.Vehicle
+
+        class Selector(object):
+            def __init__(self, flags):
+                self.flags = flags
+                self.enabled = False
+
+            def settingsFlags(self):
+                return self.flags
+
+            def start(self):
+                self.enabled = True
+
+            def stop(self):
+                self.enabled = False
+
+        class EffectManager(object):
+            def __init__(self):
+                self._CustomEffectManager__selectors = [
+                    Selector(appearance_type.SETTING_DUST),
+                    Selector(appearance_type.SETTING_EXHAUST)]
+
+            def enable(self, enable, flags):
+                for selector in self._CustomEffectManager__selectors:
+                    if selector.settingsFlags() == flags:
+                        if enable:
+                            selector.start()
+                        else:
+                            selector.stop()
+
+            def running(self):
+                return [selector.flags
+                        for selector in self._CustomEffectManager__selectors
+                        if selector.enabled]
+
+        class Decal(object):
+            def __init__(self):
+                self._VehicleDecal__attached = True
+                self._VehicleDecal__hullParent = object()
+                self.detaches = 0
+
+            def attach(self):
+                self._VehicleDecal__attached = True
+
+            def detach(self):
+                if not self._VehicleDecal__attached:
+                    return
+                self.detaches += 1
+                self._VehicleDecal__attached = False
+                self._VehicleDecal__hullParent = None
+
+        manager = EffectManager()
+        decal = Decal()
+        enemy = vehicle_type()
+        enemy.id = 11
+        enemy._offlineNativeRemote = True
+        enemy._offlineNativeDrawVisible = False
+        appearance = appearance_type(None)
+        appearance.customEffectManager = manager
+        appearance._CompoundAppearance__chassisDecal = decal
+        appearance._CompoundAppearance__vehicle = enemy
+
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+
+        # Outside a battle the stock LOD owns the decision unchanged.
+        getattr(appearance, method_name)(10.0)
+        self.assertIn(('compound_effects_lod', 10.0), operations)
+        self.assertEqual([1, 2], manager.running())
+
+        compatibility.configure_battle(player_team=1)
+        operations[:] = []
+        getattr(appearance, method_name)(10.0)
+        self.assertEqual([], operations)
+        self.assertEqual([], manager.running())
+        self.assertFalse(decal._VehicleDecal__attached)
+
+        # ``VehicleDecal.onSettingsChanged`` re-attaches every decal when the
+        # shadow quality changes.  This bounded callback is what makes the
+        # ground gate self-healing, and it must not detach twice.
+        self.assertEqual(1, decal.detaches)
+        getattr(appearance, method_name)(10.0)
+        self.assertEqual(1, decal.detaches)
+        decal.attach()
+        getattr(appearance, method_name)(10.0)
+        self.assertFalse(decal._VehicleDecal__attached)
+        self.assertEqual(2, decal.detaches)
+
+        # A drawn remote keeps the exact stock behaviour, including the
+        # ceiling that leaves dust off and exhaust on between 100 and 200 m.
+        enemy._offlineNativeDrawVisible = True
+        getattr(appearance, method_name)(150.0)
+        self.assertEqual([('compound_effects_lod', 150.0)], operations)
+        self.assertEqual([2], manager.running())
+
+        compatibility.fini()
+        self.assertIs(original, appearance_type.__dict__[method_name])
+
     def test_compatibility_does_not_replace_stock_vehicle_filters(self):
         compatibility_module = _load_port_source('compat')
         runtime, operations = self._runtime()
@@ -2876,14 +2990,39 @@ class OfflineCompatibilityTests(unittest.TestCase):
                     start_point, end_point, False, False)
 
         class CompoundAppearance(object):
+            # Exact #1513 ``EffectSettings`` selector flags.
+            SETTING_DUST = 1
+            SETTING_EXHAUST = 2
+            # Exact #1513 ``__updateEffectsLOD`` camera-distance ceilings.
+            LOD_DISTANCE_EXHAUST = 200.0
+            LOD_DISTANCE_TRAIL_PARTICLES = 100.0
+
             def __init__(self, vehicle_filter):
                 self._CompoundAppearance__filter = vehicle_filter
+                self._CompoundAppearance__vehicle = None
+                self._CompoundAppearance__chassisDecal = None
+                self._CompoundAppearance__splodge = None
+                self.customEffectManager = None
                 self._arena_callback = lambda *unused: None
                 self._camera_callback = lambda *unused: None
+
+            def __updateEffectsLOD(self, distanceFromPlayer):
+                operations.append(
+                    ('compound_effects_lod', distanceFromPlayer))
+                if not self.customEffectManager:
+                    return
+                self.customEffectManager.enable(
+                    distanceFromPlayer <=
+                    self.LOD_DISTANCE_TRAIL_PARTICLES, self.SETTING_DUST)
+                self.customEffectManager.enable(
+                    distanceFromPlayer <= self.LOD_DISTANCE_EXHAUST,
+                    self.SETTING_EXHAUST)
 
             def __onModelsRefresh(self, model_state, resource_list):
                 operations.append(
                     ('compound_refresh_before', model_state, resource_list))
+                if getattr(self, 'deactivate_during_refresh', False):
+                    self.deactivate(False)
                 replacement = getattr(self, 'replacement_filter', None)
                 if replacement is not None:
                     self._CompoundAppearance__filter = replacement
@@ -4272,12 +4411,20 @@ class OfflineCompatibilityTests(unittest.TestCase):
         operations[:] = []
         replacement = VehicleFilter('replacement')
         appearance.replacement_filter = replacement
+        detached = object()
+        disabled = object()
+        appearance._offlineSplodgeDetach = detached
+        appearance._offlineSplodgeDisabled = disabled
+        appearance.deactivate_during_refresh = True
         getattr(appearance, method_name)('offline', {'offline': True})
         self.assertEqual(
             [('compound_refresh_before', 'offline', {'offline': True}),
+             ('compound_deactivate', False),
              ('compound_refresh_after',)],
             operations)
         self.assertIsNone(compatibility._compound_refreshing_models)
+        self.assertIs(detached, appearance._offlineSplodgeDetach)
+        self.assertIs(disabled, appearance._offlineSplodgeDisabled)
         self.assertIs(replacement, appearance.nested_filter)
         self.assertIs(
             replacement,
@@ -4346,11 +4493,15 @@ class OfflineCompatibilityTests(unittest.TestCase):
         runtime.bigworld._player = None
         appearance = appearance_type(object())
         appearance.fail_deactivate = True
+        appearance._offlineSplodgeDetach = object()
+        appearance._offlineSplodgeDisabled = object()
 
         with self.assertRaisesRegex(
                 RuntimeError, 'compound deactivate failed'):
             appearance.deactivate(False)
 
+        self.assertIsNone(appearance._offlineSplodgeDetach)
+        self.assertIsNone(appearance._offlineSplodgeDisabled)
         self.assertNotIn('player', runtime.bigworld.__dict__)
         self.assertIs(original_player,
                       runtime.bigworld.__class__.__dict__['player'])
@@ -5479,6 +5630,8 @@ class LANClientTests(unittest.TestCase):
     def test_welcome_roster_and_server_validated_start_request(self):
         module, client, events, _ = self._client()
         self._activate_outbound(client)
+        client.team = 2
+        client.slot = 14
         client._handle_message({
             'type': 'welcome',
             'protocol': module.PROTOCOL_VERSION,
@@ -5501,9 +5654,9 @@ class LANClientTests(unittest.TestCase):
             'name': 'Player',
             'vehicle': 'ussr:MS-1',
             'max_health': 100,
-            'team': 1,
+            'team': 0,
             'team_sizes': {'1': 2, '2': 5},
-            'slot': 0,
+            'slot': -1,
             'map': '01_karelia',
             'map_pool': ['01_karelia', '04_himmelsdorf'],
             'phase': 'waiting',
@@ -5512,6 +5665,11 @@ class LANClientTests(unittest.TestCase):
             'spawn': {'x': 0, 'y': 0, 'z': 0, 'yaw': 0},
             'effective_params': effective_params(),
         })
+
+        self.assertTrue(client.ready)
+        self.assertEqual(0, client.team)
+        self.assertEqual(-1, client.slot)
+
         client._handle_message({
             'type': 'roster',
             'protocol': module.PROTOCOL_VERSION,
@@ -5522,7 +5680,8 @@ class LANClientTests(unittest.TestCase):
             'map_pool': ['01_karelia', '04_himmelsdorf'],
             'host_player_id': 7,
             'authority_epoch': 1,
-            'players': [wire_player(7), wire_player(8)],
+            'players': [wire_player(7, team=1, slot=0),
+                        wire_player(8, team=2, slot=0)],
         })
 
         self.assertTrue(client.ready)
@@ -5546,6 +5705,70 @@ class LANClientTests(unittest.TestCase):
         self.assertEqual(
             {'type': 'select_team', 'team': 0},
             client._outbound_queue[-1][1])
+
+    def test_new_waiting_roster_clears_previous_team_assignment(self):
+        _, client, events, _ = self._client()
+        client.running = True
+        client.ready = True
+        client.player_id = 7
+        client.round_id = 3
+        client.state_revision = 9
+        client.phase = 'battle'
+        client.team = 2
+        client.slot = 14
+
+        client._handle_message({
+            'type': 'roster', 'protocol': 5,
+            'round_id': 4, 'state_revision': 1, 'phase': 'waiting',
+            'map': '01_karelia', 'host_player_id': 7,
+            'players': [wire_player(7, team=0, slot=-1)]})
+
+        self.assertTrue(client.running)
+        self.assertTrue(client.ready)
+        self.assertEqual(4, client.round_id)
+        self.assertEqual('waiting', client.phase)
+        self.assertEqual(0, client.team)
+        self.assertEqual(-1, client.slot)
+        self.assertEqual(['roster'], [item[0] for item in events])
+
+    def test_loading_and_battle_rosters_reject_pending_assignment(self):
+        for phase in ('loading', 'battle'):
+            _, client, _, _ = self._client()
+            client.running = True
+            client.ready = True
+            client.player_id = 7
+            client.round_id = 3
+            client.state_revision = 1
+
+            client._handle_message({
+                'type': 'roster', 'protocol': 5,
+                'round_id': 3, 'state_revision': 2, 'phase': phase,
+                'map': '01_karelia', 'host_player_id': 7,
+                'bot_authority_id': -1,
+                'players': [wire_player(7, team=0, slot=-1)]})
+
+            self.assertFalse(client.running, phase)
+            self.assertEqual('invalid roster message', client.last_error)
+
+    def test_battle_start_rejects_pending_assignment(self):
+        _, client, _, _ = self._client()
+        client.running = True
+        client.ready = True
+        client.player_id = 7
+        client.round_id = 3
+        client.state_revision = 1
+
+        client._handle_message({
+            'type': 'battle_start', 'protocol': 5,
+            'round_id': 3, 'state_revision': 2, 'phase': 'loading',
+            'map': '01_karelia', 'host_player_id': 7,
+            'bot_authority_id': -1,
+            'players': [wire_player(7, team=0, slot=-1)],
+            'bots': []})
+
+        self.assertFalse(client.running)
+        self.assertFalse(client.ready)
+        self.assertEqual('invalid battle_start message', client.last_error)
 
     def test_guest_cannot_request_start_or_select_map(self):
         _, client, _, _ = self._client()
@@ -5592,13 +5815,16 @@ class LANClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': 5, 'round_id': 3,
             'state_revision': 6, 'phase': 'waiting',
             'map': '01_karelia', 'host_player_id': 2,
-            'players': [wire_player(2, name='NewHost')]})
+            'players': [wire_player(
+                2, name='NewHost', team=1, slot=0)]})
         client._handle_message({
             'type': 'roster', 'protocol': 5, 'round_id': 3,
             'state_revision': 5, 'phase': 'waiting',
             'map': '01_karelia', 'host_player_id': 1,
-            'players': [wire_player(1, name='OldHost'),
-                        wire_player(2, name='NewHost')]})
+            'players': [wire_player(
+                1, name='OldHost', team=1, slot=0),
+                        wire_player(
+                            2, name='NewHost', team=2, slot=0)]})
 
         self.assertEqual(6, client.state_revision)
         self.assertEqual(2, client.host_player_id)
@@ -5623,15 +5849,18 @@ class LANClientTests(unittest.TestCase):
             'state_revision': 6, 'phase': 'battle',
             'map': '01_karelia', 'host_player_id': 2,
             'bot_authority_id': -1,
-            'players': [wire_player(2, name='NewHost')]})
+            'players': [wire_player(
+                2, name='NewHost', team=2, slot=0)]})
         stale_start = {
             'type': 'battle_start', 'protocol': 5, 'round_id': 3,
             'state_revision': 5, 'phase': 'loading',
             'map': '01_karelia',
             'host_player_id': 1,
             'bot_authority_id': 1,
-            'players': [wire_player(1, name='OldHost'),
-                        wire_player(2, name='NewHost')],
+            'players': [wire_player(
+                1, name='OldHost', team=1, slot=0),
+                        wire_player(
+                            2, name='NewHost', team=2, slot=0)],
             'bots': [],
         }
         client._handle_message(stale_start)
@@ -5671,7 +5900,7 @@ class LANClientTests(unittest.TestCase):
             'round_id': 4, 'state_revision': 2, 'phase': 'battle',
             'map': '01_karelia', 'host_player_id': 7,
             'bot_authority_id': -1,
-            'players': [wire_player(7)]})
+            'players': [wire_player(7, team=1, slot=0)]})
         client._queue_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 4, 'server_tick': 2,
@@ -5767,7 +5996,7 @@ class LANClientTests(unittest.TestCase):
             'type': 'roster', 'protocol': 5,
             'round_id': 6, 'state_revision': 8, 'phase': 'waiting',
             'map': '01_karelia', 'host_player_id': 7,
-            'players': [wire_player(7)]})
+            'players': [wire_player(7, team=1, slot=0)]})
         self.assertEqual(6, client.round_id)
         self.assertIsNone(client.last_snapshot)
         self.assertEqual(0, client._fire_seq)
@@ -5852,7 +6081,7 @@ class LANClientTests(unittest.TestCase):
             'state_revision': 4,
             'phase': 'waiting', 'map': '01_karelia',
             'host_player_id': 'not-an-id',
-            'players': [wire_player(7)]})
+            'players': [wire_player(7, team=1, slot=0)]})
 
         self.assertFalse(client.running)
         self.assertEqual('invalid roster message', client.last_error)
@@ -5869,7 +6098,7 @@ class LANClientTests(unittest.TestCase):
             'state_revision': 4, 'phase': 'loading',
             'map': '01_karelia', 'host_player_id': 8,
             'bot_authority_id': -1,
-            'players': [wire_player(7)]})
+            'players': [wire_player(7, team=1, slot=0)]})
 
         self.assertFalse(client.running)
         self.assertFalse(client.ready)

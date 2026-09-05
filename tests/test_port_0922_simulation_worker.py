@@ -643,8 +643,10 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertEqual({}, state.players)
         self.assertEqual(SIMULATION_WORKER_AUTHORITY_ID,
                          state.bot_authority_id)
+        player_hello = _player_hello()
+        player_hello['requested_team'] = 1
         player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 1001), _player_hello())
+            _Connection(), ('127.0.0.1', 1001), player_hello)
         self.assertIsNone(error)
         self.assertEqual(1, player.player_id)
         self.assertNotIn(SIMULATION_WORKER_AUTHORITY_ID, state.players)
@@ -825,8 +827,10 @@ class SimulationWorkerStateTests(unittest.TestCase):
         worker, error = state.add_simulation_worker(
             worker_connection, ('127.0.0.1', 1000), _worker_hello())
         self.assertIsNone(error)
+        player_hello = _player_hello()
+        player_hello['requested_team'] = 1
         player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 1001), _player_hello())
+            _Connection(), ('127.0.0.1', 1001), player_hello)
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
@@ -895,8 +899,10 @@ class SimulationWorkerStateTests(unittest.TestCase):
         worker, error = state.add_simulation_worker(
             _Connection(), ('127.0.0.1', 1000), _worker_hello())
         self.assertIsNone(error)
+        player_hello = _player_hello()
+        player_hello['requested_team'] = 1
         player, error = state.add_player(
-            _Connection(), ('127.0.0.1', 1001), _player_hello())
+            _Connection(), ('127.0.0.1', 1001), player_hello)
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
@@ -1619,10 +1625,13 @@ class SimulationWorkerSocketTests(unittest.TestCase):
                 'map_pool', 'host_player_id', 'phase', 'round_id',
                 'state_revision', 'spawn', 'bot_authority_id', 'team_size',
                 'authority_epoch', 'capabilities', 'server_capabilities',
-                'team_sizes', 'bot_tier_mode', 'worker_status',
-            'vehicle_compact_descr',
-            'effective_params',
-        }, set(welcome))
+                'team_sizes', 'requested_team', 'bot_tier_mode',
+                'worker_status', 'vehicle_compact_descr',
+                'effective_params',
+            }, set(welcome))
+            self.assertEqual(0, welcome['requested_team'])
+            self.assertEqual(0, welcome['team'])
+            self.assertEqual(-1, welcome['slot'])
             roster = player.receive_until('roster')
             self.assertEqual('missing', roster['worker_status'])
             self.assertNotIn('worker_failure_reason', roster)

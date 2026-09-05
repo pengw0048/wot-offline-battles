@@ -178,10 +178,18 @@ class ServerTeamSizeTests(unittest.TestCase):
 
         state._reset_round()
         self.assertEqual('waiting', state.phase)
+        self.assertTrue(all(
+            player.team == 0 and player.slot == -1 for player in players))
+        self.assertEqual(8, len(state.bot_roster))
+        self.assertEqual(4, state.lobby_message()['team_size'])
+
+        start, error = state.request_start(players[0].player_id)
+
+        self.assertIsNone(error)
+        occupied = {(player.team, player.slot) for player in players}
         self.assertFalse(occupied & {
             (bot['team'], bot['slot']) for bot in state.bot_roster})
-        self.assertEqual(8 - len(players), len(state.bot_roster))
-        self.assertEqual(4, state.lobby_message()['team_size'])
+        self.assertEqual(8 - len(players), len(start['bots']))
 
     def test_worker_drowning_proposal_is_committed_without_descriptors(self):
         state = BattleState(team_size=1)
@@ -272,17 +280,33 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertEqual(2, one.team)
         self.assertEqual(0, one.slot)
 
-    def test_automatic_join_randomizes_an_equal_choice(self):
+    def test_random_team_is_not_assigned_until_battle_start(self):
         state = BattleState(team1_size=2, team2_size=2)
+        _attach_worker(state)
 
         with mock.patch(
                 'lan_battle_server.random.choice', return_value=2) as choose:
             player, error = state.add_player(
                 _Connection(), ('10.0.0.1', 1001), _hello(1))
 
+            self.assertIsNone(error)
+            self.assertEqual(0, player.requested_team)
+            self.assertEqual(0, player.team)
+            self.assertEqual(-1, player.slot)
+            waiting_row = state.lobby_message()['players'][0]
+            self.assertEqual((0, -1), (
+                waiting_row['team'], waiting_row['slot']))
+            self.assertEqual((0.0, 0.0), (
+                waiting_row['spawn_x'], waiting_row['spawn_z']))
+            choose.assert_not_called()
+
+            start, error = state.request_start(player.player_id)
+
         self.assertIsNone(error)
         self.assertEqual(2, player.team)
-        choose.assert_any_call([1, 2])
+        self.assertEqual(0, player.slot)
+        self.assertEqual(2, start['players'][0]['team'])
+        choose.assert_called_once_with([1, 2])
 
     def test_waiting_player_can_restore_automatic_team_selection(self):
         state = BattleState(team1_size=3, team2_size=3)
@@ -296,17 +320,92 @@ class ServerTeamSizeTests(unittest.TestCase):
             _Connection(), ('10.0.0.3', 1003), _hello(3, 2))
         self.assertIsNone(error)
 
-        with mock.patch(
-                'lan_battle_server.random.choice', return_value=2) as choose:
+        with mock.patch('lan_battle_server.random.choice') as choose:
             accepted, error = state.select_team(player.player_id, 0)
 
         self.assertTrue(accepted)
         self.assertIsNone(error)
-        self.assertEqual(2, player.team)
-        self.assertEqual(1, player.slot)
-        choose.assert_called_once_with([1, 2])
+        self.assertEqual(0, player.requested_team)
+        self.assertEqual(0, player.team)
+        self.assertEqual(-1, player.slot)
+        choose.assert_not_called()
         self.assertEqual(1, teammate.team)
         self.assertEqual(2, opponent.team)
+
+        _attach_worker(state)
+        with mock.patch(
+                'lan_battle_server.random.choice', return_value=2) as choose:
+            start, error = state.request_start(player.player_id)
+
+        self.assertIsNone(error)
+        self.assertEqual(2, player.team)
+        self.assertEqual(1, player.slot)
+        self.assertEqual(2, next(
+            row for row in start['players']
+            if row['id'] == player.player_id)['team'])
+        choose.assert_called_once_with([1, 2])
+
+    def test_team_sizes_cannot_leave_random_players_without_slots(self):
+        state = BattleState(team1_size=2, team2_size=2)
+        host, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1))
+        self.assertIsNone(error)
+        unused_second, error = state.add_player(
+            _Connection(), ('10.0.0.2', 1002), _hello(2))
+        self.assertIsNone(error)
+        unused_third, error = state.add_player(
+            _Connection(), ('10.0.0.3', 1003), _hello(3))
+        self.assertIsNone(error)
+
+        accepted, error = state.set_team_size(host.player_id, 1, 1)
+        self.assertTrue(accepted)
+        self.assertIsNone(error)
+        accepted, error = state.set_team_size(host.player_id, 2, 1)
+
+        self.assertFalse(accepted)
+        self.assertEqual('team_occupied', error)
+        self.assertEqual({1: 1, 2: 2}, state.team_sizes)
+
+    def test_random_player_is_assigned_again_for_the_next_round(self):
+        state = BattleState(team1_size=2, team2_size=2)
+        _attach_worker(state)
+        host, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
+        self.assertIsNone(error)
+        opponent, error = state.add_player(
+            _Connection(), ('10.0.0.2', 1002), _hello(2, 2))
+        self.assertIsNone(error)
+        random_player, error = state.add_player(
+            _Connection(), ('10.0.0.3', 1003), _hello(3))
+        self.assertIsNone(error)
+
+        with mock.patch(
+                'lan_battle_server.random.choice', return_value=1):
+            first_start, error = state.request_start(host.player_id)
+        self.assertIsNone(error)
+        self.assertEqual(1, random_player.team)
+        self.assertEqual(1, random_player.slot)
+        self.assertEqual(1, len(first_start['bots']))
+
+        state._reset_round()
+        self.assertEqual((0, -1), (
+            random_player.team, random_player.slot))
+        self.assertEqual((1, 0), (host.team, host.slot))
+        self.assertEqual((2, 0), (opponent.team, opponent.slot))
+
+        with mock.patch(
+                'lan_battle_server.random.choice', return_value=2):
+            second_start, error = state.request_start(host.player_id)
+
+        self.assertIsNone(error)
+        self.assertEqual((2, 1), (
+            random_player.team, random_player.slot))
+        human_slots = {
+            (player.team, player.slot) for player in state.players.values()}
+        bot_slots = {
+            (bot['team'], bot['slot']) for bot in second_start['bots']}
+        self.assertFalse(human_slots & bot_slots)
+        self.assertEqual(1, len(bot_slots))
 
     def test_host_can_resize_each_waiting_team_without_restarting(self):
         state = BattleState(team1_size=3, team2_size=4)
@@ -387,7 +486,7 @@ class ServerTeamSizeTests(unittest.TestCase):
             map_name='01_karelia', team_size=1)
         _attach_worker(state)
         player, error = state.add_player(
-            _Connection(), ('10.0.0.1', 1001), _hello(1))
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
         self.assertIsNone(error)
 
         with mock.patch(

@@ -78,6 +78,252 @@ def set_model_attachment_visibility(model, visible):
     return True
 
 
+# One line per process for each stock surface the runtime could not reach.
+_ground_effect_gate_reported = False
+_ground_decal_gate_reported = False
+_ground_effect_failure_reported = False
+_ground_decal_failure_reported = False
+
+
+def _report_ground_gate_failure(kind, error):
+    """Log one bounded failure for an optional stock presentation owner."""
+    global _ground_effect_failure_reported, _ground_decal_failure_reported
+    if kind == 'effects':
+        if _ground_effect_failure_reported:
+            return False
+        _ground_effect_failure_reported = True
+    else:
+        if _ground_decal_failure_reported:
+            return False
+        _ground_decal_failure_reported = True
+    try:
+        message = ' '.join(str(error).split())[:240]
+    except Exception:
+        message = error.__class__.__name__
+    sys.stdout.write(
+        '[Offline LAN 0.9.22] hidden vehicle ground %s gate degraded: %s\n' %
+        (kind, message or error.__class__.__name__))
+    return True
+
+
+def stop_ground_effects(appearance):
+    """Stop the stock #1513 dust and exhaust selectors for one appearance.
+
+    ``CompoundAppearance.__onPeriodicTimer`` runs every 0.25 s for a living
+    vehicle and asks ``__updateEffectsLOD`` to enable ground dust within 100 m
+    and exhaust within 200 m of ``BigWorld.camera()``.  Neither threshold
+    reads the compound draw flags, so an unspotted enemy keeps emitting both
+    over a hidden hull.  The camera is what makes this visible first in an SPG
+    aiming view: it flies to the aim point, hundreds of metres from the SPG.
+
+    ``CustomEffectManager.deactivate`` is not usable as a hide because it also
+    clears the manager's vehicle.  Its selector loop is: stock ``deactivate``
+    is exactly ``for selector in __selectors: selector.stop()``, and
+    ``MainSelectorBase.update`` returns immediately once a selector is
+    stopped.  Reveal needs no counterpart; stock restarts each selector from
+    its own distance test on the next periodic tick.
+
+    ``stop`` deactivates every effect node it owns, so re-running it four
+    times a second for every hidden enemy would be real per-frame native
+    work.  ``MainSelectorBase`` keeps ``_enabled`` as its own started flag;
+    read it so a repeated gate is a comparison rather than a teardown.
+    """
+    global _ground_effect_gate_reported
+    manager = getattr(appearance, 'customEffectManager', None)
+    if manager is None:
+        return False
+    selectors = getattr(manager, '_CustomEffectManager__selectors', None)
+    if selectors is None:
+        if not _ground_effect_gate_reported:
+            _ground_effect_gate_reported = True
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] custom effect manager exposes no '
+                'selector list; hidden vehicle dust and exhaust may still '
+                'draw\n')
+        return False
+    reached = False
+    try:
+        selectors = tuple(selectors)
+    except Exception as error:
+        _report_ground_gate_failure('effects', error)
+        return False
+    for selector in selectors:
+        try:
+            if not getattr(selector, '_enabled', True):
+                reached = True
+                continue
+            selector.stop()
+            reached = True
+        except Exception as error:
+            # One broken native selector must not leave the other selector,
+            # the decal gate or the whole visibility edge unprocessed.
+            _report_ground_gate_failure('effects', error)
+    return reached
+
+
+def set_ground_decal_visibility(appearance, visible):
+    """Detach the ground decals a hidden #1513 compound would still draw.
+
+    Exact #1513 ``CompoundAppearance.activate`` attaches its ``VehicleDecal``
+    to the compound root, hull and turret nodes, and ``__setupModels``
+    attaches a ``BigWorld.Splodge`` built from ``chassis.AODecals[0]`` to the
+    hull node.  Both carry the tank-shaped ground occlusion texture as node
+    attachments, and this build keeps ``visible`` and ``visibleAttachments``
+    as independent model draw flags, so closing the compound alone can leave
+    that shadow on the ground under an unspotted enemy.
+
+    ``VehicleDecal.attach``/``detach`` are the exact stock pair and both are
+    idempotent through the decal's own ``__attached`` flag.  The splodge has
+    no stock pair, so use the hull node the decal already resolved through
+    ``model.node(TankPartNames.HULL)`` - the same node ``__attachSplodge``
+    used - and read it before detaching the decal clears it.
+    """
+    global _ground_decal_gate_reported
+    if appearance is None:
+        return False
+    visible = bool(visible)
+    reached = False
+    attempted = False
+    try:
+        model = getattr(appearance, 'compoundModel', None)
+        decal = getattr(
+            appearance, '_CompoundAppearance__chassisDecal', None)
+        hull_node = getattr(decal, '_VehicleDecal__hullParent', None)
+        splodge = getattr(
+            appearance, '_CompoundAppearance__splodge', None)
+        detached = getattr(appearance, '_offlineSplodgeDetach', None)
+        disabled = getattr(appearance, '_offlineSplodgeDisabled', None)
+    except Exception as error:
+        _report_ground_gate_failure('decal', error)
+        return False
+
+    if disabled is not None:
+        try:
+            disabled_matches = (
+                disabled[0] is model and disabled[1] is splodge)
+            reused_disabled_splodge = (
+                not disabled_matches and disabled[1] is splodge)
+        except (IndexError, TypeError):
+            disabled_matches = False
+            reused_disabled_splodge = False
+        if not disabled_matches:
+            if (reused_disabled_splodge and model is not None and
+                    splodge is not None):
+                # A failed native operation can have partially committed.
+                # Replacing the compound does not make the retained Splodge's
+                # owner knowable again, so carry the fence into this model
+                # generation until stock supplies a new Splodge object.
+                disabled = (model, splodge)
+                appearance._offlineSplodgeDisabled = disabled
+            else:
+                appearance._offlineSplodgeDisabled = None
+                disabled = None
+
+    if detached is not None:
+        try:
+            detached_matches = (
+                detached[0] is model and detached[1] is splodge and
+                (hull_node is None or detached[2] is hull_node))
+            reused_splodge = (
+                not detached_matches and detached[1] is splodge)
+        except (IndexError, TypeError):
+            detached_matches = False
+            reused_splodge = False
+        if not detached_matches:
+            # Never dereference the retired hull node after a compound model
+            # refresh.  #1513 can retain the same Splodge while replacing its
+            # compound, in which case its ownership in the new generation is
+            # unknowable and native attach/detach must stay disabled.
+            appearance._offlineSplodgeDetach = None
+            detached = None
+            if reused_splodge and model is not None and splodge is not None:
+                disabled = (model, splodge)
+                appearance._offlineSplodgeDisabled = disabled
+
+    splodge_disabled = disabled is not None
+    if not splodge_disabled and splodge is not None:
+        if visible and detached is not None:
+            attempted = True
+            # Publish the unknown state before a native call that may
+            # synchronously re-enter Python or mutate before raising.
+            appearance._offlineSplodgeDetach = None
+            appearance._offlineSplodgeDisabled = (model, splodge)
+            try:
+                detached[2].attach(splodge)
+            except Exception as error:
+                # A native attach may have partially committed.  Do not retry
+                # an operation whose idempotence cannot be proved.
+                _report_ground_gate_failure('decal', error)
+            else:
+                appearance._offlineSplodgeDisabled = None
+                reached = True
+        elif not visible and detached is None and hull_node is not None:
+            attempted = True
+            appearance._offlineSplodgeDisabled = (model, splodge)
+            try:
+                hull_node.detach(splodge)
+            except Exception as error:
+                _report_ground_gate_failure('decal', error)
+            else:
+                appearance._offlineSplodgeDisabled = None
+                appearance._offlineSplodgeDetach = (
+                    model, splodge, hull_node)
+                reached = True
+        elif detached is not None:
+            reached = True
+    elif splodge_disabled:
+        attempted = True
+
+    try:
+        change = getattr(decal, 'attach' if visible else 'detach', None)
+        if callable(change):
+            attempted = True
+            change()
+            reached = True
+    except Exception as error:
+        _report_ground_gate_failure('decal', error)
+    if not reached and not attempted and not _ground_decal_gate_reported:
+        _ground_decal_gate_reported = True
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] compound appearance exposes no ground '
+            'decal owner; a hidden vehicle may still cast its occlusion '
+            'decal\n')
+    return reached
+
+
+def clear_ground_decal_visibility_state(appearance):
+    """Release cached node wrappers when one appearance is retired."""
+    if appearance is None:
+        return False
+    reached = False
+    for name in ('_offlineSplodgeDetach', '_offlineSplodgeDisabled'):
+        try:
+            if getattr(appearance, name, None) is not None:
+                setattr(appearance, name, None)
+                reached = True
+        except Exception:
+            # Teardown must not dereference or recover a retired native node.
+            pass
+    return reached
+
+
+def close_stock_presentation_extras(appearance, visible):
+    """Apply every draw gate the stock compound flags do not cover.
+
+    ``changeVisibility`` writes ``compoundModel.visible``, the stickers and
+    the crashed-track controller.  It reaches neither the node attachments nor
+    the camera-distance effect selectors, and both keep drawing over a hidden
+    enemy.  Each surface is optional on its own: a build that does not expose
+    one logs a single line and the round continues.
+    """
+    if appearance is None:
+        return False
+    reached = set_ground_decal_visibility(appearance, visible)
+    if not visible:
+        reached = stop_ground_effects(appearance) or reached
+    return reached
+
+
 from gui.mods.offline_lan_0922 import tank_collision
 from gui.mods.offline_lan_0922 import track_damage
 

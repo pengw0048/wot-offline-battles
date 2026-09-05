@@ -196,6 +196,23 @@ BOT_OVERTURN_DANGER_COSINE = vehicle_physics.OVERTURN_DANGER_COSINE
 BOT_OVERTURN_DEATH_SECONDS = 30.0
 BOT_OVERTURN_DEATH_REASON = 7
 
+# The ten-spring trial may follow a rise above the mature 0.6 m step gate only
+# when the last and current spring batches describe one continuous terrain
+# plane.  A fixed three-point centre proof bounds the exceptional ram/contact
+# correction cost independently from the correction distance.
+SUSPENSION_BASE_RISE = 0.6
+SUSPENSION_GROUND_PLANE_EPSILON = 0.35
+SUSPENSION_GROUND_GRADIENT_EPSILON = 0.35
+
+_BOT_SUSPENSION_STATE_FIELDS = (
+    'pitch', 'terrain_pitch', 'roll', 'vertical_speed', 'airborne',
+    'grounded_once', 'suspension_pitch_velocity',
+    'suspension_roll_velocity', 'left_flying', 'right_flying',
+    'ground_height', '_spring_ground_memory', '_pseudo_ground_memory',
+    '_suspension_ground_plane', '_suspension_support_vertical_speed',
+    '_suspension_support_gradient',
+)
+
 # Route groups lease these lateral lanes without moving an existing member.
 # A safety rejection may narrow a lane toward zero for one macro route leg,
 # but never crosses sides or upgrades again inside that leg.  The server owns
@@ -1892,6 +1909,7 @@ class BotRuntime(object):
                  artillery_launch_cancel=None,
                  spawn_resolver=None, ground_probe=None,
                  physics_ground_probe=None,
+                 suspension_ground_probe=None,
                  obstacle_probe=None, bounds=None, cover_probe=None,
                  native_motion=False, baked_graph=None, probe_clock=None,
                  motion_resolver=None, motion_report=None,
@@ -1957,6 +1975,9 @@ class BotRuntime(object):
         self._navigation_error = None
         self._ground_probe = ground_probe
         self._physics_ground_probe = physics_ground_probe
+        self._suspension_ground_probe = (
+            suspension_ground_probe
+            if callable(suspension_ground_probe) else None)
         self._obstacle_probe = obstacle_probe
         self._navigation_bounds = bounds
         self.navigator = (TerrainNavigator(
@@ -2047,6 +2068,9 @@ class BotRuntime(object):
         self._reset_shot_lane_work()
         self._reset_shot_lane_diagnostics()
         self._physics_params = {}
+        self._suspension_params = {}
+        self._suspension_param_failures = 0
+        self._suspension_trial_reports = set()
         self._repair_factors = {}
         self._vision_ranges = {}
         self._source_still = {}
@@ -2155,6 +2179,8 @@ class BotRuntime(object):
                 self._shot_lane_due_since))))
         return {
             'alive_bot_ticks': int(self._alive_bot_ticks),
+            'suspension_param_failures': int(
+                self._suspension_param_failures),
             'visibility_queue_depth': len(self._visibility_waiting),
             'visibility_queue_max_depth': int(
                 self._visibility_queue_max_depth),
@@ -2546,6 +2572,101 @@ class BotRuntime(object):
         self._physics_params[bot_id] = params
         return params
 
+    @staticmethod
+    def _reset_bot_suspension_state(state, reset_grounded=False):
+        """Discard solver-only history at a descriptor/authority boundary."""
+        if state is None:
+            return
+        state['suspension_pitch_velocity'] = 0.0
+        state['suspension_roll_velocity'] = 0.0
+        state['_suspension_support_vertical_speed'] = 0.0
+        state.pop('_suspension_support_gradient', None)
+        state.pop('_spring_ground_memory', None)
+        state.pop('_pseudo_ground_memory', None)
+        state.pop('_suspension_ground_plane', None)
+        if reset_grounded:
+            state['grounded_once'] = False
+
+    @staticmethod
+    def _snapshot_bot_suspension_state(state):
+        """Freeze the suspension-owned pose at a rollback boundary."""
+        snapshot = {}
+        for name in _BOT_SUSPENSION_STATE_FIELDS:
+            if name in state:
+                value = state[name]
+                if isinstance(value, list):
+                    value = list(value)
+                elif isinstance(value, dict):
+                    value = dict(value)
+                snapshot[name] = (True, value)
+            else:
+                snapshot[name] = (False, None)
+        return snapshot
+
+    @staticmethod
+    def _restore_bot_suspension_state(state, snapshot):
+        """Restore exactly one suspension snapshot, including missing keys."""
+        if not isinstance(snapshot, dict):
+            return False
+        for name in _BOT_SUSPENSION_STATE_FIELDS:
+            present, value = snapshot.get(name, (False, None))
+            if present:
+                if isinstance(value, list):
+                    value = list(value)
+                elif isinstance(value, dict):
+                    value = dict(value)
+                state[name] = value
+            else:
+                state.pop(name, None)
+        return True
+
+    def _report_suspension_trial(self, outcome):
+        """Publish each distinct Bot suspension activation outcome once.
+
+        The trial retires itself per vehicle, so a descriptor shape that no
+        real #1513 client ships used to leave the whole solver inert with a
+        green test suite and nothing in any log.
+        """
+        if outcome in self._suspension_trial_reports:
+            return False
+        self._suspension_trial_reports.add(outcome)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] SUSPENSION bot trial %s\n' % (outcome,))
+        return True
+
+    def _suspension_params_for(self, bot_id):
+        """Return descriptor-derived data, disabling one unsupported Bot."""
+        bot_id = int(bot_id)
+        if self._suspension_ground_probe is None:
+            return None
+        if bot_id in self._suspension_params:
+            return self._suspension_params[bot_id]
+        descriptor = self._descriptors.get(bot_id)
+        if descriptor is None or (isinstance(descriptor, dict) and
+                                  not descriptor):
+            self._suspension_params[bot_id] = None
+            self._suspension_param_failures += 1
+            self._report_suspension_trial('inactive: no descriptor')
+            return None
+        if vehicle_physics.suspension_trial_excluded(descriptor):
+            self._suspension_params[bot_id] = None
+            self._report_suspension_trial(
+                'excluded: #1513 hydraulic suspension')
+            return None
+        try:
+            params = vehicle_physics.derive_suspension_params(descriptor)
+        except (AttributeError, IndexError, KeyError, RuntimeError,
+                TypeError, ValueError) as error:
+            # The trial must not guess missing #1513 geometry and one malformed
+            # descriptor must not stop the other 28 authority vehicles.
+            params = None
+            self._suspension_param_failures += 1
+            self._report_suspension_trial('inactive: %s' % (error,))
+        else:
+            self._report_suspension_trial('active')
+        self._suspension_params[bot_id] = params
+        return params
+
     def _install_bot_descriptor(self, bot_id, state, siege_state):
         """Install one bot's active immutable mode descriptor."""
         bot_id = int(bot_id)
@@ -2560,6 +2681,7 @@ class BotRuntime(object):
         if state is not None:
             state.pop(_GUN_PITCH_LIMIT_CACHE, None)
         self._physics_params[bot_id] = _bot_physics_params(descriptor)
+        self._suspension_params.pop(bot_id, None)
         self._gun_yaw_limits[bot_id] = ai_driver.gun_yaw_limits(descriptor)
         gun_state = self._gun_states.get(bot_id)
         if gun_state is not None:
@@ -2572,6 +2694,11 @@ class BotRuntime(object):
         self._traffic_coordinator.forget(bot_id)
         self._cancel_artillery_intent(bot_id)
         if state is not None:
+            # A Siege descriptor changes spring geometry, not whether this
+            # already-streamed hull has ever established ground contact.
+            # Re-arming spawn placement here can teleport it to an unrelated
+            # upper support layer on the transition edge.
+            self._reset_bot_suspension_state(state)
             half_length, half_width = _hull_dimensions(descriptor)
             state['move_speed'] = _forward_speed(descriptor)
             state['view_range'] = self._cache_vision_range(
@@ -2893,6 +3020,9 @@ class BotRuntime(object):
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._physics_params = {}
+            self._suspension_params = {}
+            self._suspension_param_failures = 0
+            self._suspension_trial_reports = set()
             self._repair_factors = {}
             self._vision_ranges = {}
             self._source_still = {}
@@ -3071,6 +3201,7 @@ class BotRuntime(object):
                 descriptor_pair, siege_state)
             half_length, half_width = _hull_dimensions(descriptor)
             self._descriptors[bot_id] = descriptor
+            self._suspension_params.pop(bot_id, None)
             self._gun_yaw_limits[bot_id] = \
                 ai_driver.gun_yaw_limits(descriptor)
             if bot_id not in self._gun_states:
@@ -3145,6 +3276,9 @@ class BotRuntime(object):
                 'pitch': _number(raw.get('pitch')),
                 'roll': _number(raw.get('roll')),
                 'terrain_pitch': _number(raw.get('pitch')),
+                'suspension_pitch_velocity': 0.0,
+                'suspension_roll_velocity': 0.0,
+                '_suspension_support_vertical_speed': 0.0,
                 'suspension_pitch': 0.0,
                 'siege_state': siege_state,
                 'siege_time_left_ms': wire_time,
@@ -3363,7 +3497,7 @@ class BotRuntime(object):
         state['push_z'] = 0.0
         state['vertical_speed'] = 0.0
         state['airborne'] = False
-        state['grounded_once'] = False
+        self._reset_bot_suspension_state(state, reset_grounded=True)
         state['last_drive_pitch'] = 0.0
         self._turn_speeds[int(state['id'])] = 0.0
         return True
@@ -5408,6 +5542,215 @@ class BotRuntime(object):
         except (TypeError, ValueError):
             return False
 
+    def _suspension_ground_value(
+            self, x, z, minimum_y, maximum_y, flat_maximum_y=None):
+        """Run and time one travel-bounded native suspension ray."""
+        self._probe_totals[3] += 1
+        probe_started = self._probe_started()
+        try:
+            return self._suspension_ground_probe(
+                x, z, minimum_y, maximum_y, flat_maximum_y)
+        finally:
+            self._probe_finished(3, probe_started)
+
+    def _suspension_ground_samples(self, state, params,
+                                   probe_height=None,
+                                   support_gradient=None):
+        """Sample the five damper positions on each track exactly once."""
+        position = _position(state)
+        body_height = (position[1] if probe_height is None else
+                       float(probe_height))
+        yaw = _number(state.get('yaw'))
+        points = vehicle_physics.suspension_world_points(
+            params, position, yaw)
+        memory = state.get('_spring_ground_memory')
+        if not isinstance(memory, list) or len(memory) != len(points):
+            memory = [None] * len(points)
+        pitch = _number(
+            state.get('terrain_pitch', state.get('pitch')))
+        roll = _number(state.get('roll'))
+        result = []
+        for index, point in enumerate(points):
+            x, z = point
+            spring = params['springs'][index]
+            spring_height = (
+                body_height - spring['z'] * math.sin(pitch) +
+                spring['x'] * math.sin(roll))
+            minimum_y = (
+                spring_height - spring['rest_length'] -
+                vehicle_physics.CONTACT_PENETRATION)
+            spring_maximum_y = (
+                spring_height + spring['max_compression'] -
+                spring['static_compression'] + 0.05)
+            maximum_y = max(
+                spring_maximum_y,
+                spring_height + params['clearance'] +
+                vehicle_physics.CONTACT_PENETRATION)
+            ground = self._suspension_ground_value(
+                x, z, minimum_y, maximum_y, spring_maximum_y)
+            ground, memory[index] = \
+                vehicle_physics.retained_ground_contact(
+                    point, ground, memory[index],
+                    params['contact_memory_distance'], support_gradient)
+            result.append(ground)
+        state['_spring_ground_memory'] = memory
+        return tuple(result)
+
+    def _suspension_pseudo_ground_samples(self, state, params,
+                                          probe_height=None,
+                                          support_gradient=None):
+        """Sample track-gap and belly contacts once for this authority tick."""
+        position = _position(state)
+        body_height = (position[1] if probe_height is None else
+                       float(probe_height))
+        yaw = _number(state.get('yaw'))
+        points = vehicle_physics.suspension_pseudo_world_points(
+            params, position, yaw)
+        memory = state.get('_pseudo_ground_memory')
+        if not isinstance(memory, list) or len(memory) != len(points):
+            memory = [None] * len(points)
+        pitch = _number(
+            state.get('terrain_pitch', state.get('pitch')))
+        roll = _number(state.get('roll'))
+        result = []
+        for index, point in enumerate(points):
+            x, z = point
+            contact = params['pseudo_contacts'][index]
+            point_height = (
+                body_height + _number(contact.get('y')) -
+                contact['z'] * math.sin(pitch) +
+                contact['x'] * math.sin(roll))
+            minimum_y = (
+                point_height - params['rest_length'] -
+                vehicle_physics.CONTACT_PENETRATION)
+            rise = (params['clearance']
+                    if contact.get('kind') == 'track' else 0.0)
+            maximum_y = (
+                point_height + rise +
+                vehicle_physics.CONTACT_PENETRATION)
+            flat_maximum_y = (
+                point_height + vehicle_physics.CONTACT_PENETRATION
+                if contact.get('kind') == 'track' else None)
+            ground = self._suspension_ground_value(
+                x, z, minimum_y, maximum_y, flat_maximum_y)
+            ground, memory[index] = \
+                vehicle_physics.retained_ground_contact(
+                    point, ground, memory[index],
+                    params['contact_memory_distance'], support_gradient)
+            result.append(ground)
+        state['_pseudo_ground_memory'] = memory
+        return tuple(result)
+
+    @staticmethod
+    def _suspension_world_ground_plane(params, ground, position, yaw):
+        """Fit one spring batch and bind its local centre to world X/Z."""
+        return vehicle_physics.suspension_world_ground_plane(
+            params, ground, position, yaw,
+            SUSPENSION_GROUND_PLANE_EPSILON)
+
+    @staticmethod
+    def _suspension_plane_height(plane, x, z):
+        """Evaluate an anchored world-space suspension ground plane."""
+        return vehicle_physics.suspension_plane_height(plane, x, z)
+
+    def _suspension_probe_height_for_motion(
+            self, position, motion_pose, previous_plane):
+        """Carry the old body-to-ground offset along one proved plane."""
+        if motion_pose is None or previous_plane is None:
+            return float(position[1])
+        old_ground = self._suspension_plane_height(
+            previous_plane, motion_pose[0], motion_pose[2])
+        expected_ground = self._suspension_plane_height(
+            previous_plane, position[0], position[2])
+        if old_ground is None or expected_ground is None:
+            return float(position[1])
+        return float(position[1]) + expected_ground - old_ground
+
+    @staticmethod
+    def _suspension_rise_exceeds_base(body_y, support_y):
+        """Apply the mature step threshold without its speed allowance."""
+        try:
+            rise = float(support_y) - float(body_y)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return rise > SUSPENSION_BASE_RISE + 0.02
+
+    def _suspension_path_supports_plane(
+            self, previous_plane, motion_pose, position):
+        """Prove at most three interior centres along a corrected path."""
+        dx = float(position[0]) - float(motion_pose[0])
+        dz = float(position[2]) - float(motion_pose[2])
+        distance = math.sqrt(dx * dx + dz * dz)
+        for fraction in vehicle_physics.suspension_path_probe_fractions(
+                distance):
+            x = float(motion_pose[0]) + dx * fraction
+            z = float(motion_pose[2]) + dz * fraction
+            expected = self._suspension_plane_height(
+                previous_plane, x, z)
+            if expected is None:
+                return False
+            support = self._suspension_ground_value(
+                x, z,
+                expected - SUSPENSION_GROUND_PLANE_EPSILON,
+                expected + SUSPENSION_GROUND_PLANE_EPSILON,
+                expected + SUSPENSION_GROUND_PLANE_EPSILON)
+            if support is None:
+                return False
+            support = float(support)
+            if (math.isnan(support) or math.isinf(support) or
+                    abs(support - expected) >
+                    SUSPENSION_GROUND_PLANE_EPSILON):
+                return False
+        return True
+
+    def _suspension_rise_has_continuous_support(
+            self, previous_plane, current_plane, motion_pose,
+            position, solved_height):
+        """Authorize a large rise only for one continuously proved slope."""
+        if (previous_plane is None or current_plane is None or
+                motion_pose is None):
+            return False
+        old_ground = self._suspension_plane_height(
+            previous_plane, motion_pose[0], motion_pose[2])
+        expected_ground = self._suspension_plane_height(
+            previous_plane, position[0], position[2])
+        current_ground = self._suspension_plane_height(
+            current_plane, position[0], position[2])
+        if (old_ground is None or expected_ground is None or
+                current_ground is None):
+            return False
+        if not vehicle_physics.suspension_ground_planes_continuous(
+                previous_plane, current_plane, motion_pose, position,
+                SUSPENSION_GROUND_PLANE_EPSILON,
+                SUSPENSION_GROUND_GRADIENT_EPSILON):
+            return False
+        body_rise = float(solved_height) - float(position[1])
+        terrain_rise = max(0.0, current_ground - old_ground)
+        if body_rise > terrain_rise + SUSPENSION_BASE_RISE + 0.02:
+            return False
+        return self._suspension_path_supports_plane(
+            previous_plane, motion_pose, position)
+
+    def _hidden_suspension_support_is_raised(self, state):
+        """Detect an upper layer outside the bounded suspension travel."""
+        if not callable(self._physics_ground_probe):
+            return False
+        position = _position(state)
+        self._probe_totals[3] += 1
+        probe_started = self._probe_started()
+        try:
+            support = self._physics_ground_probe(
+                position[0], position[2], position[1])
+        finally:
+            self._probe_finished(3, probe_started)
+        if support is None:
+            return False
+        support = float(support)
+        if math.isnan(support) or math.isinf(support):
+            raise RuntimeError('bot centre support is non-finite')
+        return self._suspension_rise_exceeds_base(
+            position[1], support)
+
     def _terrain_support(self, state):
         """Probe centre first, then the 0.8.2 edge fallback when unsupported."""
         position = _position(state)
@@ -5602,6 +5945,11 @@ class BotRuntime(object):
 
     def _update_slope_pose(self, state, allow_ungrounded=False):
         """Refresh the four-point hull pose after this tick's ground settle."""
+        # The ten-spring solver already owns authoritative pitch and roll.
+        # A later staggered presentation sample must not overwrite that pose.
+        if getattr(self, '_suspension_params', {}).get(
+                int(state.get('id', -1))) is not None:
+            return False
         if (state.get('airborne', False) or
                 (not allow_ungrounded and not state.get(
                     'grounded_once', False))):
@@ -5651,16 +5999,20 @@ class BotRuntime(object):
         # BattleRuntime's resolver infers active crush intent from this field.
         state['movement_dir'] = 0
         try:
+            hull_yaw = _number(state.get('yaw'))
+            motion_yaw = yaw if _number(speed) >= 0.0 else yaw + math.pi
             if self._probe_clock is None:
                 status = self.motion_resolver(
-                    state['id'], position, yaw, speed,
-                    descriptor, step, now, commit_enabled)
+                    state['id'], position, hull_yaw, speed,
+                    descriptor, step, now, commit_enabled,
+                    motion_yaw=motion_yaw)
             else:
                 probe_started = self._probe_started()
                 try:
                     status = self.motion_resolver(
-                        state['id'], position, yaw, speed,
-                        descriptor, step, now, commit_enabled)
+                        state['id'], position, hull_yaw, speed,
+                        descriptor, step, now, commit_enabled,
+                        motion_yaw=motion_yaw)
                 finally:
                     self._probe_finished(4, probe_started)
         finally:
@@ -5747,8 +6099,9 @@ class BotRuntime(object):
         self._turn_speeds[state['id']] = 0.0
         return damage
 
-    def _apply_bot_landing_impact(self, state, vertical_speed):
-        """Combine retained lateral velocity with the vertical impact."""
+    def _apply_bot_landing_impact(
+            self, state, impact_speed, normal_impact=False):
+        """Retain airborne skid and apply legacy or normal impact speed."""
         lateral_x = state.get('air_lateral_x', 0.0)
         lateral_z = state.get('air_lateral_z', 0.0)
         lateral_speed = math.sqrt(
@@ -5758,13 +6111,324 @@ class BotRuntime(object):
                 state.get('slide_speed', 0.0), lateral_speed)
         state['air_lateral_x'] = 0.0
         state['air_lateral_z'] = 0.0
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed + lateral_speed * lateral_speed)
+        if not normal_impact:
+            impact_speed = math.sqrt(
+                impact_speed * impact_speed + lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
 
+    @staticmethod
+    def _tick_horizontal_travel(state, tick_pose):
+        """Return realised x/z travel from the pre-integration tick pose."""
+        if (not isinstance(tick_pose, (list, tuple)) or
+                len(tick_pose) < 3):
+            return 0.0
+        delta_x = _number(state.get('x')) - _number(tick_pose[0])
+        delta_z = _number(state.get('z')) - _number(tick_pose[2])
+        return math.sqrt(delta_x * delta_x + delta_z * delta_z)
+
+    def _support_rise_follows_tick_path(self, state, centre, tick_pose,
+                                        horizontal_travel):
+        """Confirm a suspicious raised support through bounded interior rays.
+
+        Normal grounding still spends only its centre ray.  This helper is
+        called only after that endpoint rose beyond the hard step limit.  At
+        most four interior samples split a legal 0.2-second hull sweep into
+        segments no longer than 1.5 metres; every segment must remain inside
+        the same 0.55 grade accepted by the native direction probe.  A longer
+        sweep fails closed instead of making this exceptional check unbounded.
+        """
+        if (centre is None or
+                not isinstance(tick_pose, (list, tuple)) or
+                len(tick_pose) < 3):
+            return False
+        start_x = _number(tick_pose[0])
+        start_y = _number(tick_pose[1])
+        start_z = _number(tick_pose[2])
+        delta_x = _number(state.get('x')) - start_x
+        delta_z = _number(state.get('z')) - start_z
+        distance = max(0.0, _number(horizontal_travel))
+        rise = float(centre) - start_y
+        if (distance <= 0.0001 or rise <= 0.0 or
+                rise > distance * 0.55 + 0.02):
+            return False
+        segment_count = max(2, int(math.ceil(distance / 1.5)))
+        if segment_count > 5:
+            return False
+        maximum_segment_rise = (
+            distance / float(segment_count) * 0.55 + 0.02)
+        previous_support = start_y
+        for index in range(1, segment_count):
+            fraction = float(index) / float(segment_count)
+            sample_x = start_x + delta_x * fraction
+            sample_z = start_z + delta_z * fraction
+            sample_hint = start_y + rise * fraction
+            self._probe_totals[3] += 1
+            probe_started = self._probe_started()
+            try:
+                support = self._physics_ground_probe(
+                    sample_x, sample_z, sample_hint)
+            finally:
+                self._probe_finished(3, probe_started)
+            if support is None:
+                return False
+            support = float(support)
+            if abs(support - previous_support) > maximum_segment_rise:
+                return False
+            previous_support = support
+        return abs(float(centre) - previous_support) <= \
+            maximum_segment_rise
+    def _update_suspension_vertical_motion(
+            self, state, step, params, tick_pose=None,
+            attempted_yaw=None, suspension_motion_pose=None):
+        """Advance one Bot's contrib ten-spring rigid-body trial."""
+        bot_id = int(state['id'])
+        suspension_snapshot = self._snapshot_bot_suspension_state(state)
+        grounded_before = bool(state.get('grounded_once', False))
+        previous_plane = (dict(state['_suspension_ground_plane'])
+                          if (grounded_before and isinstance(
+                              state.get('_suspension_ground_plane'), dict))
+                          else None)
+        motion_pose = (suspension_motion_pose
+                       if suspension_motion_pose is not None else tick_pose)
+        support_gradient = state.get('_suspension_support_gradient')
+        if isinstance(previous_plane, dict):
+            support_gradient = (
+                float(previous_plane['gradient_x']),
+                float(previous_plane['gradient_z']))
+        if not grounded_before:
+            # Spawn placement remains a separate one-off centre query. The
+            # ten springs and twelve pseudo contacts are still sampled only
+            # once below, even when their numerical solver takes substeps.
+            position = _position(state)
+            self._probe_totals[3] += 1
+            probe_started = self._probe_started()
+            try:
+                initial_ground = self._physics_ground_probe(
+                    position[0], position[2], position[1])
+            finally:
+                self._probe_finished(3, probe_started)
+            if initial_ground is not None:
+                state['y'] = float(initial_ground)
+                state['vertical_speed'] = 0.0
+                state['terrain_pitch'] = 0.0
+                state['roll'] = 0.0
+                self._reset_bot_suspension_state(state)
+
+        position = _position(state)
+        support_height_delta = 0.0
+        if (float(step) <= 0.0 and motion_pose is not None and
+                support_gradient is not None):
+            support_height_delta = (
+                float(support_gradient[0]) *
+                (float(position[0]) - float(motion_pose[0])) +
+                float(support_gradient[1]) *
+                (float(position[2]) - float(motion_pose[2])))
+        probe_height = self._suspension_probe_height_for_motion(
+            position, motion_pose, previous_plane)
+        ground = self._suspension_ground_samples(
+            state, params, probe_height, support_gradient)
+        pseudo_ground = self._suspension_pseudo_ground_samples(
+            state, params, probe_height, support_gradient)
+        current_plane = self._suspension_world_ground_plane(
+            params, ground, position, _number(state.get('yaw')))
+        no_sampled_support = bool(
+            all(value is None for value in ground) and
+            all(value is None for value in pseudo_ground))
+        if (not grounded_before and
+                all(value is None for value in ground) and
+                all(value is None for value in pseudo_ground)):
+            # A streamed spawn without any local terrain proof is not a real
+            # airborne launch. Keep its provisional pose until terrain loads.
+            state['vertical_speed'] = 0.0
+            state['airborne'] = False
+            state.pop('_suspension_ground_plane', None)
+            state['_suspension_support_vertical_speed'] = 0.0
+            state.pop('_suspension_support_gradient', None)
+            return False
+
+        before_airborne = bool(state.get('airborne', False))
+        before_vertical_speed = _number(state.get('vertical_speed'))
+        support_vertical_speed = _number(
+            state.get('_suspension_support_vertical_speed'))
+        if float(step) > 0.0:
+            velocity_x = velocity_z = 0.0
+            if motion_pose is not None:
+                velocity_x = (
+                    float(position[0]) - float(motion_pose[0])) / float(step)
+                velocity_z = (
+                    float(position[2]) - float(motion_pose[2])) / float(step)
+            support_gradient = None
+            measured_support_speed = None
+            if current_plane is not None:
+                measured_support_speed = \
+                    vehicle_physics.suspension_support_vertical_velocity(
+                        current_plane, velocity_x, velocity_z)
+                if measured_support_speed is not None:
+                    support_gradient = (
+                        float(current_plane['gradient_x']),
+                        float(current_plane['gradient_z']))
+            if support_gradient is None and not before_airborne:
+                support_gradient = state.get(
+                    '_suspension_support_gradient')
+                if support_gradient is not None:
+                    measured_support_speed = (
+                        float(support_gradient[0]) * velocity_x +
+                        float(support_gradient[1]) * velocity_z)
+            if measured_support_speed is None:
+                support_vertical_speed = 0.0
+            else:
+                support_vertical_speed = float(measured_support_speed)
+            if support_gradient is None:
+                state.pop('_suspension_support_gradient', None)
+            else:
+                state['_suspension_support_gradient'] = support_gradient
+            state['_suspension_support_vertical_speed'] = \
+                support_vertical_speed
+        physics_state = {
+            'height': _number(state.get('y')) + support_height_delta,
+            'vertical_velocity': before_vertical_speed,
+            'pitch': _number(
+                state.get('terrain_pitch', state.get('pitch'))),
+            'pitch_velocity': _number(
+                state.get('suspension_pitch_velocity')),
+            'roll': _number(state.get('roll')),
+            'roll_velocity': _number(
+                state.get('suspension_roll_velocity')),
+        }
+        solved = vehicle_physics.damper_suspension_step(
+            params, physics_state, ground, step, pseudo_ground,
+            support_vertical_speed)
+        values = (
+            solved['height'], solved['vertical_velocity'],
+            solved['pitch'], solved['pitch_velocity'],
+            solved['roll'], solved['roll_velocity'])
+        if any(math.isnan(value) or math.isinf(value) for value in values):
+            raise RuntimeError('bot suspension produced a non-finite pose')
+        invalid_pose = (
+            abs(solved['height'] - _number(state.get('y'))) > 5.0 or
+            abs(solved['pitch']) > 1.2 or
+            abs(solved['roll']) > 1.2)
+        raised_support = bool(
+            grounded_before and solved.get('contact_count') and
+            self._suspension_rise_exceeds_base(
+                state.get('y'), solved['height']))
+        if raised_support:
+            raised_support = not self._suspension_rise_has_continuous_support(
+                previous_plane, current_plane, motion_pose,
+                position, solved['height'])
+        hidden_raised_support = bool(
+            grounded_before and no_sampled_support and
+            self._hidden_suspension_support_is_raised(state))
+        if invalid_pose or raised_support or hidden_raised_support:
+            self._restore_bot_suspension_state(
+                state, suspension_snapshot)
+            if tick_pose is not None:
+                state['x'], state['y'], state['z'] = tick_pose
+            state['speed'] = 0.0
+            state['movement_dir'] = 0
+            state['rotation_dir'] = 0
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            state['vertical_speed'] = 0.0
+            state['airborne'] = False
+            accepted_plane = state.get('_suspension_ground_plane')
+            # The rejected contact layer is unrelated to the restored pose.
+            # Drop its contact history without replacing the last accepted
+            # support plane with the rejected upper layer.
+            self._reset_bot_suspension_state(state)
+            if accepted_plane is not None:
+                state['_suspension_ground_plane'] = accepted_plane
+            self._turn_speeds[bot_id] = 0.0
+            self._invalidate_realised_motion(
+                bot_id, (_number(state.get('yaw'))
+                         if attempted_yaw is None else attempted_yaw))
+            return True
+
+        state['y'] = solved['height']
+        state['vertical_speed'] = solved['vertical_velocity']
+        state['terrain_pitch'] = solved['pitch']
+        state['suspension_pitch_velocity'] = solved['pitch_velocity']
+        state['roll'] = solved['roll']
+        state['suspension_roll_velocity'] = solved['roll_velocity']
+        state['pitch'] = (
+            solved['pitch'] + _number(state.get('suspension_pitch')))
+        state['airborne'] = bool(solved['airborne'])
+        if state['airborne']:
+            state['_suspension_support_vertical_speed'] = 0.0
+            state.pop('_suspension_support_gradient', None)
+            state.pop('_spring_ground_memory', None)
+            state.pop('_pseudo_ground_memory', None)
+        state['left_flying'] = bool(solved['left_flying'])
+        state['right_flying'] = bool(solved['right_flying'])
+        if solved['contact_count']:
+            state['grounded_once'] = True
+            contacts = [
+                value for value in ground + pseudo_ground
+                if value is not None]
+            if contacts:
+                state['ground_height'] = sum(contacts) / len(contacts)
+        if (solved['contact_count'] and not state['airborne'] and
+                current_plane is not None):
+            state['_suspension_ground_plane'] = current_plane
+        else:
+            state.pop('_suspension_ground_plane', None)
+        if (before_airborne and not state['airborne'] and
+                before_vertical_speed < 0.0):
+            impact_vertical = solved.get('impact_speed')
+            if impact_vertical is None:
+                impact_vertical = before_vertical_speed
+            impact_speed = max(0.0, -float(impact_vertical))
+            if motion_pose is not None and float(step) > 0.0:
+                velocity = (
+                    (float(position[0]) - float(motion_pose[0])) /
+                    float(step),
+                    float(impact_vertical),
+                    (float(position[2]) - float(motion_pose[2])) /
+                    float(step),
+                )
+                normal = (current_plane.get('normal')
+                          if isinstance(current_plane, dict) else None)
+                impact_speed = vehicle_physics.landing_impact_speed(
+                    velocity, normal)
+            self._apply_bot_landing_impact(
+                state, impact_speed, normal_impact=True)
+        elif not before_airborne and state['airborne']:
+            self._turn_speeds[bot_id] = 0.0
+            state['rotation_dir'] = 0
+        return False
+
     def _update_vertical_motion(self, state, step, tick_pose=None,
-                                attempted_yaw=None):
+                                attempted_yaw=None,
+                                suspension_motion_pose=None):
         """Run grounded/ballistic phases and reject false raised support."""
+        params = self._suspension_params_for(state['id'])
+        if params is not None:
+            suspension_snapshot = self._snapshot_bot_suspension_state(state)
+            try:
+                return self._update_suspension_vertical_motion(
+                    state, step, params, tick_pose, attempted_yaw,
+                    suspension_motion_pose)
+            except (AttributeError, IndexError, KeyError, RuntimeError,
+                    TypeError, ValueError, OverflowError,
+                    ZeroDivisionError) as error:
+                # A failing tick cannot be finished by a second vertical
+                # authority. Restore it completely, retire the optional trial,
+                # and let the next tick begin on the mature legacy path.
+                self._suspension_params[int(state['id'])] = None
+                self._suspension_param_failures += 1
+                self._report_suspension_trial('retired: %s' % (error,))
+                self._restore_bot_suspension_state(
+                    state, suspension_snapshot)
+                if tick_pose is not None:
+                    state['x'], state['y'], state['z'] = tick_pose
+                self._reset_bot_suspension_state(state)
+                state['speed'] = 0.0
+                state['movement_dir'] = 0
+                state['rotation_dir'] = 0
+                state['push_x'] = 0.0
+                state['push_z'] = 0.0
+                self._turn_speeds[int(state['id'])] = 0.0
+                return True
         highest, centre = self._terrain_support(state)
         # Front/rear hits keep a bot supported across a narrow ditch, but use
         # their real CoM distance below so a remote valley floor cannot pull
@@ -5775,6 +6439,27 @@ class BotRuntime(object):
             snap_gap = vehicle_physics.ground_follow_gap(
                 state['speed'], state.get('last_drive_pitch', 0.0), step)
             max_climb = max(0.6, speed * step * 2.5)
+            support_rise_obstacle = bool(
+                state.get('grounded_once', False) and
+                tank_collision.support_rise_is_obstacle(
+                    state.get('y'), centre, max_climb))
+            support_rise_continuous = False
+            if support_rise_obstacle:
+                horizontal_travel = self._tick_horizontal_travel(
+                    state, tick_pose)
+                support_rise_continuous = \
+                    self._support_rise_follows_tick_path(
+                        state, centre, tick_pose, horizontal_travel)
+                if support_rise_continuous:
+                    # A ram/contact correction may move sideways while the
+                    # longitudinal speed is zero. Settle only the exact rise
+                    # admitted by that realised sweep in the same tick. The
+                    # displacement is proof geometry, not powered-drive climb
+                    # credit, and nothing carries into the next tick.
+                    proved_support_rise = max(
+                        0.0, float(centre) - _number(tick_pose[1]))
+                    max_climb = max(
+                        max_climb, proved_support_rise)
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
             if not state.get('grounded_once', False):
@@ -5782,8 +6467,7 @@ class BotRuntime(object):
                 state['vertical_speed'] = 0.0
                 state['airborne'] = False
                 state['grounded_once'] = True
-            elif tank_collision.support_rise_is_obstacle(
-                    state.get('y'), centre, max_climb):
+            elif support_rise_obstacle and not support_rise_continuous:
                 # The centre ray hit a wagon deck, roof, or large prop only
                 # after this tick's horizontal integration put the hull partly
                 # inside it. Restore only this tick's pose and let LocalDriver
@@ -5859,7 +6543,7 @@ class BotRuntime(object):
         return False
 
     def _guard_realised_pose(self, state, tick_pose, tick_was_safe,
-                             attempted_yaw):
+                             attempted_yaw, suspension_snapshot=None):
         """Reject a new hazard or outward map-edge drift after all motion."""
         realised_pose = _position(state)
         moved_farther_outside = not self._baked_pose_progress_clear(
@@ -5876,8 +6560,20 @@ class BotRuntime(object):
         state['rotation_dir'] = 0
         state['push_x'] = 0.0
         state['push_z'] = 0.0
-        state['vertical_speed'] = 0.0
-        state['airborne'] = False
+        if suspension_snapshot is not None:
+            # The terrain batch and solved attitude describe the rejected
+            # realised X/Z. Restore the complete pre-integration suspension
+            # pose rather than combining old position with new pitch/roll.
+            self._restore_bot_suspension_state(
+                state, suspension_snapshot)
+        else:
+            state['vertical_speed'] = 0.0
+            state['airborne'] = False
+        if (suspension_snapshot is None and
+                self._suspension_params.get(int(state['id'])) is not None):
+            # The contact batch belongs to the rejected realised pose. Drop
+            # it with the angular solver history before restoring tick_pose.
+            self._reset_bot_suspension_state(state)
         self._invalidate_realised_motion(state['id'], attempted_yaw)
         return True
 
@@ -9296,6 +9992,7 @@ class BotRuntime(object):
                 visibility_tick)
         cover_jobs = []
         tick_poses = {}
+        tick_suspension_states = {}
         tick_safe = {}
         attempted_yaws = {}
         siege_locked_poses = {}
@@ -9335,6 +10032,8 @@ class BotRuntime(object):
             self._advance_bot_siege(state, step)
             position = _position(state)
             tick_poses[state['id']] = position
+            tick_suspension_states[state['id']] = \
+                self._snapshot_bot_suspension_state(state)
             tick_safe[state['id']] = prebaked_navigation.pose_is_safe(
                 self.baked_graph, position, shoulder_cells=0)
             server_order = self._server_orders.get(state['id'])
@@ -10380,16 +11079,6 @@ class BotRuntime(object):
                         'target_kind': target.get('kind', 'human'),
                         'candidates': list(candidates),
                     })
-        pending_ram_count = len(self._pending_ram_reports)
-        self._pending_ram_reports.extend(
-            self._resolve_tank_contacts(players, now, frame_step))
-        if (not publish and
-                len(self._pending_ram_reports) > pending_ram_count):
-            # A ram report is a one-shot state barrier. Publish the contact
-            # pose from this exact physical slice before the event; waiting for
-            # the callback's final pose can move both hulls beyond the server's
-            # bounded proximity validation and silently discard a real hit.
-            publish = True
         for bot_id, locked_pose in siege_locked_poses.items():
             state = self.states.get(bot_id)
             if state is None:
@@ -10403,18 +11092,79 @@ class BotRuntime(object):
             self._turn_speeds[bot_id] = 0.0
         ordered_states = self._ordered_states()
         slope_candidates = []
+        support_blocked_by_id = {}
+        settled_poses = {}
+        ballistic_ticks = {}
         for state in ordered_states:
             if state.get('alive', True) and state['id'] in integrated:
                 attempted_yaw = attempted_yaws.get(
                     state['id'], state.get('yaw', 0.0))
+                was_airborne = bool(state.get('airborne', False))
                 support_blocked = self._update_vertical_motion(
                     state, frame_step,
                     tick_poses[state['id']], attempted_yaw)
-                if not support_blocked:
-                    self._guard_realised_pose(
-                        state, tick_poses[state['id']], tick_safe[state['id']],
-                        attempted_yaw)
+                support_blocked_by_id[state['id']] = bool(support_blocked)
+                ballistic_ticks[state['id']] = bool(
+                    was_airborne or state.get('airborne', False))
+                settled_poses[state['id']] = _position(state)
                 slope_candidates.append(state)
+        # Ram vertical overlap and native plate proof must use this slice's
+        # settled Y/pitch/roll, not the previous suspension pose. Resolve the
+        # complete roster only after every live body reaches that boundary.
+        pending_ram_count = len(self._pending_ram_reports)
+        self._pending_ram_reports.extend(
+            self._resolve_tank_contacts(players, now, frame_step))
+        # A Siege transition is immobile for its complete starting slice.
+        # Contacts may still observe and report the settled locked body, but
+        # their separation correction cannot move it after the earlier lock.
+        for bot_id, locked_pose in siege_locked_poses.items():
+            state = self.states.get(bot_id)
+            if state is None:
+                continue
+            state['x'], state['z'], state['yaw'] = locked_pose
+            state['speed'] = 0.0
+            state['movement_dir'] = 0
+            state['rotation_dir'] = 0
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            self._turn_speeds[bot_id] = 0.0
+        if (not publish and
+                len(self._pending_ram_reports) > pending_ram_count):
+            # A ram report is a one-shot state barrier. Publish the contact
+            # pose from this exact physical slice before the event; waiting for
+            # the callback's final pose can move both hulls beyond the server's
+            # bounded proximity validation and silently discard a real hit.
+            publish = True
+        for state in slope_candidates:
+            bot_id = int(state['id'])
+            attempted_yaw = attempted_yaws.get(
+                bot_id, state.get('yaw', 0.0))
+            settled = settled_poses[bot_id]
+            current = _position(state)
+            moved_after_settle = (
+                abs(current[0] - settled[0]) > 0.000001 or
+                abs(current[2] - settled[2]) > 0.000001)
+            if (moved_after_settle and
+                    self._suspension_params_for(bot_id) is not None):
+                # Tank separation is usually absent. When it changes X/Z,
+                # sample the realised endpoint once and project constraints
+                # with zero elapsed time. If that endpoint is invalid, retain
+                # the separation X/Z while restoring the settled Y.
+                rollback_pose = (current[0], settled[1], current[2])
+                support_blocked_by_id[bot_id] = bool(
+                    support_blocked_by_id.get(bot_id, False) or
+                    self._update_vertical_motion(
+                        state, 0.0, rollback_pose, attempted_yaw,
+                        suspension_motion_pose=settled))
+            if (not support_blocked_by_id.get(bot_id, False) and
+                    not ballistic_ticks.get(bot_id, False) and
+                    not state.get('airborne', False)):
+                self._guard_realised_pose(
+                    state, tick_poses[bot_id], tick_safe[bot_id],
+                    attempted_yaw,
+                    (tick_suspension_states.get(bot_id)
+                     if self._suspension_params.get(bot_id) is not None
+                     else None))
         self._alive_bot_ticks += len(slope_candidates)
         if refresh_control and slope_candidates:
             start = self._slope_pose_cursor % len(slope_candidates)

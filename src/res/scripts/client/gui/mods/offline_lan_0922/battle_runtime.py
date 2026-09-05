@@ -77,7 +77,8 @@ DIAGNOSTIC_TOP_FRAMES = 3
 # threshold counts still cover the complete window.
 DIAGNOSTIC_PERCENTILE_SAMPLES = 4096
 _WORKER_DIAGNOSTIC_FIELDS = (
-    'alive_bot_ticks', 'visibility_queue_depth',
+    'alive_bot_ticks', 'suspension_param_failures',
+    'visibility_queue_depth',
     'visibility_queue_max_depth', 'visibility_oldest_stale_age_ms',
     'visibility_oldest_stale_max_age_ms', 'visibility_admitted',
     'visibility_completed', 'visibility_deferred',
@@ -235,6 +236,16 @@ _MOVEMENT_ROTATE_LEFT = 4
 _MOVEMENT_ROTATE_RIGHT = 8
 _MOVEMENT_CRUISE_CONTROL50 = 16
 _MOVEMENT_CRUISE_CONTROL25 = 32
+# The retired stock acceleration-swing owner used these two exact windows.
+# #1513 still exposes the same animator period/direction properties, but its
+# ``CompoundAppearance.changeEngineMode`` no longer writes them.  Keep this
+# trial local to the copied player pose until the exact Windows client proves
+# the native result.
+LOCAL_ACCEL_SWING_MOVE_SECONDS = 2.0
+LOCAL_ACCEL_SWING_ROTATE_SECONDS = 1.0
+LOCAL_ACCEL_SWING_REPORT_LIMIT = 12
+LOCAL_ACCEL_SWING_PROBE_TIMES = (
+    0.0, 0.05, 0.10, 0.20, 0.40, 0.80, 1.20, 1.80, 2.10)
 # VehicleGunRotator.__isOutOfLimits uses this exact #1513 angular epsilon
 # when deciding whether a limited-traverse gun is already on either stop.
 GUN_TRAVERSE_LIMIT_EPSILON = 1.0e-5
@@ -1196,6 +1207,7 @@ def _load_runtime():
     from items import vehicles
     from vehicle_systems import camouflages
     from vehicle_systems import model_assembler
+    from vehicle_systems.tankStructure import TankPartNames
 
     class Runtime(object):
         pass
@@ -1228,6 +1240,7 @@ def _load_runtime():
     runtime.math = Math
     runtime.camouflages = camouflages
     runtime.model_assembler = model_assembler
+    runtime.tank_part_names = TankPartNames
     runtime.nations = nations
     runtime.offline_map_creator = g_offlineMapCreator
     runtime.call_with_standard_gameplay_mask = \
@@ -1541,8 +1554,21 @@ class BattleRuntime(object):
         self._ram_bot_history_index = {}
         self._ram_bot_lookup_cache = {}
         self._local_physics = None
+        self._local_suspension_params = None
+        self._local_suspension_disabled = False
+        self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
+        self._local_spring_ground_memory = None
+        self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
         self._local_roll = 0.0
+        self._local_suspension_pitch_velocity = 0.0
+        self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
+        self._local_left_flying = False
+        self._local_right_flying = False
+        self._local_support_motion_pose = None
         self._local_matrix = None
         self._local_pose_matrix = None
         self._local_stabilised_matrix = None
@@ -1556,6 +1582,14 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -1825,8 +1859,21 @@ class BattleRuntime(object):
         self._ram_bot_history_index = {}
         self._ram_bot_lookup_cache = {}
         self._local_physics = None
+        self._local_suspension_params = None
+        self._local_suspension_disabled = False
+        self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
+        self._local_spring_ground_memory = None
+        self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
         self._local_roll = 0.0
+        self._local_suspension_pitch_velocity = 0.0
+        self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
+        self._local_left_flying = False
+        self._local_right_flying = False
+        self._local_support_motion_pose = None
         self._local_matrix = None
         self._local_pose_matrix = None
         self._local_stabilised_matrix = None
@@ -1840,6 +1887,14 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -3583,6 +3638,11 @@ class BattleRuntime(object):
                     previous, '_offlineLANPresentation', False)):
                 previous._postmortem_visible = False
         self._spectated_engine_id = int(engine_id)
+        # The entity AOI is now centred on a different vehicle.  Re-evaluate
+        # the retained spotting memory on the next frame instead of leaving
+        # the new viewpoint's neighbourhood hidden for the rest of the current
+        # 0.10 s HUD period.
+        self._next_spotting_time = 0.0
         return True
 
     def _fallback_postmortem_viewpoint(self, excluded_engine_id):
@@ -4490,6 +4550,60 @@ class BattleRuntime(object):
                 return height
             from_y = height - 0.4
         return height
+
+    def _suspension_ground_y(
+            self, x, z, minimum_y, maximum_y, flat_maximum_y=None):
+        """Return ground inside one suspension contact's legal travel.
+
+        Unlike the navigation column, this probe must never acquire a roof or
+        an almost vertical wall as suspension support. Recast below rejected
+        layers while preserving the local broken-destructible filter on every
+        native query.
+        """
+        minimum_y = float(minimum_y)
+        maximum_y = float(maximum_y)
+        if maximum_y < minimum_y:
+            minimum_y, maximum_y = maximum_y, minimum_y
+        ground_filter = self._ground_filter(x, z)
+        start_y = maximum_y
+        for unused_layer in range(3):
+            try:
+                hit = self._collide_down(
+                    self._vector((x, start_y, z)),
+                    self._vector((x, minimum_y, z)), ground_filter)
+            except Exception as error:
+                raise RuntimeError(
+                    'native suspension ground query failed: %s' % error)
+            if hit is None:
+                return None
+            try:
+                height = float(hit[0].y)
+                normal = hit[1]
+                normal_x = float(normal.x)
+                normal_y = float(normal.y)
+                normal_z = float(normal.z)
+                normal_length = math.sqrt(
+                    normal_x * normal_x + normal_y * normal_y +
+                    normal_z * normal_z)
+            except (AttributeError, IndexError, TypeError, ValueError,
+                    OverflowError) as error:
+                raise RuntimeError(
+                    'native suspension ground hit is malformed: %s' % error)
+            if (math.isnan(height) or math.isinf(height) or
+                    math.isnan(normal_length) or math.isinf(normal_length) or
+                    normal_length <= 0.000001):
+                raise RuntimeError(
+                    'native suspension ground hit is malformed')
+            normal_y /= normal_length
+            if (minimum_y - 0.01 <= height <= maximum_y + 0.01 and
+                    vehicle_physics.suspension_support_allowed(
+                        height, normal_y, flat_maximum_y)):
+                return height
+            next_y = height - 0.02
+            if next_y <= minimum_y + 0.01 or next_y >= start_y:
+                break
+            start_y = next_y
+        return None
 
     def _navigation_ground(self, x, z, hint_y=0.0):
         """Copy the 0.8.2 same-layer graph probe, including ford depth."""
@@ -5545,6 +5659,17 @@ class BattleRuntime(object):
         self._local_physics = vehicle_physics.derive_params(
             entity.typeDescriptor,
             self._local_factors(entity.typeDescriptor))
+        # The ten-spring trial is derived lazily on the first copied-physics
+        # tick. A malformed detailed chassis descriptor can then fall back to
+        # the existing support path without aborting local-vehicle startup.
+        self._local_suspension_params = None
+        self._local_suspension_disabled = False
+        self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
+        self._local_spring_ground_memory = None
+        self._local_pseudo_ground_memory = None
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         return True
 
     def _attach_local_presentation(self):
@@ -5584,9 +5709,303 @@ class BattleRuntime(object):
         if model is None:
             raise RuntimeError('player compound model is unavailable')
         model.matrix = self._local_body_pose()
+        self._run_optional_feature(
+            'local body swinging', self._bind_local_body_swinging,
+            (entity, model))
         self._runtime.compatibility.bind_vehicle_pose_sources(
             self._avatar, entity)
         self._local_model = model
+        return True
+
+    def _report_local_body_swinging(self, available, error=None):
+        """Publish one line per distinct player body-swinging outcome."""
+        record = (bool(available), None if error is None else str(error))
+        if record == self._local_swinging_report:
+            return False
+        self._local_swinging_report = record
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] PRESENTATION local_body_swinging=%s%s\n' % (
+                record[0],
+                '' if record[1] is None else ' error=%r' % (record[1],)))
+        return True
+
+    def _bind_local_body_swinging(self, entity, model):
+        """Rebind the player's stock SwingingAnimator to the copied pose.
+
+        Exact #1513 ``CompoundAppearance.activate`` is the only stock writer of
+        ``swingingAnimator.placingCompensationMatrix`` and ``worldMatrix``: it
+        copies the compensation off the native vehicle filter and links the
+        animator to the compound root's matrix *provider object* that exists at
+        that moment.  This port swaps that root onto the copied LAN pose after
+        the native lifecycle completes, so the animator keeps swinging around a
+        filter placement this vehicle no longer follows and reads a provider
+        the compound no longer uses.  Repeat the same two stock writes against
+        the live provider, with an identity compensation because the copied
+        pose already carries authoritative terrain pitch and roll.
+
+        ``CompoundAppearance.__prepareSystemsForDamagedVehicle`` drops the
+        animator, so a missing one is a normal state rather than a failure.
+        This is presentation only: it never feeds authoritative motion.
+        """
+        appearance = getattr(entity, 'appearance', None)
+        swinging = getattr(appearance, 'swingingAnimator', None)
+        if swinging is None:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(
+                False, 'stock SwingingAnimator is unavailable')
+            return False
+        if swinging is self._local_swinging_animator:
+            return True
+        # Only a rebind reads the compound provider, so the steady state costs
+        # the two attribute reads above and one identity test.
+        provider = getattr(model, 'matrix', None)
+        if provider is None:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(
+                False, 'player compound model has no matrix provider')
+            return False
+        if self._local_placing_compensation is None:
+            compensation = self._runtime.math.Matrix()
+            compensation.setIdentity()
+            self._local_placing_compensation = compensation
+        try:
+            restore = (
+                swinging,
+                swinging.placingCompensationMatrix,
+                swinging.worldMatrix)
+        except Exception as error:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(False, error)
+            raise
+        try:
+            swinging.placingCompensationMatrix = \
+                self._local_placing_compensation
+            swinging.worldMatrix = provider
+        except Exception as error:
+            rollback_errors = []
+            for name, value in (
+                    ('placingCompensationMatrix', restore[1]),
+                    ('worldMatrix', restore[2])):
+                try:
+                    setattr(swinging, name, value)
+                except Exception as rollback_error:
+                    rollback_errors.append('%s: %s' % (
+                        name, rollback_error))
+            if rollback_errors:
+                # Preserve the exact owner and stock values so teardown can
+                # retry after a transient native setter failure.
+                self._local_swinging_animator = swinging
+                self._local_swinging_restore = restore
+                error = RuntimeError('%s; rollback failed: %s' % (
+                    error, '; '.join(rollback_errors)))
+            else:
+                self._local_swinging_animator = None
+                self._local_swinging_restore = None
+            self._report_local_body_swinging(False, error)
+            raise error
+        self._local_swinging_animator = swinging
+        self._local_swinging_restore = restore
+        self._report_local_body_swinging(True)
+        return True
+
+    def _restore_local_body_swinging(self, entity):
+        """Return the animator to the stock bindings this port replaced."""
+        restore = self._local_swinging_restore
+        if restore is None:
+            return False
+        swinging, compensation, world = restore
+        self._local_swinging_probe = None
+        self._local_swinging_move_flags = 0
+        appearance = getattr(entity, 'appearance', None)
+        if (not getattr(entity, 'isStarted', False) or
+                getattr(appearance, 'swingingAnimator', None) is not
+                swinging):
+            # A stock appearance refresh retired this animator.  Never write
+            # cached providers into the replacement that now owns the model.
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            return False
+        try:
+            # This trial is the sole writer that can arm the #1513 animator.
+            # Clear its finite window before returning the matrix providers;
+            # direction has no effect while the period is zero, but resetting
+            # both makes repeated attach/detach cycles deterministic.
+            swinging.accelSwingingPeriod = 0.0
+            swinging.accelSwingingDirection = 0.0
+        except Exception as error:
+            # A cosmetic native setter must not prevent restoration of the
+            # stock provider pair during battle teardown.
+            self._report_local_body_swinging(False, error)
+        try:
+            swinging.placingCompensationMatrix = compensation
+            swinging.worldMatrix = world
+        except Exception as error:
+            self._report_local_body_swinging(False, error)
+            # Keep the owner and original providers for a later cleanup retry.
+            raise
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        return True
+
+    @staticmethod
+    def _local_acceleration_swing_parameters(flags, previous_flags):
+        """Return the retired stock period/direction for one flag edge.
+
+        Exact #1513 retains writable ``accelSwingingPeriod`` and
+        ``accelSwingingDirection`` fields, but its Python
+        ``CompoundAppearance.changeEngineMode`` ignores ``forceSwinging``.
+        The last stock Python owner used a two-second window for a forward,
+        reverse or stop edge and a one-second window for a stationary turn
+        edge.  This experiment restores only that input law while leaving the
+        native animator responsible for amplitude, damping and HULL output.
+        """
+        flags = int(flags)
+        previous_flags = int(previous_flags)
+        move_mask = _MOVEMENT_FORWARD | _MOVEMENT_BACKWARD
+        rotate_mask = _MOVEMENT_ROTATE_LEFT | _MOVEMENT_ROTATE_RIGHT
+        if (flags & move_mask) ^ (previous_flags & move_mask):
+            if flags & _MOVEMENT_FORWARD:
+                direction = -1.0
+            elif flags & _MOVEMENT_BACKWARD:
+                direction = 1.0
+            else:
+                direction = 0.0
+            return LOCAL_ACCEL_SWING_MOVE_SECONDS, direction
+        if (not flags & move_mask and
+                ((flags & rotate_mask) ^
+                 (previous_flags & rotate_mask))):
+            return LOCAL_ACCEL_SWING_ROTATE_SECONDS, 0.0
+        return None
+
+    def _local_hull_swing_snapshot(self, entity):
+        """Read the stock HULL node and copied root for a bounded probe."""
+        appearance = getattr(entity, 'appearance', None)
+        compound = getattr(appearance, 'compoundModel', None)
+        part_names = getattr(self._runtime, 'tank_part_names', None)
+        hull_name = getattr(part_names, 'HULL', None)
+        if compound is None or hull_name is None:
+            raise RuntimeError('#1513 HULL diagnostic boundary is unavailable')
+        node = compound.node(hull_name)
+        if node is None:
+            raise RuntimeError('#1513 HULL node is unavailable')
+        hull = self._runtime.math.Matrix(node)
+        root = self._runtime.math.Matrix(self._local_body_pose())
+        root_ypr = tuple(_number(getattr(root, name))
+                         for name in ('yaw', 'pitch', 'roll'))
+        hull_ypr = tuple(_number(getattr(hull, name))
+                         for name in ('yaw', 'pitch', 'roll'))
+        delta_ypr = tuple(_angle_delta(root_ypr[index], hull_ypr[index])
+                          for index in range(3))
+        return root_ypr, hull_ypr, delta_ypr
+
+    def _sample_local_acceleration_swinging(self, entity, elapsed):
+        """Log sparse cross-frame HULL output for one movement transition."""
+        probe = self._local_swinging_probe
+        if probe is None:
+            return False
+        try:
+            probe['elapsed'] += max(0.0, float(elapsed))
+            times = LOCAL_ACCEL_SWING_PROBE_TIMES
+            index = int(probe['next'])
+            if index >= len(times) or probe['elapsed'] + 1.0e-9 < times[index]:
+                return False
+            # A capped physics step can cross two early sample times. Emit one
+            # current native observation and advance past every elapsed mark.
+            while (index + 1 < len(times) and
+                   probe['elapsed'] + 1.0e-9 >= times[index + 1]):
+                index += 1
+            animator = probe['animator']
+            if (animator is not self._local_swinging_animator or
+                    getattr(getattr(entity, 'appearance', None),
+                            'swingingAnimator', None) is not animator):
+                self._local_swinging_probe = None
+                return False
+            root_ypr, hull_ypr, delta_ypr = \
+                self._local_hull_swing_snapshot(entity)
+            period = _number(animator.accelSwingingPeriod)
+            direction = _number(animator.accelSwingingDirection)
+            root_degrees = tuple(math.degrees(value) for value in root_ypr)
+            hull_degrees = tuple(math.degrees(value) for value in hull_ypr)
+            delta_degrees = tuple(math.degrees(value) for value in delta_ypr)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_FRAME event=%d sample=%d '
+                'elapsed=%.3f period=%.3f direction=%.1f '
+                'root_ypr_deg=(%.3f, %.3f, %.3f) '
+                'hull_ypr_deg=(%.3f, %.3f, %.3f) '
+                'delta_ypr_deg=(%.3f, %.3f, %.3f)\n' % (
+                    probe['event'], index, probe['elapsed'], period,
+                    direction, root_degrees[0], root_degrees[1],
+                    root_degrees[2], hull_degrees[0], hull_degrees[1],
+                    hull_degrees[2], delta_degrees[0], delta_degrees[1],
+                    delta_degrees[2]))
+            probe['next'] = index + 1
+            if probe['next'] >= len(times):
+                self._local_swinging_probe = None
+            return True
+        except Exception as error:
+            # Diagnostics are observational. Losing a HULL read never retires
+            # the animator that the player is actively evaluating.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_FRAME event=%d error=%r\n' % (
+                    probe.get('event', 0), str(error)))
+            self._local_swinging_probe = None
+            return False
+
+    def _update_local_acceleration_swinging(self, entity, flags):
+        """Arm the live stock animator from an exact movement-flag edge."""
+        flags = int(flags)
+        previous_flags = int(self._local_swinging_move_flags)
+        self._local_swinging_move_flags = flags
+        parameters = self._local_acceleration_swing_parameters(
+            flags, previous_flags)
+        if parameters is None:
+            return False
+        appearance = getattr(entity, 'appearance', None)
+        animator = getattr(appearance, 'swingingAnimator', None)
+        if (animator is None or animator is not self._local_swinging_animator or
+                not self._optional_feature_enabled('local body swinging')):
+            return False
+        requested_period, direction = parameters
+        previous_period = float(animator.accelSwingingPeriod)
+        previous_direction = float(animator.accelSwingingDirection)
+        try:
+            # Match the former stock write order: direction changes on every
+            # qualifying edge, while a shorter request never truncates an
+            # already-active native swing window.
+            animator.accelSwingingDirection = direction
+            if requested_period > previous_period:
+                animator.accelSwingingPeriod = requested_period
+        except Exception:
+            try:
+                animator.accelSwingingDirection = previous_direction
+                animator.accelSwingingPeriod = previous_period
+            except Exception:
+                pass
+            raise
+        active_period = float(animator.accelSwingingPeriod)
+        self._local_swinging_event_seq += 1
+        event = self._local_swinging_event_seq
+        if self._local_swinging_events_reported < \
+                LOCAL_ACCEL_SWING_REPORT_LIMIT:
+            self._local_swinging_events_reported += 1
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SWING_ARM event=%d previous_flags=%d '
+                'flags=%d requested=%.1f before=%.3f active=%.3f '
+                'direction=%.1f\n' % (
+                    event, previous_flags, flags, requested_period,
+                    previous_period, active_period, direction))
+            self._local_swinging_probe = {
+                'event': event,
+                'animator': animator,
+                'elapsed': 0.0,
+                'next': 0,
+            }
+            self._sample_local_acceleration_swinging(entity, 0.0)
+        else:
+            self._local_swinging_probe = None
         return True
 
     def _update_local_presentation(self, entity, dt=0.0):
@@ -5629,6 +6048,13 @@ class BattleRuntime(object):
             stabilised_matrix=self._local_stabilised_pose())
         self._reset_full_turret_sniper_aim(previous_yaw)
         self._local_camera_velocity = velocity
+        # A stock compound refresh rebuilds the appearance and its animator,
+        # which would silently drop this port's rebind for the rest of the
+        # round. Re-assert it here; an unchanged animator costs one test.
+        self._run_optional_feature(
+            'local body swinging', self._bind_local_body_swinging,
+            (entity, self._local_model))
+        self._sample_local_acceleration_swinging(entity, dt)
         self._run_optional_feature(
             'local track animation', self._update_local_tracks, (entity,))
         return position
@@ -5712,6 +6138,10 @@ class BattleRuntime(object):
             entity.engineMode = mode
             change_mode(mode, True)
             self._local_engine_mode = mode
+            self._run_optional_feature(
+                'local acceleration swinging',
+                self._update_local_acceleration_swinging,
+                (entity, mode[1]))
         if not alive:
             return False
         params = self._local_physics
@@ -5732,6 +6162,7 @@ class BattleRuntime(object):
         if entity is None:
             return False
         self._sync_fire_effect(entity, False)
+        self._restore_local_body_swinging(entity)
         if self._local_model is not None and self._local_native_matrix is not None:
             self._local_model.matrix = self._local_native_matrix
         clear = getattr(
@@ -5754,6 +6185,14 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -9129,6 +9568,33 @@ class BattleRuntime(object):
             callback(output)
         return bool(output)
 
+    def _present_environment_feedback(self, event, target_record, reason_id):
+        """Feed attacker-free fall damage to the stock damage log."""
+        world_collision = self._attack_reason('WORLD_COLLISION', 3)
+        if (self._worker_mode or not target_record.get('local') or
+                self._combat_event_source(event) != 'environment' or
+                reason_id != world_collision):
+            return False
+        damage = max(0, int(event.get('damage', 0) or 0))
+        if damage <= 0:
+            return False
+        feedback_common = getattr(
+            self._runtime, 'battle_feedback_common', None)
+        event_types = getattr(feedback_common, 'BATTLE_EVENT_TYPE', None)
+        if event_types is None:
+            raise RuntimeError('#1513 battle feedback constants are unavailable')
+        callback = getattr(self._avatar, 'onBattleEvents', None)
+        if not callable(callback):
+            raise RuntimeError(
+                '#1513 battle-event feedback boundary is unavailable')
+        callback([{
+            'eventType': int(event_types.RECEIVED_DAMAGE),
+            'targetID': int(target_record['engine_id']),
+            'count': 1,
+            'details': int(event_types.packDamage(damage, reason_id)),
+        }])
+        return True
+
     def _apply_combat_event(self, event, update_state=True):
         source, attack_reason = self._validate_combat_event_contract(event)
         target_key = self._event_entity_key(event, 'target')
@@ -9186,6 +9652,9 @@ class BattleRuntime(object):
                 event, record, attacker_record, attacker_id)
             self._present_combat_feedback(
                 event, record, attacker_record, attack_reason)
+        elif source == 'environment':
+            self._present_environment_feedback(
+                event, record, attack_reason)
         critical = event.get('critical')
         if isinstance(critical, dict):
             canonical = self._critical_state(critical)
@@ -9929,6 +10398,36 @@ class BattleRuntime(object):
             # camera must fall back to the immutable canonical launch point.
             return None
 
+    def _shot_muzzle_drawn(self, record):
+        """Whether the stock muzzle effect belongs to a drawable shooter.
+
+        Exact #1513 ``scripts/entity_defs/Vehicle.def`` declares
+        ``showShooting`` under ``ClientMethods``: it is a cell-to-client RPC
+        on the Vehicle entity, and that entity carries ``IsManualAoI`` with
+        the ``receiveVisibilityUpdate``/``onDetectedByEnemy``/
+        ``onConcealedFromEnemy`` cell methods that drive its membership.  A
+        retail client that has not spotted an enemy is not in that AoI and
+        never receives the call at all.  ``Vehicle.showShooting`` itself
+        guards only on ``isStarted`` and the siege state, and its ``shoot``
+        extra is ``ShowShooting``, whose ``_start`` plays ``gunDescr.effects``
+        through ``EffectsListPlayer`` bound to the vehicle's own compound
+        model - the muzzle flash, its smoke and the gun sound.
+
+        This runtime receives every LAN shot instead, so an unspotted enemy
+        was firing that whole effect list over a hidden hull. Skip it, which
+        reproduces the retail delivery rule.
+
+        The tracer is a different entity: ``Avatar.def`` declares
+        ``showTracer``/``stopTracer`` under its own ``ClientMethods``, and the
+        player's Avatar is always in its own AoI, which is why retail still
+        draws the tracer of a shot from a vehicle it cannot see. The runtime's
+        projectile keeps its own owner and is untouched here, so a blind shot
+        still draws its tracer, still resolves and still damages.
+        """
+        if record.get('local'):
+            return True
+        return bool(record.get('spot_visible', True))
+
     def _show_shot(self, event, update_state=True):
         key = self._event_entity_key(event, 'attacker')
         if key is None:
@@ -10018,7 +10517,8 @@ class BattleRuntime(object):
                     burst_count = 1
                 burst_count = max(1, burst_count)
                 if (visual_admitted and self._optional_feature_enabled(
-                        'shot muzzle presentation')):
+                        'shot muzzle presentation') and
+                        self._shot_muzzle_drawn(record)):
                     self._run_optional_feature(
                         'shot muzzle presentation', entity.showShooting,
                         args=(burst_count, False))
@@ -15309,47 +15809,9 @@ class BattleRuntime(object):
             position[0], position[2], position[1])
         if None in (front_y, rear_y, right_y, left_y, center_y):
             return None
-        long_mid = (front_y + rear_y) * 0.5
-        side_mid = (right_y + left_y) * 0.5
-        if (abs(long_mid - side_mid) > GROUND_PLANE_EPSILON or
-                abs(center_y - long_mid) > GROUND_PLANE_EPSILON or
-                abs(center_y - side_mid) > GROUND_PLANE_EPSILON):
-            return None
-        height_forward = (front_y - rear_y) / length
-        height_right = (right_y - left_y) / width
-        gradient_x = (height_forward * sin_yaw +
-                      height_right * cos_yaw)
-        gradient_z = (height_forward * cos_yaw -
-                      height_right * sin_yaw)
-        slope_tangent = math.sqrt(
-            height_forward * height_forward +
-            height_right * height_right)
-        downhill_x = -gradient_x
-        downhill_z = -gradient_z
-        downhill_length = math.sqrt(
-            downhill_x * downhill_x + downhill_z * downhill_z)
-        if downhill_length > 0.001:
-            downhill_x /= downhill_length
-            downhill_z /= downhill_length
-        else:
-            downhill_x = downhill_z = 0.0
-        return {
-            'center_y': center_y,
-            'gradient_x': gradient_x,
-            'gradient_z': gradient_z,
-            'pitch': -math.atan2(front_y - rear_y, length),
-            # BigWorld applies YPR as yaw, pitch and then roll.  Forward
-            # pitch therefore shortens the horizontal right axis used by the
-            # final roll; dividing by its plane length keeps the displayed
-            # hull normal identical to the fitted terrain normal.
-            'roll': math.atan2(
-                height_right, math.sqrt(
-                    1.0 + height_forward * height_forward)),
-            'slope_tangent': slope_tangent,
-            'up_cosine': 1.0 / math.sqrt(
-                1.0 + slope_tangent * slope_tangent),
-            'downhill': (downhill_x, 0.0, downhill_z),
-        }
+        return vehicle_physics.sampled_ground_plane(
+            front_y, rear_y, right_y, left_y, center_y,
+            yaw, length, width, GROUND_PLANE_EPSILON)
 
     def _commit_ground_plane(self, plane, force_raw=False):
         """Publish one accepted terrain plane to pose and slide physics."""
@@ -16035,6 +16497,7 @@ class BattleRuntime(object):
                     world_hull_yaw, speed,
                     entity.typeDescriptor, self._local_airborne, dt, True,
                     True, kinetic_speed, commit_enabled=False,
+                    pitch=self._local_pitch, roll=self._local_roll,
                     motion_yaw=world_motion_yaw)
                 if isinstance(world_status, bool):
                     world_status = 'hard' if world_status else 'clear'
@@ -16051,7 +16514,9 @@ class BattleRuntime(object):
             world_hull_yaw, speed,
             entity.typeDescriptor, self._local_airborne, dt, True,
             bool(kinetic_speed is not None), kinetic_speed,
-            commit_enabled=False, motion_yaw=world_motion_yaw)
+            commit_enabled=False,
+            pitch=self._local_pitch, roll=self._local_roll,
+            motion_yaw=world_motion_yaw)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         if world_status == 'hard':
@@ -16114,7 +16579,8 @@ class BattleRuntime(object):
         return status in ('clear', 'crushed')
 
     def _resolve_bot_motion(self, bot_id, position, yaw, speed,
-                            descriptor, dt, now, commit_enabled=True):
+                            descriptor, dt, now, commit_enabled=True,
+                            motion_yaw=None):
         """Resolve Bot contact: static world first, then exact catalog."""
         pos = self._vector(position)
         bot_state = getattr(self._bots, 'states', {}).get(int(bot_id), {})
@@ -16132,15 +16598,20 @@ class BattleRuntime(object):
         if not callable(corridor_reusable):
             corridor_reusable = getattr(
                 self._bots, 'motion_world_receipt_reusable', None)
-        travel_yaw = (float(yaw) if speed >= 0.0 else
-                      float(yaw) + math.pi)
+        travel_yaw = (
+            float(motion_yaw) if motion_yaw is not None else
+            float(yaw) if speed >= 0.0 else float(yaw) + math.pi)
+        destructible_motion = (
+            {} if motion_yaw is None else
+            {'motion_yaw': float(motion_yaw)})
         if (self._destructibles is not None and not airborne and
                 movement_dir * float(speed) > 0.0 and rotation_dir == 0 and
                 abs(turn_speed) <= 0.01 and callable(corridor_reusable) and
                 corridor_reusable(
                     bot_id, position, travel_yaw, speed, now, dt) and
                 not self._destructibles._catalog_hull_contact(
-                    pos, yaw, speed, descriptor, dt)):
+                    pos, yaw, speed, descriptor, dt,
+                    **destructible_motion)):
             return 'clear'
         allow_crush_drive = (
             not airborne and
@@ -16155,14 +16626,19 @@ class BattleRuntime(object):
             self._runtime.bigworld, self._runtime.math,
             self._avatar.spaceID, pos, yaw, speed, descriptor, airborne, dt,
             True, allow_crush_drive, kinetic_speed,
-            commit_enabled=commit_enabled)
+            commit_enabled=commit_enabled,
+            pitch=_number(bot_state.get(
+                'terrain_pitch', bot_state.get('pitch'))),
+            roll=_number(bot_state.get('roll')),
+            motion_yaw=motion_yaw)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         self._bot_motion_kinds[int(bot_id)] = '-'
         if world_status == 'hard':
             if (self._destructibles is not None and
                     self._destructibles._catalog_pending_at_hull(
-                        pos, yaw, speed, descriptor, now, dt)):
+                    pos, yaw, speed, descriptor, now, dt,
+                    **destructible_motion)):
                 self._bot_motion_kinds[int(bot_id)] = 'broken'
                 return 'soft'
             return 'hard'
@@ -16177,7 +16653,7 @@ class BattleRuntime(object):
             self._avatar.spaceID, pos, yaw, speed, descriptor, now,
             dt=dt, kinetic_speed=kinetic_speed, return_detail=True,
             kinetic_commit=allow_crush_drive and commit_enabled,
-            commit_enabled=commit_enabled)
+            commit_enabled=commit_enabled, **destructible_motion)
         if isinstance(detail, bool):
             detail = {'status': 'hard' if detail else 'clear'}
         elif isinstance(detail, str):
@@ -16993,7 +17469,8 @@ class BattleRuntime(object):
             'alive': True,
             'team': int(_number(getattr(self.client, 'team', 0))),
             'x': position[0], 'y': position[1], 'z': position[2],
-            'yaw': yaw, 'mass': own_mass,
+            'yaw': yaw, 'pitch': self._local_pitch,
+            'roll': self._local_roll, 'mass': own_mass,
             'shape': self._collision_shape(entity.typeDescriptor),
             'ram_profile': self._ram_profile(
                 entity.typeDescriptor, local=True),
@@ -17365,6 +17842,302 @@ class BattleRuntime(object):
                 centre = value
         return highest, centre
 
+    def _report_local_suspension_trial(self, outcome):
+        """Publish each distinct player suspension activation outcome once.
+
+        The trial retires itself silently, so a descriptor shape that no real
+        #1513 client ships used to leave the solver inert with a green test
+        suite and nothing in ``python.log``.
+        """
+        if outcome == self._local_suspension_report:
+            return False
+        self._local_suspension_report = outcome
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] SUSPENSION player trial %s\n' % (outcome,))
+        return True
+
+    def _ensure_local_suspension_params(self, descriptor):
+        """Lazily enable the descriptor-backed ten-spring trial."""
+        if vehicle_physics.suspension_trial_excluded(descriptor):
+            self._local_suspension_params = None
+            self._local_suspension_disabled = True
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
+            self._report_local_suspension_trial(
+                'excluded: #1513 hydraulic suspension')
+            return None
+        if self._local_suspension_disabled:
+            return None
+        if self._local_suspension_params is None:
+            try:
+                self._local_suspension_params = \
+                    vehicle_physics.derive_suspension_params(descriptor)
+            except Exception as error:
+                self._local_suspension_params = None
+                self._local_suspension_disabled = True
+                self._local_spring_ground_memory = None
+                self._local_pseudo_ground_memory = None
+                self._local_suspension_support_vertical_speed = 0.0
+                self._local_suspension_support_gradient = None
+                self._report_local_suspension_trial(
+                    'inactive: %s' % (error,))
+                self._warn_optional_failure(
+                    'ten-spring suspension trial', error)
+                return None
+            self._report_local_suspension_trial('active')
+        return self._local_suspension_params
+
+    def _local_suspension_state_snapshot(self):
+        """Freeze every local field the optional trial may mutate."""
+        names = (
+            '_local_vertical_speed', '_local_airborne',
+            '_local_fall_armed', '_local_pitch', '_local_roll',
+            '_local_suspension_pitch_velocity',
+            '_local_suspension_roll_velocity',
+            '_local_suspension_support_vertical_speed',
+            '_local_suspension_support_gradient',
+            '_local_left_flying',
+            '_local_right_flying', '_local_surface_up_cosine',
+            '_local_downhill', '_local_slope_tangent',
+            '_local_slide_speed', '_local_air_lateral',
+            '_local_turn_speed', '_local_drive_turn',
+        )
+        result = dict((name, getattr(self, name)) for name in names)
+        plane = self._local_ground_plane
+        result['_local_ground_plane'] = (
+            dict(plane) if isinstance(plane, dict) else plane)
+        result['_local_spring_ground_memory'] = (
+            list(self._local_spring_ground_memory)
+            if isinstance(self._local_spring_ground_memory, list) else
+            self._local_spring_ground_memory)
+        result['_local_pseudo_ground_memory'] = (
+            list(self._local_pseudo_ground_memory)
+            if isinstance(self._local_pseudo_ground_memory, list) else
+            self._local_pseudo_ground_memory)
+        result['_pending_landing_impacts'] = list(
+            self._pending_landing_impacts)
+        return result
+
+    def _restore_local_suspension_state(self, snapshot):
+        for name, value in snapshot.items():
+            setattr(self, name, value)
+
+    def _disable_local_suspension_trial(self, error):
+        """Retire the trial after rolling back its failing physics tick."""
+        self._local_suspension_params = None
+        self._local_suspension_disabled = True
+        self._local_spring_ground_memory = None
+        self._local_pseudo_ground_memory = None
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
+        self._report_local_suspension_trial('retired: %s' % (error,))
+        self._warn_optional_failure('ten-spring suspension trial', error)
+
+    def _local_suspension_ground_samples(
+            self, position, yaw, probe_height=None,
+            support_gradient=None):
+        """Sample every real damper once for this copied-physics tick."""
+        params = self._local_suspension_params
+        if not isinstance(params, dict):
+            return ()
+        if probe_height is None:
+            probe_height = position[1]
+        probe_height = float(probe_height)
+        points = vehicle_physics.suspension_world_points(
+            params, position, yaw)
+        memory = self._local_spring_ground_memory
+        if not isinstance(memory, list) or len(memory) != len(points):
+            memory = [None] * len(points)
+        result = []
+        for index, point in enumerate(points):
+            x, z = point
+            spring = params['springs'][index]
+            spring_height = (
+                probe_height - spring['z'] * math.sin(self._local_pitch) +
+                spring['x'] * math.sin(self._local_roll))
+            minimum_y = (
+                spring_height - spring['rest_length'] -
+                vehicle_physics.CONTACT_PENETRATION)
+            spring_maximum_y = (
+                spring_height + spring['max_compression'] -
+                spring['static_compression'] + 0.05)
+            maximum_y = max(
+                spring_maximum_y,
+                spring_height + params['clearance'] +
+                vehicle_physics.CONTACT_PENETRATION)
+            value = self._suspension_ground_y(
+                x, z, minimum_y, maximum_y,
+                flat_maximum_y=spring_maximum_y)
+            value, memory[index] = vehicle_physics.retained_ground_contact(
+                point, value, memory[index],
+                params['contact_memory_distance'], support_gradient)
+            result.append(value)
+        self._local_spring_ground_memory = memory
+        return tuple(result)
+
+    def _local_suspension_pseudo_ground_samples(
+            self, position, yaw, probe_height=None,
+            support_gradient=None):
+        """Sample every track/belly constraint once for this physics tick."""
+        params = self._local_suspension_params
+        if not isinstance(params, dict):
+            return ()
+        if probe_height is None:
+            probe_height = position[1]
+        probe_height = float(probe_height)
+        points = vehicle_physics.suspension_pseudo_world_points(
+            params, position, yaw)
+        memory = self._local_pseudo_ground_memory
+        if not isinstance(memory, list) or len(memory) != len(points):
+            memory = [None] * len(points)
+        result = []
+        for index, point in enumerate(points):
+            x, z = point
+            contact = params['pseudo_contacts'][index]
+            point_height = (
+                probe_height + _number(contact.get('y')) -
+                contact['z'] * math.sin(self._local_pitch) +
+                contact['x'] * math.sin(self._local_roll))
+            minimum_y = (
+                point_height - params['rest_length'] -
+                vehicle_physics.CONTACT_PENETRATION)
+            rise = (params['clearance']
+                    if contact.get('kind') == 'track' else 0.0)
+            maximum_y = (
+                point_height + rise +
+                vehicle_physics.CONTACT_PENETRATION)
+            flat_maximum_y = (
+                point_height + vehicle_physics.CONTACT_PENETRATION
+                if contact.get('kind') == 'track' else None)
+            value = self._suspension_ground_y(
+                x, z, minimum_y, maximum_y,
+                flat_maximum_y=flat_maximum_y)
+            value, memory[index] = vehicle_physics.retained_ground_contact(
+                point, value, memory[index],
+                params['contact_memory_distance'], support_gradient)
+            result.append(value)
+        self._local_pseudo_ground_memory = memory
+        return tuple(result)
+
+    def _local_suspension_predicted_probe_height(
+            self, position, motion_pose, previous_plane):
+        """Move the query window with one already-proved terrain plane."""
+        if (motion_pose is None or not isinstance(previous_plane, dict) or
+                'center_x' not in previous_plane or
+                'center_z' not in previous_plane):
+            return float(position[1])
+        start_height = vehicle_physics.suspension_plane_height(
+            previous_plane, motion_pose[0], motion_pose[2])
+        end_height = vehicle_physics.suspension_plane_height(
+            previous_plane, position[0], position[2])
+        if start_height is None or end_height is None:
+            return float(position[1])
+        return float(position[1]) + end_height - start_height
+
+    def _local_suspension_path_is_supported(
+            self, previous_plane, current_plane, motion_pose, position):
+        """Prove a long correction's centre line with a fixed ray budget."""
+        dx = float(position[0]) - float(motion_pose[0])
+        dz = float(position[2]) - float(motion_pose[2])
+        distance = math.sqrt(dx * dx + dz * dz)
+        fractions = vehicle_physics.suspension_path_probe_fractions(distance)
+        if not fractions:
+            return True
+        start_ground = vehicle_physics.suspension_plane_height(
+            previous_plane, motion_pose[0], motion_pose[2])
+        end_ground = vehicle_physics.suspension_plane_height(
+            current_plane, position[0], position[2])
+        for fraction in fractions:
+            x = float(motion_pose[0]) + dx * fraction
+            z = float(motion_pose[2]) + dz * fraction
+            expected = start_ground + (end_ground - start_ground) * fraction
+            ground = self._suspension_ground_y(
+                x, z, expected - GROUND_PLANE_EPSILON,
+                expected + GROUND_PLANE_EPSILON,
+                flat_maximum_y=expected + GROUND_PLANE_EPSILON)
+            if (ground is None or
+                    abs(float(ground) - expected) > GROUND_PLANE_EPSILON):
+                return False
+        return True
+
+    def _local_suspension_rise_is_continuous(
+            self, position, solved_height, motion_pose,
+            previous_plane, current_plane):
+        """Authorize extra rise only when one terrain surface proves it."""
+        if (motion_pose is None or previous_plane is None or
+                current_plane is None or
+                not vehicle_physics.suspension_ground_planes_continuous(
+                    previous_plane, current_plane, motion_pose, position,
+                    GROUND_PLANE_EPSILON, GROUND_PLANE_EPSILON)):
+            return False
+        start_ground = vehicle_physics.suspension_plane_height(
+            previous_plane, motion_pose[0], motion_pose[2])
+        end_ground = vehicle_physics.suspension_plane_height(
+            current_plane, position[0], position[2])
+        terrain_rise = max(0.0, end_ground - start_ground)
+        body_rise = float(solved_height) - float(position[1])
+        if body_rise > 0.6 + terrain_rise + 0.02:
+            return False
+        return self._local_suspension_path_is_supported(
+            previous_plane, current_plane, motion_pose, position)
+
+    def _commit_local_suspension_metadata(
+            self, position, yaw, solved, ground, plane=None):
+        """Publish distinct body-attitude and terrain-slope metadata."""
+        contacting = [value for value in ground if value is not None]
+        if not contacting or solved.get('airborne'):
+            self._local_ground_plane = None
+            self._local_surface_up_cosine = None
+            self._local_downhill = (0.0, 0.0, 0.0)
+            self._local_slope_tangent = 0.0
+            return False
+        # The solved body angles include damper bounce and landing rock. Keep
+        # those angles for pose/overturn, but derive downhill grip only from
+        # the sampled terrain. Otherwise a rocking tank would manufacture a
+        # cross-slope and feed its own motion back into lateral slide.
+        body_pitch = float(solved['pitch'])
+        body_roll = float(solved['roll'])
+        self._local_surface_up_cosine = max(
+            -1.0, min(1.0,
+                      math.cos(body_pitch) * math.cos(body_roll)))
+        if plane is None:
+            plane = vehicle_physics.suspension_world_ground_plane(
+                self._local_suspension_params, ground, position, yaw,
+                GROUND_PLANE_EPSILON)
+        if plane is None:
+            self._local_ground_plane = None
+            self._local_downhill = (0.0, 0.0, 0.0)
+            self._local_slope_tangent = 0.0
+            return False
+        gradient_x = float(plane['gradient_x'])
+        gradient_z = float(plane['gradient_z'])
+        sine, cosine = math.sin(yaw), math.cos(yaw)
+        right_gradient = gradient_x * cosine - gradient_z * sine
+        forward_gradient = gradient_x * sine + gradient_z * cosine
+        slope_tangent = math.sqrt(
+            gradient_x * gradient_x + gradient_z * gradient_z)
+        if slope_tangent > 0.001:
+            downhill = (-gradient_x / slope_tangent, 0.0,
+                        -gradient_z / slope_tangent)
+        else:
+            downhill = (0.0, 0.0, 0.0)
+        self._local_ground_plane = dict(plane)
+        self._local_ground_plane.update({
+            'pitch': -math.atan2(forward_gradient, 1.0),
+            'roll': math.atan2(
+                right_gradient,
+                math.sqrt(1.0 + forward_gradient * forward_gradient)),
+            'slope_tangent': slope_tangent,
+            'up_cosine': 1.0 / math.sqrt(
+                1.0 + slope_tangent * slope_tangent),
+            'downhill': downhill,
+        })
+        self._local_downhill = downhill
+        self._local_slope_tangent = slope_tangent
+        return True
+
     def _apply_fall_damage(self, entity, impact_speed):
         """Queue a physical impact observation without mutating canonical HP."""
         maximum = max(1, int(getattr(
@@ -17394,8 +18167,9 @@ class BattleRuntime(object):
         del self._pending_landing_impacts[0]
         return True
 
-    def _apply_landing_impact(self, entity, vertical_speed):
-        """Copy combined vertical/lateral impact and retained landing skid."""
+    def _apply_landing_impact(
+            self, entity, impact_speed, normal_impact=False):
+        """Retain airborne skid and apply legacy or normal impact speed."""
         lateral_x, lateral_z = self._local_air_lateral
         lateral_speed = math.sqrt(
             lateral_x * lateral_x + lateral_z * lateral_z)
@@ -17403,12 +18177,12 @@ class BattleRuntime(object):
             self._local_slide_speed = max(
                 self._local_slide_speed, lateral_speed)
         self._local_air_lateral = (0.0, 0.0)
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed +
-            lateral_speed * lateral_speed)
+        if not normal_impact:
+            impact_speed = math.sqrt(
+                impact_speed * impact_speed + lateral_speed * lateral_speed)
         return self._apply_fall_damage(entity, impact_speed)
 
-    def _update_vertical_motion(self, entity, position, yaw, dt):
+    def _update_vertical_motion_legacy(self, entity, position, yaw, dt):
         """Copy vertical motion while rejecting false raised support."""
         self._local_support_rise_blocked = False
         highest, centre = self._terrain_support(
@@ -17518,6 +18292,326 @@ class BattleRuntime(object):
             self._local_vertical_speed = 0.0
             self._local_airborne = False
         return position
+
+    def _update_vertical_motion(
+            self, entity, position, yaw, dt,
+            support_height_delta=0.0, support_speed_delta=0.0):
+        """Contain the optional suspension trial to this local vehicle."""
+        self._local_suspension_failed_this_tick = False
+        self._local_suspension_air_motion_this_tick = False
+        params = self._ensure_local_suspension_params(entity.typeDescriptor)
+        if params is None:
+            return self._update_vertical_motion_legacy(
+                entity, position, yaw, dt)
+        snapshot = self._local_suspension_state_snapshot()
+        try:
+            if self._local_airborne and dt > 0.0:
+                # Realise carried world X/Z velocity before sampling a landing
+                # plane so the normal verdict uses this tick's displacement.
+                position = self._apply_suspension_slope_slide(
+                    position, yaw, dt, entity)
+                self._local_suspension_air_motion_this_tick = True
+            position = self._update_suspension_vertical_motion(
+                entity, position, yaw, dt,
+                support_height_delta, support_speed_delta)
+            if (self._local_support_rise_blocked and
+                    self._local_suspension_air_motion_this_tick):
+                # The carried displacement and its decay belong to the same
+                # rejected pose. Restore both alongside its X/Z rollback.
+                self._local_slide_speed = snapshot['_local_slide_speed']
+                self._local_air_lateral = snapshot['_local_air_lateral']
+            return position
+        except Exception as error:
+            self._restore_local_suspension_state(snapshot)
+            self._disable_local_suspension_trial(error)
+            self._local_suspension_failed_this_tick = True
+            self._local_support_rise_blocked = True
+            tick_pose = getattr(self, '_local_support_tick_pose', None)
+            if tick_pose is not None:
+                position = tuple(tick_pose)
+            return position
+
+    def _update_suspension_vertical_motion(
+            self, entity, position, yaw, dt,
+            support_height_delta=0.0, support_speed_delta=0.0):
+        """Advance one sampled ten-spring local rigid-body tick.
+
+        The contact columns are sampled exactly once here. The solver may use
+        fixed internal substeps, but every one of those substeps consumes this
+        immutable 10-spring plus pseudo-contact snapshot.
+        """
+        params = self._local_suspension_params
+        support_height_delta = float(support_height_delta)
+        support_speed_delta = float(support_speed_delta)
+        if any(math.isnan(value) or math.isinf(value) for value in (
+                support_height_delta, support_speed_delta)):
+            raise ValueError('suspension support adjustment is not finite')
+        self._local_support_rise_blocked = False
+        armed_before = bool(self._local_fall_armed)
+        tick_pose = getattr(self, '_local_support_tick_pose', None)
+        motion_pose = getattr(self, '_local_support_motion_pose', None)
+        if motion_pose is None:
+            motion_pose = tick_pose
+        previous_plane = self._local_ground_plane
+        support_gradient = self._local_suspension_support_gradient
+        if isinstance(previous_plane, dict):
+            support_gradient = (
+                float(previous_plane['gradient_x']),
+                float(previous_plane['gradient_z']))
+        if not armed_before:
+            # A streamed spawn may start at the provisional y=100 pose. Place
+            # it once through the existing same-layer/wide column before the
+            # only 22 suspension samples of this tick.
+            initial_ground = self._ground_y(
+                position[0], position[2], position[1], allow_wide=True)
+            if initial_ground is not None:
+                position = (
+                    position[0], float(initial_ground), position[2])
+                self._local_vertical_speed = 0.0
+                self._local_pitch = 0.0
+                self._local_roll = 0.0
+                self._local_suspension_pitch_velocity = 0.0
+                self._local_suspension_roll_velocity = 0.0
+                self._local_suspension_support_vertical_speed = 0.0
+                self._local_suspension_support_gradient = None
+        probe_height = self._local_suspension_predicted_probe_height(
+            position, motion_pose, previous_plane)
+        ground = self._local_suspension_ground_samples(
+            position, yaw, probe_height=probe_height,
+            support_gradient=support_gradient)
+        pseudo_ground = self._local_suspension_pseudo_ground_samples(
+            position, yaw, probe_height=probe_height,
+            support_gradient=support_gradient)
+        if (not armed_before and
+                (not ground or all(value is None for value in ground)) and
+                (not pseudo_ground or
+                 all(value is None for value in pseudo_ground))):
+            # Match the existing provisional-spawn contract: absence of the
+            # first streamed terrain support is not a damaging free fall.
+            self._local_vertical_speed = 0.0
+            self._local_airborne = False
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
+            return position
+        current_plane = vehicle_physics.suspension_world_ground_plane(
+            params, ground, position, yaw, GROUND_PLANE_EPSILON)
+        before_airborne = bool(self._local_airborne)
+        before_vertical_speed = (
+            float(self._local_vertical_speed) + support_speed_delta)
+        support_vertical_speed = float(
+            self._local_suspension_support_vertical_speed)
+        if float(dt) > 0.0:
+            velocity_x = velocity_z = 0.0
+            if motion_pose is not None:
+                velocity_x = (
+                    float(position[0]) - float(motion_pose[0])) / float(dt)
+                velocity_z = (
+                    float(position[2]) - float(motion_pose[2])) / float(dt)
+            support_gradient = None
+            measured_support_speed = None
+            if current_plane is not None:
+                measured_support_speed = \
+                    vehicle_physics.suspension_support_vertical_velocity(
+                        current_plane, velocity_x, velocity_z)
+                if measured_support_speed is not None:
+                    support_gradient = (
+                        float(current_plane['gradient_x']),
+                        float(current_plane['gradient_z']))
+            if (support_gradient is None and not before_airborne):
+                support_gradient = \
+                    self._local_suspension_support_gradient
+                if support_gradient is not None:
+                    measured_support_speed = (
+                        float(support_gradient[0]) * velocity_x +
+                        float(support_gradient[1]) * velocity_z)
+            if measured_support_speed is None:
+                support_vertical_speed = 0.0
+            else:
+                support_vertical_speed = float(measured_support_speed)
+            self._local_suspension_support_gradient = support_gradient
+            self._local_suspension_support_vertical_speed = \
+                support_vertical_speed
+        support_vertical_speed += support_speed_delta
+        self._local_suspension_support_vertical_speed = \
+            support_vertical_speed
+        previous_pitch = float(self._local_pitch)
+        previous_roll = float(self._local_roll)
+        physics_state = {
+            'height': float(position[1]) + support_height_delta,
+            'vertical_velocity': before_vertical_speed,
+            'pitch': previous_pitch,
+            'pitch_velocity': self._local_suspension_pitch_velocity,
+            'roll': previous_roll,
+            'roll_velocity': self._local_suspension_roll_velocity,
+        }
+        solved = vehicle_physics.damper_suspension_step(
+            params, physics_state, ground, dt, pseudo_ground,
+            support_vertical_speed)
+        values = (
+            solved['height'], solved['vertical_velocity'],
+            solved['pitch'], solved['pitch_velocity'],
+            solved['roll'], solved['roll_velocity'])
+        if any(math.isnan(value) or math.isinf(value) for value in values):
+            raise RuntimeError('player suspension produced a non-finite pose')
+        invalid_pose = (
+            abs(float(solved['height']) - position[1]) > 5.0 or
+            abs(float(solved['pitch'])) > 1.2 or
+            abs(float(solved['roll'])) > 1.2)
+        extra_rise = (
+            armed_before and bool(solved.get('contact_count')) and
+            tank_collision.support_rise_is_obstacle(
+                position[1], solved['height'], 0.6))
+        raised_support = bool(
+            extra_rise and
+            not self._local_suspension_rise_is_continuous(
+                position, solved['height'], motion_pose,
+                previous_plane, current_plane))
+        if invalid_pose or raised_support:
+            if tick_pose is not None:
+                position = tuple(tick_pose)
+            # These contacts were sampled at the rejected final X/Z pose.
+            # Retaining them after rollback can pin the restored pose to a
+            # support layer it never actually reached.
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
+            self._local_vertical_speed = 0.0
+            self._local_suspension_pitch_velocity = 0.0
+            self._local_suspension_roll_velocity = 0.0
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
+            self._local_pitch = previous_pitch
+            self._local_roll = previous_roll
+            self._local_ground_plane = previous_plane
+            self._local_airborne = False
+            self._local_support_rise_blocked = True
+            return position
+        position = (
+            position[0], float(solved['height']), position[2])
+        self._local_vertical_speed = float(solved['vertical_velocity'])
+        self._local_pitch = float(solved['pitch'])
+        self._local_suspension_pitch_velocity = \
+            float(solved['pitch_velocity'])
+        self._local_roll = float(solved['roll'])
+        self._local_suspension_roll_velocity = \
+            float(solved['roll_velocity'])
+        self._local_airborne = bool(solved['airborne'])
+        if self._local_airborne:
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
+        self._local_left_flying = bool(solved['left_flying'])
+        self._local_right_flying = bool(solved['right_flying'])
+        if solved['contact_count']:
+            self._local_fall_armed = True
+        if (before_airborne and not self._local_airborne and
+                before_vertical_speed < 0.0):
+            impact_vertical = solved.get('impact_speed')
+            if impact_vertical is None:
+                impact_vertical = before_vertical_speed
+            impact_speed = max(0.0, -float(impact_vertical))
+            if motion_pose is not None and float(dt) > 0.0:
+                velocity = (
+                    (float(position[0]) - float(motion_pose[0])) / float(dt),
+                    float(impact_vertical),
+                    (float(position[2]) - float(motion_pose[2])) / float(dt),
+                )
+                normal = (current_plane.get('normal')
+                          if isinstance(current_plane, dict) else None)
+                impact_speed = vehicle_physics.landing_impact_speed(
+                    velocity, normal)
+            self._apply_landing_impact(
+                entity, impact_speed, normal_impact=True)
+        elif not before_airborne and self._local_airborne:
+            self._local_turn_speed = 0.0
+            self._local_drive_turn = 0.0
+        self._commit_local_suspension_metadata(
+            position, yaw, solved, ground, plane=current_plane)
+        return position
+
+    def _resettle_local_suspension_endpoint(
+            self, entity, start_position, position, yaw, motion_dt=0.0):
+        """Project suspension contacts once at one corrected X/Z endpoint."""
+        dx = float(position[0]) - float(start_position[0])
+        dz = float(position[2]) - float(start_position[2])
+        if dx * dx + dz * dz <= 1.0e-10:
+            return position
+        support_gradient = self._local_suspension_support_gradient
+        plane = self._local_ground_plane
+        if isinstance(plane, dict):
+            support_gradient = (
+                float(plane['gradient_x']),
+                float(plane['gradient_z']))
+        support_height_delta = 0.0
+        support_speed_delta = 0.0
+        if support_gradient is not None:
+            support_height_delta = (
+                float(support_gradient[0]) * dx +
+                float(support_gradient[1]) * dz)
+            if float(motion_dt) > 0.0:
+                support_speed_delta = (
+                    support_height_delta / float(motion_dt))
+        # A rejected vertical support must retain collision separation X/Z;
+        # only the endpoint's incoming Y and attitude are restored.
+        self._local_support_tick_pose = tuple(position)
+        self._local_support_motion_pose = tuple(start_position)
+        try:
+            return self._update_vertical_motion(
+                entity, position, yaw, 0.0,
+                support_height_delta, support_speed_delta)
+        finally:
+            self._local_support_tick_pose = None
+            self._local_support_motion_pose = None
+
+    def _apply_suspension_slope_slide(
+            self, position, yaw, dt, entity=None):
+        """Advance slope-driven X/Z after the ram endpoint is settled."""
+        if self._local_airborne:
+            self._local_slide_speed = 0.0
+            lateral_x, lateral_z = self._local_air_lateral
+            if abs(lateral_x) <= 0.0001 and abs(lateral_z) <= 0.0001:
+                return position
+            lateral_speed = math.sqrt(
+                lateral_x * lateral_x + lateral_z * lateral_z)
+            lateral_yaw = math.atan2(lateral_x, lateral_z)
+            candidate = (
+                position[0] + lateral_x * dt, position[1],
+                position[2] + lateral_z * dt)
+            if (entity is None or self._motion_is_clear(
+                    entity, position, lateral_yaw, lateral_speed, dt,
+                    hull_yaw=yaw)):
+                position = candidate
+            self._local_air_lateral = (
+                lateral_x * 0.995, lateral_z * 0.995)
+            return position
+        self._local_slide_speed = (
+            vehicle_physics.suspension_slope_slide_speed(
+                self._local_slide_speed, self._local_slope_tangent, dt))
+        cross_x, cross_z = math.cos(yaw), -math.sin(yaw)
+        slide_dot = (self._local_downhill[0] * cross_x +
+                     self._local_downhill[2] * cross_z)
+        slide_x = cross_x * slide_dot
+        slide_z = cross_z * slide_dot
+        self._local_air_lateral = (
+            slide_x * self._local_slide_speed,
+            slide_z * self._local_slide_speed)
+        if (self._local_slide_speed <= 0.01 or
+                (abs(slide_x) <= 0.0001 and
+                 abs(slide_z) <= 0.0001)):
+            return position
+        lateral_speed = abs(slide_dot) * self._local_slide_speed
+        lateral_yaw = math.atan2(slide_x, slide_z)
+        if (entity is not None and not self._motion_is_clear(
+                entity, position, lateral_yaw, lateral_speed, dt,
+                hull_yaw=yaw)):
+            if not self._local_motion_soft_block:
+                self._local_slide_speed = 0.0
+                self._local_air_lateral = (0.0, 0.0)
+            return position
+        return (
+            position[0] + slide_x * self._local_slide_speed * dt,
+            position[1],
+            position[2] + slide_z * self._local_slide_speed * dt)
 
     def _apply_slope_slide(self, position, yaw, dt, entity=None):
         """Copy 0.8.2 cross-heading slope slip and airborne carry."""
@@ -17907,24 +19001,72 @@ class BattleRuntime(object):
             self._local_motion_kinds = 'arena'
             self._local_motion_status = 'hard'
             contact_path = contact_path or 'arena_turn'
+        suspension_active = bool(
+            self._ensure_local_suspension_params(entity.typeDescriptor))
         self._local_support_rise_blocked = False
+        self._local_suspension_air_motion_this_tick = False
         self._local_support_tick_pose = tick_pose
+        self._local_support_motion_pose = tick_pose
         try:
             position = self._update_vertical_motion(
                 entity, position, yaw, dt)
         finally:
             self._local_support_tick_pose = None
-        support_blocked = self._local_support_rise_blocked
+            self._local_support_motion_pose = None
+        air_motion_applied = bool(getattr(
+            self, '_local_suspension_air_motion_this_tick', False))
+        suspension_active = bool(
+            self._local_suspension_params is not None and
+            not self._local_suspension_disabled)
+        support_blocked = bool(self._local_support_rise_blocked)
+        ram_resolved = False
+        slide_moved = False
+        if suspension_active:
+            # Current-tick suspension now owns Y/pitch/roll before secondary
+            # horizontal contact work. This keeps world OBB checks, vertical
+            # tank overlap and native ram plate proof on one coherent pose.
+            settled_position = position
+            position = self._resolve_local_tank_contacts(
+                entity, position, yaw, dt)
+            ram_resolved = True
+            position = self._resettle_local_suspension_endpoint(
+                entity, settled_position, position, yaw)
+            support_blocked = bool(
+                support_blocked or self._local_support_rise_blocked)
+            suspension_active = bool(
+                self._local_suspension_params is not None and
+                not self._local_suspension_disabled)
+            if (suspension_active and not support_blocked and
+                    not air_motion_applied):
+                slide_start = position
+                position = self._apply_suspension_slope_slide(
+                    position, yaw, dt, entity)
+                dx = float(position[0]) - float(slide_start[0])
+                dz = float(position[2]) - float(slide_start[2])
+                slide_moved = dx * dx + dz * dz > 1.0e-10
+                position = self._resettle_local_suspension_endpoint(
+                    entity, slide_start, position, yaw, dt)
+                support_blocked = bool(
+                    support_blocked or self._local_support_rise_blocked)
+                suspension_active = bool(
+                    self._local_suspension_params is not None and
+                    not self._local_suspension_disabled)
+            self._local_support_rise_blocked = support_blocked
         if support_blocked:
             self._local_speed *= 0.35 ** (dt * 60.0)
             if abs(self._local_speed) < 0.05:
                 self._local_speed = 0.0
             self._local_grind = 4
             contact_path = 'support'
-        self._ground_pitch(position, yaw, entity.typeDescriptor)
-        position = self._apply_slope_slide(position, yaw, dt, entity)
-        position = self._resolve_local_tank_contacts(
-            entity, position, yaw, dt)
+        suspension_failed = bool(self._local_suspension_failed_this_tick)
+        if not suspension_active and not suspension_failed:
+            self._ground_pitch(position, yaw, entity.typeDescriptor)
+            if not slide_moved:
+                position = self._apply_slope_slide(
+                    position, yaw, dt, entity)
+            if not ram_resolved:
+                position = self._resolve_local_tank_contacts(
+                    entity, position, yaw, dt)
         self._report_local_contact_tick(
             contact_path, previous_speed, slope_pitch,
             position[1] - tick_pose[1])
@@ -19703,6 +20845,16 @@ class BattleRuntime(object):
             self._local_physics = vehicle_physics.derive_params(
                 entity.typeDescriptor,
                 self._local_factors(entity.typeDescriptor))
+            self._local_suspension_params = None
+            self._local_suspension_disabled = False
+            self._local_suspension_report = None
+            self._local_suspension_failed_this_tick = False
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
+            self._local_suspension_pitch_velocity = 0.0
+            self._local_suspension_roll_velocity = 0.0
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
         if record.get('local') and self._local_matrix is not None:
             self._update_local_hull_aiming(entity, 0.0)
         return True
@@ -19999,25 +21151,50 @@ class BattleRuntime(object):
         # should be guessed through a fallback.
         return current in (modes.STRATEGIC, modes.ARTY)
 
+    def _presentation_origin(self):
+        """Return the position the client's entity AOI is centred on.
+
+        Retail centres the vehicle AOI on the vehicle the player is attached
+        to, and a dead player is attached to whichever ally the postmortem
+        camera currently observes.  This runtime stops integrating the local
+        tank the moment it dies, so ``_local_position`` freezes at the wreck.
+        Keeping the AOI there hid the observed ally itself, and every vehicle
+        near it, whenever the wreck was more than 565 m away.
+        """
+        engine_id = self._spectated_engine_id
+        if engine_id is None:
+            return self._local_position
+        local_id = (int(self._server.vehicle_id)
+                    if self._server is not None else 0)
+        if int(engine_id) == local_id:
+            return self._local_position
+        try:
+            entity = self._server_entity(engine_id)
+        except ReferenceError:
+            entity = None
+        if entity is None:
+            return self._local_position
+        return _xyz(entity.position)
+
     def _spot_presentation_visibility(
             self, entity, remembered, was_model_visible=False):
         """Return ``(model, team knowledge)`` for one spotted enemy.
 
         The minimap follows team spotting memory.  The ordinary world model
-        and 3D marker remain bounded by the 565 m entity AOI, except that an
-        SPG in either of its aiming cameras must be able to aim at every
-        team-spotted target in its shell range.  The exemption covers the
-        whole aiming slice so switching between those cameras cannot make an
-        engaged target disappear.  Exact #1513 keeps an already-present entity
-        for the additional five-metre ``CIRCULAR_AOI_MARGIN`` to prevent
-        boundary flicker.
+        and 3D marker remain bounded by the 565 m entity AOI around the
+        currently observed vehicle, except that an SPG in either of its aiming
+        cameras must be able to aim at every team-spotted target in its shell
+        range.  The exemption covers the whole aiming slice so switching
+        between those cameras cannot make an engaged target disappear.  Exact
+        #1513 keeps an already-present entity for the additional five-metre
+        ``CIRCULAR_AOI_MARGIN`` to prevent boundary flicker.
         """
         remembered = bool(remembered)
         aoi_radius = spotting.VEHICLE_AOI_RADIUS
         if was_model_visible:
             aoi_radius += spotting.VEHICLE_AOI_HYSTERESIS_MARGIN
         within_aoi = _distance_2d(
-            self._local_position, _xyz(entity.position)) <= aoi_radius
+            self._presentation_origin(), _xyz(entity.position)) <= aoi_radius
         model_visible = remembered and (
             within_aoi or self._spg_aiming_view_active())
         return model_visible, remembered
@@ -21773,6 +22950,12 @@ class BattleRuntime(object):
         self._local_push_x = 0.0
         self._local_push_z = 0.0
         self._local_physics = None
+        self._local_suspension_params = None
+        self._local_suspension_disabled = False
+        self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
+        self._local_spring_ground_memory = None
+        self._local_pseudo_ground_memory = None
         self._local_matrix = None
         self._local_pose_matrix = None
         self._local_stabilised_matrix = None
@@ -21786,6 +22969,14 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
+        self._local_swinging_move_flags = 0
+        self._local_swinging_probe = None
+        self._local_swinging_event_seq = 0
+        self._local_swinging_events_reported = 0
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -21807,6 +22998,13 @@ class BattleRuntime(object):
         self._pending_landing_impacts = []
         self._local_pitch = 0.0
         self._local_roll = 0.0
+        self._local_suspension_pitch_velocity = 0.0
+        self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
+        self._local_left_flying = False
+        self._local_right_flying = False
+        self._local_support_motion_pose = None
         self._input_accumulator = 0.0
         self._gun_state = None
         self._gun_last_tick = None
