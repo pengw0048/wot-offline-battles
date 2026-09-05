@@ -63,6 +63,11 @@ vehicles, modules, ammunition and consumables are researched and bought in the
 garage at this client's own prices. Gold is spent but not earned, so premium
 vehicles and gold ammunition are paid for out of the gold the launcher grants.
 
+Ammunition is stock now, not scenery. A battle spends the rounds it fired,
+the server reports what it drew by the shell's own position in the gun, and
+reloading buys whatever the depot is short of at this client's prices. An
+account that cannot pay for a full load does not get one.
+
 A battle leaves the vehicle as damaged as it ended: the client's own
 inventory carries the outstanding repair cost beside the remaining health, so
 the garage shows the tank destroyed or damaged and the maintenance panel

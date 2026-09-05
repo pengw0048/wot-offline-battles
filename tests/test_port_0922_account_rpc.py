@@ -1282,13 +1282,12 @@ class DepotTests(unittest.TestCase):
 
         self.assertEqual(1, diff[9][4444])
 
-    def test_buying_ammunition_never_marks_it_for_removal(self):
+    def test_buying_ammunition_puts_the_rounds_in_the_depot(self):
         """A publication rule must not delete what the account owns.
 
-        Ammunition is published from what the vehicle carries, so a depot
-        purchase has nothing to publish. Saying nothing is correct; saying
-        ``None`` would tell the client to drop the rounds the player just
-        paid for.
+        Rounds are stock, so a depot purchase publishes the new count. Saying
+        ``None`` would tell the client to drop the rounds the player just paid
+        for.
         """
         state = self._garage(item_type=10)
         state.snapshot()['shopItemPrices'][11010] = {'credits': 100}
@@ -1296,7 +1295,7 @@ class DepotTests(unittest.TestCase):
 
         diff = self._buy(state, (42, 11010, 10, 0))
 
-        self.assertNotIn(11010, diff.get(10, {}))
+        self.assertEqual(40, diff[10][11010])
         self.assertEqual(
             40, state.snapshot()['inventoryItems'][10][11010])
 
@@ -1330,13 +1329,13 @@ class DepotTests(unittest.TestCase):
                     self.assertGreaterEqual(
                         published[item_type][compact_descr], count)
 
-    def test_ammunition_stays_on_what_the_vehicle_carries(self):
-        """Nothing consumes a round yet, so its account count is a high-water
-        mark rather than a stock."""
+    def test_ammunition_is_published_as_the_stock_the_account_owns(self):
+        """A battle spends rounds and a resupply is paid for, so the account
+        count is real stock rather than a high-water mark."""
         snapshot = _full_garage_snapshot()
         snapshot['inventoryItems'][10][11010] = 400
 
         published = account_data.inventory(
             snapshot, validate=False)['inventory']
 
-        self.assertEqual(30, published[10][11010])
+        self.assertEqual(400, published[10][11010])

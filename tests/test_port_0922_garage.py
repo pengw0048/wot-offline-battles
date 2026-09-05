@@ -948,6 +948,125 @@ class GarageStateTests(unittest.TestCase):
         with self.assertRaises(self.garage.GarageError):
             state.repair_vehicle(9)
 
+    # ---- ammunition ------------------------------------------------------
+
+    def _loaded_state(self, credits_amount=100000):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {
+            'credits': credits_amount, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][10010] = {'credits': 100}
+        snapshot['shopItemPrices'][10011] = {'credits': 200}
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_battle_takes_the_rounds_it_fired_out_of_the_tank(self):
+        """The receipt counts by the shell's index in the gun's shot order."""
+        state = self._loaded_state()
+
+        # _Descriptor's gun fires 20010 at index 0 and 20011 at index 1; the
+        # fixture loads 10010 and 10011, which this gun does not fire.
+        spent = state.settle_battle_ammunition(50001, {0: 5})
+
+        self.assertEqual({}, spent)
+
+    def _matching_state(self, credits_amount=100000):
+        """A vehicle whose loaded rounds are the ones its gun fires."""
+        state = self._loaded_state(credits_amount)
+        record = state.snapshot()['vehicles'][0]
+        record['shells'] = [20010, 30, 20011, 15]
+        record['shellsLayout'] = {(7001, 7002): [20010, 30, 20011, 15]}
+        record['inventoryItems'][10] = {20010: 30, 20011: 15}
+        state.snapshot()['inventoryItems'][10] = {20010: 30, 20011: 15}
+        state.snapshot()['shopItemPrices'][20010] = {'credits': 100}
+        state.snapshot()['shopItemPrices'][20011] = {'credits': 200}
+        return state
+
+    def test_the_rounds_fired_leave_the_tank_and_the_account(self):
+        state = self._matching_state()
+
+        spent = state.settle_battle_ammunition(50001, {0: 12, 1: 3})
+
+        self.assertEqual({20010: 12, 20011: 3}, spent)
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([20010, 18, 20011, 12], list(record['shells']))
+        self.assertEqual({20010: 18, 20011: 12}, record['inventoryItems'][10])
+        self.assertEqual(
+            {20010: 18, 20011: 12},
+            state.snapshot()['inventoryItems'][10])
+
+    def test_a_receipt_cannot_fire_more_rounds_than_the_tank_carried(self):
+        state = self._matching_state()
+
+        spent = state.settle_battle_ammunition(50001, {0: 500})
+
+        self.assertEqual({20010: 30}, spent)
+        self.assertEqual(
+            [20010, 0, 20011, 15],
+            list(state.snapshot()['vehicles'][0]['shells']))
+
+    def test_a_battle_that_fired_nothing_changes_nothing(self):
+        state = self._matching_state()
+
+        self.assertEqual({}, state.settle_battle_ammunition(50001, {}))
+        self.assertEqual(
+            [20010, 30, 20011, 15],
+            list(state.snapshot()['vehicles'][0]['shells']))
+
+    def test_reloading_buys_the_rounds_the_depot_is_short_of(self):
+        """SET_AND_FILL_LAYOUTS fills a layout the depot cannot."""
+        state = self._matching_state()
+        state.settle_battle_ammunition(50001, {0: 12, 1: 3})
+
+        state.equip_shells(9, [20010, 30, 20011, 15])
+
+        # 12 rounds at 100 credits and 3 at 200.
+        self.assertEqual(
+            100000 - 1200 - 600, state.snapshot()['wallet']['credits'])
+        self.assertEqual(
+            {20010: 30, 20011: 15},
+            state.snapshot()['inventoryItems'][10])
+
+    def test_an_account_that_cannot_pay_loads_nothing(self):
+        state = self._matching_state(credits_amount=100)
+        state.settle_battle_ammunition(50001, {0: 12})
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_shells(9, [20010, 30, 20011, 15])
+
+        self.assertEqual(
+            [20010, 18, 20011, 15],
+            list(state.snapshot()['vehicles'][0]['shells']))
+        self.assertEqual(100, state.snapshot()['wallet']['credits'])
+
+    def test_unloading_rounds_costs_nothing_and_keeps_them(self):
+        state = self._matching_state()
+
+        state.equip_shells(9, [20010, 10, 20011, 15])
+
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(
+            {20010: 30, 20011: 15},
+            state.snapshot()['inventoryItems'][10])
+
+    def test_a_second_vehicle_cannot_load_the_same_rounds_twice(self):
+        state = self._matching_state()
+        snapshot = state.snapshot()
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+
+        state.equip_shells(10, [20010, 30, 20011, 15])
+
+        # The account owned 30 and 15; two full loads need 60 and 30.
+        self.assertEqual(
+            100000 - 3000 - 3000, snapshot['wallet']['credits'])
+        self.assertEqual(
+            {20010: 60, 20011: 30}, snapshot['inventoryItems'][10])
+
 
 class FittingRequestTests(unittest.TestCase):
 
@@ -1083,7 +1202,9 @@ class FittingRequestTests(unittest.TestCase):
 
         self.assertEqual(
             [10010, 7], self.pushed[0]['inventory'][1]['shells'][9])
-        self.assertEqual({10010: 7}, self.pushed[0]['inventory'][10])
+        # Unloading rounds does not spend them: the account still owns the 20
+        # it had, 7 of them now sitting in the tank.
+        self.assertEqual({10010: 20}, self.pushed[0]['inventory'][10])
 
     def test_add_skill_uses_the_int3_payload(self):
         # #1513 sends tankmen.SKILL_INDICES[name]; 'repair' is 6.

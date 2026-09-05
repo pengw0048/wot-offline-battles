@@ -186,6 +186,33 @@ class PostBattleContractTests(unittest.TestCase):
             1, 7, progress, dossier_factory=factory,
             vehicle_type_resolver=lambda unused: 50001))
 
+    def test_a_receipt_carries_the_health_and_the_rounds_it_fired(self):
+        """The bill is priced by the client; the receipt states the facts."""
+        raw = _receipt()
+        raw['public_results'][0]['health'] = 40
+        raw['shells_fired'] = {'0': 12, '1': 3}
+
+        stored = postbattle_store._receipt(raw)
+
+        self.assertEqual(40, stored['health'])
+        self.assertEqual({0: 12, 1: 3}, stored['shells_fired'])
+        # A bill is still refused: only the client can price a shell.
+        self.assertEqual(0, stored['rewards']['ammo_cost'])
+
+    def test_a_receipt_without_the_ammunition_section_fired_nothing(self):
+        stored = postbattle_store._receipt(_receipt())
+
+        self.assertEqual({}, stored['shells_fired'])
+        self.assertEqual(100, stored['health'])
+
+    def test_a_malformed_ammunition_section_is_refused(self):
+        for fired in ({'10': 1}, {'0': -1}, {'a': 1}, {'0': 1000000},
+                      [1, 2], dict((str(index), 1) for index in range(11))):
+            raw = _receipt()
+            raw['shells_fired'] = fired
+            with self.assertRaises(ValueError):
+                postbattle_store._receipt(raw)
+
     def test_draw_is_not_a_loss_and_receipt_stats_accumulate(self):
         store = postbattle_store.PostBattleStore(path=None)
         receipt = _receipt(store.account_key)

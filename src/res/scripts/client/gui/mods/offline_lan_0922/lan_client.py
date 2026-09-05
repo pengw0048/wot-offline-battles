@@ -1463,6 +1463,18 @@ def _valid_battle_receipt(message):
         return False
     if rewards.get('repair_cost') != 0 or rewards.get('ammo_cost') != 0:
         return False
+    # What the battle drew, by the shell's index in the gun's own shot order.
+    # A receipt from a server that does not send it fired nothing.
+    fired = message.get('shells_fired')
+    if fired is not None:
+        if not isinstance(fired, dict) or len(fired) > 10:
+            return False
+        for index, count in fired.items():
+            index = _exact_int(index)
+            count = _exact_int(count)
+            if (index is None or not 0 <= index <= 9 or count is None or
+                    not 0 <= count <= 100000):
+                return False
     public_rows = message.get('public_results')
     if (not isinstance(public_rows, list) or
             not 1 <= len(public_rows) <= 30):

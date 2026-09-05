@@ -126,6 +126,21 @@ def _receipt(value):
     # is safer than silently applying an untrusted server value.
     if rewards['repair_cost'] or rewards['ammo_cost']:
         raise ValueError('offline service costs must be zero')
+    shells_fired = {}
+    raw_fired = value.get('shells_fired')
+    if raw_fired is not None:
+        if not isinstance(raw_fired, dict) or len(raw_fired) > 10:
+            raise ValueError('battle receipt ammunition is invalid')
+        for index, count in raw_fired.items():
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                raise ValueError('battle receipt ammunition is invalid')
+            count = _int(count)
+            if not 0 <= index <= 9 or not 0 <= count <= 100000:
+                raise ValueError('battle receipt ammunition is invalid')
+            if count:
+                shells_fired[index] = count
     public_results = []
     raw_public = value.get('public_results')
     if raw_public is None:
@@ -256,6 +271,9 @@ def _receipt(value):
         # re-deriving the roster to find them.
         'achievements': list(personal['achievements']),
         'health': personal['health'],
+        # By the shell's index in the gun's own shot order: only the client
+        # can turn that into a shell, and only the client owns its price.
+        'shells_fired': shells_fired,
         'public_results': public_results,
         'interactions': interactions,
     }

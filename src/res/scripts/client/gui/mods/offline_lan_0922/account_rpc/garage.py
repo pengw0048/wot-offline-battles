@@ -44,6 +44,10 @@ EQUIPMENT_ITEM_TYPE = 11
 # snapshot's top-level count is the real one.  Every other item type is
 # published per vehicle, which data.inventory folds into one account view.
 ACCOUNT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
+# Rounds are stock too, now that a battle spends them and a resupply is paid
+# for.  The account count covers every round the garage holds, loaded ones
+# included, which is the invariant data._validate_selected_vehicle checks.
+STOCKED_ITEM_TYPES = ACCOUNT_ITEM_TYPES + (SHELL_ITEM_TYPE,)
 # The two item types #1513's shop publishes as buyable for credits even when
 # their catalogue price is gold: premium rounds and premium consumables.
 CREDIT_PRICED_GOLD_TYPES = (SHELL_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
@@ -234,23 +238,64 @@ class GarageState(object):
     # ---- ammunition -----------------------------------------------------
 
     def equip_shells(self, vehicle_inventory_id, shells):
+        """Load one vehicle, buying whatever rounds the account is short of.
+
+        #1513 calls this command SET_AND_FILL_LAYOUTS for a reason: setting a
+        layout the depot cannot fill buys the difference.  The account count
+        covers every round the garage holds, loaded ones included, so what has
+        to be bought is whatever the new layouts need above it.
+        """
         values = [_int(value) for value in (shells or ())]
         if len(values) % 2:
             raise GarageError('shells must be descriptor/count pairs')
-        record = self._record(vehicle_inventory_id)
-        record['shells'] = values
-        mirror_shells_layout(record)
+        record = self._record(vehicle_inventory_id, touch=False)
         # data._validate_selected_vehicle requires the shell inventory and the
         # flat pair list to agree, so both move together.
         pairs = {}
         for index in range(0, len(values), 2):
             pairs[values[index]] = values[index + 1]
-        record.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = pairs
+        others = [row for row in self._records()
+                  if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+        # Read the stock before anything is published: the loops below raise
+        # the very counts this arithmetic is against.
+        owned = dict(self._snapshot.get('inventoryItems', {}).get(
+            SHELL_ITEM_TYPE, {}))
+        purchase = {}
         for compact_descr, count in pairs.items():
-            self._publish_owned(compact_descr, SHELL_ITEM_TYPE, count)
+            needed = _int(count) + self._mounted(
+                compact_descr, SHELL_ITEM_TYPE, others)
+            missing = needed - _int(owned.get(compact_descr, 0))
+            if missing > 0:
+                purchase[compact_descr] = missing
+        # Every refusal happens before the first round is loaded, so a load
+        # the account cannot pay for leaves the vehicle exactly as it was.
+        self._charge(self._shells_cost(purchase))
+        self._touched.add(_int(record.get('id', 0)))
+        record['shells'] = values
+        mirror_shells_layout(record)
+        record.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = pairs
+        for compact_descr in pairs:
+            self._publish_owned(
+                compact_descr, SHELL_ITEM_TYPE,
+                _int(owned.get(compact_descr, 0)) +
+                purchase.get(compact_descr, 0))
             self._price(compact_descr)
         self.revision += 1
         return record
+
+    def _shells_cost(self, purchase):
+        """Price a resupply, in the currency #1513 charges for each shell.
+
+        A gold shell is bought for credits at the published exchange rate, the
+        same rule a gold shell already follows everywhere else in the garage.
+        """
+        total = {}
+        for compact_descr, count in dict(purchase or {}).items():
+            price = self._in_credits(
+                self._item_cost(compact_descr, count), SHELL_ITEM_TYPE)
+            for currency, value in price.items():
+                total[currency] = _int(total.get(currency, 0)) + _int(value)
+        return total
 
     def _price(self, compact_descr):
         """Make sure one item the garage publishes also carries a price.
@@ -1065,6 +1110,65 @@ class GarageState(object):
         self.revision += 1
         return record['repair']
 
+    def settle_battle_ammunition(self, vehicle_type_compact_descr,
+                                 shells_fired):
+        """Take the rounds a battle fired out of the vehicle and the account.
+
+        The receipt counts rounds by the shell's index in the gun's own shot
+        order, because that is what the client sent with every fire intent and
+        the server cannot resolve it: only this client owns the definitions
+        that turn an index into a shell.
+        """
+        counts = {}
+        for index, count in dict(shells_fired or {}).items():
+            count = _int(count)
+            if count > 0:
+                counts[_int(index)] = count
+        if not counts:
+            return {}
+        record = self._record_by_vehicle_type(vehicle_type_compact_descr)
+        descriptor = self._descriptor(record)
+        shots = tuple(getattr(descriptor.gun, 'shots', ()) or ())
+        loaded = list(record.get('shells') or ())
+        pairs = {}
+        for position in range(0, len(loaded) - 1, 2):
+            pairs[_int(loaded[position])] = _int(loaded[position + 1])
+        spent = {}
+        for index, count in counts.items():
+            if not 0 <= index < len(shots):
+                # A round this gun cannot fire is a receipt from another
+                # fitting; charging the wrong shell is worse than charging
+                # nothing.
+                continue
+            shell = getattr(shots[index], 'shell', None)
+            compact_descr = _int(getattr(shell, 'compactDescr', 0))
+            if compact_descr not in pairs:
+                continue
+            taken = min(count, pairs[compact_descr])
+            if taken <= 0:
+                continue
+            pairs[compact_descr] = pairs[compact_descr] - taken
+            spent[compact_descr] = spent.get(compact_descr, 0) + taken
+        if not spent:
+            return {}
+        record['shells'] = [value for compact_descr in
+                            (loaded[position] for position in
+                             range(0, len(loaded) - 1, 2))
+                            for value in (compact_descr,
+                                          pairs[_int(compact_descr)])]
+        mirror_shells_layout(record)
+        record.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = dict(pairs)
+        owned = self._snapshot.setdefault(
+            'inventoryItems', {}).setdefault(SHELL_ITEM_TYPE, {})
+        for compact_descr, count in spent.items():
+            owned[compact_descr] = max(
+                self._mounted(compact_descr, SHELL_ITEM_TYPE, self._records()),
+                _int(owned.get(compact_descr, 0)) - count)
+            self._touched_items.setdefault(
+                SHELL_ITEM_TYPE, set()).add(compact_descr)
+        self.revision += 1
+        return spent
+
     def repair_vehicle(self, vehicle_inventory_id):
         """Pay one vehicle's outstanding repair bill and put it back together."""
         record = self._record(vehicle_inventory_id, touch=False)
@@ -1585,14 +1689,14 @@ class GarageState(object):
     def _mounted(self, compact_descr, item_type, records):
         """Return how many of one item the given vehicles hold between them.
 
-        An optional device or a piece of equipment belongs to the account, so
-        two vehicles mounting it hold two.  A module or a shell is published
-        per vehicle as the largest count any one of them carries, and summing
-        that view would invent stock nobody owns.
+        An optional device, a piece of equipment or a round belongs to the
+        account, so two vehicles carrying it hold two lots of it.  A module is
+        published per vehicle as the largest count any one of them carries,
+        and summing that view would invent stock nobody owns.
         """
         counts = [self._carried(record, item_type, compact_descr)
                   for record in records]
-        if int(item_type) in ACCOUNT_ITEM_TYPES:
+        if int(item_type) in STOCKED_ITEM_TYPES:
             return sum(counts)
         return max(counts) if counts else 0
 

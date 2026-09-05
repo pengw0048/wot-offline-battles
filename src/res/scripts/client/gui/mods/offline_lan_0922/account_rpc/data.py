@@ -366,15 +366,14 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
     # vehicle carries one. Publishing it alongside the per-vehicle counts is
     # what puts a purchase in the player's depot.
     #
-    # Ammunition is the exception: offline resupply is unlimited and nothing
-    # consumes a round yet, so a shell's account count is a high-water mark
-    # rather than a stock, and the honest number to show is what the vehicle
-    # is actually carrying.
+    # Ammunition is part of that view: a battle spends rounds and a resupply
+    # is paid for, so a shell's account count is real stock rather than a
+    # high-water mark.
     for item_type, items in dict(
             vehicle.get('inventoryItems', {})).items():
         item_type = int(item_type)
         if item_type not in values or item_type in (
-                VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE, SHELL_ITEM_TYPE,
+                VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,
                 CUSTOMIZATION_ITEM_TYPE):
             continue
         wanted = _wanted_items(only_items, item_type)

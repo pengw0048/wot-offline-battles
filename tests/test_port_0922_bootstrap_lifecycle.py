@@ -1257,18 +1257,21 @@ class BootstrapLifecycleTests(unittest.TestCase):
             def apply_battle_crew_xp(self, snapshot, receipt_id,
                                      vehicle_type_cd, xp, xp_flag,
                                      tankmen_module=None, rewards=None,
-                                     health=None, vehicles_module=None):
+                                     health=None, vehicles_module=None,
+                                     shells_fired=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
                 # The crew award, the earnings it was banked beside and the
-                # damage the same battle did share one transaction, so the
-                # applier must pass all three.
+                # damage and rounds the same battle spent share one
+                # transaction, so the applier must pass all of them.
                 banked.append(rewards)
                 settled.append(health)
+                spent.append(shells_fired)
                 return {'vehicle_id': 1, 'applied': True}
 
         banked = []
         settled = []
+        spent = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -1285,12 +1288,14 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 'receipt_id': 'server:1:1',
                 'rewards': {'xp': 100},
                 'health': 40,
+                'shells_fired': {0: 12},
             })
 
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
         self.assertEqual([{'xp': 100}], banked)
         self.assertEqual([40], settled)
+        self.assertEqual([{0: 12}], spent)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
 
