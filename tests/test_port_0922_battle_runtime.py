@@ -34,7 +34,9 @@ from gui.mods.offline_lan_0922.entities import remote_vehicle as \
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
-    NativeRemoteVehicleFactory, _NativeRemoteState
+    NativeRemoteVehicleFactory, _NativeRemoteState, present_shot_impulse
+from gui.mods.offline_lan_0922.entities import native_remote_vehicle as \
+    native_remote_vehicle_module
 
 
 class _Vector(object):
@@ -160,6 +162,9 @@ class _Matrix(object):
     def applyPoint(self, value):
         value = _Vector(value)
         return value + self.translation
+
+    def applyVector(self, value):
+        return _Vector(value)
 
 
 class _YawMatrix(_Matrix):
@@ -2518,6 +2523,65 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual([moving, moving], vehicle.engine_modes)
         self.assertTrue(factory.destroy(vehicle_id))
 
+    def test_hidden_belt_settle_is_reported_as_a_deliberate_zero(self):
+        """A zero readback must be attributable, not look like a failure.
+
+        The runtime logs the authoritative belt speed it computed, which is
+        not what reaches the controller once a hidden compound has been
+        settled.  Real client logs therefore showed a non-zero ``fed`` beside
+        a ``0.0`` scroll readback with no recorded cause.
+        """
+        runtime = _runtime()
+        holder = {}
+        binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            _VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=lambda entity_id:
+            holder['factory'].get(entity_id))
+        factory = NativeRemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7,
+            binding=binding, compatibility=runtime.compatibility)
+        holder['factory'] = factory
+        properties = binding.properties_from_compact_descr(
+            'ussr:R11_MS-1', 2, 'Native remote')
+        vehicle_id = factory.create(
+            _Descriptor(), properties, _Vector(), (0.0, 0.0, 0.0))
+        pending = runtime.bigworld.pending_entities[vehicle_id]
+        pending.filter.movementInfo = object()
+        pending.filter.setTracksSpeed = mock.Mock()
+        pending.appearance.filter = pending.filter
+        pending.appearance.flyingInfoProvider = types.SimpleNamespace(
+            isLeftSideFlying=False, isRightSideFlying=False)
+        runtime.bigworld.enter_pending_vehicle(vehicle_id)
+        self.assertTrue(factory.is_ready(vehicle_id))
+        vehicle = factory.get(vehicle_id)
+        moving = (ENGINE_MODE_RUNNING, 1)
+
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual(
+            ((2.0, 3.0), 'engine and python', False, True),
+            vehicle.track_feed_state())
+        # An unchanged feed keeps reporting the engine-owned write it made.
+        self.assertTrue(vehicle.update_tracks(2.0, 3.0, moving))
+        self.assertEqual('deduplicated', vehicle.track_feed_state()[1])
+
+        vehicle._offlineNativeDrawVisible = False
+        self.assertTrue(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual(
+            ((0.0, 0.0), 'hidden and settling', True, True),
+            vehicle.track_feed_state())
+        # This is the shape the real client logged: a live authoritative feed
+        # whose effective write is the deliberate hide-edge zero.
+        self.assertFalse(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual(
+            ((0.0, 0.0), 'hidden and settled', True, True),
+            vehicle.track_feed_state())
+
+        runtime.bigworld.entities.pop(vehicle_id)
+        self.assertFalse(vehicle.update_tracks(9.4, 9.4, moving))
+        self.assertEqual('not engine owned', vehicle.track_feed_state()[1])
+
     def test_guest_native_vehicle_uses_one_stable_pose_matrix(self):
         runtime = _runtime()
         holder = {}
@@ -2669,6 +2733,381 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         runtime.bigworld.enter_pending_vehicle(vehicle_id)
         self.assertTrue(factory.is_ready(vehicle_id))
         return runtime, factory, binding, vehicle_id, factory.get(vehicle_id)
+
+    def _swinging_native_factory(self):
+        runtime, factory, binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        state.presentation_capabilities['body_swinging'] = True
+        vehicle.appearance.swingingAnimator = types.SimpleNamespace()
+        vehicle.appearance.receiveShotImpulse = mock.Mock()
+        return runtime, factory, binding, vehicle_id, vehicle
+
+    def test_failed_capability_log_never_retires_belt_animation(self):
+        """update_tracks retires belts for the round on any exception."""
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        state._capability_report = mock.Mock(
+            side_effect=IOError('python.log is unavailable'))
+        state._capabilities_changed = True
+
+        self.assertFalse(state._publish_capabilities())
+        self.assertIsNone(state._capability_report)
+        # The belt write itself still completes rather than raising into the
+        # optional-feature guard that would retire it for the round.
+        state._capability_report = mock.Mock(
+            side_effect=IOError('python.log is unavailable'))
+        vehicle.update_tracks(2.0, 3.0, (ENGINE_MODE_RUNNING, 1))
+        self.assertEqual('python only', vehicle.track_feed_state()[1])
+
+    def test_bot_track_report_names_the_effective_write(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._remote_factory = factory
+        vehicle.update_tracks(2.0, 3.0, (ENGINE_MODE_RUNNING, 1))
+        stream = io.StringIO()
+
+        with mock.patch.object(battle_runtime_module.sys, 'stdout', stream):
+            self.assertTrue(battle._report_bot_tracks(
+                vehicle, 9.4, 9.4, (ENGINE_MODE_RUNNING, 1), 1.0))
+            self.assertFalse(battle._report_bot_tracks(
+                vehicle, 9.4, 9.4, (ENGINE_MODE_RUNNING, 1), 2.0))
+
+        line = stream.getvalue()
+        self.assertIn('fed=(9.400, 9.400)', line)
+        self.assertIn('wrote=(2.0, 3.0)', line)
+        self.assertIn('outcome=python only', line)
+        self.assertIn('hidden=False', line)
+
+    def test_stock_presentation_bindings_are_reported_once_per_outcome(self):
+        """One battle must show which stock components were actually bound.
+
+        ``_bind_stock_motion`` recorded the engine audition, swinging
+        animator, LOD position, wheels and suspension results and nothing
+        consumed them, so a real client log could not distinguish a rebound
+        stock component from a missing one.
+        """
+        runtime = _runtime()
+        holder = {}
+        binding = BigWorldVehicleBinding(
+            runtime.bigworld, runtime.bigworld.avatar, runtime.constants,
+            _VehicleDescr, runtime.encode_gun_angles,
+            outfit_provider=lambda unused_descriptor: '',
+            authority_entity_resolver=lambda entity_id:
+            holder['factory'].get(entity_id))
+        factory = NativeRemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7,
+            binding=binding, compatibility=runtime.compatibility)
+        holder['factory'] = factory
+        properties = binding.properties_from_compact_descr(
+            'ussr:R11_MS-1', 2, 'Native remote')
+        identifiers = []
+        for unused_index in range(2):
+            vehicle_id = factory.create(
+                _Descriptor(), properties, _Vector(), (0.0, 0.0, 0.0))
+            pending = runtime.bigworld.pending_entities[vehicle_id]
+            pending.filter.movementInfo = object()
+            pending.filter.setTracksSpeed = mock.Mock()
+            pending.appearance.filter = pending.filter
+            pending.appearance.flyingInfoProvider = types.SimpleNamespace(
+                isLeftSideFlying=False, isRightSideFlying=False)
+            pending.appearance.swingingAnimator = types.SimpleNamespace(
+                worldMatrix=None, placingCompensationMatrix=None)
+            runtime.bigworld.enter_pending_vehicle(vehicle_id)
+            identifiers.append(vehicle_id)
+        stream = io.StringIO()
+
+        with mock.patch.object(
+                native_remote_vehicle_module.sys, 'stdout', stream):
+            for vehicle_id in identifiers:
+                self.assertTrue(factory.is_ready(vehicle_id))
+            # The engine-owned belt record only exists after the first write,
+            # so it is the second stable reporting point.
+            self.assertTrue(factory.get(identifiers[0]).update_tracks(
+                2.0, 3.0, (ENGINE_MODE_RUNNING, 1)))
+            self.assertTrue(factory.get(identifiers[1]).update_tracks(
+                2.0, 3.0, (ENGINE_MODE_RUNNING, 1)))
+
+        lines = stream.getvalue().strip().splitlines()
+        # Two Bots with one shared outcome publish one line per stable point.
+        self.assertEqual(2, len(lines))
+        self.assertIn('body_swinging=True', lines[0])
+        self.assertIn('stock_wheels=False', lines[0])
+        self.assertNotIn('engine_owned_track_motion', lines[0])
+        self.assertIn('WheelsAnimator is unavailable', lines[0])
+        self.assertIn('engine_owned_track_motion=True', lines[1])
+
+    def test_shot_impulse_normalises_direction_and_keeps_retail_impulse(self):
+        appearance = types.SimpleNamespace(
+            swingingAnimator=types.SimpleNamespace(),
+            receiveShotImpulse=mock.Mock())
+
+        self.assertTrue(present_shot_impulse(
+            types.SimpleNamespace(Vector3=_Vector), appearance,
+            _Vector(0.0, 0.0, 4.0), 350.0))
+
+        direction, impulse = appearance.receiveShotImpulse.call_args.args
+        self.assertEqual((0.0, 0.0, 1.0), tuple(direction))
+        self.assertEqual(350.0, impulse)
+
+    def test_shot_impulse_rejects_every_unusable_native_argument(self):
+        animator = types.SimpleNamespace()
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        receive = mock.Mock()
+        appearance = types.SimpleNamespace(
+            swingingAnimator=animator, receiveShotImpulse=receive)
+
+        self.assertFalse(present_shot_impulse(
+            math_module, None, _Vector(0.0, 0.0, 1.0), 350.0))
+        # Stock receiveShotImpulse dereferences swingingAnimator without a
+        # guard, so a missing animator must never reach it.
+        self.assertFalse(present_shot_impulse(
+            math_module, types.SimpleNamespace(
+                swingingAnimator=None, receiveShotImpulse=receive),
+            _Vector(0.0, 0.0, 1.0), 350.0))
+        self.assertFalse(present_shot_impulse(
+            math_module, types.SimpleNamespace(swingingAnimator=animator),
+            _Vector(0.0, 0.0, 1.0), 350.0))
+        for impulse in (0.0, -1.0, float('nan'), float('inf'), 'x'):
+            self.assertFalse(present_shot_impulse(
+                math_module, appearance, _Vector(0.0, 0.0, 1.0), impulse))
+        for direction in (_Vector(0.0, 0.0, 0.0),
+                          _Vector(float('nan'), 0.0, 1.0),
+                          _Vector(float('inf'), 0.0, 1.0),
+                          (0.0, 1.0), None):
+            self.assertFalse(present_shot_impulse(
+                math_module, appearance, direction, 350.0))
+        receive.assert_not_called()
+
+        # A plain three-element sequence is accepted for callers that never
+        # built a Math.Vector3.
+        self.assertTrue(present_shot_impulse(
+            math_module, appearance, (0.0, 3.0, 0.0), 120.0))
+        self.assertEqual(
+            (0.0, 1.0, 0.0),
+            tuple(receive.call_args.args[0]))
+
+    def test_native_hit_impulse_needs_proven_swinging_and_live_owner(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        vehicle.appearance.swingingAnimator = types.SimpleNamespace()
+        vehicle.appearance.receiveShotImpulse = mock.Mock()
+
+        # _bind_stock_motion never proved the rebind for this fake appearance.
+        self.assertFalse(factory.present_hit_impulse(
+            vehicle_id, _Vector(0.0, 0.0, 1.0), 350.0))
+        state.presentation_capabilities['body_swinging'] = True
+        self.assertTrue(factory.present_hit_impulse(
+            vehicle_id, _Vector(0.0, 0.0, 1.0), 350.0))
+        self.assertFalse(factory.present_hit_impulse(
+            vehicle_id + 5000, _Vector(0.0, 0.0, 1.0), 350.0))
+
+        runtime.bigworld.entities.pop(vehicle_id)
+        self.assertFalse(factory.present_hit_impulse(
+            vehicle_id, _Vector(0.0, 0.0, 1.0), 350.0))
+        self.assertEqual(1, vehicle.appearance.receiveShotImpulse.call_count)
+
+    def test_remote_swinging_second_setter_failure_rolls_back_first(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._ready_native_factory()
+        state = factory._states[vehicle_id]
+        native_compensation = object()
+        native_world = object()
+
+        class _FailingWorldAnimator(object):
+            def __init__(self):
+                object.__setattr__(
+                    self, 'placingCompensationMatrix', native_compensation)
+                object.__setattr__(self, 'worldMatrix', native_world)
+
+            def __setattr__(self, name, value):
+                if name == 'worldMatrix' and value is state.provider:
+                    raise RuntimeError('world provider rejected')
+                object.__setattr__(self, name, value)
+
+        swinging = _FailingWorldAnimator()
+        vehicle.appearance.swingingAnimator = swinging
+
+        state._bind_stock_motion()
+
+        self.assertIs(
+            native_compensation, swinging.placingCompensationMatrix)
+        self.assertIs(native_world, swinging.worldMatrix)
+        self.assertFalse(state.presentation_capabilities['body_swinging'])
+
+    def test_direct_hit_uses_decoded_armour_axis_for_remote_impulse(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._swinging_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._local_position = (0.0, 0.0, 0.0)
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        attacker = _Vehicle(11, _Descriptor(), _Vector(0.0, 0.0, 0.0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities[11] = attacker
+        target_record = {
+            'engine_id': vehicle_id, 'local': False, 'native_remote': True,
+            'spot_visible': True, 'kind': 'bot', 'network_id': 2,
+            'state': {'team': 2, 'health': 500, 'alive': True,
+                      'x': 0.0, 'y': 0.0, 'z': 30.0}}
+        attacker_record = {
+            'engine_id': 11, 'local': True, 'kind': 'player',
+            'network_id': 1,
+            'state': {'team': 1, 'health': 500,
+                      'x': 0.0, 'y': 0.0, 'z': 0.0}}
+        event = {
+            'kind': 'bot_hit', 'world_pose': True, 'source': 'shot',
+            'x': 0.0, 'y': 1.0, 'z': 29.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 144, 'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(-2.0, 0.0, 0.0),
+                _Vector(2.0, 0.0, 0.0))))
+
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertTrue(battle._present_combat_hit(
+                event, target_record, attacker_record, 11))
+
+        direction, impulse = \
+            vehicle.appearance.receiveShotImpulse.call_args.args
+        self.assertEqual(350.0, impulse)
+        # The decoded plate ray is independent of the centre-to-centre line.
+        self.assertAlmostEqual(0.0, direction.z)
+        self.assertAlmostEqual(1.0, direction.x)
+
+    def test_hull_impulse_survives_a_failed_terrain_effect(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._swinging_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._local_position = (0.0, 0.0, 0.0)
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        runtime.bigworld.entities[11] = _Vehicle(
+            11, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+        battle._avatar.terrainEffects.addNew.side_effect = RuntimeError(
+            'native impact failed')
+        target_record = {
+            'engine_id': vehicle_id, 'local': False, 'native_remote': True,
+            'spot_visible': True, 'kind': 'bot', 'network_id': 2,
+            'state': {'team': 2, 'health': 500, 'alive': True,
+                      'x': 0.0, 'y': 0.0, 'z': 30.0}}
+        attacker_record = {
+            'engine_id': 11, 'local': True, 'kind': 'player',
+            'network_id': 1,
+            'state': {'team': 1, 'health': 500,
+                      'x': 0.0, 'y': 0.0, 'z': 0.0}}
+        event = {
+            'kind': 'bot_hit', 'world_pose': True, 'source': 'shot',
+            'x': 0.0, 'y': 1.0, 'z': 29.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 144, 'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
+
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_combat_hit(
+                event, target_record, attacker_record, 11))
+
+        vehicle.appearance.receiveShotImpulse.assert_called_once()
+        self.assertIn(
+            'projectile impact presentation',
+            battle._disabled_optional_features)
+        self.assertNotIn(
+            'vehicle hit impulse', battle._disabled_optional_features)
+
+    def test_splash_and_killing_hits_present_no_retail_hull_impulse(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._swinging_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        target_record = {
+            'engine_id': vehicle_id, 'local': False, 'native_remote': True,
+            'spot_visible': True, 'state': {'health': 500, 'alive': True}}
+        effects_descr = runtime.vehicles.g_cache.shotEffects[3]
+
+        self.assertFalse(battle._present_hit_impulse(
+            {'splash': True}, target_record, effects_descr))
+        self.assertFalse(battle._present_hit_impulse(
+            {'dead': True}, target_record, effects_descr))
+        self.assertFalse(battle._present_hit_impulse(
+            {}, dict(target_record, state={'health': 0, 'alive': False}),
+            effects_descr))
+        self.assertFalse(battle._present_hit_impulse(
+            {}, dict(target_record, native_remote=False),
+            effects_descr))
+        self.assertFalse(battle._present_hit_impulse(
+            {}, target_record, {}))
+        vehicle.appearance.receiveShotImpulse.assert_not_called()
+
+        # A hit without the exact decoded direct-hit segment must not invent
+        # an impulse direction from vehicle centres.
+        self.assertFalse(battle._present_hit_impulse(
+            {}, target_record, effects_descr))
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertTrue(battle._present_hit_impulse(
+                {'damage_sticker': 123}, target_record, effects_descr))
+
+    def test_local_victim_hull_receives_the_same_retail_impulse(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        target.appearance.swingingAnimator = types.SimpleNamespace()
+        target.appearance.receiveShotImpulse = mock.Mock()
+        runtime.bigworld.entities[10] = target
+        battle._avatar.playerVehicleID = 10
+        target_record = {
+            'engine_id': 10, 'local': True,
+            'state': {'health': 500, 'alive': True}}
+        effects_descr = runtime.vehicles.g_cache.shotEffects[3]
+
+        event = {'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
+
+        # PR #45 alone has not rebound the local stock animator and must skip
+        # the native call.  PR #46 establishes this exact ownership proof.
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_hit_impulse(
+                event, target_record, effects_descr))
+            battle._local_swinging_animator = \
+                target.appearance.swingingAnimator
+            self.assertTrue(battle._present_hit_impulse(
+                event, target_record, effects_descr))
+
+        target.appearance.receiveShotImpulse.assert_called_once()
+        target.isStarted = False
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_hit_impulse(
+                event, target_record, effects_descr))
+        self.assertEqual(
+            1, target.appearance.receiveShotImpulse.call_count)
 
     def test_sticker_owner_survives_failed_native_detach(self):
         runtime = _runtime()
