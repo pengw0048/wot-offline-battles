@@ -5563,7 +5563,9 @@ class BattleRuntime(object):
         if model is None:
             raise RuntimeError('player compound model is unavailable')
         model.matrix = self._local_body_pose()
-        self._bind_local_body_swinging(entity, model)
+        self._run_optional_feature(
+            'local body swinging', self._bind_local_body_swinging,
+            (entity, model))
         self._runtime.compatibility.bind_vehicle_pose_sources(
             self._avatar, entity)
         self._local_model = model
@@ -5625,37 +5627,68 @@ class BattleRuntime(object):
         try:
             restore = (
                 swinging,
-                getattr(swinging, 'placingCompensationMatrix', None),
-                getattr(swinging, 'worldMatrix', None))
-            swinging.placingCompensationMatrix = \
-                self._local_placing_compensation
-            swinging.worldMatrix = provider
+                swinging.placingCompensationMatrix,
+                swinging.worldMatrix)
         except Exception as error:
             self._local_swinging_animator = None
             self._local_swinging_restore = None
             self._report_local_body_swinging(False, error)
-            return False
+            raise
+        try:
+            swinging.placingCompensationMatrix = \
+                self._local_placing_compensation
+            swinging.worldMatrix = provider
+        except Exception as error:
+            rollback_errors = []
+            for name, value in (
+                    ('placingCompensationMatrix', restore[1]),
+                    ('worldMatrix', restore[2])):
+                try:
+                    setattr(swinging, name, value)
+                except Exception as rollback_error:
+                    rollback_errors.append('%s: %s' % (
+                        name, rollback_error))
+            if rollback_errors:
+                # Preserve the exact owner and stock values so teardown can
+                # retry after a transient native setter failure.
+                self._local_swinging_animator = swinging
+                self._local_swinging_restore = restore
+                error = RuntimeError('%s; rollback failed: %s' % (
+                    error, '; '.join(rollback_errors)))
+            else:
+                self._local_swinging_animator = None
+                self._local_swinging_restore = None
+            self._report_local_body_swinging(False, error)
+            raise error
         self._local_swinging_animator = swinging
         self._local_swinging_restore = restore
         self._report_local_body_swinging(True)
         return True
 
-    def _restore_local_body_swinging(self):
+    def _restore_local_body_swinging(self, entity):
         """Return the animator to the stock bindings this port replaced."""
         restore = self._local_swinging_restore
-        self._local_swinging_animator = None
-        self._local_swinging_restore = None
         if restore is None:
             return False
         swinging, compensation, world = restore
+        appearance = getattr(entity, 'appearance', None)
+        if (not getattr(entity, 'isStarted', False) or
+                getattr(appearance, 'swingingAnimator', None) is not
+                swinging):
+            # A stock appearance refresh retired this animator.  Never write
+            # cached providers into the replacement that now owns the model.
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            return False
         try:
-            if compensation is not None:
-                swinging.placingCompensationMatrix = compensation
-            if world is not None:
-                swinging.worldMatrix = world
+            swinging.placingCompensationMatrix = compensation
+            swinging.worldMatrix = world
         except Exception as error:
             self._report_local_body_swinging(False, error)
-            return False
+            # Keep the owner and original providers for a later cleanup retry.
+            raise
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
         return True
 
     def _update_local_presentation(self, entity, dt=0.0):
@@ -5807,7 +5840,7 @@ class BattleRuntime(object):
         if entity is None:
             return False
         self._sync_fire_effect(entity, False)
-        self._restore_local_body_swinging()
+        self._restore_local_body_swinging(entity)
         if self._local_model is not None and self._local_native_matrix is not None:
             self._local_model.matrix = self._local_native_matrix
         clear = getattr(

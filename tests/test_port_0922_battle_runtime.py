@@ -25891,6 +25891,75 @@ class LocalBodySwingingTests(unittest.TestCase):
 
         self.assertEqual([], writes)
 
+    def test_second_bind_setter_failure_rolls_back_and_disables_feature(self):
+        battle, entity = self._battle()
+        native_compensation = _Matrix()
+        native_world = entity.matrix
+
+        class _FailingWorldAnimator(object):
+            def __init__(self):
+                object.__setattr__(
+                    self, 'placingCompensationMatrix', native_compensation)
+                object.__setattr__(self, 'worldMatrix', native_world)
+
+            def __setattr__(self, name, value):
+                if (name == 'worldMatrix' and
+                        value is battle._local_matrix):
+                    raise RuntimeError('world provider rejected')
+                object.__setattr__(self, name, value)
+
+        swinging = _FailingWorldAnimator()
+        entity.appearance.swingingAnimator = swinging
+
+        self.assertTrue(battle._attach_local_presentation())
+
+        self.assertIs(
+            native_compensation, swinging.placingCompensationMatrix)
+        self.assertIs(native_world, swinging.worldMatrix)
+        self.assertIsNone(battle._local_swinging_animator)
+        self.assertIsNone(battle._local_swinging_restore)
+        self.assertIn(
+            'local body swinging', battle._disabled_optional_features)
+
+    def test_failed_bind_rollback_retains_owner_for_cleanup_retry(self):
+        battle, entity = self._battle()
+        native_compensation = _Matrix()
+        native_world = entity.matrix
+
+        class _FailingRollbackAnimator(object):
+            def __init__(self):
+                object.__setattr__(self, 'fail_bind', True)
+                object.__setattr__(self, 'fail_rollback', True)
+                object.__setattr__(
+                    self, 'placingCompensationMatrix', native_compensation)
+                object.__setattr__(self, 'worldMatrix', native_world)
+
+            def __setattr__(self, name, value):
+                if (name == 'worldMatrix' and self.fail_bind and
+                        value is battle._local_matrix):
+                    raise RuntimeError('world provider rejected')
+                if (name == 'placingCompensationMatrix' and
+                        self.fail_rollback and
+                        value is native_compensation):
+                    raise RuntimeError('compensation rollback rejected')
+                object.__setattr__(self, name, value)
+
+        swinging = _FailingRollbackAnimator()
+        entity.appearance.swingingAnimator = swinging
+
+        self.assertTrue(battle._attach_local_presentation())
+
+        self.assertIs(swinging, battle._local_swinging_animator)
+        self.assertIsNotNone(battle._local_swinging_restore)
+        swinging.fail_bind = False
+        swinging.fail_rollback = False
+        self.assertTrue(battle._restore_local_body_swinging(entity))
+        self.assertIs(
+            native_compensation, swinging.placingCompensationMatrix)
+        self.assertIs(native_world, swinging.worldMatrix)
+        self.assertIsNone(battle._local_swinging_animator)
+        self.assertIsNone(battle._local_swinging_restore)
+
     def test_a_missing_animator_is_reported_without_failing_the_battle(self):
         battle, entity = self._battle(animator=False)
         stream = io.StringIO()
@@ -25928,3 +25997,51 @@ class LocalBodySwingingTests(unittest.TestCase):
         self.assertIs(native_compensation, swinging.placingCompensationMatrix)
         self.assertIs(native_world, swinging.worldMatrix)
         self.assertIsNone(battle._local_swinging_animator)
+
+    def test_detach_does_not_write_a_retired_animator_after_refresh(self):
+        battle, entity = self._battle()
+        writes = []
+
+        class _CountingAnimator(object):
+            def __setattr__(self, name, value):
+                writes.append(name)
+                object.__setattr__(self, name, value)
+
+        swinging = _CountingAnimator()
+        swinging.placingCompensationMatrix = _Matrix()
+        swinging.worldMatrix = entity.matrix
+        entity.appearance.swingingAnimator = swinging
+        battle._attach_local_presentation()
+        del writes[:]
+        entity.appearance.swingingAnimator = types.SimpleNamespace(
+            placingCompensationMatrix=_Matrix(), worldMatrix=entity.matrix)
+        battle._local_native_matrix = entity.matrix
+
+        self.assertTrue(battle._detach_local_presentation())
+
+        self.assertEqual([], writes)
+        self.assertIsNone(battle._local_swinging_animator)
+        self.assertIsNone(battle._local_swinging_restore)
+
+    def test_detach_does_not_write_an_animator_after_entity_exit(self):
+        battle, entity = self._battle()
+        writes = []
+
+        class _CountingAnimator(object):
+            def __setattr__(self, name, value):
+                writes.append(name)
+                object.__setattr__(self, name, value)
+
+        swinging = _CountingAnimator()
+        swinging.placingCompensationMatrix = _Matrix()
+        swinging.worldMatrix = entity.matrix
+        entity.appearance.swingingAnimator = swinging
+        battle._attach_local_presentation()
+        del writes[:]
+        entity.isStarted = False
+
+        self.assertFalse(battle._restore_local_body_swinging(entity))
+
+        self.assertEqual([], writes)
+        self.assertIsNone(battle._local_swinging_animator)
+        self.assertIsNone(battle._local_swinging_restore)
