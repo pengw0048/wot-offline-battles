@@ -853,7 +853,7 @@ class CombatRulesTests(unittest.TestCase):
         self.assertEqual((0.6, 1.0, 0.2), combat_rules.he_factors(shot))
         self.assertEqual(110, value)
 
-    def test_he_hull_armor_reads_native_1513_component_attributes(self):
+    def test_he_missing_contact_does_not_borrow_descriptor_armor(self):
         material = types.SimpleNamespace(
             armor=35.0, vehicleDamageFactor=1.0)
 
@@ -865,7 +865,123 @@ class CombatRulesTests(unittest.TestCase):
 
         descriptor = types.SimpleNamespace(hull=Hull())
 
-        self.assertEqual(35.0, combat_rules._offh_he_hull_armor(descriptor))
+        self.assertIsNone(combat_rules.he_nominal_armor((), descriptor))
+
+    def test_he_blast_stops_at_first_structural_plate_not_weaker_backside(self):
+        first = _material(100.0)
+        weaker_backside = _material(10.0)
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (_collision(2.0, 1.0, weaker_backside),
+             _collision(1.0, 1.0, first)), 400.0)
+
+        self.assertIs(first, result['collision'].matInfo)
+        self.assertEqual(100.0, result['nominal_armor'])
+        self.assertEqual(56, result['damage'])
+        self.assertEqual((1.0, 0.0, 0.0), result['point'])
+
+    def test_he_blast_accepts_zero_armour_structural_contact(self):
+        collision = _collision(0.0, 1.0, _material(0.0))
+
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (collision,), 400.0)
+
+        self.assertEqual(0.0, result['nominal_armor'])
+        self.assertEqual(200, result['damage'])
+        self.assertEqual((collision,), result['collisions'])
+
+    def test_he_blast_requires_native_structural_evidence(self):
+        shot = _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                     explosion_radius=10.0)
+        external = _collision(0.0, 1.0, _material(20.0, 0.0))
+        missing_material = _collision(1.0, 1.0, None)
+
+        self.assertIsNone(combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (external, missing_material), 400.0))
+        self.assertIsNone(combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (), 400.0))
+
+    def test_he_blast_missing_armour_is_not_a_zero_armour_plate(self):
+        collision = _collision(1.0, 1.0, types.SimpleNamespace(
+            vehicleDamageFactor=1.0))
+        self.assertIsNone(combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', explosion_radius=4.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (4.0, 0.0, 0.0),
+            (collision,), 400.0))
+
+    def test_he_blast_uses_structural_point_distance_after_external_screen(self):
+        screen = _collision(0.001, 1.0, _material(20.0, 0.0),
+                            'vehicleChassis')
+        hull = _collision(5.0, 1.0, _material(0.0), 'vehicleHull')
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (hull, screen), 400.0)
+
+        self.assertEqual(5.0, result['distance'])
+        self.assertEqual(130, result['damage'])
+        self.assertEqual((screen, hull), result['collisions'])
+
+    def test_he_blast_allows_upstream_query_start_and_tolerance_backstep(self):
+        hull = _collision(4.9995, 1.0, _material(0.0))
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=10.0),
+            (5.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (hull,), 400.0)
+
+        self.assertAlmostEqual(0.0005, result['distance'])
+        self.assertEqual((1.0, 0.0, 0.0), result['direction'])
+
+    def test_he_blast_rejects_structural_hit_outside_radius(self):
+        result = combat_rules.he_blast_contact(
+            _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                  explosion_radius=4.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (10.0, 0.0, 0.0),
+            (_collision(4.001, 1.0, _material(0.0)),), 400.0)
+
+        self.assertIsNone(result)
+
+    def test_he_blast_reuses_caller_roll_without_random_sampling(self):
+        original_uniform = combat_rules.random.uniform
+        combat_rules.random.uniform = lambda *unused: self.fail(
+            'HE contact must use the caller-owned rolled damage')
+        try:
+            result = combat_rules.he_blast_contact(
+                _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                      explosion_radius=10.0),
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                (10.0, 0.0, 0.0),
+                (_collision(0.0, 1.0, _material(0.0)),), 321.0)
+        finally:
+            combat_rules.random.uniform = original_uniform
+
+        self.assertEqual(160, result['damage'])
+
+    def test_he_blast_material_can_opt_out_of_spall_liner(self):
+        lined = _collision(0.0, 1.0, _material(50.0))
+        opt_out = _collision(
+            0.0, 1.0, _material(50.0, useAntifragmentationLining=False))
+        shot = _shot(kind='HIGH_EXPLOSIVE', damage=400.0,
+                     explosion_radius=10.0)
+
+        lined_result = combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (lined,), 400.0, 1.5)
+        opt_out_result = combat_rules.he_blast_contact(
+            shot, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0), (opt_out,), 400.0, 1.5)
+
+        self.assertEqual(102, lined_result['damage'])
+        self.assertEqual(135, opt_out_result['damage'])
 
 
 if __name__ == '__main__':

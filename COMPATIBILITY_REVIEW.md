@@ -1235,6 +1235,40 @@ killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
 camera shake is not ported. Whether the resulting rocking magnitude matches
 retail still needs exact Windows acceptance.
 
+Non-penetrating HE and nearby splash now require a real structural collision
+inside the shell's blast sphere. The previous victim-origin radius check and
+whole-hull minimum-armour fallback could respectively miss a large vehicle's
+near surface and invent damage when no plate was hit. Loaded component
+`hitTester.bbox` values now provide at most thirteen directions per structural
+component; the existing four-field native collision adapter establishes the
+first structural plate on each ray. Selection maximizes the existing HE damage
+law over reachable candidates, sharing one victim damage roll and using the
+actual burst-to-plate distance and nominal armour. External screens remain in
+the collision prefix; their gap to the structural plate now contributes to
+blast distance. This change retains the existing structural armour absorption
+policy and does not add an unverified screen absorption formula.
+
+Blast candidates also require a clear static scenery segment through the
+existing mask-128 query and broken-destructible filter. A surface burst starts
+that visibility query on the incoming side so a wall cannot be bypassed by
+starting inside it. Direct HE uses the established collision-query burst;
+nearby victims use the projectile cursor and the same per-target presentation
+offset as direct collision. Hull/ground split and detached-turret histories
+retain the direct-collision path's explicitly recorded live-pose boundary.
+Missing geometry never supplies armour or an interior critical cone, and a
+failed nearby victim cannot discard another victim's effect. Penetrating HE
+keeps full direct damage and does not add an external splash explosion.
+
+These changes follow the historical [Wargaming HE damage explanation](https://worldoftanks.com/en/news/general-news/high-explosive-damage-explanation/),
+which describes damage through reachable armour in an explosion sphere. The
+finite component directions are a local implementation, not recovered retail
+server sampling. Dynamic vehicle/wreck occlusion and exhaustive weak-spot
+coverage are not established by this static-scene check. AP/APCR normalization,
+HEAT gap accounting and the stock penetration preview remain unchanged.
+Pure-data and adapter tests establish the stated local geometry and terminal
+contracts; exact Chinese HD #1513 Windows gameplay and frame pacing still need
+runtime acceptance.
+
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision

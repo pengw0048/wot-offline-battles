@@ -35,7 +35,7 @@ from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _collide_vehicle_evidence_at_matrix,
     _component_aim_angles, _pose_components, collide_vehicle_at_matrix,
     encode_damage_sticker, pose_animation_writes,
-    reset_pose_animation_writes)
+    reset_pose_animation_writes, vehicle_blast_probe_points_at_matrix)
 from gui.mods.offline_lan_0922.entities.runtime import EntityPropertyBuilder
 from gui.mods.offline_lan_0922.projectile_manager import InFlightProjectiles
 from gui.mods.offline_lan_0922.projectile_runtime import (
@@ -12739,9 +12739,8 @@ class BattleRuntime(object):
         if potential_damage is not None:
             # The armour ledger needs the roll the damage law already made,
             # before armour and modules reduced it.  Splash carries no roll:
-            # its own law rolls a different quantity and the server excludes
-            # splash from blocked damage.  An overlay-edited shell can roll
-            # past 5000, the exact ceiling the wire validator and the battle
+            # the server excludes splash from blocked damage. An overlay-edited
+            # shell can roll past 5000, the ceiling the wire validator and battle
             # server enforce, so saturate the statistic instead of letting
             # the validator drop the whole terminal.
             effect['potential_damage'] = max(
@@ -12764,6 +12763,136 @@ class BattleRuntime(object):
             effect.update(self._critical_proposal_contract(
                 record, critical, hull_damage, critical_delta))
         return effect
+
+    def _projectile_he_scene_origin(self, impact, state):
+        """Keep a surface burst's visibility ray on the incoming side."""
+        burst = self._vector(impact)
+        if not isinstance(state, dict):
+            return burst
+        try:
+            elapsed = float(state.get('elapsed', 0.0))
+            velocity = state['velocity']
+            gravity = state['gravity']
+            incoming = self._vector(tuple(
+                float(velocity[axis]) + float(gravity[axis]) * elapsed
+                for axis in range(3)))
+            if incoming.length > 1.0e-9:
+                incoming.normalise()
+                return burst - incoming.scale(2.0 * _SHOT_OCCLUSION_EPSILON)
+        except (KeyError, TypeError, ValueError, IndexError):
+            pass
+        return burst
+
+    def _projectile_he_world_visible(self, scene_start, point, burst):
+        """Test scenery without destroying props while searching blast rays."""
+        endpoint = self._vector(point)
+        if (endpoint - burst).length <= _SHOT_OCCLUSION_EPSILON:
+            # This is the already established direct contact itself.
+            return True
+        distance = float((endpoint - scene_start).length)
+        collision_filter = None
+        make_filter = getattr(
+            self._destructibles, 'horizontal_collision_filter', None)
+        if callable(make_filter):
+            collision_filter = make_filter(scene_start, endpoint)
+        hit = self._collide_down(scene_start, endpoint, collision_filter)
+        return (hit is None or
+                float((hit[0] - scene_start).length) +
+                _SHOT_OCCLUSION_EPSILON >= distance)
+
+    def _projectile_he_blast_contact(
+            self, meta, record, target, shot, impact, rolled_damage,
+            state=None, pose=None, seed=None):
+        """Choose maximum damage among proved, reachable native surfaces.
+
+        Component bounds only generate finite directions. Every damage
+        candidate needs a real structural collision inside the blast sphere;
+        neither a missing ray nor an unavailable model supplies armour.
+        """
+        burst = self._vector(impact)
+        radius = combat_rules.he_radius(shot)
+        if radius <= 0.0:
+            return None
+        probe_target = target
+        body_matrix = None
+        chassis_matrix = None
+        if pose is not None:
+            descriptor = self._projectile_descriptor_at_pose(target, pose)
+            if (self._projectile_pitch_hull_aiming(descriptor) or
+                    bool(getattr(target, 'isTurretDetached', False))):
+                return None
+            probe_target = self._projectile_frozen_target(target, pose)
+            if probe_target is None:
+                return None
+            body_matrix = probe_target.matrix
+        elif record.get('local') and self._local_matrix is not None:
+            body_matrix = self._local_body_pose()
+            chassis_matrix = self._local_matrix
+        elif record.get('native_remote'):
+            body_matrix, chassis_matrix = self._projectile_vehicle_matrices(
+                record, target)
+        else:
+            body_matrix = getattr(target, 'matrix', None)
+        spall = tank_collision.descriptor_spall_coefficient(
+            getattr(probe_target, 'typeDescriptor', None))
+        scene_start = self._projectile_he_scene_origin(impact, state)
+        candidates = []
+
+        def collect(start, end, collisions):
+            contact = combat_rules.he_blast_contact(
+                shot, impact, _xyz(start), _xyz(end), collisions,
+                rolled_damage, spall_coefficient=spall)
+            if contact is not None:
+                candidates.append(contact)
+
+        points = list(vehicle_blast_probe_points_at_matrix(
+            probe_target, body_matrix, burst, radius, self._runtime.math,
+            chassis_matrix=chassis_matrix))
+        if seed is not None:
+            collect(seed[0], seed[1], seed[2])
+            # Keep the precise incoming direction as an additional probe;
+            # its existing module trace can be shorter than the HE sphere.
+            delta = seed[1] - seed[0]
+            if delta.length > 1.0e-9:
+                delta.normalise()
+                points.insert(0, burst + delta.scale(radius))
+        directions = set()
+        for point in points:
+            delta = point - burst
+            if delta.length <= 1.0e-9:
+                continue
+            delta.normalise()
+            key = tuple(round(value, 9) for value in _xyz(delta))
+            if key in directions:
+                continue
+            directions.add(key)
+            start = burst - delta.scale(_SHOT_OCCLUSION_EPSILON)
+            end = burst + delta.scale(radius)
+            try:
+                if body_matrix is not None:
+                    collisions = collide_vehicle_at_matrix(
+                        probe_target, body_matrix, start, end,
+                        self._runtime.math, chassis_matrix=chassis_matrix)
+                else:
+                    collisions = target.collideSegmentExt(start, end)
+                collect(start, end, collisions)
+            except Exception as error:
+                self._report_projectile_terminal_failure(
+                    meta, state or {}, 'he_surface',
+                    str(record.get('network_id')), error)
+        # Reuse the victim's one damage roll for selection and application.
+        # A blocked weak spot does not hide another reachable candidate.
+        candidates.sort(key=lambda item: (-item['damage'], item['distance']))
+        for contact in candidates:
+            try:
+                if self._projectile_he_world_visible(
+                        scene_start, contact['point'], burst):
+                    return contact
+            except Exception as error:
+                self._report_projectile_terminal_failure(
+                    meta, state or {}, 'he_occlusion',
+                    str(record.get('network_id')), error)
+        return None
 
     def _projectile_direct_effect(self, meta, state, terminal_data):
         target_key = terminal_data.get('target_key')
@@ -12825,8 +12954,6 @@ class BattleRuntime(object):
             if matching:
                 terminal_data['world_normal'] = _xyz(
                     matching[0].worldNormal)
-        armor = combat_rules.he_nominal_armor(
-            collisions, getattr(critical_target, 'typeDescriptor', None))
         damage_sticker = self._projectile_damage_sticker(
             record, critical_target, shot, trace_start, trace_end,
             collisions, result,
@@ -12839,18 +12966,6 @@ class BattleRuntime(object):
             damage_rolls.append(rolled)
             return rolled
 
-        damage = combat_rules.damage(
-            shot, result, armor, random_uniform=capture_damage_roll,
-            spall_coefficient=tank_collision.descriptor_spall_coefficient(
-                getattr(critical_target, 'typeDescriptor', None)))
-        hull_damage = damage
-        legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
-        attacker_id = int(getattr(
-            source, 'id', meta.get('shooter_id', 0)))
-        deadeye = bool(_field(shot, 'deadeye', False))
-        layers = combat_rules.collision_layers(collisions)
-        critical = None
-        critical_delta = {}
         critical_impact = self._vector(terminal_data['impact'])
         query_delta = query[1] - query[0]
         query_length = float(query_delta.length)
@@ -12865,16 +12980,53 @@ class BattleRuntime(object):
                 0.0, min(query_length, float(contact_distance)))
             query_delta.normalise()
             critical_impact = query[0] + query_delta.scale(contact_distance)
+        is_he = combat_rules.is_he(shot)
+        if is_he:
+            # Direct and nearby victims share one combat burst even when the
+            # moving-target query differs from the visual projectile chord.
+            terminal_data['blast_impact'] = _xyz(critical_impact)
+        damage = combat_rules.damage(
+            shot, 2 if is_he else result, 0.0,
+            random_uniform=capture_damage_roll,
+            spall_coefficient=tank_collision.descriptor_spall_coefficient(
+                getattr(critical_target, 'typeDescriptor', None)))
+        blast_contact = None
+        if is_he and int(result) != 2:
+            try:
+                blast_contact = self._projectile_he_blast_contact(
+                    meta, record, target, shot, _xyz(critical_impact),
+                    damage, state=state, pose=collision_pose,
+                    seed=(query[0], query[1], terminal_data['collisions']))
+            except Exception as error:
+                self._report_projectile_terminal_failure(
+                    meta, state, 'he_direct_surface',
+                    str(record.get('network_id')), error)
+            damage = 0 if blast_contact is None else blast_contact['damage']
+        hull_damage = damage
+        legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
+        attacker_id = int(getattr(
+            source, 'id', meta.get('shooter_id', 0)))
+        deadeye = bool(_field(shot, 'deadeye', False))
+        layers = combat_rules.collision_layers(collisions)
+        explosion_direction = trace_end - trace_start
+        if blast_contact is not None:
+            layers = combat_rules.collision_layers(
+                blast_contact['collisions'])
+            explosion_direction = self._vector(blast_contact['direction'])
+        critical = None
+        critical_delta = {}
         if int(result) == 0:
             damage = 0
             hull_damage = 0
         self._install_critical_equipment_effects(record, critical_target)
-        if int(result) != 0 and combat_rules.is_he(shot):
+        if int(result) != 0 and is_he:
             damage, critical, critical_delta = (
                 critical_damage.propose_explosion(
                     critical_target, layers, critical_impact,
-                    trace_end - trace_start, damage, legacy_shell,
-                    attacker_id, deadeye=deadeye, with_delta=True))
+                    explosion_direction, damage, legacy_shell,
+                    attacker_id, deadeye=deadeye, with_delta=True,
+                    allow_interior=(int(result) == 2 or
+                                    blast_contact is not None)))
         elif int(result) != 0:
             damage, critical, critical_delta = critical_damage.propose_direct(
                 critical_target, layers, trace_start, trace_end, damage,
@@ -12896,13 +13048,13 @@ class BattleRuntime(object):
                 contact is not None and
                 contact.get('layer') == 'structural'))
 
-    def _projectile_splash_effects(self, meta, impact, direct_key):
+    def _projectile_splash_effects(self, meta, impact, direct_key, state=None,
+                                   visual_impact=None):
         source = self._projectile_source_entity(meta)
         shot = self._projectile_shot(meta)
-        if not shot:
+        if not shot or not combat_rules.is_he(shot):
             return []
-        radius = combat_rules.he_radius(shot)
-        if radius <= 0.0:
+        if combat_rules.he_radius(shot) <= 0.0:
             return []
         burst = self._vector(impact)
         legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
@@ -12917,51 +13069,69 @@ class BattleRuntime(object):
                     not getattr(target, 'isStarted', False) or
                     not self._record_alive(record, target)):
                 continue
-            position = _xyz(getattr(
-                target, 'position', record.get('state', {})))
-            delta = tuple(position[index] - impact[index]
-                          for index in range(3))
-            distance = math.sqrt(sum(value * value for value in delta))
-            if distance > radius:
-                continue
-            aim = self._vector((
-                position[0], position[1] + 1.0, position[2]))
             try:
-                if record.get('native_remote'):
-                    body_matrix, chassis_matrix = \
-                        self._projectile_vehicle_matrices(record, target)
-                    collisions = tuple(collide_vehicle_at_matrix(
-                        target, body_matrix, burst, aim,
-                        self._runtime.math,
-                        chassis_matrix=chassis_matrix) or ())
-                else:
-                    collisions = tuple(
-                        target.collideSegmentExt(burst, aim) or ())
-                nominal = combat_rules.he_nominal_armor(
-                    collisions, target.typeDescriptor)
-            except Exception:
-                collisions = ()
-                nominal = combat_rules.he_hull_armor(
-                    target.typeDescriptor)
-            damage = combat_rules.he_splash_damage(
-                shot, nominal, distance / radius,
-                spall_coefficient=tank_collision.descriptor_spall_coefficient(
-                    target.typeDescriptor))
-            if damage <= 0:
-                continue
-            hull_damage = damage
-            self._install_critical_equipment_effects(record, target)
-            damage, critical, critical_delta = (
-                critical_damage.propose_explosion(
-                    target, combat_rules.collision_layers(collisions),
-                    burst, aim - burst, damage, legacy_shell,
-                    int(getattr(source, 'id', meta.get('shooter_id', 0))),
-                    deadeye=bool(_field(shot, 'deadeye', False)),
-                    with_delta=True))
-            critical = self._critical_with_crew_roster(target, critical)
-            effects.append(self._projectile_effect(
-                record, damage, 2, impact, critical, hull_damage,
-                critical_delta, position))
+                pose = None
+                critical_target = target
+                if state is not None:
+                    # Use the same target timeline as the projectile chord.
+                    offset = float((meta.get('presentation_offsets') or {}).get(
+                        key, 0.0))
+                    pose = self._projectile_historic_pose(
+                        key, float(state['cursor_time']) - offset)
+                    if pose is None:
+                        self._report_projectile_terminal_failure(
+                            meta, state, 'he_splash_pose', key,
+                            'historic_pose_unavailable')
+                        continue
+                    descriptor = self._projectile_descriptor_at_pose(target, pose)
+                    if (self._projectile_pitch_hull_aiming(descriptor) or
+                            bool(getattr(target, 'isTurretDetached', False))):
+                        # Match the existing chord boundary for vehicles whose
+                        # separate body/ground or attachment history is absent.
+                        record['projectile_collision_pose_boundary'] = (
+                            'pitch_hull_body_ground_unavailable_live_fallback'
+                            if self._projectile_pitch_hull_aiming(descriptor)
+                            else 'turret_attachment_history_unavailable_live_fallback')
+                        pose = None
+                    else:
+                        critical_target = self._projectile_frozen_target(
+                            target, pose)
+                        if critical_target is None:
+                            self._report_projectile_terminal_failure(
+                                meta, state, 'he_splash_pose', key,
+                                'historic_component_matrix_unavailable')
+                            continue
+                # One victim roll is shared by all candidate directions.
+                rolled_damage = combat_rules.damage(shot, 2, 0.0)
+                contact = self._projectile_he_blast_contact(
+                    meta, record, target, shot, impact, rolled_damage,
+                    state=state, pose=pose)
+                if contact is None or contact['damage'] <= 0:
+                    continue
+                hull_damage = contact['damage']
+                self._install_critical_equipment_effects(record, critical_target)
+                damage, critical, critical_delta = (
+                    critical_damage.propose_explosion(
+                        critical_target,
+                        combat_rules.collision_layers(contact['collisions']),
+                        burst, self._vector(contact['direction']), hull_damage,
+                        legacy_shell,
+                        int(getattr(source, 'id', meta.get('shooter_id', 0))),
+                        deadeye=bool(_field(shot, 'deadeye', False)),
+                        with_delta=True))
+                critical = self._critical_with_crew_roster(
+                    critical_target, critical)
+                position = _xyz(getattr(
+                    critical_target, 'position', record.get('state', {})))
+                effects.append(self._projectile_effect(
+                    record, damage, 2,
+                    impact if visual_impact is None else visual_impact,
+                    critical, hull_damage, critical_delta, position))
+            except Exception as error:
+                # A missing victim surface cannot discard an established
+                # direct effect or prevent other blast victims from resolving.
+                self._report_projectile_terminal_failure(
+                    meta, state or {}, 'he_splash', key, error)
             if len(effects) >= 30:
                 break
         return effects
@@ -13107,9 +13277,14 @@ class BattleRuntime(object):
             if outcome == 'impact':
                 impact = tuple(data.get('impact', impact))
                 direct = self._projectile_direct_effect(meta, state, data)
-                if meta.get('is_he'):
+                if (meta.get('is_he') and
+                        not (direct is not None and
+                             int(direct.get('shot_result', 1)) == 2)):
+                    # A penetrating HE shell bursts inside its direct victim.
                     splash = self._projectile_splash_effects(
-                        meta, impact, data.get('target_key'))
+                        meta, data.get('blast_impact', impact),
+                        data.get('target_key'), state=state,
+                        visual_impact=impact)
         except Exception as error:
             # A malformed native collision/proposal cannot be allowed to
             # damage a different target. Retire the ledger entry without

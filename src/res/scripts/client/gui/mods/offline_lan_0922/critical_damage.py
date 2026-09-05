@@ -1473,13 +1473,14 @@ def propose_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
 
 
 def apply_explosion(vehicle, collisions, burst, direction, hull_damage,
-                    shell, attacker_id, deadeye=False):
+                    shell, attacker_id, deadeye=False, allow_interior=True):
     """Apply one HE interior cone and return its authoritative delta.
 
     Penetrating HE, a non-penetrating direct hit, and remote splash all use this
     same entry point. Native collision materials still score exposed modules;
     adopted interior targets come only from the finite cone, never the solid
-    projectile ray.
+    projectile ray. Without a reachable structural surface, callers disable
+    the interior cone while preserving collisions with exposed modules.
     """
     covered = set()
     for collision in collisions or ():
@@ -1491,9 +1492,9 @@ def apply_explosion(vehicle, collisions, burst, direction, hull_damage,
         except Exception:
             continue
     try:
-        hits = _offh_internal_cone_hits(
+        hits = (_offh_internal_cone_hits(
             vehicle, getattr(vehicle, 'typeDescriptor', None), burst,
-            direction, shell, covered)
+            direction, shell, covered) if allow_interior else ())
     except Exception as error:
         LOG_DEBUG('HE interior cone unavailable:', str(error))
         hits = None
@@ -1507,7 +1508,8 @@ def apply_explosion(vehicle, collisions, burst, direction, hull_damage,
 
 
 def propose_explosion(vehicle, collisions, burst, direction, hull_damage,
-                      shell, attacker_id, deadeye=False, with_delta=False):
+                      shell, attacker_id, deadeye=False, with_delta=False,
+                      allow_interior=True):
     """Return an HE-cone critical proposal without mutating the live Vehicle."""
     if vehicle is None:
         raise ValueError('critical proposal requires a vehicle')
@@ -1515,7 +1517,7 @@ def propose_explosion(vehicle, collisions, burst, direction, hull_damage,
     before = _state(shadow)
     damage, payload = apply_explosion(
         shadow, collisions, burst, direction, hull_damage, shell,
-        attacker_id, deadeye)
+        attacker_id, deadeye, allow_interior=allow_interior)
     if with_delta:
         after = _state(shadow)
         delta = _damage_delta(

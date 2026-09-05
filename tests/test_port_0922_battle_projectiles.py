@@ -1124,7 +1124,7 @@ class BattleProjectileTests(unittest.TestCase):
                         int(shell_kind == 'HIGH_EXPLOSIVE'),
                         battle._projectile_splash_effects.call_count)
 
-    def test_track_only_contact_blasts_hull_for_he_but_not_solid_shot(self):
+    def test_track_only_contact_cannot_invent_hull_damage(self):
         for shell_kind in ('HIGH_EXPLOSIVE', 'ARMOR_PIERCING'):
             with self.subTest(shell=shell_kind):
                 battle, unused_world, target_key, state = (
@@ -1161,10 +1161,7 @@ class BattleProjectileTests(unittest.TestCase):
                         meta, state, terminal_data)
 
                 self.assertEqual(1, effect['shot_result'])
-                if shell_kind == 'HIGH_EXPLOSIVE':
-                    self.assertGreater(effect['damage'], 0)
-                else:
-                    self.assertEqual(0, effect['damage'])
+                self.assertEqual(0, effect['damage'])
 
     def test_native_factory_exposes_unblended_projectile_matrix(self):
         canonical_matrix = object()
@@ -5067,7 +5064,7 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(390, effect['damage'])
         battle._projectile_frozen_target.assert_called_once_with(
             target, collision_pose)
-        self.assertIs(frozen_descriptor, nominal.call_args.args[1])
+        nominal.assert_not_called()
         self.assertIs(frozen_target, critical.call_args.args[0])
 
     def test_he_direct_hit_uses_the_finite_explosion_cone(self):
@@ -5107,7 +5104,9 @@ class BattleProjectileTests(unittest.TestCase):
                 combat_rules, 'resolve_armor_contact',
                 return_value={'result': 1}), \
                 mock.patch.object(
-                    combat_rules, 'he_nominal_armor', return_value=100.0), \
+                    battle, '_projectile_he_blast_contact', return_value={
+                        'damage': 200, 'collisions': (collision,),
+                        'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     combat_rules, 'damage', return_value=200), \
                 mock.patch.object(
@@ -5257,15 +5256,17 @@ class BattleProjectileTests(unittest.TestCase):
         meta = battle._projectile_wire_meta(event)
 
         with mock.patch.object(
-                combat_rules, 'he_splash_damage', return_value=90), \
+                battle, '_projectile_he_blast_contact', return_value={
+                    'damage': 90, 'collisions': (),
+                    'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     critical_damage, 'propose_explosion',
                     return_value=(90, None, None)):
             effects = battle._projectile_splash_effects(
                 meta, (9.0, 1.0, 0.0), 'player:7')
 
-        # Splash rolls its own distance-attenuated quantity and the server
-        # excludes splash from blocked damage, so it publishes no roll.
+        # The server excludes splash from blocked damage, so it publishes no
+        # potential-damage statistic.
         self.assertEqual(1, len(effects))
         self.assertEqual(90, effects[0]['damage'])
         self.assertNotIn('potential_damage', effects[0])

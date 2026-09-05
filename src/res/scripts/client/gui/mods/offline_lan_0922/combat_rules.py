@@ -2,6 +2,7 @@ from __future__ import print_function
 
 """Pinned #1513 armour and HE laws behind native input adapters."""
 
+import math
 import random
 
 
@@ -223,32 +224,6 @@ def _offh_he_radius(shot):
 	return (cal * cal / 5555.0) if cal > 0.0 else 0.0
 
 
-def _offh_he_hull_armor(td):
-	'''Thinnest STRUCTURAL plate the hull carries, from the descriptor.
-	
-	Used when the blast ray finds no plate at all. Returning 0 there let the
-	blast through untouched; the thinnest plate is the attacker-friendly but
-	still bounded assumption - blast looks for the weak facing.'''
-	best = None
-	try:
-		_hull = getattr(td, 'hull', None)
-		if isinstance(_hull, dict):
-			mats = _hull.get('materials') or {}
-		else:
-			mats = getattr(_hull, 'materials', None) or {}
-		for m in mats.values():
-			if getattr(m, 'vehicleDamageFactor', 1.0) == 0.0:
-				continue
-			a = float(getattr(m, 'armor', 0.0) or 0.0)
-			if a <= 0.0:
-				continue
-			if best is None or a < best:
-				best = a
-	except Exception:
-		return 0.0
-	return best or 0.0
-
-
 def _offh_he_nominal_armor(all_hits, td=None):
 	'''Nominal thickness of the first STRUCTURAL plate on the ray.
 	
@@ -271,9 +246,8 @@ def _offh_he_nominal_armor(all_hits, td=None):
 			best = (_d, _a)
 	if best is not None:
 		return best[1]
-	# No plate on the ray. Zero would hand the blast a free pass, so fall back to
-	# the hull's thinnest structural plate when the descriptor is available.
-	return _offh_he_hull_armor(td) if td is not None else 0.0
+	# An unavailable plate is not the descriptor's thinnest plate.
+	return None
 
 
 def _offh_he_factor(shell, name, default, maximum=None):
@@ -500,6 +474,134 @@ def collision_layers(collisions):
     return sorted(result, key=lambda item: item[0])
 
 
+def _offh_he_xyz(value):
+	"""Read one finite three-coordinate point from a native vector or tuple."""
+	try:
+		result = tuple(float(value[index]) for index in range(3))
+	except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+			OverflowError):
+		return None
+	if any(item != item or abs(item) == float('inf') for item in result):
+		return None
+	return result
+
+
+def _offh_he_collision_values(collision):
+	"""Extract distance and material while retaining the native collision."""
+	try:
+		distance = getattr(collision, 'dist')
+		material = getattr(collision, 'matInfo')
+	except (AttributeError, TypeError):
+		try:
+			distance = collision[0]
+			material = collision[2]
+		except (IndexError, KeyError, TypeError):
+			return None
+	try:
+		distance = float(distance)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if distance != distance or abs(distance) == float('inf'):
+		return None
+	return distance, material, collision
+
+
+def _offh_he_material_is_structural(material):
+	"""Only an explicit positive vehicle-damage factor is structure."""
+	factor = _offh_material_value(
+		material, 'vehicleDamageFactor', _OFFH_MISSING)
+	if factor is _OFFH_MISSING:
+		return False
+	try:
+		factor = float(factor)
+	except (TypeError, ValueError, OverflowError):
+		return False
+	return factor == factor and abs(factor) != float('inf') and factor > 0.0
+
+
+def he_blast_contact(shot, burst, start, end, collisions, rolled_damage,
+					 spall_coefficient=1.0):
+	"""Resolve one real structural HE contact from already-native ray evidence.
+
+	``collisions`` remains native evidence: this routine only orders it, rebuilds
+	the contact along ``start``/``end``, and applies the existing HE formula to
+	the first structural material at or beyond the burst.  It never samples
+	randomness and never substitutes a descriptor-wide armour fallback.
+	"""
+	converted = legacy_shot(shot)
+	if not _offh_is_he(converted):
+		return None
+	burst = _offh_he_xyz(burst)
+	start = _offh_he_xyz(start)
+	end = _offh_he_xyz(end)
+	radius = _offh_he_radius(converted)
+	try:
+		rolled_damage = float(rolled_damage)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if (burst is None or start is None or end is None or radius <= 0.0 or
+			rolled_damage != rolled_damage or abs(rolled_damage) == float('inf')):
+		return None
+	delta = tuple(end[index] - start[index] for index in range(3))
+	length_squared = sum(item * item for item in delta)
+	if length_squared <= 0.0:
+		return None
+	length = math.sqrt(length_squared)
+	direction = tuple(item / length for item in delta)
+	burst_along = sum((burst[index] - start[index]) * direction[index]
+					for index in range(3))
+	ordered = []
+	for collision in collisions or ():
+		values = _offh_he_collision_values(collision)
+		if values is not None:
+			ordered.append(values)
+	ordered.sort(key=lambda item: item[0])
+	through_contact = []
+	for distance_along, material, collision in ordered:
+		# The native distance must be on the queried segment; no extrapolated
+		# evidence may create HE damage outside its blast ray.
+		if distance_along < 0.0 or distance_along > length:
+			continue
+		if distance_along < burst_along - 1.0e-3:
+			continue
+		point = tuple(start[index] + direction[index] * distance_along
+					  for index in range(3))
+		distance = math.sqrt(sum(
+			(point[index] - burst[index]) ** 2 for index in range(3)))
+		structural = _offh_he_material_is_structural(material)
+		if distance > radius:
+			# A real structural plate in front of the query blocks a later one,
+			# even when this ray reached it outside the blast sphere.
+			if structural:
+				return None
+			continue
+		through_contact.append(collision)
+		if not structural:
+			continue
+		try:
+			nominal_armor = float(
+				_offh_material_value(material, 'armor', _OFFH_MISSING))
+		except (TypeError, ValueError, OverflowError):
+			return None
+		if (nominal_armor != nominal_armor or
+				abs(nominal_armor) == float('inf') or nominal_armor < 0.0):
+			return None
+		uses_liner = _offh_material_flag(
+			material, 'useAntifragmentationLining', True)
+		spall = spall_coefficient if uses_liner else 1.0
+		return {
+			'damage': _offh_he_damage(
+				converted, rolled_damage, nominal_armor, distance / radius, spall),
+			'nominal_armor': nominal_armor,
+			'distance': distance,
+			'point': point,
+			'direction': direction,
+			'collision': collision,
+			'collisions': tuple(through_contact),
+		}
+	return None
+
+
 def _call_with_uniform(function, uniform, *args):
     if uniform is None:
         return function(*args)
@@ -608,10 +710,6 @@ def he_radius(shot):
 
 def is_he(shot):
     return _offh_is_he(legacy_shot(shot))
-
-
-def he_hull_armor(descriptor):
-    return _offh_he_hull_armor(descriptor)
 
 
 def he_factors(shot):
