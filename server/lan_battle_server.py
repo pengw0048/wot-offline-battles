@@ -1002,6 +1002,18 @@ def _valid_shells_fired(value):
     return True
 
 
+def _valid_equipment_used(value):
+    """Report whether one receipt's consumables-used section is well formed."""
+    if not isinstance(value, (list, tuple)) or len(value) > 3:
+        return False
+    for compact_descr in value:
+        if (isinstance(compact_descr, bool) or
+                not isinstance(compact_descr, int) or
+                not 1 <= compact_descr <= 2 ** 31 - 1):
+            return False
+    return True
+
+
 def _persisted_result_receipt(value):
     """Return a plain bounded receipt loaded from disk, or raise ValueError."""
     if (not isinstance(value, dict) or
@@ -1055,6 +1067,11 @@ def _persisted_result_receipt(value):
         value["shells_fired"] = {}
     elif not _valid_shells_fired(fired):
         raise ValueError("invalid persisted battle receipt ammunition")
+    used = value.get("equipment_used")
+    if used is None:
+        value["equipment_used"] = []
+    elif not _valid_equipment_used(used):
+        raise ValueError("invalid persisted battle receipt consumables")
     public_rows = value.get("public_results")
     if not isinstance(public_rows, list) or not 1 <= len(public_rows) <= 30:
         raise ValueError("invalid persisted public result roster")
@@ -8675,6 +8692,10 @@ class BattleState:
                             self._statistics_row(
                                 "player", player_id)["shells_fired"].items())
                         if int(count) > 0),
+                    "equipment_used": sorted(
+                        int(compact_descr) for compact_descr in
+                        self._statistics_row(
+                            "player", player_id)["equipment_used"]),
                 }
                 receipt_id = receipt["receipt_id"]
                 # One account may finish another arena before an earlier ACK
@@ -10271,6 +10292,11 @@ class BattleState:
                 if not self._clear_vehicle_stun(("player", player_id)):
                     raise RuntimeError("canonical medkit stun clear diverged")
             player.equipment_revision += 1
+            consumed = _exact_int(
+                equipment.contract.get("compactDescr"), 1, 2 ** 31 - 1)
+            if consumed is not None:
+                self._statistics_row(
+                    "player", player_id)["equipment_used"][str(consumed)] = 1
             return self._finish_equipment_intent(
                 player, intent_seq, True, "")
 
@@ -10812,6 +10838,11 @@ class BattleState:
                 # and can turn it back into a shell, which the server cannot:
                 # only the client owns the item definitions.
                 "shells_fired": {},
+                # Consumables activated, by compact descriptor, which the
+                # client does send with the mounted equipment.  #1513 consumes
+                # one of each however many times it was activated, so this is
+                # a set rather than a count.
+                "equipment_used": {},
             }
             self.vehicle_statistics[key] = row
         elif not row["team"]:

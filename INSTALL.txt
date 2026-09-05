@@ -65,8 +65,8 @@ large repair kit. Every item costs nothing.
 A complex optional device is destroyed when you take it off, unless you pay
 the removal price -- the same choice the game gives you.
 
-Shells are spent in battle and cost credits to replace, so reloading after a
-battle is part of what it cost you.
+Shells are spent in battle and cost credits to replace, and so is each
+consumable you use, so resupplying after a battle is part of what it cost you.
 
 A battle leaves your tank as damaged as it ended, and repairing it costs
 credits. The garage shows the damage and the repair button pays for it. The

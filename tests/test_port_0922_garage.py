@@ -1280,6 +1280,69 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual([101, 102], first['crew'])
         self.assertEqual([None, 202], second['crew'])
 
+    # ---- consumables -----------------------------------------------------
+
+    def _consumable_state(self, credits_amount=100000):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {
+            'credits': credits_amount, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][11001] = {'credits': 3000}
+        snapshot['inventoryItems'][11] = {11001: 2}
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_consumable_used_in_battle_leaves_its_slot_empty(self):
+        """The layout still names it, which is what auto-equip refills."""
+        state = self._consumable_state()
+        state.equip_equipments(9, [11001, 0, 0])
+
+        self.assertEqual(
+            [11001], state.settle_battle_consumables(50001, [11001]))
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual([0, 0, 0], list(record['eqs']))
+        self.assertEqual([11001, 0, 0], list(record['eqsLayout']))
+        self.assertEqual(1, state.snapshot()['inventoryItems'][11][11001])
+
+    def test_a_consumable_that_was_not_mounted_is_not_charged(self):
+        state = self._consumable_state()
+
+        self.assertEqual([], state.settle_battle_consumables(50001, [11001]))
+        self.assertEqual(2, state.snapshot()['inventoryItems'][11][11001])
+
+    def test_refilling_a_used_consumable_buys_another(self):
+        state = self._consumable_state()
+        state.equip_equipments(9, [11001, 0, 0])
+        state.settle_battle_consumables(50001, [11001])
+
+        state.equip_equipments(9, [11001, 0, 0])
+
+        # Two owned, one used, one mounted: nothing to buy yet.
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+        state.settle_battle_consumables(50001, [11001])
+        state.equip_equipments(9, [11001, 0, 0])
+        self.assertEqual(
+            100000 - 3000, state.snapshot()['wallet']['credits'])
+
+    def test_an_account_that_cannot_pay_mounts_nothing(self):
+        state = self._consumable_state(credits_amount=100)
+        state.snapshot()['inventoryItems'][11] = {}
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_equipments(9, [11001, 0, 0])
+
+        self.assertEqual([0, 0, 0], list(
+            state.snapshot()['vehicles'][0]['eqs']))
+        self.assertEqual(100, state.snapshot()['wallet']['credits'])
+
+    def test_a_consumable_already_owned_is_mounted_for_nothing(self):
+        state = self._consumable_state()
+
+        state.equip_equipments(9, [11001, 0, 0])
+
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
 
 class FittingRequestTests(unittest.TestCase):
 

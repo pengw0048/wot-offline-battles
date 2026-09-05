@@ -68,9 +68,9 @@ its descriptor says whether the device survives being removed, and one that
 does not is destroyed unless the player pays the game's own removal price --
 10 gold in a career, nothing in a fully unlocked save.
 
-Ammunition is stock now, not scenery. A battle spends the rounds it fired,
-the server reports what it drew by the shell's own position in the gun, and
-reloading buys whatever the depot is short of at this client's prices. An
+Ammunition and consumables are stock now, not scenery. A battle spends the
+rounds it fired and one of each consumable it used, the server reports both,
+and reloading buys whatever the depot is short of at this client's prices. An
 account that cannot pay for a full load does not get one.
 
 A battle leaves the vehicle as damaged as it ended: the client's own

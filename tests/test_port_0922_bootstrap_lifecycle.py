@@ -1258,7 +1258,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
                                      vehicle_type_cd, xp, xp_flag,
                                      tankmen_module=None, rewards=None,
                                      health=None, vehicles_module=None,
-                                     shells_fired=None):
+                                     shells_fired=None, equipment_used=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
                 # The crew award, the earnings it was banked beside and the
@@ -1267,11 +1267,13 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 banked.append(rewards)
                 settled.append(health)
                 spent.append(shells_fired)
+                consumed.append(equipment_used)
                 return {'vehicle_id': 1, 'applied': True}
 
         banked = []
         settled = []
         spent = []
+        consumed = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -1289,6 +1291,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 'rewards': {'xp': 100},
                 'health': 40,
                 'shells_fired': {0: 12},
+                'equipment_used': [11001],
             })
 
         self.assertEqual([live], applied)
@@ -1296,6 +1299,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual([{'xp': 100}], banked)
         self.assertEqual([40], settled)
         self.assertEqual([{0: 12}], spent)
+        self.assertEqual([[11001]], consumed)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
 

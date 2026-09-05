@@ -356,7 +356,7 @@ class GarageStore(object):
                              vehicle_type_compact_descr, battle_xp,
                              xp_to_tankman_flag, tankmen_module=None,
                              rewards=None, health=None, vehicles_module=None,
-                             shells_fired=None):
+                             shells_fired=None, equipment_used=None):
         """Apply and persist one battle's whole settlement exactly once.
 
         The compact crew descriptors, the earnings, the damage the battle did
@@ -387,6 +387,9 @@ class GarageStore(object):
         if shells_fired:
             result['shells_spent'] = state.settle_battle_ammunition(
                 vehicle_type_compact_descr, shells_fired)
+        if equipment_used:
+            result['consumables_spent'] = state.settle_battle_consumables(
+                vehicle_type_compact_descr, equipment_used)
         if rewards is not None:
             # The crew award and the credits it was earned beside share one
             # JSON replacement, so a retried receipt can never bank one

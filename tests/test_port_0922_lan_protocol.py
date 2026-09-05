@@ -596,7 +596,7 @@ class LanProtocolTests(unittest.TestCase):
             'damaging_hits_received', 'deflected_hits_received',
             'crits_received_mask', 'hits_with_damage',
             'sniper_damage_dealt', 'deflection_streak',
-            'best_deflection_streak', 'shells_fired',
+            'best_deflection_streak', 'shells_fired', 'equipment_used',
             'deflected_hits_at_low_health'}, set(rows[1]))
         # Rounds fired are keyed by the shell's index in the gun's shot
         # order, as a string, because the row is broadcast as JSON and an

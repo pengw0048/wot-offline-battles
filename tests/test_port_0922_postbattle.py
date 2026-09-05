@@ -196,6 +196,7 @@ class PostBattleContractTests(unittest.TestCase):
 
         self.assertEqual(40, stored['health'])
         self.assertEqual({0: 12, 1: 3}, stored['shells_fired'])
+        self.assertEqual([], stored['equipment_used'])
         # A bill is still refused: only the client can price a shell.
         self.assertEqual(0, stored['rewards']['ammo_cost'])
 
@@ -203,7 +204,24 @@ class PostBattleContractTests(unittest.TestCase):
         stored = postbattle_store._receipt(_receipt())
 
         self.assertEqual({}, stored['shells_fired'])
+        self.assertEqual([], stored['equipment_used'])
         self.assertEqual(100, stored['health'])
+
+    def test_a_receipt_carries_the_consumables_it_used_once_each(self):
+        """#1513 consumes one of each however many times it was activated."""
+        raw = _receipt()
+        raw['equipment_used'] = [11001, 11001, 11002]
+
+        stored = postbattle_store._receipt(raw)
+
+        self.assertEqual([11001, 11002], stored['equipment_used'])
+
+    def test_a_malformed_consumable_section_is_refused(self):
+        for used in ([0], [-1], ['a'], [1, 2, 3, 4], {'a': 1}):
+            raw = _receipt()
+            raw['equipment_used'] = used
+            with self.assertRaises(ValueError):
+                postbattle_store._receipt(raw)
 
     def test_a_malformed_ammunition_section_is_refused(self):
         for fired in ({'10': 1}, {'0': -1}, {'a': 1}, {'0': 1000000},

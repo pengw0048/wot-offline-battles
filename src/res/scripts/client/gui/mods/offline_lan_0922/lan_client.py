@@ -1475,6 +1475,16 @@ def _valid_battle_receipt(message):
             if (index is None or not 0 <= index <= 9 or count is None or
                     not 0 <= count <= 100000):
                 return False
+    # #1513 consumes one of each consumable the player activated, however many
+    # times they activated it, so this is a set rather than a count.
+    used = message.get('equipment_used')
+    if used is not None:
+        if not isinstance(used, (list, tuple)) or len(used) > 3:
+            return False
+        for compact_descr in used:
+            compact_descr = _exact_int(compact_descr)
+            if compact_descr is None or compact_descr < 1:
+                return False
     public_rows = message.get('public_results')
     if (not isinstance(public_rows, list) or
             not 1 <= len(public_rows) <= 30):

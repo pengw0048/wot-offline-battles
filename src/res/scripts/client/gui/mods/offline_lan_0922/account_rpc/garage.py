@@ -508,23 +508,113 @@ class GarageState(object):
     # ---- consumables ----------------------------------------------------
 
     def equip_equipments(self, vehicle_inventory_id, equipments):
-        """Mount the regular consumables of one equipment payload."""
+        """Mount the regular consumables of one equipment payload.
+
+        A consumable a battle used has to be bought again, exactly as a round
+        does, so the layout is filled from the depot and whatever the depot is
+        short of is paid for at this client's prices.
+        """
         values = [_int(value) for value in (equipments or ())]
         if len(values) > EQUIPMENT_PAYLOAD_SLOT_COUNT:
             raise GarageError('an equipment payload carries at most four slots')
         # The trailing battle-booster slot has no published counterpart.
         values = values[:EQUIPMENT_SLOT_COUNT]
         values += [0] * (EQUIPMENT_SLOT_COUNT - len(values))
-        record = self._record(vehicle_inventory_id)
+        record = self._record(vehicle_inventory_id, touch=False)
+        purchase, owned = self._consumables_to_buy(record, values)
+        # Every refusal happens before the first slot is filled, so a layout
+        # the account cannot pay for leaves the vehicle exactly as it was.
+        self._charge(self._consumables_cost(purchase))
+        self._touched.add(_int(record.get('id', 0)))
         record['eqs'] = values
-        # Offline resupply is instant, so the vehicle is always at its layout.
-        # Vehicle.isAutoEquipFull compares the two and warns when they differ.
+        # The vehicle is at its layout again, which is what the player asked
+        # for.  Vehicle.isAutoEquipFull compares the two and warns when they
+        # differ, and a battle is what makes them differ.
         record['eqsLayout'] = list(values)
         for compact_descr in values:
-            self._own(record, compact_descr, 11)
+            if not compact_descr:
+                continue
+            self._publish_owned(
+                compact_descr, EQUIPMENT_ITEM_TYPE,
+                _int(owned.get(compact_descr, 0)) +
+                purchase.get(compact_descr, 0))
+            self._own(record, compact_descr, EQUIPMENT_ITEM_TYPE)
             self._price(compact_descr)
         self.revision += 1
         return record
+
+    def _consumables_to_buy(self, record, values):
+        """Return what a consumable layout must buy, and the stock it read."""
+        # Read the stock before anything is published: the caller's loop
+        # raises the very counts this arithmetic is against.
+        owned = dict(self._snapshot.get('inventoryItems', {}).get(
+            EQUIPMENT_ITEM_TYPE, {}))
+        others = [row for row in self._records()
+                  if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+        wanted = {}
+        for compact_descr in values:
+            if compact_descr:
+                wanted[compact_descr] = wanted.get(compact_descr, 0) + 1
+        purchase = {}
+        for compact_descr, count in wanted.items():
+            needed = count + self._mounted(
+                compact_descr, EQUIPMENT_ITEM_TYPE, others)
+            missing = needed - _int(owned.get(compact_descr, 0))
+            if missing > 0:
+                purchase[compact_descr] = missing
+        return purchase, owned
+
+    def _consumables_cost(self, purchase):
+        """Price a consumable resupply, in the currency #1513 charges."""
+        total = {}
+        for compact_descr, count in dict(purchase or {}).items():
+            price = self._in_credits(
+                self._item_cost(compact_descr, count), EQUIPMENT_ITEM_TYPE)
+            for currency, value in price.items():
+                total[currency] = _int(total.get(currency, 0)) + _int(value)
+        return total
+
+    def settle_battle_consumables(self, vehicle_type_compact_descr, used):
+        """Take the consumables a battle used out of the vehicle and account.
+
+        #1513 consumes one of each consumable the player activated, however
+        many times they activated it, and leaves the slot empty while the
+        layout still names it -- which is exactly what ``eqs`` and
+        ``eqsLayout`` are for.
+        """
+        wanted = set(_int(value) for value in (used or ()) if _int(value))
+        if not wanted:
+            return []
+        record = self._record_by_vehicle_type(vehicle_type_compact_descr)
+        mounted = list(record.get('eqs') or ())
+        spent = []
+        for slot, compact_descr in enumerate(mounted):
+            compact_descr = _int(compact_descr)
+            if compact_descr and compact_descr in wanted:
+                mounted[slot] = 0
+                spent.append(compact_descr)
+        if not spent:
+            return []
+        record['eqs'] = mounted
+        # The vehicle stops carrying what it used, which is what the account
+        # count is a sum of.
+        carried = {}
+        for compact_descr in mounted:
+            compact_descr = _int(compact_descr)
+            if compact_descr:
+                carried[compact_descr] = carried.get(compact_descr, 0) + 1
+        record.setdefault(
+            'inventoryItems', {})[EQUIPMENT_ITEM_TYPE] = carried
+        owned = self._snapshot.setdefault(
+            'inventoryItems', {}).setdefault(EQUIPMENT_ITEM_TYPE, {})
+        for compact_descr in spent:
+            self._set_owned(
+                compact_descr, EQUIPMENT_ITEM_TYPE,
+                max(self._mounted(compact_descr, EQUIPMENT_ITEM_TYPE,
+                                  self._records()),
+                    _int(owned.get(compact_descr, 0)) - 1))
+        self.revision += 1
+        return spent
 
     def set_layouts(self, vehicle_inventory_id, shells_layout=None,
                     equipment_type=EQUIPMENT_TYPE_REGULAR,

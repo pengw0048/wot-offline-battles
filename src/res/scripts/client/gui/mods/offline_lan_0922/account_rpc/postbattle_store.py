@@ -141,6 +141,17 @@ def _receipt(value):
                 raise ValueError('battle receipt ammunition is invalid')
             if count:
                 shells_fired[index] = count
+    equipment_used = []
+    raw_used = value.get('equipment_used')
+    if raw_used is not None:
+        if not isinstance(raw_used, (list, tuple)) or len(raw_used) > 3:
+            raise ValueError('battle receipt consumables are invalid')
+        for compact_descr in raw_used:
+            compact_descr = _int(compact_descr)
+            if compact_descr < 1:
+                raise ValueError('battle receipt consumables are invalid')
+            if compact_descr not in equipment_used:
+                equipment_used.append(compact_descr)
     public_results = []
     raw_public = value.get('public_results')
     if raw_public is None:
@@ -274,6 +285,9 @@ def _receipt(value):
         # By the shell's index in the gun's own shot order: only the client
         # can turn that into a shell, and only the client owns its price.
         'shells_fired': shells_fired,
+        # Consumables come by compact descriptor, which the client does send
+        # with the mounted equipment.
+        'equipment_used': equipment_used,
         'public_results': public_results,
         'interactions': interactions,
     }

@@ -159,7 +159,8 @@ def _bind_battle_progress(context):
             receipt['rewards']['xp'], VEHICLE_SETTINGS_FLAG.XP_TO_TMAN,
             tankmen_module=tankmen, rewards=receipt['rewards'],
             health=receipt.get('health'), vehicles_module=vehicles,
-            shells_fired=receipt.get('shells_fired'))
+            shells_fired=receipt.get('shells_fired'),
+            equipment_used=receipt.get('equipment_used'))
         context['selected_vehicle'] = snapshot
         touched.add(int(result['vehicle_id']))
         return result
