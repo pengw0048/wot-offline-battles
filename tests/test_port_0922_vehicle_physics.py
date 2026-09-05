@@ -98,6 +98,513 @@ class VehiclePhysicsDescriptorTests(unittest.TestCase):
         self.assertEqual(1.15, params['nativePowerRatio'])
 
 
+class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
+
+    @staticmethod
+    def _descriptor():
+        chassis_name = 'trial-chassis'
+        detailed_chassis = {
+            'roadWheelPositions': (-2.0, -1.0, 0.0, 1.0, 2.0),
+            'stiffnessFactors': (1.0, 1.0, 1.0, 1.0, 1.0),
+            'stiffness0': 1.0,
+            'stiffness1': 1.0,
+            'damping': 0.2,
+            'bodyHeight': 0.95,
+            'hullInertiaFactors': (1.0, 1.0, 1.8),
+            'wheelRadius': 0.35,
+        }
+        return types.SimpleNamespace(
+            physics={
+                'weight': 21000.0,
+                'enginePower': 430.0 * 735.5,
+                'trackCenterOffset': 1.2,
+            },
+            type=_Strict1513Component(xphysics={
+                'detailed': {'chassis': {
+                    chassis_name: detailed_chassis,
+                }},
+            }),
+            chassis=_Strict1513Component(
+                name=chassis_name,
+                rotationSpeed=0.75,
+                hullPosition=(0.0, 1.0, 0.0),
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.4, -0.5, -2.6), (1.4, 0.7, 2.6)))),
+            hull=_Strict1513Component(
+                hitTester=_Strict1513Component(bbox=(
+                    (-1.2, -0.65, -2.2), (1.2, 0.65, 2.2)))))
+
+    @staticmethod
+    def _state(**overrides):
+        state = {
+            'height': 0.0,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+        }
+        state.update(overrides)
+        return state
+
+    @staticmethod
+    def _plane_samples(params, x_gradient=0.0, z_gradient=0.0):
+        ground = tuple(
+            x_gradient * spring['x'] + z_gradient * spring['z']
+            for spring in params['springs'])
+        pseudo_ground = tuple(
+            x_gradient * contact['x'] + z_gradient * contact['z']
+            for contact in params['pseudo_contacts'])
+        return ground, pseudo_ground
+
+    def setUp(self):
+        self.params = vehicle_physics.derive_suspension_params(
+            self._descriptor())
+
+    def test_parameter_projection_uses_ten_springs_and_twelve_contacts(self):
+        self.assertEqual(10, len(self.params['springs']))
+        self.assertEqual(12, len(self.params['pseudo_contacts']))
+        # Exact #1513 initVehiclePhysicsClient mounts the pairs at
+        # +/-0.45 * chassis bbox width (2.8 m here), not at the visual
+        # trackCenterOffset.
+        self.assertEqual(
+            {-1.26, 1.26},
+            {spring['x'] for spring in self.params['springs']})
+        self.assertEqual(
+            8,
+            sum(contact['kind'] == 'track'
+                for contact in self.params['pseudo_contacts']))
+        self.assertEqual(
+            4,
+            sum(contact['kind'] == 'body'
+                for contact in self.params['pseudo_contacts']))
+
+        points = vehicle_physics.suspension_world_points(
+            self.params, (10.0, 99.0, 20.0), math.pi * 0.5)
+        self.assertAlmostEqual(8.0, points[0][0])
+        self.assertAlmostEqual(21.26, points[0][1])
+        self.assertEqual(
+            12,
+            len(vehicle_physics.suspension_pseudo_world_points(
+                self.params, (10.0, 99.0, 20.0), math.pi * 0.5)))
+
+    @staticmethod
+    def _exact_client_descriptor():
+        """Shape the descriptor the way a real #1513 client process gets it.
+
+        ``vehicles._readXPhysicsClient`` returns a flat
+        ``{'engines': ..., 'chassis': ...}`` mapping with no ``detailed``
+        level, and ``_xphysicsParseChassisClient`` fills each chassis entry
+        with ``grounds`` alone. The visible client and the hidden worker are
+        both ``IS_CLIENT`` processes, so this is production's real shape.
+        """
+        descriptor = VehiclePhysicsSuspensionTrialTests._descriptor()
+        descriptor.type = _Strict1513Component(xphysics={
+            'engines': {'trial-engine': {}},
+            'chassis': {'trial-chassis': {'grounds': {}}},
+        })
+        return descriptor
+
+    def test_the_exact_client_descriptor_still_activates_the_trial(self):
+        params = vehicle_physics.derive_suspension_params(
+            self._exact_client_descriptor())
+
+        self.assertEqual(10, len(params['springs']))
+        self.assertEqual(12, len(params['pseudo_contacts']))
+        # clearance = clamp(0.55 * 1.2, (1.0 - 0.65) * 1.75, 0.60 * 1.2)
+        self.assertAlmostEqual(0.66, params['clearance'])
+        # _computeTrackLength(0.66, 5.2) saturates at TRACK_LENGTH_MIN.
+        track_length = 0.60 * 5.2
+        step = track_length / 4.0
+        self.assertEqual(
+            [-track_length * 0.5 + step * index for index in range(5)],
+            sorted({spring['z'] for spring in params['springs']}))
+        self.assertEqual(
+            {-1.26, 1.26},
+            {spring['x'] for spring in params['springs']})
+        self.assertTrue(all(
+            spring['stiffness'] > 0.0 and spring['damping'] > 0.0
+            for spring in params['springs']))
+        self.assertGreater(params['pitch_inertia'], 0.0)
+        self.assertGreater(params['roll_inertia'], 0.0)
+
+    def test_exact_pitch_hull_aiming_descriptor_is_outside_the_trial(self):
+        descriptor = self._exact_client_descriptor()
+        descriptor.isPitchHullAimingAvailable = True
+
+        with self.assertRaisesRegex(
+                ValueError, '#1513 hydraulic suspension'):
+            vehicle_physics.derive_suspension_params(descriptor)
+
+    def test_an_unrefined_descriptor_keeps_a_bounded_contact_memory(self):
+        descriptor = self._exact_client_descriptor()
+        descriptor.chassis = _Strict1513Component(
+            name='trial-chassis',
+            rotationSpeed=0.75,
+            hullPosition=(0.0, 1.0, 0.0),
+            hitTester=_Strict1513Component(bbox=(
+                (-1.4, -0.5, -2.6), (1.4, 0.7, 2.6))))
+
+        params = vehicle_physics.derive_suspension_params(descriptor)
+
+        # No wheel groups and no wheelRadius refinement: one spring spacing
+        # is exactly the rail or sleeper gap the memory has to bridge.
+        self.assertAlmostEqual(
+            0.78, params['contact_memory_distance'])
+
+    def test_missing_client_geometry_or_detailed_values_are_rejected(self):
+        cases = []
+        descriptor = self._descriptor()
+        descriptor.physics.pop('weight')
+        cases.append(('weight', descriptor))
+        descriptor = self._descriptor()
+        descriptor.hull = _Strict1513Component()
+        cases.append(('hitTester', descriptor))
+        # A present refinement is still validated; only absence is admitted.
+        descriptor = self._descriptor()
+        descriptor.type.xphysics['detailed']['chassis'][
+            'trial-chassis']['roadWheelPositions'] = (-1.0, 0.0, 1.0)
+        cases.append(('road-wheel positions', descriptor))
+        descriptor = self._descriptor()
+        descriptor.type.xphysics['detailed']['chassis'][
+            'trial-chassis']['stiffness0'] = 0.0
+        cases.append(('stiffness', descriptor))
+
+        for expected, descriptor in cases:
+            with self.subTest(field=expected):
+                with self.assertRaisesRegex(ValueError, expected):
+                    vehicle_physics.derive_suspension_params(descriptor)
+
+    def test_flat_support_stays_at_static_equilibrium(self):
+        ground, pseudo_ground = self._plane_samples(self.params)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params, self._state(), ground, 1.0 / 30.0,
+            pseudo_ground)
+
+        self.assertAlmostEqual(0.0, solved['height'], places=12)
+        self.assertAlmostEqual(0.0, solved['vertical_velocity'], places=12)
+        self.assertAlmostEqual(0.0, solved['pitch'], places=12)
+        self.assertAlmostEqual(0.0, solved['roll'], places=12)
+        self.assertFalse(solved['airborne'])
+        self.assertEqual(18, solved['contact_count'])
+
+    def test_longitudinal_plane_converges_to_pitch(self):
+        gradient = 0.16
+        ground, pseudo_ground = self._plane_samples(
+            self.params, z_gradient=gradient)
+        state = self._state()
+
+        for unused in range(240):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, 1.0 / 60.0,
+                pseudo_ground)
+
+        self.assertAlmostEqual(
+            -math.asin(gradient), state['pitch'], delta=0.015)
+        self.assertFalse(state['airborne'])
+
+    def test_one_side_plane_converges_to_roll(self):
+        gradient = 0.14
+        ground, pseudo_ground = self._plane_samples(
+            self.params, x_gradient=gradient)
+        state = self._state()
+
+        for unused in range(240):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, 1.0 / 60.0,
+                pseudo_ground)
+
+        self.assertAlmostEqual(
+            math.asin(gradient), state['roll'], delta=0.015)
+        self.assertFalse(state['airborne'])
+
+    def test_hard_limit_projects_excess_without_a_time_step(self):
+        ground = [None] * len(self.params['springs'])
+        ground[0] = 1.0
+        before = vehicle_physics.suspension_limit_excess(
+            self.params, self._state(), ground)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params, self._state(), ground, 0.0)
+
+        self.assertGreater(before, 0.5)
+        self.assertLess(solved['max_limit_excess'], before * 0.01)
+
+    def test_multi_contact_projection_converges_independent_of_order(self):
+        gradient_x = 0.11178082363228886
+        gradient_z = 0.09193766567849293
+        center_y = 0.13635492625737228
+        ground = tuple(
+            center_y + gradient_x * spring['x'] +
+            gradient_z * spring['z']
+            for spring in self.params['springs'])
+        pseudo_ground = tuple(
+            center_y + gradient_x * contact['x'] +
+            gradient_z * contact['z']
+            for contact in self.params['pseudo_contacts'])
+        state = self._state(
+            height=-0.11332251894566656,
+            vertical_velocity=-17.82973166273263,
+            pitch=-0.2283978856788303,
+            pitch_velocity=0.4857510890352834,
+            roll=0.008904000398357759,
+            roll_velocity=-0.05963721979826242)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params, state, ground, 1.0 / 60.0, pseudo_ground)
+        reversed_params = dict(self.params)
+        reversed_params['springs'] = tuple(reversed(self.params['springs']))
+        reversed_params['pseudo_contacts'] = tuple(
+            reversed(self.params['pseudo_contacts']))
+        reversed_solved = vehicle_physics.damper_suspension_step(
+            reversed_params, state, tuple(reversed(ground)), 1.0 / 60.0,
+            tuple(reversed(pseudo_ground)))
+
+        self.assertLessEqual(solved['max_limit_excess'], 1.0e-6)
+        self.assertLessEqual(reversed_solved['max_limit_excess'], 1.0e-6)
+        for name in ('height', 'vertical_velocity', 'pitch',
+                     'pitch_velocity', 'roll', 'roll_velocity'):
+            self.assertAlmostEqual(
+                solved[name], reversed_solved[name], places=12,
+                msg=name)
+
+    def test_airborne_state_falls_and_damps_angular_velocity(self):
+        ground = (None,) * len(self.params['springs'])
+        pseudo_ground = (None,) * len(self.params['pseudo_contacts'])
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params,
+            self._state(height=5.0, pitch_velocity=2.0,
+                        roll_velocity=-2.0),
+            ground, 0.1, pseudo_ground)
+
+        self.assertTrue(solved['airborne'])
+        self.assertLess(solved['height'], 5.0)
+        self.assertLess(solved['vertical_velocity'], 0.0)
+        self.assertLess(abs(solved['pitch_velocity']), 0.6)
+        self.assertLess(abs(solved['roll_velocity']), 0.6)
+
+    def test_within_step_touch_is_distinct_from_final_airborne_state(self):
+        ground, pseudo_ground = self._plane_samples(self.params)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params,
+            self._state(vertical_velocity=10.0),
+            ground, 1.0 / 60.0, pseudo_ground)
+
+        self.assertTrue(solved['contacted_this_step'])
+        self.assertGreater(solved['touched_contact_count'], 0)
+        self.assertEqual(0, solved['contact_count'])
+        self.assertTrue(solved['airborne'])
+        self.assertTrue(solved['left_flying'])
+        self.assertTrue(solved['right_flying'])
+        self.assertIsNone(solved['impact_speed'])
+
+    def test_symmetric_five_metre_drop_reports_one_unbiased_impact(self):
+        ground, pseudo_ground = self._plane_samples(self.params)
+        state = self._state(height=5.0)
+        impact = None
+
+        for unused_tick in range(12):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, 0.1, pseudo_ground)
+            if state['impact_speed'] is not None:
+                impact = state['impact_speed']
+                break
+
+        self.assertIsNotNone(impact)
+        self.assertLessEqual(impact, -9.8)
+        self.assertTrue(state['contacted_this_step'])
+        self.assertFalse(state['airborne'])
+        self.assertAlmostEqual(0.0, state['pitch'], places=10)
+        self.assertAlmostEqual(0.0, state['pitch_velocity'], places=10)
+        self.assertAlmostEqual(0.0, state['roll'], places=10)
+        self.assertAlmostEqual(0.0, state['roll_velocity'], places=10)
+
+    def test_final_substep_touch_preserves_threshold_crossing_speed(self):
+        ground, pseudo_ground = self._plane_samples(self.params)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params,
+            self._state(height=1.1, vertical_velocity=-9.5),
+            ground, 0.1, pseudo_ground)
+
+        expected_impact = -9.5 - vehicle_physics.GRAVITY * 0.1
+        self.assertFalse(solved['airborne'])
+        self.assertEqual(18, solved['contact_count'])
+        self.assertTrue(solved['contacted_this_step'])
+        self.assertEqual(18, solved['touched_contact_count'])
+        self.assertAlmostEqual(expected_impact, solved['impact_speed'],
+                               places=12)
+        self.assertEqual(
+            0, vehicle_physics.fall_damage(1000, -9.5))
+        self.assertGreater(
+            vehicle_physics.fall_damage(1000, solved['impact_speed']), 0)
+
+    def test_soft_touch_records_the_first_negative_contact_speed(self):
+        ground, pseudo_ground = self._plane_samples(self.params)
+
+        solved = vehicle_physics.damper_suspension_step(
+            self.params,
+            self._state(height=0.1, vertical_velocity=-0.2),
+            ground, 0.1, pseudo_ground)
+
+        self.assertTrue(solved['contacted_this_step'])
+        self.assertFalse(solved['airborne'])
+        self.assertAlmostEqual(-0.2, solved['impact_speed'], places=12)
+        self.assertAlmostEqual(0.0, solved['pitch'], places=10)
+        self.assertAlmostEqual(0.0, solved['roll'], places=10)
+
+    def test_support_filter_and_contact_memory_are_bounded(self):
+        self.assertTrue(vehicle_physics.suspension_support_allowed(
+            1.0, 1.0, 1.0))
+        self.assertFalse(vehicle_physics.suspension_support_allowed(
+            1.2, 1.0, 1.0))
+        self.assertTrue(vehicle_physics.suspension_support_allowed(
+            1.2, 0.9, 1.0))
+        self.assertFalse(vehicle_physics.suspension_support_allowed(
+            1.0, 0.5, 1.0))
+
+        ground, memory = vehicle_physics.retained_ground_contact(
+            (1.0, 2.0), 3.0, None, 0.5)
+        self.assertEqual(3.0, ground)
+        retained, stationary_miss = vehicle_physics.retained_ground_contact(
+            (1.0, 2.0), None, memory, 0.5)
+        self.assertEqual(3.0, retained)
+        self.assertEqual(
+            (None, None),
+            vehicle_physics.retained_ground_contact(
+                (1.0, 2.0), None, stationary_miss, 0.5))
+        retained, moved_memory = vehicle_physics.retained_ground_contact(
+            (1.2, 2.2), None, memory, 0.5)
+        self.assertEqual(3.0, retained)
+        self.assertNotEqual(memory, moved_memory)
+        self.assertEqual(
+            (None, None),
+            vehicle_physics.retained_ground_contact(
+                (1.2, 2.2), None, moved_memory, 0.5))
+        self.assertEqual(
+            (None, None),
+            vehicle_physics.retained_ground_contact(
+                (1.6, 2.0), None, memory, 0.5))
+
+        unused_ground, memory = vehicle_physics.retained_ground_contact(
+            (0.0, 0.0), 4.0, None, 0.5)
+        for point in ((0.1, 0.0), (0.1, 0.1), (0.0, 0.1),
+                      (0.0, 0.0), (-0.1, 0.0)):
+            retained, memory = vehicle_physics.retained_ground_contact(
+                point, None, memory, 0.5)
+            self.assertEqual(4.0, retained)
+        self.assertEqual(
+            (None, None),
+            vehicle_physics.retained_ground_contact(
+                (-0.1, -0.1), None, memory, 0.5))
+
+    def test_ground_plane_uses_contacts_and_rejects_a_discontinuity(self):
+        gradient_x = 0.12
+        gradient_z = -0.08
+        ground = tuple(
+            2.5 + gradient_x * spring['x'] +
+            gradient_z * spring['z']
+            for spring in self.params['springs'])
+
+        plane = vehicle_physics.suspension_ground_plane(
+            self.params, ground, maximum_residual=0.01)
+
+        self.assertAlmostEqual(2.5, plane['center_y'])
+        self.assertAlmostEqual(gradient_x, plane['x_gradient'])
+        self.assertAlmostEqual(gradient_z, plane['z_gradient'])
+        self.assertEqual(10, plane['contact_count'])
+        broken = list(ground)
+        broken[0] += 1.0
+        self.assertIsNone(vehicle_physics.suspension_ground_plane(
+            self.params, broken, maximum_residual=0.35))
+
+    def test_world_ground_plane_projects_height_and_checks_continuity(self):
+        gradient_x = 0.12
+        gradient_z = -0.08
+        ground = tuple(
+            2.5 + gradient_x * spring['x'] +
+            gradient_z * spring['z']
+            for spring in self.params['springs'])
+        start = (10.0, 99.0, 20.0)
+        end = (12.0, 99.0, 21.0)
+
+        plane = vehicle_physics.suspension_world_ground_plane(
+            self.params, ground, start, math.pi * 0.5,
+            maximum_residual=0.01)
+
+        self.assertEqual((10.0, 20.0),
+                         (plane['center_x'], plane['center_z']))
+        self.assertAlmostEqual(2.5, plane['center_y'])
+        self.assertAlmostEqual(-0.08, plane['gradient_x'])
+        self.assertAlmostEqual(-0.12, plane['gradient_z'])
+        expected = 2.5 - 0.08 * 2.0 - 0.12
+        self.assertAlmostEqual(
+            expected,
+            vehicle_physics.suspension_plane_height(plane, 12.0, 21.0))
+
+        current = dict(plane)
+        current.update(center_x=12.0, center_z=21.0, center_y=expected)
+        self.assertTrue(vehicle_physics.suspension_ground_planes_continuous(
+            plane, current, start, end, 0.01, 0.01))
+        raised = dict(current, center_y=expected + 0.2)
+        self.assertFalse(vehicle_physics.suspension_ground_planes_continuous(
+            plane, raised, start, end, 0.05, 0.01))
+        tilted = dict(current, gradient_x=current['gradient_x'] + 0.1)
+        self.assertFalse(vehicle_physics.suspension_ground_planes_continuous(
+            plane, tilted, start, end, 0.5, 0.05))
+
+        self.assertIsNone(vehicle_physics.suspension_plane_height(
+            {'center_x': float('nan')}, 0.0, 0.0))
+        self.assertFalse(vehicle_physics.suspension_ground_planes_continuous(
+            plane, {}, start, end, 0.1, 0.1))
+
+    def test_contact_correction_uses_bounded_interior_path_probes(self):
+        self.assertEqual(
+            (), vehicle_physics.suspension_path_probe_fractions(0.2))
+        fractions = vehicle_physics.suspension_path_probe_fractions(5.0)
+        self.assertEqual(3, len(fractions))
+        self.assertTrue(all(0.0 < value < 1.0 for value in fractions))
+        self.assertTrue(all(
+            fractions[index] > fractions[index - 1]
+            for index in range(1, len(fractions))))
+        self.assertEqual(
+            vehicle_physics.SUSPENSION_PATH_MAX_PROBES,
+            len(vehicle_physics.suspension_path_probe_fractions(100.0)))
+
+    def test_side_grip_curve_releases_a_cross_slope_progressively(self):
+        self.assertEqual(1.0, vehicle_physics.lateral_slope_grip(1.0))
+        self.assertAlmostEqual(
+            0.1,
+            vehicle_physics.lateral_slope_grip(
+                vehicle_physics.SLOPE_GRIP_SDW_MIN_Y))
+        midpoint_y = (
+            vehicle_physics.SLOPE_GRIP_SDW_FULL_Y +
+            vehicle_physics.SLOPE_GRIP_SDW_MIN_Y) * 0.5
+        self.assertAlmostEqual(
+            0.55, vehicle_physics.lateral_slope_grip(midpoint_y))
+        self.assertEqual(
+            0.0,
+            vehicle_physics.suspension_slope_slide_speed(
+                0.0, math.tan(math.radians(24.0)), 0.1))
+        self.assertGreater(
+            vehicle_physics.suspension_slope_slide_speed(
+                0.0, math.tan(math.radians(25.0)), 0.1),
+            0.0)
+
+    def test_contrib_side_grip_does_not_change_the_legacy_fallback(self):
+        tangent = math.tan(math.radians(25.0))
+
+        self.assertEqual(
+            0.0, vehicle_physics.slope_slide_speed(0.0, tangent, 0.1))
+        self.assertGreater(
+            vehicle_physics.suspension_slope_slide_speed(
+                0.0, tangent, 0.1),
+            0.0)
+
+
 class VehiclePhysicsHardContactTests(unittest.TestCase):
 
     def test_candidate_yaws_keep_the_shared_glancing_order(self):
