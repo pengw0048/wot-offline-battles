@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Award #1513 post-battle achievements from one finished round.
 
 The thresholds below are copied verbatim from the pinned client's
