@@ -270,7 +270,7 @@ class WaitingRoomTests(unittest.TestCase):
         selected = []
         team_state = {
             'team': 1, 'sizes': {1: 2, 2: 5},
-            'counts': {1: 1, 2: 3}, 'supported': True,
+            'counts': {1: 1, 2: 3}, 'supported': True, 'preferred': 1,
         }
         room = self.module.WaitingRoomUI(
             self._request_start, lambda: list(self.pool),
@@ -281,12 +281,40 @@ class WaitingRoomTests(unittest.TestCase):
 
         self.assertTrue(room.open())
         self.assertTrue(room._controls['team1'].properties['visible'])
+        self.assertTrue(room._controls['team_random'].properties['visible'])
         self.assertTrue(room._controls['team2'].properties['visible'])
         self.assertIn('1/2', room._labels['team1'].properties['text'])
         self.assertIn('(YOU)', room._labels['team1'].properties['text'])
         self.assertIn('3/5', room._labels['team2'].properties['text'])
         self.assertTrue(room.activate('team2'))
         self.assertEqual([2], selected)
+        self.assertTrue(room.activate('team_random'))
+        self.assertEqual([2, 0], selected)
+
+    def test_random_team_choice_has_a_visible_selected_state(self):
+        selected = []
+        team_state = {
+            'team': 2, 'sizes': {1: 2, 2: 2},
+            'counts': {1: 1, 2: 1}, 'supported': True, 'preferred': 0,
+        }
+
+        def select(team):
+            selected.append(team)
+            team_state['preferred'] = team
+            return True
+
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: False,
+            surface=self.surface, request_team=select,
+            team_status=lambda: dict(team_state))
+
+        self.assertTrue(room.open())
+        self.assertIn('(ON)', room._labels['team_random'].properties['text'])
+        self.assertIn('(YOU)', room._labels['team2'].properties['text'])
+        self.assertTrue(room.activate('team2'))
+        self.assertEqual([2], selected)
+        self.assertNotIn('(ON)', room._labels['team_random'].properties['text'])
 
     def test_host_can_adjust_both_team_sizes_without_an_extra_row(self):
         requested = []

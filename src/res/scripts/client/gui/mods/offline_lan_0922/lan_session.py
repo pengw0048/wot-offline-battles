@@ -1202,6 +1202,7 @@ class LANSession(object):
                 counts[team] += 1
         return {
             'team': getattr(self.client, 'team', None),
+            'preferred': self._room_preferences.get('team', 0),
             'sizes': sizes,
             'counts': counts,
             'supported': self._server_supports_team_selection(),
@@ -1219,13 +1220,21 @@ class LANSession(object):
         """Ask the server to move this waiting-room player."""
         if self._stopped or self.client is None or self.state != 'waiting':
             return False
+        try:
+            team = int(team)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if team not in (0, 1, 2):
+            return False
         selector = getattr(self.client, 'select_team', None)
         if not callable(selector) or not selector(team):
             self._status_notifier(
                 'The LAN server did not accept that team selection.')
             return False
         self._remember_team(team)
-        self._status_notifier('Requesting Team %d...' % int(team))
+        self._status_notifier(
+            'Requesting a random team...'
+            if team == 0 else 'Requesting Team %d...' % team)
         return True
 
     def set_team_size(self, team, size):
@@ -2160,7 +2169,7 @@ class LANSession(object):
             code = _message_value(message, 'code')
             team = _message_value(message, 'team')
             actual_team = getattr(self.client, 'team', None)
-            if actual_team in (1, 2):
+            if team in (1, 2) and actual_team in (1, 2):
                 self._remember_team(actual_team)
             if code == 'team_full':
                 self._status_notifier(
@@ -2295,7 +2304,7 @@ class LANSession(object):
                 if code == 'team_full':
                     self._status_notifier(
                         'The selected LAN team is full. Choose the other '
-                        'team or Automatic in the launcher.')
+                        'team or Random in the waiting room.')
                 else:
                     self._status_notifier(
                         'The launcher team selection is invalid.')

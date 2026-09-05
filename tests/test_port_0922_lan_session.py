@@ -310,6 +310,19 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual(
             {1: 0, 2: 0}, self.session._team_status()['counts'])
 
+    def test_random_team_selection_reaches_the_client_and_is_saved(self):
+        self.client.ready = True
+        self.client.phase = 'waiting'
+        self.session.state = 'waiting'
+        self.session._room_preferences['team'] = 2
+
+        self.assertTrue(self.session.select_team(0))
+
+        self.assertEqual([0], self.client.team_selections)
+        self.assertEqual(0, self.saved_room_states[-1]['team'])
+        self.assertEqual(0, self.session._team_status()['preferred'])
+        self.assertEqual('Requesting a random team...', self.statuses[-1])
+
     def test_host_changes_team_sizes_without_restarting_the_session(self):
         self.client.ready = True
         self.client.phase = 'waiting'
