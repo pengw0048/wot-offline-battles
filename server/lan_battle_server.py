@@ -48,7 +48,8 @@ from vehicle_overlay_store import (
 )
 from gui.mods.offline_lan_0922 import tank_collision
 from gui.mods.offline_lan_0922.battle_achievements import (
-    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES, award_battle_achievements)
+    ACHIEVEMENT_CONDITIONS, AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES,
+    award_battle_achievements)
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922 import equipment_mechanics
@@ -384,6 +385,8 @@ VEHICLE_CLASS_TAGS = frozenset((
 # and ``['sturdy']['minHealth']`` of the pinned client.
 SNIPER_SHOT_DISTANCE = 300.0
 SPARTAN_HEALTH_PERCENT = 10.0
+LUCKY_DEVIL_RADIUS = ACHIEVEMENT_CONDITIONS["luckyDevil"]["radius"]
+ROCK_SOLID_MAX_SPEED = ACHIEVEMENT_CONDITIONS["monolith"]["maxSpeed_ms"]
 CRITICAL_STATES = frozenset(("normal", "critical", "destroyed"))
 CRITICAL_CAUSES = frozenset((
     "shot", "explosion", "repair", "fire", "drowning", "ramming"))
@@ -741,6 +744,21 @@ def _exact_int(value, low=None, high=None):
     if high is not None and value > high:
         raise ValueError("integer above upper bound")
     return value
+
+
+def _optional_exact_int(value, low=None, high=None):
+    """Return one exact bounded integer, or None when it is absent or bad.
+
+    An optional achievement input must never turn a legal message into a
+    protocol rejection, so an out-of-range or missing value simply means the
+    condition that reads it cannot be satisfied.
+    """
+    if value is None:
+        return None
+    try:
+        return _exact_int(value, low, high)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _team_capacity(value, name):
@@ -4489,6 +4507,7 @@ class BattleState:
                 message.get("affordances"), known_bots, known_targets, now)
             self._replace_bot_spotted(direct_bot_spots)
             self._replace_player_spotted(direct_player_spots)
+            self._commit_detections()
             if accepted_visibility:
                 return {
                     "type": "bot_observation",
@@ -4513,15 +4532,6 @@ class BattleState:
         for bot_id in sorted(direct_spots):
             spotted = frozenset(direct_spots[bot_id])
             self.bot_spotted[int(bot_id)] = spotted
-            reporter = ("bot", int(bot_id))
-            for target in spotted:
-                self._record_first_spot(reporter, target)
-                interaction = self._statistics_interaction(reporter, target)
-                if interaction["spotted"]:
-                    continue
-                interaction["spotted"] = 1
-                row = self._statistics_row(*reporter)
-                row["spotted"] = int(row.get("spotted", 0)) + 1
         return True
 
     def _replace_player_spotted(self, direct_spots):
@@ -4532,15 +4542,6 @@ class BattleState:
         for player_id in sorted(direct_spots):
             spotted = frozenset(direct_spots[player_id])
             self.player_spotted[int(player_id)] = spotted
-            reporter = ("player", int(player_id))
-            for target in spotted:
-                self._record_first_spot(reporter, target)
-                interaction = self._statistics_interaction(reporter, target)
-                if interaction["spotted"]:
-                    continue
-                interaction["spotted"] = 1
-                row = self._statistics_row(*reporter)
-                row["spotted"] = int(row.get("spotted", 0)) + 1
         return True
 
     @staticmethod
@@ -6207,20 +6208,18 @@ class BattleState:
                 return self._commit_fire_intent_rejection_locked(
                     player, intent_seq, fingerprint, reason)
 
-            expected_fields = frozenset((
+            required_fields = frozenset((
                 "type", "round_id", "intent_seq", "input_seq",
                 "shell_index", "shot_origin", "shot_direction",
-                "dispersion_angle", "presentation_ledger",
-                "trigger_server_time_ms"))
-            if set(message) not in (
-                    expected_fields,
-                    expected_fields - frozenset((
-                        "presentation_ledger",)),
-                    expected_fields - frozenset((
-                        "trigger_server_time_ms",)),
-                    expected_fields - frozenset((
-                        "presentation_ledger",
-                        "trigger_server_time_ms"))):
+                "dispersion_angle"))
+            # A client may omit any of these; the trigger is still legal and
+            # only the condition that reads the missing one goes unmet.
+            optional_fields = frozenset((
+                "presentation_ledger", "trigger_server_time_ms",
+                "shells_before_shot"))
+            fields = set(message)
+            if not required_fields <= fields <= (
+                    required_fields | optional_fields):
                 return reject("fire_intent_wire_shape")
             try:
                 input_seq = _exact_int(
@@ -6334,6 +6333,11 @@ class BattleState:
                 "pitch": round(float(player.pitch), 5),
                 "roll": round(float(player.roll), 5),
                 "speed": round(float(player.speed), 4),
+                # Optional: only a client that reported its ammunition can
+                # ever earn Fadin's medal, and a missing count is not a
+                # reason to reject a legal trigger.
+                "shells_before_shot": _optional_exact_int(
+                    message.get("shells_before_shot"), 0, 1000),
             }
             player.fire_intent_seq = intent_seq
             player.fire_intent_fingerprints[intent_seq] = fingerprint
@@ -6506,6 +6510,9 @@ class BattleState:
                 "authority_epoch", "fire_intent_seq", "fire_input_seq",
                 "burst_group_seq", "burst_index", "burst_count",
                 "launch_time_us", "launch_pose",
+                # Optional: the shell total this round was drawn from, which
+                # only the producer that owns the ammunition can report.
+                "shells_before_shot",
             }
             if set(message) - allowed:
                 return self._set_protocol_reject(
@@ -6753,6 +6760,15 @@ class BattleState:
                 "last_progress_request_fingerprint": None,
             })
             self.projectiles[projectile_id] = record
+            # Freeze whether this was the shooter's final round while the
+            # producer that owns the ammunition is still the one reporting it.
+            shells_before_shot = (
+                _optional_exact_int(intent.get("shells_before_shot"), 0, 1000)
+                if shooter_kind == "player" else
+                _optional_exact_int(message.get("shells_before_shot"), 0, 1000))
+            if shells_before_shot is not None:
+                self.last_shell_shots[str(projectile_id)] = (
+                    shells_before_shot <= 1)
             if shooter_kind == "player":
                 shooter.fire_seq = shot_seq
                 if bool(intent.get("shell_change_pending", False)):
@@ -7515,6 +7531,13 @@ class BattleState:
                 maximum = self._vehicle_max_health(victim)
                 if health * 100 <= SPARTAN_HEALTH_PERCENT * maximum:
                     victim_row["deflected_hits_at_low_health"] += 1
+                victim_row["deflection_streak"] += 1
+                victim_row["best_deflection_streak"] = max(
+                    victim_row["best_deflection_streak"],
+                    victim_row["deflection_streak"])
+            elif applied > 0:
+                # A shell that got through ends the run of bounces.
+                victim_row["deflection_streak"] = 0
         if was_alive and not alive:
             if target_kind == "player":
                 target.death_attacker_kind = record["shooter_kind"]
@@ -8272,6 +8295,7 @@ class BattleState:
                 "death_reason": record["death_reason"],
                 "distance": record["distance"],
                 "defended_base": record["defended_base"],
+                "actor_speed": record["actor_speed"],
             })
 
         actors = []
@@ -8294,10 +8318,14 @@ class BattleState:
                 "kills": kills_by_actor.get(identity, []),
                 "damaged_targets": sorted(
                     self.damaged_targets.get(identity, ())),
-                "first_spotted": int(statistics.get("first_spotted", 0)),
                 "exclusive_spot_assists": len(
                     self.exclusive_spot_assists.get(identity, ())),
                 "ever_spotted": identity in self.ever_spotted_targets,
+                "ally_damage": int(self.ally_damage.get(identity, 0)),
+                "last_shell_finisher": identity in self.last_shell_finishers,
+                "lucky_devil": identity in self.lucky_devils,
+                "best_deflection_streak": int(
+                    statistics.get("best_deflection_streak", 0)),
                 "crits_received": _popcount(
                     statistics.get("crits_received_mask", 0)),
                 "hits_received": int(statistics.get("hits_received", 0)),
@@ -10393,10 +10421,19 @@ class BattleState:
 
     def _reset_achievement_tracking(self):
         """Clear the per-round inputs #1513 achievement conditions read."""
-        # target -> the first actor that ever directly detected it.
-        self.first_spotters = {}
+        # team -> the enemies that team can currently see, so a vehicle that
+        # goes dark and reappears is a new detection for whoever finds it.
+        self.team_visible_targets = {1: set(), 2: set()}
         # every vehicle any enemy ever directly detected.
         self.ever_spotted_targets = set()
+        # actor -> damage it dealt to its own team.
+        self.ally_damage = {}
+        # actors that destroyed the last living enemy with their last shell.
+        self.last_shell_finishers = set()
+        # projectile id -> whether it was the shooter's final round.
+        self.last_shell_shots = {}
+        # actors that stood beside an enemy its own team destroyed.
+        self.lucky_devils = set()
         # actor -> targets it damaged while it was their only direct spotter.
         self.exclusive_spot_assists = {}
         # actor -> every enemy it damaged.
@@ -10413,18 +10450,44 @@ class BattleState:
         self.capture_invaders = {1: set(), 2: set()}
         self.base_captured_team = 0
 
-    def _record_first_spot(self, reporter, target):
-        """Remember the first detector and that this target was ever seen."""
-        reporter = (str(reporter[0]), int(reporter[1]))
-        target = (str(target[0]), int(target[1]))
-        reporter_team = self._vehicle_team(*reporter)
-        target_team = self._vehicle_team(*target)
-        if not target_team or reporter_team == target_team:
-            return
-        self.ever_spotted_targets.add(target)
-        if target not in self.first_spotters:
-            self.first_spotters[target] = reporter
-            self._statistics_row(*reporter)["first_spotted"] += 1
+    def _commit_detections(self):
+        """Credit a detection to every observer that revealed an enemy.
+
+        A vehicle is detected when it becomes visible to a team that could
+        not see it a moment ago; every direct observer on that team that saw
+        it at that instant detected it.  The statistic counts distinct
+        enemies, so re-acquiring a target the observer already revealed adds
+        nothing, while an enemy that goes dark and is revealed again credits
+        whoever found it that time.  This is the ``spotted`` column the
+        results screen shows and the count Patrol Duty (``scout``) reads.
+        """
+        observers = [(("bot", int(bot_id)), spotted)
+                     for bot_id, spotted in self.bot_spotted.items()]
+        observers.extend(
+            (("player", int(player_id)), spotted)
+            for player_id, spotted in self.player_spotted.items())
+        for team in (1, 2):
+            visible = {}
+            for reporter, spotted in observers:
+                if self._vehicle_team(*reporter) != team:
+                    continue
+                for target in spotted:
+                    target = (str(target[0]), int(target[1]))
+                    target_team = self._vehicle_team(*target)
+                    if not target_team or target_team == team:
+                        continue
+                    visible.setdefault(target, []).append(reporter)
+            for target in sorted(set(visible) - self.team_visible_targets[team]):
+                self.ever_spotted_targets.add(target)
+                for reporter in sorted(visible[target]):
+                    interaction = self._statistics_interaction(
+                        reporter, target)
+                    if interaction["spotted"]:
+                        continue
+                    interaction["spotted"] = 1
+                    row = self._statistics_row(*reporter)
+                    row["spotted"] = int(row.get("spotted", 0)) + 1
+            self.team_visible_targets[team] = set(visible)
 
     def _direct_spotters(self, target):
         """Return every enemy observer that directly sees ``target``.
@@ -10447,6 +10510,74 @@ class BattleState:
                 result.append(reporter)
         return result
 
+    def _vehicle_position(self, identity, alive_only=True):
+        """Return one vehicle's world position, or None.
+
+        A vehicle that has just been destroyed still has the pose it died in,
+        which is the only position a proximity condition can use, so
+        ``alive_only`` is False for the victim of a kill.
+        """
+        if identity[0] == "player":
+            player = self.players.get(int(identity[1]))
+            if player is None or (alive_only and not player.alive):
+                return None
+            return (float(player.x), float(player.y), float(player.z))
+        state = self.bot_states.get(int(identity[1]))
+        if state is None or (alive_only and not state.get("alive")):
+            return None
+        return (_finite_float(state.get("x")), _finite_float(state.get("y")),
+                _finite_float(state.get("z")))
+
+    def _record_lucky_devils(self, victim, victim_team):
+        """Credit everyone standing beside a vehicle its own team destroyed.
+
+        #1513 ships only the radius for Lucky (``luckyDevil``); the medal
+        itself goes to the enemies of the destroyed vehicle who were inside
+        that radius when its own side killed it.
+        """
+        origin = self._vehicle_position(victim, alive_only=False)
+        if origin is None:
+            return
+        for identity in self._round_actor_identities():
+            if (identity == victim or
+                    self._vehicle_team(*identity) in (0, int(victim_team))):
+                continue
+            position = self._vehicle_position(identity)
+            if position is None:
+                continue
+            offset = sum((position[axis] - origin[axis]) ** 2
+                         for axis in (0, 1, 2))
+            if offset <= LUCKY_DEVIL_RADIUS * LUCKY_DEVIL_RADIUS:
+                self.lucky_devils.add(identity)
+
+    def _round_actor_identities(self):
+        """Return every vehicle identity taking part in this round."""
+        identities = [("player", int(player_id))
+                      for player_id in self.players]
+        identities.extend(("bot", int(bot_id)) for bot_id in self.bot_states)
+        return identities
+
+    def _vehicle_speed(self, identity):
+        """Return one vehicle's current speed in metres per second."""
+        if identity[0] == "player":
+            player = self.players.get(int(identity[1]))
+            return abs(float(player.speed)) if player is not None else 0.0
+        state = self.bot_states.get(int(identity[1]))
+        return abs(_finite_float((state or {}).get("speed"))) if state else 0.0
+
+    def _living_enemies(self, team):
+        """Return how many vehicles hostile to ``team`` are still alive."""
+        alive = 0
+        for player in self.players.values():
+            if (player.connected and player.participating and player.alive and
+                    int(player.team) not in (0, int(team))):
+                alive += 1
+        for state in self.bot_states.values():
+            if (state.get("alive") and
+                    int(state.get("team", 0)) not in (0, int(team))):
+                alive += 1
+        return alive
+
     def _record_kill(self, attacker, victim, death_reason,
                      projectile_id=None, distance=None):
         """Freeze one enemy kill with the facts #1513 medals ask about."""
@@ -10462,7 +10593,16 @@ class BattleState:
             # inside the defender's own base circle.
             "defended_base": victim in self.capture_invaders.get(
                 self._vehicle_team(*attacker), set()),
+            # Rock Solid bounds the rammer's own speed at the moment of the
+            # kill, which is only knowable here.
+            "actor_speed": round(self._vehicle_speed(attacker), 4),
         })
+        # Fadin's medal wants the shot that ended the battle to have been the
+        # shooter's last round.  Both facts are only true at this instant.
+        if (projectile_id is not None and
+                self.last_shell_shots.get(str(projectile_id)) and
+                not self._living_enemies(self._vehicle_team(*attacker))):
+            self.last_shell_finishers.add(attacker)
         if projectile_id is not None:
             # Projectile identities are opaque strings, not integers.
             key = str(projectile_id)
@@ -10510,7 +10650,7 @@ class BattleState:
                 "damage_dealt": 0, "damage_received": 0,
                 "damage_blocked": 0, "damage_assisted_track": 0,
                 "damage_assisted_radio": 0, "damage_assisted_stun": 0,
-                "kills": 0,
+                "kills": 0, "spotted": 0,
                 "capture_points": 0, "dropped_capture_points": 0,
                 # Battle-result fidelity fields.  #1513 shows every one of
                 # these on the results screen and Wargaming's achievement
@@ -10519,8 +10659,11 @@ class BattleState:
                 "potential_damage_received": 0, "hits_received": 0,
                 "damaging_hits_received": 0, "deflected_hits_received": 0,
                 "crits_received_mask": 0, "hits_with_damage": 0,
-                "sniper_damage_dealt": 0, "first_spotted": 0,
+                "sniper_damage_dealt": 0,
                 "deflected_hits_at_low_health": 0,
+                # Cool-Headed (``ironMan``) wants bounces in a row, so the
+                # live streak and its best value are both round state.
+                "deflection_streak": 0, "best_deflection_streak": 0,
             }
             self.vehicle_statistics[key] = row
         elif not row["team"]:
@@ -10618,6 +10761,12 @@ class BattleState:
         else:
             attacker_team = int(attacker_team)
         if attacker_team == target_team:
+            # Gore's and Rock Solid both require a clean sheet against one's
+            # own team, so friendly damage needs an owner even though it
+            # earns the shooter nothing.
+            if attacker != target:
+                self.ally_damage[attacker] = int(
+                    self.ally_damage.get(attacker, 0)) + damage
             return
         if target[0] == "bot":
             self.bot_planner.report_damage(
@@ -10721,6 +10870,9 @@ class BattleState:
             team_killer = False
         else:
             return False
+        if delta < 0:
+            self._record_lucky_devils(
+                (str(victim_kind), int(victim_id)), int(victim_team))
         if delta > 0:
             row = self._statistics_row(attacker_kind, attacker_id)
             if not row["team"] and actor_team in (1, 2):

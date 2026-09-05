@@ -8,6 +8,12 @@ module also proves which table applies: ``getAchievementCondition`` only reads
 the arena bonus type, and #1513 answers ``False`` for every bonus type,
 including the regular battles this product packs (``bonusType`` 1).
 
+The full #1513 table holds 62 entries covering every mode this build ever
+shipped.  ``scripts/item_defs/achievements.xml`` tags each achievement with a
+``mode``, and only ``mode="random"`` belongs to the battles this product packs;
+that file also decides which medals exist at all, since a condition without an
+entry there is one Wargaming cancelled before release.
+
 The client ships the thresholds but not the retail award predicates, which run
 on Wargaming's battle server.  Each predicate below therefore combines an exact
 #1513 constant with the publicly documented shape of that medal.  Anything that
@@ -37,9 +43,10 @@ RECEIPT_STAT_NAMES = (
     "hits_received", "potential_damage_received", "crits_received",
 )
 
-# Verbatim #1513 ``arena_achievements.ACHIEVEMENT_CONDITIONS`` subset for the
-# medals this module can decide.  Names and numbers must not be edited without
-# re-reading the pinned client.
+# The #1513 table holds 62 entries across every game mode this build ever
+# shipped.  Copied verbatim below is the subset ``item_defs/achievements.xml``
+# marks ``mode="random"`` and this server can decide; names and numbers must
+# not be edited without re-reading the pinned client.
 ACHIEVEMENT_CONDITIONS = {
     "warrior": {"minFrags": 6},
     "invader": {"minCapturePts": 80},
@@ -91,33 +98,44 @@ ACHIEVEMENT_CONDITIONS = {
     "bombardier": {"minKills": 2},
     "kamikaze": {"levelDelta": 1},
     "sturdy": {"minHealth": 10.0},
-    # ``raider`` carries no numeric threshold in #1513; its award is purely
-    # structural (capture the enemy base without ever being detected).
+    "huntsman": {"minKills": 3},
+    "ironMan": {"minHits": 10},
+    "luckyDevil": {"radius": 10.99},
+    # #1513 keys Rock Solid's condition as ``monolith`` while the dossier
+    # record and the results layout both call it ``medalMonolith``.
+    "monolith": {"maxSpeed_ms": 3.0555555555555554},
+    # ``raider`` and ``medalFadin`` carry no numeric threshold in #1513; both
+    # awards are purely structural.
     "raider": {},
+    "medalFadin": {},
 }
+
+# Condition key -> dossier record name, where #1513 disagrees with itself.
+CONDITION_RECORD_NAMES = {"monolith": "medalMonolith"}
 
 # Medals #1513 knows about that this server deliberately never awards.  Keeping
 # the reason next to the name stops a later change from "fixing" one by
 # inventing the missing input.
 UNAWARDED_ACHIEVEMENTS = {
-    "sniper": "retired by Wargaming in 0.8.11; superseded by sniper2",
-    "medalWittmann": "no condition entry in #1513 arena_achievements",
-    "medalFadin": "needs remaining-ammunition state the server does not own",
-    "medalBrothersInArms": "platoon award; offline rounds have no platoons",
-    "medalCrucialContribution": "platoon award",
-    "medalMonolith": "needs the rammer's impact speed",
-    "luckyDevil": "needs splash-radius survival geometry",
-    "huntsman": "no sourced #1513 predicate for minKills 3",
-    "ironMan": "no sourced #1513 predicate for minHits 10",
-    "alaric": "needs per-vehicle monument destruction attribution",
-    "lumberjack": "needs per-vehicle felled-tree attribution",
+    "sniper": "#1513 registers it as DeprecatedAchievement; the client itself "
+              "only accepts one already in the dossier",
+    "medalWittmann": "#1513 registers it as DeprecatedAchievement",
+    "alaric": "no entry in #1513 item_defs/achievements.xml; Wargaming "
+              "cancelled it before release",
+    "lumberjack": "no entry in #1513 item_defs/achievements.xml; Wargaming "
+                  "cancelled it before release",
+    "medalBrothersInArms": "platoon award; this product has no platoons",
+    "medalCrucialContribution": "platoon award; this product has no platoons",
     "markOfMastery": "needs per-vehicle XP distributions retail computes",
 }
 
-# Every name this server can award.  The wire validators use it as an exact
-# allowlist; the client packer still maps each one through the pinned
-# ``dossiers2.custom.records.RECORD_DB_IDS`` table before it reaches #1513.
-AWARDABLE_ACHIEVEMENTS = tuple(sorted(ACHIEVEMENT_CONDITIONS))
+# Every name this server can award, under the record name #1513 stores.  The
+# wire validators use it as an exact allowlist; the client packer still maps
+# each one through the pinned ``dossiers2.custom.records.RECORD_DB_IDS`` table
+# before it reaches #1513.
+AWARDABLE_ACHIEVEMENTS = tuple(sorted(
+    CONDITION_RECORD_NAMES.get(name, name)
+    for name in ACHIEVEMENT_CONDITIONS))
 
 # Battle-hero medals go to exactly one actor per battle; the medal's own
 # metric also orders that winner.
@@ -229,6 +247,19 @@ def _enemy_team_health(actors, team):
                for actor in actors if _int(actor.get("team")) != team)
 
 
+def _enemy_class_counts(actors, team):
+    """Return how many vehicles of each class opposed ``team``."""
+    counts = {}
+    for actor in actors:
+        if _int(actor.get("team")) == team:
+            continue
+        vehicle_class = actor.get("vehicle_class")
+        if not vehicle_class:
+            continue
+        counts[vehicle_class] = counts.get(vehicle_class, 0) + 1
+    return counts
+
+
 def _accuracy(actor):
     shots = _stat(actor, "shots")
     if shots <= 0:
@@ -272,7 +303,7 @@ def _unique_hero_metric(name, actor, context):
         assists = len(context["confederate"].get(_identity(actor), ()))
         return assists if assists >= condition["minAssists"] else None
     if name == "scout":
-        detections = _int(actor.get("first_spotted"))
+        detections = _stat(actor, "spotted")
         return (detections if detections >= condition["minDetections"]
                 else None)
     if name == "evileye":
@@ -350,13 +381,43 @@ def _epic_achievements(actor, context):
     if base_defence_kills >= condition["minKills"]:
         earned.append("medalDeLanglade")
 
+    # Naidin's medal (``huntsman``) asks for every enemy light tank, and the
+    # count only means anything when the enemy team actually fielded some.
+    condition = ACHIEVEMENT_CONDITIONS["huntsman"]
+    enemy_light_tanks = context["enemy_class_counts"][
+        _int(actor.get("team"))].get(_LIGHT_TANK, 0)
+    if (enemy_light_tanks >= condition["minKills"] and
+            _class_kills(actor, _LIGHT_TANK) >= enemy_light_tanks):
+        earned.append("huntsman")
+
+    # Cool-Headed (``ironMan``) counts bounces in a row, not bounces in total.
+    condition = ACHIEVEMENT_CONDITIONS["ironMan"]
+    if (survived and
+            _int(actor.get("best_deflection_streak")) >= condition["minHits"]):
+        earned.append("ironMan")
+
+    if actor.get("lucky_devil"):
+        earned.append("luckyDevil")
+
+    if actor.get("last_shell_finisher"):
+        earned.append("medalFadin")
+
     if vehicle_class == _SPG:
         condition = ACHIEVEMENT_CONDITIONS["medalGore"]
         damage = _stat(actor, "damage")
         max_health = _int(actor.get("max_health"))
         if (damage >= condition["minDamage"] and max_health > 0 and
-                damage >= condition["minDamageRate"] * max_health):
+                damage >= condition["minDamageRate"] * max_health and
+                not _int(actor.get("ally_damage"))):
             earned.append("medalGore")
+        # Rock Solid: ram an enemy to death from a crawl and drive away.
+        condition = ACHIEVEMENT_CONDITIONS["monolith"]
+        if (survived and not _int(actor.get("ally_damage")) and any(
+                _int(kill.get("death_reason")) == 2 and
+                _float(kill.get("actor_speed"), -1.0) >= 0.0 and
+                _float(kill.get("actor_speed")) <= condition["maxSpeed_ms"]
+                for kill in _kills(actor))):
+            earned.append("medalMonolith")
         condition = ACHIEVEMENT_CONDITIONS["medalStark"]
         if (survived and kills >= condition["minKills"] and
                 _int(actor.get("damaging_hits_received")) >=
@@ -369,8 +430,13 @@ def _epic_achievements(actor, context):
             _float(kill.get("distance")) <= condition["maxDistance"])
         if close_kills >= condition["minKills"]:
             earned.append("medalCoolBlood")
+        # Counter-battery fire wants the whole enemy battery, not a pair of
+        # artillery kills, so the roster bounds it the way Naidin's does.
         condition = ACHIEVEMENT_CONDITIONS["medalAntiSpgFire"]
-        if _class_kills(actor, _SPG) >= condition["minKills"]:
+        enemy_spgs = context["enemy_class_counts"][
+            _int(actor.get("team"))].get(_SPG, 0)
+        if (enemy_spgs >= condition["minKills"] and
+                _class_kills(actor, _SPG) >= enemy_spgs):
             earned.append("medalAntiSpgFire")
 
     condition = ACHIEVEMENT_CONDITIONS["bombardier"]
@@ -431,6 +497,8 @@ def award_battle_achievements(battle):
     context = {
         "enemy_team_health": dict(
             (team, _enemy_team_health(actors, team)) for team in (1, 2)),
+        "enemy_class_counts": dict(
+            (team, _enemy_class_counts(actors, team)) for team in (1, 2)),
         "confederate": _confederate_targets(actors),
         "base_captured_team": _int(battle.get("base_captured_team")),
     }

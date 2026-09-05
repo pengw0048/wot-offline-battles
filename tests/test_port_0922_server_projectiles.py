@@ -1355,6 +1355,46 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         enabled.players[1].siege_state = SIEGE_ENABLED
         self.assertTrue(_launch_authority(enabled, _launch()))
 
+    @staticmethod
+    def _armed_bot(state, bot_id=16):
+        state.bot_states[bot_id] = {
+            'id': bot_id, 'team': 2, 'vehicle': 'ussr:R11_MS-1',
+            'health': 500, 'max_health': 500, 'alive': True,
+            'display_health': 500, 'fire_seq': 0,
+        }
+        state.bot_pending_projectile_launches.add((bot_id, 1))
+
+    def test_a_reported_shell_inventory_is_admitted_and_frozen(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=1)))
+
+        self.assertIs(True, state.last_shell_shots['1:b:16:1'])
+
+    def test_a_launch_with_shells_left_is_not_a_last_shell(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=7)))
+
+        self.assertIs(False, state.last_shell_shots['1:b:16:1'])
+
+    def test_an_unknown_launch_field_is_still_rejected(self):
+        state = _state()
+        self._armed_bot(state)
+
+        self.assertFalse(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _launch(shooter_id=16, shooter_kind='bot',
+                    unexpected_field=1)))
+
     def test_modern_player_launch_is_atomic_and_idempotent(self):
         state = _state()
         message = _launch()

@@ -2600,7 +2600,7 @@ class LANClient(object):
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
                          dispersion_angle, presentation_ledger,
-                         trigger_server_time_ms):
+                         trigger_server_time_ms, shells_before_shot=None):
         """Queue one ordered trigger input without damage or ballistics."""
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
@@ -2639,6 +2639,11 @@ class LANClient(object):
                 'presentation_ledger': parsed_ledger,
                 'trigger_server_time_ms': parsed_trigger_time,
             }
+            # The client owns its ammunition, so Fadin's medal needs the
+            # shell total standing at the trigger edge, this round included.
+            parsed_shells = _projectile_int_range(shells_before_shot, 0, 1000)
+            if parsed_shells is not None:
+                message['shells_before_shot'] = parsed_shells
             if not self._send(message):
                 return None
             self._fire_intent_seq = sequence
@@ -2705,7 +2710,8 @@ class LANClient(object):
             splash_radius, authority_epoch=None, penetration_factor=1.0,
             source_shot=None, fire_intent_seq=None, fire_input_seq=None,
             burst_group_seq=None, burst_index=None, burst_count=None,
-            launch_time_us=None, launch_pose=None):
+            launch_time_us=None, launch_pose=None,
+            shells_before_shot=None):
         """Enqueue one immutable projectile launch and return its shot seq."""
         if not self.ready or self.phase != 'battle':
             return None
@@ -2811,6 +2817,11 @@ class LANClient(object):
             if parsed_intent_seq is not None:
                 message['fire_intent_seq'] = parsed_intent_seq
                 message['fire_input_seq'] = parsed_input_seq
+            # The worker owns Bot ammunition, so it is the only producer that
+            # can report the shell total this shot was drawn from.
+            parsed_shells = _projectile_int_range(shells_before_shot, 0, 1000)
+            if parsed_shells is not None:
+                message['shells_before_shot'] = parsed_shells
             if not self._send(message):
                 return None
             return parsed_seq

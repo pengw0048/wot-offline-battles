@@ -724,9 +724,27 @@ regular battles this product packs (`bonusType` 1) use the base table. Those
 numbers are copied verbatim into
 `src/res/scripts/client/gui/mods/offline_lan_0922/battle_achievements.py`; the
 predicates around them combine one exact constant with the documented shape of
-the medal. `UNAWARDED_ACHIEVEMENTS` in the same module records every medal this
-product deliberately does not award and the input it would need, so no later
-change closes a gap by inventing a coefficient.
+the medal. The full table holds 62 entries across every mode this build ever
+shipped, so `scripts/item_defs/achievements.xml` selects the subset that
+matters: each achievement there carries a `mode`, and only `mode="random"`
+belongs to the battles this product packs.
+
+`UNAWARDED_ACHIEVEMENTS` in the same module records every medal this product
+deliberately does not award and why, so no later change closes a gap by
+inventing a coefficient. Two of those reasons come straight from the pinned
+client rather than from documentation:
+
+- `gui/shared/gui_items/dossier/factories.pyc` registers `sniper` and
+  `medalWittmann` as `DeprecatedAchievement`, whose `checkIsValid` returns
+  `validators.alreadyAchieved`. The client itself treats both as historical
+  and will not accept a newly earned one.
+- `alaric` and `lumberjack` have conditions and record IDs but no entry at all
+  in `item_defs/achievements.xml`, so the client has no metadata to render
+  them. They were cancelled before release and no account has ever held one.
+
+The remaining three are product decisions, not missing data: the two platoon
+medals have no platoon to award to, and Mark of Mastery needs the per-vehicle
+experience distributions retail computes.
 
 The LAN server owns the decision. `_finish_battle` freezes the complete public
 roster first, awards from it, and stores the resulting names on every roster
@@ -748,6 +766,23 @@ Two statistics the server never recorded are now canonical round state, because
 accumulated `capturePoints`, and the `droppedCapturePoints` credited to the
 enemy whose damage reset a capture. Without them Invader and Defender could
 never be awarded and both results columns stayed at zero.
+
+`spotted` is a detection count, not a sighting count. A vehicle is detected
+when it becomes visible to a team that could not see it a moment earlier, and
+every direct observer on that team at that instant detected it. The statistic
+counts distinct enemies per observer, so re-acquiring a target that observer
+already revealed adds nothing, while an enemy that goes dark and reappears
+credits whoever finds it that time. This replaces a count of every enemy the
+vehicle had ever directly seen, which had no team fence and could never drop.
+Patrol Duty (`scout`) reads the same number, and earned experience moves with
+it.
+
+Ammunition belongs to whoever owns the gun, so Fadin's medal takes the shell
+total from the producer rather than inferring it. The visible client puts
+`shells_before_shot` on its fire intent, read before the local gun debits the
+round; the worker puts the same field on a Bot launch, computed from the
+inventory it has just debited. The server freezes the flag on the projectile
+and awards the medal only when that shot also left no living enemy.
 
 Battle-hero medals go to one actor per battle, ordered by the medal's own
 metric and broken by earned experience, which is Wargaming's documented

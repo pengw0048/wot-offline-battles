@@ -78,8 +78,10 @@ def _actor(actor_kind='player', actor_id=1, team=1, **overrides):
         'vehicle': 'ussr:R11_MS-1', 'tier': 5, 'vehicle_class': 'mediumTank',
         'max_health': 1000, 'health': 1000, 'survived': True, 'won': True,
         'xp': 500, 'stats': dict(EMPTY_STATS), 'kills': [],
-        'damaged_targets': [], 'first_spotted': 0,
+        'damaged_targets': [],
         'exclusive_spot_assists': 0, 'ever_spotted': True,
+        'ally_damage': 0, 'last_shell_finisher': False,
+        'lucky_devil': False, 'best_deflection_streak': 0,
         'crits_received': 0, 'hits_received': 0,
         'damaging_hits_received': 0, 'deflected_hits_received': 0,
         'deflected_hits_at_low_health': 0,
@@ -96,12 +98,12 @@ def _actor(actor_kind='player', actor_id=1, team=1, **overrides):
 
 def _kill(victim_id, victim_tier=5, victim_class='mediumTank',
           victim_kind='bot', death_reason=0, distance=500.0,
-          defended_base=False):
+          defended_base=False, actor_speed=10.0):
     return {
         'victim_kind': victim_kind, 'victim_id': victim_id,
         'victim_tier': victim_tier, 'victim_class': victim_class,
         'death_reason': death_reason, 'distance': distance,
-        'defended_base': defended_base,
+        'defended_base': defended_base, 'actor_speed': actor_speed,
     }
 
 
@@ -199,7 +201,7 @@ class BattleHeroTests(unittest.TestCase):
         self.assertNotIn('supporter', awards[('player', 2)])
 
     def test_scout_and_patrol_duty_use_distinct_spotting_inputs(self):
-        scout = _actor(actor_id=1, first_spotted=9)
+        scout = _actor(actor_id=1, stats={'spotted': 9})
         patrol = _actor(actor_id=2, exclusive_spot_assists=6)
         awards = _awards([scout, patrol])
         self.assertIn('scout', awards[('player', 1)])
@@ -219,6 +221,74 @@ class BattleHeroTests(unittest.TestCase):
                              stats={'shots': 10, 'direct_hits': 9,
                                     'damage': 1500})
         self.assertNotIn('sniper2', _awards([close_range])[('player', 1)])
+
+
+class SourcedMedalTests(unittest.TestCase):
+    """Medals whose #1513 constant only became usable with a sourced shape."""
+
+    def test_naidin_needs_every_enemy_light_tank(self):
+        scouts = [_actor(actor_kind='bot', actor_id=index, team=2,
+                         vehicle_class='lightTank', survived=False,
+                         won=False) for index in (1, 2, 3)]
+        hunter = _actor(actor_id=1, stats={'kills': 3}, kills=[
+            _kill(index, victim_class='lightTank') for index in (1, 2, 3)])
+        self.assertIn('huntsman', _awards([hunter] + scouts)[('player', 1)])
+        survivor = _actor(actor_kind='bot', actor_id=4, team=2,
+                          vehicle_class='lightTank', won=False)
+        self.assertNotIn(
+            'huntsman',
+            _awards([hunter] + scouts + [survivor])[('player', 1)])
+
+    def test_naidin_needs_the_enemy_to_field_three_light_tanks(self):
+        scouts = [_actor(actor_kind='bot', actor_id=index, team=2,
+                         vehicle_class='lightTank', survived=False,
+                         won=False) for index in (1, 2)]
+        hunter = _actor(actor_id=1, stats={'kills': 2}, kills=[
+            _kill(index, victim_class='lightTank') for index in (1, 2)])
+        self.assertNotIn(
+            'huntsman', _awards([hunter] + scouts)[('player', 1)])
+
+    def test_cool_headed_counts_bounces_in_a_row(self):
+        steady = _actor(actor_id=1, best_deflection_streak=10)
+        self.assertIn('ironMan', _awards([steady])[('player', 1)])
+        broken = _actor(actor_id=1, best_deflection_streak=9,
+                        deflected_hits_received=30)
+        self.assertNotIn('ironMan', _awards([broken])[('player', 1)])
+        dead = _actor(actor_id=1, best_deflection_streak=12, survived=False)
+        self.assertNotIn('ironMan', _awards([dead])[('player', 1)])
+
+    def test_fadin_follows_the_last_shell_finisher_flag(self):
+        finisher = _actor(actor_id=1, last_shell_finisher=True)
+        self.assertIn('medalFadin', _awards([finisher])[('player', 1)])
+        self.assertNotIn(
+            'medalFadin', _awards([_actor(actor_id=1)])[('player', 1)])
+
+    def test_lucky_follows_the_proximity_flag(self):
+        witness = _actor(actor_id=1, lucky_devil=True)
+        self.assertIn('luckyDevil', _awards([witness])[('player', 1)])
+        self.assertNotIn(
+            'luckyDevil', _awards([_actor(actor_id=1)])[('player', 1)])
+
+    def test_rock_solid_needs_a_crawling_artillery_ram(self):
+        crawl = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
+                       kills=[_kill(1, death_reason=2, actor_speed=2.0)])
+        self.assertIn('medalMonolith', _awards([crawl])[('player', 1)])
+        fast = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
+                      kills=[_kill(1, death_reason=2, actor_speed=6.0)])
+        self.assertNotIn('medalMonolith', _awards([fast])[('player', 1)])
+        shot = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
+                      kills=[_kill(1, death_reason=0, actor_speed=2.0)])
+        self.assertNotIn('medalMonolith', _awards([shot])[('player', 1)])
+        tank = _actor(actor_id=1, vehicle_class='heavyTank',
+                      stats={'kills': 1},
+                      kills=[_kill(1, death_reason=2, actor_speed=2.0)])
+        self.assertNotIn('medalMonolith', _awards([tank])[('player', 1)])
+
+    def test_rock_solid_is_lost_by_damaging_an_ally(self):
+        dirty = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 1},
+                       ally_damage=40,
+                       kills=[_kill(1, death_reason=2, actor_speed=2.0)])
+        self.assertNotIn('medalMonolith', _awards([dirty])[('player', 1)])
 
 
 class EpicMedalTests(unittest.TestCase):
@@ -307,6 +377,11 @@ class EpicMedalTests(unittest.TestCase):
             _kill(index) for index in range(1, 5)])
         self.assertNotIn('medalDeLanglade', _awards([outside])[('player', 1)])
 
+    def _enemy_battery(self):
+        return [_actor(actor_kind='bot', actor_id=index, team=2,
+                       vehicle_class='SPG', survived=False, won=False)
+                for index in (1, 2)]
+
     def test_artillery_medals_require_a_self_propelled_gun(self):
         gore_stats = {'damage': 8000, 'kills': 2}
         artillery = _actor(actor_id=1, vehicle_class='SPG',
@@ -315,7 +390,8 @@ class EpicMedalTests(unittest.TestCase):
                            kills=[_kill(1, victim_class='SPG'),
                                   _kill(2, victim_class='SPG',
                                         distance=50.0)])
-        awards = _awards([artillery])[('player', 1)]
+        awards = _awards(
+            [artillery] + self._enemy_battery())[('player', 1)]
         self.assertIn('medalGore', awards)
         self.assertIn('medalStark', awards)
         self.assertIn('medalAntiSpgFire', awards)
@@ -324,9 +400,31 @@ class EpicMedalTests(unittest.TestCase):
                       damaging_hits_received=2,
                       kills=[_kill(1, victim_class='SPG'),
                              _kill(2, victim_class='SPG', distance=50.0)])
+        awards = _awards([tank] + self._enemy_battery())[('player', 1)]
         for name in ('medalGore', 'medalStark', 'medalAntiSpgFire',
                      'medalCoolBlood'):
-            self.assertNotIn(name, _awards([tank])[('player', 1)])
+            self.assertNotIn(name, awards)
+
+    def test_counter_battery_fire_needs_the_whole_enemy_battery(self):
+        battery = self._enemy_battery()
+        battery.append(_actor(actor_kind='bot', actor_id=3, team=2,
+                              vehicle_class='SPG', survived=True, won=False))
+        partial = _actor(actor_id=1, vehicle_class='SPG',
+                         stats={'kills': 2},
+                         kills=[_kill(1, victim_class='SPG'),
+                                _kill(2, victim_class='SPG')])
+        self.assertNotIn(
+            'medalAntiSpgFire',
+            _awards([partial] + battery)[('player', 1)])
+
+    def test_gores_medal_is_lost_by_damaging_an_ally(self):
+        stats = {'damage': 8000, 'kills': 2}
+        clean = _actor(actor_id=1, vehicle_class='SPG', max_health=800,
+                       stats=stats)
+        self.assertIn('medalGore', _awards([clean])[('player', 1)])
+        dirty = _actor(actor_id=1, vehicle_class='SPG', max_health=800,
+                       stats=stats, ally_damage=120)
+        self.assertNotIn('medalGore', _awards([dirty])[('player', 1)])
 
     def test_cool_blood_counts_close_kills_only(self):
         close = _actor(actor_id=1, vehicle_class='SPG', stats={'kills': 2},
@@ -792,6 +890,126 @@ class _Packers(object):
                      'COMMON_RESULTS', 'PLAYER_INFO', 'VEH_PUBLIC_RESULTS',
                      'AVATAR_PUBLIC_RESULTS'):
             setattr(self, name, _Packer(name, self.calls))
+
+
+class DetectionTests(unittest.TestCase):
+    """``spotted`` counts detections, not every sighting."""
+
+    @staticmethod
+    def _battle():
+        state, player = ServerReceiptTests._battle()
+        for entry in state.bot_states.values():
+            entry['alive'] = True
+        player.alive = True
+        player.participating = True
+        player.connected = True
+        return state, player
+
+    def test_one_enemy_counts_once_while_it_stays_visible(self):
+        state, unused_player = self._battle()
+        for unused in range(3):
+            state.player_spotted = {1: frozenset({('bot', 1)})}
+            state._commit_detections()
+        self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
+
+    def test_a_target_that_goes_dark_is_a_new_detection(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+        state.player_spotted = {1: frozenset()}
+        state._commit_detections()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+        # The same enemy still counts once for this observer, but the team
+        # visibility did drop, so a different observer would be credited.
+        self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
+
+    def test_a_second_observer_is_credited_for_a_re_detection(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+        state.player_spotted = {1: frozenset()}
+        state._commit_detections()
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._commit_detections()
+        self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
+        self.assertEqual(1, state._statistics_row('bot', 2)['spotted'])
+
+    def test_a_teammate_is_never_a_detection(self):
+        state, unused_player = self._battle()
+        state.bot_states[1]['team'] = 1
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+        self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
+
+
+class LuckyDevilTests(unittest.TestCase):
+    """Lucky needs the victim's dying pose, not a living one."""
+
+    @staticmethod
+    def _battle():
+        state, player = ServerReceiptTests._battle()
+        player.alive = True
+        player.participating = True
+        player.connected = True
+        player.x, player.y, player.z = 0.0, 0.0, 0.0
+        for entry in state.bot_states.values():
+            entry.update({'alive': True, 'x': 0.0, 'y': 0.0, 'z': 0.0})
+        return state, player
+
+    def test_a_nearby_enemy_team_kill_credits_the_witness(self):
+        state, unused_player = self._battle()
+        state.bot_states[1]['x'] = 5.0
+        state.bot_states[2]['x'] = 5.0
+        # Bot 2 kills its own team mate right beside the human player.
+        state.bot_states[1]['alive'] = False
+        self.assertTrue(state._record_frag(
+            'bot', 2, 2, 'bot', 1, attacker_team=2))
+        self.assertIn(('player', 1), state.lucky_devils)
+
+    def test_a_distant_witness_earns_nothing(self):
+        state, unused_player = self._battle()
+        state.bot_states[1].update({'x': 40.0, 'alive': False})
+        state.bot_states[2]['x'] = 40.0
+        self.assertTrue(state._record_frag(
+            'bot', 2, 2, 'bot', 1, attacker_team=2))
+        self.assertEqual(set(), state.lucky_devils)
+
+    def test_an_ordinary_kill_credits_nobody(self):
+        state, unused_player = self._battle()
+        state.bot_states[1].update({'x': 5.0, 'alive': False})
+        self.assertTrue(state._record_frag(
+            'player', 1, 2, 'bot', 1, attacker_team=1))
+        self.assertEqual(set(), state.lucky_devils)
+
+
+class LastShellTests(unittest.TestCase):
+    """Fadin's medal needs the final round and the final enemy together."""
+
+    def test_the_last_shell_that_ends_the_battle_earns_it(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.last_shell_shots['p1'] = True
+        state._record_kill(('player', 1), ('bot', 1), 0, projectile_id='p1')
+        self.assertIn(('player', 1), state.last_shell_finishers)
+
+    def test_a_surviving_enemy_denies_it(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.bot_states[2]['alive'] = True
+        state.last_shell_shots['p1'] = True
+        state._record_kill(('player', 1), ('bot', 1), 0, projectile_id='p1')
+        self.assertEqual(set(), state.last_shell_finishers)
+
+    def test_a_shell_still_in_the_rack_denies_it(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state.last_shell_shots['p1'] = False
+        state._record_kill(('player', 1), ('bot', 1), 0, projectile_id='p1')
+        self.assertEqual(set(), state.last_shell_finishers)
+
+    def test_a_shot_without_a_reported_inventory_denies_it(self):
+        state, unused_player = ServerReceiptTests._battle()
+        state._record_kill(('player', 1), ('bot', 1), 0, projectile_id='p1')
+        self.assertEqual(set(), state.last_shell_finishers)
 
 
 class _ReplayConnector(object):

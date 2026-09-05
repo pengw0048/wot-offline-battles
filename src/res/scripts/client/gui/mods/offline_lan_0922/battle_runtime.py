@@ -7341,11 +7341,16 @@ class BattleRuntime(object):
             'aim_yaw', 'gun_pitch', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
             'speed', 'shot_origin', 'shot_direction', 'dispersion_angle',
             'presentation_ledger'}
+        # The shell total this trigger was drawn from, which the server relays
+        # untouched from the client that owns the ammunition.  A trigger that
+        # never reported one is still legal.
+        optional = {'shells_before_shot'}
         transport_fields = {
             '_client_received_time', '_client_dispatch_delay'}
         if (not isinstance(message, dict) or
                 not required.issubset(message) or
-                not set(message).issubset(required | transport_fields)):
+                not set(message).issubset(
+                    required | optional | transport_fields)):
             raise RuntimeError('worker fire intent is malformed')
         try:
             player_id = int(message['player_id'])
@@ -19073,6 +19078,7 @@ class BattleRuntime(object):
             'burst_count': state.get('burst_count'),
             'launch_time_us': launch_time_us,
             'launch_pose': launch_pose,
+            'shells_before_shot': state.get('shells_before_shot'),
         }
         self._bot_launch_payloads[(bot_id, shot_seq)] = (args, kwargs)
         accepted = sender(*args, **kwargs)
@@ -21005,10 +21011,17 @@ class BattleRuntime(object):
         trigger_wall = _PROFILE_CLOCK()
         if not self._sender.send_current():
             return self._reject_local_fire('input_send_failed')
+        # Read the ammunition before the local gun consumes this round, so
+        # the count the server freezes includes the shell being fired.
+        try:
+            shells_before_shot = sum(int(value) for value in state.ammo)
+        except (AttributeError, TypeError, ValueError):
+            shells_before_shot = None
         intent_seq = sender(
             shell_index, list(_xyz(shot_origin)),
             list(_xyz(shot_direction)), dispersion_angle,
-            presentation_ledger, trigger_server_time_ms)
+            presentation_ledger, trigger_server_time_ms,
+            shells_before_shot)
         if not intent_seq:
             return self._reject_local_fire('intent_send_failed')
         self._local_fire_intent = {

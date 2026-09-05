@@ -8889,6 +8889,10 @@ class BotRuntime(object):
         if not ammo_state.consume_loaded(continuing):
             raise RuntimeError(
                 'bot ammunition changed during atomic burst')
+        # Fadin's medal reads the shell total this round was drawn from.
+        # ``remaining`` is already debited here, so restore the fired round
+        # rather than sampling the inventory at an unrelated moment.
+        state['shells_before_shot'] = sum(ammo_state.remaining) + 1
         if final_round and ammo_state.loaded_shell_requires_full_reload():
             gun_state.require_full_reload()
         state['fire_seq'] = shot_seq

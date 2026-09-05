@@ -1593,7 +1593,7 @@ class _Client(object):
 
     def send_fire_intent(self, shell_index, shot_origin, shot_direction,
                          dispersion_angle, presentation_ledger,
-                         trigger_server_time_ms):
+                         trigger_server_time_ms, shells_before_shot=None):
         self._fire_intent_seq += 1
         self.sent.append((
             'fire_intent', (shell_index,),
@@ -1604,7 +1604,8 @@ class _Client(object):
              'dispersion_angle': float(dispersion_angle),
              'presentation_ledger': [
                  dict(entry) for entry in presentation_ledger],
-             'trigger_server_time_ms': trigger_server_time_ms}))
+             'trigger_server_time_ms': trigger_server_time_ms,
+             'shells_before_shot': shells_before_shot}))
         return self._fire_intent_seq
 
 
@@ -20504,6 +20505,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'dispersion_angle': 0.25,
             'presentation_ledger': [],
             'trigger_server_time_ms': 0,
+            # Read before the local gun debits this round, so the total still
+            # includes the shell being fired.
+            'shells_before_shot': 24,
         }, intent[2])
         current_input = next(item for item in client.sent
                              if item[0] == 'input')
@@ -20620,8 +20624,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
             self.assertFalse(battle.shoot(0.2, -0.1))
         self.assertNotIn('FIRE TRIGGER', fire_output.getvalue())
         self.assertEqual([], battle._avatar.dispersion_queries)
+        # The trailing argument is the shell total standing at the trigger
+        # edge, which Fadin's medal reads.
         client.send_fire_intent.assert_called_once_with(
-            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0)
+            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0, 24)
 
     def test_trigger_without_a_server_clock_is_rejected_before_send(self):
         runtime = _runtime()
@@ -20791,6 +20797,24 @@ class BattleRuntimeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, 'worker fire intent is malformed'):
             battle.on_fire_intent(dict(intent, unexpected='wire field'))
+        # The relayed shell total is optional, and carrying it is not a
+        # malformed intent.
+        other = BattleRuntime(_runtime())
+        other._worker_mode = True
+        other.state = 'running'
+        other._battle_live = True
+        other._projectile_is_authority = lambda: True
+        other.client = _Client()
+        other.client.authority_epoch = 4
+        other._start_message = {'round_id': 7}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(other.on_fire_intent(
+                dict(intent, shells_before_shot=1)))
+        # The worker resolves ballistics and never needs the count, so it
+        # accepts the relay and keeps its own frozen intent unchanged.
+        self.assertEqual(
+            battle._player_fire_intents[(2, 3)],
+            other._player_fire_intents[(2, 3)])
         for invalid in (True, 1.0, -1,
                         battle_runtime_module.lan_protocol.MAX_MOTION_TIME_US //
                         1000 + 1):
