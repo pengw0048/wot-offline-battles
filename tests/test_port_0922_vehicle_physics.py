@@ -561,6 +561,35 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertFalse(vehicle_physics.suspension_ground_planes_continuous(
             plane, {}, start, end, 0.1, 0.1))
 
+    def test_world_ground_plane_projects_complete_velocity_onto_its_normal(
+            self):
+        plane = {'gradient_x': -0.5, 'gradient_z': 0.25}
+        normal_length = math.sqrt(1.0 + 0.5 * 0.5 + 0.25 * 0.25)
+
+        self.assertAlmostEqual(
+            10.0 / normal_length,
+            vehicle_physics.suspension_plane_impact_speed(
+                plane, (0.0, -10.0, 0.0)))
+        # This velocity is tangent to y = -0.5*x + 0.25*z.
+        self.assertEqual(
+            0.0,
+            vehicle_physics.suspension_plane_impact_speed(
+                plane, (10.0, -5.0, 0.0)))
+        self.assertAlmostEqual(
+            15.0 / normal_length,
+            vehicle_physics.suspension_plane_impact_speed(
+                plane, (-10.0, -10.0, 0.0)))
+        self.assertIsNone(
+            vehicle_physics.suspension_plane_impact_speed(
+                None, (0.0, -10.0, 0.0)))
+        self.assertIsNone(
+            vehicle_physics.suspension_plane_impact_speed(
+                plane, (float('nan'), -10.0, 0.0)))
+        self.assertIsNone(
+            vehicle_physics.suspension_plane_impact_speed(
+                {'gradient_x': 1.0e308, 'gradient_z': 0.0},
+                (1.0, -10.0, 0.0)))
+
     def test_contact_correction_uses_bounded_interior_path_probes(self):
         self.assertEqual(
             (), vehicle_physics.suspension_path_probe_fractions(0.2))

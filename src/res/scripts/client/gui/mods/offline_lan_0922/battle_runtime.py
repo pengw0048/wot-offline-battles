@@ -1544,6 +1544,7 @@ class BattleRuntime(object):
         self._local_suspension_params = None
         self._local_suspension_disabled = False
         self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
@@ -1837,6 +1838,7 @@ class BattleRuntime(object):
         self._local_suspension_params = None
         self._local_suspension_disabled = False
         self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
@@ -5625,6 +5627,7 @@ class BattleRuntime(object):
         self._local_suspension_params = None
         self._local_suspension_disabled = False
         self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         return True
@@ -17330,6 +17333,14 @@ class BattleRuntime(object):
 
     def _ensure_local_suspension_params(self, descriptor):
         """Lazily enable the descriptor-backed ten-spring trial."""
+        if vehicle_physics.suspension_trial_excluded(descriptor):
+            self._local_suspension_params = None
+            self._local_suspension_disabled = True
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
+            self._report_local_suspension_trial(
+                'excluded: #1513 hydraulic suspension')
+            return None
         if self._local_suspension_disabled:
             return None
         if self._local_suspension_params is None:
@@ -17382,7 +17393,7 @@ class BattleRuntime(object):
             setattr(self, name, value)
 
     def _disable_local_suspension_trial(self, error):
-        """Fail one optional native/solver boundary back to legacy physics."""
+        """Retire the trial after rolling back its failing physics tick."""
         self._local_suspension_params = None
         self._local_suspension_disabled = True
         self._local_spring_ground_memory = None
@@ -17620,8 +17631,9 @@ class BattleRuntime(object):
         del self._pending_landing_impacts[0]
         return True
 
-    def _apply_landing_impact(self, entity, vertical_speed):
-        """Copy combined vertical/lateral impact and retained landing skid."""
+    def _apply_landing_impact(
+            self, entity, impact_speed, normal_impact=False):
+        """Retain airborne skid and apply legacy or normal impact speed."""
         lateral_x, lateral_z = self._local_air_lateral
         lateral_speed = math.sqrt(
             lateral_x * lateral_x + lateral_z * lateral_z)
@@ -17629,9 +17641,9 @@ class BattleRuntime(object):
             self._local_slide_speed = max(
                 self._local_slide_speed, lateral_speed)
         self._local_air_lateral = (0.0, 0.0)
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed +
-            lateral_speed * lateral_speed)
+        if not normal_impact:
+            impact_speed = math.sqrt(
+                impact_speed * impact_speed + lateral_speed * lateral_speed)
         return self._apply_fall_damage(entity, impact_speed)
 
     def _update_vertical_motion_legacy(self, entity, position, yaw, dt):
@@ -17747,6 +17759,7 @@ class BattleRuntime(object):
 
     def _update_vertical_motion(self, entity, position, yaw, dt):
         """Contain the optional suspension trial to this local vehicle."""
+        self._local_suspension_failed_this_tick = False
         params = self._ensure_local_suspension_params(entity.typeDescriptor)
         if params is None:
             return self._update_vertical_motion_legacy(
@@ -17758,8 +17771,12 @@ class BattleRuntime(object):
         except Exception as error:
             self._restore_local_suspension_state(snapshot)
             self._disable_local_suspension_trial(error)
-            return self._update_vertical_motion_legacy(
-                entity, position, yaw, dt)
+            self._local_suspension_failed_this_tick = True
+            self._local_support_rise_blocked = True
+            tick_pose = getattr(self, '_local_support_tick_pose', None)
+            if tick_pose is not None:
+                position = tuple(tick_pose)
+            return position
 
     def _update_suspension_vertical_motion(
             self, entity, position, yaw, dt):
@@ -17873,10 +17890,22 @@ class BattleRuntime(object):
             self._local_fall_armed = True
         if (before_airborne and not self._local_airborne and
                 before_vertical_speed < 0.0):
-            impact_speed = solved.get('impact_speed')
-            if impact_speed is None:
-                impact_speed = before_vertical_speed
-            self._apply_landing_impact(entity, abs(float(impact_speed)))
+            impact_vertical = solved.get('impact_speed')
+            if impact_vertical is None:
+                impact_vertical = before_vertical_speed
+            impact_speed = max(0.0, -float(impact_vertical))
+            if motion_pose is not None and float(dt) > 0.0:
+                velocity = (
+                    (float(position[0]) - float(motion_pose[0])) / float(dt),
+                    float(impact_vertical),
+                    (float(position[2]) - float(motion_pose[2])) / float(dt),
+                )
+                normal_speed = vehicle_physics.suspension_plane_impact_speed(
+                    current_plane, velocity)
+                if normal_speed is not None:
+                    impact_speed = normal_speed
+            self._apply_landing_impact(
+                entity, impact_speed, normal_impact=True)
         elif not before_airborne and self._local_airborne:
             self._local_turn_speed = 0.0
             self._local_drive_turn = 0.0
@@ -18393,7 +18422,8 @@ class BattleRuntime(object):
                 self._local_speed = 0.0
             self._local_grind = 4
             contact_path = 'support'
-        if not suspension_active:
+        suspension_failed = bool(self._local_suspension_failed_this_tick)
+        if not suspension_active and not suspension_failed:
             self._ground_pitch(position, yaw, entity.typeDescriptor)
             if not slide_moved:
                 position = self._apply_slope_slide(
@@ -20172,6 +20202,7 @@ class BattleRuntime(object):
             self._local_suspension_params = None
             self._local_suspension_disabled = False
             self._local_suspension_report = None
+            self._local_suspension_failed_this_tick = False
             self._local_spring_ground_memory = None
             self._local_pseudo_ground_memory = None
             self._local_suspension_pitch_velocity = 0.0
@@ -22241,6 +22272,7 @@ class BattleRuntime(object):
         self._local_suspension_params = None
         self._local_suspension_disabled = False
         self._local_suspension_report = None
+        self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_matrix = None

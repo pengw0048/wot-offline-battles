@@ -647,6 +647,12 @@ def _suspension_wheel_radius(chassis, config, spring_spacing):
 	return max(0.125, float(spring_spacing) * 0.5)
 
 
+def suspension_trial_excluded(descriptor):
+	'''Return whether exact #1513 uses hydraulic hull-aiming suspension.'''
+	return bool(_value(
+		descriptor, 'isPitchHullAimingAvailable', False))
+
+
 def derive_suspension_params(descriptor):
 	'''Build the ten-spring rigid-body trial for one tank.
 
@@ -662,8 +668,7 @@ def derive_suspension_params(descriptor):
 	native solver owns them and no #1513 process is given them, so those are
 	an explicit trial projection and are the reason this remains a trial.
 	'''
-	if bool(_value(
-			descriptor, 'isPitchHullAimingAvailable', False)):
+	if suspension_trial_excluded(descriptor):
 		# Exact #1513 initVehiclePhysicsClient gives pitch-hull-aiming tanks a
 		# zero hard ratio and installs mode-specific suspensionSpringsLength
 		# caches on both descriptors.  This trial owns neither that native hull
@@ -1001,6 +1006,39 @@ def suspension_plane_height(plane, x, z):
 	if math.isnan(height) or math.isinf(height):
 		return None
 	return height
+
+
+def suspension_plane_impact_speed(plane, velocity):
+	'''Return world velocity closing against one sampled terrain plane.
+
+	The fitted plane is ``y = gx*x + gz*z + c`` and therefore has the upward
+	normal ``(-gx, 1, -gz)``. Missing or non-finite terrain/velocity evidence
+	returns ``None`` rather than manufacturing a damaging impact.
+	'''
+	if not isinstance(plane, dict):
+		return None
+	try:
+		gradient_x = float(plane['gradient_x'])
+		gradient_z = float(plane['gradient_z'])
+		velocity_x = float(velocity[0])
+		velocity_y = float(velocity[1])
+		velocity_z = float(velocity[2])
+	except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+		return None
+	values = (gradient_x, gradient_z,
+		velocity_x, velocity_y, velocity_z)
+	if any(math.isnan(value) or math.isinf(value) for value in values):
+		return None
+	normal_length = math.sqrt(
+		1.0 + gradient_x * gradient_x + gradient_z * gradient_z)
+	if math.isnan(normal_length) or math.isinf(normal_length):
+		return None
+	closing = (
+		gradient_x * velocity_x - velocity_y +
+		gradient_z * velocity_z) / normal_length
+	if math.isnan(closing) or math.isinf(closing):
+		return None
+	return max(0.0, closing)
 
 
 def suspension_ground_planes_continuous(
