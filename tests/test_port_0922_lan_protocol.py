@@ -590,7 +590,14 @@ class LanProtocolTests(unittest.TestCase):
             'shots_penetrated', 'damage_dealt', 'damage_received',
             'damage_blocked', 'damage_assisted_track',
             'damage_assisted_radio', 'damage_assisted_stun',
-            'kills'}, set(rows[1]))
+            'kills', 'spotted',
+            'capture_points', 'dropped_capture_points',
+            'potential_damage_received', 'hits_received',
+            'damaging_hits_received', 'deflected_hits_received',
+            'crits_received_mask', 'hits_with_damage',
+            'sniper_damage_dealt', 'deflection_streak',
+            'best_deflection_streak',
+            'deflected_hits_at_low_health'}, set(rows[1]))
         for row in rows.values():
             self.assertTrue(all(key == key.lower() and key.isidentifier()
                                 for key in row))

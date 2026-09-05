@@ -213,7 +213,8 @@ class AccountRpcTests(unittest.TestCase):
 
         update = pickle.loads(self.player.updates[-1])
         self.assertEqual(
-            {'credits', 'freeXP', 'vehTypeXP'}, set(update['stats']))
+            {'credits', 'freeXP', 'vehTypeXP', 'dossier'},
+            set(update['stats']))
         self.assertNotIn('eliteVehicles', update['stats'])
         self.assertNotIn('unlocks', update['stats'])
         self.assertEqual(account_data.OFFLINE_CREDITS + 700,

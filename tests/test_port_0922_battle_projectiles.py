@@ -4696,7 +4696,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact',
-                return_value={'result': 2}), \
+                return_value={'result': 2, 'layer': 'external'}), \
                 mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
@@ -4714,6 +4714,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(390, effect['damage'])
         self.assertEqual(2, effect['shot_result'])
+        self.assertIs(False, effect['structural_armor_hit'])
         self.assertEqual(
             [390.0, 150.0], critical.call_args.args[5]['damage'])
         self.assertFalse(critical.call_args.kwargs['deadeye'])
@@ -4748,6 +4749,7 @@ class BattleProjectileTests(unittest.TestCase):
         with mock.patch.object(
                 combat_rules, 'resolve_armor_contact', return_value={
                     'result': 0, 'component': 'hull', 'distance': 10.0,
+                    'layer': 'structural',
                 }) as resolved, mock.patch.object(
                     combat_rules, 'he_nominal_armor', return_value=100.0), \
                 mock.patch.object(
@@ -4760,6 +4762,7 @@ class BattleProjectileTests(unittest.TestCase):
 
         self.assertEqual(0, effect['damage'])
         self.assertEqual(0, effect['shot_result'])
+        self.assertIs(True, effect['structural_armor_hit'])
         self.assertEqual((1.0, 0.0, 0.0), terminal['world_normal'])
         self.assertEqual(
             0.75,
