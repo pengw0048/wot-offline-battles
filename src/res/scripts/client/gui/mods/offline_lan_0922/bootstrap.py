@@ -578,7 +578,9 @@ def _selected_vehicle(config, restore_saved=True):
 
         records = []
         inventory_items = {}
-        shop_item_prices = {}
+        # shop_item_prices is already the baked catalogue.  Rebinding it here
+        # would drop every real price on the floor and publish the whole shop
+        # at no cost, which is what the loops below only fill gaps in.
         vehicle_type_compact_descrs = set()
         unlock_item_compact_descrs = set()
         next_tankman_id = 100001

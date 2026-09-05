@@ -977,6 +977,23 @@ class BootstrapLifecycleTests(unittest.TestCase):
             len(career['unlockItemCompactDescrs']),
             len(career['shopItemPrices']))
 
+    def test_the_shop_publishes_the_baked_price_of_every_item(self):
+        """The garage builder must not throw the baked catalogue away.
+
+        Every price the player is charged comes from this mapping, so a
+        builder that rebuilt it empty would publish the whole shop at no cost
+        and hand out vehicles, modules and consumables for nothing.
+        """
+        starters = dict(self.STARTER_NAMES)
+        # R04_T-34 costs 356700 credits in the baked #1513 catalogue, and
+        # this harness's nation 0 is ussr.
+        starters['ussr:R04_T-34'] = (0, 12)
+        unused_bootstrap, snapshot = self._build(
+            save_mode='new_account', starters=starters)
+
+        self.assertEqual(
+            {'credits': 356700}, snapshot['shopItemPrices'][90012])
+
     def test_a_new_account_buys_its_own_consumables_and_devices(self):
         """Retail hands a new player no equipment, only the tanks."""
         unused_bootstrap, snapshot = self._career()
