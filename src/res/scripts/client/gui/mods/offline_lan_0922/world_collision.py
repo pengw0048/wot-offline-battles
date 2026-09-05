@@ -4,8 +4,7 @@
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
 	_try_destroy_solid_hit, _vehicle_hull_bbox,
-	ground_collision_filter, horizontal_collision_filter,
-	prepare_horizontal_collision_filter)
+	horizontal_collision_filter, prepare_horizontal_collision_filter)
 
 
 _MAX_DRIVABLE_GRADIENT = 1.28
@@ -89,13 +88,9 @@ def _ground_profile(spaceID, Math, pos, sx, sz, sin_y, cos_y, direction,
 		distance = segment * sample_index
 		x = sx + sin_y * distance * direction
 		z = sz + cos_y * distance * direction
-		start = Math.Vector3(x, pos.y + 12.0, z)
-		end = Math.Vector3(x, pos.y - probe_down, z)
-		broken_filter = ground_collision_filter(x, z)
-		ground = (BigWorld.wg_collideSegment(spaceID, start, end, 128)
-			if broken_filter is None else
-			BigWorld.wg_collideSegment(
-				spaceID, start, end, 128, broken_filter))
+		ground = BigWorld.wg_collideSegment(
+			spaceID, Math.Vector3(x, pos.y + 12.0, z),
+			Math.Vector3(x, pos.y - probe_down, z), 128)
 		if ground is None:
 			return (), segment
 		heights.append(ground[0].y)

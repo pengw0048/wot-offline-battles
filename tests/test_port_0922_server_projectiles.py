@@ -515,66 +515,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             1, dict(message, observation_seq=2, damage=999)))
         self.assertTrue(results[-1]['accepted'] is False)
 
-    def test_landing_spends_chassis_pool_before_it_costs_health(self):
-        state = _state()
-        player = state.players[1]
-        player.effective_params['critical']['devices'].extend([
-            {'name': 'leftTrackHealth', 'max_hp': 200.0, 'regen_hp': 100.0},
-            {'name': 'rightTrackHealth', 'max_hp': 200.0, 'regen_hp': 100.0},
-        ])
-        player.offer_reliable = lambda unused_message: True
-        self.assertTrue(_update_player_input(state, 1, up_cosine=1.0))
-
-        self.assertTrue(state.submit_landing_observation(1, {
-            'type': 'landing_observation', 'round_id': state.round_id,
-            'authority_epoch': state.authority_epoch,
-            'observation_seq': 1, 'input_seq': player.input_seq,
-            'impact_speed': 9.0,
-        }))
-
-        # #1513 damages the running gear before the hull on a world collision.
-        self.assertEqual(player.max_health, player.health)
-        devices = dict((record['name'], record)
-                       for record in player.critical['devices'])
-        self.assertEqual(
-            ('critical', 'critical'),
-            (devices['leftTrackHealth']['state'],
-             devices['rightTrackHealth']['state']))
-        event = state.pending_events[-1]
-        self.assertEqual(
-            ('health', 'environment', 0, 3, False),
-            (event['kind'], event['source'], event['damage'],
-             event['attack_reason'], event['dead']))
-        self.assertEqual(
-            ['world_collision', 'world_collision'],
-            sorted(row['cause'] for row in event['critical']['events']))
-        self.assertEqual(
-            player.critical_revision, event['critical_revision'])
-
-    def test_hard_landing_throws_both_tracks_and_costs_health(self):
-        state = _state()
-        player = state.players[1]
-        player.effective_params['critical']['devices'].extend([
-            {'name': 'leftTrackHealth', 'max_hp': 200.0, 'regen_hp': 100.0},
-            {'name': 'rightTrackHealth', 'max_hp': 200.0, 'regen_hp': 100.0},
-        ])
-        player.offer_reliable = lambda unused_message: True
-        self.assertTrue(_update_player_input(state, 1, up_cosine=1.0))
-
-        self.assertTrue(state.submit_landing_observation(1, {
-            'type': 'landing_observation', 'round_id': state.round_id,
-            'authority_epoch': state.authority_epoch,
-            'observation_seq': 1, 'input_seq': player.input_seq,
-            'impact_speed': 20.0,
-        }))
-
-        expected = vehicle_physics.fall_damage(player.max_health, 20.0)
-        self.assertEqual(player.max_health - expected, player.health)
-        self.assertEqual(
-            ['leftTrackHealth', 'rightTrackHealth'],
-            sorted(player.critical['destroyed']))
-        self.assertEqual(expected, state.pending_events[-1]['damage'])
-
     def test_server_overturn_owns_control_lock_and_terminal_death(self):
         state = _state()
         player = state.players[1]

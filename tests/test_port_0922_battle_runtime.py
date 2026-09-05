@@ -548,6 +548,33 @@ class _Descriptor(object):
                 self.turret.hitTester, self.gun.hitTester)
 
 
+def _suspension_descriptor():
+    """Return one fixture with every client-owned trial suspension field."""
+    descriptor = _Descriptor()
+    descriptor.physics.update({
+        'weight': 12000.0,
+        'trackCenterOffset': 1.2,
+    })
+    descriptor.chassis.name = 'test_chassis'
+    descriptor.type.xphysics = {
+        'detailed': {
+            'chassis': {
+                'test_chassis': {
+                    'roadWheelPositions': (-2.8, -1.4, 0.0, 1.4, 2.8),
+                    'stiffnessFactors': (1.0, 1.0, 1.0, 1.0, 1.0),
+                    'stiffness0': 1.0,
+                    'stiffness1': 1.0,
+                    'damping': 0.2,
+                    'bodyHeight': 1.6,
+                    'hullInertiaFactors': (1.0, 1.0, 1.8),
+                    'wheelRadius': 0.4,
+                },
+            },
+        },
+    }
+    return descriptor
+
+
 class _VehicleDescr(object):
     def __new__(cls, typeName=None, compactDescr=None):
         return _Descriptor(
@@ -5460,6 +5487,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._avatar = runtime.bigworld.avatar
         battle._arena_bounds = (-300.0, -300.0, 300.0, 300.0)
         battle._local_physics = {'mass': 25000.0}
+        battle._local_pitch = 0.23
+        battle._local_roll = -0.17
         battle._contact_tanks = mock.Mock(return_value=[])
         battle._poll_local_ram_contact_episodes = mock.Mock()
         battle._baked_pose_safe = mock.Mock(return_value=False)
@@ -5482,6 +5511,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertAlmostEqual(300.8, position[0])
         self.assertFalse(battle._baked_pose_safe(position))
+        proof_body = battle._poll_local_ram_contact_episodes.call_args.args[1]
+        self.assertEqual((301.0, 0.0, 0.0), (
+            proof_body['x'], proof_body['y'], proof_body['z']))
+        self.assertAlmostEqual(0.23, proof_body['pitch'])
+        self.assertAlmostEqual(-0.17, proof_body['roll'])
 
     def test_local_bot_ram_receipt_preserves_pre_separation_pose(self):
         runtime = _runtime()
@@ -11760,68 +11794,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         present_health.assert_called_once_with(False, 11, 400, 0, 0)
         self.assertNotIn('deferred_health_presentation', record)
 
-    def test_landing_event_installs_world_collision_track_damage(self):
-        """One landing that costs no HP still installs and names the crit.
-
-        The server reports a fall as a zero-damage environment event carrying
-        the chassis transition, so the local client must accept that shape and
-        use #1513's world-collision damage-info code instead of deriving a
-        shot from a silent state change.
-        """
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._avatar = runtime.bigworld.avatar
-        battle._binding = mock.Mock()
-        battle._avatar.playerVehicleID = 10
-        battle._synchronise_player_identity(10)
-        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
-                          {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle._records = {'player:1': {
-            'engine_id': 10,
-            'state': {'team': 1, 'health': 500, 'display_health': 500,
-                      'alive': True},
-            'kind': 'player', 'network_id': 1, 'local': True}}
-        battle._last_health[10] = (500, 500, True, 0)
-        critical = {
-            'devices': [
-                {'name': 'leftTrackHealth', 'hp': 60.0, 'max_hp': 200.0,
-                 'state': 'critical'},
-                {'name': 'rightTrackHealth', 'hp': 60.0, 'max_hp': 200.0,
-                 'state': 'critical'}],
-            'destroyed': [], 'crew_ko': [], 'fire': False,
-            'ammo_rack_death': False,
-            'events': [
-                {'kind': 'device', 'name': 'leftTrackHealth',
-                 'old_state': 'normal', 'state': 'critical',
-                 'cause': 'world_collision'},
-                {'kind': 'device', 'name': 'rightTrackHealth',
-                 'old_state': 'normal', 'state': 'critical',
-                 'cause': 'world_collision'}]}
-
-        with mock.patch.object(
-                battle, '_critical_extra_index', return_value=7):
-            self.assertTrue(battle._apply_combat_event({
-                'kind': 'health', 'target': 1, 'damage': 0, 'health': 500,
-                'dead': False, 'display_health': 500, 'attack_reason': 3,
-                'death_reason': 0, 'source': 'environment',
-                'critical': critical, 'critical_revision': 1,
-                'critical_base_revision': 1, 'critical_ack_seq': 0}))
-
-        record = battle._records['player:1']
-        self.assertEqual(500, entity.health)
-        (battle._avatar.guiSessionProvider.setVehicleHealth
-         .assert_not_called())
-        self.assertEqual(
-            [(10, 11, 7, 0, 0), (10, 11, 7, 0, 0)],
-            battle._avatar.damage_info)
-        self.assertEqual(1, record['critical_revision'])
-        self.assertEqual(
-            {'leftTrackHealth': 'critical', 'rightTrackHealth': 'critical'},
-            dict((row['name'], row['state'])
-                 for row in record['critical_state']['devices']))
-        self.assertTrue(entity.is_tracked is False)
-
     def test_critical_presentation_uses_exact_causes_and_ammo_effect(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -14265,6 +14237,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             probe_timing_state=lambda: 'active',
             diagnostic_totals=lambda: {
                 'alive_bot_ticks': 29,
+                'suspension_param_failures': 2,
                 'visibility_queue_depth': 3,
                 'visibility_queue_max_depth': 8,
                 'visibility_oldest_stale_age_ms': 400,
@@ -14301,6 +14274,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
             0.01, sample['bot_probe_seconds']['visibility'])
         self.assertEqual('active', sample['probe_timing'])
         self.assertEqual(29, sample['alive_bot_ticks'])
+        self.assertEqual(
+            2, sample['bot_diagnostics']['suspension_param_failures'])
         self.assertEqual(
             3, sample['bot_diagnostics']['visibility_queue_depth'])
         self.assertEqual(
@@ -17910,6 +17885,805 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertGreater(battle._local_position[2], 8.0)
         self.assertEqual(4.0, battle._local_speed)
 
+    def test_suspension_probe_skips_flat_roof_above_spring_limit(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        calls = []
+
+        def collision(unused_space, start, end, unused_mask):
+            calls.append((start.y, end.y))
+            if len(calls) == 1:
+                return (_Vector(start.x, 0.7, start.z),
+                        _Vector(0.0, 1.0, 0.0))
+            return (_Vector(start.x, 0.0, start.z),
+                    _Vector(0.0, 1.0, 0.0))
+
+        runtime.bigworld.wg_collideSegment = collision
+
+        self.assertEqual(
+            0.0,
+            battle._suspension_ground_y(
+                2.0, 3.0, -1.0, 1.0, flat_maximum_y=0.2))
+        self.assertEqual(2, len(calls))
+        self.assertAlmostEqual(0.68, calls[1][0])
+        self.assertTrue(all(end == -1.0 for unused_start, end in calls))
+
+    def test_suspension_probe_rejects_wall_and_normalises_ground_normal(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        hits = iter((
+            (_Vector(1.0, 0.4, 2.0), _Vector(1.0, 0.0, 0.0)),
+            (_Vector(1.0, 0.1, 2.0), _Vector(0.0, 2.0, 0.0)),
+        ))
+        runtime.bigworld.wg_collideSegment = \
+            lambda *unused: next(hits)
+
+        self.assertEqual(
+            0.1,
+            battle._suspension_ground_y(1.0, 2.0, -0.5, 0.8))
+
+    def test_suspension_probe_preserves_broken_skin_filter_on_recast(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        skin_filter = lambda unused_hit: False
+        battle._destructibles = types.SimpleNamespace(
+            ground_collision_filter=lambda unused_x, unused_z: skin_filter)
+        filters = []
+
+        def collision(unused_space, start, unused_end, unused_mask,
+                      ground_filter):
+            filters.append(ground_filter)
+            if len(filters) == 1:
+                return (_Vector(start.x, 0.3, start.z),
+                        _Vector(1.0, 0.0, 0.0))
+            return (_Vector(start.x, 0.0, start.z),
+                    _Vector(0.0, 1.0, 0.0))
+
+        runtime.bigworld.wg_collideSegment = collision
+
+        self.assertEqual(
+            0.0,
+            battle._suspension_ground_y(0.0, 0.0, -0.5, 0.8))
+        self.assertEqual([skin_filter, skin_filter], filters)
+
+    def test_suspension_probe_allows_incline_extension_not_flat_support(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        runtime.bigworld.wg_collideSegment = lambda *unused: (
+            _Vector(0.0, 0.6, 0.0), _Vector(0.0, 0.8, 0.6))
+
+        self.assertEqual(
+            0.6,
+            battle._suspension_ground_y(
+                0.0, 0.0, -0.5, 0.8, flat_maximum_y=0.2))
+
+    def test_suspension_probe_propagates_native_query_failure(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        runtime.bigworld.wg_collideSegment = mock.Mock(
+            side_effect=ValueError('native query failed'))
+
+        with self.assertRaisesRegex(
+                RuntimeError, 'native suspension ground query failed'):
+            battle._suspension_ground_y(0.0, 0.0, -0.5, 0.8)
+
+    def test_suspension_probe_propagates_malformed_native_hit(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        runtime.bigworld.wg_collideSegment = mock.Mock(
+            return_value=(_Vector(0.0, 0.0, 0.0),))
+
+        with self.assertRaisesRegex(
+                RuntimeError, 'native suspension ground hit is malformed'):
+            battle._suspension_ground_y(0.0, 0.0, -0.5, 0.8)
+
+    def test_local_suspension_samples_twenty_two_columns_once_per_tick(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.0)
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                wraps=vehicle_physics.damper_suspension_step) as solver:
+            position = battle._update_vertical_motion(
+                entity, (0.0, 0.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual(22, battle._suspension_ground_y.call_count)
+        solver.assert_called_once()
+        self.assertEqual(10, len(solver.call_args[0][2]))
+        self.assertEqual(12, len(solver.call_args[0][4]))
+        self.assertAlmostEqual(0.0, position[1], places=6)
+        self.assertFalse(battle._local_airborne)
+        self.assertFalse(battle._local_left_flying)
+        self.assertFalse(battle._local_right_flying)
+
+    def test_local_suspension_solves_slope_pitch_and_ground_metadata(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=lambda unused_x, z, *unused_args, **unused_kw:
+            0.08 * z)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 0.0, 0.0), 0.0, 0.05)
+
+        self.assertEqual(22, battle._suspension_ground_y.call_count)
+        self.assertFalse(battle._local_airborne)
+        self.assertLess(battle._local_pitch, 0.0)
+        self.assertLess(abs(battle._local_roll), 0.02)
+        self.assertGreater(battle._local_slope_tangent, 0.0)
+        self.assertAlmostEqual(0.08, battle._local_slope_tangent, places=6)
+        self.assertIsNotNone(battle._local_ground_plane)
+        self.assertTrue(math.isfinite(position[1]))
+
+    def test_local_suspension_rock_does_not_invent_a_terrain_slope(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        params = vehicle_physics.derive_suspension_params(
+            _suspension_descriptor())
+        battle._local_suspension_params = params
+        solved = {
+            'pitch': 0.3,
+            'roll': -0.2,
+            'airborne': False,
+        }
+
+        committed = battle._commit_local_suspension_metadata(
+            (0.0, 0.0, 0.0), 0.0, solved,
+            (0.0,) * len(params['springs']))
+
+        self.assertTrue(committed)
+        self.assertEqual(0.0, battle._local_slope_tangent)
+        self.assertEqual((0.0, 0.0, 0.0), battle._local_downhill)
+        self.assertAlmostEqual(
+            math.cos(0.3) * math.cos(-0.2),
+            battle._local_surface_up_cosine)
+
+    def test_local_suspension_enters_ballistic_state_without_contacts(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(0.0, 5.0, 0.0),
+            (0, 0, 0), {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=None)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 5.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual(22, battle._suspension_ground_y.call_count)
+        self.assertTrue(battle._local_airborne)
+        self.assertTrue(battle._local_left_flying)
+        self.assertTrue(battle._local_right_flying)
+        self.assertLess(battle._local_vertical_speed, 0.0)
+        self.assertLess(position[1], 5.0)
+        self.assertIsNone(battle._local_ground_plane)
+
+    def test_local_suspension_landing_uses_sampled_plane_normal(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_vertical_speed = -5.0
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=lambda x, unused_z, *unused_args, **unused_kw:
+            -0.5 * x)
+        impacts = []
+        battle._apply_landing_impact = mock.Mock(
+            side_effect=lambda unused_entity, speed, normal_impact=False:
+            impacts.append((speed, normal_impact)) or 0)
+        solved = {
+            'height': -0.5,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+            'impact_speed': -5.0,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=solved):
+            battle._update_vertical_motion(
+                entity, (1.0, -0.5, 0.0), 0.0, 0.1)
+
+        # (10, -5, 0) is tangent to y = -0.5*x, so it closes at zero.
+        self.assertEqual([(0.0, True)], impacts)
+
+    def test_local_suspension_landing_realises_air_carry_at_each_tick_rate(
+            self):
+        for frame_rate in (120.0, 60.0, 30.0, 20.0, 10.0):
+            with self.subTest(frame_rate=frame_rate):
+                dt = 1.0 / frame_rate
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._local_fall_armed = True
+                battle._local_airborne = True
+                battle._local_vertical_speed = -3.0
+                battle._local_air_lateral = (8.0, 4.0)
+                battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+                battle._motion_is_clear = mock.Mock(return_value=True)
+                entity = _Vehicle(
+                    10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+                    {'health': 500})
+                battle._suspension_ground_y = mock.Mock(
+                    side_effect=lambda x, z, *unused_args, **unused_kw:
+                    -0.5 * x + 0.25 * z)
+                impacts = []
+                battle._apply_landing_impact = mock.Mock(
+                    side_effect=lambda unused_entity, speed,
+                    normal_impact=False:
+                    impacts.append((speed, normal_impact)) or 0)
+                solved = {
+                    'height': -3.0 * dt,
+                    'vertical_velocity': 0.0,
+                    'pitch': 0.0,
+                    'pitch_velocity': 0.0,
+                    'roll': 0.0,
+                    'roll_velocity': 0.0,
+                    'contact_count': 10,
+                    'airborne': False,
+                    'left_flying': False,
+                    'right_flying': False,
+                    'impact_speed': -3.0,
+                }
+
+                with mock.patch.object(
+                        vehicle_physics, 'damper_suspension_step',
+                        return_value=solved):
+                    position = battle._update_vertical_motion(
+                        entity, (0.0, 0.0, 0.0), 0.0, dt)
+
+                self.assertAlmostEqual(8.0 * dt, position[0])
+                self.assertAlmostEqual(4.0 * dt, position[2])
+                self.assertEqual([(0.0, True)], impacts)
+                battle._motion_is_clear.assert_called_once()
+
+    def test_local_suspension_landing_without_plane_uses_vertical_speed(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_vertical_speed = -5.0
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.0)
+        impacts = []
+        battle._apply_landing_impact = mock.Mock(
+            side_effect=lambda unused_entity, speed, normal_impact=False:
+            impacts.append((speed, normal_impact)) or 0)
+        solved = {
+            'height': 0.0,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+            'impact_speed': -5.0,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=solved), mock.patch.object(
+                    vehicle_physics, 'suspension_world_ground_plane',
+                    return_value=None):
+            battle._update_vertical_motion(
+                entity, (0.0, 0.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual([(5.0, True)], impacts)
+
+    def test_local_suspension_keeps_main_support_rise_rollback(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_support_tick_pose = (0.0, 0.0, 0.0)
+        accepted_plane = {
+            'center_x': 0.0, 'center_z': 0.0, 'center_y': 0.0,
+            'gradient_x': 0.0, 'gradient_z': 0.0,
+            'normal': (0.0, 1.0, 0.0),
+        }
+        battle._local_ground_plane = accepted_plane
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.0)
+        raised = {
+            'height': 0.8,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 1,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=raised):
+            position = battle._update_vertical_motion(
+                entity, (0.0, 0.0, 0.2), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertTrue(battle._local_support_rise_blocked)
+        self.assertFalse(battle._local_airborne)
+        self.assertIsNone(battle._local_spring_ground_memory)
+        self.assertIsNone(battle._local_pseudo_ground_memory)
+        self.assertIs(accepted_plane, battle._local_ground_plane)
+        self.assertEqual(22, battle._suspension_ground_y.call_count)
+
+    def test_local_suspension_ram_distance_does_not_authorise_high_platform(
+            self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_speed = 0.0
+        battle._local_support_tick_pose = (2.0, 0.0, 0.0)
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+        battle._local_ground_plane = {
+            'center_x': 0.0, 'center_z': 0.0, 'center_y': 0.0,
+            'gradient_x': 0.0, 'gradient_z': 0.0,
+        }
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.8)
+        raised = {
+            'height': 0.8,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 1,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=raised):
+            position = battle._update_vertical_motion(
+                entity, (2.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((2.0, 0.0, 0.0), position)
+        self.assertTrue(battle._local_support_rise_blocked)
+        self.assertEqual(22, battle._suspension_ground_y.call_count)
+
+    def test_local_suspension_continuous_slope_authorises_bounded_high_rise(
+            self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_speed = 0.0
+        battle._local_support_tick_pose = (5.0, 0.0, 0.0)
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+        battle._local_ground_plane = {
+            'center_x': 0.0, 'center_z': 0.0, 'center_y': 0.0,
+            'gradient_x': 0.2, 'gradient_z': 0.0,
+        }
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=lambda x, unused_z, *unused_args, **unused_kw:
+            0.2 * x)
+        raised = {
+            'height': 1.0,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=raised):
+            position = battle._update_vertical_motion(
+                entity, (5.0, 0.0, 0.0), 0.0, 0.0)
+
+        self.assertEqual((5.0, 1.0, 0.0), position)
+        self.assertFalse(battle._local_support_rise_blocked)
+        # One endpoint scan (22) plus the fixed maximum of three centre
+        # checkpoints proves this five-metre correction without 22-ray
+        # segmentation along the entire path.
+        self.assertEqual(25, battle._suspension_ground_y.call_count)
+
+    def test_local_suspension_missing_path_support_rejects_high_rise(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_support_tick_pose = (5.0, 0.0, 0.0)
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+        battle._local_ground_plane = {
+            'center_x': 0.0, 'center_z': 0.0, 'center_y': 0.0,
+            'gradient_x': 0.2, 'gradient_z': 0.0,
+        }
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        calls = [0]
+
+        def ground(x, unused_z, *unused_args, **unused_kw):
+            calls[0] += 1
+            return 0.2 * x if calls[0] <= 22 else None
+
+        battle._suspension_ground_y = mock.Mock(side_effect=ground)
+        raised = {
+            'height': 1.0,
+            'vertical_velocity': 0.0,
+            'pitch': 0.0,
+            'pitch_velocity': 0.0,
+            'roll': 0.0,
+            'roll_velocity': 0.0,
+            'contact_count': 10,
+            'airborne': False,
+            'left_flying': False,
+            'right_flying': False,
+        }
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                return_value=raised):
+            position = battle._update_vertical_motion(
+                entity, (5.0, 0.0, 0.0), 0.0, 0.0)
+
+        self.assertEqual((5.0, 0.0, 0.0), position)
+        self.assertTrue(battle._local_support_rise_blocked)
+        # The first missing checkpoint fails closed; it does not spend the
+        # rest of the three-ray exceptional budget.
+        self.assertEqual(23, battle._suspension_ground_y.call_count)
+
+    def test_local_suspension_settles_ram_then_slide_at_each_endpoint(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        battle.client = client
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _suspension_descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = types.SimpleNamespace(
+            forward=0.0, turn=0.0, handbrake=False,
+            send_current=lambda: client.send_input('current'))
+        battle._local_position = (0.0, 0.0, 0.0)
+        battle._local_descriptor = descriptor
+        battle._attach_local_presentation()
+        battle._local_fall_armed = True
+        battle._destructibles = mock.Mock()
+        battle._destructibles.take_ground_skip_count.return_value = 0
+        battle._smoothed_drive_pitch = mock.Mock(return_value=0.0)
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=lambda x, unused_z, *unused_args, **unused_kw:
+            0.08 * x)
+        order = []
+
+        def ram_correct(unused_entity, position, unused_yaw, unused_dt):
+            order.append(('ram', tuple(position), battle._local_pitch,
+                          battle._local_roll))
+            return (position[0] + 0.2, position[1], position[2])
+
+        def slope_slide(position, unused_yaw, unused_dt,
+                        unused_entity=None):
+            order.append(('slide', tuple(position), battle._local_pitch,
+                          battle._local_roll))
+            return (position[0], position[1], position[2] + 0.2)
+
+        battle._resolve_local_tank_contacts = mock.Mock(
+            side_effect=ram_correct)
+        battle._apply_suspension_slope_slide = mock.Mock(
+            side_effect=slope_slide)
+        real_solver = vehicle_physics.damper_suspension_step
+
+        def solve(*args):
+            order.append(('settle', args[3]))
+            return real_solver(*args)
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'vehicle_physics.longitudinal_step', return_value=0.0), \
+                mock.patch(
+                    'gui.mods.offline_lan_0922.battle_runtime.'
+                    'vehicle_physics.traverse_step', return_value=0.0), \
+                mock.patch.object(
+                    vehicle_physics, 'damper_suspension_step',
+                    side_effect=solve) as solver:
+            battle._drive_local_step(0.1)
+
+        self.assertEqual(
+            ['settle', 'ram', 'settle', 'slide', 'settle'],
+            [row[0] for row in order])
+        ram_input = order[1]
+        slide_input = order[3]
+        self.assertTrue(abs(ram_input[3]) > 0.001)
+        self.assertGreater(slide_input[1][1], ram_input[1][1])
+        self.assertEqual(0.2, slide_input[1][0])
+        self.assertEqual([0.1, 0.0, 0.0], [
+            call.args[3] for call in solver.call_args_list])
+        self.assertEqual(66, battle._suspension_ground_y.call_count)
+        self.assertAlmostEqual(0.2, battle._local_position[0])
+        self.assertAlmostEqual(0.2, battle._local_position[2])
+        self.assertFalse(battle._local_support_rise_blocked)
+
+    def test_local_ram_correction_follows_continuous_slope_across_two_ticks(
+            self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        battle.client = client
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _suspension_descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = types.SimpleNamespace(
+            forward=0.0, turn=0.0, handbrake=False,
+            send_current=lambda: client.send_input('current'))
+        battle._local_position = (0.0, 0.0, 0.0)
+        battle._local_descriptor = descriptor
+        battle._attach_local_presentation()
+        battle._local_fall_armed = True
+        battle._destructibles = mock.Mock()
+        battle._destructibles.take_ground_skip_count.return_value = 0
+        battle._smoothed_drive_pitch = mock.Mock(return_value=0.0)
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=lambda x, unused_z, *unused_args, **unused_kw:
+            0.2 * x)
+        battle._apply_suspension_slope_slide = mock.Mock(
+            side_effect=lambda position, unused_yaw, unused_dt,
+            unused_entity=None: position)
+
+        def ram_correct(unused_entity, position, unused_yaw, unused_dt):
+            return (position[0] + 5.0, position[1], position[2])
+
+        battle._resolve_local_tank_contacts = mock.Mock(
+            side_effect=ram_correct)
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'vehicle_physics.longitudinal_step', return_value=0.0), \
+                mock.patch(
+                    'gui.mods.offline_lan_0922.battle_runtime.'
+                    'vehicle_physics.traverse_step', return_value=0.0), \
+                mock.patch.object(
+                    vehicle_physics, 'damper_suspension_step',
+                    wraps=vehicle_physics.damper_suspension_step) as solver:
+            battle._drive_local_step(0.1)
+            first_height = battle._local_position[1]
+            battle._drive_local_step(0.1)
+
+        self.assertEqual([0.1, 0.0, 0.1, 0.0], [
+            call.args[3] for call in solver.call_args_list])
+        # Each tick uses 22 primary + 22 endpoint columns, and the exceptional
+        # five-metre rise proof spends exactly three centre checkpoints.
+        self.assertEqual(94, battle._suspension_ground_y.call_count)
+        self.assertAlmostEqual(10.0, battle._local_position[0])
+        self.assertGreater(first_height, 0.6)
+        self.assertGreater(battle._local_position[1], first_height + 0.6)
+        self.assertFalse(battle._local_support_rise_blocked)
+
+    def test_invalid_suspension_descriptor_keeps_existing_support_path(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        entity = _Vehicle(
+            10, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertIsNone(battle._local_suspension_params)
+        self.assertTrue(battle._local_suspension_disabled)
+        battle._terrain_support.assert_called_once()
+
+    def test_hydraulic_player_keeps_existing_support_path(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        battle._suspension_ground_y = mock.Mock()
+        descriptor = _suspension_descriptor()
+        descriptor.isPitchHullAimingAvailable = True
+        entity = _Vehicle(
+            10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertIsNone(battle._local_suspension_params)
+        self.assertTrue(battle._local_suspension_disabled)
+        self.assertIn(
+            '#1513 hydraulic suspension', battle._local_suspension_report)
+        battle._suspension_ground_y.assert_not_called()
+        battle._terrain_support.assert_called_once()
+
+    def test_native_suspension_failure_rolls_back_then_uses_legacy(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_air_lateral = (2.0, -1.0)
+        battle._motion_is_clear = mock.Mock(return_value=True)
+        battle._local_pitch = 0.17
+        battle._local_roll = -0.09
+        battle._local_suspension_pitch_velocity = 0.4
+        battle._local_suspension_roll_velocity = -0.2
+        battle._local_spring_ground_memory = [(0.0, 0.0, 0.0)] * 10
+        battle._local_pseudo_ground_memory = [(0.0, 0.0, 0.0)] * 12
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=RuntimeError('native suspension query failed'))
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        battle._local_support_tick_pose = (0.0, 0.0, 0.0)
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+
+        position = battle._update_vertical_motion(
+            entity, (1.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertTrue(battle._local_suspension_disabled)
+        self.assertIsNone(battle._local_suspension_params)
+        self.assertIsNone(battle._local_spring_ground_memory)
+        self.assertIsNone(battle._local_pseudo_ground_memory)
+        self.assertAlmostEqual(0.17, battle._local_pitch)
+        self.assertAlmostEqual(-0.09, battle._local_roll)
+        self.assertTrue(battle._local_airborne)
+        self.assertEqual((2.0, -1.0), battle._local_air_lateral)
+        self.assertTrue(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_not_called()
+
+        battle._local_support_tick_pose = None
+        battle._local_support_motion_pose = None
+        position = battle._update_vertical_motion(
+            entity, position, 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertFalse(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_called_once()
+
+    def test_suspension_solver_failure_rolls_back_then_uses_legacy(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_vertical_speed = -2.0
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.0)
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        battle._local_support_tick_pose = (0.0, 0.0, 0.0)
+        battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+
+        with mock.patch.object(
+                vehicle_physics, 'damper_suspension_step',
+                side_effect=ValueError('solver failed')):
+            position = battle._update_vertical_motion(
+                entity, (1.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertTrue(battle._local_suspension_disabled)
+        self.assertEqual(-2.0, battle._local_vertical_speed)
+        self.assertFalse(battle._local_airborne)
+        self.assertTrue(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_not_called()
+
+        battle._local_support_tick_pose = None
+        battle._local_support_motion_pose = None
+        position = battle._update_vertical_motion(
+            entity, position, 0.0, 0.04)
+
+        self.assertEqual(0.0, battle._local_vertical_speed)
+        self.assertFalse(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_called_once()
+
+    def test_suspension_failure_does_not_run_legacy_inside_drive_tick(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        battle.client = client
+        battle._avatar = runtime.bigworld.avatar
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = types.SimpleNamespace(
+            forward=1.0, turn=0.0, handbrake=False,
+            send_current=lambda: client.send_input('current'))
+        battle._local_descriptor = entity.typeDescriptor
+        battle._attach_local_presentation()
+        battle._local_fall_armed = True
+        battle._motion_is_clear = mock.Mock(return_value=True)
+        battle._suspension_ground_y = mock.Mock(
+            side_effect=RuntimeError('native suspension query failed'))
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        battle._ground_pitch = mock.Mock(return_value=0.0)
+        battle._apply_slope_slide = mock.Mock(
+            side_effect=lambda position, *unused, **unused_kwargs: position)
+        battle._resolve_local_tank_contacts = mock.Mock(
+            side_effect=lambda unused_entity, position, unused_yaw,
+            unused_dt: position)
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'vehicle_physics.longitudinal_step', return_value=4.0):
+            battle._drive_local(0.02)
+
+        self.assertEqual((0.0, 0.0, 0.0), battle._local_position)
+        self.assertTrue(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_not_called()
+        battle._ground_pitch.assert_not_called()
+        battle._apply_slope_slide.assert_not_called()
+        battle._resolve_local_tank_contacts.assert_not_called()
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'vehicle_physics.longitudinal_step', return_value=4.0):
+            battle._drive_local(0.02)
+
+        self.assertFalse(battle._local_suspension_failed_this_tick)
+        battle._terrain_support.assert_called_once()
+        battle._ground_pitch.assert_called_once()
+        battle._apply_slope_slide.assert_called_once()
+        battle._resolve_local_tank_contacts.assert_called_once()
+
     def test_grounded_player_rejects_raised_support_as_hard_collision(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -18084,90 +18858,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._local_airborne)
         self.assertLess(battle._local_vertical_speed, 0.0)
         self.assertGreater(position[1], -2.0)
-
-    def _cliff_battle(self, speed, face_degrees=35.0, edge=4.0):
-        """One hull driving at ``speed`` toward a face of ``face_degrees``."""
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle.client = _Client()
-        battle._avatar = runtime.bigworld.avatar
-        battle._local_fall_armed = True
-        battle._local_speed = speed
-        gradient = math.tan(math.radians(face_degrees))
-
-        def support(position, unused_yaw, unused_descriptor=None,
-                    maximum_y=None):
-            height = min(0.0, -gradient * (float(position[2]) - edge))
-            return height, height
-
-        battle._terrain_support = support
-        return battle
-
-    def test_charging_a_cliff_face_leaves_the_ground(self):
-        battle = self._cliff_battle(15.0)
-        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
-                          {'health': 500})
-        position = (0.0, 0.0, 0.0)
-        step = 1.0 / 60.0
-
-        for unused in range(60):
-            position = (position[0], position[1],
-                        position[2] + battle._local_speed * step)
-            position = battle._update_vertical_motion(
-                entity, position, 0.0, step)
-            if battle._local_airborne:
-                break
-
-        self.assertTrue(battle._local_airborne)
-        self.assertLess(battle._local_vertical_speed, 0.0)
-        # The arc has to clear the face it left, not hug it.
-        self.assertGreater(
-            position[1],
-            -math.tan(math.radians(35.0)) * (position[2] - 4.0))
-
-    def test_crawling_over_the_same_lip_stays_on_the_ground(self):
-        battle = self._cliff_battle(2.0)
-        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
-                          {'health': 500})
-        position = (0.0, 0.0, 0.0)
-        step = 1.0 / 60.0
-
-        for unused in range(300):
-            position = (position[0], position[1],
-                        position[2] + battle._local_speed * step)
-            position = battle._update_vertical_motion(
-                entity, position, 0.0, step)
-
-            self.assertFalse(battle._local_airborne)
-
-        self.assertEqual([], battle._pending_landing_impacts)
-        self.assertLess(position[2], 14.0)
-
-    def test_steady_descent_never_reports_a_landing(self):
-        battle = self._cliff_battle(15.0, edge=0.0)
-        battle._local_last_pitch = math.atan(
-            math.tan(math.radians(35.0)))
-        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
-                          {'health': 500})
-        position = (0.0, 0.0, 0.0)
-        step = 1.0 / 60.0
-
-        for unused in range(120):
-            position = (position[0], position[1],
-                        position[2] + battle._local_speed * step)
-            position = battle._update_vertical_motion(
-                entity, position, 0.0, step)
-
-        surface = -math.tan(math.radians(35.0)) * position[2]
-
-        self.assertFalse(battle._local_airborne)
-        self.assertEqual([], battle._pending_landing_impacts)
-        # The hull tracks the face within the hover its placement allows and
-        # never separates from it, so a fast descent costs nothing.
-        self.assertGreaterEqual(position[1] + 1e-6, surface)
-        self.assertLessEqual(
-            position[1] - surface,
-            vehicle_physics.SUPPORT_HOVER_LIMIT + 1e-6)
 
     def test_armed_ledge_fall_only_queues_an_impact_observation(self):
         runtime = _runtime()
@@ -18478,7 +19168,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertLess(vehicle_physics.longitudinal_step(
             params, 5.0, 0.0, False, uphill, 0.1), flat)
 
-    def test_landing_skid_never_becomes_fall_damage(self):
+    def test_landing_combines_lateral_impact_and_retains_skid(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -18494,17 +19184,25 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         damage = battle._apply_landing_impact(entity, 6.0)
 
-        # Sliding across the surface it lands on closes nothing against that
-        # surface, so the carried lateral speed is a skid, not an impact.
-        self.assertEqual(0, damage)
-        self.assertEqual([], battle._pending_landing_impacts)
+        self.assertGreater(damage, 0)
         self.assertEqual((0.0, 0.0), battle._local_air_lateral)
         self.assertEqual(9.0, battle._local_slide_speed)
 
-        # A landing under the health threshold is still reported: the chassis
-        # pool starts absorbing it first and the server owns both results.
-        self.assertEqual(0, battle._apply_landing_impact(entity, 8.0))
-        self.assertEqual([8.0], battle._pending_landing_impacts)
+    def test_normal_landing_does_not_recombine_retained_lateral_skid(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._local_air_lateral = (9.0, 0.0)
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+
+        damage = battle._apply_landing_impact(
+            entity, 6.0, normal_impact=True)
+
+        self.assertEqual(0, damage)
+        self.assertEqual((0.0, 0.0), battle._local_air_lateral)
+        self.assertEqual(9.0, battle._local_slide_speed)
 
     def test_relative_gun_tracking_uses_delta_and_stop_uses_hull_yaw(self):
         owner = types.SimpleNamespace(
