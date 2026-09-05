@@ -789,13 +789,13 @@ same proven cell bounds. The worker selects a passable point within that cell,
 preferring dry ground, and obtains its height from the baked navigation data. The stock minimap feedback path creates the cell flash, runs its
 animation, and plays the `minimap_attention` sound.
 
-The candidate inspected during this review contained a loose `scripts.pkg` and
-executable rather than a complete client root. `tools/inspect_client.py`
-therefore rejected it because the required `version.xml`, `paths.xml`, packaged
-archive path, entity definitions, and assets were unavailable. The bytecode
-results above prove the contract of that actual local archive. They do not
-independently prove its regional build identity, native UI rendering, audio,
-or lifecycle behavior on the Chinese HD `0.9.22.0.1 #1513` Windows client.
+The complete Chinese HD `0.9.22.0.1 #1513` client root was inspected with
+`tools/inspect_client.py`. It passed the regional build, 32-bit x86 executable,
+mod-path, CPython 2.7 bytecode, entity-definition, representative asset, and
+reviewed native-method checks. The bytecode results above were then reproduced
+from that root's packaged `res/packages/scripts.pkg`, so the Chat2 contracts
+belong to the same client installation. Static inspection still does not prove
+native UI rendering, audio, lifecycle behavior, or frame pacing on Windows.
 
 The controller chain itself was enumerated from `game_control.__init__` and
 `new_year.__init__`. `NewYearController` is invoked first, followed by the
