@@ -9849,15 +9849,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._sync._entities['bot:11']['dead'])
         self.assertFalse(battle._sync._entities['bot:12']['dead'])
 
+        # One create per render callback, and no wall-clock delay between
+        # them: the second bot enters on the very next frame.
         battle._frame()
         self.assertIn('bot:11', battle._records)
         self.assertNotIn('bot:12', battle._records)
-        runtime.bigworld.now += 0.29
-        battle._frame()
-        self.assertNotIn('bot:12', battle._records)
-        runtime.bigworld.now += 0.02
         battle._frame()
         self.assertIn('bot:12', battle._records)
+        self.assertEqual(10.0, runtime.bigworld.now)
 
         # VehicleDescr returns unloaded #1513 testers in this full startup
         # fixture. The resolver must admit every bot descriptor before
@@ -9912,8 +9911,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._ready_sent)
         self.assertEqual(1, len(battle._pending_bot_create_order))
         self.assertFalse(battle._battle_live)
-        # Enemy models finish behind BattleLoading, but their marker/minimap
-        # visual is still not registered before the first real spot.
+        # The enemy model is assembled, but its marker/minimap visual is
+        # still not registered before the first real spot.
         self.assertEqual(0, len(runtime.bigworld.avatar.visual_starts))
         enemy = battle._records['bot:11']
         self.assertFalse(enemy['spot_visible'])
@@ -9923,9 +9922,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(runtime.bigworld.entities.get(enemy['engine_id']))
         self.assertNotIn(enemy['engine_id'], runtime.bigworld.entities)
 
-        runtime.bigworld.now += battle_runtime_module.BOT_SPAWN_SECONDS + 0.01
         battle._frame()
 
+        self.assertEqual(10.0, runtime.bigworld.now)
         client.send_battle_ready.assert_called_once()
         self.assertTrue(battle._ready_sent)
         self.assertFalse(battle._pending_bot_create_order)
@@ -9952,6 +9951,85 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertNotIn('bot:11', battle._records)
         self.assertIsNone(battle._remote_factory.get(enemy['engine_id']))
         self.assertIsNone(runtime.bigworld.entity(enemy['engine_id']))
+
+    def test_lineup_enters_without_a_wall_clock_spawn_delay(self):
+        """The countdown waits for the roster, not for one delay per bot.
+
+        The former fixed 0.30 s gap between creates held the server's shared
+        countdown closed for roughly nine seconds on a 29 bot roster, because
+        both the visible client and the hidden worker only report readiness
+        once their whole line-up exists.
+        """
+        runtime = _runtime()
+        runtime.bigworld.defer_vehicle_entry = True
+        original_load = runtime.bigworld.loadResourceListBG
+        compound_loads = []
+
+        def defer_compounds(resources, callback):
+            if isinstance(resources[0], str):
+                original_load(resources, callback)
+                return
+            compound_loads.append((resources, callback))
+
+        runtime.bigworld.loadResourceListBG = defer_compounds
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        client.send_battle_ready = mock.Mock(return_value=True)
+        start = {
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'players': [{
+                'id': 1, 'team': 1, 'slot': 0, 'name': 'Player',
+                'vehicle': 'ussr:R11_MS-1', 'health': 500}],
+            'bots': [{
+                'id': 11, 'team': 2, 'slot': 0, 'name': 'Enemy 1'}, {
+                'id': 12, 'team': 2, 'slot': 1, 'name': 'Enemy 2'}, {
+                'id': 21, 'team': 1, 'slot': 1, 'name': 'Ally 1'}, {
+                'id': 22, 'team': 1, 'slot': 2, 'name': 'Ally 2'}]}
+
+        self.assertTrue(battle.start({
+            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+            'name': 'Player', 'native_remote_vehicles': False},
+            start, client))
+        runtime.bigworld.callbacks.pop(0)()
+        runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+        runtime.bigworld.callbacks.pop(0)()
+
+        self.assertEqual(4, len(battle._pending_bot_create_order))
+        started = runtime.bigworld.now
+
+        # One create per render callback, four callbacks, no engine time.
+        teams = []
+        for expected_pending in (3, 2, 1, 0):
+            self.assertTrue(battle._flush_pending_bot_create(
+                runtime.bigworld.now))
+            self.assertEqual(
+                expected_pending, len(battle._pending_bot_create_order))
+            teams.append(battle._last_bot_create_team)
+        self.assertEqual(started, runtime.bigworld.now)
+        self.assertFalse(battle._flush_pending_bot_create(
+            runtime.bigworld.now))
+
+        # Both bases still materialize together rather than one whole team
+        # before the other.
+        self.assertEqual([2, 1, 2, 1], teams)
+        self.assertEqual(4, len(
+            [key for key in battle._records if key.startswith('bot:')]))
+        self.assertEqual(4, len(compound_loads))
+
+        # Model assembly stays asynchronous, so the shared countdown remains
+        # closed until every bot compound is really in the world.
+        battle._frame()
+        client.send_battle_ready.assert_not_called()
+        self.assertFalse(battle._ready_sent)
+
+        for resources, callback in compound_loads:
+            original_load(resources, callback)
+        battle._frame()
+
+        client.send_battle_ready.assert_called_once()
+        self.assertTrue(battle._ready_sent)
+        self.assertEqual(started, runtime.bigworld.now)
+        battle.stop(show_login=False)
 
     def test_wreck_prewarm_is_batched_in_loading_before_runtime_starts(self):
         runtime = _runtime()
@@ -9986,7 +10064,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             start, client))
 
         # All selected descriptors submit immediately from _create_entities;
-        # no bot-spawn timer has run and engine time has not advanced.
+        # no bot has been created yet and engine time has not advanced.
         self.assertTrue(wreck_requests)
         self.assertEqual(10.0, runtime.bigworld.now)
         self.assertEqual(
