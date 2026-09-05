@@ -28,6 +28,7 @@ customization writers share one live record: two independent writers would each
 rebuild the descriptor from a stale copy and silently drop the other's change.
 """
 
+import contextlib
 import copy
 
 EQUIPMENT_SLOT_COUNT = 3
@@ -47,6 +48,9 @@ ACCOUNT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
 # Rounds are stock too, now that a battle spends them and a resupply is paid
 # for.  The account count covers every round the garage holds, loaded ones
 # included, which is the invariant data._validate_selected_vehicle checks.
+# ``vehicle_records.STOCKED_ITEM_TYPES`` is the same three item types read by
+# the snapshot builders, and the two are held equal by a test: this module
+# stays importable without the rest of the package.
 STOCKED_ITEM_TYPES = ACCOUNT_ITEM_TYPES + (SHELL_ITEM_TYPE,)
 # The two item types #1513's shop publishes as buyable for credits even when
 # their catalogue price is gold: premium rounds and premium consumables.
@@ -234,6 +238,50 @@ class GarageState(object):
         owned = published.setdefault(int(item_type), {})
         owned[compact_descr] = max(int(count), int(owned.get(compact_descr, 0)))
         self._touched_items.setdefault(int(item_type), set()).add(compact_descr)
+
+    def _stock_owned(self, compact_descr, item_type, count):
+        """Publish the stock that arrives with a newly built vehicle.
+
+        A round, a consumable and an optional device belong to the account, so
+        two vehicles carrying one hold two of it and a new vehicle's load adds
+        to the depot.  A module is published per vehicle as the largest count
+        any one of them carries, so summing it would invent stock nobody owns.
+        """
+        item_type = int(item_type)
+        if item_type not in STOCKED_ITEM_TYPES:
+            self._publish_owned(compact_descr, item_type, count)
+            return
+        owned = self._snapshot.setdefault(
+            'inventoryItems', {}).setdefault(item_type, {})
+        self._set_owned(
+            compact_descr, item_type,
+            _int(owned.get(compact_descr, 0)) + _int(count))
+
+    @contextlib.contextmanager
+    def _transaction(self):
+        """Run a multi-step command on a copy, or leave the garage untouched.
+
+        A command that charges more than once cannot fail halfway: the client
+        is told one result for the whole command, and ``_fitting`` has no way
+        to undo the part that already succeeded.
+        """
+        staged = copy.deepcopy(self._snapshot)
+        touched = set(self._touched)
+        touched_items = dict(
+            (item_type, set(items))
+            for item_type, items in self._touched_items.items())
+        touched_tankmen = set(self._touched_tankmen)
+        revision = self.revision
+        try:
+            yield
+        except Exception:
+            self._snapshot.clear()
+            self._snapshot.update(staged)
+            self._touched = touched
+            self._touched_items = touched_items
+            self._touched_tankmen = touched_tankmen
+            self.revision = revision
+            raise
 
     # ---- ammunition -----------------------------------------------------
 
@@ -1353,7 +1401,10 @@ class GarageState(object):
                              range(0, len(loaded) - 1, 2))
                             for value in (compact_descr,
                                           pairs[_int(compact_descr)])]
-        mirror_shells_layout(record)
+        # The layout is deliberately left alone: it is what the player asked
+        # to carry, and after a battle it is what auto-load and the resupply
+        # button buy back.  #1513's own Vehicle.isAutoLoadFull compares the
+        # two and reports the tank as not full, which it is.
         record.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = dict(pairs)
         owned = self._snapshot.setdefault(
             'inventoryItems', {}).setdefault(SHELL_ITEM_TYPE, {})
@@ -1497,7 +1548,7 @@ class GarageState(object):
             unlocks.add(_int(item))
         for item_type, items in record['inventoryItems'].items():
             for item_compact_descr, count in items.items():
-                self._publish_owned(item_compact_descr, item_type, count)
+                self._stock_owned(item_compact_descr, item_type, count)
                 self._price(item_compact_descr)
                 unlocks.add(_int(item_compact_descr))
         self._snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
@@ -1829,10 +1880,16 @@ class GarageState(object):
         if len(pairs) % 2:
             raise GarageError(
                 'crew retraining needs tankman/school pairs')
-        retrained = []
-        for index in range(0, len(pairs), 2):
-            retrained.append(self.retrain_tankman(
-                pairs[index], pairs[index + 1], vehicle_type_compact_descr))
+        # Each member is retrained and charged in turn, so the whole command
+        # runs on a copy: a wallet that covers two of three would otherwise
+        # leave two members retrained, two schools paid for, and the client
+        # told the command failed.
+        with self._transaction():
+            retrained = []
+            for index in range(0, len(pairs), 2):
+                retrained.append(self.retrain_tankman(
+                    pairs[index], pairs[index + 1],
+                    vehicle_type_compact_descr))
         return retrained
 
     def _seated_record(self, tankman_inventory_id):

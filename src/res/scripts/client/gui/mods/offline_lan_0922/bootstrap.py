@@ -14,6 +14,7 @@ from gui.mods.offline_lan_0922 import vehicle_blacklist
 from gui.mods.offline_lan_0922 import vehicle_records
 from gui.mods.offline_lan_0922.account_rpc import economy
 from gui.mods.offline_lan_0922.vehicle_records import (
+    STOCKED_ITEM_TYPES,
     default_consumables, default_vehicle_settings, offers_in_random_battle,
     top_up_new_skill_slots, vehicle_type_guns, vehicle_type_modules,
     with_new_skill_slots)
@@ -285,8 +286,9 @@ def _validate_restored_garage(snapshot):
                 raise ValueError(
                     'saved ammunition does not fit the mounted gun')
             loaded += count
-        if loaded <= 0:
-            raise ValueError('saved vehicle has no loaded ammunition')
+        # An empty rack is a real save: a battle that fired every round leaves
+        # one, and the layout still names what to buy back.  Refusing it here
+        # would throw the whole career away over an ordinary last shot.
         maximum = int(getattr(descriptor.gun, 'maxAmmo', 0) or 0)
         if maximum > 0 and loaded > maximum:
             raise ValueError('saved ammunition exceeds the gun capacity')
@@ -482,6 +484,20 @@ def _deliver_launcher_purchases(snapshot, vehicles, tankmen, settings):
     return len(delivered)
 
 
+def _stocked_total(item_type, published, count):
+    """Return the account count one more vehicle's stock leaves behind.
+
+    A round, a consumable and an optional device belong to the account, so two
+    vehicles carrying one hold two of it.  A module is published per vehicle as
+    the largest count any one of them carries, and summing that view would
+    invent stock nobody owns.  ``account_rpc.garage`` reads the same two rules
+    when it decides what a resupply has to buy.
+    """
+    if int(item_type) in STOCKED_ITEM_TYPES:
+        return int(published) + int(count)
+    return max(int(published), int(count))
+
+
 def _build_purchased_vehicle(snapshot, vehicles, tankmen, item_type_indices,
                              settings, name):
     """Own one more vehicle, stock, exactly as a shop purchase arrives."""
@@ -505,8 +521,8 @@ def _build_purchased_vehicle(snapshot, vehicles, tankmen, item_type_indices,
         for item_compact_descr, count in items.items():
             owned_items = snapshot.setdefault(
                 'inventoryItems', {}).setdefault(int(item_type), {})
-            owned_items[item_compact_descr] = max(
-                int(owned_items.get(item_compact_descr, 0)), int(count))
+            owned_items[item_compact_descr] = _stocked_total(
+                item_type, owned_items.get(item_compact_descr, 0), count)
             prices.setdefault(item_compact_descr, {'credits': 0})
             if isinstance(unlocks, set):
                 unlocks.add(int(item_compact_descr))
@@ -612,9 +628,9 @@ def _selected_vehicle(config, restore_saved=True):
             for item_type, items in record['inventoryItems'].items():
                 published_items = inventory_items.setdefault(item_type, {})
                 for compact_descr, count in items.items():
-                    published_items[compact_descr] = max(
-                        int(published_items.get(compact_descr, 0)),
-                        int(count))
+                    published_items[compact_descr] = _stocked_total(
+                        item_type, published_items.get(compact_descr, 0),
+                        count)
                     # Every published item carries a price whether or not the
                     # baked catalogue knew it, so a baking gap can never make
                     # the snapshot fail its own consistency check.
@@ -629,9 +645,12 @@ def _selected_vehicle(config, restore_saved=True):
                 # only has to keep an alternate gun's shells priced.
                 shop_item_prices.setdefault(compact_descr, {'credits': 0})
                 if not career:
-                    published_shells[compact_descr] = max(
-                        int(published_shells.get(compact_descr, 0)),
-                        int(count))
+                    # A sandbox is handed one alternate load per vehicle, not
+                    # one for the whole garage: the loaded rows above already
+                    # add up the same way.
+                    published_shells[compact_descr] = _stocked_total(
+                        ITEM_TYPE_INDICES['shell'],
+                        published_shells.get(compact_descr, 0), count)
                     unlock_item_compact_descrs.add(compact_descr)
 
             vehicle_type_compact_descrs.add(vehicle_int_compact_descr)

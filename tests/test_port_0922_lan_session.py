@@ -739,6 +739,48 @@ class LANSessionTests(unittest.TestCase):
             (123, True, False, True))
         self.assertEqual({123}, session._completed_results)
 
+    def test_a_receipt_reaches_the_store_with_everything_the_battle_spent(self):
+        """The session hands the store the server's whole receipt.
+
+        ``shells_fired`` and ``equipment_used`` are the only record of what a
+        battle consumed, and the client is the only side that can price them,
+        so a hand-off that rebuilt the receipt from a known-key list would
+        make the whole ammunition and consumable settlement dead on the wire.
+        """
+        accepted = []
+
+        class Store(object):
+            account_key = 'key'
+
+            def accept(self, receipt):
+                accepted.append(receipt)
+                return True
+
+            def progress(self):
+                return {'battles': 0}
+
+        session = self.module.LANSession(
+            {}, postbattle_store=Store(), lobby_ready=lambda: True)
+        session.client = types.SimpleNamespace(
+            acknowledge_battle_receipt=lambda receipt_id: None)
+        session._publish_postbattle_progress = mock.Mock(return_value=True)
+        session._publish_postbattle_results = mock.Mock(return_value=True)
+
+        session._on_event('battle_receipt', {
+            'type': 'battle_receipt',
+            'receipt_id': 'server:1:1',
+            'arena_unique_id': 7,
+            'rewards': {'xp': 100},
+            'health': 40,
+            'shells_fired': {'0': 12},
+            'equipment_used': [11001],
+        })
+
+        self.assertEqual(1, len(accepted))
+        self.assertEqual({'0': 12}, accepted[0]['shells_fired'])
+        self.assertEqual([11001], accepted[0]['equipment_used'])
+        self.assertEqual(40, accepted[0]['health'])
+
     def test_lobby_view_notification_starts_postbattle_drain_without_retry(self):
         store = mock.Mock()
         store.progress.return_value = {'battles': 0}

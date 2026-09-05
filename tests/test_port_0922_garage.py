@@ -38,6 +38,19 @@ def _load(name):
     return module
 
 
+def _load_port_module(name):
+    """Load one module from the port package itself, not from account_rpc."""
+    _load('data')
+    full = 'gui.mods.offline_lan_0922.%s' % name
+    sys.modules.pop(full, None)
+    spec = importlib.util.spec_from_file_location(
+        full, PACKAGE_ROOT / ('%s.py' % name))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _request_modules():
     """Load the handlers and reuse the exact module graph they bound.
 
@@ -1081,25 +1094,77 @@ class GarageStateTests(unittest.TestCase):
             {20010: 30, 20011: 15},
             state.snapshot()['inventoryItems'][10])
 
-    def test_a_second_vehicle_cannot_load_the_same_rounds_twice(self):
-        state = self._matching_state()
+    def _second_vehicle(self, state, loaded=True):
+        """Put one more vehicle in the garage, loaded or empty."""
         snapshot = state.snapshot()
         second = copy.deepcopy(snapshot['vehicles'][0])
         second['id'] = 10
         second['vehicleTypeCompactDescr'] = 50002
         second['crew'] = [201, 202]
         second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        if not loaded:
+            second['shells'] = [20010, 0, 20011, 0]
+            second['shellsLayout'] = {(7001, 7002): [20010, 0, 20011, 0]}
+            second['inventoryItems'][10] = {20010: 0, 20011: 0}
         snapshot['vehicles'].append(second)
+        return second
+
+    def test_a_second_vehicle_buys_its_own_rounds(self):
+        """One lot of rounds cannot be loaded into two tanks."""
+        state = self._matching_state()
+        snapshot = state.snapshot()
+        self._second_vehicle(state, loaded=False)
 
         state.equip_shells(10, [20010, 30, 20011, 15])
 
-        # The account owned 30 and 15; two full loads need 60 and 30.
+        # The first tank still holds 30 and 15, so the account has to buy the
+        # second load: 30 rounds at 100 credits and 15 at 200.
         self.assertEqual(
             100000 - 3000 - 3000, snapshot['wallet']['credits'])
         self.assertEqual(
             {20010: 60, 20011: 30}, snapshot['inventoryItems'][10])
 
+    def test_a_vehicle_already_carrying_its_layout_buys_nothing(self):
+        """The depot count covers the whole garage, loaded rounds included."""
+        state = self._matching_state()
+        snapshot = state.snapshot()
+        self._second_vehicle(state, loaded=True)
+        # A garage the builders published: the depot holds what both tanks do.
+        snapshot['inventoryItems'][10] = {20010: 60, 20011: 30}
+
+        state.equip_shells(10, [20010, 30, 20011, 15])
+
+        self.assertEqual(100000, snapshot['wallet']['credits'])
+        self.assertEqual(
+            {20010: 60, 20011: 30}, snapshot['inventoryItems'][10])
+
     # ---- retraining ------------------------------------------------------
+
+    def test_a_whole_crew_retrains_at_the_school_the_player_chose(self):
+        """The popover sends the seated crew and the school for each seat."""
+        state = self._recruiting_state(unlocks=(50001,))
+
+        self.assertEqual([101, 102], state.retrain_crew(50001, [101, 1, 102, 1]))
+
+        self.assertEqual(
+            100000 - 40000, state.snapshot()['wallet']['credits'])
+
+    def test_a_crew_retraining_the_wallet_cannot_finish_changes_nothing(self):
+        """A crew half retrained is worse than one not retrained."""
+        state = self._recruiting_state(unlocks=(50001,))
+        # One school costs 20000 credits, so this pays for the first seat and
+        # not the second.
+        state.snapshot()['wallet']['credits'] = 30000
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.retrain_crew(50001, [101, 1, 102, 1])
+
+        self.assertEqual(before['wallet'], state.snapshot()['wallet'])
+        self.assertEqual(
+            before['vehicles'][0]['tankmen'],
+            state.snapshot()['vehicles'][0]['tankmen'])
+
 
     def test_retraining_asks_the_client_for_the_school_the_player_chose(self):
         """TankmanDescr.respecialize is the client's own implementation."""
@@ -1623,6 +1688,18 @@ class FittingRequestTests(unittest.TestCase):
             self.state.snapshot(), self.context['selected_vehicle'])
 
 
+class StockRuleTests(unittest.TestCase):
+    """The builders and the garage must agree on what the account owns."""
+
+    def test_the_record_factory_and_the_garage_share_one_rule(self):
+        unused_requests, unused_commands, garage = _request_modules()
+        records = _load_port_module('vehicle_records')
+
+        self.assertEqual(
+            set(garage.STOCKED_ITEM_TYPES),
+            set(records.STOCKED_ITEM_TYPES))
+
+
 class GaragePersistenceTests(unittest.TestCase):
     """Persist -> reload -> same state, across a simulated client restart."""
 
@@ -1644,11 +1721,29 @@ class GaragePersistenceTests(unittest.TestCase):
     def _store(self):
         return self.store_module.GarageStore(path=self.path)
 
-    def _restart(self):
+    def _restart(self, fresh=None):
         """Rebuild the bootstrap snapshot and overlay the saved garage."""
-        fresh = copy.deepcopy(SNAPSHOT)
+        fresh = copy.deepcopy(SNAPSHOT) if fresh is None else fresh
         self._store().apply(fresh)
         return fresh
+
+    @staticmethod
+    def _matching_snapshot():
+        """A freshly built garage whose load is what its own gun fires.
+
+        This is what the next start hands the restore: the stock fitting, the
+        stock rounds and a depot that holds exactly them.
+        """
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+        record = snapshot['vehicles'][0]
+        record['shells'] = [20010, 30, 20011, 15]
+        record['shellsLayout'] = {(7001, 7002): [20010, 30, 20011, 15]}
+        record['inventoryItems'][10] = {20010: 30, 20011: 15}
+        snapshot['inventoryItems'][10] = {20010: 30, 20011: 15}
+        for compact_descr in (20010, 20011):
+            snapshot['shopItemPrices'][compact_descr] = {'credits': 100}
+        return snapshot
 
     def _two_vehicle_snapshot(self):
         snapshot = copy.deepcopy(SNAPSHOT)
@@ -1659,6 +1754,140 @@ class GaragePersistenceTests(unittest.TestCase):
         snapshot['vehicleTypeCompactDescrs'] = {50001, 50002}
         snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
         return snapshot
+
+    def test_the_rounds_a_battle_fired_stay_spent_across_a_restart(self):
+        """A restart that refilled the racks would be free ammunition."""
+        state = self._state(self._matching_snapshot())
+        state.settle_battle_ammunition(50001, {0: 12, 1: 3})
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart(self._matching_snapshot())
+
+        self.assertEqual(
+            {20010: 18, 20011: 12}, restored['inventoryItems'][10])
+        self.assertEqual(
+            [20010, 18, 20011, 12], list(restored['vehicles'][0]['shells']))
+
+    def test_the_layout_a_battle_emptied_survives_a_restart(self):
+        """It is what auto-load and the resupply button buy back."""
+        state = self._state(self._matching_snapshot())
+        state.settle_battle_ammunition(50001, {0: 12, 1: 3})
+
+        self.assertEqual(
+            {(7001, 7002): [20010, 30, 20011, 15]},
+            state.snapshot()['vehicles'][0]['shellsLayout'])
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart(self._matching_snapshot())
+
+        self.assertEqual(
+            {(7001, 7002): [20010, 30, 20011, 15]},
+            restored['vehicles'][0]['shellsLayout'])
+
+    def test_a_rack_a_battle_emptied_comes_back_empty(self):
+        state = self._state(self._matching_snapshot())
+        state.settle_battle_ammunition(50001, {0: 30, 1: 15})
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart(self._matching_snapshot())
+
+        self.assertEqual(
+            [20010, 0, 20011, 0], list(restored['vehicles'][0]['shells']))
+        self.assertEqual(
+            {20010: 0, 20011: 0}, restored['inventoryItems'][10])
+
+    def test_the_consumable_a_battle_used_stays_used_across_a_restart(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][11] = {11001: 2}
+        state = self._state(snapshot)
+        state.equip_equipments(9, [11001, 0, 0])
+        state.settle_battle_consumables(50001, [11001])
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        fresh = copy.deepcopy(SNAPSHOT)
+        fresh['inventoryItems'][11] = {11001: 2}
+        restored = self._restart(fresh)
+
+        self.assertEqual({11001: 1}, restored['inventoryItems'][11])
+        self.assertEqual([0, 0, 0], list(restored['vehicles'][0]['eqs']))
+        self.assertEqual(
+            [11001, 0, 0], list(restored['vehicles'][0]['eqsLayout']))
+
+    def test_a_restored_vehicle_says_which_consumables_it_holds(self):
+        """Otherwise a second vehicle mounts the same one for nothing."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][11] = {11001: 1}
+        state = self._state(snapshot)
+        state.equip_equipments(9, [11001, 0, 0])
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        fresh = copy.deepcopy(SNAPSHOT)
+        fresh['inventoryItems'][11] = {11001: 1}
+        restored = self._restart(fresh)
+
+        self.assertEqual(
+            {11001: 1}, restored['vehicles'][0]['inventoryItems'][11])
+
+    def test_a_bought_round_the_stock_garage_never_had_survives(self):
+        """A save may hold what this start's fresh build did not carry."""
+        snapshot = self._matching_snapshot()
+        snapshot['shopItemPrices'][20012] = {'credits': 500}
+        state = self._state(snapshot)
+        record = state.snapshot()['vehicles'][0]
+        record['shells'] = [20010, 30, 20012, 5]
+        record['inventoryItems'][10] = {20010: 30, 20012: 5}
+        state.snapshot()['inventoryItems'][10] = {20010: 30, 20012: 5}
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        fresh = self._matching_snapshot()
+        fresh['shopItemPrices'][20012] = {'credits': 500}
+        restored = self._restart(fresh)
+
+        self.assertEqual(
+            {20010: 30, 20012: 5}, restored['inventoryItems'][10])
+        self.assertEqual(
+            [20010, 30, 20012, 5], list(restored['vehicles'][0]['shells']))
+
+    def test_a_saved_round_this_client_no_longer_prices_is_dropped(self):
+        snapshot = self._matching_snapshot()
+        snapshot['shopItemPrices'][20012] = {'credits': 500}
+        state = self._state(snapshot)
+        state.snapshot()['inventoryItems'][10][20012] = 5
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart(self._matching_snapshot())
+
+        self.assertNotIn(20012, restored['inventoryItems'][10])
+
+    def test_a_save_written_before_the_depot_keeps_the_stock_supply(self):
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(copy.deepcopy(SNAPSHOT)))
+        import json
+        with io.open(self.path, encoding='utf-8') as stream:
+            saved = json.load(stream)
+        del saved['owned']['10']
+        with io.open(self.path, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(saved))
+
+        restored = self._restart()
+
+        self.assertEqual(
+            SNAPSHOT['inventoryItems'][10], restored['inventoryItems'][10])
 
     def test_a_damaged_vehicle_comes_back_damaged(self):
         """A restart that repaired the tank would be a free repair."""

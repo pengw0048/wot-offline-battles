@@ -9,6 +9,16 @@ Nothing in this module touches BigWorld: every client dependency arrives as an
 already imported ``items`` module or an already built descriptor.
 """
 
+# items/__init__ ITEM_TYPE_NAMES: 9 is optionalDevice, 10 is shell and 11 is
+# equipment.  Each of these belongs to the account rather than to one vehicle,
+# so two vehicles carrying one hold two of it and every count adds up across
+# the garage.  Every other item type is published per vehicle as the largest
+# count any one of them carries, and summing that view would invent stock
+# nobody owns.  The garage's resupply arithmetic and the snapshot builders both
+# read this one rule, because a resupply prices exactly what the builder
+# published.
+STOCKED_ITEM_TYPES = (9, 10, 11)
+
 NEW_SKILL_SLOTS = 8
 _NEW_SKILL_XP = {}
 
@@ -316,6 +326,15 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
         item_type_indices['shell'], {})
     for index in range(0, len(shells), 2):
         record_shell_items[shells[index]] = shells[index + 1]
+
+    # A mounted consumable belongs to the account, and the record is where the
+    # garage reads what this vehicle holds.  Leaving it out would let a second
+    # vehicle mount the same one lot of it for nothing.
+    for compact_descr in consumables:
+        compact_descr = int(compact_descr)
+        if compact_descr:
+            record_inventory_items.setdefault(
+                item_type_indices['equipment'], {})[compact_descr] = 1
 
     # Saved fittings may mount any gun in the vehicle's research tree.
     # Catalogue every such gun's shells at account level, while the

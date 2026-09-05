@@ -122,6 +122,34 @@ def _ledger_payload(snapshot):
     }
 
 
+def _floor_account_stock(snapshot):
+    """Own at least what the garage already holds.
+
+    A round, a consumable and an optional device belong to the account, and
+    ``garage.GarageState`` adds them up across every vehicle to decide what a
+    resupply must buy.  A depot count below that sum would let one lot of them
+    be mounted twice, so the whole garage is the floor under the depot.  Older
+    saves recorded the largest count one vehicle carried rather than the total,
+    and this is what raises them.
+    """
+    published = snapshot.setdefault('inventoryItems', {})
+    for item_type in _ARTEFACT_ITEM_TYPES:
+        totals = {}
+        for record in _records(snapshot):
+            items = record.get('inventoryItems')
+            if not isinstance(items, dict):
+                continue
+            for compact_descr, count in (_int_map(
+                    items.get(item_type) or {}) or {}).items():
+                totals[compact_descr] = totals.get(compact_descr, 0) + count
+        if not totals:
+            continue
+        target = published.setdefault(item_type, {})
+        for compact_descr, count in totals.items():
+            target[compact_descr] = max(
+                int(target.get(compact_descr, 0)), int(count))
+
+
 def _apply_ledger(staged, stored):
     """Overlay one saved ledger, keeping the current catalogue authoritative."""
     ledger = stored.get('ledger')
@@ -269,6 +297,13 @@ class GarageStore(object):
                 value = _int_list(record.get(name))
                 if value is not None:
                     stored[name] = value
+            # What the player asked the vehicle to carry, which a battle
+            # deliberately does not change: it is what auto-load buys back.
+            layout = _int_list(
+                (record.get('shellsLayout') or {}).get(
+                    tuple(record.get('shellsLayoutIdx') or ())))
+            if layout is not None:
+                stored['shellsLayout'] = layout
             try:
                 stored['settings'] = int(record.get('settings', 0) or 0)
             except (TypeError, ValueError):
@@ -301,11 +336,14 @@ class GarageStore(object):
                     continue
                 if item_type not in _ARTEFACT_ITEM_TYPES:
                     continue
+                # An empty depot is saved as an empty depot.  A row is dropped
+                # when its count reaches zero, so omitting the whole type here
+                # would read back on the next start as "this save predates the
+                # depot" and hand the stock supply out all over again.
                 counts = _int_map(items)
-                if counts:
-                    owned[str(item_type)] = dict(
-                        (str(compact_descr), count)
-                        for compact_descr, count in counts.items())
+                owned[str(item_type)] = dict(
+                    (str(compact_descr), count)
+                    for compact_descr, count in counts.items())
         if battle_receipts is None:
             battle_receipts = self._battle_receipts
         return {
@@ -448,24 +486,28 @@ class GarageStore(object):
         owned = stored.get('owned')
         if isinstance(owned, dict):
             published = staged.setdefault('inventoryItems', {})
-            for raw_type, items in owned.items():
-                try:
-                    item_type = int(raw_type)
-                except (TypeError, ValueError):
-                    continue
-                if item_type not in _ARTEFACT_ITEM_TYPES:
-                    continue
+            prices = staged.get('shopItemPrices') or {}
+            for item_type in _ARTEFACT_ITEM_TYPES:
+                items = owned.get(str(item_type), owned.get(item_type))
                 counts = _int_map(items)
-                if not counts:
+                if counts is None:
+                    # A save written before the depot was kept, or one whose
+                    # depot cannot be read, keeps whatever stock the fresh
+                    # build handed out.
                     continue
-                target = published.setdefault(item_type, {})
+                # The save is the depot.  Taking the larger of the two would
+                # hand the stock supply back every time the client started,
+                # which is a refund for every round and consumable a battle
+                # spent.
+                target = {}
                 for compact_descr, count in counts.items():
-                    # A saved file written before the current catalogue can
-                    # still name an item this client no longer offers.
-                    if compact_descr not in target:
-                        continue
-                    target[compact_descr] = max(
-                        int(target[compact_descr]), int(count))
+                    # A saved file can still name an item this client no
+                    # longer offers, and an item with no price is one the
+                    # current catalogue does not know.
+                    if compact_descr in prices:
+                        target[compact_descr] = int(count)
+                published[item_type] = target
+        _floor_account_stock(staged)
 
         _apply_ledger(staged, stored)
 
@@ -576,7 +618,15 @@ class GarageStore(object):
                 if decoded and order[slot] is not None:
                     tankmen[order[slot]] = decoded
                     changed = True
-        mirror_shells_layout(record)
+        layout = _int_list(saved.get('shellsLayout'))
+        key = tuple(record.get('shellsLayoutIdx') or ())
+        if layout is not None and key and not len(layout) % 2:
+            record['shellsLayout'] = {key: layout}
+            changed = True
+        else:
+            # A save written before the layout was kept separately loaded
+            # exactly what it asked for.
+            mirror_shells_layout(record)
         # Mounted shells must stay consistent with the shell inventory that
         # data._validate_selected_vehicle cross-checks.
         shells = _int_list(record.get('shells'))
@@ -585,6 +635,18 @@ class GarageStore(object):
             for index in range(0, len(shells), 2):
                 pairs[shells[index]] = shells[index + 1]
             record.setdefault('inventoryItems', {})[10] = pairs
+        # A mounted consumable is what this vehicle holds of the account's
+        # stock, so the record has to say so or a second vehicle would mount
+        # the same one lot of it for nothing.
+        consumables = {}
+        for compact_descr in (record.get('eqs') or ()):
+            try:
+                compact_descr = int(compact_descr)
+            except (TypeError, ValueError):
+                continue
+            if compact_descr:
+                consumables[compact_descr] = 1
+        record.setdefault('inventoryItems', {})[11] = consumables
         return changed
 
     def _read(self):

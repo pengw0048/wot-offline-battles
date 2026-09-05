@@ -447,6 +447,28 @@ class VehiclePurchaseTests(unittest.TestCase):
         self.assertEqual(0, snapshot['vehicleXP'][SECOND_VEHICLE_CD])
         self.assertNotEqual(9, record['id'])
 
+    def test_a_bought_vehicle_adds_its_load_to_the_depot(self):
+        """Its rounds are paid for, so the account has to own them as well.
+
+        The garage adds a round up across every vehicle to decide what a
+        resupply must buy.  Publishing the largest count one vehicle carries
+        would charge the player again for rounds already in the new tank.
+        """
+        from unittest import mock
+
+        calls = []
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 20000
+        state = _state(snapshot, vehicles=_vehicles())
+        with mock.patch.dict(sys.modules, self._built(calls)):
+            state.buy_vehicle(SECOND_VEHICLE_CD)
+
+        snapshot = state.snapshot()
+        # Twenty rounds in the vehicle it already had and ten in the new one.
+        self.assertEqual(30, snapshot['inventoryItems'][10][10010])
+        # A module is published per vehicle, so it stays at one.
+        self.assertEqual(1, snapshot['inventoryItems'][2][2002])
+
     def test_a_bought_vehicle_starts_with_the_refill_switches_on(self):
         """A purchase must not differ from a vehicle the garage built itself."""
         from unittest import mock
