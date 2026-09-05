@@ -540,6 +540,10 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertAlmostEqual(2.5, plane['center_y'])
         self.assertAlmostEqual(-0.08, plane['gradient_x'])
         self.assertAlmostEqual(-0.12, plane['gradient_z'])
+        expected_normal = vehicle_physics.ground_normal(-0.08, -0.12)
+        for actual, expected_component in zip(
+                plane['normal'], expected_normal):
+            self.assertAlmostEqual(expected_component, actual)
         expected = 2.5 - 0.08 * 2.0 - 0.12
         self.assertAlmostEqual(
             expected,
@@ -561,34 +565,80 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertFalse(vehicle_physics.suspension_ground_planes_continuous(
             plane, {}, start, end, 0.1, 0.1))
 
-    def test_world_ground_plane_projects_complete_velocity_onto_its_normal(
-            self):
-        plane = {'gradient_x': -0.5, 'gradient_z': 0.25}
-        normal_length = math.sqrt(1.0 + 0.5 * 0.5 + 0.25 * 0.25)
+    def test_five_point_ground_plane_uses_actual_lateral_samples(self):
+        plane = vehicle_physics.sampled_ground_plane(
+            0.0, 0.0, 1.5, -1.5, 0.0,
+            0.0, 6.0, 3.0, 0.35)
+
+        self.assertEqual(
+            vehicle_physics.ground_normal(1.0, 0.0), plane['normal'])
+        self.assertAlmostEqual(1.0, plane['gradient_x'])
+        self.assertAlmostEqual(0.0, plane['gradient_z'])
+        self.assertGreater(plane['normal'][1], 0.0)
+
+    def test_ground_plane_rejects_invalid_geometry_and_normalises_safely(self):
+        self.assertIsNone(vehicle_physics.ground_normal(
+            float('nan'), 0.0))
+        self.assertIsNone(vehicle_physics.ground_normal(
+            float('inf'), 0.0))
+        huge = vehicle_physics.ground_normal(1.0e308, -1.0e308)
+        self.assertIsNotNone(huge)
+        self.assertGreater(huge[1], 0.0)
+        self.assertAlmostEqual(
+            1.0, math.sqrt(sum(value * value for value in huge)))
+        self.assertIsNone(vehicle_physics.sampled_ground_plane(
+            0.0, 0.0, 0.0, 0.0, float('nan'),
+            0.0, 6.0, 3.0, 0.35))
+        self.assertIsNone(vehicle_physics.sampled_ground_plane(
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 3.0, 0.35))
+
+    def test_landing_impact_uses_complete_world_velocity_and_normal(self):
+        normal = vehicle_physics.ground_normal(1.0, 0.0)
 
         self.assertAlmostEqual(
-            10.0 / normal_length,
-            vehicle_physics.suspension_plane_impact_speed(
-                plane, (0.0, -10.0, 0.0)))
-        # This velocity is tangent to y = -0.5*x + 0.25*z.
+            10.0 / math.sqrt(2.0),
+            vehicle_physics.landing_impact_speed(
+                (0.0, -10.0, 0.0), normal))
         self.assertEqual(
             0.0,
-            vehicle_physics.suspension_plane_impact_speed(
-                plane, (10.0, -5.0, 0.0)))
+            vehicle_physics.landing_impact_speed(
+                (10.0, 10.0, 0.0), normal))
         self.assertAlmostEqual(
-            15.0 / normal_length,
-            vehicle_physics.suspension_plane_impact_speed(
-                plane, (-10.0, -10.0, 0.0)))
-        self.assertIsNone(
-            vehicle_physics.suspension_plane_impact_speed(
-                None, (0.0, -10.0, 0.0)))
-        self.assertIsNone(
-            vehicle_physics.suspension_plane_impact_speed(
-                plane, (float('nan'), -10.0, 0.0)))
-        self.assertIsNone(
-            vehicle_physics.suspension_plane_impact_speed(
-                {'gradient_x': 1.0e308, 'gradient_z': 0.0},
-                (1.0, -10.0, 0.0)))
+            20.0 / math.sqrt(2.0),
+            vehicle_physics.landing_impact_speed(
+                (10.0, -10.0, 0.0), normal))
+
+    def test_landing_impact_falls_back_to_vertical_without_valid_plane(self):
+        velocity = (20.0, -13.0, -5.0)
+
+        for normal in (
+                None, (0.0, 0.0, 0.0), (0.0, -1.0, 0.0),
+                (float('nan'), 1.0, 0.0),
+                (float('inf'), 1.0, 0.0)):
+            self.assertEqual(
+                13.0,
+                vehicle_physics.landing_impact_speed(velocity, normal))
+        self.assertEqual(
+            13.0,
+            vehicle_physics.landing_impact_speed(
+                (float('nan'), -13.0, 0.0), (0.0, 1.0, 0.0)))
+        self.assertEqual(
+            13.0,
+            vehicle_physics.landing_impact_speed(
+                (None, -13.0, 0.0), (0.0, 1.0, 0.0)))
+
+    def test_tangent_landing_is_frame_rate_independent(self):
+        normal = vehicle_physics.ground_normal(-0.5, 0.25)
+
+        for frame_rate in (120.0, 60.0, 30.0, 20.0, 10.0):
+            dt = 1.0 / frame_rate
+            displacement = (8.0 * dt, -3.0 * dt, 4.0 * dt)
+            measured_velocity = tuple(value / dt for value in displacement)
+            self.assertAlmostEqual(
+                0.0,
+                vehicle_physics.landing_impact_speed(
+                    measured_velocity, normal), places=12)
 
     def test_contact_correction_uses_bounded_interior_path_probes(self):
         self.assertEqual(

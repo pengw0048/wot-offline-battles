@@ -6204,9 +6204,13 @@ class BotRuntime(object):
             state['push_z'] = 0.0
             state['vertical_speed'] = 0.0
             state['airborne'] = False
+            accepted_plane = state.get('_suspension_ground_plane')
             # The rejected contact layer is unrelated to the restored pose.
-            # Drop its plane and contact history without re-arming spawn snap.
+            # Drop its contact history without replacing the last accepted
+            # support plane with the rejected upper layer.
             self._reset_bot_suspension_state(state)
+            if accepted_plane is not None:
+                state['_suspension_ground_plane'] = accepted_plane
             self._turn_speeds[bot_id] = 0.0
             self._invalidate_realised_motion(
                 bot_id, (_number(state.get('yaw'))
@@ -6250,10 +6254,10 @@ class BotRuntime(object):
                     (float(position[2]) - float(motion_pose[2])) /
                     float(step),
                 )
-                normal_speed = vehicle_physics.suspension_plane_impact_speed(
-                    current_plane, velocity)
-                if normal_speed is not None:
-                    impact_speed = normal_speed
+                normal = (current_plane.get('normal')
+                          if isinstance(current_plane, dict) else None)
+                impact_speed = vehicle_physics.landing_impact_speed(
+                    velocity, normal)
             self._apply_bot_landing_impact(
                 state, impact_speed, normal_impact=True)
         elif not before_airborne and state['airborne']:

@@ -18117,6 +18117,56 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # (10, -5, 0) is tangent to y = -0.5*x, so it closes at zero.
         self.assertEqual([(0.0, True)], impacts)
 
+    def test_local_suspension_landing_realises_air_carry_at_each_tick_rate(
+            self):
+        for frame_rate in (120.0, 60.0, 30.0, 20.0, 10.0):
+            with self.subTest(frame_rate=frame_rate):
+                dt = 1.0 / frame_rate
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._local_fall_armed = True
+                battle._local_airborne = True
+                battle._local_vertical_speed = -3.0
+                battle._local_air_lateral = (8.0, 4.0)
+                battle._local_support_motion_pose = (0.0, 0.0, 0.0)
+                battle._motion_is_clear = mock.Mock(return_value=True)
+                entity = _Vehicle(
+                    10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+                    {'health': 500})
+                battle._suspension_ground_y = mock.Mock(
+                    side_effect=lambda x, z, *unused_args, **unused_kw:
+                    -0.5 * x + 0.25 * z)
+                impacts = []
+                battle._apply_landing_impact = mock.Mock(
+                    side_effect=lambda unused_entity, speed,
+                    normal_impact=False:
+                    impacts.append((speed, normal_impact)) or 0)
+                solved = {
+                    'height': -3.0 * dt,
+                    'vertical_velocity': 0.0,
+                    'pitch': 0.0,
+                    'pitch_velocity': 0.0,
+                    'roll': 0.0,
+                    'roll_velocity': 0.0,
+                    'contact_count': 10,
+                    'airborne': False,
+                    'left_flying': False,
+                    'right_flying': False,
+                    'impact_speed': -3.0,
+                }
+
+                with mock.patch.object(
+                        vehicle_physics, 'damper_suspension_step',
+                        return_value=solved):
+                    position = battle._update_vertical_motion(
+                        entity, (0.0, 0.0, 0.0), 0.0, dt)
+
+                self.assertAlmostEqual(8.0 * dt, position[0])
+                self.assertAlmostEqual(4.0 * dt, position[2])
+                self.assertEqual([(0.0, True)], impacts)
+                battle._motion_is_clear.assert_called_once()
+
     def test_local_suspension_landing_without_plane_uses_vertical_speed(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -18163,6 +18213,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._avatar = runtime.bigworld.avatar
         battle._local_fall_armed = True
         battle._local_support_tick_pose = (0.0, 0.0, 0.0)
+        accepted_plane = {
+            'center_x': 0.0, 'center_z': 0.0, 'center_y': 0.0,
+            'gradient_x': 0.0, 'gradient_z': 0.0,
+            'normal': (0.0, 1.0, 0.0),
+        }
+        battle._local_ground_plane = accepted_plane
         entity = _Vehicle(
             10, _suspension_descriptor(), _Vector(), (0, 0, 0),
             {'health': 500})
@@ -18191,6 +18247,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._local_airborne)
         self.assertIsNone(battle._local_spring_ground_memory)
         self.assertIsNone(battle._local_pseudo_ground_memory)
+        self.assertIs(accepted_plane, battle._local_ground_plane)
         self.assertEqual(22, battle._suspension_ground_y.call_count)
 
     def test_local_suspension_ram_distance_does_not_authorise_high_platform(
@@ -18498,6 +18555,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
         battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_air_lateral = (2.0, -1.0)
+        battle._motion_is_clear = mock.Mock(return_value=True)
         battle._local_pitch = 0.17
         battle._local_roll = -0.09
         battle._local_suspension_pitch_velocity = 0.4
@@ -18523,6 +18583,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(battle._local_pseudo_ground_memory)
         self.assertAlmostEqual(0.17, battle._local_pitch)
         self.assertAlmostEqual(-0.09, battle._local_roll)
+        self.assertTrue(battle._local_airborne)
+        self.assertEqual((2.0, -1.0), battle._local_air_lateral)
         self.assertTrue(battle._local_suspension_failed_this_tick)
         battle._terrain_support.assert_not_called()
 

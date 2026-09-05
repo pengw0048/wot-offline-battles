@@ -15260,47 +15260,9 @@ class BattleRuntime(object):
             position[0], position[2], position[1])
         if None in (front_y, rear_y, right_y, left_y, center_y):
             return None
-        long_mid = (front_y + rear_y) * 0.5
-        side_mid = (right_y + left_y) * 0.5
-        if (abs(long_mid - side_mid) > GROUND_PLANE_EPSILON or
-                abs(center_y - long_mid) > GROUND_PLANE_EPSILON or
-                abs(center_y - side_mid) > GROUND_PLANE_EPSILON):
-            return None
-        height_forward = (front_y - rear_y) / length
-        height_right = (right_y - left_y) / width
-        gradient_x = (height_forward * sin_yaw +
-                      height_right * cos_yaw)
-        gradient_z = (height_forward * cos_yaw -
-                      height_right * sin_yaw)
-        slope_tangent = math.sqrt(
-            height_forward * height_forward +
-            height_right * height_right)
-        downhill_x = -gradient_x
-        downhill_z = -gradient_z
-        downhill_length = math.sqrt(
-            downhill_x * downhill_x + downhill_z * downhill_z)
-        if downhill_length > 0.001:
-            downhill_x /= downhill_length
-            downhill_z /= downhill_length
-        else:
-            downhill_x = downhill_z = 0.0
-        return {
-            'center_y': center_y,
-            'gradient_x': gradient_x,
-            'gradient_z': gradient_z,
-            'pitch': -math.atan2(front_y - rear_y, length),
-            # BigWorld applies YPR as yaw, pitch and then roll.  Forward
-            # pitch therefore shortens the horizontal right axis used by the
-            # final roll; dividing by its plane length keeps the displayed
-            # hull normal identical to the fitted terrain normal.
-            'roll': math.atan2(
-                height_right, math.sqrt(
-                    1.0 + height_forward * height_forward)),
-            'slope_tangent': slope_tangent,
-            'up_cosine': 1.0 / math.sqrt(
-                1.0 + slope_tangent * slope_tangent),
-            'downhill': (downhill_x, 0.0, downhill_z),
-        }
+        return vehicle_physics.sampled_ground_plane(
+            front_y, rear_y, right_y, left_y, center_y,
+            yaw, length, width, GROUND_PLANE_EPSILON)
 
     def _commit_ground_plane(self, plane, force_raw=False):
         """Publish one accepted terrain plane to pose and slide physics."""
@@ -17760,14 +17722,28 @@ class BattleRuntime(object):
     def _update_vertical_motion(self, entity, position, yaw, dt):
         """Contain the optional suspension trial to this local vehicle."""
         self._local_suspension_failed_this_tick = False
+        self._local_suspension_air_motion_this_tick = False
         params = self._ensure_local_suspension_params(entity.typeDescriptor)
         if params is None:
             return self._update_vertical_motion_legacy(
                 entity, position, yaw, dt)
         snapshot = self._local_suspension_state_snapshot()
         try:
-            return self._update_suspension_vertical_motion(
+            if self._local_airborne and dt > 0.0:
+                # Realise carried world X/Z velocity before sampling a landing
+                # plane so the normal verdict uses this tick's displacement.
+                position = self._apply_suspension_slope_slide(
+                    position, yaw, dt, entity)
+                self._local_suspension_air_motion_this_tick = True
+            position = self._update_suspension_vertical_motion(
                 entity, position, yaw, dt)
+            if (self._local_support_rise_blocked and
+                    self._local_suspension_air_motion_this_tick):
+                # The carried displacement and its decay belong to the same
+                # rejected pose. Restore both alongside its X/Z rollback.
+                self._local_slide_speed = snapshot['_local_slide_speed']
+                self._local_air_lateral = snapshot['_local_air_lateral']
+            return position
         except Exception as error:
             self._restore_local_suspension_state(snapshot)
             self._disable_local_suspension_trial(error)
@@ -17871,6 +17847,7 @@ class BattleRuntime(object):
             self._local_suspension_roll_velocity = 0.0
             self._local_pitch = previous_pitch
             self._local_roll = previous_roll
+            self._local_ground_plane = previous_plane
             self._local_airborne = False
             self._local_support_rise_blocked = True
             return position
@@ -17900,10 +17877,10 @@ class BattleRuntime(object):
                     float(impact_vertical),
                     (float(position[2]) - float(motion_pose[2])) / float(dt),
                 )
-                normal_speed = vehicle_physics.suspension_plane_impact_speed(
-                    current_plane, velocity)
-                if normal_speed is not None:
-                    impact_speed = normal_speed
+                normal = (current_plane.get('normal')
+                          if isinstance(current_plane, dict) else None)
+                impact_speed = vehicle_physics.landing_impact_speed(
+                    velocity, normal)
             self._apply_landing_impact(
                 entity, impact_speed, normal_impact=True)
         elif not before_airborne and self._local_airborne:
@@ -18372,6 +18349,7 @@ class BattleRuntime(object):
         suspension_active = bool(
             self._ensure_local_suspension_params(entity.typeDescriptor))
         self._local_support_rise_blocked = False
+        self._local_suspension_air_motion_this_tick = False
         self._local_support_tick_pose = tick_pose
         self._local_support_motion_pose = tick_pose
         try:
@@ -18380,6 +18358,8 @@ class BattleRuntime(object):
         finally:
             self._local_support_tick_pose = None
             self._local_support_motion_pose = None
+        air_motion_applied = bool(getattr(
+            self, '_local_suspension_air_motion_this_tick', False))
         suspension_active = bool(
             self._local_suspension_params is not None and
             not self._local_suspension_disabled)
@@ -18401,7 +18381,8 @@ class BattleRuntime(object):
             suspension_active = bool(
                 self._local_suspension_params is not None and
                 not self._local_suspension_disabled)
-            if suspension_active and not support_blocked:
+            if (suspension_active and not support_blocked and
+                    not air_motion_applied):
                 slide_start = position
                 position = self._apply_suspension_slope_slide(
                     position, yaw, dt, entity)
