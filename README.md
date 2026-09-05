@@ -63,6 +63,11 @@ vehicles, modules, ammunition and consumables are researched and bought in the
 garage at this client's own prices. Gold is spent but not earned, so premium
 vehicles and gold ammunition are paid for out of the gold the launcher grants.
 
+Taking a complex optional device off a vehicle follows the client's own rule:
+its descriptor says whether the device survives being removed, and one that
+does not is destroyed unless the player pays the game's own removal price --
+10 gold in a career, nothing in a fully unlocked save.
+
 Ammunition is stock now, not scenery. A battle spends the rounds it fired,
 the server reports what it drew by the shell's own position in the gun, and
 reloading buys whatever the depot is short of at this client's prices. An

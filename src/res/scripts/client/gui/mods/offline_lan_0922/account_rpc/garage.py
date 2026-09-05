@@ -527,10 +527,29 @@ class GarageState(object):
         return record
 
     def equip_optional_device(self, vehicle_inventory_id, device_compact_descr,
-                              slot_index):
-        record = self._record(vehicle_inventory_id)
+                              slot_index, paid_removal=False):
+        """Mount, swap or take off one optional device.
+
+        #1513's own ``VehicleDescriptor.removeOptionalDevice`` returns what
+        comes back and what is destroyed: a device its descriptor marks
+        ``removable`` always comes back, and a complex one is destroyed unless
+        it was a paid removal.  The client sends which of the two the player
+        chose as the fifth value of the command, and the price is the shop
+        value ``OptionalDevice.getRemovalPrice`` shows them.
+        """
+        record = self._record(vehicle_inventory_id, touch=False)
         device_compact_descr = _int(device_compact_descr)
         slot_index = _int(slot_index)
+        # Whatever is in the slot now is what leaves it, whether the slot is
+        # being emptied or swapped.
+        outgoing = self._device_in_slot(record, slot_index)
+        destroyed = 0
+        if outgoing and not self._is_removable(outgoing):
+            if paid_removal:
+                self._charge(self._removal_cost())
+            else:
+                destroyed = outgoing
+        self._touched.add(_int(record.get('id', 0)))
 
         def mutate(descriptor):
             # Removing first makes a slot swap idempotent; #1513 rejects an
@@ -546,8 +565,52 @@ class GarageState(object):
         self._rebuild_descriptor(record, mutate)
         self._own(record, device_compact_descr, 9)
         self._price(device_compact_descr)
+        if destroyed:
+            self._destroy_device(destroyed)
         self.revision += 1
         return record
+
+    def _destroy_device(self, compact_descr):
+        """Take one complex device out of the account, as removing it does."""
+        owned = self._snapshot.get('inventoryItems', {}).get(
+            OPTIONAL_DEVICE_ITEM_TYPE, {})
+        remaining = max(
+            self._mounted(
+                compact_descr, OPTIONAL_DEVICE_ITEM_TYPE, self._records()),
+            _int(owned.get(compact_descr, 0)) - 1)
+        self._set_owned(compact_descr, OPTIONAL_DEVICE_ITEM_TYPE, remaining)
+
+    def _is_removable(self, device_compact_descr):
+        """Report whether one optional device comes off without being lost."""
+        vehicles = self._vehicles_module()
+        try:
+            item = vehicles.getItemByCompactDescr(_int(device_compact_descr))
+        except Exception:
+            # A device this client cannot describe is not one it can destroy.
+            return True
+        return bool(getattr(item, 'removable', True))
+
+    def _device_in_slot(self, record, slot_index):
+        """Return the optional device one slot currently holds, or zero."""
+        vehicles = self._vehicles_module()
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            devices = list(
+                getattr(descriptor, 'optionalDevices', ()) or ())
+        except Exception:
+            return 0
+        if not 0 <= _int(slot_index) < len(devices):
+            return 0
+        device = devices[_int(slot_index)]
+        return _int(getattr(device, 'compactDescr', 0) or 0)
+
+    def _removal_cost(self):
+        """Return what a paid removal costs, as the shop publishes it."""
+        cost = self._snapshot.get('deviceRemovalCost')
+        if not isinstance(cost, dict):
+            return {}
+        return dict((str(currency), _int(amount))
+                    for currency, amount in cost.items())
 
     def install_component(self, vehicle_inventory_id, compact_descr,
                           gun_compact_descr=0, position_index=0):

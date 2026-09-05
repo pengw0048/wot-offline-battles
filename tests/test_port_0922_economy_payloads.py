@@ -7,6 +7,7 @@ than guessed from a parameter name: ``Stats.unlock``,
 ``Shop.buyVehicle``, ``Inventory.__sellVehicle_onShopSynced``,
 ``Inventory.__sellItem_onShopSynced``, ``Inventory.equipTankman``,
 ``Inventory.dismissTankman``, ``Inventory.repair``,
+``Inventory.__equipOptionDevice_onShopSynced``,
 ``Inventory.__respecTman_onShopSynced``,
 ``Inventory.__multiRespecTman_onShopSynced``, ``Shop.buyTankman`` and
 ``Shop.buyAndEquipTankman``.  The economy suite proves the garage
@@ -161,6 +162,24 @@ class EconomyPayloadTests(unittest.TestCase):
                 'items_from_vehicle': [],
                 'items_from_inventory': []})],
             self._dispatch(commands.CMD_SELL_VEHICLE, ([17, 10, 0, 0, 0],)))
+
+    def test_taking_a_device_off_carries_whether_it_was_paid_for(self):
+        # Inventory.__equipOptionDevice_onShopSynced -> _doCmdIntArr(
+        #   CMD_EQUIP_OPTDEV,
+        #   [shopRev, vehInvID, deviceCompDescr, slotIdx, isPaidRemoval])
+        self.assertEqual(
+            [('equip_optional_device', (10, 0, 1),
+              {'paid_removal': True})],
+            self._dispatch(commands.CMD_EQUIP_OPTDEV, ([17, 10, 0, 1, 1],)))
+        self.assertEqual(
+            [('equip_optional_device', (10, 0, 1),
+              {'paid_removal': False})],
+            self._dispatch(commands.CMD_EQUIP_OPTDEV, ([17, 10, 0, 1, 0],)))
+        # A client that sends the older four-value payload paid nothing.
+        self.assertEqual(
+            [('equip_optional_device', (10, 9001, 1),
+              {'paid_removal': False})],
+            self._dispatch(commands.CMD_EQUIP_OPTDEV, ([17, 10, 9001, 1],)))
 
     def test_retraining_carries_the_tankman_the_school_and_the_vehicle(self):
         # Inventory.__respecTman_onShopSynced -> _doCmdInt4(CMD_TMAN_RESPEC,

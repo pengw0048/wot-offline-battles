@@ -721,6 +721,9 @@ def _selected_vehicle(config, restore_saved=True):
                               economy.SANDBOX_BARRACKS_BERTHS),
             'tankmanCosts': (economy.CAREER_TANKMAN_COSTS if career else
                              economy.SANDBOX_TANKMAN_COSTS),
+            'deviceRemovalCost': dict(
+                economy.CAREER_DEVICE_REMOVAL if career else
+                economy.SANDBOX_DEVICE_REMOVAL),
             'nextInventoryID': len(records) + 1,
             'defaultVehicleSettings': default_settings,
         })

@@ -83,6 +83,13 @@ def _tankman_cost(credits_amount, gold, role_level, premium=False):
     }
 
 
+# ``ShopCommonStats.paidRemovalCost`` falls back to 10 gold when the shop
+# publishes none, and ``paidDeluxeRemovalCost`` to 100 crystal.  Those are the
+# client's own numbers for taking a complex optional device off a vehicle, so
+# a career charges them and the historical sandbox charges nothing.
+CAREER_DEVICE_REMOVAL = {'gold': 10}
+SANDBOX_DEVICE_REMOVAL = {'gold': 0}
+
 CAREER_TANKMAN_COSTS = (
     _tankman_cost(0, 0, 50),
     _tankman_cost(20000, 0, 75),

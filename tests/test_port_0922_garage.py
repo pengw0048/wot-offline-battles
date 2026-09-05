@@ -134,6 +134,14 @@ class _Descriptor(object):
             types.SimpleNamespace(shell=_Component(shell_compact_descr))
             for shell_compact_descr in (20010, 20011))
 
+    @property
+    def optionalDevices(self):
+        # #1513 keeps one entry per slot, None where the slot is empty.
+        return [
+            None if index not in self.devices
+            else _Component(self.devices[index])
+            for index in range(3)]
+
     def installOptionalDevice(self, compact_descr, slot_index):
         if slot_index in self.devices:
             raise ValueError('slot is occupied')
@@ -233,6 +241,11 @@ def _modules():
         getDefaultAmmoForGun=lambda gun: [20010, 30, 20011, 15],
         # The fixture's own vehicle is 50001; anything else is a different
         # type, which is what makes a retraining observable.
+        # 9002 is the complex device: #1513's own descriptor marks it as not
+        # removable, and removeOptionalDevice destroys such a device unless
+        # the player paid to take it off.
+        getItemByCompactDescr=lambda compact_descr: types.SimpleNamespace(
+            removable=(compact_descr != 9002)),
         getVehicleType=lambda compact_descr: types.SimpleNamespace(
             id=(0, VEHICLE_TYPE_ID if compact_descr == 50001
                 else compact_descr % 1000),
@@ -1153,6 +1166,71 @@ class GarageStateTests(unittest.TestCase):
 
         with self.assertRaises(self.garage.GarageError):
             state.retrain_crew(50001, [101, 0, 102])
+
+    # ---- taking an optional device off -----------------------------------
+
+    def _device_state(self, gold=1000):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 100000, 'gold': gold, 'freeXP': 0}
+        snapshot['deviceRemovalCost'] = {'gold': 10}
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def test_a_simple_device_comes_off_for_nothing(self):
+        state = self._device_state()
+        state.equip_optional_device(9, 9001, 0)
+
+        state.equip_optional_device(9, 0, 0)
+
+        self.assertEqual(1000, state.snapshot()['wallet']['gold'])
+        # The fixture owns 200 of it and none of them were lost.
+        self.assertEqual(
+            200, state.snapshot()['inventoryItems'][9][9001])
+
+    def test_a_complex_device_taken_off_for_nothing_is_destroyed(self):
+        """removeOptionalDevice returns it as destroyed, not returned."""
+        state = self._device_state()
+        state.equip_optional_device(9, 9002, 0)
+        self.assertEqual(200, state.snapshot()['inventoryItems'][9][9002])
+
+        state.equip_optional_device(9, 0, 0)
+
+        self.assertEqual(1000, state.snapshot()['wallet']['gold'])
+        self.assertEqual(
+            199, state.snapshot()['inventoryItems'][9][9002])
+
+    def test_a_paid_removal_keeps_the_complex_device_and_costs_gold(self):
+        state = self._device_state()
+        state.equip_optional_device(9, 9002, 0)
+
+        state.equip_optional_device(9, 0, 0, paid_removal=True)
+
+        self.assertEqual(1000 - 10, state.snapshot()['wallet']['gold'])
+        self.assertEqual(200, state.snapshot()['inventoryItems'][9][9002])
+
+    def test_a_paid_removal_the_account_cannot_afford_is_refused(self):
+        state = self._device_state(gold=5)
+        state.equip_optional_device(9, 9002, 0)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_optional_device(9, 0, 0, paid_removal=True)
+
+        self.assertEqual(200, state.snapshot()['inventoryItems'][9][9002])
+        self.assertEqual(5, state.snapshot()['wallet']['gold'])
+
+    def test_a_sandbox_publishes_no_removal_price_and_charges_none(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 0, 'gold': 0, 'freeXP': 0}
+        snapshot['deviceRemovalCost'] = {'gold': 0}
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        state.equip_optional_device(9, 9002, 0)
+
+        state.equip_optional_device(9, 0, 0, paid_removal=True)
+
+        self.assertEqual(200, state.snapshot()['inventoryItems'][9][9002])
 
 
 class FittingRequestTests(unittest.TestCase):

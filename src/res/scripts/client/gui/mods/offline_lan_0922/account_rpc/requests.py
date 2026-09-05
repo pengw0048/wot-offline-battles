@@ -157,8 +157,9 @@ def _equip_optional_device(context, args):
     values = list(args[0] if args else ())
     if len(values) < 4:
         return Result(commands.RES_FAILURE, 'INVALID_DEVICE_REQUEST')
+    paid_removal = bool(_int(values[4])) if len(values) > 4 else False
     return _fitting(context, lambda state: state.equip_optional_device(
-        values[1], values[2], values[3]))
+        values[1], values[2], values[3], paid_removal=paid_removal))
 
 
 def _equip_component(context, args):

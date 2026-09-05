@@ -56,6 +56,19 @@ DEFAULT_TANKMAN_COSTS = (
 )
 
 
+def _device_removal_cost(vehicle):
+    """Return what taking a complex optional device off costs.
+
+    ``OptionalDevice.getRemovalPrice`` reads this for anything the client's
+    own descriptor marks as not ``removable``; the account charges the same.
+    """
+    cost = vehicle.get('deviceRemovalCost')
+    if not isinstance(cost, dict):
+        return {'gold': 0}
+    return dict((str(currency), int(amount))
+                for currency, amount in cost.items())
+
+
 def _tankman_costs(vehicle):
     """Return the account's three recruitment choices, positionally."""
     costs = vehicle.get('tankmanCosts')
@@ -685,7 +698,7 @@ def shop(revision=0, selected_vehicle=None):
             'items': dict(empty_items),
             'freeXPToTManXPRate': 10,
             'goodies': dict(empty_goodies),
-            'paidRemovalCost': {'gold': 0},
+            'paidRemovalCost': _device_removal_cost(vehicle),
             # #1513 OptionalDevice.getRemovalPrice uses a separate Money
             # value for optional devices tagged ``deluxe``.
             'paidDeluxeRemovalCost': {'crystal': 0},
