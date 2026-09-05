@@ -886,7 +886,8 @@ class ServerBotTacticsTests(unittest.TestCase):
         state = BattleState()
         state.client_build = CLIENT_BUILD_0922
         state.phase = 'battle'
-        state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
+        prebattle_ticks = int(round(PREBATTLE_SECONDS * TICK_HZ))
+        state.tick = prebattle_ticks
         state.bot_authority_id = SIMULATION_WORKER_AUTHORITY_ID
         state.bot_manifest_authority_id = SIMULATION_WORKER_AUTHORITY_ID
         state.bot_manifest = list(self.manifest)
@@ -931,11 +932,14 @@ class ServerBotTacticsTests(unittest.TestCase):
             state.bot_planner._recent_hits[11]['attacker'])
         for unused in range(BOT_PLANNER_INTERVAL_TICKS - 1):
             state.tick_once(1.0 / TICK_HZ)
-        self.assertEqual([451], build_ticks)
+        self.assertEqual([prebattle_ticks + 1], build_ticks)
 
         state.tick_once(1.0 / TICK_HZ)
 
-        self.assertEqual([451, 481], build_ticks)
+        self.assertEqual(
+            [prebattle_ticks + 1,
+             prebattle_ticks + 1 + BOT_PLANNER_INTERVAL_TICKS],
+            build_ticks)
         order = next(
             order for order in state.bot_orders['orders']
             if order['id'] == 11)

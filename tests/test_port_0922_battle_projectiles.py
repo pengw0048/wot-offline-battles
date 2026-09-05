@@ -495,7 +495,12 @@ class BattleProjectileTests(unittest.TestCase):
 
     def test_half_even_player_preinstall_matches_real_server_echo(self):
         half_even_edge = 0.0078125
-        launch_server_time_ms = 15000
+        # The trigger is frozen at the server's own receipt tick, so derive
+        # it from the countdown instead of restating one countdown's value.
+        prebattle_ticks = int(round(
+            server_runtime.PREBATTLE_SECONDS * server_runtime.TICK_HZ))
+        launch_server_time_ms = int(round(
+            prebattle_ticks * 1000.0 / server_runtime.TICK_HZ))
         source_shot = {
             'speed': 100.0,
             'gravity': 9.81,
@@ -533,8 +538,7 @@ class BattleProjectileTests(unittest.TestCase):
         server = server_runtime.BattleState(map_name='04_himmelsdorf')
         server.client_build = server_runtime.CLIENT_BUILD_0922
         server.phase = 'battle'
-        server.tick = int(round(
-            server_runtime.PREBATTLE_SECONDS * server_runtime.TICK_HZ))
+        server.tick = prebattle_ticks
         server.round_id = 9
         server.authority_epoch = 1
         server.bot_authority_id = (
