@@ -19924,9 +19924,11 @@ class BattleRuntime(object):
             if contact['layer'] != 'structural' and not combat_rules.is_he(shot):
                 return 0.0
             nominal = combat_rules.he_nominal_armor(collisions, target_descriptor)
+            rolled_damage = combat_rules.shell_damage_roll(
+                shot, random_gauss=lambda mean, unused_sigma: mean)
             return float(combat_rules.damage(
                 shot, contact['result'], nominal,
-                random_uniform=lambda minimum, maximum: (minimum + maximum) * 0.5))
+                rolled_damage=rolled_damage))
         except Exception:
             return None
 

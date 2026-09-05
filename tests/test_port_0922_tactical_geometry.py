@@ -78,12 +78,20 @@ class TacticalGeometryTests(unittest.TestCase):
             hitAngleCos=1.0, matInfo={'armor': 20.0, 'vehicleDamageFactor': 1.0},
             compName='hull')]
         with mock.patch.object(fixtures.battle_runtime_module, 'collide_vehicle_at_matrix', return_value=collisions) as collide:
-            with mock.patch('random.uniform', side_effect=AssertionError('real RNG')):
-                score = battle._bot_aim_damage_score(source_descriptor,
-                    {'descriptor': descriptor}, source, target,
-                    (0.0, 2.0, 0.0), (0.0, 1.2, 100.0))
-        self.assertIsNotNone(score)
-        self.assertGreater(score, 0.0)
+            with mock.patch('random.uniform', side_effect=AssertionError('uniform RNG')), \
+                    mock.patch.object(
+                        fixtures.battle_runtime_module.combat_rules.random,
+                        'gauss', side_effect=AssertionError('gaussian RNG')):
+                scores = []
+                for kind in ('ARMOR_PIERCING', 'ARMOR_PIERCING_CR',
+                             'HOLLOW_CHARGE', 'HIGH_EXPLOSIVE'):
+                    source_descriptor.gun.shots[0].shell.kind = kind
+                    scores.append(battle._bot_aim_damage_score(
+                        source_descriptor, {'descriptor': descriptor},
+                        source, target, (0.0, 2.0, 0.0),
+                        (0.0, 1.2, 100.0)))
+        self.assertTrue(all(score is not None and score > 0.0
+                            for score in scores))
         self.assertAlmostEqual(100.0, collide.call_args[0][1].translation.z)
 
     def test_cover_job_counts_ground_and_water_queries_and_requires_return_path(self):
