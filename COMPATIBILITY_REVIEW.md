@@ -1084,7 +1084,11 @@ are exactly what the unproven `visibleAttachments` flag would have covered.
 through the decal's own `__attached` flag; `__attach` resolves the hull node as
 `compoundModel.node(TankPartNames.HULL)`, which is the same node
 `__attachSplodge` used, so the runtime reads it from the decal before detaching
-and re-attaches the splodge to it on the reveal edge. Which of these layers
+and re-attaches the splodge to it on the reveal edge. `VehicleDecal.__reattach`
+restores every decal when `onSettingsChanged` sees a new `SHADOWS_QUALITY`,
+which is outside any spotting edge, so the wrapped `__updateEffectsLOD` re-
+asserts the decal gate on the same bounded cadence; both stock calls are
+idempotent, so the steady-state cost is a flag read. Which of these layers
 draws the artefact a tester photographs is still an exact-Windows question; all
 of them are now closed together.
 

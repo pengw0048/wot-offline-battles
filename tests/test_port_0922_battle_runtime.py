@@ -20140,6 +20140,29 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(set_draw_visibility(vehicle, True))
         self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
 
+    def test_reveal_before_start_visual_leaves_the_draw_pass_to_stock(self):
+        """``Vehicle.show`` is a silent no-op until ``startVisual`` runs.
+
+        Exact #1513 ``show`` reaches ``changeDrawPassVisibility`` only while
+        ``isStarted`` is set, and ``changeVisibility`` alone never clears
+        ``skipColorPass``, so a reveal inside that window cannot restore the
+        colour pass by itself.  Stock ``startVisual`` sets ``isStarted`` and
+        then calls ``show(True)``, which is the owner of that restore; the
+        runtime re-asserts its own gate after that call returns.
+        """
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        vehicle.isStarted = False
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertEqual([False, True], vehicle.shows)
+        self.assertFalse(vehicle.draw_pass_visible)
+        self.assertTrue(vehicle.model.visible)
+        self.assertTrue(vehicle.chassis_decal.attached)
+
     def test_hidden_remote_gate_survives_a_client_without_those_owners(self):
         """A build that exposes neither owner still runs the round."""
         vehicle = _Vehicle(

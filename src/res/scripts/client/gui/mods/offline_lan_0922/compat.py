@@ -9,7 +9,8 @@ except ImportError:
     import pickle as _pickle
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
-    close_stock_presentation_extras, stop_ground_effects)
+    close_stock_presentation_extras, set_ground_decal_visibility,
+    stop_ground_effects)
 
 
 OFFLINE_SERVER_ADDRESS = 'offline-lan.local:0'
@@ -2168,6 +2169,13 @@ class OfflineCompatibility(object):
             An SPG aiming camera makes the leak obvious: it sits over the aim
             point rather than over the player, so unspotted enemies anywhere
             near that point fall inside both LOD radii.
+
+            This is also the only stock callback that runs at a bounded
+            cadence for one hidden vehicle, so re-assert the ground decal gate
+            here.  ``VehicleDecal.onSettingsChanged`` re-attaches every decal
+            when the shadow quality changes, and the runtime's own gate runs
+            only on a spotting edge.  Both calls are idempotent, so the
+            steady-state cost is two flag reads.
             """
             original = compatibility._original_compound_effects_lod
             if not compatibility._battle_active:
@@ -2179,6 +2187,7 @@ class OfflineCompatibility(object):
                 vehicle = None
             if vehicle is not None and undrawn_lan_remote(vehicle):
                 stop_ground_effects(appearance)
+                set_ground_decal_visibility(appearance, False)
                 return None
             return original(appearance, distance_from_player)
 

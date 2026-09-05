@@ -2053,13 +2053,31 @@ class OfflineCompatibilityTests(unittest.TestCase):
                         for selector in self._CustomEffectManager__selectors
                         if selector.enabled]
 
+        class Decal(object):
+            def __init__(self):
+                self._VehicleDecal__attached = True
+                self._VehicleDecal__hullParent = object()
+                self.detaches = 0
+
+            def attach(self):
+                self._VehicleDecal__attached = True
+
+            def detach(self):
+                if not self._VehicleDecal__attached:
+                    return
+                self.detaches += 1
+                self._VehicleDecal__attached = False
+                self._VehicleDecal__hullParent = None
+
         manager = EffectManager()
+        decal = Decal()
         enemy = vehicle_type()
         enemy.id = 11
         enemy._offlineNativeRemote = True
         enemy._offlineNativeDrawVisible = False
         appearance = appearance_type(None)
         appearance.customEffectManager = manager
+        appearance._CompoundAppearance__chassisDecal = decal
         appearance._CompoundAppearance__vehicle = enemy
 
         compatibility = compatibility_module.OfflineCompatibility(runtime)
@@ -2075,6 +2093,18 @@ class OfflineCompatibilityTests(unittest.TestCase):
         getattr(appearance, method_name)(10.0)
         self.assertEqual([], operations)
         self.assertEqual([], manager.running())
+        self.assertFalse(decal._VehicleDecal__attached)
+
+        # ``VehicleDecal.onSettingsChanged`` re-attaches every decal when the
+        # shadow quality changes.  This bounded callback is what makes the
+        # ground gate self-healing, and it must not detach twice.
+        self.assertEqual(1, decal.detaches)
+        getattr(appearance, method_name)(10.0)
+        self.assertEqual(1, decal.detaches)
+        decal.attach()
+        getattr(appearance, method_name)(10.0)
+        self.assertFalse(decal._VehicleDecal__attached)
+        self.assertEqual(2, decal.detaches)
 
         # A drawn remote keeps the exact stock behaviour, including the
         # ceiling that leaves dust off and exhaust on between 100 and 200 m.
@@ -2970,6 +3000,8 @@ class OfflineCompatibilityTests(unittest.TestCase):
             def __init__(self, vehicle_filter):
                 self._CompoundAppearance__filter = vehicle_filter
                 self._CompoundAppearance__vehicle = None
+                self._CompoundAppearance__chassisDecal = None
+                self._CompoundAppearance__splodge = None
                 self.customEffectManager = None
                 self._arena_callback = lambda *unused: None
                 self._camera_callback = lambda *unused: None
