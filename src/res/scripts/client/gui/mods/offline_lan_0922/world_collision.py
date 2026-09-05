@@ -4,12 +4,14 @@
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
 	_try_destroy_solid_hit, _vehicle_hull_bbox,
-	horizontal_collision_filter, prepare_horizontal_collision_filter)
+	ground_collision_filter, horizontal_collision_filter,
+	prepare_horizontal_collision_filter)
 
 
 _MAX_DRIVABLE_GRADIENT = 1.28
 _MAX_DESCENDING_GRADIENT = 1.75
 _MIN_DRIVABLE_HEIGHT_CHANGE = 0.15
+_GROUND_HIT_EPSILON = 1.0e-3
 _WORLD_SOFT_RECAST_BUDGET = 4
 _UNPREPARED_COLLISION_FILTER = object()
 
@@ -97,21 +99,128 @@ def _ground_profile(spaceID, Math, pos, sx, sz, sin_y, cos_y, direction,
 	return heights, segment
 
 
+def _hit_matches_ground_profile(collision, heights, segment_length,
+		profile_x, profile_z, profile_sin, profile_cos, profile_direction):
+	"""Return a coarse seam candidate; exact native top must confirm it."""
+	try:
+		values = [float(value) for value in heights]
+		segment = float(segment_length)
+		if len(values) < 2 or segment <= 0.0:
+			return False
+		point = collision[0]
+		distance = float(profile_direction) * (
+			(float(point.x) - float(profile_x)) * float(profile_sin) +
+			(float(point.z) - float(profile_z)) * float(profile_cos))
+		profile_length = segment * (len(values) - 1)
+		if distance < 0.0 or distance > profile_length:
+			return False
+		index = min(len(values) - 2, int(distance / segment))
+		fraction = (distance - index * segment) / segment
+		ground_y = (values[index] +
+			(values[index + 1] - values[index]) * fraction)
+		return abs(float(point.y) - ground_y) <= _MIN_DRIVABLE_HEIGHT_CHANGE
+	except (AttributeError, IndexError, TypeError, ValueError,
+			ZeroDivisionError):
+		return False
+
+
+def _hit_matches_exact_ground_top(spaceID, Math, pos, collision, look):
+	"""Confirm that a coarse-profile candidate is the native top at its XZ."""
+	import BigWorld
+	try:
+		point = collision[0]
+		probe_down = max(
+			5.0, float(look) * _MAX_DESCENDING_GRADIENT + 1.0)
+		start = Math.Vector3(point.x, pos.y + 12.0, point.z)
+		end = Math.Vector3(point.x, pos.y - probe_down, point.z)
+		broken_filter = ground_collision_filter(point.x, point.z)
+		top = (BigWorld.wg_collideSegment(spaceID, start, end, 128)
+			if broken_filter is None else
+			BigWorld.wg_collideSegment(
+				spaceID, start, end, 128, broken_filter))
+		return (top is not None and
+			abs(float(top[0].y) - float(point.y)) <=
+			_GROUND_HIT_EPSILON)
+	except (AttributeError, IndexError, TypeError, ValueError):
+		return False
+
+
+def _hull_pose_y(pitch, roll):
+	"""Return local right/up/forward contributions to world height."""
+	import math
+	pitch = float(pitch)
+	roll = float(roll)
+	if pitch == 0.0 and roll == 0.0:
+		return 0.0, 1.0, 0.0
+	pitch_cos = math.cos(pitch)
+	return (
+		pitch_cos * math.sin(roll),
+		pitch_cos * math.cos(roll),
+		-math.sin(pitch))
+
+
+def _hull_pose_endpoint(local_start, local_end, half_width,
+		half_length_back, half_length_front):
+	"""Stop pose extrapolation where a lane leaves the hull footprint."""
+	start_right = float(local_start[0])
+	start_forward = float(local_start[1])
+	delta_right = float(local_end[0]) - start_right
+	delta_forward = float(local_end[1]) - start_forward
+	fraction = 1.0
+	for start, delta, lower, upper in (
+			(start_right, delta_right, -float(half_width), float(half_width)),
+			(start_forward, delta_forward, -float(half_length_back),
+				float(half_length_front))):
+		if delta > 0.0:
+			fraction = min(fraction, (upper - start) / delta)
+		elif delta < 0.0:
+			fraction = min(fraction, (lower - start) / delta)
+	fraction = max(0.0, min(1.0, fraction))
+	return (
+		start_right + delta_right * fraction,
+		start_forward + delta_forward * fraction)
+
+
+def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
+		height, pose_y):
+	"""Rotate one copied collision lane with the authoritative hull pose."""
+	right_y, up_y, forward_y = pose_y
+	start_y = (float(pos.y) + float(local_start[0]) * right_y +
+		float(height) * up_y + float(local_start[1]) * forward_y)
+	end_y = (float(pos.y) + float(local_end[0]) * right_y +
+		float(height) * up_y + float(local_end[1]) * forward_y)
+	return (
+		Math.Vector3(x1, start_y, z1),
+		Math.Vector3(x2, end_y, z2))
+
+
 def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
-		target_length, maximum_gradient=_MAX_DRIVABLE_GRADIENT,
+		local_start, local_end, pose_y, target_length,
+		maximum_gradient=_MAX_DRIVABLE_GRADIENT, ground_profile=None,
 		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""A drivable lower slope must not hide an independent wall above it."""
-	import BigWorld
 	for height in (1.1, 1.6):
-		start = Math.Vector3(x1, pos.y + height, z1)
-		end = Math.Vector3(x2, pos.y + height, z2)
+		start, end = _posed_ray(
+			Math, pos, x1, z1, x2, z2, local_start, local_end,
+			height, pose_y)
 		collision = _collide_horizontal(
 			spaceID, start, end, collision_filter)
 		if collision is None:
 			continue
-		if ((collision[0] - start).length < target_length and
-				not _drivable_surface(collision, maximum_gradient)):
-			return True
+		if (collision[0] - start).length >= target_length:
+			continue
+		if _drivable_surface(collision, maximum_gradient):
+			continue
+		if (ground_profile is not None and
+				_hit_matches_ground_profile(
+					collision, ground_profile[0], ground_profile[1],
+					ground_profile[2], ground_profile[3],
+					ground_profile[4], ground_profile[5],
+					ground_profile[6])):
+			if _hit_matches_exact_ground_top(
+					spaceID, Math, pos, collision, ground_profile[7]):
+				continue
+		return True
 	return False
 
 
@@ -223,7 +332,7 @@ def check_horizontal_collision(bigworld, math_module, *args, **kwargs):
 def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		airborne=False, dt=0.04, return_status=False,
 		allow_kinetic=False, kinetic_speed=None, commit_enabled=True,
-		motion_yaw=None):
+		motion_yaw=None, pitch=0.0, roll=0.0):
 	import math, BigWorld, Math
 	try:
 		hw = 1.5
@@ -254,6 +363,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			_ahead = max(0.4, abs(vel) * dt + 0.2)
 		cos_y = math.cos(yaw)
 		sin_y = math.sin(yaw)
+		pose_y = _hull_pose_y(pitch, roll)
 		lane_segments = []
 		if motion_yaw is None:
 			# Keep the shipped longitudinal probe byte-for-byte in geometry and
@@ -337,12 +447,35 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		for (x1, z1, x2, z2, target_len,
 				profile_x, profile_z, profile_sin, profile_cos,
 				profile_direction, profile_look) in lane_segments:
+			start_dx, start_dz = x1 - pos.x, z1 - pos.z
+			end_dx, end_dz = x2 - pos.x, z2 - pos.z
+			local_start = (
+				start_dx * cos_y - start_dz * sin_y,
+				start_dx * sin_y + start_dz * cos_y)
+			ray_local_end = (
+				end_dx * cos_y - end_dz * sin_y,
+				end_dx * sin_y + end_dz * cos_y)
+			# Keep the footprint start, but stop pose growth at the first hull edge.
+			# This chord is a conservative witness inside the swept hull volume;
+			# extrapolating pitch/roll through look-ahead can pass over a real wall.
+			local_end = _hull_pose_endpoint(
+				local_start, ray_local_end, hw, hl_back, hl_front)
+			pose_clamped = (
+				pose_y != (0.0, 1.0, 0.0) and
+				(abs(local_end[0] - ray_local_end[0]) > 1.0e-9 or
+				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
-			start_bot = Math.Vector3(x1, pos.y + 0.6, z1)
-			end_bot = Math.Vector3(x2, pos.y + 0.6, z2)
+			start_bot, end_bot = _posed_ray(
+				Math, pos, x1, z1, x2, z2, local_start, local_end,
+				0.6, pose_y)
 			col_bot = _collide_horizontal(
 				spaceID, start_bot, end_bot, _sweep_filter)
+			# A posed lane is longer than its flat XZ projection, and every
+			# distance test below compares a 3-D ``.length``.  The prepared
+			# sweep filter is keyed on the envelope's x/z bounds only, so
+			# posing the ray in y keeps it valid.
+			target_len = (end_bot - start_bot).length
 			
 			if col_bot is not None:
 				d_bot = (col_bot[0] - start_bot).length
@@ -354,10 +487,13 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					_heights = ()
 					_segment = 0.0
 					_gradient_limit = _MAX_DESCENDING_GRADIENT
-					# A vertical wall cannot become terrain under either directional
-					# limit, so avoid seven extra ground rays on the common hard-hit path.
-					# Only a surface that could be a slope earns the exact lane profile.
-					if _drivable_surface(col_bot, _gradient_limit):
+					_profile_allowed = not (pose_clamped and airborne)
+					# A normal level-pose wall avoids the seven ground rays. A swept
+					# chord whose endpoint height is clamped at the first hull edge can
+					# meet terrain later, so that bounded case earns the existing profile.
+					if (_profile_allowed and (
+							_drivable_surface(col_bot, _gradient_limit) or
+							pose_clamped)):
 						_heights, _segment = _ground_profile(
 							spaceID, Math, pos, profile_x, profile_z,
 							profile_sin, profile_cos, profile_direction,
@@ -373,12 +509,28 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 							# a small prop. An ascent/descent outside its directional
 							# bound remains solid instead of falling into prop handling.
 							return 'hard' if return_status else True
+					_surface_is_ground = (
+						_profile_allowed and
+						_drivable_surface(col_bot, _gradient_limit))
+					if (_profile_allowed and not _surface_is_ground and
+							pose_clamped and _hit_matches_ground_profile(
+								col_bot, _heights, _segment,
+								profile_x, profile_z,
+								profile_sin, profile_cos,
+								profile_direction)):
+						_surface_is_ground = _hit_matches_exact_ground_top(
+							spaceID, Math, pos, col_bot, profile_look)
 					if (_heights and
 							_drivable_ground_profile(_heights, _segment) and
-							_drivable_surface(col_bot, _gradient_limit)):
+							_surface_is_ground):
 						if _raised_ray_has_wall(
 								spaceID, Math, pos, x1, z1, x2, z2,
+								local_start, local_end, pose_y,
 								target_len, _gradient_limit,
+								(_heights, _segment,
+								 profile_x, profile_z,
+								 profile_sin, profile_cos,
+								 profile_direction, profile_look),
 								_sweep_filter):
 							return 'hard' if return_status else True
 						continue
@@ -390,8 +542,10 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					# heights use the same read-only exact-OBB recast path.
 					_lane_hits = [(d_bot, start_bot, end_bot, col_bot)]
 					for _height in (1.1, 1.6):
-						_ray_start = Math.Vector3(x1, pos.y + _height, z1)
-						_ray_end = Math.Vector3(x2, pos.y + _height, z2)
+						_ray_start, _ray_end = _posed_ray(
+							Math, pos, x1, z1, x2, z2,
+							local_start, local_end, _height,
+							pose_y)
 						_ray_hit = _collide_horizontal(
 							spaceID, _ray_start, _ray_end,
 							_sweep_filter)
@@ -419,8 +573,10 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				# three empty lower lanes could classify a real upper collision clear.
 				_upper_hits = []
 				for _height in (1.1, 1.6):
-					_ray_start = Math.Vector3(x1, pos.y + _height, z1)
-					_ray_end = Math.Vector3(x2, pos.y + _height, z2)
+					_ray_start, _ray_end = _posed_ray(
+						Math, pos, x1, z1, x2, z2,
+						local_start, local_end, _height,
+						pose_y)
 					_ray_hit = _collide_horizontal(
 							spaceID, _ray_start, _ray_end,
 							_sweep_filter)

@@ -5647,16 +5647,20 @@ class BotRuntime(object):
         # BattleRuntime's resolver infers active crush intent from this field.
         state['movement_dir'] = 0
         try:
+            hull_yaw = _number(state.get('yaw'))
+            motion_yaw = yaw if _number(speed) >= 0.0 else yaw + math.pi
             if self._probe_clock is None:
                 status = self.motion_resolver(
-                    state['id'], position, yaw, speed,
-                    descriptor, step, now, commit_enabled)
+                    state['id'], position, hull_yaw, speed,
+                    descriptor, step, now, commit_enabled,
+                    motion_yaw=motion_yaw)
             else:
                 probe_started = self._probe_started()
                 try:
                     status = self.motion_resolver(
-                        state['id'], position, yaw, speed,
-                        descriptor, step, now, commit_enabled)
+                        state['id'], position, hull_yaw, speed,
+                        descriptor, step, now, commit_enabled,
+                        motion_yaw=motion_yaw)
                 finally:
                     self._probe_finished(4, probe_started)
         finally:
@@ -5758,6 +5762,68 @@ class BotRuntime(object):
             vertical_speed * vertical_speed + lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
 
+    @staticmethod
+    def _tick_horizontal_travel(state, tick_pose):
+        """Return realised x/z travel from the pre-integration tick pose."""
+        if (not isinstance(tick_pose, (list, tuple)) or
+                len(tick_pose) < 3):
+            return 0.0
+        delta_x = _number(state.get('x')) - _number(tick_pose[0])
+        delta_z = _number(state.get('z')) - _number(tick_pose[2])
+        return math.sqrt(delta_x * delta_x + delta_z * delta_z)
+
+    def _support_rise_follows_tick_path(self, state, centre, tick_pose,
+                                        horizontal_travel):
+        """Confirm a suspicious raised support through bounded interior rays.
+
+        Normal grounding still spends only its centre ray.  This helper is
+        called only after that endpoint rose beyond the hard step limit.  At
+        most four interior samples split a legal 0.2-second hull sweep into
+        segments no longer than 1.5 metres; every segment must remain inside
+        the same 0.55 grade accepted by the native direction probe.  A longer
+        sweep fails closed instead of making this exceptional check unbounded.
+        """
+        if (centre is None or
+                not isinstance(tick_pose, (list, tuple)) or
+                len(tick_pose) < 3):
+            return False
+        start_x = _number(tick_pose[0])
+        start_y = _number(tick_pose[1])
+        start_z = _number(tick_pose[2])
+        delta_x = _number(state.get('x')) - start_x
+        delta_z = _number(state.get('z')) - start_z
+        distance = max(0.0, _number(horizontal_travel))
+        rise = float(centre) - start_y
+        if (distance <= 0.0001 or rise <= 0.0 or
+                rise > distance * 0.55 + 0.02):
+            return False
+        segment_count = max(2, int(math.ceil(distance / 1.5)))
+        if segment_count > 5:
+            return False
+        maximum_segment_rise = (
+            distance / float(segment_count) * 0.55 + 0.02)
+        previous_support = start_y
+        for index in range(1, segment_count):
+            fraction = float(index) / float(segment_count)
+            sample_x = start_x + delta_x * fraction
+            sample_z = start_z + delta_z * fraction
+            sample_hint = start_y + rise * fraction
+            self._probe_totals[3] += 1
+            probe_started = self._probe_started()
+            try:
+                support = self._physics_ground_probe(
+                    sample_x, sample_z, sample_hint)
+            finally:
+                self._probe_finished(3, probe_started)
+            if support is None:
+                return False
+            support = float(support)
+            if abs(support - previous_support) > maximum_segment_rise:
+                return False
+            previous_support = support
+        return abs(float(centre) - previous_support) <= \
+            maximum_segment_rise
+
     def _update_vertical_motion(self, state, step, tick_pose=None,
                                 attempted_yaw=None):
         """Run grounded/ballistic phases and reject false raised support."""
@@ -5771,6 +5837,27 @@ class BotRuntime(object):
             snap_gap = vehicle_physics.ground_follow_gap(
                 state['speed'], state.get('last_drive_pitch', 0.0), step)
             max_climb = max(0.6, speed * step * 2.5)
+            support_rise_obstacle = bool(
+                state.get('grounded_once', False) and
+                tank_collision.support_rise_is_obstacle(
+                    state.get('y'), centre, max_climb))
+            support_rise_continuous = False
+            if support_rise_obstacle:
+                horizontal_travel = self._tick_horizontal_travel(
+                    state, tick_pose)
+                support_rise_continuous = \
+                    self._support_rise_follows_tick_path(
+                        state, centre, tick_pose, horizontal_travel)
+                if support_rise_continuous:
+                    # A ram/contact correction may move sideways while the
+                    # longitudinal speed is zero. Settle only the exact rise
+                    # admitted by that realised sweep in the same tick. The
+                    # displacement is proof geometry, not powered-drive climb
+                    # credit, and nothing carries into the next tick.
+                    proved_support_rise = max(
+                        0.0, float(centre) - _number(tick_pose[1]))
+                    max_climb = max(
+                        max_climb, proved_support_rise)
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
             if not state.get('grounded_once', False):
@@ -5778,8 +5865,7 @@ class BotRuntime(object):
                 state['vertical_speed'] = 0.0
                 state['airborne'] = False
                 state['grounded_once'] = True
-            elif tank_collision.support_rise_is_obstacle(
-                    state.get('y'), centre, max_climb):
+            elif support_rise_obstacle and not support_rise_continuous:
                 # The centre ray hit a wagon deck, roof, or large prop only
                 # after this tick's horizontal integration put the hull partly
                 # inside it. Restore only this tick's pose and let LocalDriver

@@ -15899,6 +15899,7 @@ class BattleRuntime(object):
                     world_hull_yaw, speed,
                     entity.typeDescriptor, self._local_airborne, dt, True,
                     True, kinetic_speed, commit_enabled=False,
+                    pitch=self._local_pitch, roll=self._local_roll,
                     motion_yaw=world_motion_yaw)
                 if isinstance(world_status, bool):
                     world_status = 'hard' if world_status else 'clear'
@@ -15915,7 +15916,9 @@ class BattleRuntime(object):
             world_hull_yaw, speed,
             entity.typeDescriptor, self._local_airborne, dt, True,
             bool(kinetic_speed is not None), kinetic_speed,
-            commit_enabled=False, motion_yaw=world_motion_yaw)
+            commit_enabled=False,
+            pitch=self._local_pitch, roll=self._local_roll,
+            motion_yaw=world_motion_yaw)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         if world_status == 'hard':
@@ -15978,7 +15981,8 @@ class BattleRuntime(object):
         return status in ('clear', 'crushed')
 
     def _resolve_bot_motion(self, bot_id, position, yaw, speed,
-                            descriptor, dt, now, commit_enabled=True):
+                            descriptor, dt, now, commit_enabled=True,
+                            motion_yaw=None):
         """Resolve Bot contact: static world first, then exact catalog."""
         pos = self._vector(position)
         bot_state = getattr(self._bots, 'states', {}).get(int(bot_id), {})
@@ -15996,15 +16000,20 @@ class BattleRuntime(object):
         if not callable(corridor_reusable):
             corridor_reusable = getattr(
                 self._bots, 'motion_world_receipt_reusable', None)
-        travel_yaw = (float(yaw) if speed >= 0.0 else
-                      float(yaw) + math.pi)
+        travel_yaw = (
+            float(motion_yaw) if motion_yaw is not None else
+            float(yaw) if speed >= 0.0 else float(yaw) + math.pi)
+        destructible_motion = (
+            {} if motion_yaw is None else
+            {'motion_yaw': float(motion_yaw)})
         if (self._destructibles is not None and not airborne and
                 movement_dir * float(speed) > 0.0 and rotation_dir == 0 and
                 abs(turn_speed) <= 0.01 and callable(corridor_reusable) and
                 corridor_reusable(
                     bot_id, position, travel_yaw, speed, now, dt) and
                 not self._destructibles._catalog_hull_contact(
-                    pos, yaw, speed, descriptor, dt)):
+                    pos, yaw, speed, descriptor, dt,
+                    **destructible_motion)):
             return 'clear'
         allow_crush_drive = (
             not airborne and
@@ -16019,14 +16028,19 @@ class BattleRuntime(object):
             self._runtime.bigworld, self._runtime.math,
             self._avatar.spaceID, pos, yaw, speed, descriptor, airborne, dt,
             True, allow_crush_drive, kinetic_speed,
-            commit_enabled=commit_enabled)
+            commit_enabled=commit_enabled,
+            pitch=_number(bot_state.get(
+                'terrain_pitch', bot_state.get('pitch'))),
+            roll=_number(bot_state.get('roll')),
+            motion_yaw=motion_yaw)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         self._bot_motion_kinds[int(bot_id)] = '-'
         if world_status == 'hard':
             if (self._destructibles is not None and
                     self._destructibles._catalog_pending_at_hull(
-                        pos, yaw, speed, descriptor, now, dt)):
+                    pos, yaw, speed, descriptor, now, dt,
+                    **destructible_motion)):
                 self._bot_motion_kinds[int(bot_id)] = 'broken'
                 return 'soft'
             return 'hard'
@@ -16041,7 +16055,7 @@ class BattleRuntime(object):
             self._avatar.spaceID, pos, yaw, speed, descriptor, now,
             dt=dt, kinetic_speed=kinetic_speed, return_detail=True,
             kinetic_commit=allow_crush_drive and commit_enabled,
-            commit_enabled=commit_enabled)
+            commit_enabled=commit_enabled, **destructible_motion)
         if isinstance(detail, bool):
             detail = {'status': 'hard' if detail else 'clear'}
         elif isinstance(detail, str):

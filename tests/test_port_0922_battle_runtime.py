@@ -8101,6 +8101,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
         battle._arena_bounds = (-300.0, -300.0, 300.0, 300.0)
+        battle._local_pitch = 0.2
+        battle._local_roll = -0.15
         entity = _Vehicle(
             10, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
 
@@ -8123,6 +8125,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 math.pi * 0.5, world_probe.call_args.args[4])
             self.assertEqual(
                 0.0, world_probe.call_args.kwargs['motion_yaw'])
+            self.assertEqual(0.2, world_probe.call_args.kwargs['pitch'])
+            self.assertEqual(-0.15, world_probe.call_args.kwargs['roll'])
 
             world_probe.reset_mock()
             self.assertTrue(battle._motion_is_clear(
@@ -16278,6 +16282,42 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(sensor_call.kwargs['commit_enabled'])
         self.assertFalse(sensor_call.kwargs['kinetic_commit'])
 
+    def test_bot_glancing_probe_keeps_hull_pose_and_travel_separate(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._bots = types.SimpleNamespace(states={
+            11: {
+                'movement_dir': 0, 'airborne': False, 'yaw': 0.4,
+                'terrain_pitch': 0.2, 'suspension_pitch': 0.25,
+                'pitch': 0.45, 'roll': -0.15,
+            },
+        })
+        battle._destructibles = mock.Mock()
+        battle._destructibles._catalog_motion_blocked.return_value = {
+            'status': 'clear', 'token': None,
+            'accepted_now': False, 'used_kinetic_speed': False,
+        }
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'world_collision.check_horizontal_collision',
+                return_value='clear') as world_probe:
+            status = battle._resolve_bot_motion(
+                11, (1.0, 2.0, 3.0), 0.4, 4.0,
+                _Descriptor(), 0.04, 10.0, motion_yaw=-0.55)
+
+        self.assertEqual('clear', status)
+        self.assertAlmostEqual(0.4, world_probe.call_args.args[4])
+        self.assertAlmostEqual(
+            -0.55, world_probe.call_args.kwargs['motion_yaw'])
+        self.assertAlmostEqual(0.2, world_probe.call_args.kwargs['pitch'])
+        self.assertAlmostEqual(-0.15, world_probe.call_args.kwargs['roll'])
+        sensor_call = (
+            battle._destructibles._catalog_motion_blocked.call_args)
+        self.assertAlmostEqual(0.4, sensor_call.args[2])
+        self.assertAlmostEqual(-0.55, sensor_call.kwargs['motion_yaw'])
+
     def test_bot_clear_catalog_guard_skips_per_frame_world_probe(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -21776,6 +21816,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'id': 2, 'vehicle': 'ussr:R11_MS-1',
             'vehicle_compact_descr': 'dGVzdA==',
             'effective_params': _effective_params_snapshot(),
+            'pitch': -0.3, 'roll': 0.25,
             'destructible_contacts': [{
                 'seq': 3, 'x': 1.0, 'y': 2.0, 'z': 3.0,
                 'yaw': 0.25, 'speed': 8.0, 'dt': 0.04,
