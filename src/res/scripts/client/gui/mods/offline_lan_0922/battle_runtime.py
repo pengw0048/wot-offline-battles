@@ -3127,6 +3127,7 @@ class BattleRuntime(object):
                 firing_lane_probe=self._bot_firing_lane,
                 friendly_lane_probe=self._bot_friendly_firing_lane,
                 direct_launch_origin_probe=self._bot_direct_launch_origin,
+                direct_aim_point_probe=self._bot_aim_point,
                 ballistic_solution_probe=self._bot_ballistic_solution,
                 artillery_launch_probe=self._bot_artillery_launch,
                 artillery_friendly_lane_probe=(
@@ -19255,8 +19256,72 @@ class BattleRuntime(object):
             'foliage_bonus': foliage_bonus,
         }
 
+    def _bot_aim_context(self, source, target):
+        """Keep candidate ownership on the current source/target records."""
+        if not isinstance(target, dict) or not target.get('alive', True):
+            return None
+        try:
+            source_key = 'bot:%d' % int(source['id'])
+            kind = 'player' if target.get('kind') == 'human' else 'bot'
+            target_key = '%s:%d' % (
+                kind, int(target.get('network_id', target.get('id'))))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        source_record = self._records.get(source_key)
+        target_record = self._records.get(target_key)
+        if (source_record is None or target_record is None or
+                source_record.get('tombstone') or
+                target_record.get('tombstone') or
+                not source_record.get('ready') or
+                not target_record.get('ready')):
+            return None
+        source_entity = self._server_entity(source_record.get('engine_id'))
+        target_entity = self._server_entity(target_record.get('engine_id'))
+        if (source_entity is None or target_entity is None or
+                not getattr(source_entity, 'isStarted', False) or
+                not getattr(target_entity, 'isStarted', False)):
+            return None
+        descriptor = getattr(target_entity, 'typeDescriptor', None)
+        source_descriptor = getattr(source_entity, 'typeDescriptor', None)
+        if descriptor is None or source_descriptor is None:
+            return None
+        candidates = source_record.setdefault('bot_aim_targets', {})
+        entry = candidates.get(target_key)
+        geometry_ready = tuple(
+            _field(_field(_field(descriptor, name), 'hitTester'),
+                   'bbox') is not None for name in ('hull', 'turret'))
+        if (entry is None or entry['record'] is not target_record or
+                entry['descriptor'] is not descriptor or
+                entry['geometry_ready'] != geometry_ready):
+            entry = {'record': target_record, 'descriptor': descriptor,
+                     'samples': shot_geometry.vehicle_aim_samples(descriptor),
+                     'geometry_ready': geometry_ready,
+                     'cursor': 0, 'selected': None}
+            candidates[target_key] = entry
+        return source_record, source_descriptor, entry
+
+    def _bot_aim_point(self, source, target):
+        """Project the selected part at the supplied, visibility-owned pose."""
+        try:
+            context = self._bot_aim_context(source, target)
+            if context is None:
+                return None
+            entry = context[2]
+            sample = entry['selected']
+            if sample is None:
+                return None
+            return {
+                'aim_position': shot_geometry.vehicle_aim_point(sample, target),
+                # Replacing an entity or descriptor invalidates a solved shot,
+                # even when the replacement happens to have the same bbox.
+                'aim_token': (id(entry['record']), id(entry['descriptor']),
+                              sample),
+            }
+        except Exception:
+            return None
+
     def _bot_firing_lane(self, source, target):
-        """Probe static space between, rather than inside, two vehicle hulls."""
+        """Select a real exposed part with at most two static rays per job."""
         profile = source.get('profile')
         profile = profile if isinstance(profile, dict) else {}
         if str(profile.get('class_tag') or '') == 'SPG':
@@ -19267,29 +19332,53 @@ class BattleRuntime(object):
             ready, solution = self._artillery.request(
                 source, target, descriptor, shell_index, self._clock())
             return bool(ready and solution is not None)
-        source_position = _xyz(source)
-        target_position = target.get('position') or _xyz(target)
-        dx = target_position[0] - source_position[0]
-        dz = target_position[2] - source_position[2]
-        distance = math.sqrt(dx * dx + dz * dz)
-        # Keep a short but real world segment between close hulls. Treating the
-        # absence of the default eight-metre middle section as clear let tanks
-        # on opposite sides of a thin wall enter engage/hold and fire forever.
-        clearance = min(4.0, max(0.0, (distance - 0.75) * 0.5))
-        for target_height in (1.5, 2.2):
-            segment = bot_planner.trimmed_sight_segment(
-                source_position, target_position, 2.5, target_height,
-                clearance, clearance)
-            if segment is None:
+        entry = None
+        try:
+            context = self._bot_aim_context(source, target)
+            if context is None:
                 return False
-            if not segment:
+            record, descriptor, entry = context
+            samples = entry['samples']
+            if not samples:
                 return False
-            start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
-                self._avatar.spaceID,
-                self._vector(start), self._vector(end), 128)
-            if hit is None:
-                return True
+            pose_key = (id(descriptor), self._last_frame_time,
+                        source.get('fire_seq', 0)) + tuple(source.get(name, 0.0)
+                for name in ('x', 'y', 'z', 'yaw', 'pitch', 'roll',
+                             'aim_yaw', 'turret_yaw', 'gun_pitch'))
+            cached = record.get('bot_lane_origin')
+            origin = cached[1] if cached and cached[0] == pose_key else None
+            if origin is None:
+                origin = self._bot_direct_launch_origin(
+                    source, descriptor, source.get('shell_index', 0),
+                    int(source.get('fire_seq', 0)) + 1, 0.0, 0.0, 0.0)
+                if origin is None:
+                    entry['selected'] = None
+                    return False
+                record['bot_lane_origin'] = (pose_key, origin)
+            selected = entry['selected']
+            attempts = [selected] if selected is not None else []
+            # Keep a still-clear part stable. On blockage, rotate through the
+            # remaining bbox samples across the existing bounded lane jobs.
+            visited = 0
+            while len(attempts) < 2 and visited < len(samples):
+                index = entry['cursor'] % len(samples)
+                entry['cursor'] = (index + 1) % len(samples)
+                visited += 1
+                if samples[index] not in attempts:
+                    attempts.append(samples[index])
+            entry['selected'] = None
+            for sample in attempts:
+                point = shot_geometry.vehicle_aim_point(sample, target)
+                hit = self._runtime.bigworld.wg_collideSegment(
+                    self._avatar.spaceID, self._vector(origin),
+                    self._vector(point), 128)
+                if hit is None:
+                    entry['selected'] = sample
+                    return True
+        except Exception:
+            if entry is not None:
+                entry['selected'] = None
+            return False
         return False
 
     def _bot_friendly_path_verdict(

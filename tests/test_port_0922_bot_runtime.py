@@ -8242,6 +8242,73 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertLessEqual(solution['pitch'], 0.15)
         self.assertGreater(solution['flight_time'], 0.25)
 
+    def test_selected_part_aim_is_led_and_missing_geometry_blocks_solution(self):
+        selection = [{'aim_position': (0.0, 3.0, 300.0), 'aim_token': ('turret',)}]
+        runtime = self.module.BotRuntime(
+            1, direct_aim_point_probe=lambda *unused: selection[0])
+        state = {'id': 11, 'x': 0.0, 'y': 0.0, 'z': 0.0}
+        target = {'position': (0.0, 0.0, 300.0),
+                  'yaw': math.pi * 0.5, 'speed': 20.0}
+        solution = runtime._local_ballistic_solution(
+            state, target, _combat_descriptor(), 0)
+        self.assertIsNotNone(solution)
+        self.assertAlmostEqual(3.0, solution['aim_position'][1])
+        self.assertGreater(solution['aim_position'][0], 1.0)
+        self.assertEqual(('turret',), solution['_aim_token'])
+        self.assertTrue(runtime._direct_aim_matches(state, target, solution))
+        runtime._ballistic_solution_cache[11] = ('cached',)
+        selection[0] = {'aim_position': (0.0, 1.5, 300.0), 'aim_token': ('hull',)}
+        self.assertFalse(runtime._direct_aim_matches(state, target, solution))
+        self.assertNotIn(11, runtime._ballistic_solution_cache)
+        for missing in (None, {'aim_position': (0, float('nan'), 300)}):
+            selection[0] = missing
+            self.assertIsNone(runtime._local_ballistic_solution(
+                state, target, _combat_descriptor(), 0))
+
+    def test_lane_part_change_after_slew_defers_only_new_shot_admission(self):
+        selection = [{'aim_position': (0.0, 1.0, 100.0), 'aim_token': ('hull',)}]
+
+        def lane(*unused):
+            selection[0] = {'aim_position': (0.0, 2.2, 100.0),
+                            'aim_token': ('turret',)}
+            return True
+
+        command = {
+            'target_yaw': 0.0, 'throttle': 0.0, 'turn': 0.0,
+            'shell_index': 0, 'fire_allowed': True,
+            'target_id': self.module.HUMAN_TARGET_ID_BASE + 2,
+            'fire_range': 500.0, 'combat_mode': 'engage',
+            'aim_position': (0.0, 1.0, 100.0),
+            'face_position': (0.0, 1.0, 100.0),
+            'move_position': (0.0, 0.0, 0.0),
+            'recovery_mode': 'arrived', 'movement_intent': False,
+        }
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(
+                reload_time=0.01, clip=(1,)),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            visibility_probe=lambda *unused: True,
+            firing_lane_probe=lane,
+            direct_aim_point_probe=lambda *unused: selection[0],
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start(self.start)
+        runtime._next_observation = 100.0
+        runtime._next_shot_lane_refresh = 100.0
+        runtime._next_cover_refresh = 100.0
+        player = _admit_player({'id': 2, 'team': 1, 'alive': True,
+                                'x': 0.0, 'y': 0.0, 'z': 100.0})
+        runtime.states[11].update(x=0.0, y=0.0, z=0.0, yaw=0.0)
+        blocked = runtime.update(0.2, 1.0, players=[player])[0]['bots'][0]
+        self.assertEqual(0, blocked['fire_seq'])
+        self.assertNotIn(11, runtime._ballistic_solution_cache)
+        fired = runtime.update(0.2, 1.2, players=[player])[0]['bots'][0]
+        self.assertEqual(1, fired['fire_seq'])
+        self.assertTrue(runtime.states[11]['gun_aligned'])
+        self.assertLess(fired['gun_pitch'], 0.0)
+
     def test_spg_requires_a_client_proved_arc_and_accepts_low_root_fallback(self):
         descriptor = _combat_descriptor()
         target = {
@@ -13642,7 +13709,8 @@ class BotRuntimeTests(unittest.TestCase):
             'id': 2, 'team': 2, 'alive': True,
             'vehicle': 'ussr:R11_MS-1',
             'x': 10.0, 'y': 1.0, 'z': 100.0,
-            'yaw': 0.2, 'speed': 4.0, 'health': 900,
+            'yaw': 0.2, 'pitch': 0.1, 'roll': -0.1,
+            'turret_yaw': 0.4, 'speed': 4.0, 'health': 900,
             'max_health': 1000,
         })
         unused_contacts, lookup = runtime._contacts_for(
@@ -13650,9 +13718,12 @@ class BotRuntimeTests(unittest.TestCase):
         planner_id = self.module.HUMAN_TARGET_ID_BASE + 2
         self.assertEqual((10.0, 1.0, 100.0),
                          lookup[planner_id]['position'])
+        self.assertEqual((0.1, -0.1, 0.4), tuple(
+            lookup[planner_id][name] for name in ('pitch', 'roll', 'turret_yaw')))
 
         visible[0] = False
         player.update(x=80.0, y=2.0, z=240.0, yaw=1.2,
+                      pitch=0.3, roll=0.2, turret_yaw=-0.5,
                       speed=20.0, health=700)
         contacts, lookup = runtime._contacts_for(source, [player], 1.1)
         hidden_human = lookup[planner_id]
@@ -13670,6 +13741,13 @@ class BotRuntimeTests(unittest.TestCase):
             refreshed_human['z'], refreshed_human['yaw'],
             refreshed_human['speed']))
         self.assertEqual(700, refreshed_human['health'])
+        self.assertEqual((0.1, -0.1, 0.4), tuple(
+            refreshed_human[name] for name in ('pitch', 'roll', 'turret_yaw')))
+        visible[0] = True
+        unused, fresh_lookup = runtime._contacts_for(source, [player], 1.15)
+        self.assertEqual((0.3, 0.2, -0.5), tuple(
+            fresh_lookup[planner_id][name]
+            for name in ('pitch', 'roll', 'turret_yaw')))
 
         bot = {
             'id': 12, 'team': 2, 'alive': True,
@@ -14734,11 +14812,16 @@ class BotRuntimeTests(unittest.TestCase):
                 return True
 
         class Navigator(object):
+            @staticmethod
+            def observe_direct_target(*unused):
+                return None
+
             grid = Grid()
             bot_states = {}
 
             def next_target(self, bot_id, position, goal, path_key, now,
-                            anchor, avoid, lookahead_distance=None):
+                            anchor, avoid, lookahead_distance=None,
+                            movement_intent=True):
                 calls.append((bot_id, goal, path_key, anchor))
                 # The navigation result is deliberately unrelated to the
                 # macro goal. A post-A* translation would change this tuple.
@@ -15253,12 +15336,17 @@ class BotRuntimeTests(unittest.TestCase):
                 return True
 
         class Navigator(object):
+            @staticmethod
+            def observe_direct_target(*unused):
+                return None
+
             def __init__(self):
                 self.grid = Grid()
                 self.bot_states = {}
 
             def next_target(self, bot_id, position, goal, path_key, now,
-                            anchor, avoid, lookahead_distance=None):
+                            anchor, avoid, lookahead_distance=None,
+                            movement_intent=True):
                 calls.append((goal, path_key))
                 self.bot_states[bot_id] = {
                     'navigation_status': 'blocked',
@@ -15716,14 +15804,21 @@ class BotRuntimeTests(unittest.TestCase):
                 return self.allow_direct
 
         class Navigator(object):
+            @staticmethod
+            def observe_direct_target(*unused):
+                return None
+
             def __init__(self):
                 self.grid = Grid()
                 self.penalized = False
                 self.penalty_calls = []
 
             def next_target(self, bot_id, position, goal, path_key, now,
-                            anchor, avoid, lookahead_distance=None):
+                            anchor, avoid, lookahead_distance=None,
+                            movement_intent=True):
                 calls.append(('planned', bot_id, path_key))
+                if self.grid.allow_direct and not self.penalized:
+                    return tuple(goal)
                 return (4.0, 0.0, 8.0)
 
             @staticmethod
@@ -15788,8 +15883,13 @@ class BotRuntimeTests(unittest.TestCase):
         calls = []
 
         class Navigator(object):
+            @staticmethod
+            def observe_direct_target(*unused):
+                return None
+
             def next_target(self, bot_id, position, goal, path_key, now,
-                            anchor, avoid, lookahead_distance=None):
+                            anchor, avoid, lookahead_distance=None,
+                            movement_intent=True):
                 calls.append(path_key)
                 return goal
 
@@ -15809,6 +15909,27 @@ class BotRuntimeTests(unittest.TestCase):
             ('local', 11, 'base_defense', '1:0'),
             ('local', 11, 'base_defense', '1:0'),
         ], calls)
+
+    def test_artillery_proof_hold_does_not_accumulate_macro_stall_time(self):
+        runtime = self.module.BotRuntime(1, baked_graph=_graph())
+        runtime.navigator = self.module.TerrainNavigator(
+            lambda *unused: None, baked_graph=_graph())
+        runtime.states = {11: {'id': 11, 'team': 1}}
+        current = (0.0, 0.0, 0.0)
+        goal = (0.0, 0.0, 100.0)
+        strategic = {'combat_mode': 'artillery_deploy', 'target_id': 21}
+        for pending in (runtime._artillery_intents, runtime._artillery_reproofs):
+            pending[11] = {'created': 1.0}
+            for now in range(1, 31):
+                runtime._navigation_target(
+                    11, current, goal, strategic, {'now': float(now)})
+            self.assertEqual(0, runtime.navigator.bot_states[11][
+                'macro_progress_replans'])
+            pending.clear()
+            runtime._navigation_target(
+                11, current, goal, strategic, {'now': 30.1})
+            self.assertEqual(0, runtime.navigator.bot_states[11][
+                'macro_progress_replans'])
 
     def test_planner_selects_near_fast_stable_base_defenders(self):
         planner = BotPlanner()
@@ -15924,6 +16045,10 @@ class BotRuntimeTests(unittest.TestCase):
             'x': 400.0, 'y': 0.0, 'z': 0.0,
             'health': 1000, 'max_health': 1000,
         }]
+        for state in states:
+            state.update(ammo_remaining=[40], shell_index=0,
+                         ammo_reload_pending=False, reload_time=0.0,
+                         clip=1, clip_size=1, burst_active=False)
         enemy = {'id': 2, 'team': 2, 'alive': True}
         self.assertEqual(1, planner.report_contacts([{
             'observing_team': 1, 'target_kind': 'human',
@@ -16059,6 +16184,10 @@ class BotRuntimeTests(unittest.TestCase):
                 'world_pose': True, 'x': x, 'y': 0.0, 'z': 0.0,
                 'health': 1000, 'max_health': 1000,
             })
+        for state in states:
+            state.update(ammo_remaining=[40], shell_index=0,
+                         ammo_reload_pending=False, reload_time=0.0,
+                         clip=1, clip_size=1, burst_active=False)
         enemies = [
             {'id': 2, 'team': 2, 'alive': True},
             {'id': 3, 'team': 2, 'alive': True},
@@ -16379,7 +16508,7 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertFalse(orders[11]['fire_allowed'])
         self.assertEqual(2, orders[12]['target_id'])
         self.assertEqual('human', orders[12]['target_kind'])
-        self.assertTrue(orders[12]['fire_allowed'])
+        self.assertFalse(orders[12]['fire_allowed'])
 
         payload = planner.build_orders(
             manifest, bot_states, [enemy], 1.0)
@@ -16388,9 +16517,16 @@ class BotRuntimeTests(unittest.TestCase):
             'bot_orders': payload['orders'],
         }))
         # Team spotting does not pull bot 11 off its route. Bot 12 owns the
-        # current firing lane and remains the only assigned shooter.
+        # current firing lane and becomes the sole shooter after reloading.
         for index in range(4):
-            runtime.update(.06, 1.21 + index * .21, players=[enemy])
+            now = 1.21 + index * .21
+            runtime.update(.06, now, players=[enemy])
+            payload = planner.build_orders(
+                manifest, list(runtime.states.values()), [enemy], now)
+            runtime._apply_orders({
+                'bot_order_revision': payload['revision'],
+                'bot_orders': payload['orders'],
+            })
         self.assertEqual(0, runtime.states[11]['fire_seq'])
         self.assertGreater(runtime.states[12]['fire_seq'], 0)
 
@@ -16454,6 +16590,21 @@ class BotRuntimeTests(unittest.TestCase):
         yaws = []
         turns = []
         for frame in range(750):
+            if frame and frame % 50 == 0:
+                now = 1.0 + frame * 0.02
+                bot_states = [dict(runtime.states[11])]
+                planner.report_contacts([{
+                    'observing_team': 1, 'target_kind': 'human',
+                    'target_id': 2, 'target_team': 2,
+                    'visible': True, 'shootable_by_bot_ids': [11],
+                    'x': 0.0, 'y': 0.0, 'z': 20.0,
+                    'health': 1000, 'max_health': 1000,
+                }], planner.known_targets(bot_states, [enemy]), now)
+                payload = planner.build_orders(manifest, bot_states, [enemy], now)
+                runtime._apply_orders({
+                    'bot_order_revision': payload['revision'],
+                    'bot_orders': payload['orders'],
+                })
             runtime.update(0.02, 1.0 + frame * 0.02,
                            players=[enemy])
             yaws.append(runtime.states[11]['yaw'])
@@ -16484,6 +16635,10 @@ class BotRuntimeTests(unittest.TestCase):
             'id': 11, 'team': 1, 'alive': True,
             'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
         }]
+        for state in bot_states:
+            state.update(ammo_remaining=[40], shell_index=0,
+                         ammo_reload_pending=False, reload_time=0.0,
+                         clip=1, clip_size=1, burst_active=False)
         enemy = {
             'id': 2, 'team': 2, 'alive': True,
             'x': 0.0, 'y': 0.0, 'z': 150.0,
@@ -17206,6 +17361,7 @@ class BotRuntimeTests(unittest.TestCase):
         observation_batches = 0
         observation_times = []
         per_frame_lane_probes = []
+        ready_order_batches = 0
 
         # Drive the runtime at 50 FPS for 120 seconds. Periodic firing-lane
         # refreshes and current-fire safety checks share one frame budget.
@@ -17258,13 +17414,17 @@ class BotRuntimeTests(unittest.TestCase):
                     self.assertIn(order['id'],
                                   contact['shootable_by_bot_ids'])
             if len(runtime._shot_los_cache) == 420:
-                self.assertEqual(2, targeted)
-                self.assertEqual(2, firing)
-            else:
-                self.assertLessEqual(targeted, 2)
-                self.assertLessEqual(firing, targeted)
+                # Reload and empty ammunition now affect permission even when
+                # a lane exists. Only the two clear observers may be targeted.
+                self.assertTrue(all(order['id'] in (11, 25)
+                                    for order in orders
+                                    if order['target_id'] is not None))
+            self.assertLessEqual(targeted, 2)
+            self.assertLessEqual(firing, targeted)
+            ready_order_batches += int(firing > 0)
 
         self.assertTrue(observation_times)
+        self.assertGreater(ready_order_batches, 0)
         self.assertLessEqual(
             observation_times[0],
             1.0 + self.module.PUBLICATION_SECONDS + 0.02 + 1e-6)

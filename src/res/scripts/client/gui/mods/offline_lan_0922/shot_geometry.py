@@ -19,6 +19,8 @@ __all__ = (
     'shot_origin_and_direction',
     'transform_vehicle_point',
     'transform_vehicle_vector',
+    'vehicle_aim_point',
+    'vehicle_aim_samples',
     'world_direction_to_local_gun_angles',
 )
 
@@ -129,6 +131,71 @@ def transform_vehicle_point(point, position, yaw, pitch=0.0, roll=0.0):
     position = _vector3(position, 'vehicle position')
     return _add(position, transform_vehicle_vector(
         point, yaw, pitch, roll))
+
+
+def vehicle_aim_samples(descriptor):
+    """Return bounded hull/turret samples in their reviewed #1513 frames.
+
+    Quarter-box centres sample partial exposure without inventing a vehicle
+    height. Missing geometry contributes no candidate. These are aiming
+    hypotheses, not armour plates or proof that a projectile penetrates.
+    """
+    chassis = _field(descriptor, 'chassis')
+    hull = _field(descriptor, 'hull')
+    try:
+        hull_mount = _vector3(_field(chassis, 'hullPosition'),
+                              'chassis.hullPosition')
+    except (TypeError, ValueError):
+        return ()
+    components = [('hull', hull, hull_mount, 0.0)]
+    try:
+        turret_mount = _add(hull_mount, _vector3(
+            _field(hull, 'turretPositions')[0], 'hull.turretPositions[0]'))
+        static_yaw = _field(_field(descriptor, 'gun'), 'staticTurretYaw')
+        if static_yaw is not None:
+            static_yaw = _finite_number(static_yaw, 'staticTurretYaw')
+        components.append(('turret', _field(descriptor, 'turret'),
+                           turret_mount, static_yaw))
+    except (TypeError, ValueError, IndexError, KeyError):
+        pass
+    centres = []
+    edges = []
+    for name, component, mount, static_yaw in components:
+        try:
+            bbox = _field(_field(component, 'hitTester'), 'bbox')
+            lower = _vector3(bbox[0], 'aim bbox minimum')
+            upper = _vector3(bbox[1], 'aim bbox maximum')
+            if any(upper[axis] <= lower[axis] for axis in range(3)):
+                continue
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        centre = tuple((lower[axis] + upper[axis]) * 0.5
+                       for axis in range(3))
+        centres.append((name, mount, centre, static_yaw))
+        for axis, sign in ((0, -1.0), (0, 1.0), (1, 1.0)):
+            point = list(centre)
+            point[axis] += (upper[axis] - lower[axis]) * 0.25 * sign
+            edges.append((name, mount, tuple(point), static_yaw))
+    return tuple(centres + edges)
+
+
+def vehicle_aim_point(sample, pose):
+    """Resolve a retained part sample against the current observed pose."""
+    name, mount, point, static_yaw = sample
+    yaw = _finite_number(pose.get('yaw', 0.0), 'target yaw')
+    if name == 'turret':
+        turret_yaw = (static_yaw if static_yaw is not None else
+                      pose.get('turret_yaw',
+                               pose.get('aim_yaw', yaw) - yaw))
+        point = _rotate_y(point, _finite_number(turret_yaw, 'target turret'))
+    elif name != 'hull':
+        raise ValueError('unknown aim component')
+    position = pose.get('position')
+    if position is None:
+        position = (pose['x'], pose['y'], pose['z'])
+    return transform_vehicle_point(
+        _add(mount, point), position, yaw,
+        pose.get('pitch', 0.0), pose.get('roll', 0.0))
 
 
 def _mount_offsets(descriptor, turret_index):
