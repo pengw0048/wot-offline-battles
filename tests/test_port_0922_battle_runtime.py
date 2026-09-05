@@ -34,7 +34,8 @@ from gui.mods.offline_lan_0922.entities import remote_vehicle as \
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
-    NativeRemoteVehicleFactory, _NativeRemoteState, present_shot_impulse
+    NativeRemoteVehicleFactory, _NativeRemoteState, present_shot_impulse, \
+    set_draw_visibility
 from gui.mods.offline_lan_0922.entities import native_remote_vehicle as \
     native_remote_vehicle_module
 
@@ -559,6 +560,119 @@ class _VehicleDescr(object):
             typeName or compactDescr or 'ussr:R11_MS-1', loaded=False)
 
 
+class _EffectSelector(object):
+    """Reproduce exact #1513 ``MainSelectorBase`` start/stop enablement.
+
+    Stock ``stop`` deactivates every effect node it owns, so the count of
+    stops is the native work a repeated hide edge would cost.
+    """
+
+    def __init__(self, settings_flags):
+        self.settings_flags = int(settings_flags)
+        self._enabled = True
+        self.stops = 0
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    def settingsFlags(self):
+        return self.settings_flags
+
+    def start(self):
+        self._enabled = True
+
+    def stop(self):
+        self.stops += 1
+        self._enabled = False
+
+
+class _CustomEffectManager(object):
+    """Reproduce the exact #1513 dust and exhaust selector container."""
+
+    SETTING_DUST = 1
+    SETTING_EXHAUST = 2
+
+    def __init__(self):
+        self._CustomEffectManager__selectors = [
+            _EffectSelector(self.SETTING_DUST),
+            _EffectSelector(self.SETTING_EXHAUST)]
+
+    def enable(self, enable, settings_flags):
+        for selector in self._CustomEffectManager__selectors:
+            if selector.settingsFlags() == settings_flags:
+                if enable:
+                    selector.start()
+                else:
+                    selector.stop()
+
+    def deactivate(self):
+        for selector in self._CustomEffectManager__selectors:
+            selector.stop()
+        self._CustomEffectManager__vehicle = None
+
+    def running(self):
+        return [selector.settingsFlags()
+                for selector in self._CustomEffectManager__selectors
+                if selector.enabled]
+
+
+class _ModelNode(object):
+    """A compound node that rejects a double attach or a stale detach."""
+
+    def __init__(self):
+        self.attachments = []
+        self.attach_calls = []
+        self.detach_calls = []
+        self.attach_error = None
+        self.detach_error = None
+
+    def attach(self, attachment):
+        self.attach_calls.append(attachment)
+        if self.attach_error is not None:
+            raise self.attach_error
+        if attachment in self.attachments:
+            raise RuntimeError('attachment is already attached')
+        self.attachments.append(attachment)
+
+    def detach(self, attachment):
+        self.detach_calls.append(attachment)
+        if self.detach_error is not None:
+            raise self.detach_error
+        if attachment not in self.attachments:
+            raise RuntimeError('attachment is not attached')
+        self.attachments.remove(attachment)
+
+
+class _VehicleDecal(object):
+    """Reproduce exact #1513 ``VehicleDecal`` attach/detach idempotence."""
+
+    def __init__(self, hull_node):
+        self.hull_node = hull_node
+        self._VehicleDecal__attached = True
+        self._VehicleDecal__hullParent = hull_node
+        self.decal = object()
+        hull_node.attach(self.decal)
+
+    @property
+    def attached(self):
+        return self._VehicleDecal__attached
+
+    def attach(self):
+        if self._VehicleDecal__attached:
+            return
+        self._VehicleDecal__attached = True
+        self._VehicleDecal__hullParent = self.hull_node
+        self.hull_node.attach(self.decal)
+
+    def detach(self):
+        if not self._VehicleDecal__attached:
+            return
+        self._VehicleDecal__attached = False
+        self._VehicleDecal__hullParent = None
+        self.hull_node.detach(self.decal)
+
+
 class _Vehicle(object):
     def __init__(self, entity_id, descriptor, position, rotation, properties):
         self.id = entity_id
@@ -582,6 +696,13 @@ class _Vehicle(object):
             self.visibility_changes.append(bool(visible))
             self.model.visible = bool(visible)
 
+        self.hull_node = _ModelNode()
+        self.splodge = object()
+        self.hull_node.attach(self.splodge)
+        self.chassis_decal = _VehicleDecal(self.hull_node)
+        self.custom_effects = _CustomEffectManager()
+        self.custom_effects.enable(True, _CustomEffectManager.SETTING_DUST)
+        self.custom_effects.enable(True, _CustomEffectManager.SETTING_EXHAUST)
         self.appearance = types.SimpleNamespace(
             compoundModel=self.model, turretMatrix=_Matrix(),
             gunMatrix=_Matrix(),
@@ -596,6 +717,12 @@ class _Vehicle(object):
                 self.track_scrolls.append((left, right)),
             changeEngineMode=lambda mode, forceSwinging=False:
                 self.engine_modes.append(tuple(mode)))
+        # Exact #1513 keeps the ground occlusion decals and the camera
+        # distance effect selectors outside every compound draw flag.
+        setattr(self.appearance, 'customEffectManager', self.custom_effects)
+        setattr(self.appearance, '_CompoundAppearance__chassisDecal',
+                self.chassis_decal)
+        setattr(self.appearance, '_CompoundAppearance__splodge', self.splodge)
         self.health = properties['health']
         self.isCrewActive = True
         self.gunAnglesPacked = properties.get('gunAnglesPacked', 0)
@@ -614,6 +741,10 @@ class _Vehicle(object):
 
     def show(self, visible):
         self.shows.append(bool(visible))
+        # Exact #1513 ``Vehicle.show`` reaches the appearance only once
+        # ``startVisual`` has set ``isStarted``.
+        if not self.isStarted:
+            return
         self.draw_pass_visible = bool(visible)
 
     def drawEdge(self, force_simple_edge):
@@ -2133,9 +2264,13 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
 
     def test_native_state_detach_retains_owner_until_overlay_cleanup_succeeds(self):
         runtime = _runtime()
+        splodge_owner = object()
         entity = types.SimpleNamespace(
             id=44, inWorld=True, isStarted=True,
-            appearance=types.SimpleNamespace(onModelChanged=None))
+            appearance=types.SimpleNamespace(
+                onModelChanged=None,
+                _offlineSplodgeDetach=splodge_owner,
+                _offlineSplodgeDisabled=splodge_owner))
         bigworld = types.SimpleNamespace(entities={44: entity})
         compatibility = mock.Mock()
         compatibility.clear_vehicle_pose_overlay.side_effect = RuntimeError(
@@ -2152,11 +2287,42 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
 
         self.assertIs(entity, state.entity)
         self.assertIs(callback, state.model_changed)
+        self.assertIs(
+            splodge_owner, entity.appearance._offlineSplodgeDetach)
+        self.assertIs(
+            splodge_owner, entity.appearance._offlineSplodgeDisabled)
 
         compatibility.clear_vehicle_pose_overlay.side_effect = None
         self.assertTrue(state.detach())
         self.assertIsNone(state.entity)
         self.assertIsNone(state.model_changed)
+        self.assertIsNone(entity.appearance._offlineSplodgeDetach)
+        self.assertIsNone(entity.appearance._offlineSplodgeDisabled)
+
+    def test_native_state_detach_does_not_read_retired_appearance(self):
+        runtime = _runtime()
+
+        class RetiredEntity(object):
+            id = 44
+            inWorld = False
+            isStarted = False
+
+            @property
+            def appearance(self):
+                raise ReferenceError('retired native appearance')
+
+        entity = RetiredEntity()
+        compatibility = mock.Mock()
+        state = _NativeRemoteState(
+            types.SimpleNamespace(entities={}), runtime.math,
+            compatibility, None, _Vector(), (0.0, 0.0, 0.0))
+        state.entity = entity
+
+        self.assertTrue(state.detach())
+
+        compatibility.clear_vehicle_pose_overlay.assert_called_once_with(
+            entity)
+        self.assertIsNone(state.entity)
 
     def test_native_siege_authority_uses_hydraulic_body_and_ground_chassis(self):
         runtime = _runtime()
@@ -2619,13 +2785,33 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
 
         vehicle._offlineNativeDrawVisible = False
         vehicle._spot_visible = False
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        old_hull = vehicle.hull_node
+        old_splodge = vehicle.splodge
+        old_attach_count = len(old_hull.attach_calls)
         vehicle.model = _Model()
         vehicle.appearance.compoundModel = vehicle.model
+        refreshed_hull = _ModelNode()
+        refreshed_decal = _VehicleDecal(refreshed_hull)
+        setattr(
+            vehicle.appearance, '_CompoundAppearance__chassisDecal',
+            refreshed_decal)
+        # #1513 retains __splodge across this compound replacement, so it is
+        # still detached from the retired hull and has no proven new owner.
+        setattr(
+            vehicle.appearance, '_CompoundAppearance__splodge',
+            old_splodge)
         for handler in tuple(vehicle.appearance.onModelChanged.handlers):
             handler()
         self.assertIs(provider, vehicle.model.matrix)
         self.assertFalse(vehicle.model.visible)
         self.assertEqual([], vehicle.targetCaps)
+        self.assertEqual(old_attach_count, len(old_hull.attach_calls))
+        self.assertNotIn(old_splodge, refreshed_hull.detach_calls)
+        disabled = getattr(
+            vehicle.appearance, '_offlineSplodgeDisabled')
+        self.assertIs(vehicle.model, disabled[0])
+        self.assertIs(old_splodge, disabled[1])
 
         # A late stock wreck-model relink must preserve world visibility while
         # never turning the dead vehicle back into a spotting-gated target.
@@ -20408,6 +20594,329 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._binding.start_vehicle_marker.assert_called_once_with(1000)
         battle._binding.start_vehicle_minimap.assert_not_called()
 
+    def test_hidden_remote_stops_drawing_its_ground_decals_and_effects(self):
+        """Closing the compound is not enough for an unspotted enemy.
+
+        Exact #1513 ``CompoundAppearance.changeVisibility`` writes only
+        ``compoundModel.visible``, ``showStickers`` and the crashed-track
+        controller, and ``Vehicle.show`` only swaps the draw-pass mask.  The
+        occlusion decals and the ``BigWorld.Splodge`` are node attachments,
+        and ``customEffectManager`` runs its dust and exhaust selectors from
+        ``BigWorld.camera()`` distance alone, so an unspotted tank kept its
+        ground shadow and kept emitting exhaust.
+        """
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        self.assertEqual([1, 2], vehicle.custom_effects.running())
+        self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertTrue(vehicle.chassis_decal.attached)
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+
+        self.assertFalse(vehicle.model.visible)
+        self.assertEqual([], vehicle.custom_effects.running())
+        self.assertNotIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertFalse(vehicle.chassis_decal.attached)
+        detached = getattr(appearance, '_offlineSplodgeDetach')
+        self.assertIs(vehicle.model, detached[0])
+        self.assertIs(vehicle.splodge, detached[1])
+        self.assertIs(vehicle.hull_node, detached[2])
+
+        # A repeated hide edge must not detach an already detached decal or
+        # tear the effect nodes down again.
+        stops = [selector.stops for selector
+                 in vehicle.custom_effects._CustomEffectManager__selectors]
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertNotIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertEqual(stops, [
+            selector.stops for selector
+            in vehicle.custom_effects._CustomEffectManager__selectors])
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertTrue(vehicle.model.visible)
+        self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertTrue(vehicle.chassis_decal.attached)
+        self.assertIsNone(getattr(appearance, '_offlineSplodgeDetach'))
+        # Reveal never starts an effect selector: stock owns that decision
+        # through its own camera-distance test on the next periodic tick.
+        self.assertEqual([], vehicle.custom_effects.running())
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+
+    def test_ground_splodge_rebind_uses_only_the_current_model_generation(self):
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        old_hull = vehicle.hull_node
+        old_splodge = vehicle.splodge
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        old_attach_count = len(old_hull.attach_calls)
+
+        new_model = _Model()
+        new_hull = _ModelNode()
+        new_splodge = object()
+        new_hull.attach(new_splodge)
+        new_decal = _VehicleDecal(new_hull)
+        appearance.compoundModel = new_model
+        setattr(appearance, '_CompoundAppearance__splodge', new_splodge)
+        setattr(appearance, '_CompoundAppearance__chassisDecal', new_decal)
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+
+        self.assertEqual(old_attach_count, len(old_hull.attach_calls))
+        self.assertNotIn(old_splodge, old_hull.attachments)
+        self.assertIn(new_splodge, new_hull.detach_calls)
+        self.assertNotIn(new_splodge, new_hull.attachments)
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertIn(new_splodge, new_hull.attachments)
+        self.assertIsNone(getattr(appearance, '_offlineSplodgeDetach'))
+        self.assertIsNone(getattr(
+            appearance, '_offlineSplodgeDisabled', None))
+
+    def test_reused_splodge_is_disabled_when_the_compound_changes(self):
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        old_hull = vehicle.hull_node
+        splodge = vehicle.splodge
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        old_attach_count = len(old_hull.attach_calls)
+
+        new_model = _Model()
+        new_hull = _ModelNode()
+        new_decal = _VehicleDecal(new_hull)
+        appearance.compoundModel = new_model
+        setattr(appearance, '_CompoundAppearance__chassisDecal', new_decal)
+        # Exact #1513 can retain __splodge while replacing the compound.  The
+        # retained object is detached from the old hull and was never attached
+        # to this new hull, so neither node is a safe owner now.
+        setattr(appearance, '_CompoundAppearance__splodge', splodge)
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertEqual(old_attach_count, len(old_hull.attach_calls))
+        self.assertNotIn(splodge, new_hull.detach_calls)
+        self.assertNotIn(splodge, new_hull.attach_calls)
+        self.assertIsNone(getattr(appearance, '_offlineSplodgeDetach'))
+        self.assertEqual(
+            (new_model, splodge),
+            getattr(appearance, '_offlineSplodgeDisabled'))
+        self.assertTrue(new_decal.attached)
+
+        # A later stock generation with a new Splodge gets a fresh gate; the
+        # disabled token must never outlive the exact model/object pair.
+        latest_model = _Model()
+        latest_hull = _ModelNode()
+        latest_splodge = object()
+        latest_hull.attach(latest_splodge)
+        latest_decal = _VehicleDecal(latest_hull)
+        appearance.compoundModel = latest_model
+        setattr(
+            appearance, '_CompoundAppearance__splodge', latest_splodge)
+        setattr(
+            appearance, '_CompoundAppearance__chassisDecal', latest_decal)
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertIn(latest_splodge, latest_hull.detach_calls)
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertIn(latest_splodge, latest_hull.attachments)
+
+    def test_ground_owner_failures_do_not_abort_the_other_visibility_gates(self):
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        selectors = vehicle.custom_effects._CustomEffectManager__selectors
+        selectors[0].stop = mock.Mock(
+            side_effect=RuntimeError('dust stop failed'))
+        original_detach = vehicle.hull_node.detach
+        splodge_detach = mock.Mock()
+
+        def selective_detach(attachment):
+            if attachment is vehicle.splodge:
+                splodge_detach(attachment)
+                original_detach(attachment)
+                raise ReferenceError('splodge parent expired')
+            return original_detach(attachment)
+
+        vehicle.hull_node.detach = selective_detach
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+
+        self.assertFalse(vehicle.model.visible)
+        self.assertTrue(vehicle.chassis_decal.attached is False)
+        self.assertTrue(selectors[0].enabled)
+        self.assertFalse(selectors[1].enabled)
+        self.assertEqual(1, splodge_detach.call_count)
+        disabled = getattr(appearance, '_offlineSplodgeDisabled')
+        self.assertIs(vehicle.model, disabled[0])
+        self.assertIs(vehicle.splodge, disabled[1])
+
+        # The unsafe native owner stays disabled for this generation while
+        # the idempotent stock decal may still follow later visibility edges.
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertEqual(1, splodge_detach.call_count)
+        self.assertTrue(vehicle.chassis_decal.attached)
+
+        # A compound replacement does not make a retained Splodge safe again:
+        # the failed detach may already have changed native ownership.
+        new_model = _Model()
+        new_hull = _ModelNode()
+        new_decal = _VehicleDecal(new_hull)
+        appearance.compoundModel = new_model
+        setattr(appearance, '_CompoundAppearance__chassisDecal', new_decal)
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertNotIn(vehicle.splodge, new_hull.detach_calls)
+        self.assertNotIn(vehicle.splodge, new_hull.attach_calls)
+        disabled = getattr(appearance, '_offlineSplodgeDisabled')
+        self.assertIs(new_model, disabled[0])
+        self.assertIs(vehicle.splodge, disabled[1])
+
+    def test_failed_splodge_attach_is_not_retried_for_the_same_generation(self):
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        original_attach = vehicle.hull_node.attach
+        splodge_attach = mock.Mock()
+
+        def selective_attach(attachment):
+            if attachment is vehicle.splodge:
+                splodge_attach(attachment)
+                original_attach(attachment)
+                raise ReferenceError('splodge parent expired')
+            return original_attach(attachment)
+
+        vehicle.hull_node.attach = selective_attach
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertEqual(1, splodge_attach.call_count)
+        self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertTrue(vehicle.chassis_decal.attached)
+        self.assertIsNone(getattr(appearance, '_offlineSplodgeDetach'))
+        disabled = getattr(appearance, '_offlineSplodgeDisabled')
+        self.assertIs(vehicle.model, disabled[0])
+        self.assertIs(vehicle.splodge, disabled[1])
+
+    def test_reveal_before_start_visual_leaves_the_draw_pass_to_stock(self):
+        """``Vehicle.show`` is a silent no-op until ``startVisual`` runs.
+
+        Exact #1513 ``show`` reaches ``changeDrawPassVisibility`` only while
+        ``isStarted`` is set, and ``changeVisibility`` alone never clears
+        ``skipColorPass``, so a reveal inside that window cannot restore the
+        colour pass by itself.  Stock ``startVisual`` sets ``isStarted`` and
+        then calls ``show(True)``, which is the owner of that restore; the
+        runtime re-asserts its own gate after that call returns.
+        """
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        vehicle.isStarted = False
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertEqual([False, True], vehicle.shows)
+        self.assertFalse(vehicle.draw_pass_visible)
+        self.assertTrue(vehicle.model.visible)
+        self.assertTrue(vehicle.chassis_decal.attached)
+
+    def test_hidden_remote_gate_survives_a_client_without_those_owners(self):
+        """A build that exposes neither owner still runs the round."""
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        delattr(vehicle.appearance, '_CompoundAppearance__chassisDecal')
+        delattr(vehicle.appearance, '_CompoundAppearance__splodge')
+        delattr(vehicle.appearance, 'customEffectManager')
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertFalse(vehicle.model.visible)
+
+    def test_spectated_ally_beyond_the_wreck_aoi_is_still_drawn(self):
+        """A dead player's AOI follows the vehicle the camera observes.
+
+        The local integrator stops the moment the player dies, so
+        ``_local_position`` freezes at the wreck.  Centring the 565 m vehicle
+        AOI there hid the observed ally itself, and every vehicle around it,
+        as soon as the wreck was far away.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        battle._local_position = (0.0, 0.0, 0.0)
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        ally = RemoteVehicle(
+            1000, _Descriptor(), {
+                'publicInfo': {'team': 1, 'name': 'Ally'},
+                'health': 500, 'isCrewActive': True,
+                'gunAnglesPacked': 0},
+            _Vector(900.0, 0.0, 0.0), (0.0, 0.0, 0.0), runtime.math)
+        enemy = RemoteVehicle(
+            1001, _Descriptor(), {
+                'publicInfo': {'team': 2, 'name': 'Enemy'},
+                'health': 500, 'isCrewActive': True,
+                'gunAnglesPacked': 0},
+            _Vector(940.0, 0.0, 0.0), (0.0, 0.0, 0.0), runtime.math)
+        for vehicle in (ally, enemy):
+            vehicle.model = _Model()
+            vehicle.appearance.attach(vehicle.model)
+            vehicle.isStarted = True
+            vehicle.inWorld = True
+        entities = {1000: ally, 1001: enemy}
+        runtime.bigworld.entities.update(entities)
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: entities.get(entity_id))
+        battle._spotting_observers = lambda: ()
+        ally_record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'tombstone': False, 'native_remote': False,
+            'world_marker_started': True, 'minimap_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'state': {'team': 1, 'health': 500, 'alive': True}}
+        enemy_record = {
+            'engine_id': 1001, 'kind': 'bot', 'network_id': 18,
+            'ready': True, 'local': False, 'presentation': True,
+            'tombstone': False, 'native_remote': False,
+            'world_marker_started': True, 'minimap_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'spot_until': 99.0, 'spot_next': 999.0,
+            'state': {'team': 2, 'health': 500, 'alive': True}}
+        battle._records = {'bot:17': ally_record, 'bot:18': enemy_record}
+
+        # The wreck is still the viewpoint: both are outside its AOI.
+        battle._spectated_engine_id = 10
+        self.assertTrue(battle._update_spotting(10.0))
+        self.assertFalse(ally_record['spot_visible'])
+        self.assertFalse(enemy_record['spot_visible'])
+
+        # Observing the ally recentres the AOI on it, which draws the ally
+        # and the enemy the team still remembers next to it.
+        battle._spectated_engine_id = 1000
+        battle._next_spotting_time = 0.0
+        self.assertTrue(battle._update_spotting(10.1))
+        self.assertTrue(ally_record['spot_visible'])
+        self.assertTrue(enemy_record['spot_visible'])
+        self.assertEqual((900.0, 0.0, 0.0), battle._presentation_origin())
+
+        # Leaving postmortem returns the AOI to the local vehicle.
+        battle._spectated_engine_id = None
+        self.assertEqual((0.0, 0.0, 0.0), battle._presentation_origin())
+
     def test_strategic_spg_view_draws_team_spotted_target_beyond_aoi(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -22697,6 +23206,43 @@ class BattleRuntimeContractTests(unittest.TestCase):
                          battle._records['player:1']['shot_penalty_until'])
         self.assertEqual(10.75,
                          battle._records['player:2']['shot_penalty_until'])
+
+    def test_an_unspotted_shooter_fires_without_a_visible_muzzle(self):
+        """The stock shoot extra is a node-bound effect like the fire extra.
+
+        Exact #1513 ``Vehicle.showShooting`` for a remote is exactly
+        ``extra.stopFor`` then ``extra.startFor``, guarded only by
+        ``isStarted`` and the siege state.  Retail never delivers that event
+        for a vehicle the client cannot see, so an unspotted enemy must not
+        flash its muzzle or play its gun sound over a hidden hull.  The
+        camouflage penalty, the shot bookkeeping and the projectile itself are
+        unaffected.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        local = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                         {'health': 500})
+        hidden = _Vehicle(11, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities.update({10: local, 11: hidden})
+        battle._records = {
+            'player:1': {'engine_id': 10, 'local': True},
+            'bot:1': {'engine_id': 11, 'local': False,
+                      'spot_visible': False}}
+
+        battle._show_shot({'attacker_bot': 1})
+
+        self.assertFalse(hasattr(hidden, 'last_shot'))
+        self.assertEqual(10.75,
+                         battle._records['bot:1']['shot_penalty_until'])
+
+        battle._records['bot:1']['spot_visible'] = True
+        battle._show_shot({'attacker_bot': 1})
+        self.assertEqual((1, False), hidden.last_shot)
+
+        # The local player is never gated by the spotting record.
+        battle._show_shot({'attacker': 1})
+        self.assertEqual((1, False), local.last_shot)
 
     def test_bot_shot_camouflage_penalty_does_not_mark_same_id_player(self):
         runtime = _runtime()

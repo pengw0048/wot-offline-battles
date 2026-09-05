@@ -15,6 +15,7 @@ import sys
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _RemoteShotPresenter, _blend_angle, _component_aim_angles,
+    clear_ground_decal_visibility_state, close_stock_presentation_extras,
     set_model_attachment_visibility)
 
 
@@ -43,6 +44,10 @@ def set_draw_visibility(entity, visible):
     # keeps drawing over a hidden tank.  Gate the attachments too.
     set_model_attachment_visibility(
         getattr(appearance, 'compoundModel', None), visible)
+    # That flag is one unproven native property.  Close the two stock owners
+    # it would have covered directly as well: the ground occlusion decals and
+    # the camera-distance dust/exhaust selectors.
+    close_stock_presentation_extras(appearance, visible)
     return True
 
 
@@ -861,6 +866,7 @@ class _NativeRemoteState(object):
     def detach(self):
         entity = self.entity
         engine_owned = self._engine_owns_entity()
+        appearance = None
         if entity is None:
             return False
         if engine_owned:
@@ -875,6 +881,7 @@ class _NativeRemoteState(object):
         # The overlay clear is the last native-facing operation.  Preserve the
         # entity and callback owners if it raises so factory teardown can retry
         # rather than forgetting a still-linked presentation.
+        clear_ground_decal_visibility_state(appearance)
         self.model_changed = None
         self.entity = None
         return True
