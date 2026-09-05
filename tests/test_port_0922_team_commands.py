@@ -74,6 +74,17 @@ class TeamCommandTests(unittest.TestCase):
         self.assertFalse(ack['accepted'])
         self.assertEqual('unknown_command', ack['code'])
 
+    def test_same_tick_commands_keep_admission_order_across_sequence_digits(self):
+        from server_bot_ai import BotPlanner
+        first = self.state.submit_team_command(1, self._message('HELPME', sequence=9))
+        second = self.state.submit_team_command(1, self._message('ATTACK', sequence=10))
+        self.assertTrue(first['accepted'] and second['accepted'])
+        orders = self.state._active_team_commands_locked()
+        bots = [{'id': 11, 'team': 1}, {'id': 12, 'team': 1}]
+        selected = BotPlanner._team_orders_by_bot(orders, bots)
+        self.assertEqual('ATTACK', selected[11]['command'])
+        self.assertEqual(10, selected[11]['command_seq'])
+
     def test_accepts_stock_cell_command_for_nearest_bounded_bots(self):
         ack = self.state.submit_team_command(
             1, self._message('ATTENTIONTOCELL', cell_index=38))

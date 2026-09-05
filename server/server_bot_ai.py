@@ -405,9 +405,9 @@ class BotPlanner(object):
             return result
         ordered = sorted(
             (value for value in team_orders if isinstance(value, dict)),
-            key=lambda value: (
-                _integer(value.get("issued_tick")),
-                str(value.get("command_id") or "")))
+            # Stable sorting preserves the server's admission order within a
+            # tick. Lexicographic command IDs put sequence 9 after 10.
+            key=lambda value: _integer(value.get("issued_tick")))
         for raw in ordered:
             command = str(raw.get("command") or "")
             if (command not in TEAM_ORDER_COMMANDS or
