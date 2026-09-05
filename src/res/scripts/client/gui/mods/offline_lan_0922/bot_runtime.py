@@ -209,7 +209,8 @@ _BOT_SUSPENSION_STATE_FIELDS = (
     'grounded_once', 'suspension_pitch_velocity',
     'suspension_roll_velocity', 'left_flying', 'right_flying',
     'ground_height', '_spring_ground_memory', '_pseudo_ground_memory',
-    '_suspension_ground_plane',
+    '_suspension_ground_plane', '_suspension_support_vertical_speed',
+    '_suspension_support_gradient',
 )
 
 # Route groups lease these lateral lanes without moving an existing member.
@@ -2578,6 +2579,8 @@ class BotRuntime(object):
             return
         state['suspension_pitch_velocity'] = 0.0
         state['suspension_roll_velocity'] = 0.0
+        state['_suspension_support_vertical_speed'] = 0.0
+        state.pop('_suspension_support_gradient', None)
         state.pop('_spring_ground_memory', None)
         state.pop('_pseudo_ground_memory', None)
         state.pop('_suspension_ground_plane', None)
@@ -3275,6 +3278,7 @@ class BotRuntime(object):
                 'terrain_pitch': _number(raw.get('pitch')),
                 'suspension_pitch_velocity': 0.0,
                 'suspension_roll_velocity': 0.0,
+                '_suspension_support_vertical_speed': 0.0,
                 'suspension_pitch': 0.0,
                 'siege_state': siege_state,
                 'siege_time_left_ms': wire_time,
@@ -5550,7 +5554,8 @@ class BotRuntime(object):
             self._probe_finished(3, probe_started)
 
     def _suspension_ground_samples(self, state, params,
-                                   probe_height=None):
+                                   probe_height=None,
+                                   support_gradient=None):
         """Sample the five damper positions on each track exactly once."""
         position = _position(state)
         body_height = (position[1] if probe_height is None else
@@ -5586,13 +5591,14 @@ class BotRuntime(object):
             ground, memory[index] = \
                 vehicle_physics.retained_ground_contact(
                     point, ground, memory[index],
-                    params['contact_memory_distance'])
+                    params['contact_memory_distance'], support_gradient)
             result.append(ground)
         state['_spring_ground_memory'] = memory
         return tuple(result)
 
     def _suspension_pseudo_ground_samples(self, state, params,
-                                          probe_height=None):
+                                          probe_height=None,
+                                          support_gradient=None):
         """Sample track-gap and belly contacts once for this authority tick."""
         position = _position(state)
         body_height = (position[1] if probe_height is None else
@@ -5630,7 +5636,7 @@ class BotRuntime(object):
             ground, memory[index] = \
                 vehicle_physics.retained_ground_contact(
                     point, ground, memory[index],
-                    params['contact_memory_distance'])
+                    params['contact_memory_distance'], support_gradient)
             result.append(ground)
         state['_pseudo_ground_memory'] = memory
         return tuple(result)
@@ -6184,6 +6190,11 @@ class BotRuntime(object):
                           else None)
         motion_pose = (suspension_motion_pose
                        if suspension_motion_pose is not None else tick_pose)
+        support_gradient = state.get('_suspension_support_gradient')
+        if isinstance(previous_plane, dict):
+            support_gradient = (
+                float(previous_plane['gradient_x']),
+                float(previous_plane['gradient_z']))
         if not grounded_before:
             # Spawn placement remains a separate one-off centre query. The
             # ten springs and twelve pseudo contacts are still sampled only
@@ -6204,12 +6215,20 @@ class BotRuntime(object):
                 self._reset_bot_suspension_state(state)
 
         position = _position(state)
+        support_height_delta = 0.0
+        if (float(step) <= 0.0 and motion_pose is not None and
+                support_gradient is not None):
+            support_height_delta = (
+                float(support_gradient[0]) *
+                (float(position[0]) - float(motion_pose[0])) +
+                float(support_gradient[1]) *
+                (float(position[2]) - float(motion_pose[2])))
         probe_height = self._suspension_probe_height_for_motion(
             position, motion_pose, previous_plane)
         ground = self._suspension_ground_samples(
-            state, params, probe_height)
+            state, params, probe_height, support_gradient)
         pseudo_ground = self._suspension_pseudo_ground_samples(
-            state, params, probe_height)
+            state, params, probe_height, support_gradient)
         current_plane = self._suspension_world_ground_plane(
             params, ground, position, _number(state.get('yaw')))
         no_sampled_support = bool(
@@ -6223,12 +6242,50 @@ class BotRuntime(object):
             state['vertical_speed'] = 0.0
             state['airborne'] = False
             state.pop('_suspension_ground_plane', None)
+            state['_suspension_support_vertical_speed'] = 0.0
+            state.pop('_suspension_support_gradient', None)
             return False
 
         before_airborne = bool(state.get('airborne', False))
         before_vertical_speed = _number(state.get('vertical_speed'))
+        support_vertical_speed = _number(
+            state.get('_suspension_support_vertical_speed'))
+        if float(step) > 0.0:
+            velocity_x = velocity_z = 0.0
+            if motion_pose is not None:
+                velocity_x = (
+                    float(position[0]) - float(motion_pose[0])) / float(step)
+                velocity_z = (
+                    float(position[2]) - float(motion_pose[2])) / float(step)
+            support_gradient = None
+            measured_support_speed = None
+            if current_plane is not None:
+                measured_support_speed = \
+                    vehicle_physics.suspension_support_vertical_velocity(
+                        current_plane, velocity_x, velocity_z)
+                if measured_support_speed is not None:
+                    support_gradient = (
+                        float(current_plane['gradient_x']),
+                        float(current_plane['gradient_z']))
+            if support_gradient is None and not before_airborne:
+                support_gradient = state.get(
+                    '_suspension_support_gradient')
+                if support_gradient is not None:
+                    measured_support_speed = (
+                        float(support_gradient[0]) * velocity_x +
+                        float(support_gradient[1]) * velocity_z)
+            if measured_support_speed is None:
+                support_vertical_speed = 0.0
+            else:
+                support_vertical_speed = float(measured_support_speed)
+            if support_gradient is None:
+                state.pop('_suspension_support_gradient', None)
+            else:
+                state['_suspension_support_gradient'] = support_gradient
+            state['_suspension_support_vertical_speed'] = \
+                support_vertical_speed
         physics_state = {
-            'height': _number(state.get('y')),
+            'height': _number(state.get('y')) + support_height_delta,
             'vertical_velocity': before_vertical_speed,
             'pitch': _number(
                 state.get('terrain_pitch', state.get('pitch'))),
@@ -6239,7 +6296,8 @@ class BotRuntime(object):
                 state.get('suspension_roll_velocity')),
         }
         solved = vehicle_physics.damper_suspension_step(
-            params, physics_state, ground, step, pseudo_ground)
+            params, physics_state, ground, step, pseudo_ground,
+            support_vertical_speed)
         values = (
             solved['height'], solved['vertical_velocity'],
             solved['pitch'], solved['pitch_velocity'],
@@ -6295,6 +6353,11 @@ class BotRuntime(object):
         state['pitch'] = (
             solved['pitch'] + _number(state.get('suspension_pitch')))
         state['airborne'] = bool(solved['airborne'])
+        if state['airborne']:
+            state['_suspension_support_vertical_speed'] = 0.0
+            state.pop('_suspension_support_gradient', None)
+            state.pop('_spring_ground_memory', None)
+            state.pop('_pseudo_ground_memory', None)
         state['left_flying'] = bool(solved['left_flying'])
         state['right_flying'] = bool(solved['right_flying'])
         if solved['contact_count']:

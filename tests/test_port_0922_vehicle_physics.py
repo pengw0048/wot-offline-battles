@@ -289,6 +289,160 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertFalse(solved['airborne'])
         self.assertEqual(18, solved['contact_count'])
 
+    def test_support_velocity_comes_only_from_plane_and_horizontal_motion(
+            self):
+        plane = {'gradient_x': -0.2, 'gradient_z': 0.35}
+
+        speed = vehicle_physics.suspension_support_vertical_velocity(
+            plane, 4.0, 10.0)
+
+        self.assertAlmostEqual(2.7, speed)
+        self.assertIsNone(
+            vehicle_physics.suspension_support_vertical_velocity(
+                None, 4.0, 10.0))
+        self.assertIsNone(
+            vehicle_physics.suspension_support_vertical_velocity(
+                plane, float('nan'), 10.0))
+
+    def test_horizontal_travel_follows_a_continuous_slope_without_height_kick(
+            self):
+        gradient = 0.35
+        horizontal_speed = 10.0
+        support_speed = \
+            vehicle_physics.suspension_support_vertical_velocity(
+                {'gradient_x': 0.0, 'gradient_z': gradient},
+                0.0, horizontal_speed)
+        dt = 1.0 / 60.0
+        center_z = -5.0
+        center_y = gradient * center_z
+        ground, pseudo_ground = self._plane_samples(
+            self.params, z_gradient=gradient)
+        ground = tuple(center_y + value for value in ground)
+        pseudo_ground = tuple(center_y + value for value in pseudo_ground)
+        state = self._state(height=center_y)
+        for unused in range(240):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, dt, pseudo_ground)
+
+        deltas = []
+        for unused in range(120):
+            before = state['height']
+            center_z += horizontal_speed * dt
+            center_y = gradient * center_z
+            ground, pseudo_ground = self._plane_samples(
+                self.params, z_gradient=gradient)
+            ground = tuple(center_y + value for value in ground)
+            pseudo_ground = tuple(
+                center_y + value for value in pseudo_ground)
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, dt, pseudo_ground,
+                support_vertical_velocity=support_speed)
+            deltas.append(state['height'] - before)
+
+        expected_delta = support_speed * dt
+        self.assertFalse(state['airborne'])
+        self.assertAlmostEqual(center_y, state['height'], delta=0.08)
+        self.assertAlmostEqual(
+            support_speed, state['vertical_velocity'], delta=0.08)
+        self.assertGreater(min(deltas), 0.5 * expected_delta)
+        self.assertLess(max(deltas), 1.5 * expected_delta)
+
+    def test_one_substep_does_not_apply_end_of_tick_ground_as_a_spring_kick(
+            self):
+        gradient = 0.4
+        horizontal_speed = 20.0
+        support_speed = gradient * horizontal_speed
+        dt = 1.0 / 60.0
+        center_z = -12.0
+        center_y = gradient * center_z
+        ground, pseudo_ground = self._plane_samples(
+            self.params, z_gradient=gradient)
+        ground = tuple(center_y + value for value in ground)
+        pseudo_ground = tuple(
+            center_y + value for value in pseudo_ground)
+        state = self._state(height=center_y)
+        for unused in range(300):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, dt, pseudo_ground)
+        state['vertical_velocity'] = support_speed
+
+        for unused in range(60):
+            center_z += horizontal_speed * dt
+            center_y = gradient * center_z
+            ground, pseudo_ground = self._plane_samples(
+                self.params, z_gradient=gradient)
+            ground = tuple(center_y + value for value in ground)
+            pseudo_ground = tuple(
+                center_y + value for value in pseudo_ground)
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, dt, pseudo_ground,
+                support_vertical_velocity=support_speed)
+            self.assertFalse(state['airborne'])
+
+        self.assertAlmostEqual(center_y, state['height'], delta=0.03)
+        self.assertAlmostEqual(
+            support_speed, state['vertical_velocity'], delta=0.03)
+
+    def test_partial_cliff_contacts_release_with_world_slope_velocity(self):
+        gradient = 0.35
+        horizontal_speed = 10.0
+        support_speed = \
+            vehicle_physics.suspension_support_vertical_velocity(
+                {'gradient_x': 0.0, 'gradient_z': gradient},
+                0.0, horizontal_speed)
+        dt = 1.0 / 60.0
+        center_z = -4.0
+
+        def samples(points, body_z):
+            return tuple(
+                gradient * (body_z + point['z'])
+                if body_z + point['z'] <= 0.0 else None
+                for point in points)
+
+        full_ground = tuple(
+            gradient * (center_z + spring['z'])
+            for spring in self.params['springs'])
+        full_pseudo = tuple(
+            gradient * (center_z + contact['z'])
+            for contact in self.params['pseudo_contacts'])
+        state = self._state(height=gradient * center_z)
+        for unused in range(240):
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, full_ground, dt, full_pseudo)
+
+        saw_partial = False
+        last_supported_speed = None
+        airborne_state = None
+        height_deltas = []
+        for unused in range(90):
+            center_z += horizontal_speed * dt
+            ground = samples(self.params['springs'], center_z)
+            pseudo_ground = samples(
+                self.params['pseudo_contacts'], center_z)
+            available = sum(value is not None for value in ground)
+            if 0 < available < len(ground):
+                saw_partial = True
+            velocity = support_speed if any(
+                value is not None for value in ground + pseudo_ground) else 0.0
+            previous_height = state['height']
+            state = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, dt, pseudo_ground,
+                support_vertical_velocity=velocity)
+            height_deltas.append(state['height'] - previous_height)
+            if state['airborne']:
+                airborne_state = state
+                break
+            last_supported_speed = state['vertical_velocity']
+
+        self.assertTrue(saw_partial)
+        self.assertIsNotNone(airborne_state)
+        self.assertIsNotNone(last_supported_speed)
+        self.assertGreater(min(height_deltas), 0.0)
+        self.assertGreater(last_supported_speed, 0.0)
+        self.assertAlmostEqual(
+            last_supported_speed - vehicle_physics.GRAVITY * dt,
+            airborne_state['vertical_velocity'], places=10)
+
     def test_longitudinal_plane_converges_to_pitch(self):
         gradient = 0.16
         ground, pseudo_ground = self._plane_samples(
@@ -480,6 +634,11 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
             (1.2, 2.2), None, memory, 0.5)
         self.assertEqual(3.0, retained)
         self.assertNotEqual(memory, moved_memory)
+        sloped, unused_sloped_memory = \
+            vehicle_physics.retained_ground_contact(
+                (1.2, 2.2), None, memory, 0.5,
+                support_gradient=(0.5, -0.25))
+        self.assertAlmostEqual(3.05, sloped)
         self.assertEqual(
             (None, None),
             vehicle_physics.retained_ground_contact(

@@ -1108,6 +1108,28 @@ def suspension_plane_height(plane, x, z):
 	return height
 
 
+def suspension_support_vertical_velocity(plane, velocity_x, velocity_z):
+	'''Return the vertical constraint speed induced by horizontal travel.
+
+	The terrain is stationary in world space, but its height under a moving
+	vehicle changes at ``gradient dot horizontal velocity``.  Keep this input
+	geometric: the body's observed height delta is deliberately not accepted,
+	so a suspension correction cannot feed back as next tick's support speed.
+	'''
+	if not isinstance(plane, dict):
+		return None
+	try:
+		values = (
+			float(plane['gradient_x']), float(plane['gradient_z']),
+			float(velocity_x), float(velocity_z))
+	except (KeyError, TypeError, ValueError, OverflowError):
+		return None
+	if any(math.isnan(value) or math.isinf(value) for value in values):
+		return None
+	gradient_x, gradient_z, velocity_x, velocity_z = values
+	return gradient_x * velocity_x + gradient_z * velocity_z
+
+
 def landing_impact_speed(world_velocity, support_normal):
 	'''Return closing speed along one trustworthy upward support normal.
 
@@ -1224,7 +1246,8 @@ def suspension_support_allowed(height, normal_y, flat_maximum_y=None):
 	return normal_y < 0.995
 
 
-def retained_ground_contact(point, ground, memory, maximum_distance):
+def retained_ground_contact(point, ground, memory, maximum_distance,
+		support_gradient=None):
 	'''Keep one recent ground contact across a short wheel-scale gap.'''
 	try:
 		x, z = float(point[0]), float(point[1])
@@ -1270,7 +1293,19 @@ def retained_ground_contact(point, ground, memory, maximum_distance):
 		travelled += math.sqrt(step_sq)
 		if (dx * dx + dz * dz <= distance * distance + 1.0e-12 and
 				travelled <= distance + 1.0e-9):
-			return height, (
+			retained_height = height
+			if support_gradient is not None:
+				gradient_x = float(support_gradient[0])
+				gradient_z = float(support_gradient[1])
+				if any(math.isnan(value) or math.isinf(value)
+						for value in (gradient_x, gradient_z)):
+					return None, None
+				# A remembered contact belongs to its original world point.  When
+				# the point moves across a short query gap, carry the last trusted
+				# terrain plane with it instead of flattening that plane at the old
+				# world height and corrupting the next fit.
+				retained_height += gradient_x * dx + gradient_z * dz
+			return retained_height, (
 				origin_x, origin_z, height, x, z, travelled, True)
 	except (IndexError, TypeError, ValueError, OverflowError):
 		pass
@@ -1355,7 +1390,8 @@ def suspension_limit_excess(params, state, ground_heights):
 
 
 def _project_suspension_limits(params, state, ground_heights,
-		pseudo_ground_heights=None):
+		pseudo_ground_heights=None, support_vertical_velocity=0.0,
+		support_height_offset=0.0):
 	'''Resolve hard limits with an order-independent worst-contact projection.'''
 	inv_mass = 1.0 / params['mass']
 	inv_pitch = 1.0 / params['pitch_inertia']
@@ -1365,7 +1401,8 @@ def _project_suspension_limits(params, state, ground_heights,
 		ground = ground_heights[index]
 		if ground is not None:
 			constraints.append((
-				('spring', index), spring, float(ground),
+				('spring', index), spring,
+				float(ground) + support_height_offset,
 				float(spring['max_compression']) -
 				float(spring['static_compression'])))
 	pseudo_ground_heights = pseudo_ground_heights or ()
@@ -1374,7 +1411,8 @@ def _project_suspension_limits(params, state, ground_heights,
 			if index < len(pseudo_ground_heights) else None)
 		if ground is not None:
 			constraints.append((
-				('pseudo', index), contact, float(ground),
+				('pseudo', index), contact,
+				float(ground) + support_height_offset,
 				float(contact.get('penetration', ALLOWED_PENETRATION))))
 	touched = set()
 	for unused_iteration in range(params['constraint_iterations']):
@@ -1412,7 +1450,9 @@ def _project_suspension_limits(params, state, ground_heights,
 		velocity_pitch = []
 		velocity_roll = []
 		for point, excess, pitch_grad, roll_grad, denominator in selected:
-			point_velocity = _rigid_point_velocity(state, point)
+			point_velocity = (
+				_rigid_point_velocity(state, point) -
+				support_vertical_velocity)
 			if point_velocity < 0.0:
 				velocity_impulse = -point_velocity / denominator
 				velocity_height.append(velocity_impulse * inv_mass)
@@ -1451,7 +1491,7 @@ def _project_suspension_limits(params, state, ground_heights,
 
 
 def damper_suspension_step(params, state, ground_heights, dt,
-		pseudo_ground_heights=None):
+		pseudo_ground_heights=None, support_vertical_velocity=0.0):
 	'''Advance the contrib ten-spring heave/pitch/roll trial.'''
 	if not isinstance(state, dict):
 		raise ValueError('suspension state must be a dictionary')
@@ -1462,6 +1502,13 @@ def damper_suspension_step(params, state, ground_heights, dt,
 		pseudo_ground_heights = (None,) * len(pseudo_contacts)
 	if len(pseudo_ground_heights) != len(pseudo_contacts):
 		raise ValueError('pseudo-contact ground sample count mismatch')
+	try:
+		support_vertical_velocity = float(support_vertical_velocity)
+	except (TypeError, ValueError, OverflowError):
+		raise ValueError('support vertical velocity is invalid')
+	if (math.isnan(support_vertical_velocity) or
+			math.isinf(support_vertical_velocity)):
+		raise ValueError('support vertical velocity is not finite')
 	result = {
 		'height': float(state.get('height', 0.0)),
 		'vertical_velocity': float(state.get('vertical_velocity', 0.0)),
@@ -1481,18 +1528,30 @@ def damper_suspension_step(params, state, ground_heights, dt,
 	vertical_acceleration = 0.0
 	pitch_acceleration = 0.0
 	roll_acceleration = 0.0
-	for unused_step in range(steps):
+	for substep_index in range(steps):
+		# Horizontal travel moves the reduced heave constraint from the
+		# previous sample position to the current one.  Forces are evaluated at
+		# the start of this semi-implicit substep; its hard projection is
+		# evaluated at the end.  Keeping those two support poses distinct avoids
+		# presenting a complete one-substep rise as instantaneous compression.
+		support_force_offset = -support_vertical_velocity * max(
+			0.0, total - step * float(substep_index))
+		support_projection_offset = -support_vertical_velocity * max(
+			0.0, total - step * float(substep_index + 1))
 		total_force = -params['mass'] * GRAVITY
 		pitch_torque = 0.0
 		roll_torque = 0.0
 		substep_contacts = 0
 		substep_vertical_speed = result['vertical_velocity']
+		substep_relative_speed = (
+			substep_vertical_speed - support_vertical_velocity)
 		for index, spring in enumerate(params['springs']):
 			ground = ground_heights[index]
 			if ground is None:
 				continue
+			ground = float(ground) + support_force_offset
 			compression = (
-				spring['static_compression'] + float(ground) -
+				spring['static_compression'] + ground -
 				_spring_height(result, spring))
 			if compression <= 0.0:
 				continue
@@ -1501,13 +1560,15 @@ def damper_suspension_step(params, state, ground_heights, dt,
 			touched_keys.add(key)
 			substep_contacts += 1
 			if (not contact_transition_seen and
-					substep_vertical_speed < 0.0):
+					substep_relative_speed < 0.0):
 				impact_speed = (substep_vertical_speed
 					if impact_speed is None else
 					min(impact_speed, substep_vertical_speed))
+			relative_point_velocity = (
+				_spring_point_velocity(result, spring) -
+				support_vertical_velocity)
 			force = (spring['stiffness'] * compression -
-				spring['damping'] *
-				_spring_point_velocity(result, spring))
+				spring['damping'] * relative_point_velocity)
 			if compression > spring['max_compression']:
 				excess = compression - spring['max_compression']
 				force += spring['stiffness'] * 8.0 * excess * (
@@ -1522,14 +1583,15 @@ def damper_suspension_step(params, state, ground_heights, dt,
 			ground = pseudo_ground_heights[index]
 			if ground is None:
 				continue
-			gap = float(ground) - _rigid_point_height(result, contact)
+			ground = float(ground) + support_force_offset
+			gap = ground - _rigid_point_height(result, contact)
 			if gap < -CONTACT_PENETRATION:
 				continue
 			key = ('pseudo', index)
 			touched_keys.add(key)
 			substep_contacts += 1
 			if (not contact_transition_seen and
-					substep_vertical_speed < 0.0):
+					substep_relative_speed < 0.0):
 				impact_speed = (substep_vertical_speed
 					if impact_speed is None else
 					min(impact_speed, substep_vertical_speed))
@@ -1556,10 +1618,12 @@ def damper_suspension_step(params, state, ground_heights, dt,
 		result['roll'] += result['roll_velocity'] * step
 		pre_projection_speed = result['vertical_velocity']
 		projected = _project_suspension_limits(
-			params, result, ground_heights, pseudo_ground_heights)
+			params, result, ground_heights, pseudo_ground_heights,
+			support_vertical_velocity, support_projection_offset)
 		if projected:
 			if (not contact_transition_seen and
-					pre_projection_speed < 0.0):
+					pre_projection_speed -
+					support_vertical_velocity < 0.0):
 				impact_speed = (pre_projection_speed if impact_speed is None else
 					min(impact_speed, pre_projection_speed))
 			contact_transition_seen = True
@@ -1573,14 +1637,16 @@ def damper_suspension_step(params, state, ground_heights, dt,
 	# in this outer step, so preserve its post-gravity/pre-contact CoM speed for
 	# the runtime's airborne-to-grounded landing gate.
 	if contact_keys and not contact_transition_seen:
-		if result['vertical_velocity'] < 0.0:
+		if (result['vertical_velocity'] -
+				support_vertical_velocity < 0.0):
 			impact_speed = result['vertical_velocity']
 		contact_transition_seen = True
 	touched_keys.update(contact_keys)
 	if contact_count:
 		if (abs(vertical_acceleration) < FREEZE_ACCEL_EPSILON and
-				abs(result['vertical_velocity']) < FREEZE_VEL_EPSILON):
-			result['vertical_velocity'] = 0.0
+				abs(result['vertical_velocity'] -
+					support_vertical_velocity) < FREEZE_VEL_EPSILON):
+			result['vertical_velocity'] = support_vertical_velocity
 		if (abs(pitch_acceleration) < FREEZE_ANG_ACCEL_EPSILON and
 				abs(result['pitch_velocity']) < FREEZE_ANG_VEL_EPSILON):
 			result['pitch_velocity'] = 0.0

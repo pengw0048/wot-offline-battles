@@ -1564,6 +1564,8 @@ class BattleRuntime(object):
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
         self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         self._local_left_flying = False
         self._local_right_flying = False
         self._local_support_motion_pose = None
@@ -1867,6 +1869,8 @@ class BattleRuntime(object):
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
         self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         self._local_left_flying = False
         self._local_right_flying = False
         self._local_support_motion_pose = None
@@ -5664,6 +5668,8 @@ class BattleRuntime(object):
         self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         return True
 
     def _attach_local_presentation(self):
@@ -17857,6 +17863,8 @@ class BattleRuntime(object):
             self._local_suspension_disabled = True
             self._local_spring_ground_memory = None
             self._local_pseudo_ground_memory = None
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
             self._report_local_suspension_trial(
                 'excluded: #1513 hydraulic suspension')
             return None
@@ -17871,6 +17879,8 @@ class BattleRuntime(object):
                 self._local_suspension_disabled = True
                 self._local_spring_ground_memory = None
                 self._local_pseudo_ground_memory = None
+                self._local_suspension_support_vertical_speed = 0.0
+                self._local_suspension_support_gradient = None
                 self._report_local_suspension_trial(
                     'inactive: %s' % (error,))
                 self._warn_optional_failure(
@@ -17885,7 +17895,10 @@ class BattleRuntime(object):
             '_local_vertical_speed', '_local_airborne',
             '_local_fall_armed', '_local_pitch', '_local_roll',
             '_local_suspension_pitch_velocity',
-            '_local_suspension_roll_velocity', '_local_left_flying',
+            '_local_suspension_roll_velocity',
+            '_local_suspension_support_vertical_speed',
+            '_local_suspension_support_gradient',
+            '_local_left_flying',
             '_local_right_flying', '_local_surface_up_cosine',
             '_local_downhill', '_local_slope_tangent',
             '_local_slide_speed', '_local_air_lateral',
@@ -17917,11 +17930,14 @@ class BattleRuntime(object):
         self._local_suspension_disabled = True
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         self._report_local_suspension_trial('retired: %s' % (error,))
         self._warn_optional_failure('ten-spring suspension trial', error)
 
     def _local_suspension_ground_samples(
-            self, position, yaw, probe_height=None):
+            self, position, yaw, probe_height=None,
+            support_gradient=None):
         """Sample every real damper once for this copied-physics tick."""
         params = self._local_suspension_params
         if not isinstance(params, dict):
@@ -17956,13 +17972,14 @@ class BattleRuntime(object):
                 flat_maximum_y=spring_maximum_y)
             value, memory[index] = vehicle_physics.retained_ground_contact(
                 point, value, memory[index],
-                params['contact_memory_distance'])
+                params['contact_memory_distance'], support_gradient)
             result.append(value)
         self._local_spring_ground_memory = memory
         return tuple(result)
 
     def _local_suspension_pseudo_ground_samples(
-            self, position, yaw, probe_height=None):
+            self, position, yaw, probe_height=None,
+            support_gradient=None):
         """Sample every track/belly constraint once for this physics tick."""
         params = self._local_suspension_params
         if not isinstance(params, dict):
@@ -17999,7 +18016,7 @@ class BattleRuntime(object):
                 flat_maximum_y=flat_maximum_y)
             value, memory[index] = vehicle_physics.retained_ground_contact(
                 point, value, memory[index],
-                params['contact_memory_distance'])
+                params['contact_memory_distance'], support_gradient)
             result.append(value)
         self._local_pseudo_ground_memory = memory
         return tuple(result)
@@ -18276,7 +18293,9 @@ class BattleRuntime(object):
             self._local_airborne = False
         return position
 
-    def _update_vertical_motion(self, entity, position, yaw, dt):
+    def _update_vertical_motion(
+            self, entity, position, yaw, dt,
+            support_height_delta=0.0, support_speed_delta=0.0):
         """Contain the optional suspension trial to this local vehicle."""
         self._local_suspension_failed_this_tick = False
         self._local_suspension_air_motion_this_tick = False
@@ -18293,7 +18312,8 @@ class BattleRuntime(object):
                     position, yaw, dt, entity)
                 self._local_suspension_air_motion_this_tick = True
             position = self._update_suspension_vertical_motion(
-                entity, position, yaw, dt)
+                entity, position, yaw, dt,
+                support_height_delta, support_speed_delta)
             if (self._local_support_rise_blocked and
                     self._local_suspension_air_motion_this_tick):
                 # The carried displacement and its decay belong to the same
@@ -18312,7 +18332,8 @@ class BattleRuntime(object):
             return position
 
     def _update_suspension_vertical_motion(
-            self, entity, position, yaw, dt):
+            self, entity, position, yaw, dt,
+            support_height_delta=0.0, support_speed_delta=0.0):
         """Advance one sampled ten-spring local rigid-body tick.
 
         The contact columns are sampled exactly once here. The solver may use
@@ -18320,6 +18341,11 @@ class BattleRuntime(object):
         immutable 10-spring plus pseudo-contact snapshot.
         """
         params = self._local_suspension_params
+        support_height_delta = float(support_height_delta)
+        support_speed_delta = float(support_speed_delta)
+        if any(math.isnan(value) or math.isinf(value) for value in (
+                support_height_delta, support_speed_delta)):
+            raise ValueError('suspension support adjustment is not finite')
         self._local_support_rise_blocked = False
         armed_before = bool(self._local_fall_armed)
         tick_pose = getattr(self, '_local_support_tick_pose', None)
@@ -18327,6 +18353,11 @@ class BattleRuntime(object):
         if motion_pose is None:
             motion_pose = tick_pose
         previous_plane = self._local_ground_plane
+        support_gradient = self._local_suspension_support_gradient
+        if isinstance(previous_plane, dict):
+            support_gradient = (
+                float(previous_plane['gradient_x']),
+                float(previous_plane['gradient_z']))
         if not armed_before:
             # A streamed spawn may start at the provisional y=100 pose. Place
             # it once through the existing same-layer/wide column before the
@@ -18341,12 +18372,16 @@ class BattleRuntime(object):
                 self._local_roll = 0.0
                 self._local_suspension_pitch_velocity = 0.0
                 self._local_suspension_roll_velocity = 0.0
+                self._local_suspension_support_vertical_speed = 0.0
+                self._local_suspension_support_gradient = None
         probe_height = self._local_suspension_predicted_probe_height(
             position, motion_pose, previous_plane)
         ground = self._local_suspension_ground_samples(
-            position, yaw, probe_height=probe_height)
+            position, yaw, probe_height=probe_height,
+            support_gradient=support_gradient)
         pseudo_ground = self._local_suspension_pseudo_ground_samples(
-            position, yaw, probe_height=probe_height)
+            position, yaw, probe_height=probe_height,
+            support_gradient=support_gradient)
         if (not armed_before and
                 (not ground or all(value is None for value in ground)) and
                 (not pseudo_ground or
@@ -18355,15 +18390,54 @@ class BattleRuntime(object):
             # first streamed terrain support is not a damaging free fall.
             self._local_vertical_speed = 0.0
             self._local_airborne = False
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
             return position
         current_plane = vehicle_physics.suspension_world_ground_plane(
             params, ground, position, yaw, GROUND_PLANE_EPSILON)
         before_airborne = bool(self._local_airborne)
-        before_vertical_speed = float(self._local_vertical_speed)
+        before_vertical_speed = (
+            float(self._local_vertical_speed) + support_speed_delta)
+        support_vertical_speed = float(
+            self._local_suspension_support_vertical_speed)
+        if float(dt) > 0.0:
+            velocity_x = velocity_z = 0.0
+            if motion_pose is not None:
+                velocity_x = (
+                    float(position[0]) - float(motion_pose[0])) / float(dt)
+                velocity_z = (
+                    float(position[2]) - float(motion_pose[2])) / float(dt)
+            support_gradient = None
+            measured_support_speed = None
+            if current_plane is not None:
+                measured_support_speed = \
+                    vehicle_physics.suspension_support_vertical_velocity(
+                        current_plane, velocity_x, velocity_z)
+                if measured_support_speed is not None:
+                    support_gradient = (
+                        float(current_plane['gradient_x']),
+                        float(current_plane['gradient_z']))
+            if (support_gradient is None and not before_airborne):
+                support_gradient = \
+                    self._local_suspension_support_gradient
+                if support_gradient is not None:
+                    measured_support_speed = (
+                        float(support_gradient[0]) * velocity_x +
+                        float(support_gradient[1]) * velocity_z)
+            if measured_support_speed is None:
+                support_vertical_speed = 0.0
+            else:
+                support_vertical_speed = float(measured_support_speed)
+            self._local_suspension_support_gradient = support_gradient
+            self._local_suspension_support_vertical_speed = \
+                support_vertical_speed
+        support_vertical_speed += support_speed_delta
+        self._local_suspension_support_vertical_speed = \
+            support_vertical_speed
         previous_pitch = float(self._local_pitch)
         previous_roll = float(self._local_roll)
         physics_state = {
-            'height': float(position[1]),
+            'height': float(position[1]) + support_height_delta,
             'vertical_velocity': before_vertical_speed,
             'pitch': previous_pitch,
             'pitch_velocity': self._local_suspension_pitch_velocity,
@@ -18371,7 +18445,8 @@ class BattleRuntime(object):
             'roll_velocity': self._local_suspension_roll_velocity,
         }
         solved = vehicle_physics.damper_suspension_step(
-            params, physics_state, ground, dt, pseudo_ground)
+            params, physics_state, ground, dt, pseudo_ground,
+            support_vertical_speed)
         values = (
             solved['height'], solved['vertical_velocity'],
             solved['pitch'], solved['pitch_velocity'],
@@ -18402,6 +18477,8 @@ class BattleRuntime(object):
             self._local_vertical_speed = 0.0
             self._local_suspension_pitch_velocity = 0.0
             self._local_suspension_roll_velocity = 0.0
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
             self._local_pitch = previous_pitch
             self._local_roll = previous_roll
             self._local_ground_plane = previous_plane
@@ -18418,6 +18495,11 @@ class BattleRuntime(object):
         self._local_suspension_roll_velocity = \
             float(solved['roll_velocity'])
         self._local_airborne = bool(solved['airborne'])
+        if self._local_airborne:
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
+            self._local_spring_ground_memory = None
+            self._local_pseudo_ground_memory = None
         self._local_left_flying = bool(solved['left_flying'])
         self._local_right_flying = bool(solved['right_flying'])
         if solved['contact_count']:
@@ -18448,19 +18530,35 @@ class BattleRuntime(object):
         return position
 
     def _resettle_local_suspension_endpoint(
-            self, entity, start_position, position, yaw):
+            self, entity, start_position, position, yaw, motion_dt=0.0):
         """Project suspension contacts once at one corrected X/Z endpoint."""
         dx = float(position[0]) - float(start_position[0])
         dz = float(position[2]) - float(start_position[2])
         if dx * dx + dz * dz <= 1.0e-10:
             return position
+        support_gradient = self._local_suspension_support_gradient
+        plane = self._local_ground_plane
+        if isinstance(plane, dict):
+            support_gradient = (
+                float(plane['gradient_x']),
+                float(plane['gradient_z']))
+        support_height_delta = 0.0
+        support_speed_delta = 0.0
+        if support_gradient is not None:
+            support_height_delta = (
+                float(support_gradient[0]) * dx +
+                float(support_gradient[1]) * dz)
+            if float(motion_dt) > 0.0:
+                support_speed_delta = (
+                    support_height_delta / float(motion_dt))
         # A rejected vertical support must retain collision separation X/Z;
         # only the endpoint's incoming Y and attitude are restored.
         self._local_support_tick_pose = tuple(position)
         self._local_support_motion_pose = tuple(start_position)
         try:
             return self._update_vertical_motion(
-                entity, position, yaw, 0.0)
+                entity, position, yaw, 0.0,
+                support_height_delta, support_speed_delta)
         finally:
             self._local_support_tick_pose = None
             self._local_support_motion_pose = None
@@ -18947,7 +19045,7 @@ class BattleRuntime(object):
                 dz = float(position[2]) - float(slide_start[2])
                 slide_moved = dx * dx + dz * dz > 1.0e-10
                 position = self._resettle_local_suspension_endpoint(
-                    entity, slide_start, position, yaw)
+                    entity, slide_start, position, yaw, dt)
                 support_blocked = bool(
                     support_blocked or self._local_support_rise_blocked)
                 suspension_active = bool(
@@ -20755,6 +20853,8 @@ class BattleRuntime(object):
             self._local_pseudo_ground_memory = None
             self._local_suspension_pitch_velocity = 0.0
             self._local_suspension_roll_velocity = 0.0
+            self._local_suspension_support_vertical_speed = 0.0
+            self._local_suspension_support_gradient = None
         if record.get('local') and self._local_matrix is not None:
             self._update_local_hull_aiming(entity, 0.0)
         return True
@@ -22900,6 +23000,8 @@ class BattleRuntime(object):
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
         self._local_suspension_roll_velocity = 0.0
+        self._local_suspension_support_vertical_speed = 0.0
+        self._local_suspension_support_gradient = None
         self._local_left_flying = False
         self._local_right_flying = False
         self._local_support_motion_pose = None
