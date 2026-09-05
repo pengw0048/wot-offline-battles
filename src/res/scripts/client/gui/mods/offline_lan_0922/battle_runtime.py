@@ -1556,6 +1556,10 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -1840,6 +1844,10 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -5555,9 +5563,99 @@ class BattleRuntime(object):
         if model is None:
             raise RuntimeError('player compound model is unavailable')
         model.matrix = self._local_body_pose()
+        self._bind_local_body_swinging(entity, model)
         self._runtime.compatibility.bind_vehicle_pose_sources(
             self._avatar, entity)
         self._local_model = model
+        return True
+
+    def _report_local_body_swinging(self, available, error=None):
+        """Publish one line per distinct player body-swinging outcome."""
+        record = (bool(available), None if error is None else str(error))
+        if record == self._local_swinging_report:
+            return False
+        self._local_swinging_report = record
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] PRESENTATION local_body_swinging=%s%s\n' % (
+                record[0],
+                '' if record[1] is None else ' error=%r' % (record[1],)))
+        return True
+
+    def _bind_local_body_swinging(self, entity, model):
+        """Rebind the player's stock SwingingAnimator to the copied pose.
+
+        Exact #1513 ``CompoundAppearance.activate`` is the only stock writer of
+        ``swingingAnimator.placingCompensationMatrix`` and ``worldMatrix``: it
+        copies the compensation off the native vehicle filter and links the
+        animator to the compound root's matrix *provider object* that exists at
+        that moment.  This port swaps that root onto the copied LAN pose after
+        the native lifecycle completes, so the animator keeps swinging around a
+        filter placement this vehicle no longer follows and reads a provider
+        the compound no longer uses.  Repeat the same two stock writes against
+        the live provider, with an identity compensation because the copied
+        pose already carries authoritative terrain pitch and roll.
+
+        ``CompoundAppearance.__prepareSystemsForDamagedVehicle`` drops the
+        animator, so a missing one is a normal state rather than a failure.
+        This is presentation only: it never feeds authoritative motion.
+        """
+        appearance = getattr(entity, 'appearance', None)
+        swinging = getattr(appearance, 'swingingAnimator', None)
+        if swinging is None:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(
+                False, 'stock SwingingAnimator is unavailable')
+            return False
+        if swinging is self._local_swinging_animator:
+            return True
+        # Only a rebind reads the compound provider, so the steady state costs
+        # the two attribute reads above and one identity test.
+        provider = getattr(model, 'matrix', None)
+        if provider is None:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(
+                False, 'player compound model has no matrix provider')
+            return False
+        if self._local_placing_compensation is None:
+            compensation = self._runtime.math.Matrix()
+            compensation.setIdentity()
+            self._local_placing_compensation = compensation
+        try:
+            restore = (
+                swinging,
+                getattr(swinging, 'placingCompensationMatrix', None),
+                getattr(swinging, 'worldMatrix', None))
+            swinging.placingCompensationMatrix = \
+                self._local_placing_compensation
+            swinging.worldMatrix = provider
+        except Exception as error:
+            self._local_swinging_animator = None
+            self._local_swinging_restore = None
+            self._report_local_body_swinging(False, error)
+            return False
+        self._local_swinging_animator = swinging
+        self._local_swinging_restore = restore
+        self._report_local_body_swinging(True)
+        return True
+
+    def _restore_local_body_swinging(self):
+        """Return the animator to the stock bindings this port replaced."""
+        restore = self._local_swinging_restore
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        if restore is None:
+            return False
+        swinging, compensation, world = restore
+        try:
+            if compensation is not None:
+                swinging.placingCompensationMatrix = compensation
+            if world is not None:
+                swinging.worldMatrix = world
+        except Exception as error:
+            self._report_local_body_swinging(False, error)
+            return False
         return True
 
     def _update_local_presentation(self, entity, dt=0.0):
@@ -5600,6 +5698,12 @@ class BattleRuntime(object):
             stabilised_matrix=self._local_stabilised_pose())
         self._reset_full_turret_sniper_aim(previous_yaw)
         self._local_camera_velocity = velocity
+        # A stock compound refresh rebuilds the appearance and its animator,
+        # which would silently drop this port's rebind for the rest of the
+        # round. Re-assert it here; an unchanged animator costs one test.
+        self._run_optional_feature(
+            'local body swinging', self._bind_local_body_swinging,
+            (entity, self._local_model))
         self._run_optional_feature(
             'local track animation', self._update_local_tracks, (entity,))
         return position
@@ -5703,6 +5807,7 @@ class BattleRuntime(object):
         if entity is None:
             return False
         self._sync_fire_effect(entity, False)
+        self._restore_local_body_swinging()
         if self._local_model is not None and self._local_native_matrix is not None:
             self._local_model.matrix = self._local_native_matrix
         clear = getattr(
@@ -5725,6 +5830,10 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
@@ -21688,6 +21797,10 @@ class BattleRuntime(object):
         self._local_siege_aim_world_matrix = None
         self._local_siege_aim_pitch = 0.0
         self._local_model = None
+        self._local_swinging_animator = None
+        self._local_swinging_restore = None
+        self._local_placing_compensation = None
+        self._local_swinging_report = None
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None

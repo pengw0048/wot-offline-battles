@@ -1125,6 +1125,25 @@ killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
 camera shake is not ported. Whether the resulting rocking magnitude matches
 retail still needs exact Windows acceptance.
 
+The same animator needs that rebind on the player's own tank.
+`CompoundAppearance.activate` is the only stock writer of
+`swingingAnimator.placingCompensationMatrix` and `swingingAnimator.worldMatrix`
+in the pinned package: it copies the compensation off the native vehicle filter
+and links the animator to the compound root's matrix provider object that
+exists at that moment. This port replaces that root with the copied pose after
+the native lifecycle completes, so both stock links go stale on the player
+vehicle exactly as they do on a native remote. The port repeats the same two
+writes against the live provider, with an identity compensation because the
+copied pose already carries authoritative terrain pitch and roll, restores the
+stock pair when it detaches, and re-asserts the pair only when the animator
+object itself changed. `__prepareSystemsForDamagedVehicle` clears
+`swingingAnimator`, so a missing animator is a normal damaged-model state and
+is recorded rather than raised. No stock Python code in the package writes
+`accelSwingingDirection`, and this build's `changeEngineMode` no longer arms
+acceleration swing; `stopSwinging` is the only remaining Python writer of
+`accelSwingingPeriod`. Which owner arms that swing in #1513 is unresolved and
+is not ported here.
+
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision
