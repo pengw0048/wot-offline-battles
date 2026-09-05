@@ -37,9 +37,11 @@ except NameError:
 # bit index instead of a VEHICLE_SETTINGS_FLAG value.  Schema 3 drops files
 # written before every vehicle was fitted with its top modules and its three
 # consumables.  Schema 4 adds the bounded receipt journal that makes battle
-# crew XP idempotent.  Schema 3 remains readable and upgrades on the next save.
-SCHEMA = 4
-READABLE_SCHEMAS = (3, SCHEMA)
+# crew XP idempotent.  Schema 5 adds the account ledger: the balances, the
+# researched items, the per-vehicle experience and which vehicles are owned.
+# Every earlier readable schema upgrades on the next save.
+SCHEMA = 5
+READABLE_SCHEMAS = (3, 4, SCHEMA)
 STATE_FILE_NAME = 'garage_state.json'
 
 _VEHICLE_INT_KEYS = ('eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx')
@@ -74,6 +76,83 @@ def _int_list(value):
             return None
         result.append(int(item))
     return result
+
+
+def _ledger_payload(snapshot):
+    """Return the account balances and research a save must keep.
+
+    The garage already owns what the player has; the ledger is the rest of it.
+    Keeping both in one file means one JSON replacement commits a purchase and
+    the item it bought together, so a hard kill can never bank one without the
+    other.
+    """
+    wallet = snapshot.get('wallet')
+    wallet = wallet if isinstance(wallet, dict) else {}
+    vehicle_xp = {}
+    saved_xp = snapshot.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        for compact_descr, experience in saved_xp.items():
+            try:
+                vehicle_xp[str(int(compact_descr))] = max(
+                    0, int(experience))
+            except (TypeError, ValueError):
+                continue
+    unlocks = snapshot.get('unlockItemCompactDescrs')
+    return {
+        'wallet': dict(
+            (name, max(0, int(wallet.get(name, 0) or 0)))
+            for name in ('credits', 'gold', 'freeXP')),
+        'vehicleXP': vehicle_xp,
+        'unlocks': sorted(int(value) for value in (unlocks or ())),
+        'slots': max(0, int(snapshot.get('accountSlots', 0) or 0)),
+        'berths': max(0, int(snapshot.get('accountBerths', 0) or 0)),
+    }
+
+
+def _apply_ledger(staged, stored):
+    """Overlay one saved ledger, keeping the current catalogue authoritative."""
+    ledger = stored.get('ledger')
+    if not isinstance(ledger, dict):
+        # A file written before the ledger existed keeps the seeded balances
+        # rather than starting the save at zero.
+        return False
+    wallet = ledger.get('wallet')
+    if isinstance(wallet, dict):
+        staged['wallet'] = dict(
+            (name, max(0, _int_value(wallet.get(name))))
+            for name in ('credits', 'gold', 'freeXP'))
+    saved_xp = ledger.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        published = staged.setdefault('vehicleXP', {})
+        for compact_descr, experience in saved_xp.items():
+            try:
+                key = int(compact_descr)
+            except (TypeError, ValueError):
+                continue
+            # Only vehicles this client still offers keep their experience.
+            if key in published:
+                published[key] = max(0, _int_value(experience))
+    unlocks = ledger.get('unlocks')
+    if isinstance(unlocks, (list, tuple)):
+        published = staged.get('unlockItemCompactDescrs')
+        if isinstance(published, set):
+            for value in unlocks:
+                try:
+                    published.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+    for name, key in (('slots', 'accountSlots'), ('berths', 'accountBerths')):
+        if name in ledger:
+            staged[key] = max(_int_value(ledger[name]),
+                              int(staged.get(key, 0) or 0))
+    return True
+
+
+def _int_value(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _int_map(value):
@@ -187,13 +266,34 @@ class GarageStore(object):
             battle_receipts = self._battle_receipts
         return {
             'schema': SCHEMA, 'vehicles': vehicles, 'owned': owned,
+            'ledger': _ledger_payload(snapshot),
             'battleCrewReceipts': list(battle_receipts)[
                 -MAX_BATTLE_RECEIPTS:],
         }
 
+    def owned_vehicle_types(self):
+        """Return the vehicle type compact descriptors this save owns.
+
+        The saved vehicle map is already keyed on the type compact descriptor,
+        so ownership needs no second list that could disagree with it.  An
+        empty result means "nothing saved yet", which is what a new save is.
+        """
+        stored = self._read()
+        vehicles = (stored or {}).get('vehicles')
+        if not isinstance(vehicles, dict):
+            return []
+        owned = []
+        for key in vehicles:
+            try:
+                owned.append(int(key))
+            except (TypeError, ValueError):
+                continue
+        return owned
+
     def apply_battle_crew_xp(self, snapshot, receipt_id,
                              vehicle_type_compact_descr, battle_xp,
-                             xp_to_tankman_flag, tankmen_module=None):
+                             xp_to_tankman_flag, tankmen_module=None,
+                             rewards=None):
         """Apply and persist one crew award exactly once.
 
         The compact crew descriptors and their receipt marker share one JSON
@@ -216,6 +316,13 @@ class GarageStore(object):
         state = GarageState(staged, tankmen_module=tankmen_module)
         result = state.award_battle_crew_xp(
             vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
+        if rewards is not None:
+            # The crew award and the credits it was earned beside share one
+            # JSON replacement, so a retried receipt can never bank one
+            # without the other.
+            result['earnings'] = state.award_battle_earnings(
+                vehicle_type_compact_descr, rewards,
+                accelerated=bool(result['accelerated']))
         staged = state.snapshot()
         marker = {
             'receipt_id': receipt_id,
@@ -285,6 +392,8 @@ class GarageStore(object):
                         continue
                     target[compact_descr] = max(
                         int(target[compact_descr]), int(count))
+
+        _apply_ledger(staged, stored)
 
         try:
             data._validate_selected_vehicle(staged)

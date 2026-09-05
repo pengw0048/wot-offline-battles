@@ -101,6 +101,13 @@ def _price(table, key):
     return table.get(key)
 
 
+def vehicle_names(nation):
+    """Return every vehicle definition name baked for one nation."""
+    prefix = nation + ':'
+    return [key[len(prefix):] for key in VEHICLE_PRICES
+            if key.startswith(prefix)]
+
+
 def vehicle_price(nation, name):
     """Return ``(credits, gold, not_in_shop)`` for one vehicle type."""
     return _price(VEHICLE_PRICES, '%s:%s' % (nation, name))

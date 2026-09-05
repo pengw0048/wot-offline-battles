@@ -40,6 +40,13 @@ GUN_ITEM_TYPE = 4
 OPTIONAL_DEVICE_ITEM_TYPE = 9
 SHELL_ITEM_TYPE = 10
 EQUIPMENT_ITEM_TYPE = 11
+# An optional device and a piece of equipment are owned by the account, so the
+# snapshot's top-level count is the real one.  Every other item type is
+# published per vehicle, which data.inventory folds into one account view.
+ACCOUNT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
+# The two item types #1513's shop publishes as buyable for credits even when
+# their catalogue price is gold: premium rounds and premium consumables.
+CREDIT_PRICED_GOLD_TYPES = (SHELL_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
 # Shop.freeXPToTManXPRate in the pinned #1513 sync data.
 FREE_XP_TO_TANKMAN_XP_RATE = 10
 
@@ -47,6 +54,24 @@ FREE_XP_TO_TANKMAN_XP_RATE = 10
 # engine-free here; the stock parser still owns the descriptor validation.
 CUSTOMIZATION_SEASONS = (1, 2, 4, 8, 15)
 CUSTOMIZATION_ALL_SEASONS = 15
+
+
+# items/__init__ ITEM_TYPE_NAMES: the installable modules are the only items a
+# research tree gates. Vehicles are gated by their own unlock entry.
+RESEARCHED_ITEM_TYPES = (2, 3, 4, 5, 6, 7)
+# items/vehicles.py uses this literal for IS_CLIENT while reading the vehicle
+# list, so a sale returns half of what an item cost.
+SELL_PRICE_FACTOR = 0.5
+# Offline policy, not #1513 values: the gold exchange rate, the slot price and
+# the berth block are all server state the client never receives. 400 credits
+# per gold and 300 gold per slot are the long-published retail numbers.
+GOLD_EXCHANGE_RATE = 400
+GARAGE_SLOT_GOLD_PRICE = 300
+BARRACKS_BERTH_GOLD_PRICE = 300
+BARRACKS_BERTH_COUNT = 16
+# Shop.freeXPConversion in the pinned #1513 sync data: 25 vehicle experience
+# becomes 25 free experience for one gold.
+FREE_XP_CONVERSION = (25, 1)
 
 
 class GarageError(Exception):
@@ -98,6 +123,7 @@ class GarageState(object):
         self._customizations = customizations_module
         self._touched = set()
         self._touched_items = {}
+        self._touched_tankmen = set()
         self.revision = 0
 
     def snapshot(self):
@@ -151,6 +177,12 @@ class GarageState(object):
         """Return the vehicle ids mutated since the last call, then reset."""
         touched = set(self._touched)
         self._touched = set()
+        return touched
+
+    def touched_tankmen(self):
+        """Return and clear the crew ids a sale removed from the account."""
+        touched = set(self._touched_tankmen)
+        self._touched_tankmen = set()
         return touched
 
     def touched_items(self):
@@ -211,15 +243,129 @@ class GarageState(object):
         return record
 
     def _price(self, compact_descr):
+        """Make sure one item the garage publishes also carries a price.
+
+        The snapshot arrives with the whole baked catalogue, so this only
+        covers an item the catalogue did not know: publishing it at no price
+        keeps the snapshot self-consistent instead of failing a mount over a
+        baking gap.  It deliberately no longer grants an unlock; research owns
+        that, and an item can only be mounted once it has been researched and
+        bought.
+        """
         prices = self._snapshot.setdefault('shopItemPrices', {})
         if compact_descr and compact_descr not in prices:
-            prices[compact_descr] = {'credits': 0, 'gold': 0}
+            prices[compact_descr] = {'credits': 0}
+
+    # ---- the account ledger ---------------------------------------------
+
+    def _unlocks(self):
         unlocks = self._snapshot.get('unlockItemCompactDescrs')
-        # Only extend a set that already lists the garage: an empty set means
-        # the snapshot opted out of the unlock check, and partially filling it
-        # would start enforcing a constraint on items nobody validated.
-        if isinstance(unlocks, set) and unlocks and compact_descr:
-            unlocks.add(compact_descr)
+        if not isinstance(unlocks, set):
+            unlocks = set(unlocks or ())
+            self._snapshot['unlockItemCompactDescrs'] = unlocks
+        return unlocks
+
+    def _item_cost(self, compact_descr, count=1):
+        """Return what ``count`` of one item costs as a currency mapping.
+
+        A #1513 price carries exactly one currency, so the total keeps that
+        currency rather than converting between them.
+        """
+        price = self._snapshot.get('shopItemPrices', {}).get(
+            _int(compact_descr))
+        count = max(1, _int(count))
+        if not isinstance(price, dict):
+            return {'credits': 0}
+        for currency in ('gold', 'credits'):
+            amount = _int(price.get(currency, 0) or 0)
+            if amount:
+                return {currency: amount * count}
+        return {'credits': 0}
+
+    def _item_refund(self, compact_descr, count=1):
+        """Return what selling ``count`` of one item pays back.
+
+        #1513 hard-codes ``SELL_PRICE_FACTOR`` to 0.5 for clients.  A gold
+        item refunds gold, because an offline account has no store to have
+        bought that gold from and returning credits would let a sale mint
+        currency the account can never spend back into the same item.  Premium
+        rounds and consumables are the exception the client itself makes: the
+        shop publishes them as buyable for credits, so they refund credits at
+        the same rate and a purchase cannot be turned round into gold.
+        """
+        factor = self._snapshot.get('sellPriceFactor')
+        try:
+            factor = float(factor)
+        except (TypeError, ValueError):
+            factor = SELL_PRICE_FACTOR
+        cost = self._item_cost(compact_descr, count)
+        try:
+            cost = self._in_credits(cost, self._item_type(compact_descr))
+        except GarageError:
+            pass
+        return dict((currency, int(amount * factor))
+                    for currency, amount in cost.items())
+
+    def _in_credits(self, cost, item_type):
+        """Price a gold round or consumable in credits, as the shop does.
+
+        ``isEnabledBuyingGoldShellsForCredits`` and its equipment twin cover
+        exactly these two item types; a gold optional device or a gold vehicle
+        stays gold-only, which is what the client offers.
+        """
+        gold = _int(cost.get('gold', 0) or 0)
+        if not gold or int(item_type) not in CREDIT_PRICED_GOLD_TYPES:
+            return cost
+        priced = dict(cost)
+        priced.pop('gold', None)
+        priced['credits'] = (
+            _int(priced.get('credits', 0)) + gold * GOLD_EXCHANGE_RATE)
+        return priced
+
+    def _charge(self, amount):
+        """Take one currency mapping from the account, or refuse it whole."""
+        wallet = self._wallet()
+        for currency in ('credits', 'gold'):
+            needed = _int(amount.get(currency, 0) or 0)
+            if needed > wallet[currency]:
+                raise GarageError(
+                    'the account has %d %s and needs %d' % (
+                        wallet[currency], currency, needed))
+        for currency in ('credits', 'gold'):
+            needed = _int(amount.get(currency, 0) or 0)
+            if needed:
+                wallet[currency] = wallet[currency] - needed
+        return wallet
+
+    def _pay_back(self, amount):
+        wallet = self._wallet()
+        for currency in ('credits', 'gold'):
+            value = _int(amount.get(currency, 0) or 0)
+            if value:
+                wallet[currency] = wallet[currency] + value
+        return wallet
+
+    def _next_inventory_id(self):
+        """Return an id no live record uses.
+
+        Ids are session state: garage_store keys vehicles on their type
+        compact descriptor and a battle receipt names a type, so nothing needs
+        them to survive a restart.  What a purchase needs is an id that cannot
+        collide with a record already on screen.
+        """
+        used = set(_int(record.get('id', 0)) for record in self._records())
+        candidate = _int(self._snapshot.get('nextInventoryID', 0))
+        candidate = max(candidate, max(used) + 1 if used else 1)
+        while candidate in used:
+            candidate += 1
+        self._snapshot['nextInventoryID'] = candidate + 1
+        return candidate
+
+    def _next_tankman_id(self):
+        used = set()
+        for record in self._records():
+            used.update(_int(value) for value in (record.get('crew') or ()))
+        return (max(used) + 1) if used else 100001
 
     # ---- consumables ----------------------------------------------------
 
@@ -449,18 +595,34 @@ class GarageState(object):
 
     # ---- purchases and settings -----------------------------------------
 
-    def buy_item(self, compact_descr, count=1):
-        """Own more of one item.
+    def buy_item(self, compact_descr, count=1, gold_for_credits=False):
+        """Own more of one item and pay the catalogue price for it.
 
-        Offline balances are unlimited: the shop publishes every item at zero
-        price, so deducting credits would always subtract nothing. Ownership is
-        the only part of a purchase that has an observable effect here.
+        The account has to be able to afford the whole order before any of it
+        is owned, so the charge is taken first and refuses the purchase whole
+        rather than delivering part of it.  ``gold_for_credits`` is the fourth
+        value of #1513's own buy command: the shop publishes premium rounds
+        and consumables as buyable for credits, and this is the client asking
+        for that price.
         """
         compact_descr = _int(compact_descr)
         if not compact_descr:
             raise GarageError('a purchase needs an item')
         count = max(1, _int(count))
         item_type = self._item_type(compact_descr)
+        # Only modules are researched. #1513 sells shells, consumables and
+        # optional devices straight from the shop, so gating them on the
+        # unlock set would make them permanently unbuyable.  An empty unlock
+        # set means the snapshot opted out of unlock enforcement, exactly as
+        # data._validate_selected_vehicle reads it.
+        unlocks = self._unlocks()
+        if (unlocks and item_type in RESEARCHED_ITEM_TYPES and
+                compact_descr not in unlocks):
+            raise GarageError('item %d is not researched' % compact_descr)
+        cost = self._item_cost(compact_descr, count)
+        if gold_for_credits:
+            cost = self._in_credits(cost, item_type)
+        self._charge(cost)
         existing = self._snapshot.get('inventoryItems', {}).get(item_type, {})
         self._publish_owned(
             compact_descr, item_type,
@@ -765,3 +927,428 @@ class GarageState(object):
             'vehicle_id': vehicle_id,
             'weakest_tankman_id': weakest[1] if accelerated else 0,
         }
+
+    def award_battle_earnings(self, vehicle_type_compact_descr, rewards,
+                              accelerated=False):
+        """Bank one battle's credits and experience into the account ledger.
+
+        Accelerated crew training spends the vehicle's experience on the crew
+        instead of the vehicle, which is why the caller passes the flag the
+        crew award already resolved rather than reading the setting twice.
+        Free experience is a separate award and is banked either way.
+        """
+        rewards = rewards if isinstance(rewards, dict) else {}
+        wallet = self._wallet()
+        wallet['credits'] = max(
+            0, wallet['credits'] + max(0, _int(rewards.get('credits', 0))))
+        wallet['freeXP'] = max(
+            0, wallet['freeXP'] + max(0, _int(rewards.get('free_xp', 0))))
+        experience = max(0, _int(rewards.get('xp', 0)))
+        key = _int(vehicle_type_compact_descr)
+        vehicle_xp = self._snapshot.setdefault('vehicleXP', {})
+        if not accelerated and experience:
+            vehicle_xp[key] = max(0, _int(vehicle_xp.get(key, 0))) + experience
+        self.revision += 1
+        return {
+            'credits': wallet['credits'],
+            'freeXP': wallet['freeXP'],
+            'vehicleXP': _int(vehicle_xp.get(key, 0)),
+        }
+
+    # ---- purchases, sales and research ----------------------------------
+
+    def sell_item(self, compact_descr, count=1):
+        """Give up one owned item and take back half of what it cost."""
+        compact_descr = _int(compact_descr)
+        if not compact_descr:
+            raise GarageError('a sale needs an item')
+        count = max(1, _int(count))
+        item_type = self._item_type(compact_descr)
+        owned = self._snapshot.get('inventoryItems', {}).get(item_type, {})
+        available = _int(owned.get(compact_descr, 0))
+        if available < count:
+            raise GarageError(
+                'the account owns %d of item %d, not %d' % (
+                    available, compact_descr, count))
+        mounted = self._mounted(compact_descr, item_type, self._records())
+        if mounted > available - count:
+            raise GarageError(
+                'item %d is mounted on %d vehicle(s) and cannot drop to %d' % (
+                    compact_descr, mounted, available - count))
+        self._set_owned(compact_descr, item_type, available - count)
+        self._pay_back(self._item_refund(compact_descr, count))
+        self.revision += 1
+        return compact_descr
+
+    def _set_owned(self, compact_descr, item_type, count):
+        """Publish an exact owned count, including zero.
+
+        ``_publish_owned`` only ever raises a count because a mount must never
+        lower one.  A sale is the one operation that lowers it, so it writes
+        the count directly and drops the row when nothing is left.
+        """
+        published = self._snapshot.setdefault('inventoryItems', {})
+        owned = published.setdefault(int(item_type), {})
+        if count > 0:
+            owned[compact_descr] = int(count)
+        else:
+            owned.pop(compact_descr, None)
+        self._touched_items.setdefault(int(item_type), set()).add(compact_descr)
+
+    def buy_vehicle(self, vehicle_type_compact_descr, buy_shells=False,
+                    recruit_crew=False, tman_cost_type_index=0,
+                    rent_period=0):
+        """Own one more vehicle, stock, and pay the catalogue price for it.
+
+        A bought vehicle arrives exactly as retail sells it: the stock fitting,
+        nothing mounted that was not paid for, and only the modules the vehicle
+        unlocks for free already researched.
+
+        ``buy_shells`` describes what the client asked for, but a #1513 vehicle
+        record must carry ammunition -- ``data._validate_selected_vehicle``
+        rejects an empty shell inventory -- so the vehicle always arrives with
+        the client's own default load and the load is always charged for.
+        Delivering it unpaid would let a purchase and a sale mint credits.
+        """
+        compact_descr = _int(vehicle_type_compact_descr)
+        if not compact_descr:
+            raise GarageError('a purchase needs a vehicle type')
+        if rent_period:
+            raise GarageError('offline vehicles are not rented')
+        for record in self._records():
+            if _int(record.get('vehicleTypeCompactDescr', 0)) == compact_descr:
+                raise GarageError('the account already owns this vehicle')
+        slots = _int(self._snapshot.get('accountSlots', 0))
+        if slots and len(self._records()) >= slots:
+            raise GarageError('every garage slot is occupied')
+
+        from gui.mods.offline_lan_0922 import vehicle_records
+        from items import ITEM_TYPE_INDICES
+
+        vehicles = self._vehicles_module()
+        tankmen = self._tankmen_module()
+        vehicle_type = vehicles.getVehicleType(compact_descr)
+        built = vehicle_records.build_record(
+            vehicles, tankmen, ITEM_TYPE_INDICES, tuple(vehicle_type.id),
+            self._next_inventory_id(), self._next_tankman_id(),
+            self._default_vehicle_settings(),
+            [0, 0, 0], top_modules=False, own_researchable_modules=False)
+        record = built['record']
+
+        cost = self._item_cost(compact_descr)
+        shells = [_int(value) for value in (record.get('shells') or ())]
+        for index in range(0, len(shells) - 1, 2):
+            self._add_money(cost, self._in_credits(
+                self._item_cost(shells[index], shells[index + 1]),
+                SHELL_ITEM_TYPE))
+        self._charge(cost)
+        records = self._snapshot.setdefault('vehicles', self._records())
+        records.append(record)
+        self._snapshot['vehicles'] = records
+        published = self._snapshot.setdefault('vehicleTypeCompactDescrs', set())
+        if isinstance(published, set):
+            published.add(compact_descr)
+        unlocks = self._unlocks()
+        unlocks.add(compact_descr)
+        # The vehicle's free modules come with it, exactly as #1513 records
+        # them on the type rather than as a research step the player pays for.
+        for item in (getattr(vehicle_type, 'autounlockedItems', ()) or ()):
+            unlocks.add(_int(item))
+        for item_type, items in record['inventoryItems'].items():
+            for item_compact_descr, count in items.items():
+                self._publish_owned(item_compact_descr, item_type, count)
+                self._price(item_compact_descr)
+                unlocks.add(_int(item_compact_descr))
+        self._snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
+        self._touched.add(_int(record['id']))
+        self.revision += 1
+        return record
+
+    def sell_vehicle(self, vehicle_inventory_id, dismiss_crew=True,
+                     items_from_vehicle=(), items_from_inventory=()):
+        """Give up one vehicle and take back half of what it cost.
+
+        #1513's sell dialog also lists what goes with the vehicle.  Its own
+        ``VehicleSeller.__getGainSpendMoney`` pays the carried rounds by their
+        count, one unit for each mounted equipment or optional device, and the
+        whole stored stack for each module sold out of the inventory, so this
+        settles the same three cases from the same lists.
+        """
+        record = self._record(vehicle_inventory_id, touch=False)
+        records = self._records()
+        if len(records) <= 1:
+            raise GarageError('the last garage vehicle cannot be sold')
+        if not dismiss_crew and record.get('crew'):
+            # #1513 offers the crew a barracks place instead of dismissal.
+            # The offline garage has no barracks yet, and destroying a crew
+            # the player asked to keep is worse than refusing the sale.
+            raise GarageError(
+                'the offline garage has no barracks: dismiss the crew to '
+                'sell this vehicle')
+        compact_descr = _int(record.get('vehicleTypeCompactDescr', 0))
+        refund = self._item_refund(compact_descr)
+        remaining = [row for row in records
+                     if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+        for listed in (items_from_vehicle or ()):
+            self._add_money(
+                refund, self._sold_off_vehicle(record, listed, remaining))
+        for listed in (items_from_inventory or ()):
+            self._add_money(refund, self._sold_out_of_inventory(listed))
+        self._snapshot['vehicles'] = remaining
+        published = self._snapshot.get('vehicleTypeCompactDescrs')
+        if isinstance(published, set):
+            published.discard(compact_descr)
+        vehicle_xp = self._snapshot.get('vehicleXP')
+        if isinstance(vehicle_xp, dict):
+            # The experience earned on a sold vehicle is gone with it, which
+            # is what retail does outside a paid restore.
+            vehicle_xp.pop(compact_descr, None)
+        # The client only drops what the diff names, so a removal has to be
+        # announced as loudly as a change.
+        self._touched.add(_int(record.get('id', 0)))
+        for tankman_id in (record.get('tankmen') or ()):
+            self._touched_tankmen.add(_int(tankman_id))
+        self._pay_back(refund)
+        self.revision += 1
+        return compact_descr
+
+    @staticmethod
+    def _add_money(total, amount):
+        for currency, value in amount.items():
+            total[currency] = _int(total.get(currency, 0)) + _int(value)
+        return total
+
+    def _sold_off_vehicle(self, record, compact_descr, remaining):
+        """Refund one item the sell dialog listed as mounted on the vehicle.
+
+        Refusing an item the vehicle does not carry keeps a malformed list
+        from minting credits.  The owned count comes down by what was sold and
+        then back up to whatever a remaining vehicle still carries, so no
+        vehicle is ever left mounting an item the account no longer owns.
+        """
+        compact_descr = _int(compact_descr)
+        item_type = self._item_type(compact_descr)
+        carried = self._carried(record, item_type, compact_descr)
+        if item_type != SHELL_ITEM_TYPE:
+            # Only rounds are carried by the dozen; #1513 pays one unit for
+            # each mounted equipment and optional device.
+            carried = min(1, carried)
+        if carried <= 0:
+            raise GarageError(
+                'vehicle %d does not carry item %d' % (
+                    _int(record.get('id', 0)), compact_descr))
+        owned = self._snapshot.get('inventoryItems', {}).get(item_type, {})
+        left = max(0, _int(owned.get(compact_descr, 0)) - carried)
+        self._set_owned(
+            compact_descr, item_type,
+            max(left, self._mounted(compact_descr, item_type, remaining)))
+        return self._item_refund(compact_descr, carried)
+
+    def _sold_out_of_inventory(self, compact_descr):
+        """Refund the whole stored stack of one module, as #1513 prices it."""
+        compact_descr = _int(compact_descr)
+        item_type = self._item_type(compact_descr)
+        owned = self._snapshot.get('inventoryItems', {}).get(item_type, {})
+        count = _int(owned.get(compact_descr, 0))
+        if count <= 0:
+            raise GarageError(
+                'the account does not own item %d' % compact_descr)
+        mounted = self._mounted(compact_descr, item_type, self._records())
+        if mounted >= count:
+            raise GarageError(
+                'item %d is mounted on %d vehicle(s) and cannot be sold out '
+                'of the inventory' % (compact_descr, mounted))
+        self._set_owned(compact_descr, item_type, mounted)
+        return self._item_refund(compact_descr, count - mounted)
+
+    @staticmethod
+    def _carried(record, item_type, compact_descr):
+        return _int(record.get('inventoryItems', {}).get(
+            int(item_type), {}).get(compact_descr, 0))
+
+    def _mounted(self, compact_descr, item_type, records):
+        """Return how many of one item the given vehicles hold between them.
+
+        An optional device or a piece of equipment belongs to the account, so
+        two vehicles mounting it hold two.  A module or a shell is published
+        per vehicle as the largest count any one of them carries, and summing
+        that view would invent stock nobody owns.
+        """
+        counts = [self._carried(record, item_type, compact_descr)
+                  for record in records]
+        if int(item_type) in ACCOUNT_ITEM_TYPES:
+            return sum(counts)
+        return max(counts) if counts else 0
+
+    def unlock(self, vehicle_type_compact_descr, unlock_index):
+        """Research one item this vehicle leads to.
+
+        The cost, the target and its prerequisites all come from the live
+        ``VehicleType.unlocksDescrs``, so the tech tree the player sees and the
+        one the garage charges for are the same data.
+        """
+        vehicles = self._vehicles_module()
+        compact_descr = _int(vehicle_type_compact_descr)
+        try:
+            vehicle_type = vehicles.getVehicleType(compact_descr)
+            descriptors = list(
+                getattr(vehicle_type, 'unlocksDescrs', ()) or ())
+        except Exception as error:
+            raise GarageError('unknown research source: %s' % error)
+        index = _int(unlock_index)
+        if not 0 <= index < len(descriptors):
+            raise GarageError('unknown research step %d' % index)
+        descriptor = tuple(descriptors[index])
+        if len(descriptor) < 2:
+            raise GarageError('research step %d is malformed' % index)
+        target = _int(descriptor[1])
+        cost = max(0, _int(descriptor[0]))
+        unlocks = self._unlocks()
+        if compact_descr not in unlocks:
+            raise GarageError('the research source is not unlocked')
+        for required in descriptor[2:]:
+            if _int(required) not in unlocks:
+                raise GarageError(
+                    'research step %d still needs item %d' % (
+                        index, _int(required)))
+        if target in unlocks:
+            return {'compactDescr': target, 'vehicleXP': 0, 'freeXP': 0}
+
+        wallet = self._wallet()
+        vehicle_xp = self._snapshot.setdefault('vehicleXP', {})
+        available = max(0, _int(vehicle_xp.get(compact_descr, 0)))
+        from_vehicle = min(available, cost)
+        remainder = cost - from_vehicle
+        if remainder > wallet['freeXP']:
+            raise GarageError(
+                'research needs %d more experience' % (
+                    remainder - wallet['freeXP']))
+        vehicle_xp[compact_descr] = available - from_vehicle
+        wallet['freeXP'] = wallet['freeXP'] - remainder
+        unlocks.add(target)
+        self._price(target)
+        self.revision += 1
+        return {'compactDescr': target, 'vehicleXP': from_vehicle,
+                'freeXP': remainder}
+
+    def exchange_gold(self, gold):
+        """Convert gold into credits at the published shop rate."""
+        amount = _int(gold)
+        if amount <= 0:
+            raise GarageError('a gold exchange must be positive')
+        rate = max(1, _int(self._snapshot.get('goldExchangeRate', 0)) or
+                   GOLD_EXCHANGE_RATE)
+        self._charge({'gold': amount})
+        self._pay_back({'credits': amount * rate})
+        self.revision += 1
+        return {'gold': amount, 'credits': amount * rate}
+
+    def convert_to_free_xp(self, vehicle_type_compact_descrs, experience):
+        """Turn elite vehicle experience into free experience for gold.
+
+        #1513 publishes ``freeXPConversion`` as ``(rate, goldCost)``: ``rate``
+        vehicle experience becomes ``rate`` free experience for ``goldCost``
+        gold, which is why the gold charged is the experience divided by the
+        rate.
+        """
+        wanted = _int(experience)
+        if wanted <= 0:
+            raise GarageError('an experience conversion must be positive')
+        rate, gold_cost = FREE_XP_CONVERSION
+        vehicle_xp = self._snapshot.setdefault('vehicleXP', {})
+        sources = [_int(value) for value in (vehicle_type_compact_descrs or ())]
+        for compact_descr in sources:
+            if not self._is_elite(compact_descr):
+                raise GarageError(
+                    'vehicle %d still has research left' % compact_descr)
+        available = sum(max(0, _int(vehicle_xp.get(key, 0)))
+                        for key in sources)
+        if available < wanted:
+            raise GarageError(
+                'the selected vehicles hold %d experience, not %d' % (
+                    available, wanted))
+        gold = (wanted + rate - 1) // rate * gold_cost
+        self._charge({'gold': gold})
+        remaining = wanted
+        for key in sources:
+            if remaining <= 0:
+                break
+            taken = min(remaining, max(0, _int(vehicle_xp.get(key, 0))))
+            vehicle_xp[key] = _int(vehicle_xp.get(key, 0)) - taken
+            remaining -= taken
+        wallet = self._wallet()
+        wallet['freeXP'] = wallet['freeXP'] + wanted
+        self.revision += 1
+        return {'freeXP': wanted, 'gold': gold}
+
+    def buy_slot(self):
+        """Buy one garage slot at the published price."""
+        self._charge({'gold': GARAGE_SLOT_GOLD_PRICE})
+        self._snapshot['accountSlots'] = _int(
+            self._snapshot.get('accountSlots', 0)) + 1
+        self.revision += 1
+        return self._snapshot['accountSlots']
+
+    def _default_vehicle_settings(self):
+        """Return the settings mask a vehicle built at startup would carry.
+
+        A bought vehicle arriving with auto-repair and auto-resupply off would
+        silently differ from every vehicle the garage built itself.
+        """
+        published = self._snapshot.get('defaultVehicleSettings')
+        if published is not None:
+            return _int(published)
+        from gui.mods.offline_lan_0922 import vehicle_records
+
+        return _int(vehicle_records.default_vehicle_settings())
+
+    def _is_elite(self, vehicle_type_compact_descr):
+        """Return whether nothing this vehicle researches is left to unlock.
+
+        #1513 only converts the experience of an elite vehicle, because the
+        experience on a vehicle still being researched is what pays for the
+        rest of its own tree.
+        """
+        vehicles = self._vehicles_module()
+        try:
+            vehicle_type = vehicles.getVehicleType(
+                _int(vehicle_type_compact_descr))
+            descriptors = tuple(
+                getattr(vehicle_type, 'unlocksDescrs', ()) or ())
+        except Exception as error:
+            raise GarageError('unknown vehicle type: %s' % error)
+        unlocks = self._unlocks()
+        for row in descriptors:
+            row = tuple(row)
+            if len(row) >= 2 and _int(row[1]) not in unlocks:
+                return False
+        return True
+
+    def buy_berths(self):
+        """Buy one barracks berth block at the published price."""
+        self._charge({'gold': BARRACKS_BERTH_GOLD_PRICE})
+        self._snapshot['accountBerths'] = _int(
+            self._snapshot.get('accountBerths', 0)) + BARRACKS_BERTH_COUNT
+        self.revision += 1
+        return self._snapshot['accountBerths']
+
+    def _wallet(self):
+        """Return the mutable account balances.
+
+        A snapshot written before the ledger existed carries no wallet.  Zero
+        is the one value that is wrong for both save modes: it would refuse
+        every purchase in a career and turn the historical sandbox's unlimited
+        balance into whatever the next battle paid.  Seed the sandbox balance
+        instead, which is what such a save had.
+        """
+        from gui.mods.offline_lan_0922.account_rpc import economy
+
+        wallet = self._snapshot.get('wallet')
+        if not isinstance(wallet, dict):
+            wallet = dict(economy.SANDBOX_WALLET)
+            self._snapshot['wallet'] = wallet
+        for name in ('credits', 'gold', 'freeXP'):
+            if name not in wallet:
+                wallet[name] = economy.SANDBOX_WALLET[name]
+            wallet[name] = max(0, _int(wallet[name]))
+        return wallet

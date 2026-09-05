@@ -184,26 +184,35 @@ class AccountRpcTests(unittest.TestCase):
         self._run()
         self.assertEqual([(31, commands.RES_SUCCESS, '')], self.player.responses)
 
-    def test_postbattle_progress_pushes_resources_and_vehicle_xp_now(self):
+    def test_postbattle_progress_pushes_the_banked_ledger_now(self):
+        """The garage banked the battle; the push reads what it banked.
+
+        Credits, free experience and vehicle experience are spent by
+        purchases and research, so the garage snapshot owns them and the
+        post-battle push reports that balance rather than a running total the
+        result store keeps for its own counters.
+        """
         class Store(object):
             def progress(self):
-                return {
-                    'credits': 700, 'freeXP': 30,
-                    'vehicles': {'ussr:R11_MS-1': {'xp': 600}},
-                }
+                return {'battles': 1, 'wins': 1}
 
         vehicles_module = types.ModuleType('items.vehicles')
         vehicles_module.VehicleDescr = lambda typeName=None: (
             types.SimpleNamespace(type=types.SimpleNamespace(id=(0, 1))))
         vehicles_module.makeIntCompactDescrByID = (
             lambda unused_type, unused_nation, unused_vehicle: 50001)
+        vehicles_module.getVehicleType = lambda compact_descr: (
+            types.SimpleNamespace(unlocksDescrs=()))
         items_module = types.ModuleType('items')
         items_module.vehicles = vehicles_module
         server = FakeServer(
             lambda: self.player,
             lambda delay, fn: self.pending.append((delay, fn)), {
                 'selected_vehicle': {
-                    'vehicleTypeCompactDescrs': [50001]},
+                    'vehicleTypeCompactDescrs': [50001],
+                    'wallet': {'credits': 700, 'gold': 5, 'freeXP': 30},
+                    'vehicleXP': {50001: 600},
+                },
                 'postbattle_store': Store(),
             })
         with mock.patch.dict(sys.modules, {
@@ -217,10 +226,8 @@ class AccountRpcTests(unittest.TestCase):
             set(update['stats']))
         self.assertNotIn('eliteVehicles', update['stats'])
         self.assertNotIn('unlocks', update['stats'])
-        self.assertEqual(account_data.OFFLINE_CREDITS + 700,
-                         update['stats']['credits'])
-        self.assertEqual(account_data.OFFLINE_FREE_XP + 30,
-                         update['stats']['freeXP'])
+        self.assertEqual(700, update['stats']['credits'])
+        self.assertEqual(30, update['stats']['freeXP'])
         self.assertEqual(600, update['stats']['vehTypeXP'][50001])
         self.assertEqual(1, self.player.dossier_resyncs)
 
@@ -1115,3 +1122,73 @@ class AccountRpcTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SaleDiffTests(unittest.TestCase):
+    """A sale has to reach the client, not just the snapshot.
+
+    #1513 merges an inventory diff through
+    ``shared_utils.account_helpers.diff_utils.synchronizeDicts``, which pops a
+    cached key only when the diff carries that key with the value ``None``.
+    A vehicle simply left out of the diff stays in the player's hangar.
+    """
+
+    def _sell(self, args):
+        snapshot = _full_garage_snapshot()
+        snapshot['wallet'] = {'credits': 1000, 'gold': 0, 'freeXP': 0}
+        state = account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: 10))
+        pushed = []
+        context = {'garage': state, 'push_update': pushed.append}
+        result = account_requests.dispatch(
+            commands.CMD_SELL_VEHICLE, context, args)
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual(1, len(pushed))
+        return pushed[0]['inventory'], state.snapshot()
+
+    def test_a_sold_vehicle_is_published_as_removed(self):
+        diff, snapshot = self._sell(([17, 10, 1, 0, 0],))
+
+        self.assertEqual(1, len(snapshot['vehicles']))
+        vehicles = diff[account_data.VEHICLE_ITEM_TYPE]
+        self.assertIsNone(vehicles['compDescr'][10])
+        self.assertIsNone(vehicles['crew'][10])
+        # The vehicle that stayed is not touched by the same diff.
+        self.assertNotIn(9, vehicles['compDescr'])
+
+    def test_the_crew_of_a_sold_vehicle_is_published_as_removed(self):
+        """Left out, they would reappear in the client as barracks crew."""
+        diff, unused_snapshot = self._sell(([17, 10, 1, 0, 0],))
+
+        tankmen = diff[account_data.TANKMAN_ITEM_TYPE]
+        self.assertIsNone(tankmen['compDescr'][201])
+        self.assertIsNone(tankmen['compDescr'][202])
+        self.assertIsNone(tankmen['vehicle'][201])
+
+    def test_an_item_sold_down_to_nothing_is_published_as_removed(self):
+        diff, snapshot = self._sell(([17, 10, 1, 1, 11010, 0],))
+
+        self.assertNotIn(11010, snapshot['inventoryItems'][10])
+        self.assertIsNone(diff[10][11010])
+
+    def test_a_full_sync_never_carries_a_removal_marker(self):
+        """Only a delta removes; a full sync replaces the cache outright."""
+        diff = account_data.inventory(
+            _full_garage_snapshot(), validate=False)['inventory']
+
+        for section in diff.values():
+            for value in section.values():
+                self.assertIsNotNone(value)
+
+
+class ExchangeRateTests(unittest.TestCase):
+    def test_the_published_rate_is_the_rate_the_garage_charges(self):
+        """The client displays one and the garage charges the other."""
+        self.assertEqual(
+            account_data.OFFLINE_GOLD_EXCHANGE_RATE,
+            account_requests.garage.GOLD_EXCHANGE_RATE)
+        self.assertEqual(
+            account_data.OFFLINE_SELL_PRICE_FACTOR,
+            account_requests.garage.SELL_PRICE_FACTOR)

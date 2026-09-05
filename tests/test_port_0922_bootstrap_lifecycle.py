@@ -12,12 +12,38 @@ PACKAGE_ROOT = (ROOT / 'src' / 'res' / 'scripts' /
 BOOTSTRAP = PACKAGE_ROOT / 'bootstrap.py'
 
 
-def _real_module(name):
+def _real_module(name, module_name=None):
+    module_name = module_name or ('gui.mods.offline_lan_0922.' + name)
     spec = importlib.util.spec_from_file_location(
-        'gui.mods.offline_lan_0922.' + name, PACKAGE_ROOT / (name + '.py'))
+        module_name, PACKAGE_ROOT / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+_ECONOMY_MODULES = {}
+
+
+def _economy_modules(package_stubs):
+    """Load the price catalogue and the economy against the package stubs.
+
+    ``economy`` imports the generated catalogue at module level so the module
+    object bootstrap captures is the real one, which means both have to be
+    executed while the stub package is installed.  The result is cached: the
+    catalogue is a few hundred kilobytes of literals and every test that loads
+    bootstrap would otherwise re-execute it.
+    """
+    if not _ECONOMY_MODULES:
+        with mock.patch.dict(sys.modules, package_stubs):
+            _ECONOMY_MODULES['gui.mods.offline_lan_0922.price_catalogue'] = (
+                _real_module('price_catalogue'))
+            _ECONOMY_MODULES[
+                'gui.mods.offline_lan_0922.account_rpc.economy'] = (
+                    _real_module(
+                        'account_rpc/economy',
+                        'gui.mods.offline_lan_0922.account_rpc.economy'))
+    return dict(_ECONOMY_MODULES)
 
 
 VEHICLE_BLACKLIST = _real_module('vehicle_blacklist')
@@ -217,6 +243,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'vehicle': 'ussr:R11_MS-1'}
         config_module.client_mode = lambda unused_config: (
             config_module.PLAYER_MODE)
+        config_module.SAVE_MODE_UNLOCKED = 'unlocked'
+        config_module.SAVE_MODE_NEW_ACCOUNT = 'new_account'
+        config_module.save_slot_mode = lambda: (
+            config_module.SAVE_MODE_UNLOCKED)
         state_module = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc.state')
         state_module.AccountState = types.SimpleNamespace
@@ -345,6 +375,11 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     2: {1: object(), 2: object(), 3: object(), 4: object()},
                 }.get(nation_id, {})
 
+            def getIDsByName(self, unused_name):
+                # #1513 raises for a name it does not know; the price index
+                # relies on that to skip a catalogue entry this client lacks.
+                raise KeyError(unused_name)
+
         customization = types.SimpleNamespace(
             paints={12001: types.SimpleNamespace(compactDescr=12001)},
             camouflages={12002: types.SimpleNamespace(compactDescr=12002)},
@@ -380,11 +415,25 @@ class BootstrapLifecycleTests(unittest.TestCase):
             g_list=_VehicleList(),
             attemptedTypeIDs=attempted_type_ids,
             crewTypeIDs=crew_type_ids,
+            getUnlocksSources=lambda: {},
+            getVehicleType=lambda compact_descr: types.SimpleNamespace(
+                id=(0, 0), unlocksDescrs=(), autounlockedItems=()),
             g_cache=types.SimpleNamespace(
                 customization20=lambda: customization,
                 optionalDevices=lambda: optional_devices,
+                optionalDeviceIDs=lambda: {},
                 equipmentIDs=lambda: equipment_ids,
-                equipments=lambda: equipments))
+                equipments=lambda: equipments,
+                # The exact #1513 name-to-id maps the price index walks. This
+                # fake ships no shared component catalogue, so the index only
+                # prices the vehicles and artefacts it does define.
+                chassisIDs=lambda unused_nation: {},
+                turretIDs=lambda unused_nation: {},
+                gunIDs=lambda unused_nation: {},
+                engineIDs=lambda unused_nation: {},
+                fuelTankIDs=lambda unused_nation: {},
+                radioIDs=lambda unused_nation: {},
+                shellIDs=lambda unused_nation: {}))
 
         def generate_tankmen(nation_id, vehicle_type_id, roles,
                              is_premium, role_level, skills_mask, is_preview):
@@ -456,6 +505,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'items': items,
             'nations': nations,
         }
+        modules.update(_economy_modules(modules))
         name = 'test_offline_lan_0922_bootstrap_lifecycle'
         spec = importlib.util.spec_from_file_location(name, BOOTSTRAP)
         module = importlib.util.module_from_spec(spec)
@@ -713,11 +763,15 @@ class BootstrapLifecycleTests(unittest.TestCase):
         class _GarageStore(object):
             def apply_battle_crew_xp(self, snapshot, receipt_id,
                                      vehicle_type_cd, xp, xp_flag,
-                                     tankmen_module=None):
+                                     tankmen_module=None, rewards=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
+                # The crew award and the earnings it was banked beside share
+                # one transaction, so the applier must pass both.
+                banked.append(rewards)
                 return {'vehicle_id': 1, 'applied': True}
 
+        banked = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -737,6 +791,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
+        self.assertEqual([{'xp': 100}], banked)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
 

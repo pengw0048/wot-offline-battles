@@ -20,6 +20,11 @@ ITEM_TYPE_INDICES = tuple(range(1, 13))
 REQUIRED_VEHICLE_COMPONENT_TYPES = (2, 3, 4, 5, 6, 7)
 # Account-wide artefacts: owned once and mountable on any vehicle.
 ARTEFACT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
+# items/vehicles.py uses this literal for IS_CLIENT while reading the
+# vehicle list, so a sale returns half of what an item cost.
+OFFLINE_SELL_PRICE_FACTOR = 0.5
+# Offline policy, not a #1513 value. See shop().
+OFFLINE_GOLD_EXCHANGE_RATE = 400
 OFFLINE_CREDITS = 100000000
 OFFLINE_GOLD = 1000000
 OFFLINE_FREE_XP = 100000000
@@ -186,7 +191,7 @@ def _validate_selected_vehicle(vehicle):
 
 
 def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
-              only_items=None):
+              only_items=None, removed_tankmen=None):
     """Return every loadable garage vehicle and its relational records.
 
     ``selected_vehicle`` is serialized by ``bootstrap._selected_vehicle``.  It
@@ -320,8 +325,45 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         CUSTOMIZATION_UNLOCKS: {},
     }
     if delta:
+        _publish_removals(values, vehicle_values, records, only_vehicles,
+                          only_items, removed_tankmen)
         values = _prune_empty(values)
     return {'inventory': values}
+
+
+def _publish_removals(values, vehicle_values, records, only_vehicles,
+                      only_items, removed_tankmen):
+    """Say what the account no longer owns, in the client's own vocabulary.
+
+    #1513 merges an inventory diff through ``diff_utils.synchronizeDicts``,
+    which pops a cached key when the diff carries that key with the value
+    ``None``. Leaving a sold vehicle, a dismissed crew member or an item whose
+    count reached zero out of the diff is therefore not a removal at all: the
+    client's cache keeps it. Only a delta can remove anything; a full sync
+    replaces the cache outright.
+    """
+    live = set(int(record.get('id', 1)) for record in records)
+    for vehicle_id in (only_vehicles or ()):
+        vehicle_id = int(vehicle_id)
+        if vehicle_id in live:
+            continue
+        for section in vehicle_values.values():
+            section[vehicle_id] = None
+    tankmen = values.get(TANKMAN_ITEM_TYPE)
+    if isinstance(tankmen, dict):
+        for tankman_id in (removed_tankmen or ()):
+            tankmen['compDescr'][int(tankman_id)] = None
+            tankmen['vehicle'][int(tankman_id)] = None
+    for item_type, wanted in dict(only_items or {}).items():
+        item_type = int(item_type)
+        if item_type in (VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,
+                         CUSTOMIZATION_ITEM_TYPE):
+            continue
+        section = values.get(item_type)
+        if not isinstance(section, dict):
+            continue
+        for compact_descr in (wanted or ()):
+            section.setdefault(compact_descr, None)
 
 
 def _wanted_items(only_items, item_type):
@@ -335,11 +377,41 @@ def _prune_empty(values):
     """Drop the sections a delta did not change."""
     pruned = {}
     for item_type, section in values.items():
+        # ``None`` is the client's removal marker, not an empty section.
         section = dict((key, value)
-                       for key, value in section.items() if value)
+                       for key, value in section.items()
+                       if value or value is None)
         if section:
             pruned[item_type] = section
     return pruned
+
+
+def _elite_vehicles(vehicle_types, unlocks):
+    """Return the owned vehicles whose whole research list is unlocked.
+
+    #1513 marks a vehicle elite when nothing it leads to is left to research.
+    Deriving it means a career's tech tree is honest and a sandbox stays fully
+    elite because its unlock set already covers the catalogue, instead of the
+    garage asserting eliteness for every vehicle it publishes.
+    """
+    try:
+        from items import vehicles
+    except ImportError:
+        return set(vehicle_types)
+    elite = set()
+    for compact_descr in vehicle_types:
+        try:
+            vehicle_type = vehicles.getVehicleType(int(compact_descr))
+            descriptors = tuple(
+                getattr(vehicle_type, 'unlocksDescrs', ()) or ())
+        except Exception:
+            # A vehicle whose type cannot be read is a presentation problem,
+            # not a reason to withhold the rest of the account.
+            continue
+        if all(int(tuple(row)[1]) in unlocks
+               for row in descriptors if len(tuple(row)) >= 2):
+            elite.add(compact_descr)
+    return elite
 
 
 def stats(selected_vehicle=None, postbattle_progress=None):
@@ -353,36 +425,42 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             if record.get('vehicleTypeCompactDescr') is not None)
     unlocks = set(vehicle.get('unlockItemCompactDescrs', ()))
     unlocks.update(vehicle_types)
+    # The garage owns the balances: research spends vehicle experience and a
+    # purchase spends credits, so the same file that records what the player
+    # has must record what it cost. ``postbattle_progress`` keeps the battle
+    # counters its own consumers read.
     progress = (postbattle_progress
                 if isinstance(postbattle_progress, dict) else {})
-    earned_credits = max(0, int(progress.get('credits', 0) or 0))
-    earned_free_xp = max(0, int(progress.get('freeXP', 0) or 0))
+    wallet = vehicle.get('wallet')
+    wallet = wallet if isinstance(wallet, dict) else {}
+    balances = dict(
+        (name, max(0, int(wallet.get(name, default) or 0)))
+        for name, default in (('credits', OFFLINE_CREDITS),
+                              ('gold', OFFLINE_GOLD),
+                              ('freeXP', OFFLINE_FREE_XP)))
     vehicle_xp = dict((compact_descr, 0) for compact_descr in vehicle_types)
-    try:
-        from items import vehicles
-        for type_name, row in (progress.get('vehicles') or {}).items():
-            descriptor = vehicles.VehicleDescr(typeName=str(type_name))
-            nation_id, vehicle_type_id = descriptor.type.id
-            compact_descr = vehicles.makeIntCompactDescrByID(
-                'vehicle', nation_id, vehicle_type_id)
-            vehicle_xp[int(compact_descr)] = max(
-                0, int(row.get('xp', 0) or 0))
-    except Exception:
-        # Native lookup is presentation-only; persisted progress remains
-        # available for the next sync when the vehicle cache is ready.
-        pass
+    saved_xp = vehicle.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        for compact_descr, experience in saved_xp.items():
+            try:
+                vehicle_xp[int(compact_descr)] = max(0, int(experience or 0))
+            except (TypeError, ValueError):
+                continue
+    elite = _elite_vehicles(vehicle_types, unlocks)
     return {
         'account': {
             'clanDBID': 0, 'attrs': 0, 'premiumExpiryTime': 0,
             'autoBanTime': 0, 'globalRating': 0,
         },
         'stats': {
-            'credits': OFFLINE_CREDITS + earned_credits,
-            'gold': OFFLINE_GOLD,
+            'credits': balances['credits'],
+            'gold': balances['gold'],
             'crystal': 0,
-            'freeXP': OFFLINE_FREE_XP + earned_free_xp,
-            'slots': OFFLINE_GARAGE_SLOTS,
-            'berths': OFFLINE_BARRACKS_BERTHS,
+            'freeXP': balances['freeXP'],
+            'slots': max(0, int(
+                vehicle.get('accountSlots', OFFLINE_GARAGE_SLOTS) or 0)),
+            'berths': max(0, int(
+                vehicle.get('accountBerths', OFFLINE_BARRACKS_BERTHS) or 0)),
             'accOnline': 0, 'accOffline': 0,
             'freeTMenLeft': 0, 'freeVehiclesLeft': 0,
             'vehicleSellsLeft': 0, 'captchaTriesLeft': 0,
@@ -400,7 +478,7 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             'vehTypeLocks': {}, 'restrictions': {},
             'globalVehicleLocks': {}, 'refSystem': {'referrals': {}},
             'unlocks': unlocks,
-            'eliteVehicles': set(vehicle_types),
+            'eliteVehicles': elite,
             'multipliedXPVehs': set(),
         },
         'cache': {
@@ -466,7 +544,8 @@ def shop(revision=0, selected_vehicle=None):
     nation_count = max(1, int(vehicle.get('shopNationCount', 16)))
     empty_items = {
         'itemPrices': item_prices,
-        'notInShopItems': set(),
+        'notInShopItems': set(
+            vehicle.get('notInShopItems', ()) or ()),
         'vehiclesNotToBuy': set(),
         'vehiclesRentPrices': {},
         'vehiclesToSellForGold': set(),
@@ -492,7 +571,7 @@ def shop(revision=0, selected_vehicle=None):
         'rev': int(revision) + 1,
         'prevRev': int(revision),
         'crystalExchangeRate': 0,
-        'sellPriceFactor': 0.5,
+        'sellPriceFactor': OFFLINE_SELL_PRICE_FACTOR,
         'items': dict(empty_items),
         'defaults': {
             'items': dict(empty_items),
@@ -561,10 +640,14 @@ def shop(revision=0, selected_vehicle=None):
         'dailyXPFactor': 1,
         'changeRoleCost': 0,
         'freeXPToTManXPRate': 10,
-        'exchangeRate': 0,
-        'exchangeRateForShellsAndEqs': 0,
-        'isEnabledBuyingGoldShellsForCredits': False,
-        'isEnabledBuyingGoldEqsForCredits': False,
+        # Offline policy, not a #1513 value: the gold exchange rate is
+        # server state the client never receives. 400 credits per gold is the
+        # long-published retail rate and the one the garage's own dialogs
+        # were written around.
+        'exchangeRate': OFFLINE_GOLD_EXCHANGE_RATE,
+        'exchangeRateForShellsAndEqs': OFFLINE_GOLD_EXCHANGE_RATE,
+        'isEnabledBuyingGoldShellsForCredits': True,
+        'isEnabledBuyingGoldEqsForCredits': True,
     }
 
 

@@ -11,6 +11,7 @@ from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922 import instance_guard
 from gui.mods.offline_lan_0922 import vehicle_blacklist
 from gui.mods.offline_lan_0922 import vehicle_records
+from gui.mods.offline_lan_0922.account_rpc import economy
 from gui.mods.offline_lan_0922.vehicle_records import (
     default_consumables, default_vehicle_settings, offers_in_random_battle,
     top_up_new_skill_slots, vehicle_type_guns, vehicle_type_modules,
@@ -155,7 +156,7 @@ def _bind_battle_progress(context):
         result = garage_store.apply_battle_crew_xp(
             snapshot, receipt['receipt_id'], vehicle_type_cd,
             receipt['rewards']['xp'], VEHICLE_SETTINGS_FLAG.XP_TO_TMAN,
-            tankmen_module=tankmen)
+            tankmen_module=tankmen, rewards=receipt['rewards'])
         context['selected_vehicle'] = snapshot
         touched.add(int(result['vehicle_id']))
         return result
@@ -281,6 +282,57 @@ def _validate_restored_garage(snapshot):
 
 
 
+def _starter_vehicle_types(vehicles, nations, prices):
+    """Return the type ids a fresh career owns.
+
+    A retail account can research nothing until it owns a vehicle, and the
+    only vehicles no research leads to are the tier-1 starters. #1513 knows
+    exactly which those are: ``getUnlocksSources`` inverts every vehicle's
+    research list, so a type that appears in no source set is a starter. They
+    cost nothing, so owning them from the first launch is the same account a
+    new player has a minute after creating one, without an empty garage the
+    native Hangar never has to render.
+    """
+    sources = vehicles.getUnlocksSources()
+    starters = []
+    for nation_id in range(len(nations.NAMES)):
+        for vehicle_type_id in sorted(
+                vehicles.g_list.getList(nation_id).keys()):
+            compact_descr = vehicles.makeIntCompactDescrByID(
+                'vehicle', nation_id, vehicle_type_id)
+            if compact_descr in sources:
+                continue
+            price = prices.get(compact_descr)
+            if price is None or price[0] or price[1] or price[2]:
+                # Priced or never offered: a premium or reward vehicle, not a
+                # starter every account begins with.
+                continue
+            starters.append((nation_id, vehicle_type_id))
+    return starters
+
+
+def _owned_vehicle_types(vehicles, nations, career, prices):
+    """Return the vehicle type ids this save owns, as a set of id tuples."""
+    if not career:
+        return None
+    store = _garage_store()
+    owned = store.owned_vehicle_types() if store is not None else None
+    if owned:
+        resolved = set()
+        for compact_descr in owned:
+            try:
+                vehicle_type = vehicles.getVehicleType(int(compact_descr))
+            except Exception:
+                # A saved career can name a vehicle this client no longer
+                # ships. Losing that one record is contained; refusing to
+                # start the garage is not.
+                continue
+            resolved.add(tuple(vehicle_type.id))
+        if resolved:
+            return resolved
+    return set(_starter_vehicle_types(vehicles, nations, prices))
+
+
 def _selected_vehicle(config, restore_saved=True):
     try:
         import nations
@@ -289,18 +341,28 @@ def _selected_vehicle(config, restore_saved=True):
             typeName=config['vehicle'])
         selected_type_id = tuple(selected_descriptor.type.id)
         consumables = default_consumables(vehicles)
+        save_mode = port_config.save_slot_mode()
+        career = save_mode == port_config.SAVE_MODE_NEW_ACCOUNT
+        prices = economy.price_index(vehicles, nations)
+        shop_item_prices, not_in_shop_items = economy.shop_prices(prices)
+        owned_types = _owned_vehicle_types(vehicles, nations, career, prices)
 
         # The exact #1513 VehicleList exposes one nation-indexed mapping for
         # every nations.NAMES entry.  Put the configured vehicle first so its
         # inventory id remains stable while the rest of the loadable local
         # catalogue is discovered from the client, rather than hard-coded.
-        type_ids = [selected_type_id]
+        type_ids = []
+        if not career or selected_type_id in owned_types:
+            type_ids.append(selected_type_id)
         for nation_id in range(len(nations.NAMES)):
             for vehicle_type_id in sorted(
                     vehicles.g_list.getList(nation_id).keys()):
                 type_id = (nation_id, vehicle_type_id)
-                if type_id not in type_ids:
-                    type_ids.append(type_id)
+                if type_id in type_ids:
+                    continue
+                if career and type_id not in owned_types:
+                    continue
+                type_ids.append(type_id)
 
         records = []
         inventory_items = {}
@@ -314,9 +376,12 @@ def _selected_vehicle(config, restore_saved=True):
                 built = vehicle_records.build_record(
                     vehicles, tankmen, ITEM_TYPE_INDICES, type_id,
                     len(records) + 1, next_tankman_id, default_settings,
-                    consumables,
-                    descriptor=(selected_descriptor
-                                if type_id == selected_type_id else None))
+                    ([0, 0, 0] if career else consumables),
+                    descriptor=(None if career else
+                                (selected_descriptor
+                                 if type_id == selected_type_id else None)),
+                    top_modules=not career,
+                    own_researchable_modules=not career)
             except Exception:
                 if type_id == selected_type_id:
                     raise
@@ -336,26 +401,32 @@ def _selected_vehicle(config, restore_saved=True):
                     published_items[compact_descr] = max(
                         int(published_items.get(compact_descr, 0)),
                         int(count))
-                    shop_item_prices[compact_descr] = {
-                        'credits': 0, 'gold': 0,
-                    }
+                    # Every published item carries a price whether or not the
+                    # baked catalogue knew it, so a baking gap can never make
+                    # the snapshot fail its own consistency check.
+                    shop_item_prices.setdefault(
+                        compact_descr, {'credits': 0})
                     unlock_item_compact_descrs.add(compact_descr)
 
             published_shells = inventory_items.setdefault(
                 ITEM_TYPE_INDICES['shell'], {})
             for compact_descr, count in built['shellCatalog'].items():
-                published_shells[compact_descr] = max(
-                    int(published_shells.get(compact_descr, 0)), int(count))
-                shop_item_prices[compact_descr] = {
-                    'credits': 0, 'gold': 0,
-                }
-                unlock_item_compact_descrs.add(compact_descr)
+                # A career owns exactly the ammunition it loaded; the closure
+                # only has to keep an alternate gun's shells priced.
+                shop_item_prices.setdefault(compact_descr, {'credits': 0})
+                if not career:
+                    published_shells[compact_descr] = max(
+                        int(published_shells.get(compact_descr, 0)),
+                        int(count))
+                    unlock_item_compact_descrs.add(compact_descr)
 
             vehicle_type_compact_descrs.add(vehicle_int_compact_descr)
+            shop_item_prices.setdefault(
+                vehicle_int_compact_descr, {'credits': 0})
             unlock_item_compact_descrs.add(vehicle_int_compact_descr)
-            shop_item_prices[vehicle_int_compact_descr] = {
-                'credits': 0, 'gold': 0,
-            }
+            unlock_item_compact_descrs.update(
+                economy.autounlocked_items(
+                    vehicles, vehicle_int_compact_descr))
             records.append(record)
 
         if not records:
@@ -370,6 +441,7 @@ def _selected_vehicle(config, restore_saved=True):
                 ('equipment', vehicles.g_cache.equipments)):
             item_type = ITEM_TYPE_INDICES[item_type_name]
             published = inventory_items.setdefault(item_type, {})
+            offered = 0
             for descriptor in cache_accessor().values():
                 try:
                     compact_descr = int(descriptor.compactDescr)
@@ -377,13 +449,20 @@ def _selected_vehicle(config, restore_saved=True):
                     continue
                 if not offers_in_random_battle(descriptor):
                     continue
+                shop_item_prices.setdefault(
+                    compact_descr, {'credits': 0})
+                if career:
+                    # A career buys its consumables and optional devices, so
+                    # only count what the catalogue offers.
+                    offered += 1
+                    continue
                 published[compact_descr] = max(
                     int(published.get(compact_descr, 0)),
                     OFFLINE_ARTEFACT_STOCK)
-                shop_item_prices[compact_descr] = {'credits': 0, 'gold': 0}
                 unlock_item_compact_descrs.add(compact_descr)
-            artefact_counts[item_type_name] = len(published)
-            if not published:
+            artefact_counts[item_type_name] = (
+                offered if career else len(published))
+            if not artefact_counts[item_type_name]:
                 raise ValueError(
                     'client %s catalogue is empty' % item_type_name)
 
@@ -399,6 +478,7 @@ def _selected_vehicle(config, restore_saved=True):
                     # both zero-valued keys are present.
                     'credits': 0,
                 }
+                unlock_item_compact_descrs.add(item.compactDescr)
                 customization_count += 1
         if customization_count <= 0:
             raise ValueError('client customization catalogue is empty')
@@ -417,7 +497,24 @@ def _selected_vehicle(config, restore_saved=True):
             'unlockItemCompactDescrs': unlock_item_compact_descrs,
             'optionalDeviceCount': artefact_counts['optionalDevice'],
             'equipmentCount': artefact_counts['equipment'],
+            'notInShopItems': not_in_shop_items,
+            'saveMode': save_mode,
+            'wallet': (economy.CAREER_WALLET.copy() if career else
+                       economy.SANDBOX_WALLET.copy()),
+            'vehicleXP': dict(
+                (compact_descr, 0)
+                for compact_descr in vehicle_type_compact_descrs),
+            'accountSlots': (economy.CAREER_GARAGE_SLOTS if career else
+                             economy.SANDBOX_GARAGE_SLOTS),
+            'accountBerths': (economy.CAREER_BARRACKS_BERTHS if career else
+                              economy.SANDBOX_BARRACKS_BERTHS),
+            'nextInventoryID': len(records) + 1,
+            'defaultVehicleSettings': default_settings,
         })
+        if not career:
+            # A sandbox has researched everything, so its tech tree is elite
+            # by the same derived rule a career uses rather than by assertion.
+            unlock_item_compact_descrs.update(shop_item_prices)
         # Overlay the saved garage last, so it wins over the stock fitting but
         # never over the current client's catalogue.
         if restore_saved:

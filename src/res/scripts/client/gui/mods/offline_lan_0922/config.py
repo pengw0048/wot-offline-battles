@@ -444,6 +444,25 @@ def set_active_save_slot(value):
     return _active_save_slot
 
 
+def save_slot_mode(slot=None, user_data_dir=None):
+    """Return how the active save was created.
+
+    The launcher owns ``save.json``; the client only reads the mode from it.
+    Anything unreadable falls back to the historical fully unlocked garage,
+    because that is the behaviour every save written before career mode had,
+    and guessing ``new_account`` would hide a player's vehicles.
+    """
+    path = os.path.join(
+        save_slot_dir(slot, user_data_dir), SAVE_METADATA_FILE_NAME)
+    try:
+        with open(path, 'rb') as stream:
+            value = json.load(stream)
+        mode = value.get('mode') if isinstance(value, dict) else None
+    except (IOError, OSError, TypeError, ValueError):
+        return SAVE_MODE_UNLOCKED
+    return mode if mode in SAVE_MODES else SAVE_MODE_UNLOCKED
+
+
 def saves_root(user_data_dir=None):
     return os.path.join(
         USER_DATA_DIR if user_data_dir is None else user_data_dir,

@@ -6082,6 +6082,20 @@ class BootstrapContractTests(unittest.TestCase):
             return_value=True)
         vehicle_configuration.top_component = mock.Mock()
         vehicle_records = _load_port_source('vehicle_records')
+        # ``economy`` imports the generated catalogue at module level so the
+        # object bootstrap captures is the real one; both have to execute
+        # while the stub package is installed.
+        price_catalogue = _load_port_source('price_catalogue')
+        with mock.patch.dict(sys.modules, {
+                'gui': types.ModuleType('gui'),
+                'gui.mods': types.ModuleType('gui.mods'),
+                'gui.mods.offline_lan_0922': package,
+                'gui.mods.offline_lan_0922.price_catalogue': price_catalogue}):
+            package.price_catalogue = price_catalogue
+            economy = _load_port_source('account_rpc/economy')
+        account_rpc_package = types.ModuleType(
+            'gui.mods.offline_lan_0922.account_rpc')
+        account_rpc_package.economy = economy
         instance_guard = types.ModuleType(
             'gui.mods.offline_lan_0922.instance_guard')
         instance_guard.release_if_requested = mock.Mock(return_value=False)
@@ -6171,6 +6185,9 @@ class BootstrapContractTests(unittest.TestCase):
             'gui.shared.utils.HangarSpace': hangar_module,
             'gui.mods': types.ModuleType('gui.mods'),
             'gui.mods.offline_lan_0922': package,
+            'gui.mods.offline_lan_0922.price_catalogue': price_catalogue,
+            'gui.mods.offline_lan_0922.account_rpc': account_rpc_package,
+            'gui.mods.offline_lan_0922.account_rpc.economy': economy,
             'gui.mods.offline_lan_0922.compat': compatibility_module,
             'gui.mods.offline_lan_0922.config': config,
             'gui.mods.offline_lan_0922.instance_guard': instance_guard,
