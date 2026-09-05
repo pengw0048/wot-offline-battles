@@ -426,8 +426,12 @@ class BootstrapLifecycleTests(unittest.TestCase):
             attemptedTypeIDs=attempted_type_ids,
             crewTypeIDs=crew_type_ids,
             getUnlocksSources=lambda: {},
+            # The real #1513 call inverts makeIntCompactDescrByID, and the
+            # ownership resolver reads the id it returns.
             getVehicleType=lambda compact_descr: types.SimpleNamespace(
-                id=(0, 0), unlocksDescrs=(), autounlockedItems=()),
+                id=((int(compact_descr) - 90000) // 1000,
+                    (int(compact_descr) - 90000) % 1000),
+                unlocksDescrs=(), autounlockedItems=()),
             g_cache=types.SimpleNamespace(
                 customization20=lambda: customization,
                 optionalDevices=lambda: optional_devices,
@@ -546,6 +550,70 @@ class BootstrapLifecycleTests(unittest.TestCase):
     def _career(self):
         return self._build(
             save_mode='new_account', starters=self.STARTER_NAMES)
+
+    def _with_saved_garage(self, owned, **kwargs):
+        """Build a garage against a save that owns exactly ``owned``."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(**kwargs)
+        store = types.SimpleNamespace(
+            owned_vehicle_types=lambda: list(owned))
+        with mock.patch.dict(sys.modules, modules):
+            with mock.patch.object(bootstrap, '_garage_store', lambda: store):
+                with mock.patch.object(
+                        bootstrap, '_restore_garage', lambda snapshot: False):
+                    return bootstrap._selected_vehicle(
+                        {'vehicle': 'ussr:R11_MS-1'})
+
+    def test_a_sold_vehicle_does_not_come_back_in_a_fully_unlocked_save(self):
+        """The seed is what a save starts from, not a standing guarantee."""
+        unused_bootstrap, everything = self._build()
+        owned = sorted(everything['vehicleTypeCompactDescrs'])
+        # 90011 is the configured vehicle; sell one of the others.
+        sold = [compact_descr for compact_descr in owned
+                if compact_descr != 90011][0]
+        kept = [compact_descr for compact_descr in owned
+                if compact_descr != sold]
+
+        snapshot = self._with_saved_garage(kept)
+
+        self.assertEqual(set(kept), set(snapshot['vehicleTypeCompactDescrs']))
+        self.assertEqual(len(kept), len(snapshot['vehicles']))
+
+    def test_a_career_that_bought_a_vehicle_keeps_it(self):
+        unused_bootstrap, career = self._career()
+        bought = sorted(career['vehicleTypeCompactDescrs']) + [90012]
+
+        snapshot = self._with_saved_garage(
+            bought, save_mode='new_account', starters=self.STARTER_NAMES)
+
+        self.assertIn(90012, snapshot['vehicleTypeCompactDescrs'])
+
+    def test_a_save_naming_a_vehicle_this_client_lacks_still_starts(self):
+        snapshot = self._with_saved_garage([90011, 99999])
+
+        self.assertEqual({90011}, set(snapshot['vehicleTypeCompactDescrs']))
+
+    def test_a_hidden_worker_never_reads_the_visible_client_save(self):
+        """The worker owns no garage store and must not open that file."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        opened = []
+
+        def store():
+            opened.append(True)
+            return types.SimpleNamespace(owned_vehicle_types=lambda: [90011])
+
+        with mock.patch.dict(sys.modules, modules):
+            with mock.patch.object(bootstrap, '_garage_store', store):
+                snapshot = bootstrap._selected_vehicle(
+                    {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertEqual([], opened)
+        self.assertEqual(
+            {90011, 90012, 91007},
+            set(snapshot['vehicleTypeCompactDescrs']))
 
     def test_a_new_account_owns_only_the_free_starter_vehicles(self):
         """A retail account can research nothing until it owns a vehicle.

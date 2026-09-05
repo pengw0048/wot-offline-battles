@@ -311,25 +311,36 @@ def _starter_vehicle_types(vehicles, nations, prices):
     return starters
 
 
-def _owned_vehicle_types(vehicles, nations, career, prices):
-    """Return the vehicle type ids this save owns, as a set of id tuples."""
+def _owned_vehicle_types(vehicles, nations, career, prices,
+                         consult_save=True):
+    """Return the vehicle type ids this save owns, as a set of id tuples.
+
+    A save's stored garage is what the player owns, in either mode.  What the
+    save mode decides is only the seed a save that has never been written
+    starts from: every vehicle for the historical sandbox, the free starters
+    for a career.  Treating the seed as a standing guarantee instead would
+    hand back every vehicle the player had sold on the next start.
+
+    ``consult_save`` is the caller saying whether it may read the save at all.
+    The hidden worker owns no garage store and must not open the visible
+    client's file, so it builds from the seed.
+    """
+    store = _garage_store() if consult_save else None
+    owned = store.owned_vehicle_types() if store is not None else None
+    resolved = set()
+    for compact_descr in (owned or ()):
+        try:
+            vehicle_type = vehicles.getVehicleType(int(compact_descr))
+        except Exception:
+            # A save can name a vehicle this client no longer ships. Losing
+            # that one record is contained; refusing to start the garage is
+            # not.
+            continue
+        resolved.add(tuple(vehicle_type.id))
+    if resolved:
+        return resolved
     if not career:
         return None
-    store = _garage_store()
-    owned = store.owned_vehicle_types() if store is not None else None
-    if owned:
-        resolved = set()
-        for compact_descr in owned:
-            try:
-                vehicle_type = vehicles.getVehicleType(int(compact_descr))
-            except Exception:
-                # A saved career can name a vehicle this client no longer
-                # ships. Losing that one record is contained; refusing to
-                # start the garage is not.
-                continue
-            resolved.add(tuple(vehicle_type.id))
-        if resolved:
-            return resolved
     return set(_starter_vehicle_types(vehicles, nations, prices))
 
 
@@ -345,14 +356,16 @@ def _selected_vehicle(config, restore_saved=True):
         career = save_mode == port_config.SAVE_MODE_NEW_ACCOUNT
         prices = economy.price_index(vehicles, nations)
         shop_item_prices, not_in_shop_items = economy.shop_prices(prices)
-        owned_types = _owned_vehicle_types(vehicles, nations, career, prices)
+        owned_types = _owned_vehicle_types(
+            vehicles, nations, career, prices, consult_save=restore_saved)
+        restricted = owned_types is not None
 
         # The exact #1513 VehicleList exposes one nation-indexed mapping for
         # every nations.NAMES entry.  Put the configured vehicle first so its
         # inventory id remains stable while the rest of the loadable local
         # catalogue is discovered from the client, rather than hard-coded.
         type_ids = []
-        if not career or selected_type_id in owned_types:
+        if not restricted or selected_type_id in owned_types:
             type_ids.append(selected_type_id)
         for nation_id in range(len(nations.NAMES)):
             for vehicle_type_id in sorted(
@@ -360,7 +373,7 @@ def _selected_vehicle(config, restore_saved=True):
                 type_id = (nation_id, vehicle_type_id)
                 if type_id in type_ids:
                     continue
-                if career and type_id not in owned_types:
+                if restricted and type_id not in owned_types:
                     continue
                 type_ids.append(type_id)
 

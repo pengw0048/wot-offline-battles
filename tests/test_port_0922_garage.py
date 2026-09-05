@@ -829,6 +829,49 @@ class GaragePersistenceTests(unittest.TestCase):
         self._store().apply(fresh)
         return fresh
 
+    def _two_vehicle_snapshot(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['vehicleTypeCompactDescr'] = 50002
+        snapshot['vehicles'].append(second)
+        snapshot['vehicleTypeCompactDescrs'] = {50001, 50002}
+        snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
+        return snapshot
+
+    def test_the_saved_garage_names_every_vehicle_the_account_owns(self):
+        """Startup rebuilds the garage from this list, so it must be whole.
+
+        A saved set that dropped even one vehicle would look exactly like a
+        vehicle the player had sold, and the next start would build a garage
+        without it.
+        """
+        snapshot = self._two_vehicle_snapshot()
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(snapshot))
+
+        self.assertEqual(
+            set(int(record['vehicleTypeCompactDescr'])
+                for record in snapshot['vehicles']),
+            set(self._store().owned_vehicle_types()))
+
+    def test_a_sold_vehicle_leaves_the_saved_garage(self):
+        snapshot = self._two_vehicle_snapshot()
+        state = self._state(snapshot)
+        state.sell_vehicle(10)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        owned = set(self._store().owned_vehicle_types())
+        self.assertNotIn(50002, owned)
+        self.assertEqual({50001}, owned)
+
+    def test_an_unwritten_save_owns_nothing_rather_than_guessing(self):
+        """A first launch has to fall back to the save's seed."""
+        self.assertEqual([], self._store().owned_vehicle_types())
+
     def test_a_full_loadout_survives_a_restart(self):
         state = self._state()
         state.equip_optional_device(9, 9001, 0)
