@@ -22,6 +22,7 @@ def _real_module(name):
 
 VEHICLE_BLACKLIST = _real_module('vehicle_blacklist')
 VEHICLE_CONFIGURATION = _real_module('vehicle_configuration')
+VEHICLE_RECORDS = _real_module('vehicle_records')
 
 
 MAX_SKILL_LEVEL = 100
@@ -449,6 +450,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.vehicle_blacklist': VEHICLE_BLACKLIST,
             'gui.mods.offline_lan_0922.vehicle_configuration': (
                 VEHICLE_CONFIGURATION),
+            'gui.mods.offline_lan_0922.vehicle_records': VEHICLE_RECORDS,
             'gui.app_loader': app_loader_module,
             'gui.app_loader.settings': settings_module,
             'items': items,
@@ -556,7 +558,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         tankmen = modules['items'].tankmen
         descriptor = _TankmanDescr(
             b'0:11:commander|repair,camouflage|0')
-        descriptor.freeXP = bootstrap._new_skill_xp(
+        descriptor.freeXP = VEHICLE_RECORDS._new_skill_xp(
             tankmen, descriptor, 2, choices=6) + 1
         compact_descr = descriptor.makeCompactDescr()
         snapshot = {

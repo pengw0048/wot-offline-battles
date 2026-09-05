@@ -6081,6 +6081,7 @@ class BootstrapContractTests(unittest.TestCase):
         vehicle_configuration.is_standard_battle_vehicle = mock.Mock(
             return_value=True)
         vehicle_configuration.top_component = mock.Mock()
+        vehicle_records = _load_port_source('vehicle_records')
         instance_guard = types.ModuleType(
             'gui.mods.offline_lan_0922.instance_guard')
         instance_guard.release_if_requested = mock.Mock(return_value=False)
@@ -6176,6 +6177,7 @@ class BootstrapContractTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.vehicle_blacklist': vehicle_blacklist,
             'gui.mods.offline_lan_0922.vehicle_configuration':
                 vehicle_configuration,
+            'gui.mods.offline_lan_0922.vehicle_records': vehicle_records,
             'gui.mods.offline_lan_0922.account_rpc.state': state_module,
             'gui.mods.offline_lan_0922.account_rpc.postbattle_store':
                 postbattle_module,

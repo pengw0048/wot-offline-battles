@@ -10,6 +10,11 @@ from gui.mods.offline_lan_0922.compat import g_compatibility
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922 import instance_guard
 from gui.mods.offline_lan_0922 import vehicle_blacklist
+from gui.mods.offline_lan_0922 import vehicle_records
+from gui.mods.offline_lan_0922.vehicle_records import (
+    default_consumables, default_vehicle_settings, offers_in_random_battle,
+    top_up_new_skill_slots, vehicle_type_guns, vehicle_type_modules,
+    with_new_skill_slots)
 from gui.mods.offline_lan_0922.vehicle_configuration import (
     install_top_modules as _install_top_modules,
     is_standard_battle_vehicle as _is_standard_battle_vehicle,
@@ -36,91 +41,16 @@ _player_ready_signaled = False
 
 # Enough of every artefact that the garage never blocks a mount on stock.
 OFFLINE_ARTEFACT_STOCK = 200
-# Untrained skills offered per crewman before the player picks any.
-NEW_SKILL_SLOTS = 8
-_NEW_SKILL_XP = {}
 _store = None
 _postbattle_store = None
 
 
-def _default_vehicle_settings():
-    """Return the VEHICLE_SETTINGS_FLAG mask a fresh garage vehicle starts with.
-
-    Auto-repair, both auto-resupply switches and accelerated crew training are
-    on, so the player never has to tick them.
-    """
-    from AccountCommands import VEHICLE_SETTINGS_FLAG
-    return (VEHICLE_SETTINGS_FLAG.XP_TO_TMAN |
-            VEHICLE_SETTINGS_FLAG.AUTO_REPAIR |
-            VEHICLE_SETTINGS_FLAG.AUTO_LOAD |
-            VEHICLE_SETTINGS_FLAG.AUTO_EQUIP)
 
 
-def _new_skill_xp(tankmen, descriptor, trained,
-                  choices=NEW_SKILL_SLOTS):
-    """Return the free XP that leaves ``choices`` skills to pick.
-
-    #1513's ``Tankman.newSkillCount`` offers one more skill for every skill the
-    stored free XP can train to ``tankmen.MAX_SKILL_LEVEL``, plus the one it
-    starts.  The cost depends only on how many skills the crewman already has.
-    """
-    key = (trained, choices)
-    if key not in _NEW_SKILL_XP:
-        _NEW_SKILL_XP[key] = sum(
-            descriptor.levelUpXpCost(level, trained + step)
-            for step in range(1, choices)
-            for level in range(tankmen.MAX_SKILL_LEVEL))
-    return _NEW_SKILL_XP[key]
 
 
-def _top_up_new_skill_slots(tankmen, descriptor):
-    """Give one parsed crewman NEW_SKILL_SLOTS total skill choices.
-
-    Learned skills stay selected.  XP is added only when the learned and still
-    selectable skills would otherwise total less than the offline minimum.
-    """
-    maximum = int(tankmen.MAX_SKILL_LEVEL)
-    selected = int(descriptor.lastSkillNumber)
-    missing = NEW_SKILL_SLOTS - selected
-    if missing <= 0:
-        return False
-    trained = max(0, selected - int(descriptor.freeSkillsNumber))
-
-    role_level = int(getattr(descriptor, 'roleLevel', maximum))
-    if role_level != maximum:
-        # Offline crew is generated at 100%.  Do not silently retrain a saved
-        # descriptor from another source just to make secondary slots appear.
-        return False
-    last_skill_level = int(getattr(
-        descriptor, 'lastSkillLevel', maximum))
-    required = 0
-    incomplete = False
-    if trained and last_skill_level < maximum:
-        required += sum(
-            descriptor.levelUpXpCost(level, trained)
-            for level in range(max(0, last_skill_level), maximum))
-        incomplete = True
-    required += _new_skill_xp(
-        tankmen, descriptor, trained, choices=missing)
-
-    current = max(0, int(descriptor.freeXP))
-    if current >= required and not incomplete:
-        return False
-    delta = max(0, required - current)
-    # addXP consumes the budget into the current skill first.  Merely assigning
-    # freeXP would leave #1513's newSkillCount blocked below 100%.
-    descriptor.addXP(delta)
-    return True
 
 
-def _with_new_skill_slots(tankmen, descriptor):
-    """Return the tankman with NEW_SKILL_SLOTS skills left for the player.
-
-    No skill is chosen here; the player picks all of them.  The caller already
-    unpacked this descriptor to validate the crew slot, so it is reused.
-    """
-    _top_up_new_skill_slots(tankmen, descriptor)
-    return descriptor.makeCompactDescr()
 
 
 def _migrate_saved_crew_skill_slots(snapshot, tankmen):
@@ -141,7 +71,7 @@ def _migrate_saved_crew_skill_slots(snapshot, tankmen):
             if compact_descr is None:
                 continue
             descriptor = tankmen.TankmanDescr(compact_descr)
-            if not _top_up_new_skill_slots(tankmen, descriptor):
+            if not top_up_new_skill_slots(tankmen, descriptor):
                 continue
             tankman_rows[tankman_id] = descriptor.makeCompactDescr()
             migrated += 1
@@ -332,143 +262,23 @@ def _validate_restored_garage(snapshot):
     return True
 
 
-def _component_compact_descrs(value, seen):
-    """Yield compact descriptors from a component list, however it nests.
-
-    #1513 stores turrets per turret position, so the same walker has to accept
-    both a flat component list and a list of per-position lists.
-    """
-    if value is None:
-        return
-    if isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            for compact_descr in _component_compact_descrs(item, seen):
-                yield compact_descr
-        return
-    compact_descr = getattr(value, 'compactDescr', None)
-    if compact_descr is None:
-        return
-    try:
-        compact_descr = int(compact_descr)
-    except (TypeError, ValueError):
-        return
-    if compact_descr in seen:
-        return
-    seen.add(compact_descr)
-    yield compact_descr
 
 
-def _component_descriptors(value, seen):
-    """Yield unique component objects from a possibly nested component list."""
-    if value is None:
-        return
-    if isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            for descriptor in _component_descriptors(item, seen):
-                yield descriptor
-        return
-    compact_descr = getattr(value, 'compactDescr', None)
-    try:
-        compact_descr = int(compact_descr)
-    except (TypeError, ValueError):
-        return
-    if compact_descr in seen:
-        return
-    seen.add(compact_descr)
-    yield value
 
 
-def _offers_in_random_battle(descriptor):
-    """Return whether a standard random battle may carry this artefact.
-
-    #1513 tags the artillery and airstrike consumables ``avatar`` and drives
-    them through ``Avatar.activateAvatarEquipment``, which this port does not
-    implement.  Battle boosters carry a non-regular ``equipmentType`` and the
-    published garage has no slot for them.
-    """
-    from items import EQUIPMENT_TYPES
-    if 'avatar' in (getattr(descriptor, 'tags', None) or ()):
-        return False
-    equipment_type = getattr(descriptor, 'equipmentType', None)
-    return equipment_type in (None, EQUIPMENT_TYPES.regular)
 
 
-def _vehicle_type_modules(descriptor):
-    """Yield ``(itemTypeName, compactDescr)`` for every module of one type."""
-    vehicle_type = getattr(descriptor, 'type', None)
-    if vehicle_type is None:
-        return
-    seen = set()
-    for item_type_name, attribute in (
-            ('vehicleChassis', 'chassis'),
-            ('vehicleTurret', 'turrets'),
-            ('vehicleEngine', 'engines'),
-            ('vehicleRadio', 'radios'),
-            ('vehicleFuelTank', 'fuelTanks')):
-        for compact_descr in _component_compact_descrs(
-                getattr(vehicle_type, attribute, None), seen):
-            yield (item_type_name, compact_descr)
-    # Guns hang off each turret variant; a flat ``guns`` list may also exist.
-    gun_seen = set()
-    for turret in _turret_descriptors(vehicle_type):
-        for compact_descr in _component_compact_descrs(
-                getattr(turret, 'guns', None), gun_seen):
-            yield ('vehicleGun', compact_descr)
-    for compact_descr in _component_compact_descrs(
-            getattr(vehicle_type, 'guns', None), gun_seen):
-        yield ('vehicleGun', compact_descr)
 
 
-def _vehicle_type_guns(descriptor):
-    """Yield every gun the vehicle type can mount, including stock guns."""
-    vehicle_type = getattr(descriptor, 'type', None)
-    if vehicle_type is None:
-        return
-    seen = set()
-    for turret in _turret_descriptors(vehicle_type):
-        for gun in _component_descriptors(
-                getattr(turret, 'guns', None), seen):
-            yield gun
-    for gun in _component_descriptors(
-            getattr(vehicle_type, 'guns', None), seen):
-        yield gun
 
 
 # equipments.xml: autoExtinguishers id=1, largeMedkit id=3, largeRepairkit
 # id=5.  None carries a <type>, a vehicleFilter or an incompatibleTags section,
 # so all three are regular consumables that fit every vehicle.
-_DEFAULT_CONSUMABLE_NAMES = ('autoExtinguishers', 'largeMedkit',
-                             'largeRepairkit')
 
 
-def _default_consumables(vehicles):
-    """Return the compact descriptors of the three mounted consumables.
-
-    They come from the cache rather than from a rebuilt id, because #1513
-    gives an artefact ``nations.NONE_INDEX`` instead of a real nation.
-    """
-    ids = vehicles.g_cache.equipmentIDs()
-    equipments = vehicles.g_cache.equipments()
-    slots = []
-    for name in _DEFAULT_CONSUMABLE_NAMES:
-        descriptor = equipments.get(ids.get(name))
-        if descriptor is None or not _offers_in_random_battle(descriptor):
-            raise ValueError('client equipment %r is unavailable' % (name,))
-        slots.append(int(descriptor.compactDescr))
-    return slots
 
 
-def _turret_descriptors(vehicle_type):
-    stack = [getattr(vehicle_type, 'turrets', None)]
-    while stack:
-        value = stack.pop()
-        if value is None:
-            continue
-        if isinstance(value, (list, tuple, set, frozenset)):
-            stack.extend(value)
-            continue
-        if getattr(value, 'compactDescr', None) is not None:
-            yield value
 
 
 def _selected_vehicle(config, restore_saved=True):
@@ -478,7 +288,7 @@ def _selected_vehicle(config, restore_saved=True):
         selected_descriptor = vehicles.VehicleDescr(
             typeName=config['vehicle'])
         selected_type_id = tuple(selected_descriptor.type.id)
-        default_consumables = _default_consumables(vehicles)
+        consumables = default_consumables(vehicles)
 
         # The exact #1513 VehicleList exposes one nation-indexed mapping for
         # every nations.NAMES entry.  Put the configured vehicle first so its
@@ -492,120 +302,21 @@ def _selected_vehicle(config, restore_saved=True):
                 if type_id not in type_ids:
                     type_ids.append(type_id)
 
-        vehicle_records = []
+        records = []
         inventory_items = {}
         shop_item_prices = {}
         vehicle_type_compact_descrs = set()
         unlock_item_compact_descrs = set()
         next_tankman_id = 100001
-        default_settings = _default_vehicle_settings()
+        default_settings = default_vehicle_settings()
         for type_id in type_ids:
             try:
-                if type_id == selected_type_id:
-                    descriptor = selected_descriptor
-                else:
-                    descriptor = vehicles.VehicleDescr(typeID=type_id)
-
-                nation_id, vehicle_type_id = descriptor.type.id
-                if not _is_standard_battle_vehicle(descriptor.type):
-                    raise ValueError(
-                        'vehicle type is not available in standard battles')
-                if vehicle_blacklist.is_unusable(descriptor.type.name):
-                    raise ValueError(
-                        'this client has no resources for %s: %s' % (
-                            descriptor.type.name, ', '.join(
-                                vehicle_blacklist.missing_resources(
-                                    descriptor.type.name))))
-                _install_top_modules(descriptor)
-                # A fresh offline crew starts without preselected perks.  The
-                # free-XP budget below exposes the requested empty slots, so
-                # the player remains the sole owner of every skill choice.
-                skills_mask = tankmen.getSkillsMask(())
-                crew_compact_descrs = list(tankmen.generateTankmen(
-                    nation_id, vehicle_type_id, descriptor.type.crewRoles,
-                    False, tankmen.MAX_SKILL_LEVEL, skills_mask, False))
-                if (not crew_compact_descrs or
-                        len(crew_compact_descrs) !=
-                        len(descriptor.type.crewRoles)):
-                    raise ValueError(
-                        'generated crew does not match vehicle crew slots')
-
-                validated_tankmen = []
-                for index, compact_descr in enumerate(crew_compact_descrs):
-                    tankman_descr = tankmen.TankmanDescr(compact_descr)
-                    roles = descriptor.type.crewRoles[index]
-                    if (tankman_descr.nationID != nation_id or
-                            tankman_descr.vehicleTypeID != vehicle_type_id or
-                            tankman_descr.role != roles[0]):
-                        raise ValueError(
-                            'generated tankman does not match vehicle crew slot')
-                    validated_tankmen.append(
-                        _with_new_skill_slots(tankmen, tankman_descr))
-
-                components = (
-                    ('vehicleChassis', descriptor.chassis),
-                    ('vehicleTurret', descriptor.turret),
-                    ('vehicleGun', descriptor.gun),
-                    ('vehicleEngine', descriptor.engine),
-                    ('vehicleRadio', descriptor.radio),
-                    ('vehicleFuelTank', descriptor.fuelTank),
-                )
-                record_inventory_items = {}
-                for item_type_name, component in components:
-                    compact_descr = component.compactDescr
-                    item_type = ITEM_TYPE_INDICES[item_type_name]
-                    record_inventory_items.setdefault(
-                        item_type, {})[compact_descr] = 1
-                # Publish every module this vehicle type can carry, not only
-                # the stock fitting, so its research tree shows them owned
-                # instead of costing XP.  The lists come from the vehicle's own
-                # type, so a premium hull still offers only its own modules.
-                for item_type_name, compact_descr in _vehicle_type_modules(
-                        descriptor):
-                    item_type = ITEM_TYPE_INDICES[item_type_name]
-                    owned = record_inventory_items.setdefault(item_type, {})
-                    owned[compact_descr] = max(
-                        1, int(owned.get(compact_descr, 0)))
-
-                shells = list(vehicles.getDefaultAmmoForGun(descriptor.gun))
-                if not shells or len(shells) % 2:
-                    raise ValueError(
-                        'default ammo must contain descriptor/count pairs')
-                record_shell_items = record_inventory_items.setdefault(
-                    ITEM_TYPE_INDICES['shell'], {})
-                for index in range(0, len(shells), 2):
-                    record_shell_items[shells[index]] = shells[index + 1]
-
-                # Saved fittings may mount any gun in the vehicle's research
-                # tree.  Catalogue every such gun's shells at account level,
-                # while the per-vehicle inventory below remains exactly the
-                # ammunition currently loaded.  Without this closure an
-                # alternate gun saved valid shells that disappeared from the
-                # next bootstrap's prices/unlocks and Account sync aborted.
-                shell_catalog = {}
-                for gun in _vehicle_type_guns(descriptor):
-                    gun_shells = list(vehicles.getDefaultAmmoForGun(gun))
-                    if not gun_shells or len(gun_shells) % 2:
-                        raise ValueError(
-                            'gun ammo must contain descriptor/count pairs')
-                    for index in range(0, len(gun_shells), 2):
-                        compact_descr = int(gun_shells[index])
-                        count = int(gun_shells[index + 1])
-                        if compact_descr <= 0 or count < 0:
-                            raise ValueError(
-                                'gun ammo has an invalid descriptor or count')
-                        shell_catalog[compact_descr] = max(
-                            count, int(shell_catalog.get(compact_descr, 0)))
-
-                # The exact key #1513 Vehicle.shellsLayoutIdx looks up.
-                layout_key = (descriptor.turret.compactDescr,
-                              descriptor.gun.compactDescr)
-                vehicle_compact_descr = descriptor.makeCompactDescr()
-                if not vehicle_compact_descr or descriptor.maxHealth <= 0:
-                    raise ValueError('vehicle descriptor is not garage-ready')
-                vehicle_int_compact_descr = (
-                    vehicles.makeIntCompactDescrByID(
-                        'vehicle', nation_id, vehicle_type_id))
+                built = vehicle_records.build_record(
+                    vehicles, tankmen, ITEM_TYPE_INDICES, type_id,
+                    len(records) + 1, next_tankman_id, default_settings,
+                    consumables,
+                    descriptor=(selected_descriptor
+                                if type_id == selected_type_id else None))
             except Exception:
                 if type_id == selected_type_id:
                     raise
@@ -615,15 +326,11 @@ def _selected_vehicle(config, restore_saved=True):
                 # valid; never publish a half-built vehicle.
                 continue
 
-            crew_ids = []
-            tankman_compact_descrs = {}
-            for compact_descr in validated_tankmen:
-                tankman_id = next_tankman_id
-                next_tankman_id += 1
-                crew_ids.append(tankman_id)
-                tankman_compact_descrs[tankman_id] = compact_descr
+            next_tankman_id = built['nextTankmanID']
+            record = built['record']
+            vehicle_int_compact_descr = built['vehicleTypeCompactDescr']
 
-            for item_type, items in record_inventory_items.items():
+            for item_type, items in record['inventoryItems'].items():
                 published_items = inventory_items.setdefault(item_type, {})
                 for compact_descr, count in items.items():
                     published_items[compact_descr] = max(
@@ -636,7 +343,7 @@ def _selected_vehicle(config, restore_saved=True):
 
             published_shells = inventory_items.setdefault(
                 ITEM_TYPE_INDICES['shell'], {})
-            for compact_descr, count in shell_catalog.items():
+            for compact_descr, count in built['shellCatalog'].items():
                 published_shells[compact_descr] = max(
                     int(published_shells.get(compact_descr, 0)), int(count))
                 shop_item_prices[compact_descr] = {
@@ -649,24 +356,9 @@ def _selected_vehicle(config, restore_saved=True):
             shop_item_prices[vehicle_int_compact_descr] = {
                 'credits': 0, 'gold': 0,
             }
-            vehicle_records.append({
-                'id': len(vehicle_records) + 1,
-                'compDescr': vehicle_compact_descr,
-                'crew': crew_ids,
-                'tankmen': tankman_compact_descrs,
-                'repair': (0, descriptor.maxHealth),
-                'lock': (0, 0),
-                'shells': shells,
-                'shellsLayout': {layout_key: list(shells)},
-                'shellsLayoutIdx': layout_key,
-                'settings': default_settings,
-                'eqs': list(default_consumables),
-                'eqsLayout': list(default_consumables),
-                'inventoryItems': record_inventory_items,
-                'vehicleTypeCompactDescr': vehicle_int_compact_descr,
-            })
+            records.append(record)
 
-        if not vehicle_records:
+        if not records:
             raise ValueError('client vehicle catalogue is empty')
 
         # items/__init__ ITEM_TYPE_NAMES: optionalDevice is 9 and equipment is
@@ -683,7 +375,7 @@ def _selected_vehicle(config, restore_saved=True):
                     compact_descr = int(descriptor.compactDescr)
                 except (TypeError, ValueError, AttributeError):
                     continue
-                if not _offers_in_random_battle(descriptor):
+                if not offers_in_random_battle(descriptor):
                     continue
                 published[compact_descr] = max(
                     int(published.get(compact_descr, 0)),
@@ -714,9 +406,9 @@ def _selected_vehicle(config, restore_saved=True):
         # Preserve the historical selected-vehicle fields for consumers that
         # only need the configured tank.  ``vehicles`` carries the complete
         # garage and account_rpc expands every record into native inventory.
-        result = dict(vehicle_records[0])
+        result = dict(records[0])
         result.update({
-            'vehicles': vehicle_records,
+            'vehicles': records,
             'inventoryItems': inventory_items,
             'shopItemPrices': shop_item_prices,
             'shopNationCount': len(nations.NAMES),
