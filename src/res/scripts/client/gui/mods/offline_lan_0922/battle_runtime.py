@@ -184,7 +184,6 @@ ARTILLERY_ARC_RAYS_PER_FRAME = 4
 STANDARD_GAMEPLAY = 'ctf'
 PREBATTLE_SECONDS = 10.0
 BATTLE_SECONDS = 900.0
-BOT_SPAWN_SECONDS = 0.30
 BOT_MANIFEST_RETRY_SECONDS = 0.25
 PLAYER_ENVIRONMENT_SECONDS = 0.3
 MAX_PENDING_LANDING_IMPACTS = 32
@@ -1625,7 +1624,8 @@ class BattleRuntime(object):
         self._pending_bot_create_order = []
         self._last_bot_create_team = None
         self._bots_ready_reported = False
-        self._next_bot_create_time = 0.0
+        self._bot_create_started = None
+        self._bot_create_finished = None
         self._arena_type = None
         self._arena_bounds = None
         self._spawn_planner = None
@@ -1909,7 +1909,8 @@ class BattleRuntime(object):
         self._pending_bot_create_order = []
         self._last_bot_create_team = None
         self._bots_ready_reported = False
-        self._next_bot_create_time = 0.0
+        self._bot_create_started = None
+        self._bot_create_finished = None
         self._navigation_graph = None
         self._grounded_bot_ids = set()
         self._bot_vehicle_assignments = {}
@@ -15244,10 +15245,12 @@ class BattleRuntime(object):
     def _maybe_send_battle_ready(self):
         """Open the shared countdown after the complete line-up has entered.
 
-        Bot presentation remains staggered to keep one 32-bit render callback
-        from constructing 29 HD compounds.  It now finishes behind the stock
-        BattleLoading screen instead of spending the first countdown seconds
-        loading the line-up that will shortly begin moving.
+        The stock battle page appears as soon as the local Vehicle enters, so
+        every remaining create is visible to the player.  Bot creates stay one
+        per render callback to keep one 32-bit callback from constructing 29
+        HD compounds, but they are no longer spread over wall-clock time: the
+        countdown opens once the roster has entered, not one fixed delay per
+        bot later.
         """
         if self._ready_sent or self._battle_live:
             return False
@@ -15274,6 +15277,29 @@ class BattleRuntime(object):
         if not ready(bases):
             raise RuntimeError('LAN server did not accept battle readiness')
         self._ready_sent = True
+        self._report_lineup_windows(len(bot_records))
+        return True
+
+    def _report_lineup_windows(self, bot_count):
+        """Say how long this process held the shared countdown closed.
+
+        ``created`` is the wall time spent issuing native creates and ``ready``
+        the time until the last compound finished entering the world.  Both are
+        measured from the first create, so one report line from the visible
+        client and one from the hidden worker explain the whole gap between the
+        bot manifest and BATTLE LIVE in the server log.
+        """
+        started = self._bot_create_started
+        if started is None:
+            return False
+        finished = self._bot_create_finished
+        now = self._clock()
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] LINEUP bots=%d created_s=%.3f '
+            'ready_s=%.3f\n' % (
+                bot_count,
+                0.0 if finished is None else max(0.0, finished - started),
+                max(0.0, now - started)))
         return True
 
     def _sample_ground_plane(self, position, yaw, descriptor=None):
@@ -19252,12 +19278,12 @@ class BattleRuntime(object):
             self._destroy_entity(event)
 
     def _queue_bot_create(self, event):
-        """Coalesce one bot until its staggered native createEntity call.
+        """Coalesce one bot until its own native createEntity callback.
 
-        The 0.8.2 implementation deliberately spreads the line-up over time.
         Creating 29 HD Vehicle entities and their model prerequisites in one
         BigWorld callback is both visibly janky and unsafe in this 32-bit
-        client.  Keep the newest snapshot pose while preserving roster order.
+        client, so each queued bot is created in a callback of its own.  Keep
+        the newest snapshot pose while preserving roster order.
         """
         key = event.get('entity')
         if not key or key in self._records:
@@ -19286,9 +19312,20 @@ class BattleRuntime(object):
         return True
 
     def _flush_pending_bot_create(self, now):
-        if (not self._pending_bot_create_order or
-                now < self._next_bot_create_time):
+        """Create the next queued bot in this render callback.
+
+        One create per callback is the whole rule: a single BigWorld callback
+        must never construct the entire line-up, but nothing in #1513 requires
+        the line-up to be spread over wall-clock time.  The former fixed
+        0.30 s delay between creates delayed the shared countdown by roughly
+        nine seconds for a 29 bot roster, because both the visible client and
+        the hidden worker only report battle readiness once their whole roster
+        exists.
+        """
+        if not self._pending_bot_create_order:
             return False
+        if self._bot_create_started is None:
+            self._bot_create_started = now
         key = self._pending_bot_create_order[0]
         # Alternate teams so both bases materialize together instead of one
         # full lineup appearing before the other.
@@ -19302,7 +19339,6 @@ class BattleRuntime(object):
                     break
         self._pending_bot_create_order.remove(key)
         event = self._pending_bot_creates.pop(key, None)
-        self._next_bot_create_time = now + BOT_SPAWN_SECONDS
         if event is None or key in self._records:
             return False
         self._create_remote(event)
@@ -19316,6 +19352,7 @@ class BattleRuntime(object):
             # battle_start runs before the first bot is queued, so the native
             # counters only mean something once the whole roster exists.
             self._bots_ready_reported = True
+            self._bot_create_finished = now
             self._report_memory('bots_ready')
         return created
 
