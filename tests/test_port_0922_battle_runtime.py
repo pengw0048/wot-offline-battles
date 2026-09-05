@@ -163,6 +163,9 @@ class _Matrix(object):
         value = _Vector(value)
         return value + self.translation
 
+    def applyVector(self, value):
+        return _Vector(value)
+
 
 class _YawMatrix(_Matrix):
     """Rigid yaw transform for visible-pose collision regression tests."""
@@ -2907,7 +2910,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             vehicle_id, _Vector(0.0, 0.0, 1.0), 350.0))
         self.assertEqual(1, vehicle.appearance.receiveShotImpulse.call_count)
 
-    def test_direct_hit_rocks_the_native_remote_hull_before_the_effect(self):
+    def test_direct_hit_uses_decoded_armour_axis_for_remote_impulse(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
             self._swinging_native_factory()
         battle = BattleRuntime(runtime)
@@ -2931,17 +2934,24 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         event = {
             'kind': 'bot_hit', 'world_pose': True, 'source': 'shot',
             'x': 0.0, 'y': 1.0, 'z': 29.0, 'shell_index': 0,
-            'shot_result': 2, 'damage': 144}
+            'shot_result': 2, 'damage': 144, 'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(-2.0, 0.0, 0.0),
+                _Vector(2.0, 0.0, 0.0))))
 
-        self.assertTrue(battle._present_combat_hit(
-            event, target_record, attacker_record, 11))
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertTrue(battle._present_combat_hit(
+                event, target_record, attacker_record, 11))
 
         direction, impulse = \
             vehicle.appearance.receiveShotImpulse.call_args.args
         self.assertEqual(350.0, impulse)
-        # Retail's direction points from the shooter into the armour plate.
-        self.assertAlmostEqual(1.0, direction.z)
-        self.assertAlmostEqual(0.0, direction.x)
+        # The decoded plate ray is independent of the centre-to-centre line.
+        self.assertAlmostEqual(0.0, direction.z)
+        self.assertAlmostEqual(1.0, direction.x)
 
     def test_hull_impulse_survives_a_failed_terrain_effect(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
@@ -2968,10 +2978,17 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         event = {
             'kind': 'bot_hit', 'world_pose': True, 'source': 'shot',
             'x': 0.0, 'y': 1.0, 'z': 29.0, 'shell_index': 0,
-            'shot_result': 2, 'damage': 144}
+            'shot_result': 2, 'damage': 144, 'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
 
-        self.assertFalse(battle._present_combat_hit(
-            event, target_record, attacker_record, 11))
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_combat_hit(
+                event, target_record, attacker_record, 11))
 
         vehicle.appearance.receiveShotImpulse.assert_called_once()
         self.assertIn(
@@ -2991,24 +3008,34 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             'engine_id': vehicle_id, 'local': False, 'native_remote': True,
             'spot_visible': True, 'state': {'health': 500, 'alive': True}}
         effects_descr = runtime.vehicles.g_cache.shotEffects[3]
-        direction = _Vector(0.0, 0.0, 1.0)
 
         self.assertFalse(battle._present_hit_impulse(
-            {'splash': True}, target_record, direction, effects_descr))
+            {'splash': True}, target_record, effects_descr))
         self.assertFalse(battle._present_hit_impulse(
-            {'dead': True}, target_record, direction, effects_descr))
+            {'dead': True}, target_record, effects_descr))
         self.assertFalse(battle._present_hit_impulse(
             {}, dict(target_record, state={'health': 0, 'alive': False}),
-            direction, effects_descr))
+            effects_descr))
         self.assertFalse(battle._present_hit_impulse(
             {}, dict(target_record, native_remote=False),
-            direction, effects_descr))
+            effects_descr))
         self.assertFalse(battle._present_hit_impulse(
-            {}, target_record, direction, {}))
+            {}, target_record, {}))
         vehicle.appearance.receiveShotImpulse.assert_not_called()
 
-        self.assertTrue(battle._present_hit_impulse(
-            {}, target_record, direction, effects_descr))
+        # A hit without the exact decoded direct-hit segment must not invent
+        # an impulse direction from vehicle centres.
+        self.assertFalse(battle._present_hit_impulse(
+            {}, target_record, effects_descr))
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertTrue(battle._present_hit_impulse(
+                {'damage_sticker': 123}, target_record, effects_descr))
 
     def test_local_victim_hull_receives_the_same_retail_impulse(self):
         runtime = _runtime()
@@ -3026,13 +3053,31 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             'state': {'health': 500, 'alive': True}}
         effects_descr = runtime.vehicles.g_cache.shotEffects[3]
 
-        self.assertTrue(battle._present_hit_impulse(
-            {}, target_record, _Vector(0.0, 0.0, 1.0), effects_descr))
+        event = {'damage_sticker': 123}
+        decoder = types.SimpleNamespace(decodeSegment=mock.Mock(
+            return_value=(
+                'hull', 29, _Vector(0.0, 0.0, -1.0),
+                _Vector(0.0, 0.0, 1.0))))
+
+        # PR #45 alone has not rebound the local stock animator and must skip
+        # the native call.  PR #46 establishes this exact ownership proof.
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_hit_impulse(
+                event, target_record, effects_descr))
+            battle._local_swinging_animator = \
+                target.appearance.swingingAnimator
+            self.assertTrue(battle._present_hit_impulse(
+                event, target_record, effects_descr))
 
         target.appearance.receiveShotImpulse.assert_called_once()
         target.isStarted = False
-        self.assertFalse(battle._present_hit_impulse(
-            {}, target_record, _Vector(0.0, 0.0, 1.0), effects_descr))
+        with mock.patch.dict(sys.modules, {
+                'VehicleEffects': types.SimpleNamespace(
+                    DamageFromShotDecoder=decoder)}):
+            self.assertFalse(battle._present_hit_impulse(
+                event, target_record, effects_descr))
         self.assertEqual(
             1, target.appearance.receiveShotImpulse.call_count)
 
