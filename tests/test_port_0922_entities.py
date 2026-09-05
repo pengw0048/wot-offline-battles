@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 from pathlib import Path
 import pickle
+import sys
 import types
 import unittest
 from unittest import mock
@@ -14,6 +15,8 @@ RUNTIME_PATH = (ROOT / 'src' / 'res' / 'scripts' /
                 'entities' / 'runtime.py')
 BINDING_PATH = RUNTIME_PATH.parent / 'bigworld_binding.py'
 AVATAR_BRIDGE_PATH = RUNTIME_PATH.parent / 'avatar_server.py'
+CLIENT_SCRIPTS = ROOT / 'src' / 'res' / 'scripts' / 'client'
+sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 
 def _runtime_module():
@@ -1177,6 +1180,7 @@ class AvatarServerBridgeTests(unittest.TestCase):
             'setRemoteCamera': 1,
             'switchObserverFPVControlMode': 1,
             'sendStateToOwnClient': 0,
+            'messenger_onActionByClient_chat2': 3,
         }
 
         for name, wire_count in expected_wire_args.items():

@@ -2227,6 +2227,37 @@ class LANSession(object):
                     self._battle_runtime is None):
                 return
             self._battle_runtime.on_bot_observation(message)
+        elif kind == 'team_command_ack':
+            round_id = _message_value(message, 'round_id')
+            if (not self._battle_started or
+                    round_id != self._active_round_id or
+                    self._battle_runtime is None):
+                return
+            self._battle_runtime.on_team_command_ack(message)
+        elif kind in ('team_chat', 'team_chat_ack'):
+            round_id = _message_value(message, 'round_id')
+            if (not self._battle_started or
+                    round_id != self._active_round_id or
+                    self._battle_runtime is None):
+                return
+            if kind == 'team_chat':
+                self._battle_runtime.on_team_chat(message)
+            else:
+                self._battle_runtime.on_team_chat_ack(message)
+        elif kind == 'team_command':
+            round_id = _message_value(message, 'round_id')
+            if (not self._battle_started or
+                    round_id != self._active_round_id or
+                    self._battle_runtime is None):
+                return
+            self._battle_runtime.on_team_command(message)
+        elif kind == 'team_command_terminal':
+            round_id = _message_value(message, 'round_id')
+            if (not self._battle_started or
+                    round_id != self._active_round_id or
+                    self._battle_runtime is None):
+                return
+            self._battle_runtime.on_team_command_terminal(message)
         elif kind == 'battle_failed':
             self._on_battle_failed(message)
         elif kind == 'battle_receipt':

@@ -25,6 +25,8 @@ try:
 except ImportError:
     import pickle as _pickle
 
+from gui.mods.offline_lan_0922.tactical_radio import BattleRadioAdapter
+
 
 class AvatarBridgeError(RuntimeError):
     pass
@@ -114,7 +116,8 @@ class AvatarServerBridge(object):
                  on_ready=None, on_leave=None,
                  on_vehicle_enter=None, on_viewpoint_switch=None,
                  on_monitor_vehicle_devices=None,
-                 initial_period='battle', initial_period_seconds=0.0):
+                 initial_period='battle', initial_period_seconds=0.0,
+                 radio_player_getter=None):
         self._avatar = avatar
         self._binding = entity_binding
         self._builder = property_builder
@@ -143,6 +146,8 @@ class AvatarServerBridge(object):
         self._client_context = ''
         self._destroyed = False
         self._leave_requested = False
+        self._battle_radio = BattleRadioAdapter(
+            avatar, lan_sender, player_getter=radio_player_getter)
 
     def prepareVehicleEnter(self, vehicle):
         """Install client-server pose state before stock local entry runs."""
@@ -494,6 +499,54 @@ class AvatarServerBridge(object):
     def makeDenunciation(self, violator_id, topic_id, violator_kind):
         return None
 
+    def messenger_onActionByClient_chat2(self, action_id, request_id, args):
+        """Forward one reviewed #1513 Chat2 action to the LAN server."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.handle_client_action(
+            action_id, request_id, args)
+
+    def start_team_chat(self):
+        """Initialize both stock arena channels after Avatar GUI startup."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.start_team_chat()
+
+    def close_team_chat(self):
+        """Deinitialize stock arena channels before Avatar GUI teardown."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.close_team_chat()
+
+    def receive_team_chat_ack(self, chat_seq, accepted):
+        """Complete one outgoing stock team-text request."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_chat_ack(chat_seq, accepted)
+
+    def receive_team_chat(self, text, sender_account_dbid):
+        """Present one server-validated teammate text through stock UI."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_team_chat(
+            text, sender_account_dbid)
+
+    def receive_team_command_ack(self, command_seq, accepted,
+                                 responder_account_dbids=None):
+        """Complete and present one LAN team-command acknowledgement."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_ack(
+            command_seq, accepted, responder_account_dbids)
+
+    def receive_team_command(self, command, sender_account_dbid,
+                             target_id=None, cell_index=None, details=None):
+        """Present one server-validated teammate command through stock UI."""
+        if self._destroyed:
+            return False
+        return self._battle_radio.receive_command(
+            command, sender_account_dbid, target_id, cell_index, details)
+
     def banUnbanUser(self, account_dbid, restriction_type, ban_period,
                      reason, is_ban):
         return None
@@ -593,6 +646,7 @@ class AvatarServerBridge(object):
         if self._destroyed and self._vehicle_id is None:
             return False
         self._destroyed = True
+        self._battle_radio.close()
         if self._vehicle_id is None:
             self._vehicle_enter_states = {}
             return False
