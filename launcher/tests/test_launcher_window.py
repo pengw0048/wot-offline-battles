@@ -1014,6 +1014,150 @@ class WindowTest(unittest.TestCase):
         self.assertIn("could not be checked", self._log_text())
         self.assertIn("unsafe overlay path", self._log_text())
 
+    def _saves_root(self):
+        root = os.path.join(self.settings_dir, "appdata")
+        patch = mock.patch.dict(os.environ, {"APPDATA": root})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.window._refresh_save_slots()
+        return os.path.join(
+            root, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            "saves")
+
+    def test_the_default_save_is_offered_and_cannot_be_deleted(self):
+        self._saves_root()
+
+        self.assertEqual(
+            (self.window._t("Default save"),),
+            tuple(self.window.save_slot_box.cget("values")))
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual(
+            "disabled", self.window.delete_save_slot_button.cget("state"))
+        self.assertFalse(self.window._delete_save_slot())
+        self.assertIn("default save cannot be deleted", self._log_text())
+
+    def test_a_new_save_becomes_the_selected_one_and_is_remembered(self):
+        saves_root = self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.assertTrue(self.window._new_save_slot())
+
+        self.assertNotEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual("Career", self.window.save_slot.get())
+        self.assertTrue(os.path.isdir(
+            os.path.join(saves_root, self.window._save_slot_id)))
+        self.assertEqual(
+            self.window._save_slot_id,
+            core.load_settings().get("save_slot"))
+        self.assertEqual(
+            "normal", self.window.delete_save_slot_button.cget("state"))
+
+    def test_selecting_another_save_records_it_for_the_next_launch(self):
+        self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.window._new_save_slot()
+        career = self.window._save_slot_id
+
+        self.window.save_slot.set(self.window._t("Default save"))
+        self.assertTrue(self.window._save_slot_selected())
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            core.load_settings().get("save_slot"))
+
+        self.window.save_slot.set("Career")
+        self.assertTrue(self.window._save_slot_selected())
+        self.assertEqual(career, self.window._save_slot_id)
+
+    def test_deleting_the_selected_save_returns_to_the_default(self):
+        saves_root = self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.window._new_save_slot()
+        career = self.window._save_slot_id
+
+        with mock.patch.object(
+                self.window, "_confirm_delete_save_slot", return_value=False):
+            self.assertFalse(self.window._delete_save_slot())
+        self.assertTrue(os.path.isdir(os.path.join(saves_root, career)))
+
+        with mock.patch.object(
+                self.window, "_confirm_delete_save_slot", return_value=True):
+            self.assertTrue(self.window._delete_save_slot())
+
+        self.assertFalse(os.path.exists(os.path.join(saves_root, career)))
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+
+    def test_a_save_cannot_be_deleted_while_any_game_client_is_running(self):
+        saves_root = self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.window._new_save_slot()
+        career = self.window._save_slot_id
+
+        with mock.patch.object(core, "game_is_running", return_value=True), \
+                mock.patch.object(
+                    self.window, "_confirm_delete_save_slot") as confirm:
+            self.assertFalse(self.window._delete_save_slot())
+
+        confirm.assert_not_called()
+        self.assertTrue(os.path.isdir(os.path.join(saves_root, career)))
+        self.assertIn(
+            "Close World of Tanks before deleting a save", self._log_text())
+
+    def test_a_save_deleted_outside_the_launcher_falls_back_to_the_default(
+            self):
+        saves_root = self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.window._new_save_slot()
+        shutil.rmtree(os.path.join(saves_root, self.window._save_slot_id))
+
+        self.window._refresh_save_slots()
+
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+
+    def test_saves_with_the_same_name_stay_distinguishable(self):
+        self._saves_root()
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value="Career"):
+            self.window._new_save_slot()
+            first = self.window._save_slot_id
+            self.window._new_save_slot()
+            second = self.window._save_slot_id
+
+        labels = tuple(self.window.save_slot_box.cget("values"))
+        self.assertEqual(3, len(labels))
+        self.assertIn("Career (%s)" % first, labels)
+        self.assertIn("Career (%s)" % second, labels)
+
+    def test_a_save_named_like_the_default_stays_distinguishable(self):
+        self._saves_root()
+        default_label = self.window._t("Default save")
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name",
+                return_value=default_label):
+            self.window._new_save_slot()
+            custom = self.window._save_slot_id
+
+        labels = tuple(self.window.save_slot_box.cget("values"))
+        self.assertIn(
+            "%s (%s)" % (
+                default_label, wot_launcher.save_slots.DEFAULT_SLOT_ID),
+            labels)
+        self.assertIn("%s (%s)" % (default_label, custom), labels)
+
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(
                 "wot_launcher.vehicle_overlays.list_vehicle_profiles",

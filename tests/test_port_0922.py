@@ -794,7 +794,8 @@ class PortConfigTests(unittest.TestCase):
 
             migrated = config_module.load(str(path))
 
-            self.assertEqual(2, migrated['schema'])
+            self.assertEqual(
+                config_module.DEFAULT_CONFIG['schema'], migrated['schema'])
             self.assertTrue(migrated['native_remote_vehicles'])
 
             path.write_text(

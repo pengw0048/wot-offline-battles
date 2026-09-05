@@ -20,12 +20,13 @@ if __package__ in (None, ""):
     import core
     import error_reports
     import i18n
+    import save_slots
     import vehicle_editor_ui
     import vehicle_overlays
 else:
     from . import (
         bot_lineup_profiles, bot_lineup_ui, core, error_reports, i18n,
-        vehicle_editor_ui, vehicle_overlays)
+        save_slots, vehicle_editor_ui, vehicle_overlays)
 
 
 LAUNCHER_VERSION = "0.6.7"
@@ -105,6 +106,22 @@ _CHINESE = {
         "无法移除本机车辆属性方案：%s",
     "Vehicle profiles are available for the 0.9.22 client.":
         "车辆属性方案仅适用于 0.9.22 客户端。",
+    "Saves": "存档",
+    "Save": "存档",
+    "Default save": "默认存档",
+    "New save...": "新建存档…",
+    "Rename save...": "重命名存档…",
+    "Delete save...": "删除存档…",
+    "New save": "新建存档",
+    "Rename save": "重命名存档",
+    "Save name:": "存档名称：",
+    "Delete save?": "删除存档？",
+    "Delete save '%s'? Its garage, crew, account settings and battle "
+    "results are removed permanently.":
+        "确定删除存档“%s”吗？它的车库、乘员、账号设置和战斗记录将被永久删除。",
+    "Each save keeps its own garage, crew, account settings and battle "
+    "results. The selected save is the one the game starts with.":
+        "每个存档有独立的车库、乘员、账号设置和战斗记录。启动游戏时使用当前选中的存档。",
     "Repair": "修复",
     "Repair startup (keep saved data)": "修复启动问题（保留存档）",
     "Normal client stuck loading? Clean preferences...":
@@ -535,12 +552,50 @@ class LauncherWindow(object):
 
         self.tools_tabs = self._ttk.Notebook(frame)
         self.tools_tabs.grid(row=3, column=0, sticky="we", pady=(0, 8))
+        self.save_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.tools_tabs.add(self.save_panel, text="")
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
+
+        self._save_slot_records = []
+        self._save_slot_id_by_label = {}
+        self._save_slot_id = str(
+            settings.get("save_slot") or save_slots.DEFAULT_SLOT_ID)
+        if not save_slots.valid_slot_id(self._save_slot_id):
+            self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+        self.save_slot_label = tk.Label(self.save_panel, text="")
+        self.save_slot_label.grid(row=0, column=0, sticky="w")
+        self.save_slot = tk.StringVar(value="")
+        self.save_slot_box = self._ttk.Combobox(
+            self.save_panel, textvariable=self.save_slot, values=(),
+            state="readonly", width=40)
+        self.save_slot_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.save_slot_box.bind(
+            "<<ComboboxSelected>>", self._save_slot_selected)
+        save_actions = tk.Frame(self.save_panel)
+        save_actions.grid(
+            row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.new_save_slot_button = tk.Button(
+            save_actions, text="", command=self._new_save_slot)
+        self.new_save_slot_button.pack(side="left", fill="x", expand=True)
+        self.rename_save_slot_button = tk.Button(
+            save_actions, text="", command=self._rename_save_slot)
+        self.rename_save_slot_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.delete_save_slot_button = tk.Button(
+            save_actions, text="", command=self._delete_save_slot)
+        self.delete_save_slot_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.save_help_label = tk.Label(
+            self.save_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.save_help_label.grid(
+            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self.save_panel.grid_columnconfigure(1, weight=1)
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
             settings.get("bot_lineup_profiles"))
@@ -702,6 +757,16 @@ class LauncherWindow(object):
         self.network_help_label.config(text=self._t(
             "To host: start the server, then join the game. Other players use "
             "a LAN address shown in the log."))
+        self.tools_tabs.tab(self.save_panel, text=self._t("Saves"))
+        self.save_slot_label.config(text=self._t("Save"))
+        self.new_save_slot_button.config(text=self._t("New save..."))
+        self.rename_save_slot_button.config(text=self._t("Rename save..."))
+        self.delete_save_slot_button.config(text=self._t("Delete save..."))
+        self.save_help_label.config(text=self._t(
+            "Each save keeps its own garage, crew, account settings and "
+            "battle results. The selected save is the one the game starts "
+            "with."))
+        self._refresh_save_slots()
         self.tools_tabs.tab(
             self.vehicle_panel, text=self._t("Vehicle modifier"))
         self.tools_tabs.tab(
@@ -803,6 +868,7 @@ class LauncherWindow(object):
         self._selected_client = status["client"]
         self._refresh_profiles(status)
         self._refresh_bot_lineup_profiles()
+        self._refresh_save_slots(status)
         self._update_action_controls()
         self._refresh_mode()
         return status
@@ -917,6 +983,164 @@ class LauncherWindow(object):
     def _profile_selected(self, unused_event=None):
         self._update_action_controls()
         self._save_settings()
+
+    def _save_slot_label(self, record):
+        """Return one unambiguous list entry for a save.
+
+        Two saves may carry the same name, and the default save has no name
+        until the player renames it, so the label falls back to the directory
+        id whenever the name alone would not identify the save.
+        """
+        def display_name(row):
+            if (row["id"] == save_slots.DEFAULT_SLOT_ID and
+                    row["name"] == save_slots.DEFAULT_SLOT_ID):
+                return self._t("Default save")
+            return row["name"]
+
+        name = display_name(record)
+        same_name = sum(
+            1 for row in self._save_slot_records
+            if display_name(row) == name)
+        return "%s (%s)" % (name, record["id"]) if same_name > 1 else name
+
+    def _refresh_save_slots(self, status=None):
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            records = save_slots.list_slots(game_root or None)
+        except save_slots.SaveSlotError as error:
+            # Without APPDATA a save still needs the game folder to live in.
+            # Keep the launcher usable and let the player pick a folder first.
+            if hasattr(self, "log_view"):
+                self._log("Saves could not be listed: %s" % error)
+            records = []
+        self._save_slot_records = list(records)
+        self._save_slot_id_by_label = {}
+        values = []
+        for record in self._save_slot_records:
+            label = self._save_slot_label(record)
+            self._save_slot_id_by_label[label] = record["id"]
+            values.append(label)
+        self.save_slot_box.config(values=tuple(values))
+        selected = [label for label, slot_id
+                    in self._save_slot_id_by_label.items()
+                    if slot_id == self._save_slot_id]
+        if selected:
+            self.save_slot.set(selected[0])
+        elif values:
+            # The selected save was deleted outside the launcher.  Fall back to
+            # the default rather than starting the game with a save id that no
+            # longer resolves to any progress.
+            self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+            self.save_slot.set(values[0])
+        else:
+            self.save_slot.set("")
+        self.delete_save_slot_button.config(
+            state=("disabled"
+                   if self._save_slot_id == save_slots.DEFAULT_SLOT_ID
+                   else "normal"))
+        return tuple(values)
+
+    def _save_slot_selected(self, unused_event=None):
+        slot_id = self._save_slot_id_by_label.get(self.save_slot.get())
+        if slot_id is None or slot_id == self._save_slot_id:
+            return False
+        self._save_slot_id = slot_id
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Selected save '%s'." % self.save_slot.get())
+        return True
+
+    def _ask_save_slot_name(self, title, current=None):
+        from tkinter import simpledialog
+
+        return simpledialog.askstring(
+            self._t(title), self._t("Save name:"), initialvalue=current)
+
+    def _confirm_delete_save_slot(self, label):
+        from tkinter import messagebox
+
+        return messagebox.askyesno(
+            self._t("Delete save?"),
+            self._t("Delete save '%s'? Its garage, crew, account settings "
+                    "and battle results are removed permanently.") % label,
+            icon="warning")
+
+    def _selected_save_slot_record(self):
+        for record in self._save_slot_records:
+            if record["id"] == self._save_slot_id:
+                return record
+        return None
+
+    def _new_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        game_root = self.game_root.get().strip()
+        raw_name = self._ask_save_slot_name("New save")
+        if raw_name is None:
+            return False
+        try:
+            record = save_slots.create_slot(
+                raw_name, save_slots.MODE_UNLOCKED, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not create the save: %s" % error)
+            return False
+        self._save_slot_id = record["id"]
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Created save '%s'." % record["name"])
+        return True
+
+    def _rename_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        record = self._selected_save_slot_record()
+        if record is None:
+            self._log("Select a save before renaming it.")
+            return False
+        game_root = self.game_root.get().strip()
+        current = ("" if record["name"] == record["id"] else record["name"])
+        raw_name = self._ask_save_slot_name("Rename save", current)
+        if raw_name is None:
+            return False
+        try:
+            renamed = save_slots.rename_slot(
+                record["id"], raw_name, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not rename the save: %s" % error)
+            return False
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Renamed save to '%s'." % renamed["name"])
+        return True
+
+    def _delete_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        if core.game_is_running():
+            self._log("Close World of Tanks before deleting a save.")
+            return False
+        record = self._selected_save_slot_record()
+        if record is None or record["id"] == save_slots.DEFAULT_SLOT_ID:
+            self._log("The default save cannot be deleted.")
+            return False
+        label = self.save_slot.get()
+        if not self._confirm_delete_save_slot(label):
+            self._log("Save deletion was cancelled.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            save_slots.delete_slot(record["id"], game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not delete the save: %s" % error)
+            return False
+        self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Deleted save '%s'." % record["name"])
+        return True
 
     def _refresh_bot_lineup_profiles(self):
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
@@ -1357,6 +1581,7 @@ class LauncherWindow(object):
             "vehicle_profile": self.vehicle_profile.get().strip(),
             "bot_lineup_profile": self.bot_lineup_profile.get().strip(),
             "bot_lineup_profiles": self._bot_lineup_store,
+            "save_slot": self._save_slot_id,
             "language": self.language_preference,
             COLLECT_CRASH_REPORTS_SETTING:
                 bool(self.collect_crash_reports.get()),
@@ -1837,8 +2062,9 @@ class LauncherWindow(object):
                             prepared["installedMembers"],
                             "" if prepared["installedMembers"] == 1 else "s"))
                 self._log(core.ensure_0_9_22_preferences_isolation(game_root))
-            for path in core.write_settings(game_root, session["client"],
-                                            session["mode"], host, port, name):
+            for path in core.write_settings(
+                    game_root, session["client"], session["mode"], host, port,
+                    name, self._save_slot_id):
                 self._log("Wrote %s" % path)
             if session["needs_server"]:
                 start_options = {
