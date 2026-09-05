@@ -597,7 +597,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
         roll.assert_not_called()
         blast_contact.assert_not_called()
 
-    def test_moving_target_terminal_shares_combat_burst_and_keeps_visual_impact(self):
+    def test_moving_target_terminal_keeps_splash_at_world_impact(self):
         battle, meta, unused_target, collision, data, state = self._direct_fixture()
         meta.update({'is_he': True, 'origin': (0.0, 1.0, 0.0),
                      'max_time_ms': 1000, 'max_distance': 100.0})
@@ -622,8 +622,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
                 state, {'reason': 'impact'}))
 
         self.assertEqual((5.0, 1.0, 0.0), direct_blast.call_args.args[4])
-        self.assertEqual(direct_blast.call_args.args[4],
-                         splash.call_args.args[1])
+        self.assertEqual((6.0, 1.0, 0.0), splash.call_args.args[1])
         self.assertEqual((6.0, 1.0, 0.0),
                          splash.call_args.kwargs['visual_impact'])
         self.assertEqual(6.0, meta['pending_resolution']['direct']['x'])

@@ -13585,10 +13585,6 @@ class BattleRuntime(object):
             query_delta.normalise()
             critical_impact = query[0] + query_delta.scale(contact_distance)
         is_he = combat_rules.is_he(shot)
-        if is_he:
-            # Direct and nearby victims share one combat burst even when the
-            # moving-target query differs from the visual projectile chord.
-            terminal_data['blast_impact'] = _xyz(critical_impact)
         damage = combat_rules.damage(
             shot, 2 if is_he else result, 0.0,
             rolled_damage=damage_roll,
@@ -13950,8 +13946,11 @@ class BattleRuntime(object):
                         not (direct is not None and
                              int(direct.get('shot_result', 1)) == 2)):
                     # A penetrating HE shell bursts inside its direct victim.
+                    # The direct victim resolves against its frozen collision
+                    # frame, while nearby victims share the projectile's
+                    # terminal-time world impact.
                     splash = self._projectile_splash_effects(
-                        meta, data.get('blast_impact', impact),
+                        meta, impact,
                         data.get('target_key'), state=state,
                         visual_impact=impact)
         except Exception as error:
