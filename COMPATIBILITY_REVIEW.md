@@ -362,11 +362,11 @@ contracts: `maxHpForShootingThrough` is `19`, and every listed material has
 `projectilePiercingPowerReduction` factor/minimum values `(0, 25)`. Version
 0.3.68 therefore lets AP, APCR and APHE continue only through an item whose
 scale-adjusted health is at most 19. Each accepted item leaves damage unchanged
-and adds a fixed 25 mm penetration loss; multiple items accumulate. The first
-operation that actually needs penetration lazily samples one shell factor and
-reuses it, while the range-dependent mean is evaluated at each tested obstacle
-distance and again at the vehicle. A pure miss or HE/HEAT stopped by a
-destructible consumes no penetration RNG. A sampled remainder below 1 mm makes
+and adds a fixed 25 mm penetration loss; multiple items accumulate. Each launch
+freezes one shell factor and reuses it, while the range-dependent mean is
+evaluated at each tested obstacle distance and again at the vehicle. Scene
+queries without an admitted projectile sample lazily only when penetration is
+needed. A sampled remainder below 1 mm makes
 the shell disappear at that
 obstacle. An above-threshold item may be destroyed but stops traversal. Under
 the pre-1.13 HE mechanics used by #1513, HE and HEAT stop at the first
@@ -376,12 +376,60 @@ The threshold and material reduction are exact pinned-resource evidence.
 Official same-family mechanics descriptions support the shell-family split,
 cumulative penetration reduction and unchanged damage. The proprietary retail
 0.9.22 server implementation and its exact operation order are not published,
-however. The lazy one-factor, per-tested-hit-range, then cumulative-reduction
+however. The one-factor, per-tested-hit-range, then cumulative-reduction
 order above is therefore documented as a high-confidence reconstruction rather than an exact
 server-source copy. The resulting fragile/module payload preserves its encoded
 shot bit, but the local manager order is unsynchronized: the copied projectile
 path does not deliver the retail server's later `damagedDestructibles` payload
 required to release a projectile-synchronized native order.
+
+Shell penetration and vehicle-damage rolls use a reconstruction of the public
+normal-distribution rule. The former uniform draw inside +/-25% overproduced
+both high and low rolls. [WG's May 2013 explanation for 8.6](https://wot-news.com/track/post/ru/HuKoguM/1369231089)
+explicitly changes damage and penetration from two to three sigma;
+the [North American 8.6 release notes](https://worldoftanks.com/en/news/general-news/86-update-notes/)
+confirm the reduction of extreme damage and penetration rolls. That entry is
+absent from the European release-notes page. The earlier 2011 recollection
+of 2.5 sigma does not establish the law for a client released after 8.6.
+[MrConway's June 2017 answer](https://wot-news.com/track/post/eu/MrConway/1497292760)
+still explicitly describes nonuniform penetration and damage. Accordingly,
+the shell value has mean equal to its descriptor value, standard deviation
+equal to one twelfth of that value, and limits of +/-25%. Out-of-interval
+samples are redrawn. **Resampling is an explicit reconstruction choice:**
+the published three-sigma cutoff does not specify the generator's exact
+outlier algorithm. The versioned announcement and release notes support this
+reconstruction, but do not expose the proprietary #1513 server. No claim of
+proprietary-server RNG equivalence
+follows from local distribution tests. This change covers the armour-damage
+channel even when a track material selects it; the separate devices-damage
+channel and aiming dispersion retain their existing laws.
+
+Aiming dispersion is a separate unresolved version gap. The implemented
+radial two-sigma law follows the [8.6 accuracy explanation](https://worldoftanks.com/en/news/general-news/some-changes-coming-86-update/),
+including uniform radial redistribution of outliers. It gives about 16.3%
+of shots within the innermost tenth of the radius. The [9.6 accuracy update](https://worldoftanks.com/en/news/general-news/9-6-accuracy-changes/)
+reduces central hits; the [retained Russian support explanation](https://lesta.ru/support/ru/products/mt/article/35718/)
+states the historical change from 16% to 10%. The official 3,000-shot diagrams
+do not publish a complete sampling law. The 9.6 reweighting is not implemented;
+the current scatter model must not be described as verified #1513 accuracy.
+Matching the client-owned cone angle and armour preview cannot establish
+matching weak-spot hit probabilities. No guessed ring weights have been added.
+
+One accepted penetration factor remains frozen across range, obstacles,
+ordered vehicle layers and a ricochet continuation. AP/APCR continuations
+preserve penetration spent on external plates, use the selected ricochet
+plate's actual trajectory position/time/distance, and apply their retained
+base multiplier to later destructibles. The native query may be in a moving
+target's frozen frame; its selected collision fraction is mapped onto the
+corresponding projectile chord before creating the reflected segment.
+
+Independent affine and moving-plane tests exercise the real component adapter,
+chord, armour resolver and wire-effect parser for ordinary player/Bot AP/APCR
+hits. They check component transforms, impact points, material identity,
+relative incidence and reuse of the frozen roll. They establish local geometry
+and data flow, not the exact Windows native BSP implementation, presentation
+timing or parity with a live retail server. The stock penetration preview and
+AP/APCR normalization/material laws are unchanged.
 
 The complete streamed-slot boundary comes from the exact #1513 native path:
 `game.onChunkLoad(spaceID, chunkID, numDestructibles, isOutside)` writes
@@ -1435,6 +1483,40 @@ code, normalises its contact direction, and presents no impulse for a splash,
 killing or dead-target hit. Retail's companion `inputHandler.onVehicleShaken`
 camera shake is not ported. Whether the resulting rocking magnitude matches
 retail still needs exact Windows acceptance.
+
+Non-penetrating HE and nearby splash now require a real structural collision
+inside the shell's blast sphere. The previous victim-origin radius check and
+whole-hull minimum-armour fallback could respectively miss a large vehicle's
+near surface and invent damage when no plate was hit. Loaded component
+`hitTester.bbox` values now provide at most thirteen directions per structural
+component; the existing four-field native collision adapter establishes the
+first structural plate on each ray. Selection maximizes the existing HE damage
+law over reachable candidates, sharing one victim damage roll and using the
+actual burst-to-plate distance and nominal armour. External screens remain in
+the collision prefix; their gap to the structural plate now contributes to
+blast distance. This change retains the existing structural armour absorption
+policy and does not add an unverified screen absorption formula.
+
+Blast candidates also require a clear static scenery segment through the
+existing mask-128 query and broken-destructible filter. A surface burst starts
+that visibility query on the incoming side so a wall cannot be bypassed by
+starting inside it. Direct HE uses the established collision-query burst;
+nearby victims use the projectile cursor and the same per-target presentation
+offset as direct collision. Hull/ground split and detached-turret histories
+retain the direct-collision path's explicitly recorded live-pose boundary.
+Missing geometry never supplies armour or an interior critical cone, and a
+failed nearby victim cannot discard another victim's effect. Penetrating HE
+keeps full direct damage and does not add an external splash explosion.
+
+These changes follow the historical [Wargaming HE damage explanation](https://worldoftanks.com/en/news/general-news/high-explosive-damage-explanation/),
+which describes damage through reachable armour in an explosion sphere. The
+finite component directions are a local implementation, not recovered retail
+server sampling. Dynamic vehicle/wreck occlusion and exhaustive weak-spot
+coverage are not established by this static-scene check. AP/APCR normalization,
+HEAT gap accounting and the stock penetration preview remain unchanged.
+Pure-data and adapter tests establish the stated local geometry and terminal
+contracts; exact Chinese HD #1513 Windows gameplay and frame pacing still need
+runtime acceptance.
 
 The same animator needs that rebind on the player's own tank.
 `CompoundAppearance.activate` is the only stock writer of

@@ -2,6 +2,7 @@ from __future__ import print_function
 
 """Pinned #1513 armour and HE laws behind native input adapters."""
 
+import math
 import random
 
 
@@ -68,7 +69,7 @@ def _offh_material_flag(material, name, default):
 
 def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 		initial_pierce_loss=0.0, penetration_factor=None,
-		base_penetration_multiplier=1.0):
+		base_penetration_multiplier=1.0, random_gauss=None):
 	'''Resolve the terminal external or structural plate in projectile order.
 
 	Returns a contact dictionary for the plate that stops external traversal or
@@ -103,7 +104,7 @@ def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 			continue
 		_comp = _h[3] if len(_h) > 3 else None
 		if factor is None:
-			factor = random.uniform(0.75, 1.25)
+			factor = sample_penetration_factor(random_gauss)
 		if base_pierce is None:
 			base_pierce = (_offh_range_piercing(shot, dist_m) *
 				float(base_penetration_multiplier) * float(factor))
@@ -175,11 +176,12 @@ def _offh_resolve_armor_contact(shot, dist_m, all_hits,
 
 
 def _offh_resolve_hull_hit(shot, dist_m, all_hits, initial_pierce_loss=0.0,
-		penetration_factor=None, base_penetration_multiplier=1.0):
+		penetration_factor=None, base_penetration_multiplier=1.0,
+		random_gauss=None):
 	'''Keep the legacy structural-hit tuple contract unchanged.'''
 	contact = _offh_resolve_armor_contact(
 		shot, dist_m, all_hits, initial_pierce_loss, penetration_factor,
-		base_penetration_multiplier)
+		base_penetration_multiplier, random_gauss)
 	if contact is None or contact['layer'] != 'structural':
 		return None
 	return (contact['result'], contact['effective_armor'],
@@ -223,32 +225,6 @@ def _offh_he_radius(shot):
 	return (cal * cal / 5555.0) if cal > 0.0 else 0.0
 
 
-def _offh_he_hull_armor(td):
-	'''Thinnest STRUCTURAL plate the hull carries, from the descriptor.
-	
-	Used when the blast ray finds no plate at all. Returning 0 there let the
-	blast through untouched; the thinnest plate is the attacker-friendly but
-	still bounded assumption - blast looks for the weak facing.'''
-	best = None
-	try:
-		_hull = getattr(td, 'hull', None)
-		if isinstance(_hull, dict):
-			mats = _hull.get('materials') or {}
-		else:
-			mats = getattr(_hull, 'materials', None) or {}
-		for m in mats.values():
-			if getattr(m, 'vehicleDamageFactor', 1.0) == 0.0:
-				continue
-			a = float(getattr(m, 'armor', 0.0) or 0.0)
-			if a <= 0.0:
-				continue
-			if best is None or a < best:
-				best = a
-	except Exception:
-		return 0.0
-	return best or 0.0
-
-
 def _offh_he_nominal_armor(all_hits, td=None):
 	'''Nominal thickness of the first STRUCTURAL plate on the ray.
 	
@@ -271,9 +247,8 @@ def _offh_he_nominal_armor(all_hits, td=None):
 			best = (_d, _a)
 	if best is not None:
 		return best[1]
-	# No plate on the ray. Zero would hand the blast a free pass, so fall back to
-	# the hull's thinnest structural plate when the descriptor is available.
-	return _offh_he_hull_armor(td) if td is not None else 0.0
+	# An unavailable plate is not the descriptor's thinnest plate.
+	return None
 
 
 def _offh_he_factor(shell, name, default, maximum=None):
@@ -361,7 +336,7 @@ def _offh_he_apply_tuning(overrides):
 
 def _offh_penetration(shot, dist_m, armor, hit_angle_cos, pierce_loss=0.0,
 		penetration_factor=None, material=None, allow_ricochet=True,
-		base_penetration_multiplier=1.0):
+		base_penetration_multiplier=1.0, random_gauss=None):
 	'''Armour test shared by the player and by bot-vs-bot fire.
 
 	Returns (result, eff_armor, pierce): 0 ricochet, 1 no penetration, 2 penetration.
@@ -384,7 +359,7 @@ def _offh_penetration(shot, dist_m, armor, hit_angle_cos, pierce_loss=0.0,
 	pierce = (_offh_range_piercing(shot, dist_m) *
 		float(base_penetration_multiplier))
 	if penetration_factor is None:
-		penetration_factor = random.uniform(0.75, 1.25)
+		penetration_factor = sample_penetration_factor(random_gauss)
 	pierce *= float(penetration_factor)
 	# spaced armour already crossed (tracks, external devices) is subtracted here
 	pierce -= float(pierce_loss or 0.0)
@@ -500,31 +475,179 @@ def collision_layers(collisions):
     return sorted(result, key=lambda item: item[0])
 
 
-def _call_with_uniform(function, uniform, *args):
-    if uniform is None:
-        return function(*args)
-    original = random.uniform
-    random.uniform = uniform
-    try:
-        return function(*args)
-    finally:
-        random.uniform = original
+def _offh_he_xyz(value):
+	"""Read one finite three-coordinate point from a native vector or tuple."""
+	try:
+		result = tuple(float(value[index]) for index in range(3))
+	except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+			OverflowError):
+		return None
+	if any(item != item or abs(item) == float('inf') for item in result):
+		return None
+	return result
+
+
+def _offh_he_collision_values(collision):
+	"""Extract distance and material while retaining the native collision."""
+	try:
+		distance = getattr(collision, 'dist')
+		material = getattr(collision, 'matInfo')
+	except (AttributeError, TypeError):
+		try:
+			distance = collision[0]
+			material = collision[2]
+		except (IndexError, KeyError, TypeError):
+			return None
+	try:
+		distance = float(distance)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if distance != distance or abs(distance) == float('inf'):
+		return None
+	return distance, material, collision
+
+
+def _offh_he_material_is_structural(material):
+	"""Only an explicit positive vehicle-damage factor is structure."""
+	factor = _offh_material_value(
+		material, 'vehicleDamageFactor', _OFFH_MISSING)
+	if factor is _OFFH_MISSING:
+		return False
+	try:
+		factor = float(factor)
+	except (TypeError, ValueError, OverflowError):
+		return False
+	return factor == factor and abs(factor) != float('inf') and factor > 0.0
+
+
+def he_blast_contact(shot, burst, start, end, collisions, rolled_damage,
+					 spall_coefficient=1.0):
+	"""Resolve one real structural HE contact from already-native ray evidence.
+
+	``collisions`` remains native evidence: this routine only orders it, rebuilds
+	the contact along ``start``/``end``, and applies the existing HE formula to
+	the first structural material at or beyond the burst.  It never samples
+	randomness and never substitutes a descriptor-wide armour fallback.
+	"""
+	converted = legacy_shot(shot)
+	if not _offh_is_he(converted):
+		return None
+	burst = _offh_he_xyz(burst)
+	start = _offh_he_xyz(start)
+	end = _offh_he_xyz(end)
+	radius = _offh_he_radius(converted)
+	try:
+		rolled_damage = float(rolled_damage)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if (burst is None or start is None or end is None or radius <= 0.0 or
+			rolled_damage != rolled_damage or abs(rolled_damage) == float('inf')):
+		return None
+	delta = tuple(end[index] - start[index] for index in range(3))
+	length_squared = sum(item * item for item in delta)
+	if length_squared <= 0.0:
+		return None
+	length = math.sqrt(length_squared)
+	direction = tuple(item / length for item in delta)
+	burst_along = sum((burst[index] - start[index]) * direction[index]
+					for index in range(3))
+	ordered = []
+	for collision in collisions or ():
+		values = _offh_he_collision_values(collision)
+		if values is not None:
+			ordered.append(values)
+	ordered.sort(key=lambda item: item[0])
+	through_contact = []
+	for distance_along, material, collision in ordered:
+		# The native distance must be on the queried segment; no extrapolated
+		# evidence may create HE damage outside its blast ray.
+		if distance_along < 0.0 or distance_along > length:
+			continue
+		if distance_along < burst_along - 1.0e-3:
+			continue
+		point = tuple(start[index] + direction[index] * distance_along
+					  for index in range(3))
+		distance = math.sqrt(sum(
+			(point[index] - burst[index]) ** 2 for index in range(3)))
+		structural = _offh_he_material_is_structural(material)
+		if distance > radius:
+			# A real structural plate in front of the query blocks a later one,
+			# even when this ray reached it outside the blast sphere.
+			if structural:
+				return None
+			continue
+		through_contact.append(collision)
+		if not structural:
+			continue
+		try:
+			nominal_armor = float(
+				_offh_material_value(material, 'armor', _OFFH_MISSING))
+		except (TypeError, ValueError, OverflowError):
+			return None
+		if (nominal_armor != nominal_armor or
+				abs(nominal_armor) == float('inf') or nominal_armor < 0.0):
+			return None
+		uses_liner = _offh_material_flag(
+			material, 'useAntifragmentationLining', True)
+		spall = spall_coefficient if uses_liner else 1.0
+		return {
+			'damage': _offh_he_damage(
+				converted, rolled_damage, nominal_armor, distance / radius, spall),
+			'nominal_armor': nominal_armor,
+			'distance': distance,
+			'point': point,
+			'direction': direction,
+			'collision': collision,
+			'collisions': tuple(through_contact),
+		}
+	return None
+
+
+def sample_shell_value(mean, random_gauss=None):
+    """Reconstruct the post-8.6 +/-25%, three-sigma shell roll.
+
+    WG described penetration and vehicle damage as normal, not uniform:
+    https://wot-news.com/track/post/ru/HuKoguM/1369231089
+    https://worldoftanks.com/en/news/general-news/86-update-notes/
+    https://wot-news.com/track/post/eu/MrConway/1497292760
+    The 8.6 announcement explicitly changes damage/penetration from two to
+    three sigma; the release notes confirm fewer extreme rolls. The older
+    2011 recollection of 2.5 sigma must not override this versioned change.
+    Those statements do not specify outlier handling. Conditional resampling
+    is an explicit reconstruction choice, not a recovered #1513 server ABI;
+    it preserves the normal density inside the stated interval without
+    inventing probability mass at the endpoints. See COMPATIBILITY_REVIEW.
+    """
+    mean = float(mean)
+    if mean != mean or abs(mean) == float('inf'):
+        raise ValueError('shell roll mean must be finite')
+    if mean <= 0.0:
+        return 0.0
+    sampler = random.gauss if random_gauss is None else random_gauss
+    minimum, maximum = mean * 0.75, mean * 1.25
+    sigma = mean * 0.25 / 3.0
+    while True:
+        value = float(sampler(mean, sigma))
+        if value != value or abs(value) == float('inf'):
+            raise ValueError('shell roll must be finite')
+        if minimum <= value <= maximum:
+            return value
+
 
 
 def penetration(shot, distance, armor, hit_angle_cos,
-                pierce_loss=0.0, random_uniform=None,
+                pierce_loss=0.0, random_gauss=None,
                 penetration_factor=None, material=None,
                 base_penetration_multiplier=1.0):
-    return _call_with_uniform(
-        _offh_penetration, random_uniform, legacy_shot(shot),
+    return _offh_penetration(
+        legacy_shot(shot),
         distance, armor, hit_angle_cos, pierce_loss, penetration_factor,
-        material, True, base_penetration_multiplier)
+        material, True, base_penetration_multiplier, random_gauss)
 
 
-def sample_penetration_factor(random_uniform=None):
-    """Draw the one #1513 penetration random factor owned by a shell."""
-    sampler = random.uniform if random_uniform is None else random_uniform
-    return float(sampler(0.75, 1.25))
+def sample_penetration_factor(random_gauss=None):
+    """Draw the one penetration factor frozen and owned by a shell."""
+    return sample_shell_value(1.0, random_gauss)
 
 
 def range_piercing(shot, distance):
@@ -555,23 +678,23 @@ def nominal_piercing_after_loss(shot, distance, pierce_loss=0.0):
                float(pierce_loss or 0.0))
 
 
-def resolve_armor_contact(shot, distance, collisions, random_uniform=None,
+def resolve_armor_contact(shot, distance, collisions, random_gauss=None,
                           pierce_loss=0.0, penetration_factor=None,
                           base_penetration_multiplier=1.0):
     """Return the terminal external or structural armor contact."""
-    return _call_with_uniform(
-        _offh_resolve_armor_contact, random_uniform, legacy_shot(shot),
+    return _offh_resolve_armor_contact(
+        legacy_shot(shot),
         distance, collision_layers(collisions), pierce_loss,
-        penetration_factor, base_penetration_multiplier)
+        penetration_factor, base_penetration_multiplier, random_gauss)
 
 
-def resolve_hull_hit(shot, distance, collisions, random_uniform=None,
+def resolve_hull_hit(shot, distance, collisions, random_gauss=None,
                      pierce_loss=0.0, penetration_factor=None,
                      base_penetration_multiplier=1.0):
-    return _call_with_uniform(
-        _offh_resolve_hull_hit, random_uniform, legacy_shot(shot),
+    return _offh_resolve_hull_hit(
+        legacy_shot(shot),
         distance, collision_layers(collisions), pierce_loss,
-        penetration_factor, base_penetration_multiplier)
+        penetration_factor, base_penetration_multiplier, random_gauss)
 
 
 def he_nominal_armor(collisions, descriptor=None):
@@ -579,9 +702,8 @@ def he_nominal_armor(collisions, descriptor=None):
         collision_layers(collisions), descriptor)
 
 
-def damage(shot, result, nominal_armor, random_uniform=None,
-           spall_coefficient=1.0):
-    """Apply the legacy direct-damage formula to the resolved vehicle hit."""
+def shell_damage_roll(shot, random_gauss=None):
+    """Draw vehicle damage before armour absorption and integer HP display."""
     converted = legacy_shot(shot)
     shell = converted.get('shell') or {}
     raw = shell.get('damage')
@@ -592,8 +714,16 @@ def damage(shot, result, nominal_armor, random_uniform=None,
             average = float(raw)
         except (TypeError, ValueError):
             return 0
-    uniform = random_uniform or random.uniform
-    rolled = int(uniform(average * 0.75, average * 1.25))
+    return sample_shell_value(average, random_gauss)
+
+
+def damage(shot, result, nominal_armor, random_gauss=None,
+           spall_coefficient=1.0, rolled_damage=None):
+    """Apply direct damage, optionally reusing the caller's exact frozen roll."""
+    converted = legacy_shot(shot)
+    if rolled_damage is None:
+        rolled_damage = shell_damage_roll(converted, random_gauss)
+    rolled = int(rolled_damage)
     if int(result) == 2:
         return rolled
     if _offh_is_he(converted):
@@ -610,28 +740,14 @@ def is_he(shot):
     return _offh_is_he(legacy_shot(shot))
 
 
-def he_hull_armor(descriptor):
-    return _offh_he_hull_armor(descriptor)
-
-
 def he_factors(shot):
     return _offh_he_factors(legacy_shot(shot))
 
 
 def he_splash_damage(shot, nominal_armor, distance_fraction,
-                     random_uniform=None, spall_coefficient=1.0):
+                     random_gauss=None, spall_coefficient=1.0):
     converted = legacy_shot(shot)
-    shell = converted.get('shell') or {}
-    raw = shell.get('damage')
-    try:
-        average = float(raw[0])
-    except (TypeError, ValueError, IndexError):
-        try:
-            average = float(raw)
-        except (TypeError, ValueError):
-            return 0
-    uniform = random_uniform or random.uniform
-    rolled = uniform(average * 0.75, average * 1.25)
+    rolled = shell_damage_roll(converted, random_gauss)
     return _offh_he_damage(
         converted, rolled, nominal_armor, distance_fraction,
         spall_coefficient)

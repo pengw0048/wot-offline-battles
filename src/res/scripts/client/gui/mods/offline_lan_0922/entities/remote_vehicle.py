@@ -1348,6 +1348,153 @@ def _pose_components(vehicle, math_module):
     return result
 
 
+def _finite_blast_coordinate(value):
+    """Return one finite geometry coordinate, or ``None``."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return value
+
+
+def _blast_bbox_bounds(bbox):
+    """Read one loaded native hit-test AABB without inventing dimensions."""
+    try:
+        lower = tuple(_finite_blast_coordinate(bbox[0][axis])
+                      for axis in range(3))
+        upper = tuple(_finite_blast_coordinate(bbox[1][axis])
+                      for axis in range(3))
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return None
+    if (None in lower or None in upper or
+            any(lower[axis] > upper[axis] for axis in range(3))):
+        return None
+    return lower, upper
+
+
+def _blast_component_has_structure(component):
+    """Whether a component can contain a vehicle-damaging native material."""
+    materials = _component_value(component, 'materials', {}) or {}
+    try:
+        values = materials.itervalues()
+    except AttributeError:
+        try:
+            values = materials.values()
+        except AttributeError:
+            return False
+    for material in values:
+        factor = _finite_blast_coordinate(
+            _component_value(material, 'vehicleDamageFactor'))
+        if factor is not None and factor > 0.0:
+            return True
+    return False
+
+
+def _blast_bbox_probe_locals(burst, lower, upper):
+    """Return the finite, deterministic AABB surface candidates for a burst."""
+    closest = tuple(max(lower[axis], min(upper[axis], burst[axis]))
+                    for axis in range(3))
+    result = [closest]
+    middle = tuple((lower[axis] + upper[axis]) * 0.5
+                   for axis in range(3))
+    for axis in range(3):
+        for bound in (lower[axis], upper[axis]):
+            face_center = list(middle)
+            face_center[axis] = bound
+            result.append(tuple(face_center))
+            projection = list(closest)
+            projection[axis] = bound
+            result.append(tuple(projection))
+    unique = []
+    seen = set()
+    for point in result:
+        if point not in seen:
+            seen.add(point)
+            unique.append(point)
+    return unique
+
+
+def vehicle_blast_probe_points_at_matrix(vehicle, vehicle_matrix, burst,
+                                         radius, math_module,
+                                         chassis_matrix=None):
+    """Return bounded native probe endpoints for an HE blast at a frozen pose.
+
+    Each loaded structural component contributes its closest AABB point, face
+    centres, and nearest projections onto those faces (at most thirteen local
+    candidates).  They are only broad candidate directions: the caller must
+    still run native collision to establish a real plate, blast distance and
+    occlusion.  This finite set is deliberately not an exhaustive retail HE
+    surface search.
+    """
+    radius = _finite_blast_coordinate(radius)
+    if vehicle is None or vehicle_matrix is None or radius is None or radius <= 0.0:
+        return ()
+    try:
+        burst = tuple(_finite_blast_coordinate(getattr(burst, axis))
+                      for axis in ('x', 'y', 'z'))
+    except (AttributeError, TypeError):
+        return ()
+    if None in burst:
+        return ()
+    try:
+        burst = math_module.Vector3(burst)
+        components = _pose_components(vehicle, math_module)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+            OverflowError):
+        return ()
+    result = []
+    seen = set()
+    radius_squared = radius * radius
+    for component_index, pair in enumerate(components):
+        try:
+            component, component_matrix = pair
+            tester = _component_value(component, 'hitTester')
+            local_hit_test = getattr(tester, 'localHitTest', None)
+            bounds = _blast_bbox_bounds(_component_value(tester, 'bbox'))
+            if (not callable(local_hit_test) or bounds is None or
+                    not _blast_component_has_structure(component)):
+                continue
+            root_matrix = (chassis_matrix if component_index == 0 and
+                           chassis_matrix is not None else vehicle_matrix)
+            world_to_root = math_module.Matrix(root_matrix)
+            world_to_root.invert()
+            root_burst = world_to_root.applyPoint(burst)
+            local_burst = component_matrix.applyPoint(root_burst)
+            local_burst = tuple(_finite_blast_coordinate(
+                getattr(local_burst, axis)) for axis in ('x', 'y', 'z'))
+            if None in local_burst:
+                continue
+            lower, upper = bounds
+            closest = tuple(max(lower[axis], min(upper[axis],
+                                                 local_burst[axis]))
+                            for axis in range(3))
+            distance_squared = sum(
+                (local_burst[axis] - closest[axis]) ** 2
+                for axis in range(3))
+            if distance_squared > radius_squared:
+                continue
+            component_to_root = math_module.Matrix(component_matrix)
+            component_to_root.invert()
+            for local_point in _blast_bbox_probe_locals(
+                    local_burst, lower, upper):
+                root_point = component_to_root.applyPoint(
+                    math_module.Vector3(local_point))
+                world_point = root_matrix.applyPoint(root_point)
+                coordinate = tuple(_finite_blast_coordinate(
+                    getattr(world_point, axis)) for axis in ('x', 'y', 'z'))
+                if coordinate is None or None in coordinate or coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                result.append(math_module.Vector3(coordinate))
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                OverflowError):
+            # Missing optional geometry must not suppress other components.
+            continue
+    return tuple(result)
+
+
 def _damage_sticker_coordinate(value, lower, upper):
     """Quantize one #1513 damage-sticker coordinate to its wire byte."""
     value = float(value)

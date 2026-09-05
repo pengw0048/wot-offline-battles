@@ -1490,7 +1490,7 @@ _FRONT_BOUND = _HALF_LENGTH - _FRONT_WHEEL
 _REAR_BOUND = _REAR_WHEEL - _HALF_LENGTH
 _T110E4_SHELL = {'damage': (750.0, 210.0), 'kind': 'ARMOR_PIERCING',
                  'caliber': 155.0}
-# random.uniform is pinned to its low bound in these tests, so the armour roll
+# Both channel samplers are pinned to their low bounds, so the armour roll
 # is 562.5 and the device roll 157.5. A mean-based mock could not tell the two
 # laws apart: 750 / 3 is exactly the 250 HP pool.
 _ARMOR_ROLL = 750.0 * 0.75
@@ -1533,6 +1533,10 @@ class TrackWheelDamageTests(unittest.TestCase):
     """Update 6.4 leading/rearmost wheel zones on the exact #1513 law."""
 
     def setUp(self):
+        armor_roll = mock.patch(
+            'random.gauss', side_effect=lambda mean, sigma: mean - 3.0 * sigma)
+        armor_roll.start()
+        self.addCleanup(armor_roll.stop)
         self.player = types.SimpleNamespace(
             playerVehicleID=999,
             arena=types.SimpleNamespace(onVehicleKilled=lambda *args: None),
