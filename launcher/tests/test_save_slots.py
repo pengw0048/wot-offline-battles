@@ -138,6 +138,23 @@ class SaveSlotsTests(unittest.TestCase):
 
         self.assertEqual(["default"], self._names())
 
+    def test_a_linked_slot_cannot_read_or_write_outside_the_saves_root(self):
+        os.makedirs(self.root)
+        outside = os.path.join(os.path.dirname(self.root), "outside")
+        os.makedirs(outside)
+        linked = os.path.join(self.root, "linked")
+        try:
+            os.symlink(outside, linked, target_is_directory=True)
+        except (AttributeError, NotImplementedError, OSError):
+            self.skipTest("directory symlinks are unavailable")
+
+        self.assertEqual(["default"], self._names())
+        with self.assertRaises(save_slots.SaveSlotError):
+            save_slots.read_slot("linked", root=self.root)
+        with self.assertRaises(save_slots.SaveSlotError):
+            save_slots.rename_slot("linked", "Outside", root=self.root)
+        self.assertFalse(os.path.exists(os.path.join(outside, "save.json")))
+
     def test_the_saves_root_follows_appdata_and_falls_back_to_the_game(self):
         appdata = save_slots.saves_root(
             environment={"APPDATA": os.path.join("C:\\", "Users", "p",

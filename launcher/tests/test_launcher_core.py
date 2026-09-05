@@ -1115,6 +1115,57 @@ class ClientInstallTest(unittest.TestCase):
             self.game, *saves_root.rstrip("/").split("/"))))
         self.assertEqual("keep", self._read(state_root + "notes.json"))
 
+    def test_reset_deletes_save_slots_from_appdata(self):
+        default_config = json.dumps({"enabled": True})
+        self._stage_0_9_22(default_config)
+        self._make_0_9_22_target()
+        appdata = os.path.join(self.work, "appdata")
+        saves_root = os.path.join(
+            appdata, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            core.SAVES_DIR_NAME_0_9_22)
+        state_root = os.path.dirname(saves_root)
+        self._write(
+            saves_root, "default/garage_state.json", "default garage")
+        self._write(
+            saves_root, "career/postbattle_state.json", "career results")
+        self._write(state_root, "garage_state.json", "legacy garage")
+        self._write(state_root, "notes.json", "keep")
+
+        with mock.patch.dict(os.environ, {"APPDATA": appdata}):
+            core.reset_0_9_22_state(
+                self.game, self.payload, is_running=lambda: False)
+
+        self.assertFalse(os.path.exists(saves_root))
+        self.assertFalse(os.path.exists(os.path.join(
+            state_root, "garage_state.json")))
+        with open(os.path.join(state_root, "notes.json")) as stream:
+            self.assertEqual("keep", stream.read())
+
+    def test_failed_reset_restores_appdata_saves_and_legacy_state(self):
+        self._make_0_9_22_target()
+        appdata = os.path.join(self.work, "appdata")
+        saves_root = os.path.join(
+            appdata, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            core.SAVES_DIR_NAME_0_9_22)
+        state_root = os.path.dirname(saves_root)
+        self._write(
+            saves_root, "default/garage_state.json", "default garage")
+        self._write(state_root, "garage_state.json", "legacy garage")
+
+        with mock.patch.dict(os.environ, {"APPDATA": appdata}), \
+                mock.patch.object(
+                    core, "install_client_mod",
+                    side_effect=core.LauncherError("install failed")):
+            with self.assertRaisesRegex(core.LauncherError, "install failed"):
+                core.reset_0_9_22_state(
+                    self.game, self.payload, is_running=lambda: False)
+
+        with open(os.path.join(
+                saves_root, "default", "garage_state.json")) as stream:
+            self.assertEqual("default garage", stream.read())
+        with open(os.path.join(state_root, "garage_state.json")) as stream:
+            self.assertEqual("legacy garage", stream.read())
+
     def test_reset_also_deletes_only_the_isolated_client_preferences(self):
         default_config = json.dumps({"enabled": True})
         self._stage_0_9_22(default_config)

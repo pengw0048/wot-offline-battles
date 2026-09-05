@@ -991,13 +991,16 @@ class LauncherWindow(object):
         until the player renames it, so the label falls back to the directory
         id whenever the name alone would not identify the save.
         """
-        name = record["name"]
-        if (record["id"] == save_slots.DEFAULT_SLOT_ID and
-                name == save_slots.DEFAULT_SLOT_ID):
-            name = self._t("Default save")
+        def display_name(row):
+            if (row["id"] == save_slots.DEFAULT_SLOT_ID and
+                    row["name"] == save_slots.DEFAULT_SLOT_ID):
+                return self._t("Default save")
+            return row["name"]
+
+        name = display_name(record)
         same_name = sum(
             1 for row in self._save_slot_records
-            if row["name"] == record["name"])
+            if display_name(row) == name)
         return "%s (%s)" % (name, record["id"]) if same_name > 1 else name
 
     def _refresh_save_slots(self, status=None):
@@ -1115,6 +1118,9 @@ class LauncherWindow(object):
     def _delete_save_slot(self):
         if self._busy or self._maintenance_busy:
             self._log("Wait for the current launcher operation to finish.")
+            return False
+        if core.game_is_running():
+            self._log("Close World of Tanks before deleting a save.")
             return False
         record = self._selected_save_slot_record()
         if record is None or record["id"] == save_slots.DEFAULT_SLOT_ID:
