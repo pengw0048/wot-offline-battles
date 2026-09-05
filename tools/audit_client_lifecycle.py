@@ -236,6 +236,23 @@ ORDERED_USES = (
     ),
     (
         'scripts/client/ProjectileMover.pyc',
+        'ProjectileMover.hide',
+        ('_ProjectileMover__projectiles', 'pop',
+         '_ProjectileMover__projectiles', 'fireMissedTrigger',
+         'showExplosion', '_ProjectileMover__notifyProjectileHit',
+         '_ProjectileMover__ballistics', 'hideProjectile'),
+        'hide transfers the stock row before retiring its native motor',
+    ),
+    (
+        'scripts/client/ProjectileMover.pyc',
+        'ProjectileMover.__deleteProjectile',
+        ('_ProjectileMover__projectiles', 'get',
+         '_ProjectileMover__delProjectile', 'fireMissedTrigger',
+         'TriggersManager', 'fireTrigger'),
+        'native expiry deletes the model before optional missed feedback',
+    ),
+    (
+        'scripts/client/ProjectileMover.pyc',
         'ProjectileMover.destroy',
         ('inputHandler', 'onCameraChanged',
          '_ProjectileMover__onCameraChanged',

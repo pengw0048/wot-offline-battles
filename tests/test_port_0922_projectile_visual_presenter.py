@@ -201,29 +201,128 @@ class _TriggerManager(object):
         self.triggers.append(trigger_type)
 
 
+class _NativeMotor(object):
+
+    def __init__(self, origin, velocity, start, gravity):
+        self.origin = _Vector(origin)
+        self.velocity = _Vector(velocity)
+        self.start = _Vector(start)
+        self.gravity = gravity
+        self.elapsed = 0.0
+
+    def advance(self, dt):
+        self.elapsed += dt
+        t = self.elapsed
+        return _Vector(self.start.x + self.velocity.x * t,
+                       self.start.y + self.velocity.y * t -
+                       0.5 * self.gravity * t * t,
+                       self.start.z + self.velocity.z * t)
+
+
 class _ProjectileMover(object):
+    """Exercise the reviewed stock guards, rows and ownership callbacks.
+
+    Motor stepping is a fake engine callback, not evidence of native physics
+    or Windows rendering. Its purpose is to expose competing Python writers.
+    """
 
     instances = []
     explode_error = None
     destroy_error = None
+    add_error = None
+    hide_error = None
+    reject_add = False
+    on_add = None
+    bigworld = None
 
     def __init__(self):
         self.calls = []
         self.explode_calls = []
+        self.hide_calls = []
+        self.hold_calls = []
         self.destroy_calls = 0
         self.space_ids = []
         self._ProjectileMover__projectiles = {}
         self.__class__.instances.append(self)
 
     def add(self, *args):
+        if not self.space_ids:
+            return
         self.calls.append(args)
-        if args[1].get('artilleryID') is None:
-            self._ProjectileMover__projectiles[args[0]] = object()
+        if self.__class__.on_add is not None:
+            self.__class__.on_add()
+        if self.__class__.add_error is not None:
+            raise self.__class__.add_error
+        if self.__class__.reject_add:
+            return
+        (shot_id, effects, gravity, origin, velocity, start,
+         maximum, attacker_id, camera_position) = args
+        if effects.get('artilleryID') is not None:
+            return
+        if sum((a - b) ** 2 for a, b in zip(_xyz(start), _xyz(origin))) > 400:
+            start = origin
+        own = attacker_id == self.bigworld.player().playerVehicleID
+        motor = _NativeMotor(origin, velocity, start, gravity)
+        model = self.bigworld.Model(effects['projectile'][int(own)])
+        model.position = _Vector(start)
+        row = {'model': model, 'motor': motor, 'effectsDescr': effects,
+               'showExplosion': False, 'fireMissedTrigger': own,
+               'autoScaleProjectile': own, 'attackerID': attacker_id,
+               'effectsData': {}}
+        self.bigworld.player().addModel(model)
+        model.addMotor(motor)
+        model.visible = False
+        model.visibleAttachments = True
+        effects['projectile'][2].attachTo(
+            model, row['effectsData'], 'flying',
+            isPlayerVehicle=own, isArtillery=False)
+        self._ProjectileMover__projectiles[shot_id] = row
+
+    def engine_frame(self, dt):
+        for shot_id, row in self._ProjectileMover__projectiles.items():
+            if shot_id > 0:
+                row['model'].position = row['motor'].advance(dt)
+
+    def _ProjectileMover__notifyProjectileHit(self, position, row):
+        self.bigworld.player().inputHandler.onProjectileHit(
+            position, row['effectsDescr']['caliber'],
+            row['autoScaleProjectile'])
 
     def explode(self, *args):
         self.explode_calls.append(args)
         if self.__class__.explode_error is not None:
             raise self.__class__.explode_error
+        row = self._ProjectileMover__projectiles.get(args[0])
+        if row is not None:
+            row['fireMissedTrigger'] = False
+            row['showExplosion'] = True
+            self._ProjectileMover__notifyProjectileHit(args[3], row)
+
+    def hide(self, shot_id, position):
+        if self.__class__.hide_error is not None:
+            raise self.__class__.hide_error
+        self.hide_calls.append((shot_id, position))
+        row = self._ProjectileMover__projectiles.pop(shot_id, None)
+        if row is not None:
+            self._ProjectileMover__projectiles[-shot_id] = row
+            row['fireMissedTrigger'] = False
+            row['showExplosion'] = False
+            self._ProjectileMover__notifyProjectileHit(position, row)
+
+    def hold(self, shot_id):
+        self.hold_calls.append(shot_id)
+
+    def expire(self, shot_id):
+        row = self._ProjectileMover__projectiles.pop(shot_id, None)
+        if row is None:
+            return
+        row['effectsDescr']['projectile'][2].detachAllFrom(row['effectsData'])
+        row['model'].delMotor(row['motor'])
+        self.bigworld.player().delModel(row['model'])
+        if row['fireMissedTrigger']:
+            import TriggersManager
+            TriggersManager.g_manager.fireTrigger(
+                TriggersManager.TRIGGER_TYPE.PLAYER_SHOT_MISSED)
 
     def setSpaceID(self, space_id):
         self.space_ids.append(space_id)
@@ -232,6 +331,10 @@ class _ProjectileMover(object):
         self.destroy_calls += 1
         if self.__class__.destroy_error is not None:
             raise self.__class__.destroy_error
+        for shot_id in list(self._ProjectileMover__projectiles):
+            # Stock destroy calls __delProjectile, not its expiry callback.
+            self._ProjectileMover__projectiles[shot_id]['fireMissedTrigger'] = False
+            self.expire(shot_id)
 
 
 def _descriptor(effects_index=7):
@@ -273,9 +376,14 @@ class ProjectileVisualPresenterTests(unittest.TestCase):
         _ProjectileMover.instances[:] = []
         _ProjectileMover.explode_error = None
         _ProjectileMover.destroy_error = None
+        _ProjectileMover.add_error = None
+        _ProjectileMover.hide_error = None
+        _ProjectileMover.reject_add = False
+        _ProjectileMover.on_add = None
         self.events = []
         _Matrix.events = self.events
         self.bigworld = _BigWorld(self.events)
+        _ProjectileMover.bigworld = self.bigworld
         self.math = types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix)
         self.effects, self.projectile_effects = _effects(self.events)
         self.flock = _FlockManager(self.events)
@@ -314,436 +422,293 @@ class ProjectileVisualPresenterTests(unittest.TestCase):
                 projectile_id, reference_position, reference_velocity,
                 is_ricochet, visual_start)
 
-    def test_player_and_bot_use_visible_stock_effects_on_controlled_servos(self):
+    def test_player_and_bot_use_space_bound_stock_native_motors(self):
         factory = self._factory()
-
-        player_visual = self._launch(factory, 'player:1', attacker_id=42)
-        bot_visual = self._launch(factory, 'bot:1', attacker_id=99)
-
-        self.assertEqual(1000000, player_visual)
-        self.assertEqual(1000001, bot_visual)
-        self.assertEqual([], _ProjectileMover.instances)
-        models = self.bigworld._player.models
-        self.assertEqual(
-            ['own-projectile.model', 'remote-projectile.model'],
-            [model.name for model in models])
-        self.assertTrue(all(model.visibleAttachments for model in models))
-        self.assertTrue(all(not model.visible for model in models))
-        self.assertTrue(all(len(model.motors) == 1 for model in models))
-        self.assertTrue(all(
-            isinstance(model.motors[0], _Servo) for model in models))
-        self.assertEqual((3.0, 4.0, 5.0),
-                         _xyz(models[0].motors[0].provider.translation))
-        calls = self.projectile_effects.attach_calls
-        self.assertEqual(['flying', 'flying'], [call[2] for call in calls])
-        self.assertEqual(
-            [True, False],
-            [call[3]['isPlayerVehicle'] for call in calls])
-        self.assertEqual([False, False],
-                         [call[3]['isArtillery'] for call in calls])
-
-    def test_non_ledgered_show_shooting_keeps_self_retiring_stock_tracer(self):
-        presenter = _RemoteShotPresenter(
-            self.bigworld, self.math, types.SimpleNamespace(), 7)
-        node = types.SimpleNamespace(translation=_Vector(4.0, 5.0, 6.0))
-        vehicle = types.SimpleNamespace(
-            id=99,
-            model=types.SimpleNamespace(node=mock.Mock(return_value=node)),
-            typeDescriptor=_descriptor(), _offlineLANShotIndex=0,
-            position=_Vector(), yaw=0.0, _aim_yaw=math.pi / 2.0,
-            _gun_pitch=-0.2)
-
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            self.assertTrue(presenter.play_tracer(vehicle))
-
-        self.assertEqual([], self.bigworld._player.models)
-        mover = _ProjectileMover.instances[0]
-        self.assertEqual(1, len(mover.calls))
-        args = mover.calls[0]
-        self.assertIs(self.effects, args[1])
-        self.assertEqual((4.0, 5.0, 6.0), _xyz(args[3]))
-        self.assertEqual((4.0, 5.0, 6.0), _xyz(args[5]))
-        self.assertEqual(99, args[7])
-
-    def test_update_moves_same_pose_and_duplicate_launch_does_not_recreate(self):
-        factory = self._factory()
-        visual_id = self._launch(factory)
-        entry = factory._shot_presenter._projectile_shots['round:shot']
-        pose = entry['pose']
-        model = entry['model']
-
-        duplicate = self._launch(
-            factory, reference_position=(999.0, 999.0, 999.0))
-        self.assertTrue(factory.update_projectile_visual(
-            'round:shot', (11.0, 12.0, 13.0), (0.0, -4.0, 80.0)))
-
-        self.assertEqual(visual_id, duplicate)
-        self.assertIs(pose, model.motors[0].provider)
-        self.assertEqual((11.0, 12.0, 13.0), _xyz(pose.translation))
-        self.assertEqual(1, len(self.bigworld._player.models))
-        self.assertEqual(1, len(self.projectile_effects.attach_calls))
-        self.assertEqual([], _ProjectileMover.instances)
-
-    def test_visual_start_uses_stock_twenty_metre_guard(self):
-        factory = self._factory()
-        origin = (1.0, 2.0, 3.0)
-        reference = (51.0, 2.0, 3.0)
-
-        self.assertTrue(self._launch(
-            factory, projectile_id='edge:accepted', origin=origin,
-            reference_position=reference,
-            visual_start=(71.0, 2.0, 3.0)))
-        self.assertTrue(self._launch(
-            factory, projectile_id='edge:rejected', origin=origin,
-            reference_position=reference,
-            visual_start=(71.001, 2.0, 3.0)))
-
-        presenter = factory._shot_presenter
-        accepted = presenter._projectile_shots['edge:accepted']
-        rejected = presenter._projectile_shots['edge:rejected']
-        self.assertEqual(
-            (71.0, 2.0, 3.0), _xyz(accepted['pose'].translation))
-        self.assertEqual(reference, _xyz(rejected['pose'].translation))
-        self.assertEqual(
-            [(71.0, 2.0, 3.0), reference],
-            [_xyz(position) for position in self.flock.positions])
-
-    def test_terminal_pins_then_keeps_stock_tail_before_owner_cleanup(self):
-        factory = self._factory()
-        self._launch(factory)
-        model = self.bigworld._player.models[0]
-        self.events[:] = []
-
-        self.assertTrue(factory.stop_projectile_tracer(
-            'round:shot', (31.0, 7.0, -2.0)))
-
-        self.assertEqual(('pose', (31.0, 7.0, -2.0)), self.events[0])
-        self.assertLess(
-            self.events.index(('pose', (31.0, 7.0, -2.0))),
-            self.events.index(('hit', (31.0, 7.0, -2.0), 0.12, True)))
-        self.assertLess(
-            self.events.index(('hit', (31.0, 7.0, -2.0), 0.12, True)),
-            self.events.index(('detach', 'stopFlying')))
-        self.assertEqual(1, len(model.motors))
-        self.assertEqual([model], self.bigworld._player.models)
-        presenter = factory._shot_presenter
-        self.assertNotIn('round:shot', presenter._projectile_shots)
-        self.assertEqual(1, len(presenter._projectile_tails))
-        self.assertNotIn(
-            'round:shot', factory._shot_presenter._visual_admissions)
-        self.assertFalse(factory.stop_projectile_tracer(
-            'round:shot', (31.0, 7.0, -2.0)))
-        self.assertEqual([], _ProjectileMover.instances)
-        self.assertEqual(2, len(self.flock.positions))
-        self.assertEqual((31.0, 7.0, -2.0),
-                         _xyz(self.flock.positions[-1]))
-        self.assertEqual(1, len(self.bigworld._player.projectile_hits))
-        self.assertEqual(1, len(self.bigworld.callbacks))
-        self.assertEqual(2.0, self.bigworld.callbacks[0][0])
-        self.assertEqual([], self.projectile_effects.detach_all_calls)
-
-        self.bigworld.run_callbacks()
-
-        self.assertEqual([], model.motors)
-        self.assertEqual([], self.bigworld._player.models)
-        self.assertNotIn(
-            'round:shot', factory._shot_presenter._projectile_shots)
-        self.assertEqual({}, factory._shot_presenter._projectile_tails)
-        self.assertEqual(1, len(self.projectile_effects.detach_all_calls))
-
-    def test_world_terminal_cleans_tracer_then_uses_unknown_id_explosion(self):
-        factory = self._factory()
-        self._launch(factory, projectile_id='world:shot')
-        self.events[:] = []
-        explosion = (self.effects, 'ground', (2.0, -2.0, 0.0))
-
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            self.assertTrue(factory.stop_projectile_tracer(
-                'world:shot', (12.0, 0.0, 3.0), explosion=explosion,
-                missed=True))
-
-        self.assertEqual(1, len(self.bigworld._player.models))
-        mover = _ProjectileMover.instances[0]
-        self.assertEqual([], mover.calls)
+        self.bigworld.Servo = mock.Mock(side_effect=AssertionError('second owner'))
+        first = self._launch(factory, 'player:1', attacker_id=42)
+        second = self._launch(factory, 'bot:2', attacker_id=77)
+        mover = factory._shot_presenter._mover
         self.assertEqual([7], mover.space_ids)
-        self.assertEqual(1, len(mover.explode_calls))
-        args = mover.explode_calls[0]
-        self.assertEqual(1000001, args[0])
-        self.assertNotIn(args[0], mover._ProjectileMover__projectiles)
-        self.assertEqual((12.0, 0.0, 3.0), _xyz(args[3]))
-        self.assertAlmostEqual(1.0, args[4].length)
-        self.assertEqual(['player-shot-missed'], self.triggers.triggers)
-        self.assertLess(
-            self.events.index(('detach', 'stopFlying')),
-            self.events.index(('callback', 2.0)))
+        self.assertEqual(2, len(mover.calls))
+        self.assertNotEqual(first, second)
+        self.bigworld.Servo.assert_not_called()
+        for shot_id, own in ((first, True), (second, False)):
+            row = mover._ProjectileMover__projectiles[shot_id]
+            self.assertIsInstance(row['motor'], _NativeMotor)
+            self.assertFalse(row['model'].visible)
+            self.assertTrue(row['model'].visibleAttachments)
+            self.assertFalse(row['fireMissedTrigger'])
+            self.assertTrue(row['_offlineLANCanonical'])
+            self.assertEqual(own, row['autoScaleProjectile'])
+        self.assertEqual('own-projectile.model', self.bigworld.player().models[0].name)
+        self.assertEqual('remote-projectile.model', self.bigworld.player().models[1].name)
+        self.assertEqual((3.0, 4.0, 5.0), _xyz(mover.calls[0][3]))
+        self.assertEqual((100.0, 10.0, 0.0), _xyz(mover.calls[0][4]))
+        self.assertEqual((91.0, 17.0, -4.0), _xyz(mover.calls[0][-1]))
 
-        self.bigworld.run_callbacks()
-        self.assertEqual([], self.bigworld._player.models)
-
-    def test_bot_world_terminal_does_not_fire_player_missed_trigger(self):
+    def test_native_flight_does_not_wait_for_a_worker_cursor(self):
         factory = self._factory()
-        self._launch(
-            factory, projectile_id='bot:world', attacker_id=99)
-
-        self.assertTrue(factory.stop_projectile_tracer(
-            'bot:world', (12.0, 0.0, 3.0), missed=True))
-
+        shot_id = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        mover.engine_frame(0.4)
+        row = mover._ProjectileMover__projectiles[shot_id]
+        position = _xyz(row['model'].position)
+        self.assertGreater(position[0], 3.0)
+        self.assertEqual(shot_id, self._launch(factory))
+        self.assertEqual(1, len(mover.calls))
+        self.assertEqual(position, _xyz(row['model'].position))
+        self.assertFalse(hasattr(factory, 'update_projectile_visual'))
         self.assertEqual([], self.triggers.triggers)
 
-    def test_pending_world_terminal_preserves_explosion_without_late_tracer(self):
+    def test_current_muzzle_and_stock_distance_guard_do_not_change_reference(self):
+        for start, expected in (((8, 4, 5), (8, 4, 5)),
+                                ((24, 4, 5), (3, 4, 5))):
+            with self.subTest(start=start):
+                factory = self._factory()
+                shot_id = self._launch(factory, visual_start=start)
+                mover = factory._shot_presenter._mover
+                row = mover._ProjectileMover__projectiles[shot_id]
+                self.assertEqual(expected, _xyz(row['model'].position))
+                self.assertEqual((3, 4, 5), _xyz(row['motor'].origin))
+                factory.destroy_all()
+
+    def test_worker_vehicle_terminal_hides_at_its_endpoint_once(self):
+        factory = self._factory()
+        shot_id = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        mover.engine_frame(0.8)
+        self.assertTrue(factory.stop_projectile_tracer('round:shot', (23, 2, 1)))
+        self.assertEqual([(shot_id, (23, 2, 1))], [
+            (key, _xyz(point)) for key, point in mover.hide_calls])
+        self.assertIn(-shot_id, mover._ProjectileMover__projectiles)
+        self.assertEqual(1, len(self.bigworld.player().projectile_hits))
+        self.assertEqual([], self.triggers.triggers)
+        self.assertFalse(factory.stop_projectile_tracer('round:shot', (23, 2, 1)))
+        mover.expire(-shot_id)
+        self.assertEqual([], self.bigworld.player().models)
+        self.assertEqual(1, len(self.bigworld.player().projectile_hits))
+
+    def test_world_terminal_uses_stock_explode_and_authoritative_feedback(self):
+        for attacker, missed_count in ((42, 1), (77, 0)):
+            with self.subTest(attacker=attacker):
+                self.triggers.triggers[:] = []
+                factory = self._factory()
+                shot_id = self._launch(factory, attacker_id=attacker)
+                mover = factory._shot_presenter._mover
+                self.assertTrue(factory.stop_projectile_tracer(
+                    'round:shot', (20, 0, 0),
+                    explosion=(self.effects, 'ground', (100, 0, 0)), missed=True))
+                self.assertEqual(shot_id, mover.explode_calls[0][0])
+                self.assertEqual((1, 0, 0), _xyz(mover.explode_calls[0][4]))
+                self.assertEqual([], mover.hide_calls)
+                self.assertEqual(missed_count, len(self.triggers.triggers))
+                factory.destroy_all()
+                self.assertEqual(missed_count, len(self.triggers.triggers))
+
+    def test_native_expiry_neither_reports_a_miss_nor_relaunches_on_retry(self):
+        factory = self._factory()
+        shot_id = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        mover.expire(shot_id)
+        self.assertEqual([], self.triggers.triggers)
+        self.assertEqual([], self.bigworld.player().projectile_hits)
+        self.assertEqual(shot_id, self._launch(factory))
+        self.assertEqual(1, len(mover.calls))
+        self.assertTrue(factory.stop_projectile_tracer(
+            'round:shot', (100, 0, 0),
+            explosion=(self.effects, 'ground', (1, 0, 0)), missed=True))
+        self.assertEqual(shot_id, mover.explode_calls[0][0])
+        self.assertEqual({}, mover._ProjectileMover__projectiles)
+        self.assertEqual(1, len(self.triggers.triggers))
+        self.assertEqual(1, len(self.bigworld.player().projectile_hits))
+
+    def test_ricochet_gets_a_new_held_motor_and_old_tail_cannot_delete_it(self):
+        factory = self._factory()
+        first = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        self.assertTrue(factory.stop_projectile_tracer('round:shot', (20, 0, 0)))
+        second = self._launch(factory, is_ricochet=True)
+        self.assertNotEqual(first, second)
+        self.assertEqual([second], mover.hold_calls)
+        mover.expire(-first)
+        self.assertIn(second, mover._ProjectileMover__projectiles)
+        self.assertEqual(second, factory._shot_presenter._projectile_shots[
+            'round:shot']['visual_id'])
+
+    def test_capacity_counts_native_tails_without_detaching_other_motors(self):
         factory = self._factory()
         presenter = factory._shot_presenter
-        self.assertTrue(factory.admit_projectile_visual(
-            42, 'pending:world', now=10.0))
+        presenter._MAX_ACTIVE_TOTAL = 1
+        first = self._launch(factory, 'first')
+        mover = presenter._mover
+        self.assertTrue(factory.stop_projectile_tracer('first', (20, 0, 0)))
+        self.assertFalse(self._launch(factory, 'second'))
+        self.assertIn(-first, mover._ProjectileMover__projectiles)
+        mover.expire(-first)
+        # Cosmetic denial is final for this shot, so freeing a tail cannot
+        # make an old launch suddenly appear seconds after its muzzle effect.
+        self.assertFalse(self._launch(factory, 'second'))
+        self.assertTrue(self._launch(factory, 'third'))
+        self.assertEqual([], self.triggers.triggers)
 
+    def test_non_ledgered_stock_tracer_keeps_its_original_feedback(self):
+        factory = self._factory()
         with mock.patch.dict(sys.modules, _modules(self.effects)):
-            self.assertTrue(factory.stop_projectile_tracer(
-                'pending:world', (12.0, 0.0, 3.0),
-                explosion=(self.effects, 'ground', (1.0, -1.0, 0.0))))
+            shot_id = factory._shot_presenter._play_legacy_tracer(
+                _descriptor(), 0, (1, 2, 3), (100, 0, 0), 9.81, 640, 42)
+        mover = factory._shot_presenter._mover
+        self.assertTrue(shot_id)
+        self.assertNotIn('_offlineLANCanonical',
+                         mover._ProjectileMover__projectiles[shot_id])
+        mover.hide(shot_id, _Vector(20, 2, 3))
+        self.assertEqual(1, len(self.bigworld.player().projectile_hits))
 
-        self.assertEqual([], self.bigworld._player.models)
-        mover = _ProjectileMover.instances[0]
-        self.assertEqual([], mover.calls)
-        self.assertEqual(1, len(mover.explode_calls))
-        self.assertNotIn('pending:world', presenter._visual_admissions)
-
-    def test_unmapped_terminal_cannot_bypass_visual_admission(self):
+    def test_reset_retires_native_owners_without_combat_feedback(self):
         factory = self._factory()
+        self._launch(factory)
+        mover = factory._shot_presenter._mover
+        self.assertTrue(factory.reset_projectile_visuals())
+        self.assertEqual(1, mover.destroy_calls)
+        self.assertEqual([], self.bigworld.player().models)
+        self.assertEqual([], self.bigworld.player().projectile_hits)
+        self.assertEqual([], self.triggers.triggers)
+        self.assertTrue(self._launch(factory, 'next-round'))
+        self.assertIsNot(mover, factory._shot_presenter._mover)
 
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            self.assertFalse(factory.stop_projectile_tracer(
-                'unknown', (12.0, 0.0, 3.0),
-                explosion=(self.effects, 'ground', (1.0, -1.0, 0.0))))
-
-        self.assertEqual([], _ProjectileMover.instances)
-        self.assertEqual([], self.bigworld._player.models)
-
-    def test_pressure_retires_oldest_controlled_visual_without_native_rows(self):
-        presenter = _RemoteShotPresenter(
-            self.bigworld, self.math, types.SimpleNamespace(), 7)
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            for index in range(25):
-                projectile_id = 'rapid:%d' % index
-                self.assertTrue(presenter.admit_visual(
-                    42, projectile_id, now=float(index)))
-                self.assertTrue(presenter.play_canonical(
-                    _descriptor(), 0, (float(index), 1.0, 0.0),
-                    (100.0, 0.0, 0.0), 9.81, 640.0, 42,
-                    projectile_id))
-
-        self.assertEqual(24, len(presenter._projectile_shots))
-        self.assertNotIn('rapid:0', presenter._projectile_shots)
-        self.assertIn('rapid:24', presenter._projectile_shots)
-        self.assertEqual(24, len(self.bigworld._player.models))
-        self.assertEqual([], _ProjectileMover.instances)
-        self.assertFalse(presenter._visual_admissions['rapid:0'][1])
-
-    def test_failed_terminal_detach_keeps_owner_for_retry(self):
+    def test_failed_reset_retains_native_owner_and_disables_new_cosmetics(self):
         factory = self._factory()
-        self._launch(factory, projectile_id='retry:terminal')
-        self.projectile_effects.detach_error = RuntimeError('detach failed')
+        self._launch(factory)
+        mover = factory._shot_presenter._mover
+        _ProjectileMover.destroy_error = RuntimeError('retirement failed')
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(factory.reset_projectile_visuals())
+        self.assertIs(mover, factory._shot_presenter._mover)
+        self.assertFalse(self._launch(factory, 'next-shot'))
+        _ProjectileMover.destroy_error = None
+        self.assertTrue(factory.reset_projectile_visuals())
+        self.assertIsNone(factory._shot_presenter._mover)
+        self.assertEqual([], self.bigworld.player().models)
 
-        self.assertFalse(factory.stop_projectile_tracer(
-            'retry:terminal', (10.0, 1.0, 0.0)))
-        self.assertIn(
-            'retry:terminal', factory._shot_presenter._projectile_shots)
-        self.assertEqual(1, len(self.bigworld._player.models))
-
-        self.projectile_effects.detach_error = None
-        self.assertTrue(factory.stop_projectile_tracer(
-            'retry:terminal', (10.0, 1.0, 0.0)))
-        self.assertEqual(1, len(self.bigworld._player.models))
-        self.bigworld.run_callbacks()
-        self.assertEqual([], self.bigworld._player.models)
-
-    def test_ricochet_reuses_id_without_losing_old_tail_or_new_segment(self):
+    def test_native_add_rejection_can_retry_without_duplicate_resources(self):
         factory = self._factory()
-        self._launch(factory, projectile_id='reused:1')
-        self.assertTrue(factory.stop_projectile_tracer(
-            'reused:1', (10.0, 1.0, 0.0)))
+        _ProjectileMover.reject_add = True
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(self._launch(factory))
+        self.assertEqual({}, factory._shot_presenter._projectile_shots)
+        self.assertEqual([], self.bigworld.player().models)
+        _ProjectileMover.reject_add = False
+        self.assertTrue(self._launch(factory))
+        self.assertEqual(1, len(self.bigworld.player().models))
 
-        self.assertTrue(self._launch(
-            factory, projectile_id='reused:1', is_ricochet=True,
-            reference_position=(10.0, 1.0, 0.0),
-            reference_velocity=(-80.0, 4.0, 0.0)))
-        replacement = factory._shot_presenter._projectile_shots['reused:1']
-        self.assertEqual(2, len(self.bigworld._player.models))
-        self.assertEqual(1, len(factory._shot_presenter._projectile_tails))
-        self.assertTrue(factory.update_projectile_visual(
-            'reused:1', (8.0, 1.1, 0.0), (-80.0, 3.0, 0.0)))
-
-        self.bigworld.run_callbacks()
-
-        self.assertIs(
-            replacement,
-            factory._shot_presenter._projectile_shots['reused:1'])
-        self.assertEqual([replacement['model']], self.bigworld._player.models)
-        self.assertEqual({}, factory._shot_presenter._projectile_tails)
-
-    def test_failed_creation_cleanup_keeps_owner_until_exact_retry(self):
+    def test_identity_is_installed_before_native_creation_can_reenter(self):
         factory = self._factory()
-        presenter = factory._shot_presenter
-        self.projectile_effects.attach_error = RuntimeError('attach failed')
-        self.bigworld._player.del_model_error = RuntimeError(
-            'delModel failed')
+        seen = []
+        _ProjectileMover.on_add = lambda: seen.append(dict(
+            factory._shot_presenter._projectile_shots['round:shot']))
+        self.assertTrue(self._launch(factory))
+        self.assertEqual(1, len(seen))
+        self.assertFalse(seen[0]['started'])
+        self.assertEqual(1000000, seen[0]['visual_id'])
 
-        self.assertFalse(self._launch(
-            factory, projectile_id='retry:creation'))
-
-        retained = presenter._projectile_shots['retry:creation']
-        self.assertTrue(retained['creation_failed'])
-        self.assertEqual(1, len(self.bigworld._player.models))
-
-        self.projectile_effects.attach_error = None
-        self.bigworld._player.del_model_error = None
-        self.assertTrue(self._launch(
-            factory, projectile_id='retry:creation'))
-
-        active = presenter._projectile_shots['retry:creation']
-        self.assertFalse(active['creation_failed'])
-        self.assertEqual(1, len(self.bigworld._player.models))
-        self.assertEqual(2, len(self.projectile_effects.attach_calls))
-
-    def test_reset_releases_epoch_visuals_and_presenter_can_launch_again(self):
+    def test_native_add_exception_retains_owner_without_retrying(self):
         factory = self._factory()
-        self._launch(factory, projectile_id='old:1')
-        self._launch(factory, projectile_id='old:2', attacker_id=99)
-
+        _ProjectileMover.add_error = RuntimeError('partial creation')
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(self._launch(factory))
+        mover = factory._shot_presenter._mover
+        self.assertFalse(self._launch(factory))
+        self.assertEqual(1, len(mover.calls))
+        self.assertIn('round:shot', factory._shot_presenter._projectile_shots)
         self.assertTrue(factory.reset_projectile_visuals())
 
-        presenter = factory._shot_presenter
-        self.assertEqual({}, presenter._projectile_shots)
-        self.assertEqual({}, presenter._visual_admissions)
-        self.assertEqual([], self.bigworld._player.models)
-        self.assertTrue(self._launch(factory, projectile_id='new:1'))
-        self.assertEqual(1, len(self.bigworld._player.models))
-
-    def test_failed_epoch_reset_disables_later_cosmetic_launches(self):
+    def test_failed_terminal_cannot_reuse_old_motor_as_a_ricochet(self):
         factory = self._factory()
-        self._launch(factory, projectile_id='old:1')
-        presenter = factory._shot_presenter
-        self.bigworld._player.del_model_error = RuntimeError(
-            'delModel failed')
+        first = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        _ProjectileMover.hide_error = RuntimeError('native hide failed')
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(factory.stop_projectile_tracer(
+                'round:shot', (20, 0, 0)))
+        self.assertFalse(self._launch(factory, is_ricochet=True))
+        self.assertIn(first, mover._ProjectileMover__projectiles)
+        self.assertEqual([], mover.hold_calls)
+        self.assertTrue(self._launch(factory, 'independent-shot'))
+        _ProjectileMover.hide_error = None
+        self.assertTrue(factory.stop_projectile_tracer('round:shot', (20, 0, 0)))
 
-        self.assertFalse(factory.reset_projectile_visuals())
-        self.assertFalse(presenter._launches_enabled)
-
-        self.bigworld._player.del_model_error = None
-        self.assertFalse(self._launch(factory, projectile_id='new:1'))
-        self.assertNotIn('new:1', presenter._projectile_shots)
-
-    def test_canonical_combat_equipment_artillery_fails_closed(self):
-        artillery, unused_effects = _effects(self.events, artillery=True)
-        forged = dict(self.effects)
-        forged['artilleryID'] = 92
+    def test_material_effect_failure_still_hides_and_does_not_block_later_flight(self):
         factory = self._factory()
-        presenter = factory._shot_presenter
+        shot_id = self._launch(factory)
+        mover = factory._shot_presenter._mover
+        _ProjectileMover.explode_error = RuntimeError('material failure')
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertTrue(factory.stop_projectile_tracer(
+                'round:shot', (20, 0, 0),
+                explosion=(self.effects, 'ground', (1, 0, 0))))
+        self.assertIn(-shot_id, mover._ProjectileMover__projectiles)
+        self.assertTrue(self._launch(factory, 'next-shot'))
+        self.assertEqual(2, len(mover.calls))
 
-        with mock.patch('sys.stdout', new_callable=io.StringIO) as output:
-            first = self._launch(
-                factory, projectile_id='artillery:1', effects=artillery)
-            forged_result = self._launch(
-                factory, projectile_id='artillery:forged', effects=forged)
-
-        self.assertFalse(first)
-        self.assertFalse(forged_result)
-        self.assertEqual([], self.bigworld._player.models)
-        self.assertEqual([], _ProjectileMover.instances)
-        self.assertEqual({}, presenter._projectile_shots)
-        self.assertNotIn('artillery:1', presenter._visual_admissions)
-        self.assertNotIn(
-            'artillery:forged', presenter._visual_admissions)
-        self.assertEqual(1, output.getvalue().count(
-            'canonical combat-equipment artillery rejected'))
-        self.assertFalse(factory.update_projectile_visual(
-            'artillery:1', (9.0, 8.0, 7.0)))
+    def test_unmapped_or_denied_terminal_does_not_fabricate_visuals(self):
+        factory = self._factory()
         self.assertFalse(factory.stop_projectile_tracer(
-            'artillery:1', (9.0, 8.0, 7.0)))
+            'unowned', (20, 0, 0),
+            explosion=(self.effects, 'ground', (1, 0, 0))))
+        self.assertIsNone(factory._shot_presenter._mover)
+        factory._shot_presenter._visual_admissions['denied'] = (42, False)
+        self.assertFalse(factory.stop_projectile_tracer(
+            'denied', (20, 0, 0),
+            explosion=(self.effects, 'ground', (1, 0, 0))))
 
-    def test_world_explosion_failure_does_not_disable_controlled_tracers(self):
+    def test_admitted_missing_tracer_keeps_late_world_explosion_without_add(self):
         factory = self._factory()
-        self._launch(factory, projectile_id='world:failed')
-        _ProjectileMover.explode_error = RuntimeError('explosion failed')
+        self.assertTrue(factory.admit_projectile_visual(42, 'admitted', 0.0))
         with mock.patch.dict(sys.modules, _modules(self.effects)):
             self.assertTrue(factory.stop_projectile_tracer(
-                'world:failed', (12.0, 0.0, 3.0),
-                explosion=(self.effects, 'ground', (1.0, -1.0, 0.0)),
-                missed=True))
+                'admitted', (20, 0, 0),
+                explosion=(self.effects, 'ground', (1, 0, 0))))
+        mover = factory._shot_presenter._mover
+        self.assertEqual([], mover.calls)
+        self.assertEqual(1, len(mover.explode_calls))
+        self.assertFalse(factory.stop_projectile_tracer(
+            'admitted', (20, 0, 0),
+            explosion=(self.effects, 'ground', (1, 0, 0))))
 
-        self.assertTrue(self._launch(factory, projectile_id='next:shot'))
-        self.assertEqual(2, len(self.bigworld._player.models))
-        self.bigworld.run_callbacks()
-        self.assertEqual(1, len(self.bigworld._player.models))
-        self.assertEqual([], _ProjectileMover.instances[0].calls)
-        self.assertEqual(['player-shot-missed'], self.triggers.triggers)
-
-    def test_invalid_launches_fail_before_scene_or_mover_acquisition(self):
+    def test_combat_equipment_artillery_is_not_admitted_to_native_shell_ledger(self):
         factory = self._factory()
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            self.assertFalse(factory.play_projectile_tracer(
-                _descriptor(), 0, (float('nan'), 0.0, 0.0),
-                (1.0, 0.0, 0.0), 1.0, 10.0, 1, 'bad:point'))
-            self.assertFalse(factory.play_projectile_tracer(
-                _descriptor(), 0, (0.0, 0.0, 0.0),
-                (1.0, 0.0, 0.0), 1.0, 10.0, 1, None))
-
-        self.assertEqual([], self.bigworld._player.models)
-        self.assertEqual([], _ProjectileMover.instances)
-
-    def test_destroy_releases_controlled_and_lazy_native_owners_once(self):
-        factory = self._factory()
-        self._launch(factory, projectile_id='world:active')
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            mover = factory._shot_presenter._projectile_mover()
-
-        factory.destroy_all()
-
-        self.assertEqual([], self.bigworld._player.models)
-        self.assertEqual(1, mover.destroy_calls)
-        self.assertFalse(self._launch(factory, projectile_id='late:shot'))
-
-    def test_failed_mover_destroy_retains_owner_for_exact_retry(self):
-        factory = self._factory()
-        with mock.patch.dict(sys.modules, _modules(self.effects)):
-            mover = factory._shot_presenter._projectile_mover()
-        _ProjectileMover.destroy_error = RuntimeError('destroy failed')
-
-        with self.assertRaisesRegex(RuntimeError, 'destroy failed'):
-            factory.destroy_all()
-
-        self.assertIs(mover, factory._shot_presenter._mover)
-        self.assertEqual(1, mover.destroy_calls)
-        _ProjectileMover.destroy_error = None
-        factory.destroy_all()
-        self.assertEqual(2, mover.destroy_calls)
+        effects, unused = _effects(self.events, artillery=True)
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(self._launch(factory, effects=effects))
         self.assertIsNone(factory._shot_presenter._mover)
+        self.assertEqual([], self.bigworld.player().models)
 
-    def test_both_factory_implementations_expose_controlled_visual_lifecycle(self):
-        for factory_type in (RemoteVehicleFactory,
-                             NativeRemoteVehicleFactory):
-            self.assertTrue(callable(getattr(
-                factory_type, 'update_projectile_visual', None)))
-            self.assertTrue(callable(getattr(
-                factory_type, 'reset_projectile_visuals', None)))
+    def test_destroy_is_safe_twice_and_late_native_expiry_is_harmless(self):
+        factory = self._factory()
+        shot_id = self._launch(factory)
+        presenter = factory._shot_presenter
+        mover = presenter._mover
+        presenter.destroy()
+        presenter.destroy()
+        mover.expire(shot_id)
+        self.assertEqual(1, mover.destroy_calls)
+        self.assertEqual([], self.bigworld.player().models)
+        self.assertEqual([], self.triggers.triggers)
+        self.assertFalse(self._launch(factory, 'after-destroy'))
 
-    def test_both_factory_implementations_forward_visual_start(self):
-        visual_start = (7.0, 8.0, 9.0)
-        for factory_type in (RemoteVehicleFactory,
-                             NativeRemoteVehicleFactory):
-            with self.subTest(factory=factory_type.__name__):
-                factory = factory_type.__new__(factory_type)
+    def test_both_factories_forward_native_launch_and_terminal(self):
+        for cls in (RemoteVehicleFactory, NativeRemoteVehicleFactory):
+            with self.subTest(factory=cls.__name__):
+                factory = object.__new__(cls)
                 factory._shot_presenter = mock.Mock()
-                factory._shot_presenter.play_canonical.return_value = 17
-
-                self.assertEqual(17, factory.play_projectile_tracer(
-                    _descriptor(), 0, (1.0, 2.0, 3.0),
-                    (120.0, 20.0, 0.0), 9.81, 640.0, 42,
-                    'forwarded:1', (3.0, 4.0, 5.0),
-                    (100.0, 10.0, 0.0), False, visual_start))
-
-                self.assertEqual(
-                    visual_start,
-                    factory._shot_presenter.play_canonical.call_args.args[-1])
+                factory.play_projectile_tracer(
+                    'descriptor', 2, (1, 2, 3), (100, 0, 0), 9.81,
+                    400, 42, 'round:shot', (2, 2, 3), (100, 0, 0),
+                    False, (3, 2, 3))
+                factory._shot_presenter.play_canonical.assert_called_once_with(
+                    'descriptor', 2, (1, 2, 3), (100, 0, 0), 9.81,
+                    400, 42, 'round:shot', (2, 2, 3), (100, 0, 0),
+                    False, (3, 2, 3))
+                self.assertFalse(hasattr(factory, 'update_projectile_visual'))
 
 
 if __name__ == '__main__':

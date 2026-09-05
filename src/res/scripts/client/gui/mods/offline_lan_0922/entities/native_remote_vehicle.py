@@ -1078,12 +1078,6 @@ class NativeRemoteVehicleFactory(object):
         return self._shot_presenter.stop_canonical(
             projectile_id, end_position, explosion, missed)
 
-    def update_projectile_visual(self, projectile_id, position,
-                                 velocity=None):
-        """Move a tracer to the latest hidden-worker-confirmed cursor."""
-        return self._shot_presenter.update_canonical(
-            projectile_id, position, velocity)
-
     def reset_projectile_visuals(self):
         """Release the old epoch's visuals while keeping the factory live."""
         return self._shot_presenter.reset_canonical()
