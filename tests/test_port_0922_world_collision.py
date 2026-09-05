@@ -1191,10 +1191,61 @@ class WorldCollisionTests(unittest.TestCase):
                 bigworld, math_module, 1, _Vector(), 0.0, 20.0,
                 None, False, 0.20, pitch=-math.atan(gradient)))
 
-        self.assertEqual(3, filter_factory.call_count)
+        # Three exact-top probes plus three seven-sample ground profiles all
+        # hide a destructible skin that has already been marked broken.
+        self.assertEqual(24, filter_factory.call_count)
         self.assertEqual(3, len(filtered_queries))
         self.assertTrue(all(row[2] is reject_broken
                             for row in filtered_queries))
+
+    def test_ground_profile_filter_skips_broken_skin_to_terrain(self):
+        gradient = 0.20
+        profile_look = 3.5 + 20.0 * 0.20 + 0.20
+        broken_z = profile_look / 6.0 * 2.0
+        broken_queries = {'raw': 0, 'filtered': 0}
+
+        def reject_broken(*hit):
+            return tuple(hit[2:4]) != (37, 22)
+
+        def collide(unused_space, start, end, unused_mask, *callbacks):
+            if abs(start.y - end.y) > 10.0:
+                terrain_y = gradient * start.z
+                if abs(start.z - broken_z) <= 1.0e-6:
+                    if callbacks:
+                        broken_queries['filtered'] += 1
+                        if not callbacks[0](75, 0, 37, 22):
+                            return (_Vector(start.x, terrain_y, start.z),)
+                    else:
+                        broken_queries['raw'] += 1
+                    return (_Vector(start.x, terrain_y + 2.0, start.z),)
+                return (_Vector(start.x, terrain_y, start.z),)
+            delta_y = end.y - start.y
+            delta_z = end.z - start.z
+            denominator = delta_y - gradient * delta_z
+            if abs(denominator) <= 1.0e-9:
+                return None
+            progress = (gradient * start.z - start.y) / denominator
+            if not 0.0 <= progress <= 1.0:
+                return None
+            return (_Vector(
+                start.x, start.y + delta_y * progress,
+                start.z + delta_z * progress),
+                _Vector(0.0, 1.0, -gradient), 0)
+
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+
+        with mock.patch.object(
+                world_collision, 'ground_collision_filter',
+                return_value=reject_broken):
+            self.assertFalse(world_collision.check_horizontal_collision(
+                bigworld, math_module, 1, _Vector(), 0.0, 20.0,
+                None, False, 0.20, pitch=-math.atan(gradient)))
+
+        self.assertEqual(0, broken_queries['raw'])
+        self.assertGreater(broken_queries['filtered'], 0)
 
     def test_raised_chords_ignore_matching_long_slope_seams(self):
         gradient = 0.50
