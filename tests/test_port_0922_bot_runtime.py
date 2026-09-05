@@ -4112,6 +4112,22 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             1, runtime.diagnostic_totals()['suspension_param_failures'])
 
+    def test_hydraulic_bot_is_excluded_without_disabling_ordinary_bot(self):
+        runtime, state, calls = self._suspension_case(
+            lambda unused_x, unused_z: 0.0)
+        hydraulic = runtime._descriptors[11]
+        hydraulic.isPitchHullAimingAvailable = True
+        runtime._descriptors[12] = _suspension_descriptor()
+
+        self.assertIsNone(runtime._suspension_params_for(11))
+        self.assertIsNotNone(runtime._suspension_params_for(12))
+        self.assertFalse(runtime._update_vertical_motion(state, 0.1))
+
+        self.assertEqual([], calls)
+        self.assertEqual(
+            1, runtime.diagnostic_totals()['suspension_param_failures'])
+        self.assertEqual(0.0, state['y'])
+
     def test_suspension_pose_guard_discards_rejected_contact_history(self):
         runtime, state, unused_calls = self._suspension_case(
             lambda unused_x, unused_z: 0.0)

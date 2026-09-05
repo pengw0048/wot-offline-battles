@@ -18390,6 +18390,28 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._local_suspension_disabled)
         battle._terrain_support.assert_called_once()
 
+    def test_hydraulic_player_keeps_existing_support_path(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        battle._suspension_ground_y = mock.Mock()
+        descriptor = _suspension_descriptor()
+        descriptor.isPitchHullAimingAvailable = True
+        entity = _Vehicle(
+            10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 0.0, 0.0), 0.0, 0.04)
+
+        self.assertEqual((0.0, 0.0, 0.0), position)
+        self.assertIsNone(battle._local_suspension_params)
+        self.assertTrue(battle._local_suspension_disabled)
+        self.assertIn(
+            '#1513 hydraulic suspension', battle._local_suspension_report)
+        battle._suspension_ground_y.assert_not_called()
+        battle._terrain_support.assert_called_once()
+
     def test_native_suspension_failure_disables_trial_and_uses_legacy(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

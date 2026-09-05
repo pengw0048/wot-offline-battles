@@ -228,6 +228,14 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertGreater(params['pitch_inertia'], 0.0)
         self.assertGreater(params['roll_inertia'], 0.0)
 
+    def test_exact_pitch_hull_aiming_descriptor_is_outside_the_trial(self):
+        descriptor = self._exact_client_descriptor()
+        descriptor.isPitchHullAimingAvailable = True
+
+        with self.assertRaisesRegex(
+                ValueError, '#1513 hydraulic suspension'):
+            vehicle_physics.derive_suspension_params(descriptor)
+
     def test_an_unrefined_descriptor_keeps_a_bounded_contact_memory(self):
         descriptor = self._exact_client_descriptor()
         descriptor.chassis = _Strict1513Component(

@@ -662,6 +662,15 @@ def derive_suspension_params(descriptor):
 	native solver owns them and no #1513 process is given them, so those are
 	an explicit trial projection and are the reason this remains a trial.
 	'''
+	if bool(_value(
+			descriptor, 'isPitchHullAimingAvailable', False)):
+		# Exact #1513 initVehiclePhysicsClient gives pitch-hull-aiming tanks a
+		# zero hard ratio and installs mode-specific suspensionSpringsLength
+		# caches on both descriptors.  This trial owns neither that native hull
+		# aiming state nor those per-mode caches, so its ordinary-tank projection
+		# must not compete with the existing hydraulic implementation.
+		raise ValueError(
+			'#1513 hydraulic suspension is outside the contrib trial')
 	physics = derive_params(descriptor)
 	descriptor_physics = _required_value(
 		descriptor, 'physics', 'vehicle physics descriptor')
