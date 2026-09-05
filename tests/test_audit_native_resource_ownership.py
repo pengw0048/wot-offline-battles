@@ -85,6 +85,43 @@ class NativeResourceOwnershipAuditTests(unittest.TestCase):
             AUDIT.audit_acquisition_inventory(
                 source_root, approved_acquisitions=approved)
 
+    def test_nested_subclass_cannot_hide_native_mover_acquisition(self):
+        source_root = self._synthetic_root('''
+            from ProjectileMover import ProjectileMover as NativeMover
+
+            def unreviewed_tracer():
+                class CanonicalMover(NativeMover):
+                    pass
+                return CanonicalMover()
+        ''')
+
+        with self.assertRaisesRegex(
+                ValueError,
+                r'synthetic\.py:unreviewed_tracer ProjectileMover '
+                r'acquisitions=1 expected=0'):
+            AUDIT.audit_acquisition_inventory(
+                source_root, approved_acquisitions=())
+
+    def test_module_subclass_acquisition_is_counted_in_calling_function(self):
+        source_root = self._synthetic_root('''
+            from ProjectileMover import ProjectileMover
+
+            class BaseMover(ProjectileMover):
+                pass
+
+            class CanonicalMover(BaseMover):
+                pass
+
+            def reviewed():
+                return CanonicalMover()
+        ''')
+
+        report = AUDIT.audit_acquisition_inventory(
+            source_root,
+            approved_acquisitions=(
+                ('synthetic.py', 'reviewed', 'ProjectileMover', 1),))
+        self.assertEqual(1, report['approvedAcquisitionSites'])
+
     def test_ownership_commit_before_initialization_violates_order(self):
         tree = ast.parse(textwrap.dedent('''
             def setup(self):
