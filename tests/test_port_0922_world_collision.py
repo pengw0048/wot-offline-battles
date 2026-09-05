@@ -1028,7 +1028,7 @@ class WorldCollisionTests(unittest.TestCase):
                 None, False, 0.20,
                 pitch=-math.atan(world_gradient)))
             self.assertEqual(9, counts['horizontal'])
-            self.assertEqual(24, counts['ground'])
+            self.assertEqual(27, counts['ground'])
 
     def test_exact_top_rejects_wall_hidden_by_coarse_profile(self):
         gradient = 0.20
@@ -1193,7 +1193,7 @@ class WorldCollisionTests(unittest.TestCase):
 
         # Three exact-top probes plus three seven-sample ground profiles all
         # hide a destructible skin that has already been marked broken.
-        self.assertEqual(24, filter_factory.call_count)
+        self.assertEqual(27, filter_factory.call_count)
         self.assertEqual(3, len(filtered_queries))
         self.assertTrue(all(row[2] is reject_broken
                             for row in filtered_queries))
@@ -1287,7 +1287,7 @@ class WorldCollisionTests(unittest.TestCase):
                 pitch=-math.atan(world_gradient)))
             self.assertEqual(9, counts['horizontal'])
             self.assertEqual(9, counts['seams'])
-            self.assertEqual(30, counts['ground'])
+            self.assertEqual(33, counts['ground'])
 
     def test_airborne_posed_chord_cannot_bypass_slope_cliff(self):
         gradient = 0.50
@@ -1326,7 +1326,131 @@ class WorldCollisionTests(unittest.TestCase):
                     bigworld, math_module, 1, _Vector(), 0.0, velocity,
                     None, True, 0.20, True, commit_enabled=False,
                     pitch=-math.atan(world_gradient)))
-            self.assertEqual(0, ground_calls[0])
+            # One downward query per pitched lane, airborne included; the
+            # first lane already returns hard, so only that lane pays.
+            self.assertEqual(1, ground_calls[0])
+
+    @staticmethod
+    def _pitched_hull_scene(ground_gradient, wall_z=None, wall_top=None):
+        """Build one collide() over a constant-gradient ground plus a wall."""
+        def ground_at(z):
+            return ground_gradient * z
+
+        def collide(unused_space, start, end, unused_mask, *unused):
+            if abs(start.y - end.y) > 10.0:
+                height = ground_at(start.z)
+                if min(start.y, end.y) <= height <= max(start.y, end.y):
+                    return (_Vector(start.x, height, start.z),)
+                return None
+            steps = 64
+            for index in range(steps + 1):
+                fraction = float(index) / steps
+                z = start.z + (end.z - start.z) * fraction
+                y = start.y + (end.y - start.y) * fraction
+                if y <= ground_at(z):
+                    length = math.sqrt(
+                        1.0 + ground_gradient * ground_gradient)
+                    return (_Vector(start.x, y, z),
+                            _Vector(0.0, 1.0 / length,
+                                    -ground_gradient / length), 0)
+            if wall_z is None:
+                return None
+            delta_z = end.z - start.z
+            if abs(delta_z) <= 1.0e-9:
+                return None
+            fraction = (wall_z - start.z) / delta_z
+            if not 0.0 <= fraction <= 1.0:
+                return None
+            y = start.y + (end.y - start.y) * fraction
+            if not ground_at(wall_z) <= y <= wall_top:
+                return None
+            return (_Vector(start.x, y, wall_z),
+                    _Vector(0.0, 0.0, -1.0), 0)
+
+        return collide
+
+    def _pitched_hull_status(self, ground_gradient, hull_pitch,
+                             wall_z=None, wall_height=None, airborne=False):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        wall_top = (None if wall_z is None else
+                    ground_gradient * wall_z + wall_height)
+        bigworld = types.SimpleNamespace(
+            wg_collideSegment=self._pitched_hull_scene(
+                ground_gradient, wall_z, wall_top),
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        return world_collision.check_horizontal_collision(
+            bigworld, math_module, 1, _Vector(), 0.0, 20.0,
+            None, airborne, 0.10, True, pitch=hull_pitch)
+
+    def test_a_pitched_hull_still_sees_a_wall_on_level_ground(self):
+        """A transiently pitched hull must not lift its lowest witness.
+
+        A hull is pitched for a moment on every crest and every suspension
+        stroke while the ground it is driving on to is flat. Posing the lane
+        along the hull plane through the whole look-ahead segment sailed the
+        0.6 m witness over a fully exposed wall the level hull always saw.
+        """
+        pitch = math.atan(0.40)
+        for hull_pitch in (-pitch, pitch):
+            for wall_height in (0.8, 1.0, 1.2):
+                for wall_z in (3.0, 4.0, 5.0):
+                    with self.subTest(pitch=hull_pitch, top=wall_height,
+                                      z=wall_z):
+                        self.assertEqual(
+                            'hard',
+                            self._pitched_hull_status(
+                                0.0, hull_pitch, wall_z, wall_height))
+                        self.assertEqual(
+                            'hard',
+                            self._pitched_hull_status(
+                                0.0, 0.0, wall_z, wall_height))
+
+    def test_a_pitched_hull_sees_a_wall_standing_on_its_own_slope(self):
+        pitch = math.atan(0.40)
+        for gradient, hull_pitch in ((0.40, -pitch), (-0.40, pitch)):
+            with self.subTest(gradient=gradient):
+                self.assertEqual(
+                    'hard',
+                    self._pitched_hull_status(
+                        gradient, hull_pitch, 4.0, 1.2))
+
+    def test_the_ground_ahead_cap_admits_every_continuous_slope(self):
+        """The cap may only lower a witness, never make terrain a wall.
+
+        A grounded hull following its own slope stays clear in both
+        directions. The airborne rising-slope contact is a separate,
+        deliberate verdict covered by
+        ``test_airborne_posed_chord_cannot_bypass_slope_cliff`` and is
+        unchanged by the cap.
+        """
+        for gradient in (0.40, 0.25, 0.0, -0.25, -0.40):
+            hull_pitch = -math.atan(gradient)
+            with self.subTest(gradient=gradient):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(gradient, hull_pitch))
+            if gradient > 0.0:
+                continue
+            with self.subTest(gradient=gradient, airborne=True):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(
+                        gradient, hull_pitch, airborne=True))
+
+    def test_an_obstacle_below_the_witness_stays_drivable(self):
+        """Keep the port's own 0.6 m witness law on a raised plateau.
+
+        ``main`` reports hard for a wall flush with the terrain only because
+        its level lane runs 0.8 m below the plateau surface. An obstacle that
+        protrudes less than the witness height is drivable here, exactly as a
+        kerb on level ground always has been.
+        """
+        for wall_height in (0.0, 0.1):
+            with self.subTest(height=wall_height):
+                self.assertEqual(
+                    'clear',
+                    self._pitched_hull_status(
+                        0.0, 0.0, 4.0, wall_height))
 
     def test_pitch_does_not_lift_lookahead_over_wall_beyond_hull(self):
         wall_top = 1.75
@@ -1372,10 +1496,20 @@ class WorldCollisionTests(unittest.TestCase):
                 ground_calls = [
                     call for call in calls
                     if abs(call[0].y - call[1].y) > 10.0]
-                self.assertEqual(not airborne, bool(ground_calls))
-                unused_start, end = calls[0]
+                # A pitched lane always buys the ground under its own
+                # look-ahead endpoint, airborne included: an airborne hull is
+                # exactly the pose that used to lift its lowest witness over a
+                # wall it was about to land into.
+                self.assertTrue(ground_calls)
+                lane_calls = [
+                    call for call in calls
+                    if abs(call[0].y - call[1].y) <= 10.0]
+                unused_start, end = lane_calls[0]
                 footprint_end = 3.5 if velocity > 0.0 else -3.5
                 pose_y = world_collision._hull_pose_y(hull_pitch, 0.0)
+                # The plateau beyond the crest sits at 1.4 m, so the
+                # ground-ahead cap of 1.4 + 0.6 is above the clamped hull-edge
+                # height and this lane keeps its posed endpoint.
                 expected_end_y = (
                     0.6 * pose_y[1] + footprint_end * pose_y[2])
                 self.assertAlmostEqual(expected_end_y, end.y)

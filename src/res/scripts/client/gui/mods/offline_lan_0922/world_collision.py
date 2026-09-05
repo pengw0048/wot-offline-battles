@@ -185,14 +185,47 @@ def _hull_pose_endpoint(local_start, local_end, half_width,
 		start_forward + delta_forward * fraction)
 
 
+def _lane_ground_ahead(spaceID, Math, pos, x, z, look):
+	"""Return the native ground top under one lane's look-ahead endpoint."""
+	import BigWorld
+	try:
+		probe_down = max(
+			5.0, float(look) * _MAX_DESCENDING_GRADIENT + 1.0)
+		start = Math.Vector3(x, pos.y + 12.0, z)
+		end = Math.Vector3(x, pos.y - probe_down, z)
+		broken_filter = ground_collision_filter(x, z)
+		ground = (BigWorld.wg_collideSegment(spaceID, start, end, 128)
+			if broken_filter is None else
+			BigWorld.wg_collideSegment(
+				spaceID, start, end, 128, broken_filter))
+		return None if ground is None else float(ground[0].y)
+	except (AttributeError, IndexError, TypeError, ValueError):
+		return None
+
+
 def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
-		height, pose_y):
-	"""Rotate one copied collision lane with the authoritative hull pose."""
+		height, pose_y, ground_ahead=None):
+	"""Rotate one copied collision lane with the authoritative hull pose.
+
+	``local_end`` already stops the pose at the first hull edge, but the lane
+	still spans the whole look-ahead segment, so that clamped height would
+	otherwise be reached only at the far endpoint.  A hull pitched over a
+	crest then lifts its own lowest witness above real geometry standing on
+	the ground it is about to reach: on level ground a transiently nose-up
+	hull passed straight over a fully exposed 1.2 m wall.
+
+	``ground_ahead`` is the native ground top under that endpoint.  The lane
+	never ends higher than ``height`` above the ground it is travelling on to,
+	and never higher than the hull plane at its own leading edge, so the pose
+	can only ever lower this witness.
+	"""
 	right_y, up_y, forward_y = pose_y
 	start_y = (float(pos.y) + float(local_start[0]) * right_y +
 		float(height) * up_y + float(local_start[1]) * forward_y)
 	end_y = (float(pos.y) + float(local_end[0]) * right_y +
 		float(height) * up_y + float(local_end[1]) * forward_y)
+	if ground_ahead is not None:
+		end_y = min(end_y, float(ground_ahead) + float(height))
 	return (
 		Math.Vector3(x1, start_y, z1),
 		Math.Vector3(x2, end_y, z2))
@@ -201,12 +234,13 @@ def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
 def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
 		local_start, local_end, pose_y, target_length,
 		maximum_gradient=_MAX_DRIVABLE_GRADIENT, ground_profile=None,
-		collision_filter=_UNPREPARED_COLLISION_FILTER):
+		collision_filter=_UNPREPARED_COLLISION_FILTER,
+		ground_ahead=None):
 	"""A drivable lower slope must not hide an independent wall above it."""
 	for height in (1.1, 1.6):
 		start, end = _posed_ray(
 			Math, pos, x1, z1, x2, z2, local_start, local_end,
-			height, pose_y)
+			height, pose_y, ground_ahead)
 		collision = _collide_horizontal(
 			spaceID, start, end, collision_filter)
 		if collision is None:
@@ -468,11 +502,19 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				pose_y != (0.0, 1.0, 0.0) and
 				(abs(local_end[0] - ray_local_end[0]) > 1.0e-9 or
 				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
+			# Only the pitch term lifts a lane along its own travel, so only
+			# a pitched lane pays one downward query for the ground it is
+			# travelling on to.  A level or purely rolled hull keeps the
+			# shipped lane geometry and its exact ray count.
+			_ground_ahead = (
+				_lane_ground_ahead(
+					spaceID, Math, pos, x2, z2, target_len)
+				if pose_y[2] else None)
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
 			start_bot, end_bot = _posed_ray(
 				Math, pos, x1, z1, x2, z2, local_start, local_end,
-				0.6, pose_y)
+				0.6, pose_y, _ground_ahead)
 			col_bot = _collide_horizontal(
 				spaceID, start_bot, end_bot, _sweep_filter)
 			# A posed lane is longer than its flat XZ projection, and every
@@ -535,7 +577,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 								 profile_x, profile_z,
 								 profile_sin, profile_cos,
 								 profile_direction, profile_look),
-								_sweep_filter):
+								_sweep_filter, _ground_ahead):
 							return 'hard' if return_status else True
 						continue
 					# Treat every occupied hull height as independent evidence.  The
@@ -549,7 +591,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 						_ray_start, _ray_end = _posed_ray(
 							Math, pos, x1, z1, x2, z2,
 							local_start, local_end, _height,
-							pose_y)
+							pose_y, _ground_ahead)
 						_ray_hit = _collide_horizontal(
 							spaceID, _ray_start, _ray_end,
 							_sweep_filter)
@@ -580,7 +622,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					_ray_start, _ray_end = _posed_ray(
 						Math, pos, x1, z1, x2, z2,
 						local_start, local_end, _height,
-						pose_y)
+						pose_y, _ground_ahead)
 					_ray_hit = _collide_horizontal(
 							spaceID, _ray_start, _ray_end,
 							_sweep_filter)
