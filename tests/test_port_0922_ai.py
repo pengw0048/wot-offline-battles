@@ -781,6 +781,86 @@ class BotAiPortTests(unittest.TestCase):
         self.assertEqual(current, held)
         self.assertEqual('pending', navigator.fallback_modes[7])
 
+    def test_new_pending_request_reuses_only_a_target_that_advances_it(self):
+        graph = self._baked_graph(7, 7, blocked=((3, 5),))
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=graph)
+        current = (22.0, 0.0, 32.0)
+        old_goal = (22.0, 0.0, 36.0)
+        new_goal = (22.0, 0.0, 44.0)
+
+        old_target = navigator.next_target(
+            11, current, old_goal, ('route', 1, 'near-north'), 1.0)
+        selected = navigator.next_target(
+            11, current, new_goal, ('route', 1, 'far-north'), 1.1)
+
+        self.assertEqual(old_goal, old_target)
+        self.assertEqual(old_target, selected)
+        self.assertEqual('pending', navigator.bot_states[11][
+            'navigation_status'])
+        self.assertTrue(navigator.searches)
+
+    def test_new_pending_request_immediately_replaces_opposed_old_target(self):
+        graph = self._baked_graph(7, 7, blocked=((3, 2),))
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=graph)
+        current = (22.0, 0.0, 32.0)
+        old_goal = (22.0, 0.0, 36.0)
+        new_goal = (22.0, 0.0, 20.0)
+
+        old_target = navigator.next_target(
+            11, current, old_goal, ('route', 1, 'north'), 1.0)
+        old_request = navigator.bot_states[11]['request_key']
+        selected = navigator.next_target(
+            11, current, new_goal, ('route', 1, 'south'), 1.1)
+        state = navigator.bot_states[11]
+
+        self.assertEqual(old_goal, old_target)
+        self.assertNotEqual(old_request, state['request_key'])
+        self.assertEqual('pending', state['navigation_status'])
+        self.assertTrue(navigator.searches)
+        self.assertNotEqual(current, selected)
+        self.assertNotEqual(old_target, selected)
+        self.assertLess(_distance_2d(selected, new_goal),
+                        _distance_2d(current, new_goal))
+        self.assertTrue(navigator.grid.dry_segment_clear(
+            current, selected, 1.1))
+
+    def test_opposed_old_target_stays_retired_after_no_safe_first_step(self):
+        graph = self._baked_graph(7, 7, blocked=((3, 2),))
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=graph)
+        current = (22.0, 0.0, 32.0)
+        old_goal = (22.0, 0.0, 36.0)
+        new_goal = (22.0, 0.0, 20.0)
+        old_target = navigator.next_target(
+            11, current, old_goal, ('route', 1, 'north'), 1.0)
+        safe_local_target = navigator.grid.safe_local_target
+        safe_calls = [0]
+
+        def delayed_safe_local(*args, **kwargs):
+            safe_calls[0] += 1
+            if safe_calls[0] == 1:
+                return None
+            return safe_local_target(*args, **kwargs)
+
+        navigator._path = lambda *unused: (('pending-south',), None)
+        navigator.grid.safe_local_target = delayed_safe_local
+        first = navigator.next_target(
+            11, current, new_goal, ('route', 1, 'south'), 1.1)
+        second = navigator.next_target(
+            11, current, new_goal, ('route', 1, 'south'), 1.2)
+        third = navigator.next_target(
+            11, current, new_goal, ('route', 1, 'south'), 1.8)
+
+        self.assertEqual(old_goal, old_target)
+        self.assertEqual(current, first)
+        self.assertNotEqual(old_target, second)
+        self.assertEqual(current, second)
+        self.assertNotEqual(old_target, third)
+        self.assertLess(_distance_2d(third, new_goal),
+                        _distance_2d(current, new_goal))
+
     def test_completed_route_target_restarts_the_pending_grace(self):
         """A real routed target ends the episode; a probed step does not."""
         navigator = self._pending_navigator()
@@ -1122,6 +1202,190 @@ class BotAiPortTests(unittest.TestCase):
             1, navigator.bot_states[11]['blocked_step_replans'])
         self.assertEqual(0, navigator.bot_states[12].get(
             'blocked_step_replans', 0))
+
+    def test_macro_hard_edge_expires_and_restores_the_only_corridor(self):
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        current = (14.0, 0.0, 20.0)
+        goal = (26.0, 0.0, 20.0)
+        edge = ((1, 0), (2, 0))
+        navigator.bot_failed_edges[31] = {
+            edge: (20.0, 240.0),
+        }
+        navigator.bot_macro_edges[31] = {
+            edge: (5.0, 240.0),
+        }
+
+        blocked = navigator.grid.plan(
+            current, goal, now=1.0,
+            edge_penalties=navigator._active_planning_edge_penalties(31, 1.0),
+            hard_edge_penalties=navigator._active_macro_edge_penalties(31, 1.0))
+        restored = navigator.grid.plan(
+            current, goal, now=5.1,
+            edge_penalties=navigator._active_planning_edge_penalties(31, 5.1),
+            hard_edge_penalties=navigator._active_macro_edge_penalties(31, 5.1))
+
+        self.assertEqual((), blocked)
+        self.assertTrue(restored)
+        self.assertTrue(navigator.grid.path_has_edge_penalty(restored, {edge: 1.0}))
+        self.assertNotIn(31, navigator.bot_macro_edges)
+
+    def test_macro_progress_replans_a_shuffling_bot_without_shared_penalty(self):
+        graph = self._baked_graph(7, 7)
+        hazards_before = tuple(graph['hazards'])
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=graph)
+        goal = (34.0, 0.0, 32.0)
+        route_key = ('route', 1, 'east')
+        old_target = None
+        rerouted = None
+        now = 1.0
+
+        for step in range(64):
+            current = (14.1 if step & 1 else 14.0, 0.0, 32.0)
+            selected = navigator.next_target(
+                21, current, goal, route_key, now)
+            if old_target is None and selected != current:
+                old_target = selected
+            if (navigator.bot_states[21]['macro_progress_replans'] and
+                    selected not in (current, old_target)):
+                rerouted = selected
+                break
+            now += 0.25
+
+        self.assertEqual(goal, old_target)
+        self.assertIsNotNone(rerouted)
+        self.assertNotEqual(old_target, rerouted)
+        self.assertEqual(1, navigator.bot_states[21][
+            'macro_progress_replans'])
+        self.assertEqual(rerouted, navigator.bot_states[21].get(
+            'macro_escape_target'))
+        self.assertEqual(goal, navigator.next_target(
+            22, (14.0, 0.0, 32.0), goal, route_key, now))
+        self.assertNotIn(22, navigator.bot_macro_edges)
+        self.assertFalse(navigator.grid._failed_edges)
+        self.assertEqual(hazards_before, tuple(navigator.grid._baked_hazards))
+
+    def test_runtime_near_goal_direct_path_still_observes_macro_progress(self):
+        from gui.mods.offline_lan_0922.bot_runtime import BotRuntime
+
+        runtime = BotRuntime(1)
+        runtime.adapter = BotAdapter('04_himmelsdorf', 1)
+        runtime.navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(7, 7))
+        runtime.states = {41: {'id': 41, 'team': 1}}
+        goal = (26.0, 0.0, 32.0)
+        strategic = {'combat_mode': 'engage', 'target_id': 91}
+        first = None
+        rerouted = None
+        now = 1.0
+        driver_state = {'now': now, 'speed': 0.0}
+
+        for step in range(64):
+            current = (14.1 if step & 1 else 14.0, 0.0, 32.0)
+            driver_state['now'] = now
+            selected = runtime._navigation_target(
+                41, current, goal, strategic,
+                driver_state)
+            if first is None:
+                first = selected
+            state = runtime.navigator.bot_direct_progress.get(41, {})
+            if (state.get('replans') and
+                    selected not in (current, first)):
+                rerouted = selected
+                break
+            now += 0.25
+
+        self.assertEqual(goal, first)
+        self.assertIsNotNone(rerouted)
+        self.assertEqual(1, runtime.navigator.bot_direct_progress[41][
+            'replans'])
+        self.assertFalse(driver_state['navigation_stop_at_target'])
+
+    def test_runtime_hold_and_traffic_wait_pause_macro_progress_lease(self):
+        from gui.mods.offline_lan_0922.bot_runtime import BotRuntime
+
+        runtime = BotRuntime(1)
+        runtime.adapter = BotAdapter('04_himmelsdorf', 1)
+        runtime.navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(7, 7))
+        runtime.states = {
+            42: {'id': 42, 'team': 1},
+            43: {'id': 43, 'team': 1},
+            44: {'id': 44, 'team': 1},
+        }
+        current = (14.0, 0.0, 32.0)
+        goal = (26.0, 0.0, 32.0)
+        arrived_goal = (15.0, 0.0, 32.0)
+        held = {
+            'combat_mode': 'engage', 'target_id': 92,
+            'throttle_override': 0.0,
+        }
+        moving = {'combat_mode': 'engage', 'target_id': 93}
+        traffic_state = runtime.adapter.driver._state(43, 1, current)
+        traffic_state['traffic_waiting'] = True
+
+        for step in range(64):
+            now = 1.0 + step * 0.25
+            runtime._navigation_target(
+                42, current, goal, held, {'now': now, 'speed': 0.0})
+            runtime._navigation_target(
+                43, current, goal, moving, {'now': now, 'speed': 0.0})
+            arrived = runtime._navigation_target(
+                44, current, arrived_goal, moving,
+                {'now': now, 'speed': 0.0})
+        traffic_state['traffic_waiting'] = False
+        runtime._navigation_target(
+            42, current, goal, moving, {'now': 17.0, 'speed': 0.0})
+        runtime._navigation_target(
+            43, current, goal, moving, {'now': 17.0, 'speed': 0.0})
+
+        self.assertEqual(0, runtime.navigator.bot_direct_progress[42][
+            'replans'])
+        self.assertEqual(0, runtime.navigator.bot_direct_progress[43][
+            'replans'])
+        self.assertEqual(arrived_goal, arrived)
+        self.assertEqual(0, runtime.navigator.bot_direct_progress[44][
+            'replans'])
+
+    def test_macro_progress_accepts_slow_waypoint_detour_and_tactical_hold(self):
+        navigator = TerrainNavigator(lambda *unused: 0.0)
+        navigator.grid.segment_clear = lambda *unused: True
+        navigator.grid.segment_penalty = lambda *unused: 0.0
+        navigator.grid.segment_has_baked_hazard = lambda *unused: False
+        detour = ((0.0, 0.0, 0.0),
+                  (0.0, 0.0, 20.0),
+                  (20.0, 0.0, 20.0),
+                  (20.0, 0.0, 0.0))
+        navigator._path = lambda key, *unused: (key, detour)
+        navigator._lookahead_index = (
+            lambda current, path, index, *unused: index)
+        now = 1.0
+
+        for step in range(64):
+            current = (0.0, 0.0, float(step) * 0.05)
+            selected = navigator.next_target(
+                31, current, detour[-1], ('route', 1, 'detour'), now)
+            self.assertEqual(detour[1], selected)
+            now += 0.25
+
+        self.assertGreater(_distance_2d(current, detour[-1]),
+                           _distance_2d(detour[0], detour[-1]))
+
+        hold = detour[0]
+        for step in range(64):
+            navigator.next_target(
+                32, hold, detour[-1], ('hold', 1), now + step * 0.25,
+                movement_intent=False)
+        resumed = navigator.next_target(
+            32, hold, detour[-1], ('hold', 1), now + 16.0,
+            movement_intent=True)
+
+        self.assertEqual(0, navigator.bot_states[31][
+            'macro_progress_replans'])
+        self.assertEqual(0, navigator.bot_states[32][
+            'macro_progress_replans'])
+        self.assertEqual(detour[1], resumed)
 
     def test_shore_ford_episode_crosses_instead_of_oscillating(self):
         open_cells = set(((0, 2), (1, 2), (2, 2), (3, 2)))

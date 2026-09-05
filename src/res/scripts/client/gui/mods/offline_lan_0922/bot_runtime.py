@@ -101,9 +101,12 @@ MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME = 16
 # visibility, planning, ballistics and observation serialisation consume.  In
 # particular, do not clone a complete Bot authority state for every enemy
 # observer pair.
-_TARGET_DYNAMIC_FIELDS = (
-    'team', 'alive', 'health', 'max_health',
-    'x', 'y', 'z', 'yaw', 'speed', 'velocity', 'fire_seq', 'critical',
+_TARGET_POSE_FIELDS = (
+    'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw', 'turret_yaw',
+    'gun_pitch', 'speed', 'velocity',
+)
+_TARGET_DYNAMIC_FIELDS = _TARGET_POSE_FIELDS + (
+    'team', 'alive', 'health', 'max_health', 'fire_seq', 'critical',
 )
 _HUMAN_TARGET_STATIC_FIELDS = (
     'vehicle', 'vehicle_compact_descr', 'effective_params',
@@ -1886,6 +1889,7 @@ class BotRuntime(object):
                  vehicle_selector=None, visibility_probe=None,
                  firing_lane_probe=None, friendly_lane_probe=None,
                  direct_launch_origin_probe=None,
+                 direct_aim_point_probe=None,
                  ballistic_solution_probe=None,
                  artillery_launch_probe=None,
                  artillery_friendly_lane_probe=None,
@@ -1902,6 +1906,9 @@ class BotRuntime(object):
         self.local_player_id = local_player_id
         self.descriptor_resolver = descriptor_resolver or (lambda unused: {})
         self.player_descriptor_resolver = player_descriptor_resolver
+        # Production resolves the same descriptor-local part selected by the
+        # bounded firing-lane queue. None retains the engine-free test seam.
+        self.direct_aim_point_probe = direct_aim_point_probe
         self.direction_probe = self._adapt_direction_probe(
             direction_probe or (lambda *unused: True))
         self.adapter_factory = adapter_factory or BotAdapter
@@ -4835,6 +4842,14 @@ class BotRuntime(object):
     def _copy_target_fields(raw, names):
         return dict((name, raw[name]) for name in names if name in raw)
 
+    @staticmethod
+    def _target_pose_snapshot(target):
+        remembered = BotRuntime._copy_target_fields(target, _TARGET_POSE_FIELDS)
+        remembered['position'] = _position(target)
+        for name in ('x', 'y', 'z', 'yaw', 'speed'):
+            remembered.setdefault(name, 0.0)
+        return remembered
+
     def _human_observation_target(
             self, raw, tick_cache=None, player_id=None):
         if player_id is None:
@@ -4951,14 +4966,7 @@ class BotRuntime(object):
                     continue
                 entry[3].add(source['id'])
                 team_visibility[key] = True
-                remembered = {
-                    'position': _position(target),
-                    'x': target.get('x', 0.0),
-                    'y': target.get('y', 0.0),
-                    'z': target.get('z', 0.0),
-                    'yaw': target.get('yaw', 0.0),
-                    'speed': target.get('speed', 0.0),
-                }
+                remembered = self._target_pose_snapshot(target)
                 self._visible_target_poses[key] = remembered
                 entry[2].update(remembered)
                 duration = spotting.SPOT_MEMORY_SECONDS
@@ -4991,18 +4999,15 @@ class BotRuntime(object):
             key = (source_team, target.get('kind'),
                    int(target.get('network_id', 0)))
             if target['fresh_visible']:
-                remembered = {
-                    'position': _position(target),
-                    'x': target.get('x', 0.0),
-                    'y': target.get('y', 0.0),
-                    'z': target.get('z', 0.0),
-                    'yaw': target.get('yaw', 0.0),
-                    'speed': target.get('speed', 0.0),
-                }
+                remembered = self._target_pose_snapshot(target)
                 self._visible_target_poses[key] = remembered
                 target.update(remembered)
                 return True
             remembered = self._visible_target_poses.get(key)
+            # Discard every live pose field first: an old observation can lack
+            # articulation or velocity that the current hidden entity has.
+            for name in _TARGET_POSE_FIELDS:
+                target.pop(name, None)
             if remembered is None:
                 # The server treats a first hidden sample as a valid no-op.
                 # Publish a shape-complete neutral record, but never expose
@@ -5080,7 +5085,7 @@ class BotRuntime(object):
         if live is not None:
             if target.get('fresh_visible') is True:
                 target['position'] = _position(live)
-                pose_fields = ('x', 'y', 'z', 'yaw', 'speed')
+                pose_fields = _TARGET_POSE_FIELDS
             else:
                 pose_fields = ()
             for name in (('alive', 'health', 'max_health', 'team') +
@@ -6510,17 +6515,30 @@ class BotRuntime(object):
         direct_target = bool(
             direct_close and callable(direct) and
             not direct_penalized and direct(position, goal, now))
+        # Short, clear routes still need the navigator's progress monitor:
+        # local motion alone cannot distinguish travel from oscillation.
+        throttle_override = strategic.get('throttle_override')
+        driver = getattr(self.adapter, 'driver', None)
+        driver_state = getattr(driver, 'states', {}).get(int(bot_id), {})
+        movement_intent = bool(
+            (throttle_override is None or float(throttle_override) > 0.0)
+            and not driver_state.get('traffic_waiting', False)
+            and int(bot_id) not in self._artillery_intents
+            and int(bot_id) not in self._artillery_reproofs)
         if direct_target:
-            target = tuple(goal)
+            escape = self.navigator.observe_direct_target(
+                bot_id, position, goal, path_key, now, movement_intent)
+            target = tuple(escape or goal)
         else:
             target = self.navigator.next_target(
                 bot_id, position, goal, path_key, now,
-                anchor, avoid, lookahead_distance)
+                anchor, avoid, lookahead_distance,
+                movement_intent=movement_intent)
         terminal = getattr(self.navigator, 'target_is_terminal', None)
         state['navigation_stop_at_target'] = bool(
             stop_at_goal and
-            (direct_target or
-             (callable(terminal) and terminal(bot_id))))
+            ((direct_target and tuple(target) == tuple(goal)) or
+             (not direct_target and callable(terminal) and terminal(bot_id))))
         if mode in ('route', 'advance') and anchor is None:
             target = self._route_lane_target(
                 bot_id, position, goal, target, strategic, now)
@@ -7562,11 +7580,25 @@ class BotRuntime(object):
         start = self._exact_shot_origin(state, descriptor, shell_index)
         if start is None:
             return None
-        target_position = _point(
-            target.get('position'), _position(target))
-        target_position = (
-            target_position[0], target_position[1] + 1.0,
-            target_position[2])
+        aim_token = None
+        if callable(self.direct_aim_point_probe):
+            selected = self.direct_aim_point_probe(state, target)
+            if not isinstance(selected, dict):
+                return None
+            try:
+                target_position = _water_sensor_vector(
+                    selected['aim_position'], 3, 'bot aim point')
+                aim_token = selected['aim_token']
+            except (KeyError, TypeError, ValueError):
+                return None
+        else:
+            # The logical runtime has no target model. BattleRuntime always
+            # supplies the exact part-selection seam above, including failure.
+            target_position = _point(
+                target.get('position'), _position(target))
+            target_position = (
+                target_position[0], target_position[1] + 1.0,
+                target_position[2])
         solution = ballistics.ballistic_intercept(
             start, target_position, self._target_velocity(target),
             speed, gravity, -math.pi * 0.5, math.pi * 0.5)
@@ -7589,7 +7621,20 @@ class BotRuntime(object):
             # the exact frozen muzzle instead of crossing the native
             # HP_gunFire boundary a second time for the identical pose.
             '_origin': start,
+            '_aim_token': aim_token,
         }
+
+    def _direct_aim_matches(self, state, target, solution):
+        """A lane refresh may select a new part after this tick's gun slew."""
+        if not callable(self.direct_aim_point_probe):
+            return True
+        selected = self.direct_aim_point_probe(state, target)
+        matches = bool(
+            isinstance(selected, dict) and isinstance(solution, dict) and
+            selected.get('aim_token') == solution.get('_aim_token'))
+        if not matches:
+            self._ballistic_solution_cache.pop(int(state['id']), None)
+        return matches
 
     @staticmethod
     def _artillery_target_identity(target):
@@ -9560,14 +9605,7 @@ class BotRuntime(object):
                 team_visibility[key] = bool(
                     fresh_visible or team_visibility.get(key, False))
                 if fresh_visible:
-                    remembered = {
-                        'position': _position(observed_target),
-                        'x': observed_target.get('x', 0.0),
-                        'y': observed_target.get('y', 0.0),
-                        'z': observed_target.get('z', 0.0),
-                        'yaw': observed_target.get('yaw', 0.0),
-                        'speed': observed_target.get('speed', 0.0),
-                    }
+                    remembered = self._target_pose_snapshot(observed_target)
                     self._visible_target_poses[key] = remembered
                     observed_target.update(remembered)
                 if collect_observation:
@@ -10249,7 +10287,7 @@ class BotRuntime(object):
                                 self._probe_finished(1, probe_started)
                         lane_clear, lane_verdict = \
                             self._friendly_lane_verdict(lane_value)
-                else:
+                elif self._direct_aim_matches(state, target, ballistic_solution):
                     launch_preview = self._direct_launch_preview(
                         state, descriptor, state['shell_index'], gun_state,
                         ballistic_solution)

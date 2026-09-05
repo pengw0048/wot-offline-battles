@@ -196,6 +196,46 @@ class ShotGeometryTest(unittest.TestCase):
                 ValueError, 'invalid activeTurretPosition'):
             shot_geometry.compute_barrel_local_point(descriptor, 0.0, 0.0)
 
+    def test_aim_samples_use_part_bounds_and_current_articulated_pose(self):
+        descriptor = _mode_descriptor(SIEGE_VEHICLES[0])
+        descriptor.turret.hitTester = _Tester((0.0, 0.0, 0.0), (2.0, 2.0, 4.0))
+        samples = shot_geometry.vehicle_aim_samples(descriptor)
+        self.assertEqual(8, len(samples))
+        self.assertEqual(('hull', 'turret'), tuple(s[0] for s in samples[:2]))
+        pose = {'position': (10.0, 20.0, 30.0), 'yaw': math.pi / 2.0,
+                'turret_yaw': -math.pi / 2.0}
+        self.assertVectorAlmostEqual(
+            (9.9, 21.3, 29.8), shot_geometry.vehicle_aim_point(samples[0], pose))
+        # The current #1513 compound uses the first turret mount, even on a
+        # descriptor with a different active barrel mount.
+        self.assertVectorAlmostEqual(
+            (11.2, 22.8, 31.65), shot_geometry.vehicle_aim_point(samples[1], pose))
+        posed = dict(pose, pitch=0.2, roll=-0.3)
+        self.assertNotEqual(shot_geometry.vehicle_aim_point(samples[1], pose),
+                            shot_geometry.vehicle_aim_point(samples[1], posed))
+        self.assertVectorAlmostEqual(
+            shot_geometry.transform_vehicle_point(
+                (-1.65, 2.8, 1.2), posed['position'], posed['yaw'], 0.2, -0.3),
+            shot_geometry.vehicle_aim_point(samples[1], posed))
+
+    def test_fixed_turret_aim_ignores_unavailable_articulation(self):
+        descriptor = _mode_descriptor(SIEGE_VEHICLES[0])
+        descriptor.gun.staticTurretYaw = math.pi
+        descriptor.turret.hitTester = _Tester((0.0, 0.0, 0.0), (2.0, 2.0, 4.0))
+        sample = shot_geometry.vehicle_aim_samples(descriptor)[1]
+        self.assertVectorAlmostEqual(
+            (-0.65, 2.8, -1.8), shot_geometry.vehicle_aim_point(
+                sample, {'x': 0, 'y': 0, 'z': 0, 'turret_yaw': 0.7}))
+
+    def test_missing_or_invalid_aim_geometry_has_no_invented_part(self):
+        descriptor = _mode_descriptor(SIEGE_VEHICLES[0])
+        descriptor.turret.hitTester.bbox = None
+        self.assertEqual({'hull'},
+                         {s[0] for s in shot_geometry.vehicle_aim_samples(descriptor)})
+        descriptor.hull.hitTester.bbox = (
+            _Vector(0.0, 0.0, 0.0), _Vector(float('nan'), 1.0, 2.0))
+        self.assertEqual((), shot_geometry.vehicle_aim_samples(descriptor))
+
 
 if __name__ == '__main__':
     unittest.main()

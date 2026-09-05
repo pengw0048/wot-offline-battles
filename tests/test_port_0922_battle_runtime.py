@@ -10452,8 +10452,62 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(result['collision'])
         soft.assert_not_called()
 
-    def test_bot_firing_lane_trims_hulls_and_tries_two_target_heights(self):
+    def _bot_lane_scene(self, target_kind='bot'):
         runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _Descriptor()
+        descriptor.hull.turretPositions = (_Vector(0.0, 1.4, 0.0),)
+        runtime.bigworld.entities.update({
+            10: types.SimpleNamespace(isStarted=True,
+                                      typeDescriptor=_Descriptor()),
+            20: types.SimpleNamespace(isStarted=True,
+                                      typeDescriptor=descriptor),
+        })
+        target_key = 'player:2' if target_kind == 'human' else 'bot:12'
+        battle._records = {
+            'bot:11': {'engine_id': 10, 'ready': True},
+            target_key: {'engine_id': 20, 'ready': True},
+        }
+        battle._bot_direct_launch_origin = lambda *unused: (0.0, 2.5, 0.0)
+        source = {'id': 11, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0}
+        target = {'id': 12, 'network_id': 2 if target_kind == 'human' else 12,
+                  'kind': target_kind, 'position': (0.0, 0.0, 100.0),
+                  'yaw': 0.0, 'alive': True}
+        return runtime, battle, source, target, descriptor
+
+    def test_bot_exposed_turret_selection_drives_the_actual_ballistic_aim(self):
+        runtime, battle, source, target, descriptor = self._bot_lane_scene()
+        rays = []
+
+        def wall(unused_space_id, start, end, unused_mask):
+            rays.append((start, end))
+            height = start.y + (end.y - start.y) * 90.0 / end.z
+            return (_Vector(0.0, height, 90.0),) if height < 1.8 else None
+
+        runtime.bigworld.wg_collideSegment = wall
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        self.assertEqual(2, len(rays))
+        self.assertAlmostEqual(1.2, rays[0][1].y)
+        self.assertAlmostEqual(2.2, rays[1][1].y)
+        selected = battle._bot_aim_point(source, target)
+        self.assertAlmostEqual(2.2, selected['aim_position'][1])
+
+        bots = bot_runtime.BotRuntime(
+            1, direct_launch_origin_probe=battle._bot_direct_launch_origin,
+            direct_aim_point_probe=battle._bot_aim_point)
+        solution = bots._local_ballistic_solution(source, target, descriptor, 0)
+        self.assertIsNotNone(solution)
+        self.assertAlmostEqual(2.2, solution['aim_position'][1])
+        speed = descriptor.gun.shots[0].speed
+        gravity = descriptor.gun.shots[0].gravity
+        time_at_wall = 90.0 / (speed * math.cos(solution['pitch']))
+        height = (2.5 - speed * math.sin(solution['pitch']) * time_at_wall -
+                  gravity * time_at_wall ** 2 * 0.5)
+        self.assertGreater(height, 1.8)
+
+    def test_bot_firing_lane_rotates_real_samples_with_two_ray_budget(self):
+        runtime, battle, source, target, unused = self._bot_lane_scene()
         rays = []
 
         def collide(unused_space_id, start, end, unused_mask):
@@ -10461,26 +10515,24 @@ class BattleRuntimeContractTests(unittest.TestCase):
             return (_Vector(start.x + 1.0, start.y, start.z),)
 
         runtime.bigworld.wg_collideSegment = collide
-        battle = BattleRuntime(runtime)
-        battle._avatar = runtime.bigworld.avatar
-        source = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        target = {'position': (0.0, 0.0, 100.0)}
-
         self.assertFalse(battle._bot_firing_lane(source, target))
-
         self.assertEqual(2, len(rays))
-        self.assertEqual({1.5, 2.2}, {round(end.y, 1)
-                                     for unused, end in rays})
-        self.assertTrue(all(round(start.z, 1) == 4.0
+        self.assertFalse(battle._bot_firing_lane(source, target))
+        self.assertEqual(4, len(rays))
+        self.assertTrue(any(end.x != 0.0 for unused, end in rays))
+        self.assertTrue(all(round(start.z, 1) == 0.0
                             for start, unused in rays))
-        self.assertTrue(all(round(end.z, 1) == 96.0
+        self.assertTrue(all(round(end.z, 1) == 100.0
                             for unused, end in rays))
-
+        self.assertIsNone(battle._bot_aim_point(source, target))
         runtime.bigworld.wg_collideSegment = lambda *unused: None
         self.assertTrue(battle._bot_firing_lane(source, target))
+        selected = battle._bot_aim_point(source, target)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        self.assertEqual(selected, battle._bot_aim_point(source, target))
 
     def test_bot_firing_lane_probes_close_targets_instead_of_assuming_clear(self):
-        runtime = _runtime()
+        runtime, battle, source, target, unused = self._bot_lane_scene()
         rays = []
 
         def wall(unused_space_id, start, end, unused_mask):
@@ -10488,10 +10540,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             return (_Vector(start.x, start.y, start.z + 0.25),)
 
         runtime.bigworld.wg_collideSegment = wall
-        battle = BattleRuntime(runtime)
-        battle._avatar = runtime.bigworld.avatar
-        source = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        target = {'position': (0.0, 0.0, 8.0)}
+        target['position'] = (0.0, 0.0, 8.0)
 
         self.assertFalse(battle._bot_firing_lane(source, target))
         self.assertEqual(2, len(rays))
@@ -10499,6 +10548,53 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         runtime.bigworld.wg_collideSegment = lambda *unused: None
         self.assertTrue(battle._bot_firing_lane(source, target))
+
+    def test_bot_aim_lifecycle_and_observed_pose_for_human_and_bot_targets(self):
+        for kind in ('human', 'bot'):
+            runtime, battle, source, target, descriptor = self._bot_lane_scene(kind)
+            runtime.bigworld.wg_collideSegment = lambda *unused: None
+            entity = runtime.bigworld.entities[20]
+            entity.isStarted = False
+            self.assertFalse(battle._bot_firing_lane(source, target))
+            entity.isStarted = True
+            hull_bbox = descriptor.hull.hitTester.bbox
+            turret_bbox = descriptor.turret.hitTester.bbox
+            descriptor.hull.hitTester.bbox = None
+            descriptor.turret.hitTester.bbox = None
+            self.assertFalse(battle._bot_firing_lane(source, target))
+            descriptor.hull.hitTester.bbox = hull_bbox
+            descriptor.turret.hitTester.bbox = turret_bbox
+            self.assertTrue(battle._bot_firing_lane(source, target))
+            first = battle._bot_aim_point(source, target)
+            # A hidden/live entity position is not an observation. The supplied
+            # target pose alone owns where the retained sample is projected.
+            entity.position = _Vector(500.0, 500.0, 500.0)
+            self.assertEqual(first, battle._bot_aim_point(source, target))
+            target['position'] = (10.0, 3.0, 80.0)
+            moved = battle._bot_aim_point(source, target)
+            self.assertEqual(first['aim_token'], moved['aim_token'])
+            self.assertAlmostEqual(4.2, moved['aim_position'][1])
+            key = 'player:2' if kind == 'human' else 'bot:12'
+            battle._records[key] = dict(battle._records[key])
+            self.assertIsNone(battle._bot_aim_point(source, target))
+            self.assertTrue(battle._bot_firing_lane(source, target))
+            self.assertNotEqual(first['aim_token'],
+                                battle._bot_aim_point(source, target)['aim_token'])
+            battle._records[key]['tombstone'] = True
+            self.assertIsNone(battle._bot_aim_point(source, target))
+
+    def test_bot_aim_missing_muzzle_or_failed_native_ray_revokes_selection(self):
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = lambda *unused: None
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        runtime.bigworld.wg_collideSegment = mock.Mock(side_effect=RuntimeError('BSP'))
+        self.assertFalse(battle._bot_firing_lane(source, target))
+        self.assertIsNone(battle._bot_aim_point(source, target))
+        runtime.bigworld.wg_collideSegment = mock.Mock(return_value=None)
+        battle._last_frame_time = 1.0
+        battle._bot_direct_launch_origin = lambda *unused: None
+        self.assertFalse(battle._bot_firing_lane(source, target))
+        runtime.bigworld.wg_collideSegment.assert_not_called()
 
     def test_bot_friendly_lane_uses_the_frozen_dispersed_parabola(self):
         runtime = _runtime()
