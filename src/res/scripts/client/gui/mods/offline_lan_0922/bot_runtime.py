@@ -2065,6 +2065,7 @@ class BotRuntime(object):
         self._physics_params = {}
         self._suspension_params = {}
         self._suspension_param_failures = 0
+        self._suspension_trial_reports = set()
         self._repair_factors = {}
         self._vision_ranges = {}
         self._source_still = {}
@@ -2612,6 +2613,20 @@ class BotRuntime(object):
                 state.pop(name, None)
         return True
 
+    def _report_suspension_trial(self, outcome):
+        """Publish each distinct Bot suspension activation outcome once.
+
+        The trial retires itself per vehicle, so a descriptor shape that no
+        real #1513 client ships used to leave the whole solver inert with a
+        green test suite and nothing in any log.
+        """
+        if outcome in self._suspension_trial_reports:
+            return False
+        self._suspension_trial_reports.add(outcome)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] SUSPENSION bot trial %s\n' % (outcome,))
+        return True
+
     def _suspension_params_for(self, bot_id):
         """Return descriptor-derived data, disabling one unsupported Bot."""
         bot_id = int(bot_id)
@@ -2624,15 +2639,19 @@ class BotRuntime(object):
                                   not descriptor):
             self._suspension_params[bot_id] = None
             self._suspension_param_failures += 1
+            self._report_suspension_trial('inactive: no descriptor')
             return None
         try:
             params = vehicle_physics.derive_suspension_params(descriptor)
         except (AttributeError, IndexError, KeyError, RuntimeError,
-                TypeError, ValueError):
+                TypeError, ValueError) as error:
             # The trial must not guess missing #1513 geometry and one malformed
             # descriptor must not stop the other 28 authority vehicles.
             params = None
             self._suspension_param_failures += 1
+            self._report_suspension_trial('inactive: %s' % (error,))
+        else:
+            self._report_suspension_trial('active')
         self._suspension_params[bot_id] = params
         return params
 
@@ -2991,6 +3010,7 @@ class BotRuntime(object):
             self._physics_params = {}
             self._suspension_params = {}
             self._suspension_param_failures = 0
+            self._suspension_trial_reports = set()
             self._repair_factors = {}
             self._vision_ranges = {}
             self._source_still = {}

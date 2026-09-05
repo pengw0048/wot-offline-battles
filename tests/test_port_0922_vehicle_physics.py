@@ -164,8 +164,11 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
     def test_parameter_projection_uses_ten_springs_and_twelve_contacts(self):
         self.assertEqual(10, len(self.params['springs']))
         self.assertEqual(12, len(self.params['pseudo_contacts']))
+        # Exact #1513 initVehiclePhysicsClient mounts the pairs at
+        # +/-0.45 * chassis bbox width (2.8 m here), not at the visual
+        # trackCenterOffset.
         self.assertEqual(
-            {-1.2, 1.2},
+            {-1.26, 1.26},
             {spring['x'] for spring in self.params['springs']})
         self.assertEqual(
             8,
@@ -179,11 +182,67 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         points = vehicle_physics.suspension_world_points(
             self.params, (10.0, 99.0, 20.0), math.pi * 0.5)
         self.assertAlmostEqual(8.0, points[0][0])
-        self.assertAlmostEqual(21.2, points[0][1])
+        self.assertAlmostEqual(21.26, points[0][1])
         self.assertEqual(
             12,
             len(vehicle_physics.suspension_pseudo_world_points(
                 self.params, (10.0, 99.0, 20.0), math.pi * 0.5)))
+
+    @staticmethod
+    def _exact_client_descriptor():
+        """Shape the descriptor the way a real #1513 client process gets it.
+
+        ``vehicles._readXPhysicsClient`` returns a flat
+        ``{'engines': ..., 'chassis': ...}`` mapping with no ``detailed``
+        level, and ``_xphysicsParseChassisClient`` fills each chassis entry
+        with ``grounds`` alone. The visible client and the hidden worker are
+        both ``IS_CLIENT`` processes, so this is production's real shape.
+        """
+        descriptor = VehiclePhysicsSuspensionTrialTests._descriptor()
+        descriptor.type = _Strict1513Component(xphysics={
+            'engines': {'trial-engine': {}},
+            'chassis': {'trial-chassis': {'grounds': {}}},
+        })
+        return descriptor
+
+    def test_the_exact_client_descriptor_still_activates_the_trial(self):
+        params = vehicle_physics.derive_suspension_params(
+            self._exact_client_descriptor())
+
+        self.assertEqual(10, len(params['springs']))
+        self.assertEqual(12, len(params['pseudo_contacts']))
+        # clearance = clamp(0.55 * 1.2, (1.0 - 0.65) * 1.75, 0.60 * 1.2)
+        self.assertAlmostEqual(0.66, params['clearance'])
+        # _computeTrackLength(0.66, 5.2) saturates at TRACK_LENGTH_MIN.
+        track_length = 0.60 * 5.2
+        step = track_length / 4.0
+        self.assertEqual(
+            [-track_length * 0.5 + step * index for index in range(5)],
+            sorted({spring['z'] for spring in params['springs']}))
+        self.assertEqual(
+            {-1.26, 1.26},
+            {spring['x'] for spring in params['springs']})
+        self.assertTrue(all(
+            spring['stiffness'] > 0.0 and spring['damping'] > 0.0
+            for spring in params['springs']))
+        self.assertGreater(params['pitch_inertia'], 0.0)
+        self.assertGreater(params['roll_inertia'], 0.0)
+
+    def test_an_unrefined_descriptor_keeps_a_bounded_contact_memory(self):
+        descriptor = self._exact_client_descriptor()
+        descriptor.chassis = _Strict1513Component(
+            name='trial-chassis',
+            rotationSpeed=0.75,
+            hullPosition=(0.0, 1.0, 0.0),
+            hitTester=_Strict1513Component(bbox=(
+                (-1.4, -0.5, -2.6), (1.4, 0.7, 2.6))))
+
+        params = vehicle_physics.derive_suspension_params(descriptor)
+
+        # No wheel groups and no wheelRadius refinement: one spring spacing
+        # is exactly the rail or sleeper gap the memory has to bridge.
+        self.assertAlmostEqual(
+            0.78, params['contact_memory_distance'])
 
     def test_missing_client_geometry_or_detailed_values_are_rejected(self):
         cases = []
@@ -191,15 +250,17 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         descriptor.physics.pop('weight')
         cases.append(('weight', descriptor))
         descriptor = self._descriptor()
-        descriptor.physics.pop('trackCenterOffset')
-        cases.append(('trackCenterOffset', descriptor))
-        descriptor = self._descriptor()
         descriptor.hull = _Strict1513Component()
         cases.append(('hitTester', descriptor))
+        # A present refinement is still validated; only absence is admitted.
         descriptor = self._descriptor()
-        del descriptor.type.xphysics['detailed']['chassis'][
-            'trial-chassis']['roadWheelPositions']
-        cases.append(('roadWheelPositions', descriptor))
+        descriptor.type.xphysics['detailed']['chassis'][
+            'trial-chassis']['roadWheelPositions'] = (-1.0, 0.0, 1.0)
+        cases.append(('road-wheel positions', descriptor))
+        descriptor = self._descriptor()
+        descriptor.type.xphysics['detailed']['chassis'][
+            'trial-chassis']['stiffness0'] = 0.0
+        cases.append(('stiffness', descriptor))
 
         for expected, descriptor in cases:
             with self.subTest(field=expected):

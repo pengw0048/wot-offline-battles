@@ -120,8 +120,21 @@ CLEARANCE_MIN = 0.55
 CLEARANCE_MAX = 0.60
 CLEARANCE_TO_LENGTH_MIN = 0.085
 CLEARANCE_TO_LENGTH_MAX = 0.112
+TRACK_LENGTH_MIN = 0.60
+TRACK_LENGTH_MAX = 0.64
 HARD_RATIO_MIN = 0.50
 HARD_RATIO_MAX = 0.52
+# Exact #1513 physics_shared.initVehiclePhysicsClient spring layout.  Both
+# NUM_SPRINGS_NORMAL and NUM_SPRINGS_LONG are 5 in this build, so the client
+# always mounts five pairs, evenly spaced over _computeTrackLength and offset
+# to +/-0.45 * chassis bbox width.  descriptor.physics['trackCenterOffset'] is
+# the visual track centre, not this spring mount, and is deliberately unused.
+NUM_SPRING_PAIRS = 5
+SPRING_TRACK_WIDTH_RATIO = 0.45
+# Per-spring stiffness, damping and the hull inertia tensor are owned by the
+# native #1513 solver and are shipped to no process, client or cell.  These
+# remain an explicit trial projection rather than a recovered retail law.
+TRIAL_HULL_INERTIA_FACTORS = (1.0, 1.0, 1.8)
 SERVER_PHYSICS_HZ = 30.0
 SERVER_PHYSICS_SUBSTEPS = 2
 SERVER_PHYSICS_STEP = 1.0 / (
@@ -480,6 +493,24 @@ def _required_value(component, name, context):
 	return value
 
 
+def _optional_factor(config, name):
+	'''Return one positive side-stiffness refinement, defaulting to uniform.'''
+	raw = _optional_value(config, name)
+	if raw is None:
+		return 1.0
+	value = _finite_number(raw, 'detailed chassis %s' % name)
+	if value <= 0.0:
+		raise ValueError('detailed chassis stiffness must be positive')
+	return value
+
+
+def _optional_value(component, name):
+	'''Return one refinement value, or None when the client does not ship it.'''
+	if isinstance(component, dict):
+		return component.get(name)
+	return getattr(component, name, None)
+
+
 def _finite_number(value, context):
 	try:
 		value = float(value)
@@ -515,6 +546,15 @@ def _suspension_compression(mass_tons):
 		SUSP_COMPRESSION_MIN, SUSP_COMPRESSION_MAX)
 
 
+def _track_length(clearance, chassis_length):
+	'''Exact #1513 physics_shared._computeTrackLength.'''
+	ratio = float(clearance) / max(float(chassis_length), 0.01)
+	length_ratio = _linear_interpolate(
+		ratio, CLEARANCE_TO_LENGTH_MIN, CLEARANCE_TO_LENGTH_MAX,
+		TRACK_LENGTH_MAX, TRACK_LENGTH_MIN)
+	return length_ratio * float(chassis_length)
+
+
 def _hard_ratio(clearance, chassis_length):
 	ratio = float(clearance) / max(float(chassis_length), 0.01)
 	return _linear_interpolate(
@@ -523,23 +563,45 @@ def _hard_ratio(clearance, chassis_length):
 
 
 def _detailed_chassis_config(descriptor):
+	"""Return the optional richer chassis xphysics, or an empty mapping.
+
+	Exact #1513 ``vehicles.VehicleType.__init__`` reads xphysics through
+	``_readXPhysics`` only under ``IS_CELLAPP``; every ``IS_CLIENT`` process
+	goes through ``_readXPhysicsClient``, which returns a flat
+	``{'engines': ..., 'chassis': ...}`` mapping with no ``detailed`` level,
+	and whose ``_xphysicsParseChassisClient`` fills each chassis entry with
+	``grounds`` alone.  Both this product's visible client and its hidden
+	worker are real client processes, so ``roadWheelPositions``,
+	``stiffnessFactors``, ``stiffness0``, ``stiffness1``, ``damping``,
+	``bodyHeight`` and ``hullInertiaFactors`` are never present in production.
+	They stay supported as refinements for a non-client descriptor, but the
+	trial derives its layout from the client projection when they are absent.
+	"""
 	try:
 		tank_type = _required_value(
 			descriptor, 'type', 'vehicle type descriptor')
 		xphysics = _required_value(
 			tank_type, 'xphysics', 'vehicle xphysics')
-		detailed = xphysics['detailed']
-		configs = detailed['chassis']
+	except ValueError:
+		return {}
+	if not isinstance(xphysics, dict):
+		return {}
+	# The client mapping is already the chassis level; the cell mapping nests
+	# the same key one level below 'detailed'.
+	level = xphysics.get('detailed', xphysics)
+	if not isinstance(level, dict):
+		return {}
+	configs = level.get('chassis')
+	if not isinstance(configs, dict):
+		return {}
+	try:
 		chassis = _required_value(
 			descriptor, 'chassis', 'vehicle chassis descriptor')
 		name = _required_value(chassis, 'name', 'selected chassis name')
-		config = configs[name]
-	except (KeyError, TypeError) as error:
-		raise ValueError(
-			'detailed chassis xphysics is unavailable: %s' % error)
-	if not isinstance(config, dict):
-		raise ValueError('detailed chassis xphysics must be a dictionary')
-	return config
+	except ValueError:
+		return {}
+	config = configs.get(name)
+	return config if isinstance(config, dict) else {}
 
 
 def _bbox(component, context):
@@ -560,8 +622,15 @@ def _bbox(component, context):
 	return minimum, maximum, dimensions
 
 
-def _suspension_wheel_radius(chassis, config):
-	raw = config.get('wheelRadius')
+def _suspension_wheel_radius(chassis, config, spring_spacing):
+	'''Return the contact-memory radius: a wheel, else one spring spacing.
+
+	The radius only sizes ``contact_memory_distance``, which bridges a single
+	rail or sleeper gap between two ground samples.  One spring spacing is
+	exactly that gap, so an unrefined descriptor without wheel groups keeps a
+	bounded tolerance instead of retiring the whole trial.
+	'''
+	raw = _optional_value(config, 'wheelRadius')
 	if raw is not None:
 		radius = _finite_number(
 			raw, 'detailed chassis wheelRadius')
@@ -571,20 +640,27 @@ def _suspension_wheel_radius(chassis, config):
 		radius = _finite_number(
 			chassis.wheels.groups[0].radius,
 			'selected chassis wheel radius')
-	except (AttributeError, IndexError, TypeError):
+	except (AttributeError, IndexError, TypeError, ValueError):
 		radius = 0.0
-	if radius <= 0.0:
-		raise ValueError(
-			'wheel radius is required by the contrib suspension trial')
-	return radius
+	if radius > 0.0:
+		return radius
+	return max(0.125, float(spring_spacing) * 0.5)
 
 
 def derive_suspension_params(descriptor):
-	'''Build the contributed ten-spring rigid-body trial for one tank.
+	'''Build the ten-spring rigid-body trial for one tank.
 
-	The descriptor supplies all geometry and detailed-chassis values. The
-	remaining interpolation constants are a derived contrib projection, not
-	evidence that this Python solver is identical to the #1513 native solver.
+	The spring layout is the exact #1513 client projection.
+	``physics_shared.initVehiclePhysicsClient`` derives its five carrier pairs
+	from the hull and chassis bboxes, ``chassis.hullPosition`` and
+	``physics['weight']`` alone, and every interpolation constant used here
+	(``WEIGHT_SCALE``, ``CLEARANCE``, ``CLEARANCE_MIN``/``MAX``,
+	``SUSP_COMPRESSION_*``, ``CLEARANCE_TO_LENGTH_*``, ``TRACK_LENGTH_*``,
+	``HARD_RATIO_*``) is that module's own value.
+
+	Per-spring stiffness, damping and the hull inertia tensor are not: the
+	native solver owns them and no #1513 process is given them, so those are
+	an explicit trial projection and are the reason this remains a trial.
 	'''
 	physics = derive_params(descriptor)
 	descriptor_physics = _required_value(
@@ -624,54 +700,56 @@ def derive_suspension_params(descriptor):
 	rest_length = clearance / max(compression_ratio, 0.01)
 	static_compression = max(0.01, rest_length - clearance)
 	hard_ratio = _hard_ratio(clearance, chassis_length)
+	track_length = _track_length(clearance, chassis_length)
+	step_z = track_length / float(NUM_SPRING_PAIRS - 1)
 	config = _detailed_chassis_config(descriptor)
-	positions = _number_tuple(
-		_required_value(config, 'roadWheelPositions',
-			'detailed chassis roadWheelPositions'),
-		'detailed chassis roadWheelPositions')
-	if len(positions) != 5:
-		raise ValueError(
-			'contrib suspension trial requires five road-wheel positions')
-	position_limit = chassis_length * 0.5
-	if any(abs(value) > position_limit + SUSPENSION_GEOMETRY_EPSILON
-			for value in positions):
-		raise ValueError(
-			'roadWheelPositions extend beyond the chassis bbox')
-	stiffness_factors = _number_tuple(
-		_required_value(config, 'stiffnessFactors',
-			'detailed chassis stiffnessFactors'),
-		'detailed chassis stiffnessFactors')
-	if len(stiffness_factors) != len(positions):
-		raise ValueError(
-			'stiffnessFactors must match the five road-wheel positions')
-	if any(value <= 0.0 for value in stiffness_factors):
-		raise ValueError('stiffnessFactors must be positive')
-	left_factor = _finite_number(
-		_required_value(config, 'stiffness0',
-			'detailed chassis stiffness0'),
-		'detailed chassis stiffness0')
-	right_factor = _finite_number(
-		_required_value(config, 'stiffness1',
-			'detailed chassis stiffness1'),
-		'detailed chassis stiffness1')
-	if left_factor <= 0.0 or right_factor <= 0.0:
-		raise ValueError('detailed chassis stiffness must be positive')
-	damping_value = _finite_number(
-		_required_value(config, 'damping', 'detailed chassis damping'),
-		'detailed chassis damping')
-	if damping_value < 0.0:
-		raise ValueError('detailed chassis damping must not be negative')
+	# Exact #1513 initVehiclePhysicsClient mounts the five carrier pairs at
+	# begZ = -trackLen * 0.5 with stepZ = trackLen / (pairs - 1).  A non-client
+	# descriptor may refine that with authored road-wheel positions.
+	raw_positions = _optional_value(config, 'roadWheelPositions')
+	if raw_positions is None:
+		positions = tuple(
+			-track_length * 0.5 + step_z * float(index)
+			for index in range(NUM_SPRING_PAIRS))
+	else:
+		positions = _number_tuple(
+			raw_positions, 'detailed chassis roadWheelPositions')
+		if len(positions) != NUM_SPRING_PAIRS:
+			raise ValueError(
+				'contrib suspension trial requires five road-wheel positions')
+		position_limit = chassis_length * 0.5
+		if any(abs(value) > position_limit + SUSPENSION_GEOMETRY_EPSILON
+				for value in positions):
+			raise ValueError(
+				'roadWheelPositions extend beyond the chassis bbox')
+	raw_stiffness_factors = _optional_value(config, 'stiffnessFactors')
+	if raw_stiffness_factors is None:
+		# The client's addDamperSpring call passes one shared length and hard
+		# ratio to every pair, so an unrefined layout is uniform.
+		stiffness_factors = tuple(1.0 for unused in positions)
+	else:
+		stiffness_factors = _number_tuple(
+			raw_stiffness_factors, 'detailed chassis stiffnessFactors')
+		if len(stiffness_factors) != len(positions):
+			raise ValueError(
+				'stiffnessFactors must match the five road-wheel positions')
+		if any(value <= 0.0 for value in stiffness_factors):
+			raise ValueError('stiffnessFactors must be positive')
+	left_factor = _optional_factor(config, 'stiffness0')
+	right_factor = _optional_factor(config, 'stiffness1')
+	raw_damping = _optional_value(config, 'damping')
+	if raw_damping is None:
+		damping_value = 0.0
+	else:
+		damping_value = _finite_number(
+			raw_damping, 'detailed chassis damping')
+		if damping_value < 0.0:
+			raise ValueError(
+				'detailed chassis damping must not be negative')
 	damping_ratio = max(0.55, min(
 		1.25, SERVER_PHYSICS_DAMPING_RATIO_BASE +
 		SERVER_PHYSICS_DAMPING_RATIO_SCALE * damping_value))
-	track_x = abs(_finite_number(
-		_required_value(descriptor_physics, 'trackCenterOffset',
-			'vehicle physics trackCenterOffset'),
-		'vehicle physics trackCenterOffset'))
-	if (track_x <= 0.0 or
-			track_x > width * 0.5 + SUSPENSION_GEOMETRY_EPSILON):
-		raise ValueError(
-			'vehicle physics trackCenterOffset lies outside the chassis bbox')
+	track_x = width * SPRING_TRACK_WIDTH_RATIO
 	raw_springs = []
 	for side, x, side_factor in (
 			('left', -track_x, left_factor),
@@ -716,20 +794,29 @@ def derive_suspension_params(descriptor):
 			'z': (positions[index] + positions[index + 1]) * 0.5,
 			'penetration': ALLOWED_PENETRATION,
 		})
-	body_height = _finite_number(
-		_required_value(config, 'bodyHeight', 'detailed chassis bodyHeight'),
-		'detailed chassis bodyHeight')
-	if body_height <= 0.0:
-		raise ValueError('detailed chassis bodyHeight must be positive')
-	inertia_factors = _number_tuple(
-		_required_value(config, 'hullInertiaFactors',
-			'detailed chassis hullInertiaFactors'),
-		'detailed chassis hullInertiaFactors')
-	if len(inertia_factors) != 3 or any(
-			value <= 0.0 for value in inertia_factors):
-		raise ValueError(
-			'hullInertiaFactors must contain three positive values')
-	wheel_radius = _suspension_wheel_radius(chassis, config)
+	raw_body_height = _optional_value(config, 'bodyHeight')
+	if raw_body_height is None:
+		# The inertia tensor below is a labelled trial projection either way,
+		# so an unrefined body height uses the chassis bbox this port already
+		# measured rather than reproducing the client's collision-box law.
+		body_height = chassis_height
+	else:
+		body_height = _finite_number(
+			raw_body_height, 'detailed chassis bodyHeight')
+		if body_height <= 0.0:
+			raise ValueError(
+				'detailed chassis bodyHeight must be positive')
+	raw_inertia_factors = _optional_value(config, 'hullInertiaFactors')
+	if raw_inertia_factors is None:
+		inertia_factors = TRIAL_HULL_INERTIA_FACTORS
+	else:
+		inertia_factors = _number_tuple(
+			raw_inertia_factors, 'detailed chassis hullInertiaFactors')
+		if len(inertia_factors) != 3 or any(
+				value <= 0.0 for value in inertia_factors):
+			raise ValueError(
+				'hullInertiaFactors must contain three positive values')
+	wheel_radius = _suspension_wheel_radius(chassis, config, step_z)
 	pitch_inertia = max(
 		1.0, mass * (body_height ** 2 + chassis_length ** 2) /
 		12.0 * inertia_factors[0])

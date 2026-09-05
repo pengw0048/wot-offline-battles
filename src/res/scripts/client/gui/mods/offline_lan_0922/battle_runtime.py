@@ -1543,6 +1543,7 @@ class BattleRuntime(object):
         self._local_physics = None
         self._local_suspension_params = None
         self._local_suspension_disabled = False
+        self._local_suspension_report = None
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
@@ -1835,6 +1836,7 @@ class BattleRuntime(object):
         self._local_physics = None
         self._local_suspension_params = None
         self._local_suspension_disabled = False
+        self._local_suspension_report = None
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_pitch = 0.0
@@ -5622,6 +5624,7 @@ class BattleRuntime(object):
         # the existing support path without aborting local-vehicle startup.
         self._local_suspension_params = None
         self._local_suspension_disabled = False
+        self._local_suspension_report = None
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         return True
@@ -17311,6 +17314,20 @@ class BattleRuntime(object):
                 centre = value
         return highest, centre
 
+    def _report_local_suspension_trial(self, outcome):
+        """Publish each distinct player suspension activation outcome once.
+
+        The trial retires itself silently, so a descriptor shape that no real
+        #1513 client ships used to leave the solver inert with a green test
+        suite and nothing in ``python.log``.
+        """
+        if outcome == self._local_suspension_report:
+            return False
+        self._local_suspension_report = outcome
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] SUSPENSION player trial %s\n' % (outcome,))
+        return True
+
     def _ensure_local_suspension_params(self, descriptor):
         """Lazily enable the descriptor-backed ten-spring trial."""
         if self._local_suspension_disabled:
@@ -17324,9 +17341,12 @@ class BattleRuntime(object):
                 self._local_suspension_disabled = True
                 self._local_spring_ground_memory = None
                 self._local_pseudo_ground_memory = None
+                self._report_local_suspension_trial(
+                    'inactive: %s' % (error,))
                 self._warn_optional_failure(
                     'ten-spring suspension trial', error)
                 return None
+            self._report_local_suspension_trial('active')
         return self._local_suspension_params
 
     def _local_suspension_state_snapshot(self):
@@ -17367,6 +17387,7 @@ class BattleRuntime(object):
         self._local_suspension_disabled = True
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
+        self._report_local_suspension_trial('retired: %s' % (error,))
         self._warn_optional_failure('ten-spring suspension trial', error)
 
     def _local_suspension_ground_samples(
@@ -20150,6 +20171,7 @@ class BattleRuntime(object):
                 self._local_factors(entity.typeDescriptor))
             self._local_suspension_params = None
             self._local_suspension_disabled = False
+            self._local_suspension_report = None
             self._local_spring_ground_memory = None
             self._local_pseudo_ground_memory = None
             self._local_suspension_pitch_velocity = 0.0
@@ -22218,6 +22240,7 @@ class BattleRuntime(object):
         self._local_physics = None
         self._local_suspension_params = None
         self._local_suspension_disabled = False
+        self._local_suspension_report = None
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_matrix = None
