@@ -606,9 +606,27 @@ class GarageState(object):
         for that price.
         """
         compact_descr = _int(compact_descr)
+        count = max(1, _int(count))
+        item_type, cost = self._purchase_terms(
+            compact_descr, count, gold_for_credits)
+        self._charge(cost)
+        existing = self._snapshot.get('inventoryItems', {}).get(item_type, {})
+        self._publish_owned(
+            compact_descr, item_type,
+            int(existing.get(compact_descr, 0)) + count)
+        self._price(compact_descr)
+        self.revision += 1
+        return compact_descr
+
+    def _purchase_terms(self, compact_descr, count=1, gold_for_credits=False):
+        """Return one purchase's item type and price, or refuse it.
+
+        Every check that can refuse a purchase lives here, so a request that
+        buys and mounts in one step can be refused before it touches a vehicle
+        rather than after.
+        """
         if not compact_descr:
             raise GarageError('a purchase needs an item')
-        count = max(1, _int(count))
         item_type = self._item_type(compact_descr)
         # Only modules are researched. #1513 sells shells, consumables and
         # optional devices straight from the shop, so gating them on the
@@ -619,17 +637,17 @@ class GarageState(object):
         if (unlocks and item_type in RESEARCHED_ITEM_TYPES and
                 compact_descr not in unlocks):
             raise GarageError('item %d is not researched' % compact_descr)
-        cost = self._item_cost(compact_descr, count)
+        cost = self._item_cost(compact_descr, max(1, _int(count)))
         if gold_for_credits:
             cost = self._in_credits(cost, item_type)
-        self._charge(cost)
-        existing = self._snapshot.get('inventoryItems', {}).get(item_type, {})
-        self._publish_owned(
-            compact_descr, item_type,
-            int(existing.get(compact_descr, 0)) + count)
-        self._price(compact_descr)
-        self.revision += 1
-        return compact_descr
+        balances = self._balances()
+        for currency in ('credits', 'gold'):
+            needed = _int(cost.get(currency, 0) or 0)
+            if needed > balances[currency]:
+                raise GarageError(
+                    'the account has %d %s and needs %d' % (
+                        balances[currency], currency, needed))
+        return item_type, cost
 
     def _item_type(self, compact_descr):
         vehicles = self._vehicles_module()
@@ -645,7 +663,10 @@ class GarageState(object):
                            slot_index=0, gun_compact_descr=0):
         """Own one item and mount it on the vehicle in the same request."""
         compact_descr = _int(compact_descr)
-        item_type = self._item_type(compact_descr)
+        # Refuse an unaffordable or unresearched item before the mount, which
+        # has already changed the record by the time a later charge could
+        # raise and leave the item mounted for nothing.
+        item_type, unused_cost = self._purchase_terms(compact_descr)
         if item_type == OPTIONAL_DEVICE_ITEM_TYPE:
             record = self.equip_optional_device(
                 vehicle_inventory_id, compact_descr, slot_index)
@@ -1332,23 +1353,35 @@ class GarageState(object):
         self.revision += 1
         return self._snapshot['accountBerths']
 
-    def _wallet(self):
-        """Return the mutable account balances.
+    def _balances(self):
+        """Return the account balances without writing anything.
 
         A snapshot written before the ledger existed carries no wallet.  Zero
         is the one value that is wrong for both save modes: it would refuse
         every purchase in a career and turn the historical sandbox's unlimited
-        balance into whatever the next battle paid.  Seed the sandbox balance
+        balance into whatever the next battle paid.  Read the sandbox balance
         instead, which is what such a save had.
         """
         from gui.mods.offline_lan_0922.account_rpc import economy
 
         wallet = self._snapshot.get('wallet')
+        wallet = wallet if isinstance(wallet, dict) else {}
+        return dict(
+            (name, max(0, _int(
+                wallet.get(name, economy.SANDBOX_WALLET[name]))))
+            for name in ('credits', 'gold', 'freeXP'))
+
+    def _wallet(self):
+        """Return the mutable account balances, seeding them if a save had none.
+
+        Only a path that is about to change a balance may call this: it writes
+        the seeded wallet into the snapshot.  A check that can still refuse
+        reads ``_balances`` instead, so a refused request leaves the save
+        exactly as it found it.
+        """
+        wallet = self._snapshot.get('wallet')
         if not isinstance(wallet, dict):
-            wallet = dict(economy.SANDBOX_WALLET)
+            wallet = {}
             self._snapshot['wallet'] = wallet
-        for name in ('credits', 'gold', 'freeXP'):
-            if name not in wallet:
-                wallet[name] = economy.SANDBOX_WALLET[name]
-            wallet[name] = max(0, _int(wallet[name]))
+        wallet.update(self._balances())
         return wallet

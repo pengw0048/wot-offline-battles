@@ -290,12 +290,22 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         tankman_vehicles.update(dict(
             (tankman_id, vehicle_id) for tankman_id in tankmen))
 
-    # Optional devices and equipment are owned by the account, not by one
-    # vehicle, so they arrive in the snapshot's top-level catalogue.
+    # The account owns items; a vehicle only carries some of them. The
+    # snapshot's top-level catalogue is that account view, and it is the only
+    # place a spare module or a bought consumable exists at all, because no
+    # vehicle carries one. Publishing it alongside the per-vehicle counts is
+    # what puts a purchase in the player's depot.
+    #
+    # Ammunition is the exception: offline resupply is unlimited and nothing
+    # consumes a round yet, so a shell's account count is a high-water mark
+    # rather than a stock, and the honest number to show is what the vehicle
+    # is actually carrying.
     for item_type, items in dict(
             vehicle.get('inventoryItems', {})).items():
         item_type = int(item_type)
-        if item_type not in ARTEFACT_ITEM_TYPES:
+        if item_type not in values or item_type in (
+                VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE, SHELL_ITEM_TYPE,
+                CUSTOMIZATION_ITEM_TYPE):
             continue
         wanted = _wanted_items(only_items, item_type)
         target = values[item_type]
@@ -325,14 +335,14 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         CUSTOMIZATION_UNLOCKS: {},
     }
     if delta:
-        _publish_removals(values, vehicle_values, records, only_vehicles,
-                          only_items, removed_tankmen)
+        _publish_removals(values, vehicle_values, records, vehicle,
+                          only_vehicles, only_items, removed_tankmen)
         values = _prune_empty(values)
     return {'inventory': values}
 
 
-def _publish_removals(values, vehicle_values, records, only_vehicles,
-                      only_items, removed_tankmen):
+def _publish_removals(values, vehicle_values, records, vehicle,
+                      only_vehicles, only_items, removed_tankmen):
     """Say what the account no longer owns, in the client's own vocabulary.
 
     #1513 merges an inventory diff through ``diff_utils.synchronizeDicts``,
@@ -341,7 +351,13 @@ def _publish_removals(values, vehicle_values, records, only_vehicles,
     count reached zero out of the diff is therefore not a removal at all: the
     client's cache keeps it. Only a delta can remove anything; a full sync
     replaces the cache outright.
+
+    A removal is decided by the account, never by the diff: an item the
+    account still owns but that this publication had no reason to carry is
+    left alone, so a publication rule can never delete a player's property by
+    saying nothing about it.
     """
+    owned = dict(vehicle.get('inventoryItems', {}))
     live = set(int(record.get('id', 1)) for record in records)
     for vehicle_id in (only_vehicles or ()):
         vehicle_id = int(vehicle_id)
@@ -362,8 +378,18 @@ def _publish_removals(values, vehicle_values, records, only_vehicles,
         section = values.get(item_type)
         if not isinstance(section, dict):
             continue
+        still_owned = dict(owned.get(item_type, {}))
         for compact_descr in (wanted or ()):
+            if _int_count(still_owned.get(compact_descr)) > 0:
+                continue
             section.setdefault(compact_descr, None)
+
+
+def _int_count(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _wanted_items(only_items, item_type):

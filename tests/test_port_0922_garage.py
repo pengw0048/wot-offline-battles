@@ -627,9 +627,12 @@ class FittingRequestTests(unittest.TestCase):
             ([77, 3333, 9, 0, 0, 4444],))
 
         self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
-        record = self.state.snapshot()['vehicles'][0]
+        snapshot = self.state.snapshot()
+        record = snapshot['vehicles'][0]
         self.assertEqual((3333, 4444), record['shellsLayoutIdx'])
         self.assertEqual([20010, 30, 20011, 15], record['shells'])
+        # The mount is also a purchase, so the account owns the turret.
+        self.assertEqual(1, snapshot['inventoryItems'][3][3333])
 
     def test_refused_buy_and_equip_does_not_publish_new_ownership(self):
         vehicles, tankmen = _modules()

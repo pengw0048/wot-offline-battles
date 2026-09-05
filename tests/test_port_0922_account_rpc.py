@@ -1192,3 +1192,107 @@ class ExchangeRateTests(unittest.TestCase):
         self.assertEqual(
             account_data.OFFLINE_SELL_PRICE_FACTOR,
             account_requests.garage.SELL_PRICE_FACTOR)
+
+
+class DepotTests(unittest.TestCase):
+    """A bought spare exists in the account, not on any vehicle.
+
+    The snapshot keeps both views of an item: what each vehicle carries and
+    what the account owns. Only the second one can hold a spare, so a purchase
+    that is never mounted is visible to the client only if the account view is
+    published.
+    """
+
+    def _garage(self, item_type=4):
+        snapshot = _full_garage_snapshot()
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][4444] = {'credits': 20000}
+        snapshot['unlockItemCompactDescrs'].add(4444)
+        return account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: item_type))
+
+    def _buy(self, state, args):
+        pushed = []
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': pushed.append}, args)
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual(1, len(pushed))
+        return pushed[0]['inventory']
+
+    def test_a_bought_spare_module_reaches_the_depot(self):
+        state = self._garage()
+
+        diff = self._buy(state, (42, 4444, 2, 0))
+
+        self.assertEqual(2, diff[4][4444])
+        self.assertEqual(
+            100000 - 40000, state.snapshot()['wallet']['credits'])
+
+    def test_a_bought_optional_device_reaches_the_depot(self):
+        state = self._garage(item_type=9)
+
+        diff = self._buy(state, (42, 4444, 1, 0))
+
+        self.assertEqual(1, diff[9][4444])
+
+    def test_buying_ammunition_never_marks_it_for_removal(self):
+        """A publication rule must not delete what the account owns.
+
+        Ammunition is published from what the vehicle carries, so a depot
+        purchase has nothing to publish. Saying nothing is correct; saying
+        ``None`` would tell the client to drop the rounds the player just
+        paid for.
+        """
+        state = self._garage(item_type=10)
+        state.snapshot()['shopItemPrices'][11010] = {'credits': 100}
+        state.snapshot()['unlockItemCompactDescrs'].add(11010)
+
+        diff = self._buy(state, (42, 11010, 10, 0))
+
+        self.assertNotIn(11010, diff.get(10, {}))
+        self.assertEqual(
+            40, state.snapshot()['inventoryItems'][10][11010])
+
+    def test_a_refused_purchase_leaves_the_save_untouched(self):
+        """A check that can still refuse must not write anything first."""
+        snapshot = _full_garage_snapshot()
+        state = account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: 4))
+        snapshot['wallet'] = {'credits': 10, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][4444] = {'credits': 20000}
+        snapshot['unlockItemCompactDescrs'].add(4444)
+        before = copy.deepcopy(state.snapshot())
+
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM, {'garage': state}, (42, 4444, 1, 0))
+
+        self.assertEqual(commands.RES_FAILURE, result.result_id)
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_startup_garage_publishes_what_its_vehicles_carry(self):
+        """The two views agree at startup, so nothing here may change."""
+        snapshot = _full_garage_snapshot()
+        published = account_data.inventory(
+            snapshot, validate=False)['inventory']
+
+        for item_type in tuple(range(2, 8)) + (10,):
+            for record in snapshot['vehicles']:
+                for compact_descr, count in record.get(
+                        'inventoryItems', {}).get(item_type, {}).items():
+                    self.assertGreaterEqual(
+                        published[item_type][compact_descr], count)
+
+    def test_ammunition_stays_on_what_the_vehicle_carries(self):
+        """Nothing consumes a round yet, so its account count is a high-water
+        mark rather than a stock."""
+        snapshot = _full_garage_snapshot()
+        snapshot['inventoryItems'][10][11010] = 400
+
+        published = account_data.inventory(
+            snapshot, validate=False)['inventory']
+
+        self.assertEqual(30, published[10][11010])

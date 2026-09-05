@@ -729,3 +729,41 @@ class BattleEarningsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BuyAndEquipTests(unittest.TestCase):
+    """#1513's "buy and install" sends one command that does both.
+
+    It is the button on the tech tree and in the depot, so it is the first
+    purchase a career makes, and it mounts before it charges.
+    """
+
+    def _state(self, credits_amount, item_type=9):
+        snapshot = _snapshot()
+        snapshot['wallet'] = {
+            'credits': credits_amount, 'gold': 0, 'freeXP': 0}
+        vehicles = _vehicles()
+        vehicles.getTypeOfCompactDescr = lambda compact_descr: (
+            item_type if compact_descr == 9001 else 10)
+        return GARAGE.GarageState(
+            snapshot, vehicles_module=vehicles,
+            tankmen_module=types.SimpleNamespace())
+
+    def test_an_unaffordable_device_is_refused_before_it_is_mounted(self):
+        state = self._state(100)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(GARAGE.GarageError):
+            state.buy_and_equip_item(9, 9001, 0)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_an_unresearched_module_is_refused_before_it_is_mounted(self):
+        state = self._state(1000000, item_type=4)
+        state.snapshot()['unlockItemCompactDescrs'].discard(9001)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(GARAGE.GarageError):
+            state.buy_and_equip_item(9, 9001, 0)
+
+        self.assertEqual(before, state.snapshot())
