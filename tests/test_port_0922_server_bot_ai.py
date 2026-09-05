@@ -76,8 +76,36 @@ def _state(bot_id, team, x, z):
         'yaw': 0.0,
         'health': 1000,
         'max_health': 1000,
+        'fire_seq': 0,
+        'shell_index': 0,
+        'next_shell_index': 0,
+        'ammo_remaining': [20],
+        'ammo_reload_pending': False,
+        'reload_time': 0.0,
+        'reload_duration': 20.0,
+        'clip': 1,
+        'clip_size': 1,
+        'burst_active': False,
         'critical': {},
     }
+
+
+def _weapon_state(raw, reload_time=0.0, clip=1, clip_size=1,
+                  ammunition=(20,), reload_pending=False, fire_seq=0,
+                  burst_active=False):
+    raw.update({
+        'fire_seq': int(fire_seq),
+        'shell_index': 0,
+        'next_shell_index': 0,
+        'ammo_remaining': list(ammunition),
+        'ammo_reload_pending': bool(reload_pending),
+        'reload_time': float(reload_time),
+        'reload_duration': 20.0,
+        'clip': int(clip),
+        'clip_size': int(clip_size),
+        'burst_active': bool(burst_active),
+    })
+    return raw
 
 
 def _contact(target_id, x, z, observers, class_tag='mediumTank'):
@@ -318,6 +346,433 @@ class ServerBotTacticsTests(unittest.TestCase):
             self.manifest, self.states, players, 3.1)['orders'][0]
         self.assertIsNone(expired['target_id'])
         self.assertEqual('route', expired['combat_mode'])
+
+    def test_ready_shooter_preempts_a_reloading_target_lease(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(_state(11, 1, 0, 0)),
+            _weapon_state(_state(12, 1, 20, 0)),
+        ]
+        contact = _contact(2, 0, 240, [11, 12])
+        contact.update({'health': 500, 'max_health': 1000})
+        players = self._report(planner, [contact])
+
+        first = dict((order['id'], order) for order in
+                     planner.build_orders(
+                         manifest, states, players, 1.0)['orders'])
+        self.assertEqual(2, first[11]['target_id'])
+        self.assertIsNone(first[12]['target_id'])
+
+        states[0].update({
+            'reload_time': 8.0,
+            'ammo_reload_pending': True,
+        })
+        ready_only = _contact(2, 0, 240, [12])
+        ready_only.update({'health': 500, 'max_health': 1000})
+        self.assertEqual(1, planner.report_contacts(
+            [ready_only], planner.known_targets(states, players), 1.5))
+        reallocated = dict((order['id'], order) for order in
+                           planner.build_orders(
+                               manifest, states, players, 1.5)['orders'])
+
+        self.assertEqual(2, reallocated[11]['target_id'])
+        self.assertFalse(reallocated[11]['fire_allowed'])
+        self.assertEqual(first[11]['combat_mode'],
+                         reallocated[11]['combat_mode'])
+        self.assertEqual(first[11]['move_position'],
+                         reallocated[11]['move_position'])
+        self.assertEqual(2, reallocated[12]['target_id'])
+        self.assertTrue(reallocated[12]['fire_allowed'])
+
+    def test_unavailable_weapons_do_not_consume_focus_capacity(self):
+        unavailable_states = (
+            (True, _weapon_state(
+                _state(11, 1, 0, 0), reload_time=8.0,
+                reload_pending=True)),
+            (True, _weapon_state(
+                _state(11, 1, 0, 0), reload_time=20.0,
+                clip=0, clip_size=3, reload_pending=True)),
+            (False, _weapon_state(
+                _state(11, 1, 0, 0), ammunition=(0,))),
+            (True, _weapon_state(_state(11, 1, 0, 0))),
+        )
+        unavailable_states[-1][1]['critical'] = {
+            'destroyed': ['gunHealth'],
+        }
+
+        for keeps_movement_target, unavailable in unavailable_states:
+            with self.subTest(state=unavailable):
+                planner = BotPlanner()
+                manifest = [
+                    _bot(11, 1, 0, self.route, 'mediumTank'),
+                    _bot(12, 1, 1, self.route, 'mediumTank'),
+                ]
+                states = [
+                    unavailable,
+                    _weapon_state(_state(12, 1, 20, 0)),
+                ]
+                contact = _contact(2, 0, 240, [11, 12])
+                contact.update({'health': 500, 'max_health': 1000})
+                players = self._report(planner, [contact])
+
+                orders = dict((order['id'], order) for order in
+                              planner.build_orders(
+                                  manifest, states, players, 1.0)['orders'])
+
+                if keeps_movement_target:
+                    self.assertEqual(2, orders[11]['target_id'])
+                    self.assertFalse(orders[11]['fire_allowed'])
+                else:
+                    self.assertIsNone(orders[11]['target_id'])
+                    self.assertEqual('route', orders[11]['combat_mode'])
+                    self.assertNotEqual(
+                        {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                        orders[11]['move_position'])
+                self.assertEqual(2, orders[12]['target_id'])
+                self.assertTrue(orders[12]['fire_allowed'])
+
+    def test_reloading_vehicle_uses_a_new_close_threat_for_withdrawal(self):
+        planner = BotPlanner()
+        states = [_weapon_state(
+            _state(11, 1, 0, 0), reload_time=8.0,
+            reload_pending=True)]
+        contact = _contact(2, 0, 20, [11])
+        players = self._report(planner, [contact])
+
+        order = planner.build_orders(
+            self.manifest, states, players, 1.0)['orders'][0]
+
+        self.assertEqual(2, order['target_id'])
+        self.assertEqual('withdraw', order['combat_mode'])
+        self.assertFalse(order['fire_allowed'])
+
+    def test_exhausted_weapon_releases_an_old_lease(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(_state(11, 1, 0, 0)),
+            _weapon_state(_state(12, 1, 20, 0)),
+        ]
+        contact = _contact(2, 0, 240, [11, 12])
+        contact.update({'health': 500, 'max_health': 1000})
+        players = self._report(planner, [contact])
+        first = dict((order['id'], order) for order in
+                     planner.build_orders(
+                         manifest, states, players, 1.0)['orders'])
+        self.assertEqual(2, first[11]['target_id'])
+
+        states[0].update({
+            'ammo_remaining': [0],
+            'clip': 0,
+        })
+        ready_only = _contact(2, 0, 240, [12])
+        ready_only.update({'health': 500, 'max_health': 1000})
+        self.assertEqual(1, planner.report_contacts(
+            [ready_only], planner.known_targets(states, players), 1.5))
+        orders = dict((order['id'], order) for order in
+                      planner.build_orders(
+                          manifest, states, players, 1.5)['orders'])
+
+        self.assertIsNone(orders[11]['target_id'])
+        self.assertNotIn(11, planner._target_assignments)
+        self.assertEqual(2, orders[12]['target_id'])
+        self.assertTrue(orders[12]['fire_allowed'])
+
+    def test_cover_movement_lease_does_not_reserve_a_firing_slot(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(_state(11, 1, 0, 0)),
+            _weapon_state(_state(12, 1, 20, 0)),
+        ]
+        initial_contact = _contact(2, 0, 150, [11])
+        initial_contact.update({'health': 500, 'max_health': 1000})
+        players = self._report(planner, [initial_contact])
+        self.assertEqual(1, planner.report_affordances(
+            [_cover_report(11, 2)], planner.known_bots(manifest, states),
+            planner.known_targets(states, players), 1.0))
+        approach = dict((order['id'], order) for order in
+                        planner.build_orders(
+                            manifest, states, players, 1.0)['orders'])
+        self.assertEqual('take_cover', approach[11]['combat_mode'])
+        states[0].update(approach[11]['move_position'])
+
+        ready_only = _contact(2, 0, 150, [12])
+        ready_only.update({'health': 500, 'max_health': 1000})
+        self.assertEqual(1, planner.report_contacts(
+            [ready_only], planner.known_targets(states, players), 2.0))
+        holding = dict((order['id'], order) for order in
+                       planner.build_orders(
+                           manifest, states, players, 2.0)['orders'])
+
+        self.assertEqual('cover_hold', holding[11]['combat_mode'])
+        self.assertFalse(holding[11]['fire_allowed'])
+        self.assertEqual(2, holding[12]['target_id'])
+        self.assertTrue(holding[12]['fire_allowed'])
+
+        peeking = dict((order['id'], order) for order in
+                       planner.build_orders(
+                           manifest, states, players, 4.0)['orders'])
+        self.assertEqual('cover_peek', peeking[11]['combat_mode'])
+        self.assertFalse(peeking[11]['fire_allowed'])
+        self.assertEqual(2, peeking[12]['target_id'])
+        self.assertTrue(peeking[12]['fire_allowed'])
+
+    def test_destroyed_gun_keeps_its_movement_lease_until_repaired(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(_state(11, 1, 0, 0)),
+            _weapon_state(_state(12, 1, 20, 0)),
+        ]
+        contact = _contact(2, 0, 240, [11, 12])
+        contact.update({'health': 500, 'max_health': 1000})
+        players = self._report(planner, [contact])
+        first = dict((order['id'], order) for order in
+                     planner.build_orders(
+                         manifest, states, players, 1.0)['orders'])
+        self.assertEqual(2, first[11]['target_id'])
+
+        states[0]['critical'] = {'destroyed': ['gunHealth']}
+        self.assertEqual(1, planner.report_contacts(
+            [contact], planner.known_targets(states, players), 1.5))
+        destroyed = dict((order['id'], order) for order in
+                         planner.build_orders(
+                             manifest, states, players, 1.5)['orders'])
+        self.assertEqual(2, destroyed[11]['target_id'])
+        self.assertFalse(destroyed[11]['fire_allowed'])
+        self.assertEqual(first[11]['move_position'],
+                         destroyed[11]['move_position'])
+        self.assertEqual(2, destroyed[12]['target_id'])
+        self.assertTrue(destroyed[12]['fire_allowed'])
+
+        states[0]['critical'] = {'destroyed': []}
+        self.assertEqual(1, planner.report_contacts(
+            [contact], planner.known_targets(states, players), 19.6))
+        repaired = dict((order['id'], order) for order in
+                        planner.build_orders(
+                            manifest, states, players, 19.6)['orders'])
+        self.assertEqual(2, repaired[11]['target_id'])
+        self.assertTrue(repaired[11]['fire_allowed'])
+        self.assertIsNone(repaired[12]['target_id'])
+
+    def test_active_burst_keeps_focus_while_reload_is_pending(self):
+        planner = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(
+                _state(11, 1, 0, 0), reload_time=1.0,
+                clip=2, clip_size=3, reload_pending=True,
+                fire_seq=1, burst_active=True),
+            _weapon_state(_state(12, 1, 20, 0)),
+        ]
+        contact = _contact(2, 0, 240, [11, 12])
+        contact.update({'health': 500, 'max_health': 1000})
+        players = self._report(planner, [contact])
+
+        orders = dict((order['id'], order) for order in
+                      planner.build_orders(
+                          manifest, states, players, 1.0)['orders'])
+
+        self.assertEqual(2, orders[11]['target_id'])
+        self.assertTrue(orders[11]['fire_allowed'])
+        self.assertIsNone(orders[12]['target_id'])
+
+    def test_minor_answerable_hit_does_not_force_withdrawal(self):
+        planner = BotPlanner()
+        self.states[0] = _weapon_state(self.states[0])
+        contact = _contact(2, 0, 150, [11])
+        players = self._report(planner, [contact])
+        self.assertTrue(planner.report_damage(
+            11, 'player', 2, 1, 1.1))
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.1)['orders'][0]
+
+        self.assertEqual(2, order['target_id'])
+        self.assertTrue(order['fire_allowed'])
+        self.assertNotIn(order['combat_mode'], (
+            'under_fire_withdraw', 'under_fire_hold'))
+
+    def test_minor_unanswerable_hit_uses_nearby_support(self):
+        contact = _contact(2, 0, 50, [12])
+        players = [{'id': 2, 'team': 2, 'alive': True}]
+
+        unsupported = BotPlanner()
+        solo_states = [_weapon_state(_state(11, 1, 0, 0))]
+        self.assertEqual(1, unsupported.report_contacts(
+            [contact], unsupported.known_targets(solo_states, players), 1.0))
+        self.assertTrue(unsupported.report_damage(
+            11, 'player', 2, 1, 1.1))
+        solo = unsupported.build_orders(
+            self.manifest, solo_states, players, 1.1)['orders'][0]
+        self.assertEqual('under_fire_withdraw', solo['combat_mode'])
+
+        supported = BotPlanner()
+        manifest = [
+            _bot(11, 1, 0, self.route, 'mediumTank'),
+            _bot(12, 1, 1, self.route, 'mediumTank'),
+        ]
+        states = [
+            _weapon_state(_state(11, 1, 0, 0)),
+            _weapon_state(_state(12, 1, 0, 0)),
+        ]
+        self.assertEqual(1, supported.report_contacts(
+            [contact], supported.known_targets(states, players), 1.0))
+        self.assertTrue(supported.report_damage(
+            11, 'player', 2, 1, 1.1))
+        orders = dict((order['id'], order) for order in
+                      supported.build_orders(
+                          manifest, states, players, 1.1)['orders'])
+
+        self.assertEqual('route', orders[11]['combat_mode'])
+        self.assertEqual(2, orders[11]['target_id'])
+        self.assertFalse(orders[11]['fire_allowed'])
+        self.assertEqual(2, orders[12]['target_id'])
+        self.assertTrue(orders[12]['fire_allowed'])
+
+        for unavailable in ('no_lane', 'empty', 'destroyed'):
+            with self.subTest(unavailable=unavailable):
+                planner = BotPlanner()
+                ally = _weapon_state(_state(12, 1, 0, 0))
+                shooters = [12]
+                if unavailable == 'no_lane':
+                    shooters = []
+                elif unavailable == 'empty':
+                    ally.update({'ammo_remaining': [0], 'clip': 0})
+                else:
+                    ally['critical'] = {'destroyed': ['gunHealth']}
+                blocked_contact = _contact(2, 0, 50, shooters)
+                blocked_states = [
+                    _weapon_state(_state(11, 1, 0, 0)), ally,
+                ]
+                self.assertEqual(1, planner.report_contacts(
+                    [blocked_contact], planner.known_targets(
+                        blocked_states, players), 1.0))
+                self.assertTrue(planner.report_damage(
+                    11, 'player', 2, 1, 1.1))
+
+                blocked = dict((order['id'], order) for order in
+                               planner.build_orders(
+                                   manifest, blocked_states, players,
+                                   1.1)['orders'])
+
+                self.assertEqual(
+                    'under_fire_withdraw', blocked[11]['combat_mode'])
+
+    def test_dead_recent_attacker_is_cleared_before_ordering(self):
+        planner = BotPlanner()
+        contact = _contact(2, 0, 150, [11])
+        players = self._report(planner, [contact])
+        self.assertTrue(planner.report_damage(
+            11, 'player', 2, 240, 1.1))
+        players[0]['alive'] = False
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.2)['orders'][0]
+
+        self.assertNotIn(11, planner._recent_hits)
+        self.assertIsNone(order['target_id'])
+        self.assertEqual('route', order['combat_mode'])
+
+    def test_cover_waits_for_reload_and_completes_the_exposed_magazine(self):
+        planner = BotPlanner()
+        self.states[0] = _weapon_state(
+            self.states[0], clip=3, clip_size=3)
+        contact = _contact(2, 0, 150, [11])
+        players = self._report(planner, [contact])
+        known_bots = planner.known_bots(self.manifest, self.states)
+        known_targets = planner.known_targets(self.states, players)
+        self.assertEqual(1, planner.report_affordances(
+            [_cover_report(11, 2)], known_bots, known_targets, 1.0))
+
+        approach = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+        self.assertEqual('take_cover', approach['combat_mode'])
+        self.states[0].update(approach['move_position'])
+        self.states[0].update({
+            'reload_time': 10.0,
+            'ammo_reload_pending': True,
+        })
+        holding = planner.build_orders(
+            self.manifest, self.states, players, 2.0)['orders'][0]
+        self.assertEqual('cover_hold', holding['combat_mode'])
+
+        self.states[0]['reload_time'] = 8.0
+        blocked_contact = _contact(2, 0, 150, [])
+        self.assertEqual(1, planner.report_contacts(
+            [blocked_contact], planner.known_targets(
+                self.states, players), 4.0))
+        blocked = planner.build_orders(
+            self.manifest, self.states, players, 4.0)['orders'][0]
+        self.assertEqual('cover_hold', blocked['combat_mode'])
+        self.assertFalse(blocked['fire_allowed'])
+
+        self.states[0].update({
+            'reload_time': 0.0,
+            'ammo_reload_pending': False,
+        })
+        peeking = planner.build_orders(
+            self.manifest, self.states, players, 4.1)['orders'][0]
+        self.assertEqual('cover_peek', peeking['combat_mode'])
+        self.assertFalse(peeking['fire_allowed'])
+        self.states[0].update(peeking['move_position'])
+        at_peek = planner.build_orders(
+            self.manifest, self.states, players, 4.2)['orders'][0]
+        self.assertEqual('cover_peek', at_peek['combat_mode'])
+
+        self.states[0].update({
+            'fire_seq': 1,
+            'clip': 2,
+            'ammo_remaining': [19],
+            'reload_time': 0.8,
+            'reload_duration': 1.0,
+            'ammo_reload_pending': True,
+        })
+        followup = planner.build_orders(
+            self.manifest, self.states, players, 4.3)['orders'][0]
+        self.assertEqual('cover_peek', followup['combat_mode'])
+
+        self.states[0].update({
+            'fire_seq': 2,
+            'clip': 1,
+            'ammo_remaining': [18],
+            'reload_time': 0.8,
+            'reload_duration': 1.0,
+            'ammo_reload_pending': True,
+            'burst_active': True,
+        })
+        bursting = planner.build_orders(
+            self.manifest, self.states, players, 4.4)['orders'][0]
+        self.assertEqual('cover_peek', bursting['combat_mode'])
+
+        self.states[0].update({
+            'fire_seq': 3,
+            'clip': 0,
+            'ammo_remaining': [17],
+            'reload_time': 20.0,
+            'reload_duration': 20.0,
+            'burst_active': False,
+        })
+        returning = planner.build_orders(
+            self.manifest, self.states, players, 4.5)['orders'][0]
+        self.assertEqual('cover_return', returning['combat_mode'])
 
     def test_cover_lease_outlives_full_roster_refresh_cycle(self):
         planner = BotPlanner()
@@ -1084,6 +1539,108 @@ class ServerBotArtilleryTests(unittest.TestCase):
         self.assertEqual('1:0', order['defense_base_id'])
         self.assertEqual({'x': 0.0, 'y': 0.0, 'z': 0.0},
                          order['move_position'])
+
+    def test_base_defense_releases_one_excess_responder_per_delay(self):
+        planner = BotPlanner()
+        route = _route('defense-lane', [
+            (0, -100, False), (0, 100, False), (0, 500, False),
+        ])
+        manifest = [
+            _bot(11 + index, 1, index, route, 'mediumTank')
+            for index in range(4)
+        ]
+        states = [
+            _state(bot['id'], 1, index * 20, 0)
+            for index, bot in enumerate(manifest)
+        ]
+        defense = {
+            'bases': {'1': [
+                {'id': '1:0', 'x': 0.0, 'y': 0.0, 'z': -100.0},
+            ]},
+            'states': {'1': {
+                'points': 20,
+                'time_left': 60.0,
+                'invaders': 3,
+                'stopped': False,
+            }},
+            'contributors': {'1': []},
+        }
+
+        first = planner.build_orders(
+            manifest, states, [], 1.0, defense)['orders']
+        first_ids = {order['id'] for order in first
+                     if order['combat_mode'] == 'base_defense'}
+        self.assertEqual(3, len(first_ids))
+
+        defense['states']['1']['invaders'] = 1
+        delayed = planner.build_orders(
+            manifest, states, [], 2.0, defense)['orders']
+        delayed_ids = {order['id'] for order in delayed
+                       if order['combat_mode'] == 'base_defense'}
+        self.assertEqual(first_ids, delayed_ids)
+
+        reduced_once = planner.build_orders(
+            manifest, states, [], 5.1, defense)['orders']
+        reduced_once_ids = {order['id'] for order in reduced_once
+                            if order['combat_mode'] == 'base_defense'}
+        self.assertEqual(2, len(reduced_once_ids))
+        self.assertTrue(reduced_once_ids < first_ids)
+
+        reduced_twice = planner.build_orders(
+            manifest, states, [], 8.2, defense)['orders']
+        reduced_twice_ids = {order['id'] for order in reduced_twice
+                             if order['combat_mode'] == 'base_defense'}
+        self.assertEqual(1, len(reduced_twice_ids))
+        self.assertTrue(reduced_twice_ids < reduced_once_ids)
+
+    def test_base_defense_keeps_an_arrived_responder_firing_on_capturer(self):
+        planner = BotPlanner()
+        route = _route('defense-lane', [
+            (0, -100, False), (0, 100, False), (0, 500, False),
+        ])
+        manifest = [
+            _bot(11 + index, 1, index, route, 'mediumTank')
+            for index in range(3)
+        ]
+        states = [
+            _weapon_state(_state(bot['id'], 1, 0, -100))
+            for bot in manifest
+        ]
+        defense = {
+            'bases': {'1': [
+                {'id': '1:0', 'x': 0.0, 'y': 0.0, 'z': -100.0},
+            ]},
+            'states': {'1': {
+                'points': 20,
+                'time_left': 60.0,
+                'invaders': 2,
+                'stopped': False,
+            }},
+            'contributors': {'1': [
+                {'kind': 'human', 'id': 2},
+            ]},
+        }
+        initial = planner.build_orders(
+            manifest, states, [], 1.0, defense)['orders']
+        initial_ids = {order['id'] for order in initial
+                       if order['combat_mode'] == 'base_defense'}
+        self.assertEqual({11, 12}, initial_ids)
+
+        player = {'id': 2, 'team': 2, 'alive': True}
+        contact = _contact(2, 0, -80, [11])
+        self.assertEqual(1, planner.report_contacts(
+            [contact], planner.known_targets(states, [player]), 2.0))
+        defense['states']['1']['invaders'] = 1
+        planner.build_orders(manifest, states, [player], 2.0, defense)
+        reduced = planner.build_orders(
+            manifest, states, [player], 5.1, defense)['orders']
+        retained_ids = {order['id'] for order in reduced
+                        if order['combat_mode'] == 'base_defense'}
+
+        self.assertEqual({11}, retained_ids)
+        retained = next(order for order in reduced if order['id'] == 11)
+        self.assertEqual(2, retained['target_id'])
+        self.assertTrue(retained['fire_allowed'])
 
     def test_spg_is_never_a_pressured_route_donor(self):
         planner = BotPlanner()
