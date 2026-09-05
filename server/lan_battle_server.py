@@ -364,7 +364,8 @@ CRITICAL_CREW_NAMES = frozenset((
 ))
 CRITICAL_STATES = frozenset(("normal", "critical", "destroyed"))
 CRITICAL_CAUSES = frozenset((
-    "shot", "explosion", "repair", "fire", "drowning", "ramming"))
+    "shot", "explosion", "repair", "fire", "drowning", "ramming",
+    "world_collision"))
 TRACK_DEVICE_NAMES = frozenset(("leftTrackHealth", "rightTrackHealth"))
 OUTFIT_SEASONS = frozenset((1, 2, 4))
 MAX_OUTFIT_BYTES = 64 * 1024
@@ -5663,12 +5664,19 @@ class BattleState:
         return deaths
 
     def _commit_player_environment_damage(
-            self, player, damage, reason, display_health=None):
-        """Apply one server-decided fall or overturn HP delta atomically."""
+            self, player, damage, reason, display_health=None,
+            critical=None):
+        """Apply one server-decided fall or overturn delta atomically.
+
+        A landing may spend chassis pool without costing any health, so the
+        module transition alone is enough to commit and report: the client
+        needs the event to name #1513's world-collision cause instead of
+        deriving a shot from a silent state change.
+        """
         if player is None or not player.alive or player.health <= 0:
             return False
         damage = min(max(0, int(damage)), int(player.health))
-        if damage <= 0:
+        if damage <= 0 and critical is None:
             return False
         reason = int(reason)
         critical_before = player.critical
@@ -5688,10 +5696,13 @@ class BattleState:
             player.pending_fire_intents.clear()
         else:
             player.display_health = int(player.health)
-        self._record_damage(
-            None, ("player", player.player_id), damage, critical_before)
-        self._drop_capture_for_vehicle("player", player.player_id)
-        self.pending_events.append({
+        critical_commit = self._commit_external_player_critical(
+            player, critical)
+        if damage > 0:
+            self._record_damage(
+                None, ("player", player.player_id), damage, critical_before)
+            self._drop_capture_for_vehicle("player", player.player_id)
+        event = {
             "kind": "health",
             "target": player.player_id,
             "damage": damage,
@@ -5702,7 +5713,12 @@ class BattleState:
             "attack_reason": reason,
             "death_reason": reason if dead else 0,
             "source": "environment",
-        })
+        }
+        if critical is not None:
+            event["critical"] = critical
+        if critical_commit is not None:
+            event.update(critical_commit)
+        self.pending_events.append(event)
         return True
 
     def _player_overturn_danger(self, player_id):
@@ -5867,10 +5883,17 @@ class BattleState:
                     "stale_input")
                 self._offer_landing_observation_result(player, result)
                 return False
+            # The chassis pool absorbs a landing below the health
+            # threshold, so this runs before the hull loses HP and while the
+            # player is certainly alive.
+            landing_critical = player_critical_mechanics.apply_landing(
+                player, impact_speed, float(self.tick) / TICK_HZ)
             damage = vehicle_physics.fall_damage(
                 int(player.max_health), impact_speed)
             self._commit_player_environment_damage(
-                player, damage, 3, display_health=0)
+                player, damage, 3, display_health=0,
+                critical=(None if landing_critical is None else
+                          _critical_payload(landing_critical)))
             player.landing_observation_seq = observation_seq
             player.landing_observation_input_seq = input_seq
             player.landing_observation_fingerprints[

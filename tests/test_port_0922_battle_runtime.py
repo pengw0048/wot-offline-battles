@@ -11760,6 +11760,68 @@ class BattleRuntimeContractTests(unittest.TestCase):
         present_health.assert_called_once_with(False, 11, 400, 0, 0)
         self.assertNotIn('deferred_health_presentation', record)
 
+    def test_landing_event_installs_world_collision_track_damage(self):
+        """One landing that costs no HP still installs and names the crit.
+
+        The server reports a fall as a zero-damage environment event carrying
+        the chassis transition, so the local client must accept that shape and
+        use #1513's world-collision damage-info code instead of deriving a
+        shot from a silent state change.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        battle._avatar.playerVehicleID = 10
+        battle._synchronise_player_identity(10)
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._records = {'player:1': {
+            'engine_id': 10,
+            'state': {'team': 1, 'health': 500, 'display_health': 500,
+                      'alive': True},
+            'kind': 'player', 'network_id': 1, 'local': True}}
+        battle._last_health[10] = (500, 500, True, 0)
+        critical = {
+            'devices': [
+                {'name': 'leftTrackHealth', 'hp': 60.0, 'max_hp': 200.0,
+                 'state': 'critical'},
+                {'name': 'rightTrackHealth', 'hp': 60.0, 'max_hp': 200.0,
+                 'state': 'critical'}],
+            'destroyed': [], 'crew_ko': [], 'fire': False,
+            'ammo_rack_death': False,
+            'events': [
+                {'kind': 'device', 'name': 'leftTrackHealth',
+                 'old_state': 'normal', 'state': 'critical',
+                 'cause': 'world_collision'},
+                {'kind': 'device', 'name': 'rightTrackHealth',
+                 'old_state': 'normal', 'state': 'critical',
+                 'cause': 'world_collision'}]}
+
+        with mock.patch.object(
+                battle, '_critical_extra_index', return_value=7):
+            self.assertTrue(battle._apply_combat_event({
+                'kind': 'health', 'target': 1, 'damage': 0, 'health': 500,
+                'dead': False, 'display_health': 500, 'attack_reason': 3,
+                'death_reason': 0, 'source': 'environment',
+                'critical': critical, 'critical_revision': 1,
+                'critical_base_revision': 1, 'critical_ack_seq': 0}))
+
+        record = battle._records['player:1']
+        self.assertEqual(500, entity.health)
+        (battle._avatar.guiSessionProvider.setVehicleHealth
+         .assert_not_called())
+        self.assertEqual(
+            [(10, 11, 7, 0, 0), (10, 11, 7, 0, 0)],
+            battle._avatar.damage_info)
+        self.assertEqual(1, record['critical_revision'])
+        self.assertEqual(
+            {'leftTrackHealth': 'critical', 'rightTrackHealth': 'critical'},
+            dict((row['name'], row['state'])
+                 for row in record['critical_state']['devices']))
+        self.assertTrue(entity.is_tracked is False)
+
     def test_critical_presentation_uses_exact_causes_and_ammo_effect(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -18023,6 +18085,90 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertLess(battle._local_vertical_speed, 0.0)
         self.assertGreater(position[1], -2.0)
 
+    def _cliff_battle(self, speed, face_degrees=35.0, edge=4.0):
+        """One hull driving at ``speed`` toward a face of ``face_degrees``."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_speed = speed
+        gradient = math.tan(math.radians(face_degrees))
+
+        def support(position, unused_yaw, unused_descriptor=None,
+                    maximum_y=None):
+            height = min(0.0, -gradient * (float(position[2]) - edge))
+            return height, height
+
+        battle._terrain_support = support
+        return battle
+
+    def test_charging_a_cliff_face_leaves_the_ground(self):
+        battle = self._cliff_battle(15.0)
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        position = (0.0, 0.0, 0.0)
+        step = 1.0 / 60.0
+
+        for unused in range(60):
+            position = (position[0], position[1],
+                        position[2] + battle._local_speed * step)
+            position = battle._update_vertical_motion(
+                entity, position, 0.0, step)
+            if battle._local_airborne:
+                break
+
+        self.assertTrue(battle._local_airborne)
+        self.assertLess(battle._local_vertical_speed, 0.0)
+        # The arc has to clear the face it left, not hug it.
+        self.assertGreater(
+            position[1],
+            -math.tan(math.radians(35.0)) * (position[2] - 4.0))
+
+    def test_crawling_over_the_same_lip_stays_on_the_ground(self):
+        battle = self._cliff_battle(2.0)
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        position = (0.0, 0.0, 0.0)
+        step = 1.0 / 60.0
+
+        for unused in range(300):
+            position = (position[0], position[1],
+                        position[2] + battle._local_speed * step)
+            position = battle._update_vertical_motion(
+                entity, position, 0.0, step)
+
+            self.assertFalse(battle._local_airborne)
+
+        self.assertEqual([], battle._pending_landing_impacts)
+        self.assertLess(position[2], 14.0)
+
+    def test_steady_descent_never_reports_a_landing(self):
+        battle = self._cliff_battle(15.0, edge=0.0)
+        battle._local_last_pitch = math.atan(
+            math.tan(math.radians(35.0)))
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        position = (0.0, 0.0, 0.0)
+        step = 1.0 / 60.0
+
+        for unused in range(120):
+            position = (position[0], position[1],
+                        position[2] + battle._local_speed * step)
+            position = battle._update_vertical_motion(
+                entity, position, 0.0, step)
+
+        surface = -math.tan(math.radians(35.0)) * position[2]
+
+        self.assertFalse(battle._local_airborne)
+        self.assertEqual([], battle._pending_landing_impacts)
+        # The hull tracks the face within the hover its placement allows and
+        # never separates from it, so a fast descent costs nothing.
+        self.assertGreaterEqual(position[1] + 1e-6, surface)
+        self.assertLessEqual(
+            position[1] - surface,
+            vehicle_physics.SUPPORT_HOVER_LIMIT + 1e-6)
+
     def test_armed_ledge_fall_only_queues_an_impact_observation(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -18332,7 +18478,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertLess(vehicle_physics.longitudinal_step(
             params, 5.0, 0.0, False, uphill, 0.1), flat)
 
-    def test_landing_combines_lateral_impact_and_retains_skid(self):
+    def test_landing_skid_never_becomes_fall_damage(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -18348,9 +18494,17 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         damage = battle._apply_landing_impact(entity, 6.0)
 
-        self.assertGreater(damage, 0)
+        # Sliding across the surface it lands on closes nothing against that
+        # surface, so the carried lateral speed is a skid, not an impact.
+        self.assertEqual(0, damage)
+        self.assertEqual([], battle._pending_landing_impacts)
         self.assertEqual((0.0, 0.0), battle._local_air_lateral)
         self.assertEqual(9.0, battle._local_slide_speed)
+
+        # A landing under the health threshold is still reported: the chassis
+        # pool starts absorbing it first and the server owns both results.
+        self.assertEqual(0, battle._apply_landing_impact(entity, 8.0))
+        self.assertEqual([8.0], battle._pending_landing_impacts)
 
     def test_relative_gun_tracking_uses_delta_and_stop_uses_hull_yaw(self):
         owner = types.SimpleNamespace(

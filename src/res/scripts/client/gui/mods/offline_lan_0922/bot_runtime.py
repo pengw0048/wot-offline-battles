@@ -3137,6 +3137,7 @@ class BotRuntime(object):
                 'air_lateral_x': 0.0, 'air_lateral_z': 0.0,
                 'slide_speed': 0.0,
                 'vertical_speed': 0.0, 'airborne': False,
+                'support_y': None,
                 'grounded_once': False, 'last_drive_pitch': 0.0,
                 'pitch': _number(raw.get('pitch')),
                 'roll': _number(raw.get('roll')),
@@ -3359,6 +3360,7 @@ class BotRuntime(object):
         state['push_z'] = 0.0
         state['vertical_speed'] = 0.0
         state['airborne'] = False
+        state['support_y'] = None
         state['grounded_once'] = False
         state['last_drive_pitch'] = 0.0
         self._turn_speeds[int(state['id'])] = 0.0
@@ -5712,8 +5714,46 @@ class BotRuntime(object):
         if callable(remember):
             remember(bot_id, attempted_yaw, 5.0)
 
+    def _apply_bot_landing_module_damage(self, state, impact_speed):
+        """Spend chassis pool on one hard landing, as a world collision.
+
+        #1513's ``Vehicle.onStaticCollision`` carries separate left and right
+        track damage beside the hull damage, so a landing loads the running
+        gear.  Both tracks take the same share here: unlike a shot, a landing
+        does not pick a side.
+        """
+        descriptor = self._descriptors.get(state['id'])
+        if descriptor is None:
+            return False
+        shadow = _BotCriticalVehicle(
+            state, descriptor, None,
+            _number(state.get('combat_fire_timer')),
+            self._equipment_passives.get(int(state['id'])))
+        payload = None
+        for name in ('leftTrackHealth', 'rightTrackHealth'):
+            maximum = device_damage.device_max_hp(descriptor, name)
+            if maximum is None:
+                continue
+            loss = vehicle_physics.fall_track_damage(maximum, impact_speed)
+            if loss <= 0.0:
+                continue
+            # Each call returns the shadow's complete device state, so the
+            # last one carries both tracks. Bot critical state travels as
+            # state, not as events: ``_canonical_critical`` drops them.
+            payload = critical_damage.damage_device_over_time(
+                shadow, name, loss, 'world_collision') or payload
+        if payload is None:
+            return False
+        state['critical'] = _canonical_critical(payload)
+        return True
+
     def _apply_bot_fall_damage(self, state, impact_speed):
         """Apply the shared landing law to one hidden-worker Bot."""
+        if not vehicle_physics.landing_is_damaging(impact_speed):
+            return 0
+        # The chassis pool absorbs a landing below the health threshold, so
+        # this runs before the hull loses any HP and while the Bot is alive.
+        self._apply_bot_landing_module_damage(state, impact_speed)
         maximum = max(1, int(
             state.get('max_health', state.get('health', 1))))
         damage = vehicle_physics.fall_damage(maximum, impact_speed)
@@ -5743,8 +5783,13 @@ class BotRuntime(object):
         self._turn_speeds[state['id']] = 0.0
         return damage
 
-    def _apply_bot_landing_impact(self, state, vertical_speed):
-        """Combine retained lateral velocity with the vertical impact."""
+    def _apply_bot_landing_impact(self, state, impact_speed):
+        """Retain the airborne skid and report one surface-normal impact.
+
+        ``impact_speed`` is already the closing speed along the landing
+        surface normal.  Lateral air speed becomes a landing skid: sliding
+        across the surface it lands on closes nothing against that surface.
+        """
         lateral_x = state.get('air_lateral_x', 0.0)
         lateral_z = state.get('air_lateral_z', 0.0)
         lateral_speed = math.sqrt(
@@ -5754,9 +5799,21 @@ class BotRuntime(object):
                 state.get('slide_speed', 0.0), lateral_speed)
         state['air_lateral_x'] = 0.0
         state['air_lateral_z'] = 0.0
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed + lateral_speed * lateral_speed)
         return self._apply_bot_fall_damage(state, impact_speed)
+
+    @staticmethod
+    def _bot_support_rise_rate(previous, ground, step):
+        """Vertical rate of the ground under one Bot between two samples."""
+        if previous is None or float(step) <= 0.0:
+            return 0.0
+        return (float(ground) - float(previous)) / float(step)
+
+    @staticmethod
+    def _bot_support_drop(previous, ground):
+        """Metres the support under one Bot fell since the last sample."""
+        if previous is None:
+            return 0.0
+        return float(previous) - float(ground)
 
     def _update_vertical_motion(self, state, step, tick_pose=None,
                                 attempted_yaw=None):
@@ -5773,17 +5830,36 @@ class BotRuntime(object):
             max_climb = max(0.6, speed * step * 2.5)
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
+            # Measure the ground against the ground: the placement below eases
+            # toward its support, and that lag is not a physical separation.
+            # The hull's own distance still counts past the hover it may rest
+            # at, which is what a first sample or a teleport leaves behind.
+            previous_support = state.get('support_y')
+            support_drop = max(
+                self._bot_support_drop(previous_support, ground),
+                com_gap - vehicle_physics.SUPPORT_HOVER_LIMIT)
+            support_rate = self._bot_support_rise_rate(
+                previous_support, ground, step)
+            state['support_y'] = float(ground)
             if not state.get('grounded_once', False):
                 state['y'] = land_y
                 state['vertical_speed'] = 0.0
                 state['airborne'] = False
                 state['grounded_once'] = True
-            elif tank_collision.support_rise_is_obstacle(
-                    state.get('y'), centre, max_climb):
+            elif (not state.get('airborne', False) and
+                  tank_collision.support_rise_is_obstacle(
+                      state.get('y'), centre, max_climb)):
                 # The centre ray hit a wagon deck, roof, or large prop only
                 # after this tick's horizontal integration put the hull partly
                 # inside it. Restore only this tick's pose and let LocalDriver
                 # choose its normal reverse/turn recovery on the next update.
+                #
+                # Only a driving hull can meet a step at all. A ballistic hull
+                # that found ground above it has landed on that ground, so it
+                # skips this branch: the landing below raises it by at most
+                # one tick's climb and charges the impact, and the horizontal
+                # world probe still owns a wall. Rolling the tick back instead
+                # would strand it in the air and repeat the same fall.
                 if tick_pose is not None:
                     state['x'], state['y'], state['z'] = tick_pose
                 state['speed'] = 0.0
@@ -5801,19 +5877,25 @@ class BotRuntime(object):
                      else attempted_yaw))
                 return True
             elif (state['y'] <= ground or
-                  (com_gap <= snap_gap and not state.get('airborne', False))):
-                impact_speed = (state.get('vertical_speed', 0.0)
-                                if state.get('airborne', False) else 0.0)
+                  (support_drop <= snap_gap and
+                   not state.get('airborne', False))):
+                impact_speed = (
+                    vehicle_physics.landing_impact_speed(
+                        state.get('vertical_speed', 0.0), support_rate,
+                        abs(state['speed']))
+                    if state.get('airborne', False) else 0.0)
                 if state['y'] < ground:
                     rise = ground - state['y']
                     state['y'] += min(rise, max_climb)
                 else:
                     state['y'] += ((ground - state['y']) *
                                    min(1.0, step * 15.0))
-                    state['y'] = min(state['y'], ground + 0.12)
+                    state['y'] = min(
+                        state['y'],
+                        ground + vehicle_physics.SUPPORT_HOVER_LIMIT)
                 state['vertical_speed'] = 0.0
                 state['airborne'] = False
-                if impact_speed < 0.0:
+                if impact_speed > 0.0:
                     self._apply_bot_landing_impact(state, impact_speed)
             else:
                 if not state.get('airborne', False):
@@ -5831,7 +5913,9 @@ class BotRuntime(object):
                         vehicle_physics.GRAVITY * sub_step)
                     state['y'] += state['vertical_speed'] * sub_step
                     if state['y'] <= land_y:
-                        impact_speed = state['vertical_speed']
+                        impact_speed = vehicle_physics.landing_impact_speed(
+                            state['vertical_speed'], support_rate,
+                            abs(state['speed']))
                         state['y'] = land_y
                         state['vertical_speed'] = 0.0
                         state['airborne'] = False
@@ -5839,6 +5923,7 @@ class BotRuntime(object):
                             state, impact_speed)
                         break
         elif state.get('grounded_once', False):
+            state['support_y'] = None
             if not state.get('airborne', False):
                 state['vertical_speed'] = (
                     vehicle_physics.launch_vertical_speed(
@@ -5850,6 +5935,7 @@ class BotRuntime(object):
         else:
             # Terrain streaming owns the first placement. A missing first hit
             # must not turn map loading into a fictitious fall from altitude.
+            state['support_y'] = None
             state['vertical_speed'] = 0.0
             state['airborne'] = False
         return False
@@ -10128,8 +10214,16 @@ class BotRuntime(object):
                             speed = previous_speed
                             state.pop('destructible_contact_speed', None)
                         elif motion_status == 'hard':
-                            self._invalidate_realised_motion(
-                                state['id'], travel_yaw)
+                            if not state.get('airborne', False):
+                                # A ballistic tick is not evidence that this
+                                # heading is undrivable: the exact resolver
+                                # skips the destructible seam while the hull
+                                # is off the ground, so a crushable item can
+                                # answer 'hard' here. Remembering it would
+                                # steer the Bot away from a route it can
+                                # drive once it lands.
+                                self._invalidate_realised_motion(
+                                    state['id'], travel_yaw)
                             hard_contact = True
                             state.pop('destructible_contact_speed', None)
                     else:
@@ -10399,10 +10493,17 @@ class BotRuntime(object):
             if state.get('alive', True) and state['id'] in integrated:
                 attempted_yaw = attempted_yaws.get(
                     state['id'], state.get('yaw', 0.0))
+                was_airborne = bool(state.get('airborne', False))
                 support_blocked = self._update_vertical_motion(
                     state, frame_step,
                     tick_poses[state['id']], attempted_yaw)
-                if not support_blocked:
+                # A ballistic hull is not driving. Rolling its pose back to
+                # the start of the tick because the baked graph calls the air
+                # above a cliff unsafe would strand it mid-flight and repeat
+                # the same fall every tick; the landing tick is skipped too so
+                # the Bot lands where physics put it and recovers by driving.
+                if not support_blocked and not was_airborne and not bool(
+                        state.get('airborne', False)):
                     self._guard_realised_pose(
                         state, tick_poses[state['id']], tick_safe[state['id']],
                         attempted_yaw)

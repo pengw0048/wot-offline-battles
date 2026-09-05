@@ -1254,6 +1254,37 @@ the next intent can proceed. Messages that cannot establish the current
 identity, round, type or exact sequence still consume nothing. Extra fields
 remain rejected rather than extending the protocol.
 
+Landing damage follows #1513's own world-collision shape.
+`scripts/client/Vehicle.pyc` declares
+`onStaticCollision(self, energy, point, normal, miscFlags, damageHull,
+damageLeftTrack, damageRightTrack, destrEffectIdx, matKind)`, so retail sends
+a world collision as separate hull and per-track damage, and
+`constants.ATTACK_REASON.WORLD_COLLISION` is index 3 in the shipped order
+(`shot`, `fire`, `ramming`, `world_collision`, `death_zone`, `drowning`,
+`gas_attack`, `overturn`, `manual`). The cell law behind those factors is not
+shipped with the client. This port therefore keeps the copied HP law and adds
+one explicit chassis ladder: a landing spends chassis pool from
+`FALL_TRACK_SAFE_SPEED` and throws both tracks at `FALL_TRACK_BREAK_SPEED`, so
+a moderate drop damages the suspension before the hull loses any health. Both
+thresholds are `physics_tuning` keys, not recovered retail constants. The
+visible player reports one sequenced impact observation and the server owns
+both results, emitting the module transition on the same environment event so
+the client can use the exact `_AT_WORLD_COLLISION` damage-info codes it already
+maps; the hidden worker applies the identical law to Bots.
+
+Ground support itself is a physical test rather than a fixed distance. One step
+may follow the drop the previous supporting surface produces plus what gravity
+and modelled spring travel can pull the hull down in that step, so separation
+depends on how fast the ground curves away instead of on the frame rate, and
+the visible player and the 0.1-second worker obey the same limit. A hull that
+loses support keeps the signed vertical rate of the surface it left, holds the
+attitude it left with, and charges a landing only for the closing speed along
+the landing surface normal, so following a descent costs nothing. Airborne
+poses are exempt from the step-rise rollback and from the Bot baked-graph pose
+guard, which would otherwise strand a ballistic hull in the air. Exact native
+feel, camera and effects for a real jump remain a Windows acceptance boundary,
+and no `onStaticCollision` presentation is driven yet.
+
 ## AI, room and round boundaries
 
 Humans take real team slots first. The first waiting 0.9.22 player owns map

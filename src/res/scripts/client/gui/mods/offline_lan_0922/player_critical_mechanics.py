@@ -7,6 +7,7 @@ import math
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import vehicle_physics
 
 
 DEVICE_NAMES = (
@@ -209,6 +210,45 @@ def apply_equipment(player, effect, now):
         return critical_damage.restore_crew(
             target, effect.get('selected'), bool(effect.get('repairAll')))
     return None
+
+
+def apply_landing(player, impact_speed, now):
+    """Spend chassis pool on one landing, as a #1513 world collision.
+
+    #1513's ``Vehicle.onStaticCollision`` carries ``damageLeftTrack`` and
+    ``damageRightTrack`` beside ``damageHull``, so a world collision loads the
+    running gear as well as the hull.  Both tracks take the same share: unlike
+    a shot, a landing does not pick a side.  The pool starts absorbing the
+    impact below the health threshold, so this runs for landings that cost no
+    HP at all.
+    """
+    descriptor = _descriptor(player)
+    if (descriptor is None or not isinstance(player.critical, dict) or
+            not player.alive or player.health <= 0):
+        return None
+    target = _CriticalTarget(player, descriptor, now)
+    payload = None
+    events = []
+    for name in sorted(TRACK_DEVICE_NAMES):
+        maximum = device_damage.device_max_hp(descriptor, name)
+        if maximum is None:
+            continue
+        loss = vehicle_physics.fall_track_damage(maximum, impact_speed)
+        if loss <= 0.0:
+            continue
+        step = critical_damage.damage_device_over_time(
+            target, name, loss, 'world_collision')
+        if step is None:
+            continue
+        events.extend(step.get('events') or ())
+        payload = step
+    if payload is None:
+        return None
+    # The last call carries both tracks in its device list; the events of the
+    # first one would otherwise be lost with it.
+    payload = dict(payload)
+    payload['events'] = events
+    return payload
 
 
 def advance_critical(player, dt, now):

@@ -10,6 +10,7 @@ CLIENT_SCRIPTS = (
     ROOT / 'src' / 'res' / 'scripts' / 'client')
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
+from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import vehicle_physics
 
 
@@ -346,7 +347,33 @@ class VehiclePhysicsAirborneTests(unittest.TestCase):
         fast = vehicle_physics.ground_follow_gap(15.0, 0.0, 0.1)
 
         self.assertEqual(slow, fast)
-        self.assertEqual(vehicle_physics.GROUND_FOLLOW_MIN, fast)
+        self.assertAlmostEqual(
+            vehicle_physics.GROUND_SAMPLE_TOLERANCE +
+            (vehicle_physics.GRAVITY +
+             vehicle_physics.SUSPENSION_FOLLOW_ACCEL) * 0.1 * 0.1, fast)
+
+    def test_ordinary_cliff_face_leaves_the_ground_at_any_frame_rate(self):
+        # The reported bug: a hull driven off a cliff was pulled onto the face
+        # every frame instead of flying. Separation must depend on the ground,
+        # not on the frame rate, so a 35 degree break outruns the allowance at
+        # the visible client's frame steps and at the worker's 0.1 s step.
+        for speed in (10.0, 15.0):
+            for step in (1.0 / 60.0, 1.0 / 30.0, 0.1):
+                gap = vehicle_physics.ground_follow_gap(speed, 0.0, step)
+                face_drop = speed * step * math.tan(math.radians(35.0))
+
+                self.assertGreater(face_drop, gap)
+
+    def test_gentle_ground_still_supports_the_hull(self):
+        # A five degree undulation must not throw the hull into the air; only
+        # ground that curves away faster than the springs can follow ends
+        # support.
+        speed = 10.0
+        for step in (1.0 / 60.0, 1.0 / 30.0, 0.1):
+            gap = vehicle_physics.ground_follow_gap(speed, 0.0, step)
+            gentle_drop = speed * step * math.tan(math.radians(5.0))
+
+            self.assertLess(gentle_drop, gap)
 
     def test_continuous_downhill_tangent_extends_the_follow_gap(self):
         pitch = math.atan(0.5)
@@ -377,8 +404,50 @@ class VehiclePhysicsAirborneTests(unittest.TestCase):
 
         self.assertGreater(forward, 0.0)
         self.assertAlmostEqual(forward, reverse)
+        self.assertAlmostEqual(12.0 * math.tan(pitch), forward)
+
+    def test_launch_velocity_keeps_the_descent_rate_of_the_lost_surface(self):
+        # Zeroing this made the hull hang at the lip of every drop and then
+        # fall from rest; the arc has to continue the slope it left.
+        pitch = math.radians(20.0)
+
+        descending = vehicle_physics.launch_vertical_speed(12.0, pitch)
+
+        self.assertAlmostEqual(-12.0 * math.tan(pitch), descending)
+
+    def test_landing_impact_ignores_a_slope_the_hull_merely_follows(self):
+        speed = 15.0
+        pitch = math.radians(30.0)
+        rate = -speed * math.tan(pitch)
+
+        self.assertEqual(0.0, vehicle_physics.landing_impact_speed(
+            rate, rate, speed))
+        self.assertAlmostEqual(
+            abs(rate) * math.cos(pitch),
+            vehicle_physics.landing_impact_speed(2.0 * rate, rate, speed))
+
+    def test_landing_impact_on_flat_ground_is_the_vertical_speed(self):
+        self.assertAlmostEqual(
+            14.0, vehicle_physics.landing_impact_speed(-14.0, 0.0, 20.0))
         self.assertEqual(
-            0.0, vehicle_physics.launch_vertical_speed(12.0, pitch))
+            0.0, vehicle_physics.landing_impact_speed(3.0, 0.0, 20.0))
+
+    def test_landing_track_damage_precedes_the_health_threshold(self):
+        maximum = 200.0
+
+        self.assertEqual(0.0, vehicle_physics.fall_track_damage(maximum, 5.0))
+        self.assertFalse(vehicle_physics.landing_is_damaging(5.0))
+        gentle = vehicle_physics.fall_track_damage(maximum, 9.0)
+
+        # A ~3 m drop leaves a damaged suspension and full health.
+        self.assertEqual('critical', device_damage.device_state(
+            maximum - gentle, maximum))
+        self.assertEqual(0, vehicle_physics.fall_damage(1000, 9.0))
+        self.assertTrue(vehicle_physics.landing_is_damaging(9.0))
+        self.assertEqual(
+            maximum, vehicle_physics.fall_track_damage(maximum, 12.0))
+        self.assertEqual(
+            maximum, vehicle_physics.fall_track_damage(maximum, 40.0))
 
 
 if __name__ == '__main__':

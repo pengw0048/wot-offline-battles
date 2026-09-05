@@ -88,18 +88,44 @@ SCROLL_CAP = 0.995
 # linear in the excess. 10 m fall ~ 17% HP, 20 m ~ 38%.
 FALL_SAFE_SPEED = 10.0
 FALL_DMG_PER_MS = 0.03
+# Landing module damage. #1513's ``Vehicle.onStaticCollision`` receives
+# separate ``damageHull``, ``damageLeftTrack`` and ``damageRightTrack``
+# factors, so a world collision damages the running gear as well as the hull.
+# The cell law behind those factors is not shipped with the client, so the
+# ladder below is this product's choice: the chassis pool starts absorbing a
+# landing before the hull loses any HP (a ~3 m drop leaves a damaged
+# suspension and full health) and is spent completely at
+# FALL_TRACK_BREAK_SPEED, which throws both tracks.
+FALL_TRACK_SAFE_SPEED = 6.0
+FALL_TRACK_BREAK_SPEED = 12.0
 # #1513 classifies overturn from the hull world-up cosine.
 OVERTURN_WARNING_COSINE = math.cos(math.radians(70.0))
 OVERTURN_DANGER_COSINE = math.cos(math.radians(80.0))
-# Ground following may bridge small suspension seams, but the allowance must
-# describe the old supporting slope rather than grow with absolute road speed.
-# Otherwise a faster tank is pulled farther down a cliff each frame and never
-# enters the airborne phase. The bounds preserve the copied integration
-# envelope while keeping flat-ground tolerance independent of speed.
-GROUND_FOLLOW_BASE = 0.6
-GROUND_FOLLOW_MIN = 0.8
+# Ground following bridges what the suspension can actually follow, not a
+# cliff. The allowance is the drop the old supporting surface itself produces
+# in this step, plus what the hull can be accelerated downward in one step:
+# gravity, plus SUSPENSION_FOLLOW_ACCEL for springs that push the road wheels
+# into a dip faster than free fall. Because that part grows with the square of
+# the step, the separation limit is a property of the ground - the hull leaves
+# it once the surface curves away faster than about 2 * (GRAVITY +
+# SUSPENSION_FOLLOW_ACCEL) - instead of a property of the frame rate.
+# GROUND_SAMPLE_TOLERANCE absorbs terrain sampling noise and mesh kinks so an
+# ordinary rolling field does not flicker.
+#
+# The previous fixed 0.6 m allowance with a 0.8 m floor was worth 1400 m/s^2 at
+# 60 Hz: a hull driven off a cliff at 15 m/s needed a 73 degree face before it
+# could leave the ground at all, so every ordinary drop pressed it onto the
+# face and it slid down instead of flying. The same constant was worth only
+# 40 m/s^2 in the hidden worker's 0.1 s step, so Bots and the visible player
+# obeyed different laws.
+SUSPENSION_FOLLOW_ACCEL = 6.0
+GROUND_SAMPLE_TOLERANCE = 0.05
 GROUND_FOLLOW_MAX = 2.5
 GROUND_PITCH_LIMIT = 0.96
+# A grounded hull eases toward its support instead of snapping onto it, and
+# never rests more than this above it. Separation is therefore measured from
+# the support, with the hull's own distance only counting past this hover.
+SUPPORT_HOVER_LIMIT = 0.12
 # Grounded hulls use the same four glancing directions after an exact hard
 # contact. These angles and decay constants used to live only in the visible
 # player's integrator while copied Bots stopped with a separate fixed factor.
@@ -163,6 +189,10 @@ _TUNABLE = {
 	'coh_decay_bound':     'COH_DECAY_BOUND',
 	'fall_safe_speed':     'FALL_SAFE_SPEED',
 	'fall_dmg_per_ms':     'FALL_DMG_PER_MS',
+	'fall_track_safe_speed':  'FALL_TRACK_SAFE_SPEED',
+	'fall_track_break_speed': 'FALL_TRACK_BREAK_SPEED',
+	'suspension_follow_accel': 'SUSPENSION_FOLLOW_ACCEL',
+	'ground_sample_tolerance': 'GROUND_SAMPLE_TOLERANCE',
 }
 
 
@@ -746,20 +776,84 @@ def ground_follow_gap(speed, slope_pitch, dt):
 	``speed`` is signed along the same axis used by ``slope_pitch`` and the pose
 	integrator moves x/z by ``speed * dt``. The old surface contributes
 	``speed * tan(pitch) * dt`` only when travel is downhill. Gravity adds the
-	same semi-implicit one-step sag used by the airborne integrator.
+	same semi-implicit one-step sag used by the airborne integrator, and the
+	springs add SUSPENSION_FOLLOW_ACCEL on top of it. Ground that falls away
+	faster than that is no longer support, so the hull goes ballistic instead of
+	being pulled onto the face.
 	'''
 	step = max(0.0, float(dt))
 	pitch = max(-GROUND_PITCH_LIMIT, min(
 		GROUND_PITCH_LIMIT, float(slope_pitch)))
 	tangent_drop = max(0.0, float(speed) * math.tan(pitch) * step)
-	gap = GROUND_FOLLOW_BASE + tangent_drop + GRAVITY * step * step
-	return max(GROUND_FOLLOW_MIN, min(GROUND_FOLLOW_MAX, gap))
+	slack = GROUND_SAMPLE_TOLERANCE + (
+		GRAVITY + SUSPENSION_FOLLOW_ACCEL) * step * step
+	if slack > GROUND_FOLLOW_MAX:
+		slack = GROUND_FOLLOW_MAX
+	# The tangent drop is the surface the hull is already on, so it is never
+	# capped: a steady descent must stay supported at any step length.
+	return tangent_drop + slack
 
 
 def launch_vertical_speed(speed, slope_pitch):
-	'''Upward velocity retained when signed travel loses ground support.'''
-	vertical = float(speed) * math.sin(-float(slope_pitch))
-	return vertical if vertical > 0.0 else 0.0
+	'''Signed vertical speed the hull carries when ground support ends.
+
+	The pose integrator moves x/z by ``speed * dt``, so the surface the hull
+	just left was lifting or dropping it by ``-speed * tan(pitch)``. A crest
+	throws the hull upward; a descent must keep its downward rate, otherwise the
+	hull hangs at the lip of every drop and then falls from rest.
+	'''
+	pitch = max(-GROUND_PITCH_LIMIT, min(
+		GROUND_PITCH_LIMIT, float(slope_pitch)))
+	return -float(speed) * math.tan(pitch)
+
+
+def landing_impact_speed(vertical_speed, support_rise_rate=0.0,
+			horizontal_speed=0.0):
+	'''Closing speed along the landing surface normal.
+
+	``support_rise_rate`` is the vertical rate (m/s) of the ground under the
+	hull, measured between the previous and the current support sample, and
+	``horizontal_speed`` is the ground-plane speed that produced it. A hull that
+	simply follows a descending slope closes at zero and must not be treated as
+	a fall; only the part of its velocity that beats the surface counts, and
+	only its component along the surface normal.
+	'''
+	closing = float(support_rise_rate) - float(vertical_speed)
+	if closing <= 0.0:
+		return 0.0
+	horizontal = abs(float(horizontal_speed))
+	if horizontal <= 0.0:
+		return closing
+	rise = float(support_rise_rate)
+	return closing * horizontal / math.sqrt(
+		horizontal * horizontal + rise * rise)
+
+
+def fall_track_damage(max_hp, impact_speed):
+	'''Chassis pool HP one landing removes from each track.
+
+	Runs from FALL_TRACK_SAFE_SPEED to FALL_TRACK_BREAK_SPEED, where the whole
+	pool is gone and the track is thrown. Both tracks take the same share: a
+	landing loads the running gear evenly, unlike a shot.
+	'''
+	speed = abs(float(impact_speed))
+	if speed <= FALL_TRACK_SAFE_SPEED:
+		return 0.0
+	share = ((speed - FALL_TRACK_SAFE_SPEED) /
+		 (FALL_TRACK_BREAK_SPEED - FALL_TRACK_SAFE_SPEED))
+	if share > 1.0:
+		share = 1.0
+	return max(0.0, float(max_hp)) * share
+
+
+def landing_is_damaging(impact_speed):
+	'''True when a landing costs hull HP or chassis pool.
+
+	The chassis threshold is the lower of the two, so a landing worth reporting
+	is not the same as a landing that costs health.
+	'''
+	speed = abs(float(impact_speed))
+	return speed > min(FALL_SAFE_SPEED, FALL_TRACK_SAFE_SPEED)
 
 
 def overturn_level_from_up_cosine(up_cosine, warning_cosine=None,

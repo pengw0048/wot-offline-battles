@@ -1573,6 +1573,7 @@ class BattleRuntime(object):
         self._local_vertical_speed = 0.0
         self._local_airborne = False
         self._local_fall_armed = False
+        self._local_support_y = None
         self._local_last_pitch = 0.0
         self._local_drive_pitch_history = None
         self._local_smooth_drive_pitch = 0.0
@@ -1856,6 +1857,7 @@ class BattleRuntime(object):
         self._local_vertical_speed = 0.0
         self._local_airborne = False
         self._local_fall_armed = False
+        self._local_support_y = None
         self._local_last_pitch = 0.0
         self._local_drive_pitch_history = None
         self._local_smooth_drive_pitch = 0.0
@@ -17230,12 +17232,17 @@ class BattleRuntime(object):
         return highest, centre
 
     def _apply_fall_damage(self, entity, impact_speed):
-        """Queue a physical impact observation without mutating canonical HP."""
+        """Queue a physical impact observation without mutating canonical HP.
+
+        The chassis pool starts absorbing a landing below the health
+        threshold, so the observation is worth reporting before the fall costs
+        any HP; the server owns both results.
+        """
+        if not vehicle_physics.landing_is_damaging(impact_speed):
+            return 0
         maximum = max(1, int(getattr(
             entity.typeDescriptor, 'maxHealth', getattr(entity, 'health', 1))))
         damage = vehicle_physics.fall_damage(maximum, impact_speed)
-        if damage <= 0:
-            return 0
         impact_speed = min(
             lan_protocol.PLAYER_LANDING_MAX_IMPACT_SPEED,
             abs(float(impact_speed)))
@@ -17258,8 +17265,14 @@ class BattleRuntime(object):
         del self._pending_landing_impacts[0]
         return True
 
-    def _apply_landing_impact(self, entity, vertical_speed):
-        """Copy combined vertical/lateral impact and retained landing skid."""
+    def _apply_landing_impact(self, entity, impact_speed):
+        """Retain the airborne skid and report one surface-normal impact.
+
+        ``impact_speed`` is already the closing speed along the landing
+        surface normal.  A hull carrying lateral air speed keeps it as a
+        landing skid: sliding across the surface it lands on closes nothing
+        against that surface and must not fabricate fall damage.
+        """
         lateral_x, lateral_z = self._local_air_lateral
         lateral_speed = math.sqrt(
             lateral_x * lateral_x + lateral_z * lateral_z)
@@ -17267,10 +17280,26 @@ class BattleRuntime(object):
             self._local_slide_speed = max(
                 self._local_slide_speed, lateral_speed)
         self._local_air_lateral = (0.0, 0.0)
-        impact_speed = math.sqrt(
-            vertical_speed * vertical_speed +
-            lateral_speed * lateral_speed)
         return self._apply_fall_damage(entity, impact_speed)
+
+    @staticmethod
+    def _support_drop(previous, ground):
+        """Metres the support fell since the previous sample."""
+        if previous is None:
+            return 0.0
+        return float(previous) - float(ground)
+
+    @staticmethod
+    def _support_rise_rate(previous, ground, dt):
+        """Vertical rate of the ground under the hull between two samples.
+
+        A hull that only follows a descending slope closes at zero against it;
+        without this the signed launch speed would report every micro-hop on a
+        fast descent as a fall.
+        """
+        if previous is None or float(dt) <= 0.0:
+            return 0.0
+        return (float(ground) - float(previous)) / float(dt)
 
     def _update_vertical_motion(self, entity, position, yaw, dt):
         """Copy vertical motion while rejecting false raised support."""
@@ -17287,19 +17316,38 @@ class BattleRuntime(object):
             max_climb = max(0.6, abs(self._local_speed) * dt * 2.5)
             com_gap = position[1] - ground
             land_y = ground if centre is None else centre
+            # Measure the ground against the ground, not against the hull:
+            # the grounded placement below eases toward its support, and that
+            # lag is not a physical separation. The hull's own distance still
+            # counts past the hover it is allowed to rest at, which is what a
+            # first sample or a teleport leaves behind.
+            previous_support = self._local_support_y
+            support_drop = max(
+                self._support_drop(previous_support, ground),
+                com_gap - vehicle_physics.SUPPORT_HOVER_LIMIT)
+            support_rate = self._support_rise_rate(
+                previous_support, ground, dt)
+            self._local_support_y = float(ground)
             if not self._local_fall_armed:
                 position = (position[0], land_y, position[2])
                 self._local_vertical_speed = 0.0
                 self._local_airborne = False
                 self._local_fall_armed = True
             else:
-                if tank_collision.support_rise_is_obstacle(
-                        position[1], centre, max_climb):
+                if (not self._local_airborne and
+                        tank_collision.support_rise_is_obstacle(
+                            position[1], centre, max_climb)):
                     # The first ray may have met the top edge of a trench,
                     # wagon deck or low ruin. Re-probe below the exact per-tick
                     # climb limit, as the mature 0.8.2 path did. Static
                     # horizontal hull collision remains authoritative for an
                     # actual wall.
+                    #
+                    # Only a driving hull can meet a step at all. A ballistic
+                    # hull that found ground above it has landed on that
+                    # ground, so it skips this branch: the landing below
+                    # raises it by at most one tick's climb, and the
+                    # horizontal world probe still owns a wall.
                     maximum_support_y = (
                         float(position[1]) +
                         min(max(0.0, float(max_climb)), 0.85) + 0.02)
@@ -17321,22 +17369,31 @@ class BattleRuntime(object):
                         return position
                     highest, centre = lower_highest, lower_centre
                     ground = lower_ground
-                    com_gap = position[1] - ground
                     land_y = ground if centre is None else centre
+                    support_drop = max(
+                        self._support_drop(previous_support, ground),
+                        (position[1] - ground) -
+                        vehicle_physics.SUPPORT_HOVER_LIMIT)
+                    support_rate = self._support_rise_rate(
+                        previous_support, ground, dt)
+                    self._local_support_y = float(ground)
                 if (position[1] <= ground or
-                        (com_gap <= snap_gap and
+                        (support_drop <= snap_gap and
                          not self._local_airborne)):
-                    if (self._local_airborne and
-                            self._local_vertical_speed < 0.0):
+                    if self._local_airborne:
                         self._apply_landing_impact(
-                            entity, abs(self._local_vertical_speed))
+                            entity, vehicle_physics.landing_impact_speed(
+                                self._local_vertical_speed, support_rate,
+                                abs(self._local_speed)))
                     if position[1] < ground:
                         rise = ground - position[1]
                         next_y = position[1] + min(rise, max_climb)
                     else:
                         next_y = position[1] + (
                             ground - position[1]) * min(1.0, dt * 15.0)
-                        next_y = min(next_y, ground + 0.12)
+                        next_y = min(
+                            next_y,
+                            ground + vehicle_physics.SUPPORT_HOVER_LIMIT)
                     position = (position[0], next_y, position[2])
                     self._local_vertical_speed = 0.0
                     self._local_airborne = False
@@ -17360,13 +17417,16 @@ class BattleRuntime(object):
                         if next_y <= land_y:
                             next_y = land_y
                             self._apply_landing_impact(
-                                entity, abs(self._local_vertical_speed))
+                                entity, vehicle_physics.landing_impact_speed(
+                                    self._local_vertical_speed, support_rate,
+                                    abs(self._local_speed)))
                             self._local_vertical_speed = 0.0
                             self._local_airborne = False
                             self._local_fall_armed = True
                             break
                     position = (position[0], next_y, position[2])
         elif self._local_fall_armed:
+            self._local_support_y = None
             if not self._local_airborne:
                 self._local_vertical_speed = (
                     vehicle_physics.launch_vertical_speed(
@@ -17379,6 +17439,7 @@ class BattleRuntime(object):
         else:
             # The first streamed terrain hit owns spawn placement.  Never turn
             # the temporary y=100 fallback into a damaging free fall.
+            self._local_support_y = None
             self._local_vertical_speed = 0.0
             self._local_airborne = False
         return position
@@ -17785,7 +17846,13 @@ class BattleRuntime(object):
                 self._local_speed = 0.0
             self._local_grind = 4
             contact_path = 'support'
-        self._ground_pitch(position, yaw, entity.typeDescriptor)
+        if not self._local_airborne:
+            # A hull in the air keeps the attitude it left the ground with.
+            # Sampling the four-point plane under it would pitch the hull onto
+            # a surface it is not touching, which is exactly what made a drop
+            # look like a slide down the face.  The landing tick is already
+            # grounded here, so it re-samples immediately.
+            self._ground_pitch(position, yaw, entity.typeDescriptor)
         position = self._apply_slope_slide(position, yaw, dt, entity)
         position = self._resolve_local_tank_contacts(
             entity, position, yaw, dt)
@@ -21641,6 +21708,7 @@ class BattleRuntime(object):
         self._local_vertical_speed = 0.0
         self._local_airborne = False
         self._local_fall_armed = False
+        self._local_support_y = None
         self._local_last_pitch = 0.0
         self._local_drive_pitch_history = None
         self._local_smooth_drive_pitch = 0.0

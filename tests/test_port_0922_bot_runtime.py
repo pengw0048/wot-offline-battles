@@ -3854,6 +3854,78 @@ class BotRuntimeTests(unittest.TestCase):
         runtime._update_vertical_motion(state, 0.1)
         self.assertEqual(700, state['health'])
 
+    def _landing_state(self, vertical_speed):
+        return {
+            'id': 11, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+            'speed': 0.0, 'half_length': 3.0,
+            'health': 1000, 'max_health': 1000,
+            'display_health': 1000, 'alive': True, 'critical': {},
+            'vertical_speed': vertical_speed, 'airborne': True,
+            'grounded_once': True, 'last_drive_pitch': 0.0,
+        }
+
+    def test_hard_bot_landing_throws_both_tracks(self):
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=lambda *unused: 0.0)
+        runtime._descriptors[11] = _critical_descriptor()
+        state = self._landing_state(-13.0)
+
+        runtime._update_vertical_motion(state, 0.1)
+
+        devices = dict((record['name'], record)
+                       for record in state['critical']['devices'])
+        self.assertEqual(
+            ('destroyed', 'destroyed'),
+            (devices['leftTrackHealth']['state'],
+             devices['rightTrackHealth']['state']))
+        self.assertEqual(910, state['health'])
+
+    def test_moderate_bot_landing_damages_tracks_without_health_loss(self):
+        runtime = self.module.BotRuntime(
+            1, physics_ground_probe=lambda *unused: 0.0)
+        runtime._descriptors[11] = _critical_descriptor()
+        state = self._landing_state(-9.0)
+
+        runtime._update_vertical_motion(state, 0.1)
+
+        devices = dict((record['name'], record)
+                       for record in state['critical']['devices'])
+        self.assertEqual(
+            ('critical', 'critical'),
+            (devices['leftTrackHealth']['state'],
+             devices['rightTrackHealth']['state']))
+        self.assertEqual(1000, state['health'])
+        self.assertTrue(state['alive'])
+
+    def test_bot_following_a_descent_never_lands_on_its_own_slope(self):
+        """A hull that only follows a slope closes nothing against it.
+
+        With the signed launch speed a fast descent carries a large downward
+        velocity, so a micro-hop over a mesh kink used to look like a fall.
+        """
+        grade = 0.5
+        heights = {'y': 0.0}
+
+        def probe(unused_x, z, unused_hint):
+            return -grade * float(z)
+
+        runtime = self.module.BotRuntime(1, physics_ground_probe=probe)
+        runtime._descriptors[11] = _critical_descriptor()
+        state = self._landing_state(0.0)
+        state.update(
+            speed=15.0, airborne=False, vertical_speed=0.0,
+            last_drive_pitch=math.atan(grade))
+        step = 0.1
+        for unused in range(12):
+            state['z'] += state['speed'] * step
+            runtime._update_vertical_motion(state, step)
+            heights['y'] = state['y']
+
+        self.assertEqual(1000, state['health'])
+        self.assertEqual({}, state['critical'])
+        self.assertFalse(state['airborne'])
+        self.assertAlmostEqual(-grade * state['z'], heights['y'], places=3)
+
     def test_fatal_bot_landing_uses_world_collision_terminal_state(self):
         runtime = self.module.BotRuntime(
             1, physics_ground_probe=lambda *unused: 0.0)
@@ -10801,6 +10873,56 @@ class BotRuntimeTests(unittest.TestCase):
             runtime.states[11]['x'], runtime.states[11]['y'],
             runtime.states[11]['z'], runtime.states[11]['yaw'],
             runtime.states[11]['speed']))
+
+    def test_airborne_bot_keeps_the_pose_physics_gave_it(self):
+        """The baked graph calls the air past a cliff unsafe.
+
+        A ballistic hull is not driving, so rolling its pose back to the start
+        of the tick would strand it above the edge and repeat the same fall
+        every tick.  It must land where physics puts it and recover by driving.
+        """
+        edge = 6.0
+
+        def ground(unused_x, z, unused_hint):
+            return 0.0 if float(z) < edge else -40.0
+
+        command = self._stationary_command()
+        command.update({
+            'throttle': 1.0, 'combat_mode': 'route',
+            'move_position': (0.0, 0.0, 400.0),
+            'recovery_mode': 'drive', 'movement_intent': True,
+        })
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': True, 'collision': False, 'slope': 0.0},
+            ground_probe=ground, physics_ground_probe=ground,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.battle_start(self.start)
+        runtime.navigator = None
+        runtime.states[11].update(
+            x=0.0, y=0.0, z=0.0, yaw=0.0, speed=12.0, grounded_once=True)
+        state = runtime.states[11]
+        original_decision_seconds = self.module.DECISION_SECONDS
+        original_pose_safe = self.module.prebaked_navigation.pose_is_safe
+        self.module.DECISION_SECONDS = 2.0
+        self.module.prebaked_navigation.pose_is_safe = (
+            lambda unused_graph, pose, **unused_kwargs: pose[2] < edge)
+        try:
+            for frame in range(8):
+                runtime.update(0.1, 1.0 + (frame + 1) * 0.1)
+                if state['airborne']:
+                    break
+        finally:
+            self.module.DECISION_SECONDS = original_decision_seconds
+            self.module.prebaked_navigation.pose_is_safe = original_pose_safe
+
+        self.assertTrue(state['airborne'])
+        self.assertGreater(state['z'], edge)
+        self.assertLess(state['vertical_speed'], 0.0)
+        self.assertLess(state['y'], 0.0)
 
     @staticmethod
     def _stationary_command():
