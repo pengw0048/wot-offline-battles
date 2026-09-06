@@ -5015,7 +5015,11 @@ class LANClient(object):
                      _projectile_int_range(message.get('chat_seq'),
                                            1, MAX_PROJECTILE_ID) is not None)
             if kind == 'team_chat':
+                # A server without Bot chat omits the issuer kind, and every
+                # line it relays came from a human.
+                issuer_kind = message.get('issuer_kind', 'human')
                 valid = (valid and _exact_int(message.get('team')) == self.team and
+                         issuer_kind in ('human', 'bot') and
                          _projectile_int_range(message.get('issuer_id'),
                                                1, MAX_PROJECTILE_ID) is not None and
                          is_valid_team_chat_text(message.get('text')))

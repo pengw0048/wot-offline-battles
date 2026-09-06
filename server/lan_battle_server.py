@@ -39,6 +39,7 @@ _CLIENT_SCRIPT_ROOT = os.path.join(
 if _CLIENT_SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, _CLIENT_SCRIPT_ROOT)
 
+import bot_chat
 from server_bot_ai import BotPlanner
 from offline_rewards import compute_offline_rewards
 from vehicle_overlay_store import (
@@ -73,6 +74,12 @@ TICK_HZ = 30.0
 # #1513 ingests observations and damage immediately, but only needs one
 # full-team tactical order synthesis per second.
 BOT_PLANNER_INTERVAL_TICKS = max(1, int(round(TICK_HZ)))
+# Bot conversation is paced in seconds, not frames.  Half a second is
+# fine grained enough for a scheduled reply and costs one dictionary
+# walk when nothing is due.
+BOT_CHAT_INTERVAL_TICKS = max(1, int(round(TICK_HZ / 2.0)))
+# A Bot reports its own damage once per round, below this fraction.
+BOT_CHAT_LOW_HEALTH_FRACTION = 0.3
 REPLICA_SNAPSHOT_HZ = 15.0
 REPLICA_SNAPSHOT_TICKS = max(
     1, int(round(TICK_HZ / REPLICA_SNAPSHOT_HZ)))
@@ -2062,6 +2069,12 @@ class BattleState:
         self.bot_orders = {"revision": 0, "orders": []}
         self.team_commands = OrderedDict()
         self._next_bot_planner_tick = 0
+        self.bot_chat = bot_chat.BotChatDirector(
+            random.Random(), tick_hz=TICK_HZ)
+        self._next_bot_chat_tick = 0
+        self.bot_chat_seq = {}
+        self.bot_chat_low_health = set()
+        self._bot_chat_class_cache = {}
         self.bot_reported_hits = set()
         self.bot_reported_rams = set()
         self.bot_reported_ram_fingerprints = {}
@@ -3184,6 +3197,7 @@ class BattleState:
         self.bot_orders = {"revision": 0, "orders": []}
         self.team_commands = OrderedDict()
         self._next_bot_planner_tick = 0
+        self._reset_bot_chat()
         self.bot_reported_hits = set()
         self.bot_reported_rams = set()
         self.bot_reported_ram_fingerprints = {}
@@ -3582,6 +3596,7 @@ class BattleState:
         self.phase = "battle"
         self.tick = 0
         self._next_bot_planner_tick = 0
+        self._reset_bot_chat()
         self.state_revision += 1
         live_message = {
             "type": "battle_live",
@@ -5348,6 +5363,7 @@ class BattleState:
                 "round_id": self.round_id,
                 "chat_seq": sequence,
                 "issuer_id": issuer_id,
+                "issuer_kind": "human",
                 "team": team,
                 "text": text,
             }
@@ -5358,10 +5374,216 @@ class BattleState:
             issuer.team_chat_publications[sequence] = fingerprint
             while len(issuer.team_chat_publications) > TEAM_CHAT_HISTORY:
                 issuer.team_chat_publications.popitem(last=False)
+            self._observe_bot_chat_line_locked(issuer, text)
         for recipient in recipients:
             if not recipient.offer_reliable(message):
                 self.remove_player(recipient.player_id, expected=recipient)
         return True
+
+    def _reset_bot_chat(self):
+        """Fence every Bot conversation at a round boundary."""
+        self.bot_chat.reset_round(self.round_id)
+        self._next_bot_chat_tick = 0
+        self.bot_chat_seq = {}
+        self.bot_chat_low_health = set()
+        self._bot_chat_class_cache = {}
+
+    def _bot_chat_vehicle_class_locked(self, vehicle):
+        """Return one catalogued class tag, remembering what was resolved.
+
+        The catalogue walk is linear in every vehicle the clients listed, and
+        the conversation asks about every Bot twice a second.  A vehicle's
+        class never changes, so a resolved answer is cached; an unresolved one
+        is not, because the catalogue may still arrive.
+        """
+        cached = self._bot_chat_class_cache.get(vehicle)
+        if cached is not None:
+            return cached
+        resolved = self._result_vehicle_class(vehicle)
+        if resolved:
+            self._bot_chat_class_cache[vehicle] = resolved
+        return resolved
+
+    def _bot_chat_snapshot_locked(self, speaker=None, with_bounds=False):
+        """Freeze the plain facts one conversation decision reads."""
+        bots = []
+        for identity in self.bot_manifest:
+            try:
+                bot_id = int(identity.get("id", 0))
+            except (TypeError, ValueError):
+                continue
+            state = self.bot_states.get(bot_id)
+            if state is None:
+                continue
+            vehicle = str(identity.get("vehicle") or "")
+            bots.append({
+                "id": bot_id,
+                "team": int(identity.get("team", 0)),
+                "name": str(identity.get("name") or ""),
+                "vehicle": vehicle,
+                "vehicle_class": self._bot_chat_vehicle_class_locked(vehicle),
+                "alive": bool(state.get("alive")),
+                "x": state.get("x"),
+                "z": state.get("z"),
+                "hp": state.get("health"),
+                "max_hp": state.get("max_health"),
+                "combat_mode": str(state.get("combat_mode") or ""),
+            })
+        return {
+            "bots": bots,
+            "speaker": speaker or {},
+            # Only address resolution reads the grid, and it is the one
+            # conversation step a human line drives.
+            "arena_bounds": (self._bot_defense_context()["arena_bounds"]
+                             if with_bounds else None),
+        }
+
+    def _bot_chat_speaker_locked(self, player):
+        """Describe the human who just spoke, including what they can see."""
+        spotted = self.player_spotted.get(int(player.player_id), frozenset())
+        return {
+            "name": str(player.name),
+            "x": float(player.x),
+            "z": float(player.z),
+            "spotted": set(
+                vehicle_id for kind, vehicle_id in spotted if kind == "bot"),
+        }
+
+    def _observe_bot_chat_line_locked(self, issuer, text):
+        """Let the Bot conversation react to one relayed human line."""
+        if self.battle_result is not None:
+            return
+        try:
+            self.bot_chat.observe_player_line(
+                self.tick, int(issuer.team), text,
+                self._bot_chat_snapshot_locked(
+                    self._bot_chat_speaker_locked(issuer), with_bounds=True))
+        except Exception as error:
+            # A conversation fault is contained to this line.  It must never
+            # cost the team its chat relay or fault the round.
+            _server_log("BOT CHAT line observation failed: %s" % (error,))
+
+    def _observe_bot_chat_kill_locked(self, attacker, victim):
+        """Let a kill start a line with nobody having spoken."""
+        if self.battle_result is not None:
+            return
+        try:
+            snapshot = self._bot_chat_snapshot_locked()
+            if attacker[0] == "bot":
+                self.bot_chat.observe_event(
+                    self.tick, self._vehicle_team(*attacker),
+                    bot_chat.TRIGGER_KILL, attacker[1], snapshot)
+            if victim[0] == "bot":
+                victim_team = self._vehicle_team(*victim)
+                self.bot_chat.observe_event(
+                    self.tick, victim_team, bot_chat.TRIGGER_DOWN,
+                    victim[1], snapshot)
+                mourner = self._bot_chat_nearest_ally(
+                    victim[1], victim_team, snapshot)
+                if mourner is not None:
+                    self.bot_chat.observe_event(
+                        self.tick, victim_team, bot_chat.TRIGGER_ALLY_DOWN,
+                        mourner, snapshot)
+        except Exception as error:
+            _server_log("BOT CHAT kill observation failed: %s" % (error,))
+
+    @staticmethod
+    def _bot_chat_nearest_ally(victim_id, team, snapshot):
+        """Return the living teammate standing closest to one loss."""
+        fallen = None
+        for bot in snapshot["bots"]:
+            if bot["id"] == int(victim_id):
+                fallen = bot
+                break
+        if fallen is None or fallen.get("x") is None:
+            return None
+        best = None
+        best_distance = None
+        for bot in snapshot["bots"]:
+            if (bot["id"] == int(victim_id) or not bot["alive"] or
+                    bot["team"] != int(team) or bot.get("x") is None):
+                continue
+            distance = ((float(bot["x"]) - float(fallen["x"])) ** 2 +
+                        (float(bot["z"]) - float(fallen["z"])) ** 2)
+            if best_distance is None or distance < best_distance:
+                best = bot["id"]
+                best_distance = distance
+        return best
+
+    def _observe_bot_chat_damage_locked(self, snapshot):
+        """Let a Bot mention its own damage once per round."""
+        for bot in snapshot["bots"]:
+            if bot["id"] in self.bot_chat_low_health or not bot["alive"]:
+                continue
+            try:
+                health = float(bot.get("hp") or 0.0)
+                maximum = float(bot.get("max_hp") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if (maximum <= 0.0 or
+                    health > maximum * BOT_CHAT_LOW_HEALTH_FRACTION):
+                continue
+            self.bot_chat_low_health.add(bot["id"])
+            self.bot_chat.observe_event(
+                self.tick, bot["team"], bot_chat.TRIGGER_LOW_HEALTH,
+                bot["id"], snapshot)
+
+    def _bot_team_chat_message_locked(self, line):
+        """Turn one composed line into a stock-shaped team chat message."""
+        try:
+            team = int(line.get("team", 0))
+        except (TypeError, ValueError):
+            return None
+        text = line.get("text")
+        if team not in (1, 2) or not self._valid_team_chat_text(text):
+            return None
+        identity = self._team_command_bot_identity_locked(line.get("bot_id"))
+        if identity is None or int(identity.get("team", 0)) != team:
+            return None
+        sequence = self.bot_chat_seq.get(team, 0) + 1
+        if sequence > PROJECTILE_MAX_ID:
+            return None
+        self.bot_chat_seq[team] = sequence
+        return {
+            "type": "team_chat",
+            "protocol": PROTOCOL_VERSION,
+            "round_id": self.round_id,
+            "chat_seq": sequence,
+            "issuer_id": int(identity["id"]),
+            "issuer_kind": "bot",
+            "team": team,
+            "text": text,
+        }
+
+    def publish_bot_team_chat(self):
+        """Publish the Bot lines this tick has due, at a bounded cadence."""
+        with self.lock:
+            if (self.phase != "battle" or self.battle_result is not None or
+                    self.tick < self._next_bot_chat_tick):
+                return False
+            self._next_bot_chat_tick = self.tick + BOT_CHAT_INTERVAL_TICKS
+            try:
+                snapshot = self._bot_chat_snapshot_locked()
+                self._observe_bot_chat_damage_locked(snapshot)
+                lines = self.bot_chat.tick(self.tick, snapshot)
+            except Exception as error:
+                _server_log("BOT CHAT tick failed: %s" % (error,))
+                return False
+            deliveries = []
+            for line in lines:
+                message = self._bot_team_chat_message_locked(line)
+                if message is None:
+                    continue
+                deliveries.append((message, tuple(
+                    player for player in self.players.values()
+                    if player.connected and player.participating and
+                    player.team == message["team"])))
+        for message, recipients in deliveries:
+            for recipient in recipients:
+                if not recipient.offer_reliable(message):
+                    self.remove_player(recipient.player_id,
+                                       expected=recipient)
+        return bool(deliveries)
 
     @staticmethod
     def _ordinary_bot_burst(fire_seq, shell_index):
@@ -11507,6 +11729,7 @@ class BattleState:
             "actor_speed": round(self._vehicle_speed(attacker), 4),
             "victim_speed": round(self._vehicle_speed(victim), 4),
         })
+        self._observe_bot_chat_kill_locked(attacker, victim)
         # Fadin wants the final enemy destroyed either directly by the last
         # round or by the fire that round started. Both facts are only true
         # at this instant.
@@ -12559,6 +12782,7 @@ class BattleState:
         }
 
     def tick_once(self, dt):
+        self.publish_bot_team_chat()
         reset_message = None
         had_pending_live = False
         failed_live_recipients = []

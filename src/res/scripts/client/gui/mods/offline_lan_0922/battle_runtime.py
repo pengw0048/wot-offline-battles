@@ -3432,11 +3432,17 @@ class BattleRuntime(object):
         if (not self._radio_message_current(message) or
                 message.get('team') != self.client.team):
             return False
-        issuer = self._radio_identity('human', message.get('issuer_id'))
+        # Bots speak on the same stock channel as their teammates.  The
+        # issuer kind selects the roster the identity is resolved against and
+        # keeps the two id spaces from colliding in the duplicate filter.
+        issuer_kind = message.get('issuer_kind', 'human')
+        if issuer_kind not in ('human', 'bot'):
+            return False
+        issuer = self._radio_identity(issuer_kind, message.get('issuer_id'))
         if issuer is None:
             return False
         seen = getattr(self, '_team_chat_seen', {})
-        key = (message['round_id'], message['issuer_id'])
+        key = (message['round_id'], issuer_kind, message['issuer_id'])
         if message['chat_seq'] <= seen.get(key, 0):
             return False
         result = self._server.receive_team_chat(message.get('text'), issuer[1])

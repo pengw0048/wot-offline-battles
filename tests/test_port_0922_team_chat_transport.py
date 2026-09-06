@@ -11,6 +11,7 @@ SERVER_ROOT = TEST_ROOT.parent / 'server'
 sys.path.insert(0, str(TEST_ROOT))
 sys.path.insert(0, str(SERVER_ROOT))
 
+import bot_chat  # noqa: E402
 import lan_battle_server as server_module  # noqa: E402
 from lan_battle_server import (  # noqa: E402
     BattleState, CLIENT_BUILD_0922, ClientHandler, ThreadedTCPServer,
@@ -183,6 +184,7 @@ class TeamChatTransportTests(unittest.TestCase):
             'round_id': self.state.round_id,
             'chat_seq': 1,
             'issuer_id': sender_id,
+            'issuer_kind': 'human',
             'team': 1,
             'text': text,
         }, broadcast)
@@ -359,6 +361,142 @@ class TeamChatTransportTests(unittest.TestCase):
             (message.get('round_id') == old_round or
              message.get('text') == 'Stale in the new round.')
             for message in observed))
+
+
+class _ScriptedRandom(object):
+    """Remove the randomness so one conversation rule is provable."""
+
+    def random(self):
+        return 0.0
+
+    def uniform(self, low, high):
+        return low
+
+    def choice(self, sequence):
+        return list(sequence)[0]
+
+
+class _FixedBackend(object):
+    def __init__(self, text='收到, 这就回来'):
+        self.text = text
+
+    def compose(self, request):
+        return self.text
+
+
+class BotTeamChatTransportTests(unittest.TestCase):
+    """Cover the one wire change: a Bot as the issuer of a stock chat line."""
+
+    def setUp(self):
+        self.state = BattleState(
+            map_name='01_karelia', max_players=3,
+            team1_size=2, team2_size=1)
+        self.server = ThreadedTCPServer(('127.0.0.1', 0), ClientHandler)
+        self.server.game_server = type(
+            'GameServer', (), {'state': self.state})()
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.daemon = True
+        self.thread.start()
+        self.peers = []
+
+    def tearDown(self):
+        for peer in self.peers:
+            peer.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2.0)
+
+    def _connect(self, name, account_key, team):
+        peer = _Peer(self.server.server_address)
+        self.peers.append(peer)
+        peer.send(_player_hello(name, account_key, team))
+        messages = peer.receive_until(_type('welcome'))
+        welcome = next(message for message in messages
+                       if message.get('type') == 'welcome')
+        return peer, welcome['player_id']
+
+    def _prepare(self, backend=None):
+        sender, sender_id = self._connect('Sender', 'bot_chat_sender', 1)
+        opponent, unused_id = self._connect('Opponent', 'bot_chat_enemy', 2)
+        for sequence, peer in enumerate((sender, opponent), 1):
+            peer.send({'type': 'ping', 'seq': sequence})
+            peer.receive_until(
+                lambda message, expected=sequence:
+                message.get('type') == 'pong' and
+                message.get('seq') == expected)
+        with self.state.lock:
+            self.state.phase = 'battle'
+            self.state.bot_manifest = [{
+                'id': 5, 'team': 1, 'slot': 1, 'name': '今天不加班',
+                'vehicle': 'ussr:R04_T-34',
+            }]
+            self.state.bot_states = {5: {
+                'id': 5, 'team': 1, 'alive': True, 'x': 12.0, 'z': 12.0,
+                'health': 400, 'max_health': 400,
+            }}
+            self.state.bot_chat = bot_chat.BotChatDirector(
+                _ScriptedRandom(), tick_hz=server_module.TICK_HZ,
+                backend=backend or _FixedBackend())
+            self.state.bot_chat.reset_round(self.state.round_id)
+            self.state._next_bot_chat_tick = 0
+        return sender, sender_id, opponent
+
+    def _run_chat_ticks(self, limit=400):
+        published = False
+        for tick in range(limit):
+            with self.state.lock:
+                self.state.tick = tick
+            published = self.state.publish_bot_team_chat() or published
+        return published
+
+    def test_an_addressed_bot_answers_on_the_stock_channel(self):
+        sender, unused_sender_id, opponent = self._prepare()
+        sender.send({'type': 'team_chat', 'round_id': self.state.round_id,
+                     'chat_seq': 1, 'text': '那个t34 回来一下'})
+        sender.receive_until(_chat_ack(1))
+        self.assertTrue(self._run_chat_ticks())
+        line = next(
+            message for message in sender.receive_until(
+                lambda message: message.get('type') == 'team_chat' and
+                message.get('issuer_kind') == 'bot')
+            if message.get('issuer_kind') == 'bot')
+        self.assertEqual(line['issuer_id'], 5)
+        self.assertEqual(line['team'], 1)
+        self.assertEqual(line['round_id'], self.state.round_id)
+        self.assertEqual(line['text'], '收到, 这就回来')
+        self.assertGreaterEqual(line['chat_seq'], 1)
+
+    def test_a_bot_line_never_reaches_the_other_team(self):
+        sender, unused_sender_id, opponent = self._prepare()
+        sender.send({'type': 'team_chat', 'round_id': self.state.round_id,
+                     'chat_seq': 1, 'text': '那个t34 回来一下'})
+        sender.receive_until(_chat_ack(1))
+        self._run_chat_ticks()
+        opponent.send({'type': 'ping', 'seq': 99})
+        seen = opponent.receive_until(
+            lambda message: message.get('type') == 'pong' and
+            message.get('seq') == 99)
+        self.assertFalse([message for message in seen
+                          if message.get('type') == 'team_chat'])
+
+    def test_an_unpublishable_line_is_dropped_without_a_sequence(self):
+        sender, unused_sender_id, unused_opponent = self._prepare(
+            backend=_FixedBackend('   '))
+        sender.send({'type': 'team_chat', 'round_id': self.state.round_id,
+                     'chat_seq': 1, 'text': '那个t34 回来一下'})
+        sender.receive_until(_chat_ack(1))
+        self.assertFalse(self._run_chat_ticks())
+        with self.state.lock:
+            self.assertEqual({}, self.state.bot_chat_seq)
+
+    def test_a_finished_battle_stops_the_conversation(self):
+        sender, unused_sender_id, unused_opponent = self._prepare()
+        sender.send({'type': 'team_chat', 'round_id': self.state.round_id,
+                     'chat_seq': 1, 'text': '那个t34 回来一下'})
+        sender.receive_until(_chat_ack(1))
+        with self.state.lock:
+            self.state.battle_result = {'winner': 1}
+        self.assertFalse(self._run_chat_ticks())
 
 
 if __name__ == '__main__':
