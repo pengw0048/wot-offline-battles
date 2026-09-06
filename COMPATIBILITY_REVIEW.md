@@ -1910,6 +1910,51 @@ donation and destructible-map donation paths have been removed. The remaining
 vehicle catalog is waiting-room metadata for vehicle tiers and does not provide
 combat descriptors.
 
+## Experimental native sweep preparation
+
+`offline_compute_native.pyd` is a second exact-build sidecar, selected only
+when the hidden worker is configured for it. It carries the arithmetic of one
+world-collision sweep preparation and nothing else: no BigWorld call, no
+entity, no query, no ownership of an accepted event. The worker chooses
+`python` (unchanged inline preparation), `batch` (the same arithmetic in
+`world_collision_prep`), `native` or `native-shadow` before a battle starts,
+through `OFFLINE_LAN_0922_COMPUTE_BACKEND` or
+`mods/configs/offline_lan_0922/compute_backend.txt`, and logs the effective
+name. A load, self-test or preparation failure recovers through the unchanged
+inline path and permanently stops labelling the run as native.
+
+Exact-build facts this bridge depends on, read from the pinned
+`WorldOfTanks.exe` (image base `0x400000`, timestamp `0x5a6edca4`, size
+`0x206a000`, large-address aware):
+
+- `PyInt_FromLong` at RVA `0x00be1180` and `Py_InitModule4` at RVA
+  `0x00be1940`, already resolved by the instance-guard bridge. No further C
+  API function is resolved.
+- `PyInt_Type` at RVA `0x01664bf0` (`tp_basicsize` 12): the object header is
+  8 bytes, `ob_type` at `+4`, `ob_ival` at `+8`. The module derives the type
+  pointer from a real object at import and refuses to load unless it matches
+  this RVA.
+- `PyTuple_Type` at RVA `0x0165c398` (`tp_basicsize` 12, `tp_itemsize` 4): a
+  `METH_VARARGS` tuple holds `ob_size` at `+8` and `ob_item[i]` at `+12+4i`.
+  `layout_self_test(11, 22, 33)` must return `112233` inside the live
+  interpreter before `prepare_sweep` computes anything.
+- `array` is a builtin module of this executable (`_PyImport_Inittab` at
+  `0x1a7d4a0`, `initarray` at `0x106a400`), so `array.array('d')` and
+  `buffer_info()` carry every double. Arguments are plain ints only, and the
+  buffer address crosses as two 16-bit halves because a large-address-aware
+  process can place the buffer above the signed 32-bit range.
+- `PyFloat_Type.tp_as_number->nb_add` (`0x00fda690`) ends in `addsd`, so the
+  interpreter's float arithmetic is SSE2. The extension is built with
+  `-msse2 -mfpmath=sse -ffp-contract=off`, and the required agreement with
+  the Python reference is exact, to zero units in the last place.
+
+`tests/test_port_0922_native_compute.py` proves that agreement by compiling
+the shipped core for the test host and comparing raw doubles, and proves that
+the batched backend issues the identical native queries with identical
+arguments. Neither proves the extension's own Windows build; `native-shadow`
+exists to compare both implementations on the exact client, and it must never
+be used for a timing run.
+
 ## Known deterministic parity gaps
 
 The source audit deliberately keeps the following differences visible:

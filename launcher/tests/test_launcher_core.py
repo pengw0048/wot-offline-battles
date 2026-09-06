@@ -738,6 +738,7 @@ class ClientInstallTest(unittest.TestCase):
         members = {
             "mods/0.9.22.0.1/org.peng.offline_lan_0922_9.9.9.wotmod": content,
             "mods/0.9.22.0.1/offline_instance_guard_native.pyd": content,
+            "mods/0.9.22.0.1/offline_compute_native.pyd": content,
             "mods/configs/offline_lan_0922/config.json": content,
             core.BUILD_IDENTITY_RELATIVE_PATH_0922: json.dumps({
                 "schema": 1,
@@ -1322,6 +1323,7 @@ class PayloadStagingTest(unittest.TestCase):
         runtime_files = (
             "offline_worker_starter.exe",
             "mods/0.9.22.0.1/offline_instance_guard_native.pyd",
+            "mods/0.9.22.0.1/offline_compute_native.pyd",
             "res_mods/0.9.22.0.1/engine_config.offline-player.xml",
             "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
         )
@@ -1436,6 +1438,7 @@ class PayloadStagingTest(unittest.TestCase):
                        core.BUILD_IDENTITY_RELATIVE_PATH_0922,
                        "offline_worker_starter.exe",
                        "mods/0.9.22.0.1/offline_instance_guard_native.pyd",
+                       "mods/0.9.22.0.1/offline_compute_native.pyd",
                        "res_mods/0.9.22.0.1/"
                        "engine_config.offline-player.xml",
                        "res_mods/0.9.22.0.1/"
