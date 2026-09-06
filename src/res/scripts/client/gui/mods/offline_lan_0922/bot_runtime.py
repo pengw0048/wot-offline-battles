@@ -6114,7 +6114,7 @@ class BotRuntime(object):
 
     def _planner_corridor_clear(self, position, yaw, speed,
                                 wet_escape=False, allow_shallow=False,
-                                hazard_only=False):
+                                hazard_only=False, maximum_distance=None):
         """Rank one candidate through the validated baked static corridor.
 
         ``True`` admits a planner candidate and ``False`` rejects a known fatal
@@ -6146,6 +6146,9 @@ class BotRuntime(object):
             # navigator explicitly selected that adjacent linked cell. The native
             # motion gate and per-frame hull sweep still prove realised travel.
             distance = max(1.0, _number(getattr(grid, 'cell_size', 1.0)))
+            if maximum_distance is not None:
+                # A bounded recovery may stop before the next baked edge.
+                distance = min(distance, max(0.0, _number(maximum_distance)))
             sine = math.sin(float(yaw))
             cosine = math.cos(float(yaw))
             end = (
@@ -10671,6 +10674,7 @@ class BotRuntime(object):
                 # as the only recovery in exactly the places no hull can turn.
                 advisory = self._planner_corridor_clear(
                     position, sample_yaw, state.get('speed', 0.0),
+                    maximum_distance=maximum_distance,
                     wet_escape=(baked_shallow_escape or
                                 state.get('_water_depth', -1.0) >
                                 BOT_WATER_AVOID_DEPTH),

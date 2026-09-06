@@ -12646,6 +12646,33 @@ class BotRuntimeTests(unittest.TestCase):
         runtime.battle_start(self.start)
         return runtime
 
+    def test_bounded_recovery_ignores_hazards_beyond_its_travel(self):
+        runtime = self._ford_runtime()
+        approach = (4.0, 0.0, 4.0)
+        toward_ford = math.pi * 0.5
+        self.assertFalse(runtime._planner_corridor_clear(
+            approach, toward_ford, 0.0))
+        self.assertTrue(runtime._planner_corridor_clear(
+            approach, toward_ford, 0.0, maximum_distance=1.6))
+        self.assertFalse(runtime._planner_corridor_clear(
+            approach, toward_ford, 0.0, maximum_distance=4.0))
+
+    def test_bounded_recovery_distance_reaches_baked_advisory(self):
+        runtime = self._ford_runtime()
+        runtime.states[11].update(x=4.0, y=0.0, z=4.0, yaw=0.0,
+                                  speed=0.0, grounded_once=True)
+        checked = []
+
+        def decide(state, clear):
+            if state['id'] == 11:
+                checked.append((clear(math.pi * 0.5, 1.6),
+                                clear(math.pi * 0.5, 4.0)))
+            return self._stationary_command()
+
+        runtime.adapter.decide = decide
+        runtime.update(0.04, 1.0)
+        self.assertEqual([(True, False)], checked)
+
     def test_shallow_corridor_mask_depends_on_admission(self):
         """The baked mask is the same query; only admission differs."""
         runtime = self._ford_runtime()
