@@ -228,7 +228,7 @@ TEAM_COMMAND_TTL_TICKS = int(15 * TICK_HZ)
 # Travel orders need time to cross the map; short tactical focus stays brief.
 TEAM_COMMAND_MOVEMENT_TTL_TICKS = int(120 * TICK_HZ)
 TEAM_COMMAND_MOVEMENT = frozenset((
-    "BACKTOBASE", "HELPME", "HELPMEEX", "FOLLOWME", "TURNBACK",
+    "ATTACK", "BACKTOBASE", "HELPME", "HELPMEEX", "FOLLOWME", "TURNBACK",
     "ATTENTIONTOCELL",
 ))
 # A radio call asks nearby teammates to respond.  This is a product response
@@ -4905,6 +4905,8 @@ class BattleState:
                 (combat_mode == "base_defense" and
                  command != "BACKTOBASE")):
             return False
+        if command == "STOP":
+            return True
         critical = bot.get("critical")
         if not isinstance(critical, dict):
             return True
@@ -5139,11 +5141,23 @@ class BattleState:
                 if (not target_live or target_marker not in
                         self.player_spotted.get(player.player_id, frozenset())):
                     can_order = False
+            # A positive Bot reply admits an executable navigation target.
+            # Missing target data must not turn an accepted order into a marker.
+            if can_order and command in ("FOLLOWME", "HELPME", "HELPMEEX"):
+                can_order = self._team_command_player_has_world_pose(player)
+            if can_order and command == "BACKTOBASE":
+                bases = self._sanitize_capture_bases(self.capture_bases)
+                can_order = bool(bases.get(player.team))
+            if can_order and command == "ATTENTIONTOCELL":
+                can_order = self._bot_defense_context()["arena_bounds"] is not None
             if can_order:
                 bots = list(live_bots)
                 if command in TEAM_COMMAND_ALLY_TARGETS:
                     bots = (bots if target_kind == "bot" else [])
-                    bots = [bot for bot in bots if bot["id"] == target_id]
+                    bots = [bot for bot in bots
+                            if (bot["id"] == target_id and
+                                self._team_command_bot_can_respond(
+                                    bot, None, command))]
                 elif not self._team_command_player_has_world_pose(player):
                     bots = []
                 else:

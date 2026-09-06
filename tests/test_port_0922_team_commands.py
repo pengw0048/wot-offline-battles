@@ -33,6 +33,7 @@ class TeamCommandTests(unittest.TestCase):
         self.state = BattleState(map_name='01_karelia')
         self.state.client_build = CLIENT_BUILD_0922
         self.state.phase = 'battle'
+        self.state.capture_bases = {1: [(0.0, -200.0)], 2: [(0.0, 200.0)]}
         self.state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
         self.sender = Player(1, _Socket(), ('127.0.0.1', 1), team=1,
                              x=0.0, z=0.0, client_position=True)
@@ -217,6 +218,37 @@ class TeamCommandTests(unittest.TestCase):
         self.assertEqual([12], ack['recipient_bot_ids'])
         self.assertEqual([12], self.state._active_team_commands_locked()[0]
                          ['recipient_bot_ids'])
+
+    def test_named_navigation_does_not_acknowledge_an_immobile_bot(self):
+        self.state.bot_states[12]['critical'] = {
+            'destroyed': ['leftTrackHealth']}
+        for sequence, command in enumerate(('FOLLOWME', 'HELPMEEX', 'TURNBACK'), 1):
+            with self.subTest(command=command):
+                ack = self.state.submit_team_command(1, self._message(
+                    command, sequence=sequence, target_id=12, target_kind='bot'))
+                self.assertEqual([], ack['recipient_bot_ids'])
+        stop = self.state.submit_team_command(1, self._message(
+            'STOP', sequence=4, target_id=12, target_kind='bot'))
+        self.assertEqual([12], stop['recipient_bot_ids'])
+
+    def test_named_follow_needs_a_real_issuer_pose(self):
+        self.sender.client_position = False
+        for sequence, command in enumerate(('FOLLOWME', 'HELPMEEX'), 1):
+            ack = self.state.submit_team_command(1, self._message(
+                command, sequence=sequence, target_id=12, target_kind='bot'))
+            self.assertEqual([], ack['recipient_bot_ids'])
+        self.assertEqual([], self.state._active_team_commands_locked())
+
+    def test_navigation_without_target_data_does_not_produce_a_bot_reply(self):
+        from unittest import mock
+        self.state.capture_bases = {}
+        back = self.state.submit_team_command(1, self._message('BACKTOBASE'))
+        self.assertEqual([], back['recipient_bot_ids'])
+        with mock.patch.object(self.state, '_map_rule_data', return_value={}):
+            cell = self.state.submit_team_command(1, self._message(
+                'ATTENTIONTOCELL', sequence=2, cell_index=38))
+        self.assertEqual([], cell['recipient_bot_ids'])
+        self.assertEqual([], self.state._active_team_commands_locked())
 
     def test_sender_death_clears_command_before_next_planning_cycle(self):
         sent = []

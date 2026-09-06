@@ -82,8 +82,9 @@ whose profile changed after it started must be restarted first.
   General requests select zero to three mobile Bots within 300 metres; a named
   ally command addresses that Bot. Each assigned Bot replies through the stock
   team-message system. Movement orders last up to two minutes, while short
-  tactical commands last 15 seconds. Ordinary cover and engagement yield to
-  player orders; urgent defense and survival remain higher priority.
+  tactical commands last 15 seconds. Once accepted, navigation orders override
+  autonomous tactical choices; unavailable Bots or missing destinations produce
+  no positive reply.
   Minimap requests choose passable ground inside the cell; following Bots
   leave room behind the player. Native menu, marker and sound presentation
   still needs acceptance on the supported Windows client.
