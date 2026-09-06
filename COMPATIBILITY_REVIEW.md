@@ -744,6 +744,15 @@ controller registers its event consumers on `startControl` and removes them on
 clears pending request identities during Avatar teardown, and ignores duplicate
 or late acknowledgements and relays.
 
+In the inspected Chinese HD `0.9.22.0.1 #1513` bytecode,
+`TeamChannelController.isEnabled()` additionally requires
+`sessionProvider.getArenaDP().getAlliesVehiclesNumber() > 1`; its base guard
+keeps `g_settings.userPrefs.disableBattleChat` effective for random battles.
+The runtime therefore waits for the real `ArenaDP` reader after
+`VEHICLE_ADDED` before issuing action 19, and retries on subsequent frames
+until that native roster condition is visible. It does not write the user chat
+preference.
+
 Team text uses stock actions `INIT_BATTLE_CHAT=19`,
 `DEINIT_BATTLE_CHAT=20`, `BROADCAST_BATTLE_MESSAGE=21`, and
 `ON_BATTLE_MESSAGE_BROADCAST=22`. Outgoing TEAM messages carry channel marker

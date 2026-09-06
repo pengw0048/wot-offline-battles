@@ -1488,6 +1488,7 @@ class BattleRuntime(object):
         self._damage_info_failure_reported = False
         self._optional_failures_reported = set()
         self._disabled_optional_features = set()
+        self._team_chat_initialized = False
         self._avatar = None
         self._binding = None
         self._server = None
@@ -1840,6 +1841,7 @@ class BattleRuntime(object):
         self._damage_info_failure_reported = False
         self._optional_failures_reported = set()
         self._disabled_optional_features = set()
+        self._team_chat_initialized = False
         self._sixth_sense = None
         self._has_sixth_sense = False
         self._has_expert = False
@@ -2715,6 +2717,31 @@ class BattleRuntime(object):
             self._warn_optional_failure(feature, error, disable=disable)
             return False
 
+    def _start_team_chat_when_roster_ready(self):
+        """Start stock Chat2 only after its ArenaDP teammate guard passes."""
+        if (self._worker_mode or self._team_chat_initialized or
+                self.state != 'running'):
+            return False
+        provider = getattr(self._avatar, 'guiSessionProvider', None)
+        arena_getter = getattr(provider, 'getArenaDP', None)
+        if not callable(arena_getter):
+            return False
+        arena_dp = arena_getter()
+        allies_getter = getattr(arena_dp, 'getAlliesVehiclesNumber', None)
+        if not callable(allies_getter):
+            return False
+        try:
+            has_teammate = int(allies_getter()) > 1
+        except (TypeError, ValueError, OverflowError, ReferenceError):
+            return False
+        if not has_teammate:
+            return False
+        started = self._run_optional_feature(
+            'team chat initialization', self._server.start_team_chat)
+        if started:
+            self._team_chat_initialized = True
+        return bool(started)
+
     def _disable_standard_space_visibility(self):
         self._standard_space_visibility = None
         return True
@@ -3256,10 +3283,10 @@ class BattleRuntime(object):
             self.state = 'running'
             if not self._worker_mode:
                 # Stock __startGUI has registered the battle messenger before
-                # setClientReady reaches this boundary. Initialize channels
-                # after that owner exists and before our shared load barrier.
-                self._run_optional_feature(
-                    'team chat initialization', self._server.start_team_chat)
+                # setClientReady reaches this boundary. TeamChannelController
+                # additionally requires the ArenaDP roster to have a teammate;
+                # remote VEHICLE_ADDED events can arrive later.
+                self._start_team_chat_when_roster_ready()
                 self._bind_local_arcade_camera()
                 self._run_optional_feature(
                     'engine RPM presentation', self._publish_rpm,
@@ -15001,6 +15028,7 @@ class BattleRuntime(object):
                 self._disable_standard_space_visibility)
             self._flush_pending_bot_create(now)
             self._flush_pending_entities(now)
+            self._start_team_chat_when_roster_ready()
             self._drain_event_journal()
             self._run_optional_feature(
                 'foliage camouflage',
@@ -21206,6 +21234,10 @@ class BattleRuntime(object):
                 'team_killer': bool(
                     (record.get('state') or {}).get('team_killer', False))})
             record['arena_added'] = True
+            # ClientArena receives VEHICLE_ADDED before Chat2 asks its
+            # ArenaDP reader whether a teammate exists. Frame retries cover
+            # any native event propagation deferred past this callback.
+            self._start_team_chat_when_roster_ready()
         if (not self._worker_mode and record.get('presentation') and
                 not record.get('native_remote') and
                 record.get('arena_added') and

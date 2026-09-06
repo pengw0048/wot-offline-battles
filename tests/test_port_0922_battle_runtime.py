@@ -837,6 +837,7 @@ class _ArenaDataProvider(object):
         self.avatar = avatar
         self.player_vehicle_id = 0
         self.refreshes = 0
+        self.vehicle_teams = {}
 
     def isRequiredDataExists(self):
         if self.player_vehicle_id > 0:
@@ -856,6 +857,10 @@ class _ArenaDataProvider(object):
     def getVehicleInfo(self, vehicle_id):
         return types.SimpleNamespace(
             vehicleID=int(vehicle_id), team=self.avatar.team)
+
+    def getAlliesVehiclesNumber(self):
+        return sum(1 for team in self.vehicle_teams.values()
+                   if team == self.avatar.team)
 
 
 class _InputHandler(object):
@@ -1033,6 +1038,10 @@ class _Avatar(object):
             # Avatar.__startGUI, before the native client-ready callback.
             if not self._offlineLANInitComplete or not self.playerVehicleID:
                 raise RuntimeError('battle messenger is not ready')
+            # #1513 TeamChannelController reads ArenaDP while action 19
+            # creates the channels; this must already see a teammate.
+            if self.arena_dp.getAlliesVehiclesNumber() <= 1:
+                raise RuntimeError('battle chat roster is not ready')
         self.chat_actions.append((action_id, request_id, dict(args)))
 
     def set_playerVehicleID(self, previous):
@@ -1052,6 +1061,9 @@ class _Avatar(object):
 
     def updateArena(self, kind, payload):
         self.arena_updates.append((kind, payload))
+        if kind == 2:
+            values = pickle.loads(zlib.decompress(payload))
+            self.arena_dp.vehicle_teams[int(values[0])] = int(values[3])
 
     def syncVehicleAttrs(self, values):
         self.synced_attrs = values
@@ -9722,19 +9734,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
             type(runtime.app_loader).__dict__['showBattlePage'])
         self.assertEqual('newer', runtime.app_loader.showBattlePage())
 
-    @mock.patch('gui.mods.offline_lan_0922.tactical_radio.'
-                '_notify_stock_ignore_lists_ready')
-    def test_map_to_native_vehicle_to_ready_lifecycle(self, notify_users):
+    def test_map_to_native_vehicle_to_ready_lifecycle(self):
         runtime = _runtime()
         runtime.bigworld.defer_vehicle_entry = True
         battle = BattleRuntime(runtime)
-
-        def users_ready():
-            self.assertEqual('running', battle.state)
-            self.assertEqual([19], [entry[0] for entry in
-                                    runtime.bigworld.avatar.chat_actions])
-
-        notify_users.side_effect = users_ready
         client = _Client()
         start = {
             'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
@@ -9750,7 +9753,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual('loading_entities', battle.state)
         self.assertIsNotNone(battle._server.vehicle_id)
         self.assertEqual([], runtime.bigworld.avatar.chat_actions)
-        notify_users.assert_not_called()
         self.assertEqual(
             battle._server.vehicle_id,
             runtime.bigworld.avatar.playerVehicleID)
@@ -9775,12 +9777,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual('running', battle.state)
         self.assertEqual(1, runtime.bigworld.avatar.vehicle_changed)
-        self.assertEqual([19], [entry[0] for entry in
-                                runtime.bigworld.avatar.chat_actions])
+        self.assertEqual([], runtime.bigworld.avatar.chat_actions)
         self.assertFalse(battle._server.setClientReady())
-        self.assertFalse(battle._server.start_team_chat())
-        self.assertEqual(1, len(runtime.bigworld.avatar.chat_actions))
-        notify_users.assert_called_once_with()
+        self.assertEqual(1,
+                         runtime.bigworld.avatar.arena_dp.
+                         getAlliesVehiclesNumber())
         self.assertEqual(500, runtime.bigworld.entity(
             battle._server.vehicle_id).health)
 
@@ -9789,6 +9790,48 @@ class BattleRuntimeContractTests(unittest.TestCase):
             [(2, [54, 3])], runtime.compatibility.account_int_commands)
         self.assertEqual((77, 0, ''),
                          runtime.bigworld.avatar.responses[-1])
+
+    @mock.patch('gui.mods.offline_lan_0922.tactical_radio.'
+                '_notify_stock_ignore_lists_ready')
+    def test_team_chat_waits_for_arena_dp_teammate(self, notify_users):
+        runtime = _runtime()
+        runtime.bigworld.defer_vehicle_entry = True
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        start = {
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'players': [{
+                'id': 1, 'team': 1, 'slot': 0, 'name': 'Player',
+                'vehicle': 'ussr:R11_MS-1', 'health': 500}],
+            'bots': [{
+                'id': 11, 'team': 1, 'slot': 1, 'name': 'Ally'}]}
+
+        self.assertTrue(battle.start({
+            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+            'name': 'Player', 'native_remote_vehicles': False},
+            start, client))
+        runtime.bigworld.callbacks.pop(0)()
+        runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+        runtime.bigworld.callbacks.pop(0)()
+
+        self.assertEqual('running', battle.state)
+        self.assertEqual(1,
+                         runtime.bigworld.avatar.arena_dp.
+                         getAlliesVehiclesNumber())
+        self.assertEqual([], runtime.bigworld.avatar.chat_actions)
+        notify_users.assert_not_called()
+
+        battle._frame()
+
+        self.assertEqual(2,
+                         runtime.bigworld.avatar.arena_dp.
+                         getAlliesVehiclesNumber())
+        self.assertEqual([19], [entry[0] for entry in
+                                runtime.bigworld.avatar.chat_actions])
+        notify_users.assert_called_once_with()
+        battle._frame()
+        self.assertEqual([19], [entry[0] for entry in
+                                runtime.bigworld.avatar.chat_actions])
 
     def test_client_ready_restores_lakeville_ctf_visibility_after_stock_update(self):
         runtime = _runtime()
