@@ -1400,7 +1400,8 @@ class LANSession(object):
         try:
             window = self._queue_factory(
                 self.request_start, self._map_pool_value,
-                endpoint=self._picker_description,
+                endpoint=lambda: tr(
+                    u'Select a map and battle duration here, then confirm to return to the waiting room.'),
                 on_close=self._on_map_window_closed,
                 on_select=self._on_map_window_selected,
                 selection=self._map_window_selection)
