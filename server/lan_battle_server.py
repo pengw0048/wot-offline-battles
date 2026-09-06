@@ -3224,7 +3224,7 @@ class BattleState:
         self.bot_launch_clock_offset_us = None
         self.bot_last_projectile_launch_time_us = {}
         self.motion_time_offset_us = 0
-        self.bot_planner.reset()
+        self.bot_planner.reset(self.round_id)
         self.bot_orders = {"revision": 0, "orders": []}
         self.team_commands = OrderedDict()
         self._next_bot_planner_tick = 0
@@ -4377,6 +4377,14 @@ class BattleState:
                     # Keep the worker's resolved tier on canonical identity;
                     # snapshots and takeover messages are rebuilt from it.
                     entry['skill'] = raw['skill']
+                if 'skill_rating' in raw:
+                    rating = _finite_float(raw['skill_rating'], -1.0)
+                    if rating < 0.0 or rating > 1.0:
+                        return False
+                    # The rating is what the tactical planner reads. It rides
+                    # canonical identity beside the tier name so a takeover
+                    # reinstalls the same Bot rather than re-drawing one.
+                    entry['skill_rating'] = rating
                 manifest.append(entry)
                 states[bot_id] = self._sanitize_bot_state(
                     raw, entry, self.bot_states.get(bot_id))

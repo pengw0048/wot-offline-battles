@@ -10979,6 +10979,71 @@ class BattleRuntimeContractTests(unittest.TestCase):
                   gravity * time_at_wall ** 2 * 0.5)
         self.assertGreater(height, 1.8)
 
+    def test_a_weak_gunner_keeps_the_part_the_cursor_offered(self):
+        """Not knowing where to aim is an unranked choice, not a bad one."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        scored = []
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda unused_descriptor, unused_entry, unused_source,
+            unused_target, unused_origin, point: scored.append(point) or
+            (900.0 if point[1] > 2.0 else 100.0))
+
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            False)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        weak = battle._bot_aim_point(source, target)
+        # One tested part, taken as offered: no second ray, no comparison.
+        self.assertEqual(1, len(scored))
+
+        scored[:] = []
+        battle._records['bot:11'].pop('bot_aim_targets', None)
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            True)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        strong = battle._bot_aim_point(source, target)
+
+        self.assertEqual(2, len(scored))
+        self.assertGreater(strong['aim_position'][1], 2.0)
+        self.assertLess(weak['aim_position'][1], strong['aim_position'][1])
+
+    def test_no_gunner_deliberately_aims_at_a_part_it_cannot_hurt(self):
+        """Not knowing which plate is thinnest is ordinary; this is not."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        tested = []
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda unused_descriptor, unused_entry, unused_source,
+            unused_target, unused_origin, point: tested.append(point) or
+            (0.0 if point[1] < 2.0 else 250.0))
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            False)
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        selected = battle._bot_aim_point(source, target)
+
+        self.assertEqual(2, len(tested))
+        self.assertGreater(selected['aim_position'][1], 2.0)
+
+    def test_a_useless_part_is_still_fired_at_when_it_is_all_there_is(self):
+        """Holding fire would read as a broken Bot, not a weak one."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda *unused_args: 0.0)
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            True)
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        self.assertIsNotNone(battle._bot_aim_point(source, target))
+
     def test_bot_firing_lane_rotates_real_samples_with_two_ray_budget(self):
         runtime, battle, source, target, unused = self._bot_lane_scene()
         rays = []
@@ -11283,6 +11348,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
     def test_direction_and_graph_probes_reject_drowning_depth_water(self):
         runtime = _runtime()
+        runtime.bigworld.wg_collideSegment = lambda space, start, end, *args: (
+            _Vector(start.x, 0.0, start.z), _Vector(0.0, 1.0, 0.0), 2)
         runtime.bigworld.wg_collideWater = lambda start, *unused: (
             20.0 if abs(float(start.z)) < 1.0 else 18.5)
         battle = BattleRuntime(runtime)
@@ -16569,6 +16636,58 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual('hard', battle._local_motion_status)
         self.assertEqual('structure', battle._local_motion_kinds)
         self.assertEqual([], battle.local_destructible_contacts())
+
+    def test_ground_columns_recast_below_gate_ceiling(self):
+        for navigation in (False, True):
+            for ceiling_y in (-10.7, -8.0):
+                with self.subTest(navigation=navigation, ceiling=ceiling_y):
+                    runtime = _runtime()
+                    battle = BattleRuntime(runtime)
+                    battle._avatar = runtime.bigworld.avatar
+                    skin_filter = lambda *unused: True
+                    battle._ground_filter = lambda x, z: skin_filter
+                    battle._water_depth = lambda position: 0.0
+                    calls = []
+
+                    def collide(*args):
+                        calls.append(args)
+                        start, end = args[1:3]
+                        # The gate underside faces down; a road ray must
+                        # continue below it, including when the first hit
+                        # lies outside the accepted near-ground band.
+                        if end.y <= ceiling_y <= start.y:
+                            return (_Vector(start.x, ceiling_y, start.z),
+                                    _Vector(0.0, -1.0, 0.0), 2)
+                        if end.y <= -15.0 <= start.y:
+                            return (_Vector(start.x, -15.0, start.z),
+                                    _Vector(0.0, 1.0, 0.0), 2)
+                        return None
+
+                    runtime.bigworld.wg_collideSegment = collide
+                    probe = (battle._navigation_ground if navigation
+                             else battle._ground_y)
+                    self.assertEqual(-15.0, probe(402.4, -156.0, -15.0))
+                    self.assertEqual(2, len(calls))
+                    self.assertTrue(all(call[4] is skin_filter
+                                        for call in calls))
+
+    def test_ground_column_keeps_bridge_deck_and_real_missing_ground(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        for normal_y, expected in ((1.0, 0.0), (-1.0, None)):
+            calls = []
+
+            def collide(*args):
+                calls.append(args)
+                if args[1].y >= 0.0 >= args[2].y:
+                    return (_Vector(0.0, 0.0, 0.0),
+                            _Vector(0.0, normal_y, 0.0), 2)
+                return None
+
+            runtime.bigworld.wg_collideSegment = collide
+            self.assertEqual(expected, battle._ground_y(0.0, 0.0, 0.0))
+            self.assertLessEqual(len(calls), 2)
 
     def test_ground_probe_hands_the_broken_skin_filter_to_the_engine(self):
         runtime = _runtime()

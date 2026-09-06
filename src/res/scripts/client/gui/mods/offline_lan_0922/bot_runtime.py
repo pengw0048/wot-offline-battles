@@ -2127,7 +2127,7 @@ class BotRuntime(object):
         self._reset_shot_lane_work()
         self._reset_shot_lane_diagnostics()
         self._physics_params = {}
-        self._bot_skills = {}
+        self._bot_ratings = {}
         self._bot_skill_mode = bot_gunnery.DEFAULT_SKILL_MODE
         self._bot_skill_pins = {}
         self._gunnery_holds = {}
@@ -3090,17 +3090,21 @@ class BotRuntime(object):
                 continue
         return pins
 
-    def _resolve_bot_skill(self, raw):
-        """Return one Bot's gunnery tier for this round.
+    def _resolve_bot_rating(self, raw):
+        """Return one Bot's competence rating for this round.
 
-        A takeover manifest already carries the tier the previous authority
-        installed, so it wins.  Then the host's explicit lineup pin.  Then the
-        room preset, which resolves from round and slot identity alone, so
-        every process reaches the same tier without it travelling first.
+        A takeover manifest already carries the rating the previous authority
+        installed, so it wins; an older manifest carrying only a tier name is
+        read at that tier's anchor.  Then the host's explicit lineup pin.
+        Then the room preset, which resolves from round and slot identity
+        alone, so every process reaches the same rating without it travelling
+        first.
         """
+        if 'skill_rating' in raw:
+            return bot_gunnery.normalize_rating(raw.get('skill_rating'))
         published = raw.get('skill')
         if published in bot_gunnery.SKILL_TIERS:
-            return published
+            return bot_gunnery.rating_for_skill(published)
         try:
             team = int(raw.get('team', 1))
             slot = int(raw.get('slot', 0))
@@ -3108,17 +3112,47 @@ class BotRuntime(object):
             raise ValueError('authority manifest Bot slot identity is invalid')
         pinned = self._bot_skill_pins.get((team, slot))
         if pinned in bot_gunnery.SKILL_TIERS:
-            return pinned
-        return bot_gunnery.resolve_skill(
+            return bot_gunnery.rating_for_skill(pinned)
+        return bot_gunnery.resolve_rating(
             self._bot_skill_mode, self.round_id, team, slot)
 
+    def bot_rating(self, bot_id):
+        """Return the competence rating installed for one Bot this round."""
+        return self._bot_ratings.get(
+            int(bot_id), bot_gunnery.DEFAULT_RATING)
+
     def bot_skill(self, bot_id):
-        """Return the gunnery tier installed for one Bot this round."""
-        return self._bot_skills.get(int(bot_id), bot_gunnery.DEFAULT_SKILL)
+        """Return the tier name labelling one Bot's rating, for the wire."""
+        return bot_gunnery.skill_for_rating(self.bot_rating(bot_id))
 
     def bot_crew_level(self, bot_id):
-        """Return the #1513 crew level this Bot's tier trains it to."""
-        return bot_gunnery.crew_level(self.bot_skill(bot_id))
+        """Return the #1513 crew level this Bot's rating trains it to."""
+        return bot_gunnery.rating_crew_level(self.bot_rating(bot_id))
+
+    def bot_aim_selection_allowed(self, state, target):
+        """Return whether this Bot's gunner picks the part it can hurt most.
+
+        The presentation client owns the armour ranking, but not this clock:
+        the answer has to change on the same aiming epoch the aim-point bias
+        already uses, or a per-frame flip would invalidate the solved shot
+        through ``_direct_aim_matches`` and re-solve the ballistics every
+        tick.  Reading the existing hold record keeps one owner for that
+        epoch; this accessor never creates or advances one.
+        """
+        try:
+            bot_id = int(state['id'])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        record = self._gunnery_holds.get(bot_id)
+        key = (self._observer_target_key(target)
+               if isinstance(target, dict) else None)
+        epoch = 0
+        if (record is not None and key is not None and
+                record.get('key') == key):
+            epoch = int(record.get('epoch') or 0)
+        return bot_gunnery.capability_allowed(
+            self.bot_rating(bot_id), bot_gunnery.CAPABILITY_WEAK_SPOT,
+            self.round_id, bot_id, key, epoch)
 
     def battle_start(self, message):
         """Build a local authority manifest from the server roster once per round."""
@@ -3161,7 +3195,7 @@ class BotRuntime(object):
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._physics_params = {}
-            self._bot_skills = {}
+            self._bot_ratings = {}
             self._gunnery_holds = {}
             self._suspension_params = {}
             self._suspension_param_failures = 0
@@ -3342,8 +3376,9 @@ class BotRuntime(object):
             wire_total = int(raw_wire_total)
             siege_time_left = wire_time / 1000.0
             siege_transition_total = wire_total / 1000.0
-            self._bot_skills[bot_id] = self._resolve_bot_skill(raw)
-            crew_level = bot_gunnery.crew_level(self._bot_skills[bot_id])
+            self._bot_ratings[bot_id] = self._resolve_bot_rating(raw)
+            crew_level = bot_gunnery.rating_crew_level(
+                self._bot_ratings[bot_id])
             self._descriptor_pairs[bot_id] = descriptor_pair
             descriptor = siege_mechanics.active_descriptor(
                 descriptor_pair, siege_state)
@@ -4316,8 +4351,11 @@ class BotRuntime(object):
                 'siege_time_left_ms', 'siege_transition_total_ms',
                 'equipment_states', 'stun_end_server_time_ms')
         result = dict((key, state[key]) for key in keys)
-        # The tier rides the manifest so a takeover installs the same gunner
-        # rather than re-rolling one from a preset mid-round.
+        # The rating rides the manifest so a takeover installs the same
+        # gunner rather than re-rolling one from a preset mid-round.  The
+        # tier name rides with it because saved launcher profiles, the room
+        # panel and the server's own validation still speak that vocabulary.
+        result['skill_rating'] = self.bot_rating(state['id'])
         result['skill'] = self.bot_skill(state['id'])
         descriptor = self._descriptors.get(state['id'], {})
         terminal = _terminal_critical(state, descriptor, 'shot')
@@ -6124,7 +6162,7 @@ class BotRuntime(object):
     @observed('bot.corridor_hazards')
     def _planner_corridor_clear(self, position, yaw, speed,
                                 wet_escape=False, allow_shallow=False,
-                                hazard_only=False):
+                                hazard_only=False, maximum_distance=None):
         """Rank one candidate through the validated baked static corridor.
 
         ``True`` admits a planner candidate and ``False`` rejects a known fatal
@@ -6156,6 +6194,9 @@ class BotRuntime(object):
             # navigator explicitly selected that adjacent linked cell. The native
             # motion gate and per-frame hull sweep still prove realised travel.
             distance = max(1.0, _number(getattr(grid, 'cell_size', 1.0)))
+            if maximum_distance is not None:
+                # A bounded recovery may stop before the next baked edge.
+                distance = min(distance, max(0.0, _number(maximum_distance)))
             sine = math.sin(float(yaw))
             cosine = math.cos(float(yaw))
             end = (
@@ -8904,7 +8945,7 @@ class BotRuntime(object):
         if record['epoch'] != epoch or record['error'] is None:
             record['epoch'] = epoch
             record['error'] = bot_gunnery.engagement_error(
-                self.bot_skill(bot_id), self.round_id, bot_id,
+                self.bot_rating(bot_id), self.round_id, bot_id,
                 record['key'], epoch)
         return record['error']
 
@@ -8935,7 +8976,7 @@ class BotRuntime(object):
         if horizontal <= 1.0:
             return target
         lateral, vertical = bot_gunnery.aim_offset_metres(
-            self.bot_skill(bot_id), error,
+            self.bot_rating(bot_id), error,
             gun_state.fully_aimed_dispersion, _distance(origin, position))
         velocity = self._target_velocity(target)
         scale = float(error['lead_scale'])
@@ -8954,7 +8995,7 @@ class BotRuntime(object):
         if held is None:
             return False
         return bot_gunnery.may_fire(
-            self.bot_skill(int(state['id'])), held[0], held[1],
+            self.bot_rating(int(state['id'])), held[0], held[1],
             gun_state.current_dispersion_factor, held[2])
 
     def _ballistic_solution(self, state, target, descriptor, shell_index,
@@ -10664,17 +10705,20 @@ class BotRuntime(object):
             raw_command = None
             planner_probe_samples = {}
 
-            def planner_sample_direction(sample_yaw):
+            def planner_sample_direction(sample_yaw, maximum_distance=None):
                 # Invalid or unavailable baked data retains the mature native
                 # planner path.  These advisory samples never enter the motion
                 # cache and never authorize the finally selected direction.
                 normalised = ((float(sample_yaw) + math.pi) %
                               (2.0 * math.pi) - math.pi)
-                key = round(normalised, 4)
+                key = (round(normalised, 4),
+                       None if maximum_distance is None
+                       else round(float(maximum_distance), 2))
                 if key not in planner_probe_samples:
                     planner_probe_samples[key] = self._probe_direction(
                         position, sample_yaw, state.get('speed', 0.0),
-                        self._descriptors.get(state['id']))
+                        self._descriptors.get(state['id']),
+                        maximum_distance)
                 return planner_probe_samples[key]
 
             grid = getattr(self.navigator, 'grid', None)
@@ -10687,9 +10731,31 @@ class BotRuntime(object):
             controlled_shallow_commit = getattr(
                 self.navigator, 'controlled_shallow_committed', None)
 
-            def sample_clear(sample_yaw):
+            def sample_pose_clear(sample_yaw):
+                # Whether this hull may rotate where it stands is a question
+                # about a rectangle, not about a heading. Answer it from the
+                # shipped graph the navigator already owns.
+                pose_grid = getattr(self.navigator, 'grid', None)
+                pose_probe = getattr(pose_grid, 'hull_pose_clear', None)
+                if not callable(pose_probe):
+                    return True
+                try:
+                    return bool(pose_probe(
+                        position, sample_yaw,
+                        state.get('half_length', 3.5),
+                        state.get('half_width', 1.7)))
+                except Exception:
+                    return True
+
+            def sample_clear(sample_yaw, maximum_distance=None):
+                # A short manoeuvre asks about the space it actually enters.
+                # Ranking a five-metre backing escape against the fifteen to
+                # twenty metre travel horizon rejects every gateway, alley and
+                # bridge underpass on the map, which leaves an in-place turn
+                # as the only recovery in exactly the places no hull can turn.
                 advisory = self._planner_corridor_clear(
                     position, sample_yaw, state.get('speed', 0.0),
+                    maximum_distance=maximum_distance,
                     wet_escape=(baked_shallow_escape or
                                 state.get('_water_depth', -1.0) >
                                 BOT_WATER_AVOID_DEPTH),
@@ -10698,7 +10764,8 @@ class BotRuntime(object):
                                        state['id'], position, sample_yaw)))
                 if advisory is not None:
                     return bool(advisory)
-                sample = planner_sample_direction(sample_yaw)
+                sample = planner_sample_direction(
+                    sample_yaw, maximum_distance)
                 # Exhausting the soft-static recast budget is not a wall. Keep
                 # the previous drive intent; commit-side world collision still
                 # stops the hull if this corridor reaches real hard geometry.
@@ -10769,6 +10836,7 @@ class BotRuntime(object):
                     # is the physical quantity being consumed.
                     'speed': state['speed'],
                     'dt': decision_step, 'now': now,
+                    'pose_clear': sample_pose_clear,
                     'health': state['health'],
                     'max_health': state['max_health'],
                     'contacts': contacts,

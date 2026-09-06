@@ -111,6 +111,7 @@ class TerrainGrid(object):
 		# only the amount of side exploration changes.
 		self.heuristic_weight = 1.70
 		self._ground_cache = {}
+		self._corridor_cache = {}
 		self._edge_cache = {}
 		self._segment_cache = {}
 		self._failed_edges = {}
@@ -149,6 +150,72 @@ class TerrainGrid(object):
 		                       self.cell_size + 0.5)),
 		        int(math.floor((float(point[2]) - origin_z) /
 		                       self.cell_size + 0.5)))
+
+	# Four grid orientations name the shape a hull actually has to drive:
+	# the direction the baked cells run furthest in is the passage, and the
+	# span across it is the room the hull has to turn in.
+	_CORRIDOR_AXES = ((1, 0), (1, 1), (0, 1), (-1, 1))
+	CORRIDOR_SPAN_CELLS = 5
+
+	def local_corridor(self, point):
+		"""Return ``(axis_yaw, width)`` for the baked space around ``point``.
+
+		``width`` is the free span in metres across the longest local axis.
+		Returns ``None`` outside baked support, where there is no measured
+		passage and the caller must not invent one.
+		"""
+		if not self.prebaked:
+			return None
+		cell = self.cell_for(point)
+		if self._baked_index(cell) is None:
+			return None
+		cached = self._corridor_cache.get(cell)
+		if cached is not None:
+			return cached
+		spans = []
+		for axis_x, axis_z in self._CORRIDOR_AXES:
+			step = math.hypot(axis_x, axis_z) * self.cell_size
+			cells = 1
+			for sign in (1, -1):
+				for reach in range(1, self.CORRIDOR_SPAN_CELLS + 1):
+					probe = (cell[0] + axis_x * reach * sign,
+					         cell[1] + axis_z * reach * sign)
+					if self._baked_index(probe) is None:
+						break
+					cells += 1
+			spans.append(cells * step)
+		longest = max(range(len(spans)), key=lambda index: spans[index])
+		axis_x, axis_z = self._CORRIDOR_AXES[longest]
+		result = (math.atan2(float(axis_x), float(axis_z)),
+		          spans[(longest + 2) % len(self._CORRIDOR_AXES)])
+		self._corridor_cache[cell] = result
+		return result
+
+	def hull_pose_clear(self, point, yaw, half_length, half_width):
+		"""Report whether one chassis rectangle stands on baked cells.
+
+		A ray answers whether a direction is drivable; it cannot answer
+		whether a hull already standing here may rotate, because the corners
+		that a turn sweeps are metres away from every ray it casts. Sample
+		the real rectangle instead, so an in-place turn inside a gateway is
+		refused for the geometry that actually stops it.
+		"""
+		if not self.prebaked:
+			return True
+		half_length = max(0.5, float(half_length))
+		half_width = max(0.3, float(half_width))
+		forward = (math.sin(float(yaw)), math.cos(float(yaw)))
+		side = (math.cos(float(yaw)), -math.sin(float(yaw)))
+		for along in (-half_length, 0.0, half_length):
+			for across in (-half_width, 0.0, half_width):
+				sample = (float(point[0]) + forward[0] * along +
+				          side[0] * across,
+				          0.0,
+				          float(point[2]) + forward[1] * along +
+				          side[1] * across)
+				if self._baked_index(self.cell_for(sample)) is None:
+					return False
+		return True
 
 	def point_for(self, cell, height):
 		origin_x, origin_z = self._baked_origin if self.prebaked else (0.0, 0.0)

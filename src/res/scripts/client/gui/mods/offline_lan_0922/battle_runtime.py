@@ -4792,18 +4792,33 @@ class BattleRuntime(object):
             self._avatar.spaceID, start, end, 128, ground_filter)
 
     def _ground_y(self, x, z, hint=0.0, allow_wide=False):
-        """Use the 0.8.2 near-hull probe so roofs do not become terrain."""
+        """Find upward-facing support below rejected overhead surfaces.
+
+        A gate underside can be inside the height band, or conceal a valid
+        road while falling just outside it. Neither case is missing ground.
+        Keep the existing near-hull range and a bounded layered query, so
+        real bridge decks and slopes retain their previous placement.
+        """
         ground_filter = self._ground_filter(x, z)
-        try:
-            hit = self._collide_down(
-                self._vector((x, hint + 8.0, z)),
-                self._vector((x, hint - 30.0, z)), ground_filter)
-            if hit is not None:
+        start_y = float(hint) + 8.0
+        end_y = float(hint) - 30.0
+        for unused_layer in range(4):
+            try:
+                hit = self._collide_down(
+                    self._vector((x, start_y, z)),
+                    self._vector((x, end_y, z)), ground_filter)
+                if hit is None:
+                    break
                 value = float(hit[0].y)
-                if -14.0 < value - float(hint) < 6.0:
+                if (-14.0 < value - float(hint) < 6.0 and
+                        float(hit[1].y) > 0.0):
                     return value
-        except Exception:
-            pass
+                next_y = value - 0.05
+                if not end_y < next_y < start_y:
+                    break
+                start_y = next_y
+            except Exception:
+                break
         if not allow_wide:
             return None
         from_y = max(1000.0, hint + 50.0)
@@ -4887,17 +4902,22 @@ class BattleRuntime(object):
                 hit = self._collide_down(
                     self._vector((x, probe_top, z)),
                     self._vector((x, probe_bottom, z)), ground_filter)
+                if hit is None:
+                    return None
+                height = float(hit[0].y)
+                normal_y = float(hit[1].y)
             except Exception:
                 return None
-            if hit is None:
-                return None
-            height = float(hit[0].y)
-            if height <= float(hint_y) + 4.5:
+            if (height <= float(hint_y) + 4.5 and
+                    normal_y > 0.0):
                 if self._water_depth((x, height, z)) > \
                         BOT_WATER_AVOID_DEPTH:
                     return None
                 return height
-            probe_top = height - 0.35
+            next_top = height - 0.05
+            if not probe_bottom < next_top < probe_top:
+                return None
+            probe_top = next_top
         return None
 
     def _baked_pose_safe(self, position):
@@ -20193,8 +20213,22 @@ class BattleRuntime(object):
                 if samples[index] not in attempts:
                     attempts.append(samples[index])
             entry['selected'] = None
+            # A gunner who has not worked out where this tank is soft still
+            # aims at something exposed. It ranks the tested parts only when
+            # its own competence roll succeeds for the current aiming epoch,
+            # so the same Bot finds the weak spot in one engagement and not
+            # in the next. A failed roll keeps whichever exposed part the
+            # rotating cursor offered, which is uncorrelated with armour -
+            # not knowing where to aim is that, and not the inverted armour
+            # solve it would take to deliberately pick the worst plate.
+            # No reachable Bot runtime means no rating to read, so the part
+            # ranking stays on. A Bot must never lose a competence because
+            # the plumbing that scores it went missing.
+            ranks = (self._bots is None or
+                     self._bots.bot_aim_selection_allowed(source, target))
             best = None
             best_score = None
+            exposed = None
             for sample in attempts:
                 point = shot_geometry.vehicle_aim_point(sample, target)
                 hit = self._runtime.bigworld.wg_collideSegment(
@@ -20204,15 +20238,22 @@ class BattleRuntime(object):
                     continue
                 score = self._bot_aim_damage_score(
                     descriptor, entry, source, target, origin, point)
-                if best is None or (score is not None and
+                if exposed is None:
+                    exposed = sample
+                # A part the armour resolver proved cannot be hurt is never a
+                # deliberate choice at any competence, only a last resort
+                # when nothing else in this job was clear.
+                if score == 0.0:
+                    continue
+                if best is None or (ranks and score is not None and
                         best_score is not None and score > best_score):
                     best, best_score = sample, score
                 # Missing material evidence cannot authorize a weak-spot
                 # claim. Preserve the exposed-part behaviour in that case.
-                if score is None:
+                if score is None or not ranks:
                     break
-            entry['selected'] = best
-            return best is not None
+            entry['selected'] = best if best is not None else exposed
+            return entry['selected'] is not None
         except Exception:
             if entry is not None:
                 entry['selected'] = None

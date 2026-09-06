@@ -2368,6 +2368,56 @@ class BotAiPortTests(unittest.TestCase):
         self.assertIn('pivot_recovery', modes)
         self.assertNotIn('reverse_turn', modes)
 
+    def test_wedged_hull_uses_bounded_backing_distance(self):
+        driver = LocalDriver()
+        distances = []
+
+        def probe(yaw, maximum_distance=None):
+            distances.append(maximum_distance)
+            return maximum_distance is not None and maximum_distance < 8.0
+
+        modes = set()
+        for unused in range(150):
+            order = driver.drive(
+                9, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                (0.0, 0.0, 50.0), (), probe, half_length=3.5)
+            modes.add(order['recovery_mode'])
+        self.assertIn('reverse_turn', modes)
+        self.assertTrue(any(value is not None and abs(value - 5.6) < 1e-9
+                            for value in distances))
+
+    def test_wedged_hull_holds_when_neither_pivot_fits(self):
+        driver = LocalDriver()
+        behind = ({'id': 12, 'position': (0.0, 0.0, -7.0), 'yaw': 0.0,
+                   'half_length': 3.5, 'half_width': 1.7},)
+        blocked = []
+        for unused in range(150):
+            order = driver.drive(
+                9, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                (0.0, 0.0, 50.0), behind, lambda *unused: True,
+                pose_clear=lambda unused: False)
+            self.assertNotIn(order['recovery_mode'],
+                             ('pivot_recovery', 'reverse_turn'))
+            if 'reverse_blocked_by' in order:
+                blocked.append(order)
+        self.assertTrue(blocked)
+        self.assertTrue(all(order['reverse_blocked_by'] == 12 and
+                            order['throttle'] == 0.0 and order['turn'] == 0.0
+                            for order in blocked))
+
+    def test_wedged_hull_tries_the_pivot_side_that_fits(self):
+        driver = LocalDriver()
+        pivots = []
+        for unused in range(150):
+            order = driver.drive(
+                9, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 1.0 / 30.0,
+                (0.0, 0.0, 50.0), (), lambda *unused: False,
+                pose_clear=lambda yaw: yaw <= 0.0)
+            if order['recovery_mode'] == 'pivot_recovery':
+                pivots.append(order)
+        self.assertTrue(pivots)
+        self.assertTrue(all(order['turn'] == -1.0 for order in pivots))
+
     def test_reverse_guard_checks_the_complete_reachable_hull_sweep(self):
         """A blocker before the sampled endpoint is still in the sweep."""
         driver = LocalDriver()
