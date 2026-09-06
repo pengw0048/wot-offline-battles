@@ -5887,25 +5887,32 @@ def _transparent_tree_shot_filter_1513(ignored_trees):
 
 
 def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
-		shot=None):
+		shot=None, diagnostic=None):
 	"""Resolve the first native or exact-catalog destructible on a shell ray.
 
 	Passing a shot opts into typed traversal metadata.  Omitting it preserves the
 	legacy float contract for diagnostics and old fixtures.
 	"""
 	import math
+	def measured(stage, function, *args):
+		if diagnostic is None:
+			return function(*args)
+		return diagnostic.call(stage, function, *args)
+
 	ignored_trees = set()
 	tree_filter = _transparent_tree_shot_filter_1513(ignored_trees)
 	tree_hits = 0
 	world_dist = 99999.0
-	world_collision = bigworld.wg_collideSegment(
+	world_collision = measured('native.projectile.world',
+		bigworld.wg_collideSegment,
 		spaceID, start_pos, end_pos, 128)
 	shot_yaw = math.atan2(dir_vec.x, dir_vec.z)
 	decoded = None
 	catalog_hit = None
 	while world_collision is not None:
 		world_dist = (world_collision[0] - start_pos).length
-		mat_info = bigworld.wg_getMatInfoNearPoint(
+		mat_info = measured('native.projectile.material',
+			bigworld.wg_getMatInfoNearPoint,
 			spaceID, start_pos,
 			world_collision[0] + dir_vec.scale(0.3),
 			world_collision[0], lambda *unused: False)
@@ -5936,7 +5943,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			if tree_hits > 64:
 				raise RuntimeError(
 					'#1513 transparent tree shot traversal exceeded 64 hits')
-			world_collision = bigworld.wg_collideSegment(
+			world_collision = measured('native.projectile.world',
+				bigworld.wg_collideSegment,
 				spaceID, start_pos, end_pos, 128, tree_filter)
 			continue
 		if destruction_accepted:
@@ -5970,7 +5978,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 					world_dist, stop_distance=world_dist,
 					stopped_by_destructible=True)
 			# Destructible broken by the shell: re-cast past the debris.
-			second = bigworld.wg_collideSegment(
+			second = measured('native.projectile.world',
+				bigworld.wg_collideSegment,
 				spaceID, world_collision[0] + dir_vec.scale(0.6),
 				end_pos, 128)
 			return ((second[0] - start_pos).length
@@ -6080,7 +6089,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 		return catalog_hit['distance']
 	recast_distance = catalog_hit['exit_distance'] + _SHOT_RAY_EPSILON
 	recast_start = start_pos + dir_vec.scale(recast_distance)
-	second = bigworld.wg_collideSegment(
+	second = measured('native.projectile.world',
+		bigworld.wg_collideSegment,
 		spaceID, recast_start, end_pos, 128)
 	return ((second[0] - start_pos).length
 		if second is not None else 99999.0)

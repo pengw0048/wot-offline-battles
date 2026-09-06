@@ -30,6 +30,7 @@ from gui.mods.offline_lan_0922 import loadout
 from gui.mods.offline_lan_0922 import lan_client
 from gui.mods.offline_lan_0922 import tank_collision
 from gui.mods.offline_lan_0922 import vehicle_physics
+from gui.mods.offline_lan_0922.worker_diagnostics import timed, call as timed_call
 
 
 try:
@@ -1927,8 +1928,9 @@ class BotRuntime(object):
                  water_depth_probe=None, ram_contact_probe=None,
                  bot_equipment_resolver=None,
                  destructible_body_scan=None, control_seconds=None,
-                 incoming_lane_probe=None):
+                 incoming_lane_probe=None, combat_diagnostics=None):
         self.local_player_id = local_player_id
+        self._combat_diagnostics = combat_diagnostics
         self.descriptor_resolver = descriptor_resolver or (lambda unused: {})
         self.player_descriptor_resolver = player_descriptor_resolver
         # Production resolves the same descriptor-local part selected by the
@@ -2233,19 +2235,31 @@ class BotRuntime(object):
         }
 
     def _probe_started(self):
-        if self._probe_clock is None:
-            return None
+        diagnostic = self._combat_diagnostics
+        detail = (diagnostic.start()
+                  if diagnostic is not None and diagnostic.active else None)
+        started = None
         try:
-            return float(self._probe_clock())
+            if self._probe_clock is not None:
+                started = float(self._probe_clock())
         except Exception:
             # Diagnostics must never change or terminate gameplay.
             self._probe_clock = None
             self._probe_clock_pending = None
             self._probe_timing_deadline = None
             self._probe_timing_state = 'failed'
-            return None
+        return (started, detail) if detail is not None else started
+
+    def _probe_timing_enabled(self):
+        return bool(self._probe_clock is not None or
+                    (self._combat_diagnostics is not None and
+                     self._combat_diagnostics.active))
 
     def _probe_finished(self, index, started):
+        if isinstance(started, tuple):
+            started, detail = started
+            self._combat_diagnostics.stop(
+                'bot.probe.' + PROBE_KINDS[index], detail)
         if started is None or self._probe_clock is None:
             return
         try:
@@ -2445,6 +2459,7 @@ class BotRuntime(object):
         self._world_receipt_waiting = next_waiting
         self._world_receipt_frame = None
 
+    @timed('bot.motion_proof')
     def _probe_world_receipt(self, bot_id, position, yaw, speed, descriptor,
                              uncached, maximum_distance=None):
         """Run one read-only exact-hull proof for the selected travel ray."""
@@ -4484,6 +4499,8 @@ class BotRuntime(object):
 
     def _reset_shot_lane_work(self):
         """Discard supplemental identities at one authority boundary."""
+        if self._combat_diagnostics is not None:
+            self._combat_diagnostics.queue_reset()
         self._shot_lane_work_cycle = None
         self._shot_lane_work = []
         self._shot_lane_work_set = set()
@@ -4610,6 +4627,7 @@ class BotRuntime(object):
             cached is not None and cached[0] == cache_key and
             now < cached[1])
 
+    @timed('bot.visibility_schedule')
     def _prepare_visibility_frame(self, players, now, include_humans):
         """Select a bounded, fair stale-pair cohort before native calls."""
         frame = self._visibility_frame
@@ -5057,6 +5075,7 @@ class BotRuntime(object):
             cache[key] = target
         return target
 
+    @timed('bot.human_observations')
     def _append_human_observations(
             self, players, now, aggregate, team_visibility,
             visibility_tick=None):
@@ -5144,6 +5163,7 @@ class BotRuntime(object):
                 self._human_direct_targets[source['id']] = direct_targets
         return True
 
+    @timed('bot.targets')
     def _contacts_for(self, source, players, now, team_spotted=None,
                       visibility_tick=None, processed_bot_ids=None):
         contacts = []
@@ -5985,6 +6005,7 @@ class BotRuntime(object):
             # the old native candidate probe; it never becomes a clear path.
             return None
 
+    @timed('bot.slope')
     def _update_slope_pose(self, state, allow_ungrounded=False):
         """Refresh the four-point hull pose after this tick's ground settle."""
         # The ten-spring solver already owns authoritative pitch and roll.
@@ -6043,15 +6064,19 @@ class BotRuntime(object):
         try:
             hull_yaw = _number(state.get('yaw'))
             motion_yaw = yaw if _number(speed) >= 0.0 else yaw + math.pi
-            if self._probe_clock is None:
-                status = self.motion_resolver(
+            if not self._probe_timing_enabled():
+                status = timed_call(
+                    self._combat_diagnostics, 'bot.physics',
+                    self.motion_resolver,
                     state['id'], position, hull_yaw, speed,
                     descriptor, step, now, commit_enabled,
                     motion_yaw=motion_yaw)
             else:
                 probe_started = self._probe_started()
                 try:
-                    status = self.motion_resolver(
+                    status = timed_call(
+                        self._combat_diagnostics, 'bot.physics',
+                        self.motion_resolver,
                         state['id'], position, hull_yaw, speed,
                         descriptor, step, now, commit_enabled,
                         motion_yaw=motion_yaw)
@@ -6439,6 +6464,7 @@ class BotRuntime(object):
             state['rotation_dir'] = 0
         return False
 
+    @timed('bot.vertical')
     def _update_vertical_motion(self, state, step, tick_pose=None,
                                 attempted_yaw=None,
                                 suspension_motion_pose=None):
@@ -6584,6 +6610,7 @@ class BotRuntime(object):
             state['airborne'] = False
         return False
 
+    @timed('bot.pose_guard')
     def _guard_realised_pose(self, state, tick_pose, tick_was_safe,
                              attempted_yaw, suspension_snapshot=None):
         """Reject a new hazard or outward map-edge drift after all motion."""
@@ -7941,6 +7968,7 @@ class BotRuntime(object):
             except Exception:
                 continue
 
+    @timed('bot.vehicle_contacts')
     def _resolve_tank_contacts(self, players, now, step):
         """Apply current 0.8.2 chassis OBB response and report rams."""
         if self.native_motion:
@@ -8671,7 +8699,7 @@ class BotRuntime(object):
                     state, target, descriptor, shell_index, reproof)
             if not callable(self.ballistic_solution_probe):
                 return None
-            if self._probe_clock is None:
+            if not self._probe_timing_enabled():
                 value = self.ballistic_solution_probe(
                     _copy_runtime_state(state), (dict(target)
                                   if target is not None else None),
@@ -8721,6 +8749,7 @@ class BotRuntime(object):
             int(state.get('fire_seq', 0)),
         )
 
+    @timed('bot.ballistic_aim')
     def _cadenced_ballistic_solution(
             self, state, target, descriptor, shell_index, now, force=False):
         """Refresh target geometry at 10 Hz while presentation stays 30 Hz."""
@@ -8744,6 +8773,7 @@ class BotRuntime(object):
             return solution, True
         return cached[2], False
 
+    @timed('bot.gun_aim')
     def _update_gun_aim(self, state, command, target, step):
         """Slew the rendered turret and barrel through the 0.8.2 limits."""
         descriptor = self._descriptors.get(state['id'], {})
@@ -8863,15 +8893,21 @@ class BotRuntime(object):
         return (float(bucket) / SHOT_LANE_PHASES) * \
             SHOT_LANE_REFRESH_SECONDS
 
-    def _queue_shot_lane_identity(self, key, cycle_time):
+    def _queue_shot_lane_identity(self, key, cycle_time, now):
         if (self._shot_los_deadlines.get(key) == cycle_time or
                 key in self._shot_lane_work_set):
+            if self._combat_diagnostics is not None:
+                self._combat_diagnostics.count('lane_deduplicated')
             return False
         self._shot_lane_work.append(key)
         self._shot_lane_work_set.add(key)
+        if self._combat_diagnostics is not None:
+            self._combat_diagnostics.queue_added(
+                key, now, cycle_time - SHOT_LANE_REFRESH_SECONDS +
+                self._shot_los_phase(key))
         return True
 
-    def _prepare_shot_lane_work(self, cycle_time, team_visibility):
+    def _prepare_shot_lane_work(self, cycle_time, team_visibility, now):
         """Add identities once per target/cycle, never full target records."""
         cycle_time = _number(cycle_time)
         if self._shot_lane_work_cycle != cycle_time:
@@ -8891,7 +8927,7 @@ class BotRuntime(object):
                 team, kind, target_id = target_key
                 for source_id in live_sources.get(team, ()):
                     self._queue_shot_lane_identity(
-                        (source_id, kind, target_id), cycle_time)
+                        (source_id, kind, target_id), cycle_time, now)
 
         for target_key in sorted(
                 key for key, visible in team_visibility.items() if visible):
@@ -8903,7 +8939,7 @@ class BotRuntime(object):
             self._shot_lane_enqueued_targets.add(target_key)
             for source_id in live_sources[team]:
                 self._queue_shot_lane_identity(
-                    (source_id, kind, int(target_id)), cycle_time)
+                    (source_id, kind, int(target_id)), cycle_time, now)
         return True
 
     def _shot_lane_live_records(
@@ -8947,13 +8983,19 @@ class BotRuntime(object):
         return (source_cache[source_id], target_cache[cache_key],
                 target_key)
 
+    @timed('bot.lane_service')
     def _service_shot_lane_work(
             self, now, cycle_time, team_visibility, players,
             visibility_tick, processed_bot_ids, selected_priorities,
             probe_budget):
         """Service bounded current-pose jobs from one persistent identity set."""
-        self._prepare_shot_lane_work(cycle_time, team_visibility)
+        self._prepare_shot_lane_work(cycle_time, team_visibility, now)
+        diagnostic = self._combat_diagnostics
+        if diagnostic is not None:
+            diagnostic.count('lane_service_callbacks')
         if not self._shot_lane_work_set:
+            if diagnostic is not None:
+                diagnostic.queue_state(now, (), selected_priorities)
             return 0
         now = _number(now)
         cycle_time = _number(cycle_time)
@@ -8968,17 +9010,23 @@ class BotRuntime(object):
         materialized = [0]
         maximum_jobs = max(0, int(probe_budget[0]))
 
+        def retire(key, reason):
+            self._shot_lane_work_set.discard(key)
+            if diagnostic is not None:
+                diagnostic.queue_retired(
+                    key, now, reason, key in selected_priorities)
+
         def attempt(key):
             if key in attempted or key not in self._shot_lane_work_set:
                 return False
             attempted.add(key)
             if self._shot_los_deadlines.get(key) == cycle_time:
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'already_complete')
                 return False
             source = self.states.get(int(key[0]))
             if (not isinstance(source, dict) or
                     not source.get('alive', True)):
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'invalid')
                 return False
             source_team = int(source.get('team', 0))
             if key[1] == 'bot':
@@ -8990,19 +9038,23 @@ class BotRuntime(object):
             if (not isinstance(raw_target, dict) or
                     not raw_target.get('alive', True) or
                     int(raw_target.get('team', 0)) == source_team):
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'invalid')
                 return False
             target_key = (source_team, key[1], int(key[2]))
             if not team_visibility.get(target_key, False):
+                if diagnostic is not None:
+                    diagnostic.count('lane_attempt_hidden')
                 return False
             cached = self._shot_los_cache.get(key)
             if cached is not None and cached[0] > window_start + 1e-9:
                 self._shot_los_deadlines[key] = cycle_time
                 self._shot_lane_completed_pairs += 1
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'cache')
                 return False
             deadline = window_start + self._shot_los_phase(key)
             if now + 1e-9 < deadline:
+                if diagnostic is not None:
+                    diagnostic.count('lane_attempt_not_due')
                 return False
             if materialized[0] >= maximum_jobs:
                 return False
@@ -9010,12 +9062,12 @@ class BotRuntime(object):
                 key, live_players, visibility_tick, processed_bot_ids,
                 source_cache, target_cache)
             if source is None or target is None:
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'invalid')
                 return False
             if not team_visibility.get(target_key, False):
                 return False
             if self._shot_los_key(source, target) != key:
-                self._shot_lane_work_set.discard(key)
+                retire(key, 'invalid')
                 return False
             # Only this direct-spot-gated queue may inspect incoming geometry.
             # One extra pair per control callback keeps advisory threat work
@@ -9037,11 +9089,15 @@ class BotRuntime(object):
             # native budget. A distant pure-data rejection is still one
             # bounded job even though it consumes no collision ray.
             materialized[0] += 1
+            probes_before = self._probe_totals[1]
+            distance_cache = [None]
             self._refresh_shot_clear(
                 source, target, now, cycle_time, probe_budget,
-                lane_key=key, distance_cache=[None])
+                lane_key=key, distance_cache=distance_cache)
             if self._shot_los_deadlines.get(key) == cycle_time:
-                self._shot_lane_work_set.discard(key)
+                retire(key, ('probe' if self._probe_totals[1] > probes_before
+                             else 'distance' if distance_cache[0] is not None
+                             else 'cache'))
             return True
 
         selected = sorted(
@@ -9074,6 +9130,8 @@ class BotRuntime(object):
         service_budget_exhausted = materialized[0] >= maximum_jobs
         pending = 0
         budget_deferred = 0
+        eligible_keys = ([] if diagnostic is not None and diagnostic.active
+                         else None)
         for key in self._shot_lane_work_set:
             source = self.states.get(int(key[0]))
             if (not isinstance(source, dict) or
@@ -9094,6 +9152,8 @@ class BotRuntime(object):
             if not team_visibility.get(target_key, False):
                 continue
             pending += 1
+            if eligible_keys is not None:
+                eligible_keys.append(key)
             if (not service_budget_exhausted or key in attempted or
                     now + 1e-9 <
                     window_start + self._shot_los_phase(key)):
@@ -9111,6 +9171,10 @@ class BotRuntime(object):
                     query_distance:
                 budget_deferred += 1
         self._shot_lane_budget_deferred_attempts += budget_deferred
+        if diagnostic is not None:
+            diagnostic.count('lane_materialized', materialized[0])
+            diagnostic.count('lane_budget_deferred_attempts', budget_deferred)
+            diagnostic.queue_state(now, eligible_keys, selected_priorities)
         return pending
 
     def _merge_observation_shot_lanes(
@@ -9124,6 +9188,9 @@ class BotRuntime(object):
             if (not isinstance(source, dict) or
                     not source.get('alive', True) or
                     not sample[1] or _number(now) - sample[0] > maximum_age):
+                if (self._combat_diagnostics is not None and
+                        _number(now) - sample[0] > maximum_age):
+                    self._combat_diagnostics.receipt_expired(lane_key, sample[0])
                 continue
             key = (int(source.get('team', 0)),
                    target_kind, int(target_id))
@@ -9132,6 +9199,12 @@ class BotRuntime(object):
             entry = aggregate.get(key)
             if entry is not None:
                 entry[1].add(int(source_id))
+                if (self._combat_diagnostics is not None and
+                        self._combat_diagnostics.active):
+                    selected = self._selected_visibility_target(source)
+                    self._combat_diagnostics.receipt_published(
+                        lane_key, sample[0],
+                        selected == (target_kind, int(target_id)))
         return True
 
     def _shot_clear(self, source, target, now, force=False,
@@ -9158,6 +9231,8 @@ class BotRuntime(object):
         cached = self._shot_los_cache.get(key)
         if (not force and cached is not None and
                 _number(now) - cached[0] <= SHOT_LANE_SECONDS + 1e-9):
+            if self._combat_diagnostics is not None:
+                self._combat_diagnostics.count('lane_final_cache_reads')
             return cached[1]
         if probe_budget is not None:
             if probe_budget[0] <= 0:
@@ -9170,6 +9245,8 @@ class BotRuntime(object):
         finally:
             self._probe_finished(1, probe_started)
         self._shot_los_cache[key] = (_number(now), value)
+        if self._combat_diagnostics is not None:
+            self._combat_diagnostics.receipt_stored(key, _number(now), value)
         if len(self._shot_los_cache) > 1024:
             oldest = sorted(self._shot_los_cache.items(),
                             key=lambda item: item[1][0])[:256]
@@ -9210,6 +9287,7 @@ class BotRuntime(object):
         self._shot_lane_completed_pairs += 1
         return True
 
+    @timed('bot.observation_pack')
     def _pack_observations(self, aggregate, now):
         """Serialise one lightweight record per canonical team target.
 
@@ -9453,7 +9531,7 @@ class BotRuntime(object):
         shot_yaw = intent['shot_yaw']
         shot_pitch = intent['shot_pitch']
         flight_time = intent['solution']['flight_time']
-        if self._probe_clock is None:
+        if not self._probe_timing_enabled():
             value = self.artillery_launch_probe(
                 _copy_runtime_state(state), dict(target), descriptor,
                 int(shell_index),
@@ -9532,7 +9610,7 @@ class BotRuntime(object):
             burst_index, burst_group_seq,
             base_direction=base_direction)
         try:
-            if self._probe_clock is None:
+            if not self._probe_timing_enabled():
                 raw_origin = self.direct_launch_origin_probe(
                     _copy_runtime_state(state), descriptor, int(shell_index),
                     fire_seq,
@@ -9942,7 +10020,7 @@ class BotRuntime(object):
                 self._cancel_active_burst(
                     state, gun_state, ammo_state, burst_state)
                 break
-            if self._probe_clock is None:
+            if not self._probe_timing_enabled():
                 lane_value = self.friendly_lane_probe(
                     state, target if isinstance(target, dict) else {},
                     descriptor, burst_state.shell_index, preview)
@@ -9980,6 +10058,7 @@ class BotRuntime(object):
             result = min(result, due)
         return result
 
+    @timed('bot.update')
     def update(self, dt, now, players=None, neighbours=None):
         """Advance Bot motion in real time with one control refresh per frame.
 
@@ -10083,6 +10162,7 @@ class BotRuntime(object):
             message['source_batch_horizon_us'] = source_batch_horizon_us
         return outgoing
 
+    @timed('bot.destructible_bodies')
     def _scan_moving_destructible_bodies(self):
         """Scan each moving hull once at its final control-callback pose."""
         scan = self.destructible_body_scan
@@ -10114,10 +10194,17 @@ class BotRuntime(object):
             (self._refresh_control_this_step,
              self._publish_control_this_step) = previous
 
+    @timed('bot.slice')
     def _update_once(self, frame_step, now, players=None, neighbours=None):
         """Advance one stable authority substep and preserve its events."""
         publish = bool(self._publish_control_this_step)
         refresh_control = bool(self._refresh_control_this_step)
+        if self._combat_diagnostics is not None:
+            self._combat_diagnostics.count(
+                'bot_control_refreshes', int(refresh_control))
+            self._combat_diagnostics.count('bot_physical_slices')
+            self._combat_diagnostics.count(
+                'bot_elapsed_us', int(round(frame_step * 1000000.0)))
         self._incoming_lane_budget = 1 if refresh_control else 0
         step_duration_us = max(
             1, int(round(float(frame_step) * 1000000.0)))
@@ -10368,7 +10455,9 @@ class BotRuntime(object):
                     self._friendly_reposition_order(state, targets, now)
                 if (reposition_order is not None and
                         callable(decide_with_order)):
-                    command = decide_with_order(
+                    command = timed_call(
+                        self._combat_diagnostics, 'bot.planner_driver',
+                        decide_with_order,
                         decision_state, reposition_order, sample_clear)
                 elif server_order is not None and callable(decide_with_order):
                     server_order = dict(server_order)
@@ -10380,13 +10469,19 @@ class BotRuntime(object):
                         server_order,
                         targets.get(server_order.get('target_id')),
                         position)
-                    command = decide_with_order(
+                    command = timed_call(
+                        self._combat_diagnostics, 'bot.planner_driver',
+                        decide_with_order,
                         decision_state, server_order,
                         sample_clear)
                 else:
-                    command = self.adapter.decide(
+                    command = timed_call(
+                        self._combat_diagnostics, 'bot.planner_driver',
+                        self.adapter.decide,
                         decision_state, sample_clear)
-                command = self._traffic_coordinator.adjust(
+                command = timed_call(
+                    self._combat_diagnostics, 'bot.traffic',
+                    self._traffic_coordinator.adjust,
                     state['id'], traffic_bodies[state['id']], command,
                     decision_state['neighbours'], now, sample_clear)
                 if reposition_expired:
@@ -10988,14 +11083,18 @@ class BotRuntime(object):
                     # exact resolver must not sweep (and possibly crush) along
                     # a corridor the hull is not travelling this slice.
                     resolved_motion = True
-                    if self._probe_clock is None:
-                        motion_status = self.motion_resolver(
+                    if not self._probe_timing_enabled():
+                        motion_status = timed_call(
+                            self._combat_diagnostics, 'bot.physics',
+                            self.motion_resolver,
                             state['id'], position, state['yaw'], speed,
                             descriptor, step, now)
                     else:
                         probe_started = self._probe_started()
                         try:
-                            motion_status = self.motion_resolver(
+                            motion_status = timed_call(
+                                self._combat_diagnostics, 'bot.physics',
+                                self.motion_resolver,
                                 state['id'], position, state['yaw'], speed,
                                 descriptor, step, now)
                         finally:
@@ -11120,7 +11219,7 @@ class BotRuntime(object):
                         state, target, descriptor, state['shell_index'],
                         gun_state, ballistic_solution, now)
                     if launch_receipt is not None:
-                        if self._probe_clock is None:
+                        if not self._probe_timing_enabled():
                             lane_value = self.artillery_friendly_lane_probe(
                                 state, target, descriptor,
                                 state['shell_index'], launch_receipt)
@@ -11140,7 +11239,7 @@ class BotRuntime(object):
                         state, descriptor, state['shell_index'], gun_state,
                         ballistic_solution)
                     if launch_preview is not None:
-                        if self._probe_clock is None:
+                        if not self._probe_timing_enabled():
                             lane_value = self.friendly_lane_probe(
                                 state, target, descriptor,
                                 state['shell_index'], launch_preview)
@@ -11213,6 +11312,10 @@ class BotRuntime(object):
             self._update_shot_lane_debt_diagnostics(
                 now, shot_lane_refresh_time,
                 self._shot_lane_pending_pairs, shot_lane_refresh_due)
+            if self._combat_diagnostics is not None:
+                self._combat_diagnostics.queue_state(
+                    now, None, selected_lane_priorities,
+                    cover_blocked=refresh_control and bool(self._cover_queue))
         if (shot_lane_refresh_due and refresh_shot_lanes and
                 shot_lanes_ready):
             self._next_shot_lane_refresh = (
