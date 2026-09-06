@@ -68,6 +68,10 @@ SQUAD_MAX_SPEAKERS = 2
 EVENT_REPLY_PROBABILITY = 0.4
 
 RECENT_LINE_MEMORY = 12
+# One line continuing another word for word reads as the same line to a
+# player, which is how a small model repeats itself when it does not repeat
+# itself exactly.
+REPEAT_PREFIX_CHARACTERS = 3
 MAX_CHAT_UTF16_UNITS = 140
 
 PERSONA_TACTICAL = "tactical"
@@ -427,15 +431,13 @@ class BotChatDirector(object):
                     return {"kind": ADDRESS_CELL, "bot_ids": [near[0]["id"]]}
 
         thread = self._threads.get(team)
-        if thread:
-            # The player is still talking to whoever they addressed, even
-            # after other Bots have chimed in on top of that answer.
-            for candidate in ([thread.get("anchor")] +
-                              list(reversed(thread.get("participants") or ()))):
-                if candidate is None:
-                    continue
-                if any(bot["id"] == candidate for bot in bots):
-                    return {"kind": ADDRESS_THREAD, "bot_ids": [candidate]}
+        anchor = (thread or {}).get("anchor")
+        # Only a teammate the player actually named keeps the follow-up. A
+        # Bot that merely answered an open remark must not become the
+        # addressee of everything said for the rest of the round, which is
+        # what made one tank do all the talking.
+        if anchor is not None and any(bot["id"] == anchor for bot in bots):
+            return {"kind": ADDRESS_THREAD, "bot_ids": [anchor]}
         return {"kind": ADDRESS_NONE, "bot_ids": []}
 
     def _disambiguate(self, matched, snapshot):
@@ -450,6 +452,20 @@ class BotChatDirector(object):
         pool = visible or matched
         pool = self._by_relevance(pool, snapshot)
         return [pool[0]["id"]]
+
+    def _by_turn(self, bots, snapshot):
+        """Order an unaddressed answer by who has been quiet longest.
+
+        Relevance alone is a fixed ordering, so the same Bot answered every
+        open remark for a whole battle while fourteen others never spoke.
+        """
+        relevance = dict(
+            (bot["id"], index)
+            for index, bot in enumerate(self._by_relevance(bots, snapshot)))
+        return sorted(
+            bots,
+            key=lambda bot: (self._bot_last_line.get(bot["id"], -1),
+                             relevance.get(bot["id"], 0), bot["id"]))
 
     def _by_relevance(self, bots, snapshot):
         speaker = snapshot.get("speaker") or {}
@@ -538,7 +554,7 @@ class BotChatDirector(object):
         # still gets an answer, and an interesting one may get two.
         if self._rng.random() > self._open_probability(text):
             return self._admitted(address, scheduled_before, ask)
-        pool = [bot for bot in self._by_relevance(bots, snapshot)
+        pool = [bot for bot in self._by_turn(bots, snapshot)
                 if self._can_speak(tick, bot["id"])]
         if not pool:
             return self._admitted(address, scheduled_before, ask)
@@ -710,8 +726,7 @@ class BotChatDirector(object):
         if marker is not None and not request.get("ask"):
             # Nothing was asked, so there is nothing to agree to.
             marker = None
-        if any(text == record["text"]
-               for record in list(self._recent.get(team, ()))[-3:]):
+        if self._is_repetition(team, text):
             return None
         self._spend_budget(tick, team)
         self._remember(team, bot.get("name"), text)
@@ -837,6 +852,23 @@ class BotChatDirector(object):
         for team in list(self._threads):
             if tick - self._threads[team]["last_tick"] >= window:
                 del self._threads[team]
+
+    def _is_repetition(self, team, text):
+        """Refuse a line the channel has effectively just heard.
+
+        Comparing only the last few lines for exact equality let a small
+        model say the same thing over and over with a character changed, so
+        the whole remembered window is checked and a shared opening counts.
+        """
+        for record in self._recent.get(team, ()):
+            said = record["text"]
+            if said == text:
+                return True
+            shorter, longer = sorted((said, text), key=len)
+            if (len(shorter) >= REPEAT_PREFIX_CHARACTERS and
+                    longer.startswith(shorter)):
+                return True
+        return False
 
     def _remember(self, team, name, text):
         record = {"name": str(name or ""), "text": str(text or "")}

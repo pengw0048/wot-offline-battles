@@ -82,7 +82,8 @@ SHARED_RULES = (
     "你在玩《坦克世界》，是玩家的AI队友，正在队伍聊天频道里说话。",
     "规则：",
     "1. 只输出一句话，不超过25个字。",
-    "2. 不要加引号，不要写自己的ID，不要解释，不要换行。",
+    "2. 不要加引号，不要写名字，不要解释，不要换行。",
+    "5. 不要重复上面已经说过的话，换个说法。",
     "3. 玩家说中文你就说中文，玩家说英文你就说英文。",
     "4. 像队友在打字，可以口语、可以不完整。",
 )
@@ -307,15 +308,18 @@ def build_messages(request):
     """Turn one frozen line request into a Qwen chat exchange."""
     bot = request.get("bot") or {}
     persona = request.get("persona") or PERSONA_PLAIN
-    name = str(bot.get("name") or "队友")
     vehicle = str(bot.get("vehicle") or "")
     if ":" in vehicle:
         vehicle = vehicle.split(":", 1)[1]
     # The shared rules come first and the per-Bot identity last, so every
     # Bot's prompt starts with the same tokens. llama.cpp reuses the cached
     # prefix, and on a slow machine prompt processing is most of the wait.
+    # The callsign is deliberately absent. A small model given its own name
+    # simply says it: a Bot called 慢慢开别急 answered every line with a
+    # variation on its own callsign. The persona is already derived from that
+    # name, so nothing is lost by not repeating it here.
     system = "\n".join(SHARED_RULES + (
-        "你的ID是“%s”，开的车是 %s。" % (name, vehicle),
+        "你开的车是 %s。" % vehicle,
         "你的说话风格：%s。" % PERSONA_STYLE.get(persona, PERSONA_STYLE[
             PERSONA_PLAIN]),
     ))

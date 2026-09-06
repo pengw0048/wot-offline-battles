@@ -239,14 +239,19 @@ class ExtractTest(unittest.TestCase):
 
 
 class PromptTest(unittest.TestCase):
-    def test_the_persona_and_identity_reach_the_system_turn(self):
+    def test_the_persona_reaches_the_system_turn(self):
         messages = build_messages(_request())
         system = messages[0]['content']
         self.assertEqual('system', messages[0]['role'])
-        self.assertIn('今天不加班', system)
         self.assertIn('T-34', system)
         self.assertIn(bot_chat_llm.PERSONA_STYLE[bot_chat.PERSONA_SLACKER],
                       system)
+
+    def test_the_callsign_is_kept_out_of_the_prompt(self):
+        # A small model handed its own name simply says it: one Bot answered
+        # every line with a variation on its own callsign.
+        for message in build_messages(_request()):
+            self.assertNotIn('今天不加班', message['content'])
 
     def test_the_transcript_and_task_reach_the_user_turn(self):
         recent = ({'name': 'Peng', 'text': '那个t34 回来一下'},)

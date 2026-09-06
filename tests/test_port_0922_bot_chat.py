@@ -271,14 +271,34 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertEqual(address['kind'], ADDRESS_THREAD)
         self.assertEqual(address['bot_ids'], [2])
 
-    def test_a_thread_falls_back_when_the_addressed_bot_dies(self):
+    def test_a_dead_addressee_returns_the_line_to_the_room(self):
+        # Handing the follow-up to whoever spoke last is what made one tank
+        # answer everything; an open remark is open again instead.
         director = _director()
         director.observe_player_line(0, 1, '孤狼 顶一下', self.snapshot)
         _drain(director, self.snapshot, 0, 400)
         roster = [dict(bot, alive=bot['id'] != 2) for bot in _roster()]
         address = director.resolve_address('你到了吗', 1, _snapshot(roster))
-        self.assertEqual(address['kind'], ADDRESS_THREAD)
-        self.assertNotEqual(address['bot_ids'], [2])
+        self.assertEqual(ADDRESS_NONE, address['kind'])
+
+    def test_an_open_remark_never_anchors_the_thread(self):
+        director = _director()
+        director.observe_player_line(0, 1, '这局有点难打', self.snapshot)
+        _drain(director, self.snapshot, 0, 400)
+        address = director.resolve_address('还行吧', 1, self.snapshot)
+        self.assertEqual(ADDRESS_NONE, address['kind'])
+
+    def test_the_voice_moves_around_the_team(self):
+        # Fifteen Bots and one of them doing all the talking is the bug.
+        director = _director()
+        snapshot = _snapshot(_roster())
+        speakers = []
+        for index in range(4):
+            tick = index * 900
+            director.observe_player_line(tick, 1, '这局有点难打', snapshot)
+            for line in _drain(director, snapshot, tick, tick + 900):
+                speakers.append(line['bot_id'])
+        self.assertGreater(len(set(speakers)), 1, speakers)
 
     def test_a_thread_expires_after_silence(self):
         director = _director()
@@ -525,6 +545,49 @@ class AdmissionReportTest(unittest.TestCase):
         outcome = director.observe_player_line(
             0, 1, '那个t34 过来', _snapshot(dead))
         self.assertEqual(0, outcome['scheduled'])
+
+
+class RepetitionTest(unittest.TestCase):
+    """A small model repeats itself by continuing, not by copying."""
+
+    def setUp(self):
+        self.snapshot = _snapshot(_roster())
+
+    def _published(self, lines):
+        class _Scripted(object):
+            def __init__(self):
+                self.index = 0
+
+            def compose(self, request):
+                text = lines[min(self.index, len(lines) - 1)]
+                self.index += 1
+                return text
+
+        director = _director(backend=_Scripted())
+        published = []
+        for index in range(len(lines)):
+            tick = index * 900
+            director.observe_player_line(tick, 1, '这局有点难打',
+                                         self.snapshot)
+            published.extend(_drain(director, self.snapshot, tick,
+                                    tick + 900))
+        return [line['text'] for line in published]
+
+    def test_the_same_line_twice_is_said_once(self):
+        self.assertEqual(['慢慢开车'], self._published(['慢慢开车',
+                                                       '慢慢开车']))
+
+    def test_one_line_continuing_another_is_refused(self):
+        self.assertEqual(['慢慢开车'],
+                         self._published(['慢慢开车', '慢慢开车，别急']))
+
+    def test_genuinely_different_lines_are_all_said(self):
+        said = self._published(['我在B3', '右边有人', '装填好了'])
+        self.assertEqual(3, len(said))
+
+    def test_a_short_answer_is_not_treated_as_a_repeat(self):
+        said = self._published(['好', '好的这就去'])
+        self.assertEqual(2, len(said))
 
 
 class NoBackendTest(unittest.TestCase):
