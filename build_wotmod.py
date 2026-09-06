@@ -28,6 +28,7 @@ BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 BUILD_IDENTITY_FILENAME = 'build_identity.json'
 BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
 NATIVE_BRIDGE_FILENAME = 'offline_instance_guard_native.pyd'
+COMPUTE_BRIDGE_FILENAME = 'offline_compute_native.pyd'
 WORKER_STARTER_FILENAME = 'offline_worker_starter.exe'
 SERVER_FILENAME = 'WoT-0.9.22-LAN-Server.exe'
 PREFERENCES_CONFIGS = (
@@ -187,6 +188,7 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
                           graph_source=None, foliage_source=None,
                           destructible_source=None,
                           native_bridge_source=None,
+                          compute_bridge_source=None,
                           worker_starter_source=None,
                           server_executable_source=None,
                           build_identity=None):
@@ -196,12 +198,15 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
         else str(build_identity))
     native_bridge_source = native_bridge_source or os.path.join(
         os.path.dirname(__file__), 'native', NATIVE_BRIDGE_FILENAME)
+    compute_bridge_source = compute_bridge_source or os.path.join(
+        os.path.dirname(__file__), 'native', COMPUTE_BRIDGE_FILENAME)
     worker_starter_source = worker_starter_source or os.path.join(
         os.path.dirname(__file__), 'native', WORKER_STARTER_FILENAME)
     server_executable_source = server_executable_source or os.path.join(
         os.path.dirname(__file__), 'dist', 'server', SERVER_FILENAME)
     native_payloads = (
         ('native instance guard bridge', native_bridge_source),
+        ('native compute bridge', compute_bridge_source),
         ('simulation worker starter', worker_starter_source),
         ('Windows LAN server', server_executable_source),
     )
@@ -225,6 +230,7 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
     # Windows cannot load a native extension directly from a wotmod ZIP.
     # Keep the exact-build bridge beside the package for imp.load_dynamic.
     shutil.copy2(native_bridge_source, mod_root)
+    shutil.copy2(compute_bridge_source, mod_root)
     preferences_source = os.path.join(
         os.path.dirname(__file__), 'client_overlay', 'res_mods',
         '0.9.22.0.1')
@@ -627,7 +633,8 @@ def _remove_stale_outputs(dist_root):
         is_old_overlay = filename == 'client-overlay'
         is_old_zip = filename.startswith(
             'WoT-0.9.22.0.1-Offline-LAN-Vertical-Slice-')
-        is_native_bridge = filename == NATIVE_BRIDGE_FILENAME
+        is_native_bridge = filename in (
+            NATIVE_BRIDGE_FILENAME, COMPUTE_BRIDGE_FILENAME)
         output_path = os.path.join(dist_root, filename)
         if (is_mod or is_client_release or is_old_overlay or is_old_zip or
                 is_native_bridge):
@@ -689,18 +696,20 @@ def build():
         checksum_path = destination + '.sha256'
         with open(checksum_path, 'wb') as stream:
             stream.write(('%s  %s\n' % (digest, filename)).encode('ascii'))
-        native_bridge_source = os.path.join(
-            repo_root, 'native', NATIVE_BRIDGE_FILENAME)
-        if not os.path.isfile(native_bridge_source):
-            raise SystemExit(
-                'native instance guard bridge is missing: %s' %
-                native_bridge_source)
-        native_bridge_path = os.path.join(
-            dist_root, NATIVE_BRIDGE_FILENAME)
-        shutil.copy2(native_bridge_source, native_bridge_path)
+        native_paths = []
+        for description, filename in (
+                ('native instance guard bridge', NATIVE_BRIDGE_FILENAME),
+                ('native compute bridge', COMPUTE_BRIDGE_FILENAME)):
+            source = os.path.join(repo_root, 'native', filename)
+            if not os.path.isfile(source):
+                raise SystemExit('%s is missing: %s' % (description, source))
+            staged = os.path.join(dist_root, filename)
+            shutil.copy2(source, staged)
+            native_paths.append(staged)
         overlay_root, overlay_zip = _write_client_overlay(
             dist_root, destination, checksum_path, digest,
-            native_bridge_source=native_bridge_path,
+            native_bridge_source=native_paths[0],
+            compute_bridge_source=native_paths[1],
             build_identity=build_identity)
         print('build identity=%s version=%s' %
               (build_identity, MOD_VERSION))

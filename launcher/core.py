@@ -94,6 +94,7 @@ STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922 = 45.0
 _CLIENT_RUNTIME_FILES_0_9_22 = (
     WORKER_STARTER_FILENAME_0922,
     "mods/0.9.22.0.1/offline_instance_guard_native.pyd",
+    "mods/0.9.22.0.1/offline_compute_native.pyd",
     "res_mods/0.9.22.0.1/engine_config.offline-player.xml",
     "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
 )

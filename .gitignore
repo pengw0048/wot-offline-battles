@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 !native/offline_instance_guard_native.pyd
+!native/offline_compute_native.pyd
 
 # Runtime state belongs beside the user's game installation, not in source.
 offhangar_user/
@@ -19,3 +20,6 @@ deliverables/
 
 # The developer-supplied client package a source checkout reads.
 /client/
+
+# Local build output for the host compute bridge.
+/build/

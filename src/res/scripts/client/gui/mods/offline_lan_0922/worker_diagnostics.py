@@ -9,6 +9,7 @@ simulation work. Stage totals include children; self time excludes them.
 import collections
 import functools
 import math
+import threading
 
 
 CAPTURE_SECONDS = 30.0
@@ -16,17 +17,82 @@ CAPTURE_COOLDOWN_SECONDS = 30.0
 MAX_CAPTURES = 3
 MAX_QUEUE_IDENTITIES = 1024
 MAX_WAIT_SAMPLES = 512
+MAX_GEOMETRY_KEYS = 2048
+MAX_STAGE_SAMPLES = 512
+# Stages whose complete duration distribution is reported, not just its mean.
+SAMPLED_STAGES = ('bot.update', 'motion.world', 'motion.prepare')
+
+# Only a synchronous, instrumented Python call binds this observer. No native
+# hook, entity, scheduled callback or process-global simulation state is owned,
+# and an unbound thread always runs the unmeasured call.
+_observer = threading.local()
+
+
+def current():
+    """Return the diagnostic owning this synchronous call, if any."""
+    diagnostic = getattr(_observer, 'current', None)
+    return diagnostic if diagnostic is not None and diagnostic.active else None
+
+
+def count(name, value=1):
+    """Count an event inside the current observed scope."""
+    diagnostic = current()
+    if diagnostic is not None:
+        diagnostic.count(name, value)
+
+
+def observed(stage):
+    """Observe a pure helper only inside its synchronous worker owner."""
+    def decorate(function):
+        @functools.wraps(function)
+        def measured(*args, **kwargs):
+            diagnostic = current()
+            if diagnostic is None:
+                return function(*args, **kwargs)
+            return _invoke(diagnostic, stage, function, args, kwargs)
+        return measured
+    return decorate
+
+
+def observed_call(stage, function, *args, **kwargs):
+    """Observe one injected callable without changing its identity."""
+    diagnostic = current()
+    if diagnostic is None:
+        return function(*args, **kwargs)
+    return _invoke(diagnostic, stage, function, args, kwargs)
+
+
+def observed_ray(stage, function, space, start, end, *args):
+    """Observe one native segment query and its repeated geometry."""
+    diagnostic = current()
+    if diagnostic is None:
+        return function(space, start, end, *args)
+    try:
+        diagnostic.geometry(stage, (
+            space, (start.x, start.y, start.z), (end.x, end.y, end.z)))
+    except Exception:
+        diagnostic.count('ray_geometry_unavailable')
+    return _invoke(diagnostic, stage, function, (space, start, end) + args, {})
+
+
+def _invoke(diagnostic, stage, function, args, kwargs):
+    previous = getattr(_observer, 'current', None)
+    _observer.current = diagnostic
+    token = diagnostic.start()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        try:
+            diagnostic.stop(stage, token)
+        finally:
+            _observer.current = previous
 
 
 def call(diagnostic, stage, function, *args, **kwargs):
     """Measure an injected adapter without changing its callable identity."""
     if diagnostic is None or not diagnostic.active:
         return function(*args, **kwargs)
-    token = diagnostic.start()
-    try:
-        return function(*args, **kwargs)
-    finally:
-        diagnostic.stop(stage, token)
+    return _invoke(diagnostic, stage, function, args, kwargs)
 
 
 def timed(stage):
@@ -37,11 +103,7 @@ def timed(stage):
             diagnostic = getattr(self, '_combat_diagnostics', None)
             if diagnostic is None or not diagnostic.active:
                 return method(self, *args, **kwargs)
-            token = diagnostic.start()
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                diagnostic.stop(stage, token)
+            return _invoke(diagnostic, stage, method, (self,) + args, kwargs)
         return measured
     return decorate
 
@@ -51,11 +113,16 @@ class WorkerCombatDiagnostics(object):
 
     def __init__(self, clock, capture_seconds=CAPTURE_SECONDS,
                  cooldown_seconds=CAPTURE_COOLDOWN_SECONDS,
-                 maximum_captures=MAX_CAPTURES):
+                 maximum_captures=MAX_CAPTURES,
+                 sampled_stages=SAMPLED_STAGES, backend_status=None):
         self.clock = clock
+        # An injected reader, so a capture can prove which implementation ran
+        # without this module depending on the experiment.
+        self.backend_status = backend_status
         self.capture_seconds = float(capture_seconds)
         self.cooldown_seconds = float(cooldown_seconds)
         self.maximum_captures = int(maximum_captures)
+        self.sampled_stages = frozenset(sampled_stages or ())
         self.reset()
 
     def reset(self):
@@ -86,6 +153,8 @@ class WorkerCombatDiagnostics(object):
             maxlen=MAX_WAIT_SAMPLES)
         self._capture_wait_count = 0
         self._capture_selected_wait_count = 0
+        self._capture_samples = {}
+        self._geometry = set()
         self._completed = []
 
     def _fail(self):
@@ -94,6 +163,22 @@ class WorkerCombatDiagnostics(object):
         self._stack = []
         self._queue.clear()
         self._receipts.clear()
+        self._geometry = set()
+
+    def geometry(self, name, key):
+        """Count queries and repeats without asserting unchanged world state."""
+        if not self.active:
+            return
+        self.count(name + '_queries')
+        try:
+            if key in self._geometry:
+                self.count(name + '_same_geometry_in_frame')
+            elif len(self._geometry) < MAX_GEOMETRY_KEYS:
+                self._geometry.add((name,) + tuple(key))
+            else:
+                self.count('geometry_tracking_overflow')
+        except Exception:
+            self.count('geometry_tracking_unavailable')
 
     @staticmethod
     def _finite(value):
@@ -128,6 +213,7 @@ class WorkerCombatDiagnostics(object):
                 self._capture_selected_waits.clear()
                 self._capture_wait_count = 0
                 self._capture_selected_wait_count = 0
+                self._capture_samples = {}
                 self._receipts.clear()
             self._frame = int(frame)
             self._now = now
@@ -138,6 +224,7 @@ class WorkerCombatDiagnostics(object):
             self._waits = []
             self._selected_waits = []
             self._queue_snapshot = {}
+            self._geometry = set()
             return self.active
         except Exception:
             self._fail()
@@ -172,6 +259,13 @@ class WorkerCombatDiagnostics(object):
             row[1] += elapsed
             row[2] += max(0.0, elapsed - token[1])
             row[3] = max(row[3], elapsed)
+            if stage in self.sampled_stages:
+                samples = self._capture_samples.get(stage)
+                if samples is None:
+                    samples = self._capture_samples.setdefault(
+                        stage, [collections.deque(maxlen=MAX_STAGE_SAMPLES), 0])
+                samples[0].append(elapsed)
+                samples[1] += 1
         except Exception:
             self._fail()
 
@@ -351,8 +445,17 @@ class WorkerCombatDiagnostics(object):
             self._fail()
             return None
 
+    def _backend_record(self):
+        if self.backend_status is None:
+            return None
+        try:
+            return self.backend_status()
+        except Exception:
+            return {'error': 'backend status unavailable'}
+
     def _complete_capture(self, reason):
         self._completed.append({
+            'backend': self._backend_record(),
             'capture': self.capture, 'trigger': self._reason,
             'end_reason': reason,
             'authority_start': self._capture_started,
@@ -360,6 +463,9 @@ class WorkerCombatDiagnostics(object):
             'frames': self._capture_frames,
             'stages': self._stage_rows(self._capture_totals),
             'counts': dict(self._capture_counts),
+            'stage_samples': dict(
+                (name, self._wait_summary(samples[0], samples[1]))
+                for name, samples in self._capture_samples.items()),
             'queue_maxima': dict(self._capture_queue_maxima),
             'completed_wait': self._wait_summary(
                 self._capture_waits, self._capture_wait_count),

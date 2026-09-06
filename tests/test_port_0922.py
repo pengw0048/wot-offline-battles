@@ -440,6 +440,7 @@ class PortSourceTests(unittest.TestCase):
             package = root / 'mod.wotmod'
             checksum = root / 'mod.wotmod.sha256'
             native_bridge = root / 'offline_instance_guard_native.pyd'
+            compute_bridge = root / 'offline_compute_native.pyd'
             worker_starter = root / 'offline_worker_starter.exe'
             server_executable = root / 'WoT-0.9.22-LAN-Server.exe'
             graphs = root / 'navgraphs'
@@ -450,6 +451,7 @@ class PortSourceTests(unittest.TestCase):
             package.write_bytes(b'mod')
             checksum.write_text('checksum\n', encoding='ascii')
             native_bridge.write_bytes(b'native bridge')
+            compute_bridge.write_bytes(b'compute bridge')
             worker_starter.write_bytes(b'worker starter')
             server_executable.write_bytes(b'LAN server')
             overlay, archive = packager._write_client_overlay(
@@ -458,6 +460,7 @@ class PortSourceTests(unittest.TestCase):
                 str(PORT_ROOT / 'foliage'),
                 str(PORT_ROOT / 'destructibles'),
                 native_bridge_source=str(native_bridge),
+                compute_bridge_source=str(compute_bridge),
                 worker_starter_source=str(worker_starter),
                 server_executable_source=str(server_executable))
 
