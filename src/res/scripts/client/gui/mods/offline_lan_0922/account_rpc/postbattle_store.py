@@ -736,7 +736,7 @@ class PostBattleStore(object):
         # #1513 clears its own disk cache on every process start.  Retain the
         # bounded canonical receipt after 1501 so a later 1500 can rebuild it.
         self._history.append(receipt)
-        self._history = self._history[-MAX_HISTORY:]
+        self._trim_history_bodies()
         del self._pending[key]
         try:
             self._save()
@@ -744,6 +744,20 @@ class PostBattleStore(object):
             self._restore(previous)
             raise
         return True
+
+    def _trim_history_bodies(self):
+        # Evict only replayable bodies. A retired body's identity still fences
+        # a delayed server receipt, including after this process restarts.
+        # Replace rows instead of mutating them so transaction rollback keeps
+        # the previous bodies intact.
+        cutoff = max(0, len(self._history) - MAX_HISTORY)
+        for index in range(cutoff):
+            row = self._history[index]
+            if 'account_key' in row:
+                self._history[index] = {
+                    'receipt_id': row['receipt_id'],
+                    'arena_unique_id': row['arena_unique_id'],
+                }
 
     def _apply_progress(self, receipt, vehicle_xp=None):
         rewards = receipt['rewards']
@@ -862,7 +876,8 @@ class PostBattleStore(object):
                 return
             self._account_key = account_key
             self._pending = pending
-            self._history = history[-MAX_HISTORY:]
+            self._history = history
+            self._trim_history_bodies()
             self._progress = progress
             self._progress.setdefault(
                 'losses', max(0, int(self._progress.get('battles', 0)) -

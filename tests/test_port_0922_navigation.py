@@ -538,6 +538,31 @@ class StaticHullNavigationTests(unittest.TestCase):
         # the caller retires a plan once per hull revision instead.
         self.assertFalse(grid.path_has_penalty(path, 0.0))
 
+    def test_a_pending_search_does_not_claim_a_new_wreck_revision(self):
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._flat_graph())
+        start, goal = (20.0, 0.0, 20.0), (20.0, 0.0, 76.0)
+        path_key = ('route', 1, 'pending', 0)
+        key = navigator._cache_key(path_key, goal)
+        search = navigator.grid.begin_plan(start, goal)
+        navigator.searches[key] = search
+        navigator.search_times[key] = 0.0
+        search.step(8)
+        self.assertFalse(search.done)
+        navigator.grid.set_static_hulls(((7, 20.0, 40.0, 0.0, 3.5, 1.7),))
+        while not search.done:
+            search.step(1)
+        self.assertTrue(navigator.grid.path_crosses_static_hull(search.result))
+        navigator._finish_search(key, search, 0.1)
+        self.assertNotEqual(navigator.grid.static_hull_revision,
+                            navigator.path_hull_revisions[key])
+        navigator._path(path_key, start, goal, 0.2, None)
+        if key in navigator.paths:
+            self.assertFalse(navigator.grid.path_crosses_static_hull(
+                navigator.paths[key]))
+        else:
+            self.assertIn(key, navigator.searches)
+
     def test_a_sealed_route_is_researched_once_not_every_tick(self):
         navigator = TerrainNavigator(
             lambda *unused: None, baked_graph=self._flat_graph())

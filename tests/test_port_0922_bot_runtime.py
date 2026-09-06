@@ -496,7 +496,8 @@ class ServerBotStateRevisionTests(unittest.TestCase):
         player = server.players[1]
         player.capabilities = (LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
         self.assertTrue(server.update_bot_states(
-            SIMULATION_WORKER_AUTHORITY_ID, self._publication(server, 1.0)))
+            SIMULATION_WORKER_AUTHORITY_ID,
+            bot_state_rows.publication(self._publication(server, 1.0))))
 
         def sent_snapshots():
             return [json.loads(payload.decode('utf-8'))

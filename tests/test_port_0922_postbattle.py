@@ -1128,6 +1128,26 @@ class PostBattleContractTests(unittest.TestCase):
             self.assertFalse(client.accept(delivered))
             self.assertEqual(1, client.progress()['battles'])
 
+    def test_evicted_result_body_keeps_its_durable_settlement_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            rows = []
+            for index in range(postbattle_store.MAX_HISTORY + 1):
+                row = _receipt(store.account_key)
+                row['receipt_id'] = 'server:%d:1' % (600 + index)
+                row['arena_unique_id'] = ((600 + index) << 32) | 1
+                rows.append(row)
+                self.assertTrue(store.accept(row))
+                self.assertTrue(store.acknowledge(row['arena_unique_id']))
+            progress = store.progress()
+            self.assertFalse(store.accept(rows[0]))
+            self.assertEqual(progress, store.progress())
+            restarted = postbattle_store.PostBattleStore(path=path)
+            self.assertFalse(restarted.accept(rows[0]))
+            self.assertEqual(progress, restarted.progress())
+            self.assertIsNone(restarted.latest_archived_arena())
+
     def test_only_ten_results_stay_reopenable_within_one_session(self):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / 'postbattle_state.json')
@@ -1142,8 +1162,9 @@ class PostBattleContractTests(unittest.TestCase):
                 self.assertTrue(store.accept(row))
                 self.assertTrue(store.acknowledge(row['arena_unique_id']))
 
-            self.assertEqual(postbattle_store.MAX_HISTORY,
-                             len(store._history))
+            self.assertEqual(len(arenas), len(store._history))
+            self.assertEqual(postbattle_store.MAX_HISTORY, sum(
+                'account_key' in row for row in store._history))
             self.assertEqual(arenas[-1], store.latest_archived_arena())
             # ``should_show_immediately`` answers from the archived body, so
             # it is true only while the result can still be served.

@@ -948,7 +948,8 @@ class TerrainGrid(object):
 			hard_edge_penalties=None):
 		return _TerrainSearch(self._plan_steps(
 			start, goal, avoid_points, max_expansions, now,
-			bool(prefer_clearance), edge_penalties, hard_edge_penalties))
+			bool(prefer_clearance), edge_penalties, hard_edge_penalties),
+			self.static_hull_revision)
 
 	def _plan_steps(self, start, goal, avoid_points, max_expansions, now,
 			prefer_clearance, edge_penalties, hard_edge_penalties):
@@ -1130,8 +1131,9 @@ class TerrainGrid(object):
 class _TerrainSearch(object):
 	"""Small resumable A* task so collision probes are spread across frames."""
 
-	def __init__(self, generator):
+	def __init__(self, generator, hull_revision):
 		self.generator = generator
+		self.hull_revision = hull_revision
 		self.done = False
 		self.result = None
 		self.last_frame = None
@@ -1663,7 +1665,9 @@ class TerrainNavigator(object):
 		self.search_times.pop(key, None)
 		self.paths[key] = path
 		self.path_times[key] = float(now)
-		self.path_hull_revisions[key] = self.grid.static_hull_revision
+		# A resumable search may have traversed a cell before a wreck appeared.
+		# Stamp the revision it started with so that path still gets retired.
+		self.path_hull_revisions[key] = search.hull_revision
 		if path:
 			combat_count('nav_search_completed')
 			self.search_completed += 1

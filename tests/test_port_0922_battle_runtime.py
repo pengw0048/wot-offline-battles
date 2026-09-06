@@ -703,6 +703,75 @@ class _VehicleDecal(object):
         self.hull_node.detach(self.decal)
 
 
+class _VehicleTraces(object):
+    """One assembled #1513 ``Vehicular.VehicleTraces`` component."""
+
+    def __init__(self, appearance, vehicle_filter, lod_state_link):
+        self.appearance = appearance
+        self.movementInfo = getattr(vehicle_filter, 'movementInfo', None)
+        self.lodStateLink = lod_state_link
+
+
+class _TracesAssembler(object):
+    """Reproduce exact #1513 ``model_assembler.assembleVehicleTraces``.
+
+    Stock builds a fresh component, feeds it the chassis trace textures, the
+    compound, the flying links, the LOD link and the filter's movement info,
+    and publishes it through the appearance's component descriptor last.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.error = None
+
+    def assembleVehicleTraces(self, appearance, vehicleFilter, lodStateLink):
+        self.calls.append((appearance, vehicleFilter, lodStateLink))
+        if self.error is not None:
+            raise self.error
+        appearance.vehicleTraces = _VehicleTraces(
+            appearance, vehicleFilter, lodStateLink)
+
+
+class _Appearance(types.SimpleNamespace):
+    """A compound appearance that owns components the way #1513 does.
+
+    ``svarog_script.py_component_system.ComponentDescriptor.__set__`` removes
+    the previous component from the native component system before it stores
+    a replacement, and adds a non-None one.  A fake that only rebound an
+    attribute could not tell a retired traces component from a live one.
+    """
+
+    def __init__(self, **fields):
+        self.components = []
+        self._traces = None
+        types.SimpleNamespace.__init__(self, **fields)
+
+    def addComponent(self, component, name=''):
+        self.components.append((name, component))
+
+    def removeComponent(self, component):
+        self.components = [entry for entry in self.components
+                           if entry[1] is not component]
+
+    @property
+    def vehicleTraces(self):
+        return self._traces
+
+    @vehicleTraces.setter
+    def vehicleTraces(self, value):
+        if self._traces is not None:
+            self.removeComponent(self._traces)
+        if value is not None:
+            self.addComponent(value, 'vehicleTraces')
+        self._traces = value
+
+
+# The client resolves ``vehicle_systems.model_assembler`` lazily, so a
+# pure-data test can pin the exact stock entry point to a recording fake.
+_TRACES_ASSEMBLER = _TracesAssembler()
+remote_vehicle_module._stock_traces_assembler = _TRACES_ASSEMBLER
+
+
 class _VehicleBoundEffects(object):
     """``helpers.bound_effects.ModelBoundEffects`` over one vehicle compound.
 
@@ -731,7 +800,7 @@ class _VehicleBoundEffects(object):
         if (entity is not None and matProv is not None and
                 entity.isStarted and entity.isAlive()):
             self.played.append((node, effectsList, args.get('damageFactor')))
-        return _Appearance(
+        return types.SimpleNamespace(
             stop=lambda **unused: None, keyOff=lambda: None)
 
 
