@@ -528,10 +528,36 @@ class StaticHullNavigationTests(unittest.TestCase):
     def test_a_published_hull_retires_the_cached_path_through_it(self):
         grid = self._grid()
         path = ((20.0, 0.0, 32.0), (20.0, 0.0, 40.0), (20.0, 0.0, 48.0))
+        clear = ((8.0, 0.0, 32.0), (8.0, 0.0, 48.0))
 
-        self.assertFalse(grid.path_has_penalty(path, 0.0))
+        self.assertFalse(grid.path_crosses_static_hull(path))
         grid.set_static_hulls(((7, 20.0, 40.0, 0.0, 3.5, 1.7),))
-        self.assertTrue(grid.path_has_penalty(path, 0.0))
+        self.assertTrue(grid.path_crosses_static_hull(path))
+        self.assertFalse(grid.path_crosses_static_hull(clear))
+        # A wreck is not a timed failure, so it must not be reported as one:
+        # the caller retires a plan once per hull revision instead.
+        self.assertFalse(grid.path_has_penalty(path, 0.0))
+
+    def test_a_sealed_route_is_researched_once_not_every_tick(self):
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._flat_graph())
+        key = ('route', 1, 'direct', 0)
+        start = (20.0, 0.0, 20.0)
+        goal = (20.0, 0.0, 60.0)
+        navigator.next_target(1, start, goal, key, 0.0)
+        # Seal every lane so no replan can avoid the wrecks.
+        navigator.grid.set_static_hulls(tuple(
+            (index, 4.0 * index, 40.0, 0.0, 3.5, 2.1)
+            for index in range(21)))
+
+        searches = []
+        for tick in range(1, 61):
+            before = navigator.search_completed + navigator.search_failed
+            navigator.next_target(1, start, goal, key, tick * 0.1)
+            searches.append(
+                navigator.search_completed + navigator.search_failed - before)
+
+        self.assertLessEqual(sum(searches), 4)
 
     def test_a_search_prefers_the_free_lane_beside_a_wreck(self):
         grid = self._grid()

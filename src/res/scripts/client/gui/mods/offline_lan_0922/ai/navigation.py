@@ -145,6 +145,7 @@ class TerrainGrid(object):
 		self._failed_edges = {}
 		self._static_hull_edges = {}
 		self._static_hull_key = None
+		self.static_hull_revision = 0
 
 	def _install_baked_graph(self, graph):
 		if (graph.get('format') != BAKED_FORMAT_NAME or
@@ -395,18 +396,21 @@ class TerrainGrid(object):
 				except Exception:
 					break
 
-	def _failed_edge_penalty(self, first_cell, second_cell, now):
-		key = tuple(sorted((first_cell, second_cell)))
-		# A published wreck never expires on a timer: it stays until the hull
-		# is retired from the roster.
-		penalty = self._static_hull_edges.get(key, 0.0)
+	def _failed_edge_timed_penalty(self, key, now):
 		value = self._failed_edges.get(key)
 		if value is None:
-			return penalty
+			return 0.0
 		if float(now) >= value[0]:
 			self._failed_edges.pop(key, None)
-			return penalty
-		return max(penalty, value[1])
+			return 0.0
+		return value[1]
+
+	def _failed_edge_penalty(self, first_cell, second_cell, now):
+		key = tuple(sorted((first_cell, second_cell)))
+		# A published wreck never expires on a timer: it stays marked until the
+		# hull leaves the roster.
+		return max(self._static_hull_edges.get(key, 0.0),
+		           self._failed_edge_timed_penalty(key, now))
 
 	def set_static_hulls(self, hulls):
 		"""Publish the destroyed hulls that now occupy baked navigation cells.
@@ -428,6 +432,7 @@ class TerrainGrid(object):
 		if key == self._static_hull_key:
 			return False
 		self._static_hull_key = key
+		self.static_hull_revision += 1
 		edges = {}
 		half_extent = self.cell_size * 0.5
 		for unused_id, x, z, yaw, half_length, half_width in key:
@@ -571,11 +576,28 @@ class TerrainGrid(object):
 		        self.segment_clear(start, end))
 
 	def path_has_penalty(self, path, now):
-		if not self._failed_edges and not self._static_hull_edges:
+		if not self._failed_edges:
 			return False
 		for index in range(len(path) - 1):
-			if self.segment_penalty(path[index], path[index + 1], now) > 0.0:
-				return True
+			for key in self._edge_keys_for_segment(path[index], path[index + 1]):
+				if self._failed_edge_timed_penalty(key, now) > 0.0:
+					return True
+		return False
+
+	def path_crosses_static_hull(self, path):
+		"""Return whether a planned path runs through a published wreck.
+
+		This is separate from the timed failure above because a wreck does not
+		expire. A caller retires a path once, when the hull set that invalidates
+		it is newer than the plan; re-planning with the same wrecks in place is
+		the best answer available even where the route still has to pass one.
+		"""
+		if not self._static_hull_edges:
+			return False
+		for index in range(len(path) - 1):
+			for key in self._edge_keys_for_segment(path[index], path[index + 1]):
+				if key in self._static_hull_edges:
+					return True
 		return False
 
 	def path_has_edge_penalty(self, path, edge_penalties):
@@ -1118,6 +1140,7 @@ class TerrainNavigator(object):
 		                        baked_graph=baked_graph)
 		self.paths = {}
 		self.path_times = {}
+		self.path_hull_revisions = {}
 		self.searches = {}
 		self.search_times = {}
 		self.bot_states = {}
@@ -1607,6 +1630,7 @@ class TerrainNavigator(object):
 		for key, _timestamp in ordered[:len(ordered) - 80]:
 			self.paths.pop(key, None)
 			self.path_times.pop(key, None)
+			self.path_hull_revisions.pop(key, None)
 
 	def _finish_search(self, key, search, now):
 		path = search.result or ()
@@ -1614,6 +1638,7 @@ class TerrainNavigator(object):
 		self.search_times.pop(key, None)
 		self.paths[key] = path
 		self.path_times[key] = float(now)
+		self.path_hull_revisions[key] = self.grid.static_hull_revision
 		if path:
 			self.search_completed += 1
 		else:
@@ -1760,19 +1785,33 @@ class TerrainNavigator(object):
 				owner, now)
 			# A probe can fail while distant chunks are still streaming. Successful
 			# paths are permanent for the battle; failed ones get another chance.
-			if (path and not self.grid.path_has_penalty(path, now) and
+			#
+			# The one exception is a wreck published after this plan, which
+			# retires it exactly once. A path replanned with the same hulls
+			# already marked is the best answer the graph has, even where it
+			# still has to run past one, so it must not be discarded and
+			# researched again on every following tick.
+			retired_by_hull = bool(
+				self.path_hull_revisions.get(key) !=
+				self.grid.static_hull_revision and
+				self.grid.path_crosses_static_hull(path))
+			if (path and not retired_by_hull and
+					not self.grid.path_has_penalty(path, now) and
 					not self.grid.path_has_edge_penalty(
 						path, hard_edge_penalties)):
 				self.path_times[key] = float(now)
+				self.path_hull_revisions[key] = self.grid.static_hull_revision
 				return key, path
 			if path:
 				del self.paths[key]
 				self.path_times.pop(key, None)
+				self.path_hull_revisions.pop(key, None)
 			else:
 				if float(now) - self.path_times.get(key, 0.0) < 8.0:
 					return key, path
 				del self.paths[key]
 				self.path_times.pop(key, None)
+				self.path_hull_revisions.pop(key, None)
 				self.grid.clear_negative_cache()
 		search = self.searches.get(key)
 		if search is None:
@@ -1790,6 +1829,8 @@ class TerrainNavigator(object):
 				path = (tuple(start), tuple(goal))
 				self.paths[key] = path
 				self.path_times[key] = float(now)
+				self.path_hull_revisions[key] = (
+					self.grid.static_hull_revision)
 				return key, path
 			# Moving tanks do not belong in a cached static terrain path. Including all
 			# 28 peers made every expansion scan transient positions, permanently baked
