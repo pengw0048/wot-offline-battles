@@ -2121,7 +2121,7 @@ class BotRuntime(object):
         self._reset_shot_lane_work()
         self._reset_shot_lane_diagnostics()
         self._physics_params = {}
-        self._bot_skills = {}
+        self._bot_ratings = {}
         self._bot_skill_mode = bot_gunnery.DEFAULT_SKILL_MODE
         self._bot_skill_pins = {}
         self._gunnery_holds = {}
@@ -3076,17 +3076,21 @@ class BotRuntime(object):
                 continue
         return pins
 
-    def _resolve_bot_skill(self, raw):
-        """Return one Bot's gunnery tier for this round.
+    def _resolve_bot_rating(self, raw):
+        """Return one Bot's competence rating for this round.
 
-        A takeover manifest already carries the tier the previous authority
-        installed, so it wins.  Then the host's explicit lineup pin.  Then the
-        room preset, which resolves from round and slot identity alone, so
-        every process reaches the same tier without it travelling first.
+        A takeover manifest already carries the rating the previous authority
+        installed, so it wins; an older manifest carrying only a tier name is
+        read at that tier's anchor.  Then the host's explicit lineup pin.
+        Then the room preset, which resolves from round and slot identity
+        alone, so every process reaches the same rating without it travelling
+        first.
         """
+        if 'skill_rating' in raw:
+            return bot_gunnery.normalize_rating(raw.get('skill_rating'))
         published = raw.get('skill')
         if published in bot_gunnery.SKILL_TIERS:
-            return published
+            return bot_gunnery.rating_for_skill(published)
         try:
             team = int(raw.get('team', 1))
             slot = int(raw.get('slot', 0))
@@ -3094,17 +3098,47 @@ class BotRuntime(object):
             raise ValueError('authority manifest Bot slot identity is invalid')
         pinned = self._bot_skill_pins.get((team, slot))
         if pinned in bot_gunnery.SKILL_TIERS:
-            return pinned
-        return bot_gunnery.resolve_skill(
+            return bot_gunnery.rating_for_skill(pinned)
+        return bot_gunnery.resolve_rating(
             self._bot_skill_mode, self.round_id, team, slot)
 
+    def bot_rating(self, bot_id):
+        """Return the competence rating installed for one Bot this round."""
+        return self._bot_ratings.get(
+            int(bot_id), bot_gunnery.DEFAULT_RATING)
+
     def bot_skill(self, bot_id):
-        """Return the gunnery tier installed for one Bot this round."""
-        return self._bot_skills.get(int(bot_id), bot_gunnery.DEFAULT_SKILL)
+        """Return the tier name labelling one Bot's rating, for the wire."""
+        return bot_gunnery.skill_for_rating(self.bot_rating(bot_id))
 
     def bot_crew_level(self, bot_id):
-        """Return the #1513 crew level this Bot's tier trains it to."""
-        return bot_gunnery.crew_level(self.bot_skill(bot_id))
+        """Return the #1513 crew level this Bot's rating trains it to."""
+        return bot_gunnery.rating_crew_level(self.bot_rating(bot_id))
+
+    def bot_aim_selection_allowed(self, state, target):
+        """Return whether this Bot's gunner picks the part it can hurt most.
+
+        The presentation client owns the armour ranking, but not this clock:
+        the answer has to change on the same aiming epoch the aim-point bias
+        already uses, or a per-frame flip would invalidate the solved shot
+        through ``_direct_aim_matches`` and re-solve the ballistics every
+        tick.  Reading the existing hold record keeps one owner for that
+        epoch; this accessor never creates or advances one.
+        """
+        try:
+            bot_id = int(state['id'])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        record = self._gunnery_holds.get(bot_id)
+        key = (self._observer_target_key(target)
+               if isinstance(target, dict) else None)
+        epoch = 0
+        if (record is not None and key is not None and
+                record.get('key') == key):
+            epoch = int(record.get('epoch') or 0)
+        return bot_gunnery.capability_allowed(
+            self.bot_rating(bot_id), bot_gunnery.CAPABILITY_WEAK_SPOT,
+            self.round_id, bot_id, key, epoch)
 
     def battle_start(self, message):
         """Build a local authority manifest from the server roster once per round."""
@@ -3147,7 +3181,7 @@ class BotRuntime(object):
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._physics_params = {}
-            self._bot_skills = {}
+            self._bot_ratings = {}
             self._gunnery_holds = {}
             self._suspension_params = {}
             self._suspension_param_failures = 0
@@ -3328,8 +3362,9 @@ class BotRuntime(object):
             wire_total = int(raw_wire_total)
             siege_time_left = wire_time / 1000.0
             siege_transition_total = wire_total / 1000.0
-            self._bot_skills[bot_id] = self._resolve_bot_skill(raw)
-            crew_level = bot_gunnery.crew_level(self._bot_skills[bot_id])
+            self._bot_ratings[bot_id] = self._resolve_bot_rating(raw)
+            crew_level = bot_gunnery.rating_crew_level(
+                self._bot_ratings[bot_id])
             self._descriptor_pairs[bot_id] = descriptor_pair
             descriptor = siege_mechanics.active_descriptor(
                 descriptor_pair, siege_state)
@@ -4298,8 +4333,11 @@ class BotRuntime(object):
                 'siege_time_left_ms', 'siege_transition_total_ms',
                 'equipment_states', 'stun_end_server_time_ms')
         result = dict((key, state[key]) for key in keys)
-        # The tier rides the manifest so a takeover installs the same gunner
-        # rather than re-rolling one from a preset mid-round.
+        # The rating rides the manifest so a takeover installs the same
+        # gunner rather than re-rolling one from a preset mid-round.  The
+        # tier name rides with it because saved launcher profiles, the room
+        # panel and the server's own validation still speak that vocabulary.
+        result['skill_rating'] = self.bot_rating(state['id'])
         result['skill'] = self.bot_skill(state['id'])
         descriptor = self._descriptors.get(state['id'], {})
         terminal = _terminal_critical(state, descriptor, 'shot')
@@ -8851,7 +8889,7 @@ class BotRuntime(object):
         if record['epoch'] != epoch or record['error'] is None:
             record['epoch'] = epoch
             record['error'] = bot_gunnery.engagement_error(
-                self.bot_skill(bot_id), self.round_id, bot_id,
+                self.bot_rating(bot_id), self.round_id, bot_id,
                 record['key'], epoch)
         return record['error']
 
@@ -8882,7 +8920,7 @@ class BotRuntime(object):
         if horizontal <= 1.0:
             return target
         lateral, vertical = bot_gunnery.aim_offset_metres(
-            self.bot_skill(bot_id), error,
+            self.bot_rating(bot_id), error,
             gun_state.fully_aimed_dispersion, _distance(origin, position))
         velocity = self._target_velocity(target)
         scale = float(error['lead_scale'])
@@ -8901,7 +8939,7 @@ class BotRuntime(object):
         if held is None:
             return False
         return bot_gunnery.may_fire(
-            self.bot_skill(int(state['id'])), held[0], held[1],
+            self.bot_rating(int(state['id'])), held[0], held[1],
             gun_state.current_dispersion_factor, held[2])
 
     def _ballistic_solution(self, state, target, descriptor, shell_index,

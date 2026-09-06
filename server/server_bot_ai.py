@@ -18,6 +18,7 @@ _CLIENT_SCRIPT_ROOT = os.path.join(
 if _CLIENT_SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, _CLIENT_SCRIPT_ROOT)
 
+from gui.mods.offline_lan_0922 import bot_gunnery
 from gui.mods.offline_lan_0922.ai.cover import (
     normalize_candidate,
     score_candidates,
@@ -134,6 +135,21 @@ def _route_point_reached(bx, bz, waypoints, index, route_limit):
     return math.hypot(closest_x - bx, closest_z - bz) <= ROUTE_ARRIVAL_RADIUS
 
 
+def _bot_rating(raw):
+    """Return one manifest entry's competence rating.
+
+    An entry carrying neither field predates the rating.  It keeps this
+    project's original behaviour - every Bot executing every tactic - rather
+    than silently becoming a 34 percent Bot because the plumbing failed.
+    """
+    if "skill_rating" in raw:
+        return bot_gunnery.normalize_rating(raw.get("skill_rating"))
+    skill = raw.get("skill")
+    if skill in bot_gunnery.SKILL_TIERS:
+        return bot_gunnery.rating_for_skill(skill)
+    return 1.0
+
+
 def _order_signature(order):
     """Return the strategic fields which advance the order revision."""
     signature = dict(order or {})
@@ -153,6 +169,7 @@ class BotPlanner(object):
 
     def __init__(self):
         self.revision = 0
+        self._round_id = 0
         self._contacts = {1: {}, 2: {}}
         self._last_orders = None
         self._last_order_signature = None
@@ -172,8 +189,16 @@ class BotPlanner(object):
         self._artillery_anchors = {}
         self._recent_hits = {}
 
-    def reset(self):
+    def reset(self, round_id=None):
+        """Start a clean round.
+
+        ``round_id`` salts every competence draw, so a roster slot that never
+        angled last round is not condemned to the same habit for the life of
+        the server process.
+        """
         self.revision = 0
+        if round_id is not None:
+            self._round_id = _integer(round_id)
         self._contacts = {1: {}, 2: {}}
         self._last_orders = None
         self._last_order_signature = None
@@ -192,6 +217,25 @@ class BotPlanner(object):
         self._base_capture = {1: {}, 2: {}}
         self._artillery_anchors = {}
         self._recent_hits = {}
+
+    def _capable(self, bot, capability, *occasion):
+        """Return whether one Bot does the tactically right thing this time.
+
+        A latched capability is seeded with round and Bot identity alone, so
+        the answer holds for the battle and a roster keeps Bots with a
+        recognisable habit.  Every other capability is seeded with the
+        identity of the single decision - a target lease, a cover manoeuvre,
+        one hit - so a Bot hesitates instead of being uniformly incapable,
+        and the answer still cannot flip inside one manoeuvre.
+
+        Nothing is stored.  An order rebuilt on the next tick, or by a
+        replacement authority after a failover, reaches the same answer.
+        """
+        if capability in bot_gunnery.LATCHED_CAPABILITIES:
+            occasion = ()
+        return bot_gunnery.capability_allowed(
+            bot.get("rating"), capability, self._round_id, bot.get("id"),
+            *occasion)
 
     def report_damage(self, victim_bot_id, attacker_kind, attacker_id,
                       damage, now):
@@ -841,6 +885,7 @@ class BotPlanner(object):
                 "id": bot_id,
                 "team": _integer(raw.get("team")),
                 "slot": _integer(raw.get("slot")),
+                "rating": _bot_rating(raw),
                 "profile": raw.get("profile") if isinstance(raw.get("profile"), dict) else {},
                 "route": raw.get("route") if isinstance(raw.get("route"), dict) else {},
                 "state": state,
@@ -1460,8 +1505,18 @@ class BotPlanner(object):
             sum(max(0, _integer(value)) for value in remaining) > 0)
 
     def _hit_requires_withdrawal(self, bot, hit, threat, team_bots):
-        """Escalate damage only when it is material or cannot be answered."""
+        """Escalate damage only when it is material or cannot be answered.
+
+        Reading one hit as a reason to break contact is a competence, decided
+        once per hit. Without it the Bot keeps fighting where it stands. The
+        low-health retreat is deliberately not gated here: that is survival,
+        not judgement, and removing it would only feed the other team.
+        """
         if not isinstance(hit, dict):
+            return False
+        if not self._capable(
+                bot, bot_gunnery.CAPABILITY_WITHDRAW,
+                hit.get("attacker"), round(_number(hit.get("reported_at")), 3)):
             return False
         state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
         max_health = max(1.0, _number(state.get("max_health"), 1.0))
@@ -1696,9 +1751,26 @@ class BotPlanner(object):
         assigned = {}
         candidates = []
         by_bot = {}
+        priority = {}
         for bot in bots:
             bx = _number(bot["state"].get("x"))
             bz = _number(bot["state"].get("z"))
+            # Ranking a whole contact list by how nearly dead each target is,
+            # and turning on whoever last hit you, is a competence. The
+            # occasion is the target lease this assignment already runs on,
+            # not the wall clock: a Bot that re-decided on a timer would
+            # change its mind mid-lease, and every candidate's score would
+            # move at once for no reason the enemy gave it. Decided once per
+            # call and reused below, so the score and the attacker override
+            # cannot disagree. Distance and the point-blank override survive
+            # either way: closing to your own gun and answering a tank in
+            # your face are not tactics.
+            lease = self._target_assignments.get(bot["id"])
+            reads_priority = self._capable(
+                bot, bot_gunnery.CAPABILITY_TARGET_PRIORITY,
+                round(_number(lease.get("until")), 3)
+                if isinstance(lease, dict) else None)
+            priority[bot["id"]] = reads_priority
             for contact in contacts:
                 if (not contact.get("visible") or
                         bot["id"] not in contact.get(
@@ -1710,10 +1782,12 @@ class BotPlanner(object):
                 if distance > self._engagement_range(bot, contact):
                     continue
                 score = 0.0
-                score += contact["health"] / float(max(1, contact["max_health"])) * 28.0
+                if reads_priority:
+                    score += contact["health"] / float(
+                        max(1, contact["max_health"])) * 28.0
                 score += distance * 0.018
                 hit = self._recent_hit(bot["id"], now)
-                if (hit is not None and
+                if (reads_priority and hit is not None and
                         hit.get("attacker") == (
                             str(contact.get("target_kind") or ""),
                             _integer(contact.get("id")))):
@@ -1811,7 +1885,8 @@ class BotPlanner(object):
             hit = self._recent_hit(bot["id"], now)
             attacker_override = bool(
                 hit is not None and best_key == hit.get("attacker") and
-                best_key != previous.get("target"))
+                best_key != previous.get("target") and
+                priority.get(bot["id"], True))
             if close_override or attacker_override:
                 continue
             if (lease_expired and
@@ -2352,13 +2427,20 @@ class BotPlanner(object):
         return max(candidates, key=lambda value: value[:2])[2]
 
     @staticmethod
-    def _shell_index(profile, contact, personality, state=None):
+    def _shell_index(profile, contact, personality, state=None,
+                     plans_shell=True):
         """Plan the next round: standard first, HE soft, premium hard.
 
         Descriptor order supplies the standard baseline. A later non-HE round
         is treated as premium only when it has materially higher penetration;
         store prices are not part of the stable LAN profile. Depleted rounds
         are never requested.
+
+        ``plans_shell`` is the competence to read a target and answer it with
+        the right round. Without it the Bot fires whatever the descriptor
+        loads first and still has in the racks, which is what not knowing
+        looks like: it neither switches to premium against armour it cannot
+        beat, nor picks HE for a soft or nearly dead target.
         """
         shells = profile.get("shells") if isinstance(profile.get("shells"), list) else []
         if not shells:
@@ -2377,6 +2459,11 @@ class BotPlanner(object):
             available.append(shell)
         if not available:
             return max(0, _integer((state or {}).get("shell_index", 0)))
+        if not plans_shell:
+            return max(0, _integer(min(
+                available,
+                key=lambda shell: _integer(shell.get("index"))
+            ).get("index")))
         armor = max(0.0, _number(contact.get("armor")))
         health = max(0.0, _number(contact.get("health")))
         non_he = []
@@ -2543,6 +2630,17 @@ class BotPlanner(object):
 
     def _apply_cover_order(self, order, bot, focus, personality, now,
                            urgent=False, hold_only=False):
+        # One engagement is one decision to use cover, so the answer cannot
+        # change between the approach and the return and leave a Bot driving
+        # in and out of the same position. Reaching for hard cover under fire
+        # is a different, easier competence than choosing a firing position.
+        capability = (bot_gunnery.CAPABILITY_URGENT_COVER
+                      if urgent or hold_only
+                      else bot_gunnery.CAPABILITY_TACTICAL_COVER)
+        if not self._capable(bot, capability, focus.get("target_kind"),
+                             focus.get("id")):
+            self._cover_states.pop(bot["id"], None)
+            return False
         selected_state = None
         for unused_attempt in range(2):
             selected_state = self._cover_candidate(
@@ -2588,7 +2686,9 @@ class BotPlanner(object):
                 order.get("face_position") or focus["position"])
         elif (phase == "hold" and not urgent and not hold_only and
               _number(now) >= _number(state.get("phase_until")) and
-              self._weapon_ready(bot)):
+              self._weapon_ready(bot) and
+              self._capable(bot, bot_gunnery.CAPABILITY_COVER_PEEK,
+                            candidate["id"])):
             phase = "peek"
             self._begin_cover_phase(state, phase, now, peek_distance)
             state["peek_fire_seq"] = _integer(
@@ -2661,8 +2761,7 @@ class BotPlanner(object):
         if order.get("target_id") is None:
             order["face_position"] = dict(anchor["face"])
 
-    @staticmethod
-    def _set_target(order, bot, contact, profile, personality,
+    def _set_target(self, order, bot, contact, profile, personality,
                     fire_allowed):
         order["target_id"] = contact["id"]
         order["target_kind"] = contact.get("target_kind")
@@ -2670,8 +2769,13 @@ class BotPlanner(object):
         order["face_position"] = dict(contact["position"])
         order["fire_allowed"] = bool(
             fire_allowed and BotPlanner._weapon_ready(bot))
+        # One engagement is one shell decision. Re-rolling per tick would
+        # leave a Bot swapping rounds in front of the same tank.
         order["shell_index"] = BotPlanner._shell_index(
-            profile, contact, personality, bot.get("state"))
+            profile, contact, personality, bot.get("state"),
+            plans_shell=self._capable(
+                bot, bot_gunnery.CAPABILITY_SHELL_CHOICE,
+                contact.get("target_kind"), contact.get("id")))
 
     @staticmethod
     def _angled_face_point(bot, target, personality):
@@ -2714,7 +2818,9 @@ class BotPlanner(object):
                     "under_fire_withdraw", "crossfire_withdraw") or
                 _number(order.get("throttle_override"), 1.0) != 0.0 or
                 not order.get("fire_allowed") or
-                not self._may_angle_hull(profile)):
+                not self._may_angle_hull(profile) or
+                not self._capable(
+                    bot, bot_gunnery.CAPABILITY_HULL_ANGLING)):
             return
         target_key = (order.get("target_kind"), order.get("target_id"))
         anchor = self._engage_anchors.get(bot["id"])
@@ -2907,7 +3013,9 @@ class BotPlanner(object):
             return order
 
         if (crossfire_risk is not None and crossfire_risk >= 0.35 and
-                support_score < 0.70):
+                support_score < 0.70 and
+                self._capable(bot, bot_gunnery.CAPABILITY_CROSSFIRE,
+                              focus.get("target_kind"), focus.get("id"))):
             self._engage_anchors.pop(bot["id"], None)
             self._combat_states.pop(bot["id"], None)
             if (distance <= fire_range * 1.15 and
@@ -2953,6 +3061,7 @@ class BotPlanner(object):
 
         self._retreat_states.pop(bot["id"], None)
         if (distance > close_limit and distance <= fire_range and
+                self._capable(bot, bot_gunnery.CAPABILITY_FLANK) and
                 self._should_flank(bot, focus, team_bots or ())):
             self._engage_anchors.pop(bot["id"], None)
             self._combat_states.pop(bot["id"], None)
