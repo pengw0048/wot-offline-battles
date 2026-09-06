@@ -330,13 +330,22 @@ def _text(value):
         return value
 
 
-def write_json(path, value, durable=True):
+def write_json(path, value, durable=True, compact=False):
+    """Replace one JSON file only after its complete contents reach disk.
+
+    ``compact`` selects the smallest machine-readable form.  The embedded
+    CPython 2.7 runtime only uses its C JSON encoder when ``indent`` is None
+    *and* ``sort_keys`` is false, so a large state file written for the port's
+    own reader is several times cheaper to encode without them.  Keep the
+    readable form for the small files a player or a support request inspects.
+    """
     output_dir = os.path.dirname(path)
     if output_dir and not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     temporary_path = path + '.tmp'
     with open(temporary_path, 'wb') as stream:
-        payload = json.dumps(value, indent=2, sort_keys=True) + '\n'
+        payload = (json.dumps(value, separators=(',', ':')) if compact
+                   else json.dumps(value, indent=2, sort_keys=True)) + '\n'
         stream.write(payload.encode('utf-8'))
         if durable:
             stream.flush()

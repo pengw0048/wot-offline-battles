@@ -324,6 +324,126 @@ class PostBattleContractTests(unittest.TestCase):
             self.assertTrue(final.acknowledge(receipt['arena_unique_id']))
             self.assertFalse(final.accept(receipt))
 
+    def test_terminal_receipt_does_not_re_copy_the_archived_history(self):
+        """The victory instant must not cost time per archived receipt.
+
+        The server ships settlement inside the terminal round barrier, so
+        ``accept`` runs in a BigWorld callback the moment the last enemy
+        dies.  Neither ``accept`` nor ``acknowledge`` edits an archived or
+        pending receipt, so the rollback state must reference those rows
+        rather than rebuild them.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            archived = []
+            for index in range(8):
+                row = _receipt(store.account_key)
+                row['receipt_id'] = 'server:%d:1' % (100 + index)
+                row['arena_unique_id'] = ((100 + index) << 32) | 1
+                archived.append(postbattle_store._receipt(row))
+            store._history = list(archived)
+            pending = postbattle_store._receipt(_receipt(store.account_key))
+            store._pending[str(pending['arena_unique_id'])] = pending
+
+            rollback = store._snapshot()
+
+            self.assertEqual(len(archived), len(rollback['history']))
+            for index, row in enumerate(archived):
+                self.assertIs(row, rollback['history'][index])
+            self.assertIs(
+                pending,
+                rollback['pending'][str(pending['arena_unique_id'])])
+            # The counters ``_apply_progress`` edits in place still need a
+            # real copy, including the nested per-vehicle row.
+            store._progress['vehicles']['ussr:R11_MS-1'] = {'battles': 3}
+            rollback = store._snapshot()
+            store._progress['vehicles']['ussr:R11_MS-1']['battles'] = 9
+            self.assertEqual(
+                3, rollback['progress']['vehicles']['ussr:R11_MS-1'][
+                    'battles'])
+
+    def test_a_failed_durable_write_restores_every_container(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            first = _receipt(store.account_key)
+            self.assertTrue(store.accept(first))
+            self.assertTrue(store.acknowledge(first['arena_unique_id']))
+            settled_progress = store.progress()
+            settled_history = list(store._history)
+
+            second = _receipt(store.account_key)
+            second['receipt_id'] = 'server:8:1'
+            second['arena_unique_id'] = (8 << 32) | 1
+            with mock.patch.object(
+                    postbattle_store.port_config, 'write_json',
+                    side_effect=OSError('disk unavailable')):
+                self.assertRaises(OSError, store.accept, second)
+            self.assertEqual(settled_progress, store.progress())
+            self.assertEqual([], store.pending_arenas())
+            self.assertEqual(settled_history, store._history)
+
+            # The same rollback must survive an acknowledge failure, which is
+            # the only transaction that appends to the archived history.
+            self.assertTrue(store.accept(second))
+            with mock.patch.object(
+                    postbattle_store.port_config, 'write_json',
+                    side_effect=OSError('disk unavailable')):
+                self.assertRaises(
+                    OSError, store.acknowledge, second['arena_unique_id'])
+            self.assertEqual([second['arena_unique_id']],
+                             store.pending_arenas())
+            self.assertEqual(settled_history, store._history)
+
+    def test_a_saturated_history_still_rolls_back_its_dropped_head(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            saturated = []
+            for index in range(postbattle_store.MAX_HISTORY):
+                row = _receipt(store.account_key)
+                row['receipt_id'] = 'server:%d:1' % (1000 + index)
+                row['arena_unique_id'] = ((1000 + index) << 32) | 1
+                saturated.append(postbattle_store._receipt(row))
+            store._history = list(saturated)
+            pending = _receipt(store.account_key)
+            pending['receipt_id'] = 'server:9:1'
+            pending['arena_unique_id'] = (9 << 32) | 1
+            self.assertTrue(store.accept(pending))
+
+            with mock.patch.object(
+                    postbattle_store.port_config, 'write_json',
+                    side_effect=OSError('disk unavailable')):
+                self.assertRaises(
+                    OSError, store.acknowledge, pending['arena_unique_id'])
+
+            # The trim drops the oldest row; a rollback must put it back.
+            self.assertEqual(len(saturated), len(store._history))
+            self.assertIs(saturated[0], store._history[0])
+            self.assertEqual([pending['arena_unique_id']],
+                             store.pending_arenas())
+
+    def test_the_durable_state_file_is_written_for_the_ports_own_reader(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            receipt = _receipt(store.account_key)
+            self.assertTrue(store.accept(receipt))
+
+            text = Path(path).read_text(encoding='utf-8')
+            # The embedded 2.7 runtime only uses its C JSON encoder without
+            # sort_keys and indent, so this cache must carry neither.
+            self.assertEqual(1, text.count('\n'))
+            self.assertNotIn(', ', text)
+            self.assertNotIn(': ', text)
+            reloaded = json.loads(text)
+            self.assertEqual(postbattle_store.SCHEMA, reloaded['schema'])
+            restarted = postbattle_store.PostBattleStore(path=path)
+            self.assertEqual([receipt['arena_unique_id']],
+                             restarted.pending_arenas())
+            self.assertEqual(store.progress(), restarted.progress())
+
     def test_client_store_reloads_nonempty_interaction_details(self):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / 'postbattle_state.json')

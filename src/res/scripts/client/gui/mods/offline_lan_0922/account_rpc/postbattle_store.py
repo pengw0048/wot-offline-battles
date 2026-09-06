@@ -8,6 +8,7 @@ the exact client ``battle_results_shared`` packers and are never persisted.
 
 from __future__ import print_function
 
+import copy
 import json
 import os
 import time
@@ -788,10 +789,22 @@ class PostBattleStore(object):
         row['changeTime'] = progress['battles']
 
     def _snapshot(self):
-        return json.loads(json.dumps({
-            'pending': self._pending, 'history': self._history,
-            'progress': self._progress,
-        }))
+        """Capture enough state to undo one failed durable transaction.
+
+        The server ships settlement inside the terminal round barrier, so
+        ``accept`` runs in a BigWorld callback at the instant the victory
+        condition is met.  A JSON round-trip of the whole store cost time
+        proportional to the archived history there -- hundreds of
+        milliseconds of visible freeze on a saturated profile -- while
+        neither ``accept`` nor ``acknowledge`` mutates an archived or pending
+        receipt in place.  Copy the two containers, not their rows, and deep
+        copy only the counters ``_apply_progress`` edits in place.
+        """
+        return {
+            'pending': dict(self._pending),
+            'history': list(self._history),
+            'progress': copy.deepcopy(self._progress),
+        }
 
     def _restore(self, value):
         self._pending = value['pending']
@@ -865,4 +878,8 @@ class PostBattleStore(object):
             'pending': list(self._pending.values()),
             'history': self._history, 'progress': self._progress,
         }
-        port_config.write_json(self._path, value)
+        # This file is a machine-owned cache of up to MAX_HISTORY full
+        # receipts, and it is rewritten on the terminal round barrier.  Only
+        # ``_load`` reads it, so sorted and indented output buys nothing and
+        # costs the embedded 2.7 runtime its C JSON encoder.
+        port_config.write_json(self._path, value, compact=True)
