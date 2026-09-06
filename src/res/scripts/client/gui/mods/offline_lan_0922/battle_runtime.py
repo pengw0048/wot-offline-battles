@@ -1712,6 +1712,7 @@ class BattleRuntime(object):
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
+        self._reset_local_camera_motion()
         self._local_engine_mode = None
         self._local_engine_state = None
         self._local_engine_audio_report = None
@@ -2024,6 +2025,7 @@ class BattleRuntime(object):
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
+        self._reset_local_camera_motion()
         self._local_engine_mode = None
         self._local_engine_state = None
         self._local_engine_audio_report = None
@@ -6095,6 +6097,11 @@ class BattleRuntime(object):
             steady_rotation_matrix=self._local_steady_rotation(),
             stabilised_matrix=self._local_stabilised_pose())
         self._local_camera_velocity = zero_motion
+        self._reset_local_camera_motion()
+        # Seed the motion history with the spawn pose so the very first
+        # copied-physics frame already has one earlier sample to difference.
+        self._local_motion_history.append(
+            (0.0, tuple(float(value) for value in self._local_position)))
         self._local_physics = vehicle_physics.derive_params(
             entity.typeDescriptor,
             self._local_factors(entity.typeDescriptor))
@@ -6520,23 +6527,107 @@ class BattleRuntime(object):
             self._local_swinging_probe = None
         return True
 
+    def _reset_local_camera_motion(self):
+        """Drop the pose history behind the copied camera-motion estimate."""
+        self._local_motion_history = []
+        self._local_motion_clock = 0.0
+        self._local_motion_window = None
+        return True
+
+    def _camera_motion_window(self):
+        """Return the exact #1513 pose-sample interval for camera motion."""
+        window = self._local_motion_window
+        if window is not None:
+            return window
+        value = getattr(
+            self._runtime.constants, 'SERVER_TICK_LENGTH', None)
+        try:
+            window = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError('#1513 server tick length is unavailable')
+        if not window > 0.0:
+            raise RuntimeError('#1513 server tick length is invalid')
+        self._local_motion_window = window
+        return window
+
+    def _local_motion_pose_at(self, moment):
+        """Read the recorded copied pose at one exact earlier moment."""
+        history = self._local_motion_history
+        if not history or moment < history[0][0]:
+            return None
+        index = len(history) - 1
+        while index > 0 and history[index][0] > moment:
+            index -= 1
+        if index + 1 >= len(history):
+            return history[index][1]
+        earlier_moment, earlier = history[index]
+        later_moment, later = history[index + 1]
+        span = later_moment - earlier_moment
+        if span <= 0.0:
+            return later
+        ratio = (moment - earlier_moment) / span
+        return tuple(
+            earlier[axis] + (later[axis] - earlier[axis]) * ratio
+            for axis in range(3))
+
+    def _local_camera_motion(self, position, dt, previous_velocity):
+        """Estimate the pose motion #1513's dynamic cameras consume.
+
+        Retail fills ``WGVehicleFilter.velocity`` and ``acceleration`` from
+        the native filter, which observes the vehicle pose on the exact
+        ``constants.SERVER_TICK_LENGTH`` grid.  ``AccelerationSmoother`` and
+        ``SniperCamera.__calcCurOscillatorAcceleration`` turn that value into
+        camera rotation, so at sniper zoom it is an aiming input.
+
+        Differentiating this port's copied pose twice per rendered frame
+        measures the ground-follow snap instead of vehicle motion, and scales
+        the result with the frame rate: the same 112 m Prokhorovka drive
+        peaks at 18.5 m/s^2 at 60 FPS and 10.3 m/s^2 at 30 FPS.
+        Read the recorded pose at that exact interval instead.  Publication
+        cadence is unchanged; every rendered frame still carries a value.
+        """
+        window = self._camera_motion_window()
+        history = self._local_motion_history
+        moment = self._local_motion_clock + dt
+        self._local_motion_clock = moment
+        history.append((moment, position))
+        # Two intervals answer both differences.  Keep the newest sample
+        # already older than that span so the oldest lookup stays bracketed.
+        limit = moment - 2.0 * window
+        drop = 0
+        while drop + 1 < len(history) and history[drop + 1][0] <= limit:
+            drop += 1
+        if drop:
+            del history[:drop]
+
+        recent = self._local_motion_pose_at(moment - window)
+        if recent is None:
+            # A spawn, respawn or teardown leaves less than one interval of
+            # history.  Publish the last known velocity rather than invent
+            # one, exactly as a zero-length frame does.
+            return previous_velocity, (0.0, 0.0, 0.0)
+        velocity = tuple(
+            (position[axis] - recent[axis]) / window for axis in range(3))
+        earlier = self._local_motion_pose_at(moment - 2.0 * window)
+        if earlier is None:
+            return velocity, (0.0, 0.0, 0.0)
+        previous = tuple(
+            (recent[axis] - earlier[axis]) / window for axis in range(3))
+        acceleration = tuple(
+            (velocity[axis] - previous[axis]) / window for axis in range(3))
+        return velocity, acceleration
+
     def _update_local_presentation(self, entity, dt=0.0):
         if self._local_matrix is None or self._local_model is None:
             raise RuntimeError('player presentation is not attached')
         previous_yaw = float(getattr(
             self._local_matrix, 'yaw', self._local_yaw))
-        previous_position = _xyz(self._local_matrix.translation)
         position = self._vector(self._local_position)
         dt = max(0.0, float(dt))
         previous_velocity = _xyz(self._local_camera_velocity)
         if dt > 0.0:
-            current_position = _xyz(position)
-            velocity_tuple = tuple(
-                (current_position[index] - previous_position[index]) / dt
-                for index in range(3))
-            acceleration_tuple = tuple(
-                (velocity_tuple[index] - previous_velocity[index]) / dt
-                for index in range(3))
+            velocity_tuple, acceleration_tuple = self._local_camera_motion(
+                _xyz(position), dt, previous_velocity)
         else:
             velocity_tuple = previous_velocity
             acceleration_tuple = (0.0, 0.0, 0.0)
@@ -6711,6 +6802,7 @@ class BattleRuntime(object):
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
+        self._reset_local_camera_motion()
         self._local_engine_mode = None
         self._local_engine_state = None
         self._local_engine_audio_report = None
@@ -24101,6 +24193,7 @@ class BattleRuntime(object):
         self._local_native_matrix = None
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
+        self._reset_local_camera_motion()
         self._local_engine_mode = None
         self._local_engine_state = None
         self._local_engine_audio_report = None
