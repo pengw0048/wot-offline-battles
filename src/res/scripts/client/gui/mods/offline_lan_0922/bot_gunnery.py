@@ -60,8 +60,11 @@ MAX_AIM_OFFSET_METRES = 8.0
 
 _PARAMETERS = {
     SKILL_ROOKIE: {
-        # #1513 crew level, fed to generateDefaultCrew.
-        'crew_level': 50,
+        # #1513 crew level, fed to generateDefaultCrew.  The crew level also
+        # shortens view range and slows reload, so only the two weaker tiers
+        # spend it at all and the top two share a full crew: this is a
+        # gunnery setting, not a spotting setting.
+        'crew_level': 75,
         # Seconds of holding a firing solution on one target before the
         # trigger is available at all.
         'reaction_seconds': 1.20,
@@ -79,7 +82,7 @@ _PARAMETERS = {
         'lead_error': 0.45,
     },
     SKILL_REGULAR: {
-        'crew_level': 75,
+        'crew_level': 90,
         'reaction_seconds': 0.75,
         'patience_seconds': 1.10,
         'converged_factor': 1.80,
@@ -87,7 +90,7 @@ _PARAMETERS = {
         'lead_error': 0.22,
     },
     SKILL_VETERAN: {
-        'crew_level': 90,
+        'crew_level': 100,
         'reaction_seconds': 0.45,
         'patience_seconds': 1.70,
         'converged_factor': 1.35,

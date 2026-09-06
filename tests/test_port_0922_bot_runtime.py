@@ -8231,8 +8231,8 @@ class BotRuntimeTests(unittest.TestCase):
         self.runtime.battle_start(dict(self.start, bot_skill_mode='easy'))
 
         self.assertEqual('rookie', self.runtime.bot_skill(11))
-        self.assertEqual(50, self.runtime.bot_crew_level(11))
-        self.assertIn(50, self.crew_levels)
+        self.assertEqual(75, self.runtime.bot_crew_level(11))
+        self.assertIn(75, self.crew_levels)
         self.assertNotIn(None, self.crew_levels)
 
     def test_a_weaker_crew_aims_more_slowly_and_scatters_further(self):

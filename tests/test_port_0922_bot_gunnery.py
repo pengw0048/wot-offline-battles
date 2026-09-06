@@ -42,10 +42,15 @@ class SkillTierTableTests(unittest.TestCase):
             values = [row[name] for row in rows]
             self.assertEqual(sorted(values, reverse=True), values, name)
             self.assertEqual(len(set(values)), len(values), name)
-        for name in ('crew_level', 'patience_seconds'):
+        for name in ('patience_seconds',):
             values = [row[name] for row in rows]
             self.assertEqual(sorted(values), values, name)
             self.assertEqual(len(set(values)), len(values), name)
+        # The crew level only has to never fall, because it is the one knob
+        # that also moves view range and reload; tiers are allowed to share
+        # a full crew and separate on gunnery alone.
+        levels = [row['crew_level'] for row in rows]
+        self.assertEqual(sorted(levels), levels)
 
     def test_every_crew_level_is_one_1513_can_train(self):
         for skill in gunnery.SKILL_TIERS:
@@ -53,6 +58,17 @@ class SkillTierTableTests(unittest.TestCase):
             self.assertGreaterEqual(level, 50)
             self.assertLessEqual(level, 100)
         self.assertEqual(100, gunnery.crew_level(gunnery.SKILL_ELITE))
+
+    def test_only_the_two_weaker_tiers_train_below_a_full_crew(self):
+        """The crew level is deliberately not the knob that ranks tiers.
+
+        It also shortens view range and slows reload, so spending it on every
+        tier would turn a gunnery preset into a spotting preset.  Veteran and
+        elite share #1513's full crew and separate on the gunner model alone.
+        """
+        self.assertEqual(
+            [75, 90, 100, 100],
+            [gunnery.crew_level(skill) for skill in gunnery.SKILL_TIERS])
 
     def test_unknown_names_fall_back_instead_of_raising(self):
         for value in (None, '', 'perfect', 7, object()):
