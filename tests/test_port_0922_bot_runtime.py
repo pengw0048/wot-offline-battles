@@ -16597,13 +16597,13 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertGreater(offset_goals, 0)
 
     def test_prohorovka_bot_hull_cannot_settle_past_the_stock_red_border(self):
-        # scripts/arena_defs/05_prohorovka.xml boundingBox. The shipped graph
-        # samples out to x=512 because the baker padded its grid around the
-        # authored east-lane waypoint at x=496, so the map-edge guard used to
-        # accept a Bot whose whole hull sat outside the red border.
+        # Reproduce the old overextended bake explicitly. Current shipped
+        # data honors the arena; runtime clipping must still fence a stale
+        # graph whose east edge was padded around an authored waypoint.
         arena = (-500.0, -500.0, 500.0, 500.0)
         graph = json.loads(
             (PORT_ROOT / 'navgraphs' / '05_prohorovka.json').read_text())
+        graph['bounds'][2] = 512.0
         state = {'id': 11, 'half_length': 3.5, 'half_width': 1.7}
         outside = (506.0, 0.0, -316.0)
         inside = (494.0, 0.0, -316.0)
@@ -16788,7 +16788,7 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(5.0, runtime.states[14]['_route_lane_offset'])
         self.assertEqual([14, 14], [value[0] for value in checked])
 
-    def test_malinovka_route_lanes_reject_shallow_and_fatal_hazards(self):
+    def test_malinovka_route_lanes_allow_navigable_water_and_reject_fatal_hazards(self):
         graph = json.loads(
             (PORT_ROOT / 'navgraphs' / '02_malinovka.json').read_text())
         runtime = self.module.BotRuntime(1)
@@ -16808,9 +16808,9 @@ class BotRuntimeTests(unittest.TestCase):
             -226.92893218813452, 0.0, 202.92893218813452)
         central_minus_five = (
             -230.46446609406726, 0.0, 206.46446609406726)
-        self.assertTrue(runtime.navigator.grid.point_has_baked_hazard(
+        self.assertFalse(runtime.navigator.grid.point_has_baked_hazard(
             central_minus_ten, self.module.BAKED_SHALLOW_WATER))
-        self.assertTrue(runtime.navigator.grid.point_has_baked_hazard(
+        self.assertFalse(runtime.navigator.grid.point_has_baked_hazard(
             central_minus_five, self.module.BAKED_SHALLOW_WATER))
         central = runtime._route_lane_target(
             24, (-270.0, 0.0, 174.0), (-234.0, 0.0, 210.0),
@@ -16818,8 +16818,8 @@ class BotRuntimeTests(unittest.TestCase):
                 'route_id': 'central_field', 'route_index': 3,
                 'route_anchor': (-270.0, 0.0, 174.0),
             }, 1.0)
-        self.assertEqual((-234.0, 0.0, 210.0), central)
-        self.assertEqual(0.0, state['_route_lane_offset'])
+        self.assertEqual(central_minus_ten[::2], central[::2])
+        self.assertEqual(-10.0, state['_route_lane_offset'])
 
         west_group = (2, 'west_lake_road')
         state.update(_route_lane_group=west_group,

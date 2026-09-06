@@ -951,7 +951,7 @@ class ServerBotTacticsTests(unittest.TestCase):
 
         self.assertEqual('central_field', route_id)
         self.assertEqual(3, index)
-        self.assertEqual({'x': -270.0, 'y': 0.0, 'z': 174.0}, point)
+        self.assertEqual({'x': -282.0, 'y': 0.0, 'z': 174.0}, point)
         self.assertEqual({'x': -362.0, 'y': 0.0, 'z': 106.0}, anchor)
         self.assertFalse(route_join)
 

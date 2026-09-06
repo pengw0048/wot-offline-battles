@@ -351,8 +351,8 @@ class ArenaRectangleClipTests(unittest.TestCase):
     """A baked rectangle is a sampling artifact; the red border is not."""
 
     # scripts/arena_defs/05_prohorovka.xml boundingBox in the pinned #1513
-    # client. The shipped graph samples 12 m further east because the baker
-    # padded its grid around the authored east-lane waypoint at x=496.
+    # client. Older bakes padded the graph beyond this rectangle around an
+    # authored east-lane waypoint; current bakes already honor the border.
     PROKHOROVKA_ARENA = (-500.0, -500.0, 500.0, 500.0)
 
     _DIRECTIONS = [[-1, -1], [0, -1], [1, -1], [-1, 0],
@@ -406,7 +406,7 @@ class ArenaRectangleClipTests(unittest.TestCase):
         return json.loads(
             (PORT_ROOT / 'navgraphs' / '05_prohorovka.json').read_text())
 
-    def test_shipped_prohorovka_cells_reach_past_the_stock_red_border(self):
+    def test_shipped_prohorovka_cells_stay_inside_the_stock_red_border(self):
         graph = self._prohorovka()
         grid = TerrainNavigator(lambda *unused: None, baked_graph=graph).grid
         outside = [(column, row)
@@ -417,13 +417,18 @@ class ArenaRectangleClipTests(unittest.TestCase):
                        graph['origin'][0] + column * graph['cell_size'] >
                        self.PROKHOROVKA_ARENA[2])]
 
-        self.assertTrue(outside)
-        self.assertTrue(any(grid._baked_edge_height(
-            (column - 1, row), (column, row)) is not None
-            for column, row in outside))
+        self.assertFalse(outside)
+        self.assertEqual(list(self.PROKHOROVKA_ARENA), list(grid.bounds))
 
-    def test_clipped_prohorovka_stops_planning_past_the_red_border(self):
-        graph = self._prohorovka()
+    def test_clip_stops_planning_past_the_red_border(self):
+        # Reproduce an old overextended bake without requiring shipped data
+        # to retain that defect after a fresh bake.
+        graph = self._row_graph()
+        graph['format'] = 'offline-lan-0922-navgraph'
+        graph['version'] = 2
+        graph['origin'] = [490.0, 0.0]
+        graph['bounds'] = list(self.PROKHOROVKA_ARENA)
+        graph['bounds'][2] = 508.0
         cell_size = graph['cell_size']
         origin_x = graph['origin'][0]
         entries = [(row, column)
