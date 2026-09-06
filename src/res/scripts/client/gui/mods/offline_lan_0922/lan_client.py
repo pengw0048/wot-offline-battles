@@ -20,6 +20,12 @@ from gui.mods.offline_lan_0922 import spotting
 PROTOCOL_VERSION = 5
 CLIENT_BUILD = 'wot-0.9.22.0.1-cn-1513'
 RANDOM_MAP_OPTION = 'server_random'
+# The stock map window publishes whole minutes inside the exact #1513
+# ``getTrainingBattleRoundLimits`` range: 300..1800 s for a plain
+# account, 60..14400 s with the daily-bonus attribute.  The LAN server
+# accepts that same range for one round.
+MIN_ROUND_SECONDS = 60
+MAX_ROUND_SECONDS = 14400
 PROJECTILE_LEDGER_CAPABILITY = 'projectile_ledger_v2'
 RICOCHET_CONTINUATION_CAPABILITY = 'ricochet_continuation_v1'
 PROJECTILE_HIT_VEHICLE_CAPABILITY = 'projectile_hit_vehicle_v1'
@@ -1892,11 +1898,18 @@ class LANClient(object):
                     if not is_alive():
                         self._sender_thread = None
 
-    def request_start(self, map_name=None):
+    def request_start(self, map_name=None, round_seconds=None):
         if (not self.ready or self.phase != 'waiting' or
                 self.player_id != self.host_player_id):
             return False
         message = {'type': 'start_battle', 'round_id': self.round_id}
+        if round_seconds is not None:
+            round_seconds = _exact_int(round_seconds)
+            if (round_seconds is None or
+                    round_seconds < MIN_ROUND_SECONDS or
+                    round_seconds > MAX_ROUND_SECONDS):
+                return False
+            message['round_seconds'] = round_seconds
         if map_name:
             map_name = _safe_text(map_name, '', 80)
             if (map_name == RANDOM_MAP_OPTION and

@@ -321,6 +321,71 @@ class QueueUITests(unittest.TestCase):
         self.assertTrue(window.closed)
         self.assertFalse(getattr(window, self.queue_ui._PICKER_MARKER))
 
+    def test_select_only_mode_returns_the_choice_and_the_battle_time(self):
+        selected = []
+        adapter = self.queue_ui.QueueUI(
+            lambda *args: self.started.append(args),
+            lambda: ('01_karelia', '05_prohorovka'),
+            endpoint=lambda: 'LAN SERVER: 10.0.0.5:28782',
+            runtime=(self.arena_type, _Window),
+            on_close=lambda: self.closed.append(True),
+            on_select=lambda name, seconds: selected.append((name, seconds)),
+            selection=lambda: ('05_prohorovka', 1200))
+        self.addCleanup(adapter.uninstall)
+        adapter.install()
+        window = _Window({'isOfflineLanPicker': True})
+
+        info = window.getInfo()
+        # The LAN room has no privacy, no room comment and no training room
+        # to create, and the window opens on the room's current choice.
+        self.assertFalse(info['canChangeComment'])
+        self.assertFalse(info['canMakeOpenedClosed'])
+        self.assertFalse(info['privacy'])
+        self.assertFalse(info['create'])
+        self.assertEqual(3, info['arena'])
+        self.assertEqual(20, info['timeout'])
+
+        self.assertIsNone(window.updateTrainingRoom(1, 20, False, 'ignored'))
+        self.assertEqual([('01_karelia', 1200)], selected)
+        # A map choice never starts the battle in this mode.
+        self.assertEqual([], self.started)
+
+    def test_an_unusable_battle_time_keeps_the_owner_round_length(self):
+        selected = []
+        adapter = self.queue_ui.QueueUI(
+            lambda *args: self.started.append(args),
+            lambda: ('01_karelia',),
+            runtime=(self.arena_type, _Window),
+            on_select=lambda name, seconds: selected.append((name, seconds)))
+        self.addCleanup(adapter.uninstall)
+        adapter.install()
+        window = _Window({'isOfflineLanPicker': True})
+
+        self.assertIsNone(window.updateTrainingRoom(1, 0, False, ''))
+        self.assertEqual([('01_karelia', None)], selected)
+
+    def test_round_seconds_follows_the_exact_1513_training_limits(self):
+        self.assertEqual(900, self.queue_ui.DEFAULT_ROUND_SECONDS)
+        self.assertEqual(60, self.queue_ui.MIN_ROUND_SECONDS)
+        self.assertEqual(14400, self.queue_ui.MAX_ROUND_SECONDS)
+        self.assertEqual(300, self.queue_ui.round_seconds(5))
+        self.assertEqual(1800, self.queue_ui.round_seconds(30))
+        self.assertIsNone(self.queue_ui.round_seconds(0))
+        self.assertIsNone(self.queue_ui.round_seconds(241))
+        self.assertIsNone(self.queue_ui.round_seconds(None))
+        self.assertIsNone(self.queue_ui.round_seconds(True))
+
+    def test_arena_id_lookup_honours_gameplay_and_server_pool(self):
+        cache = self.arena_type.g_cache
+        self.assertEqual(
+            3, self.catalog.arena_type_id(cache, '05_prohorovka', None))
+        self.assertIsNone(
+            self.catalog.arena_type_id(cache, '04_himmelsdorf', None))
+        self.assertIsNone(
+            self.catalog.arena_type_id(cache, '01_karelia',
+                                       ('05_prohorovka',)))
+        self.assertIsNone(self.catalog.arena_type_id(cache, None, None))
+
     def test_close_clears_marker_before_stock_window_cleanup(self):
         self.adapter.install()
         window = _Window({'isOfflineLanPicker': True})

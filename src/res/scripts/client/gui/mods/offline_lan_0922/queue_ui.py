@@ -17,6 +17,31 @@ UPSTREAM_TUXEDO_URL = (
     '/sources/scripts/client/gui/mods/mod_observer.py')
 
 
+# The stock window publishes its battle time in whole minutes inside the exact
+# #1513 ``getTrainingBattleRoundLimits`` range: 300..1800 s for a plain
+# account, 60..14400 s with the daily-bonus account attribute.
+DEFAULT_ROUND_SECONDS = 900
+MIN_ROUND_SECONDS = 60
+MAX_ROUND_SECONDS = 14400
+
+
+def round_seconds(round_length):
+    """Return one stock battle time in seconds, or None when it is not one.
+
+    An unusable battle time must not reject the map the player just chose, so
+    the caller keeps its current round length instead.
+    """
+    if isinstance(round_length, bool):
+        return None
+    try:
+        seconds = int(round_length) * 60
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if seconds < MIN_ROUND_SECONDS or seconds > MAX_ROUND_SECONDS:
+        return None
+    return seconds
+
+
 def _load_runtime():
     import ArenaType
     from gui.Scaleform.daapi.view.lobby.trainings.TrainingSettingsWindow import \
@@ -146,11 +171,15 @@ class QueueUI(object):
     """A reversible, chain-safe adapter for the stock map picker."""
 
     def __init__(self, request_start, map_pool, endpoint=None, runtime=None,
-                 on_close=None):
+                 on_close=None, on_select=None, selection=None):
         self._request_start = request_start
         self._map_pool = map_pool
         self._endpoint = endpoint or (lambda: '')
         self._on_close = on_close
+        # ``on_select`` turns this window into the waiting room's map picker:
+        # the choice returns to the room instead of starting the battle.
+        self._on_select = on_select
+        self._selection = selection or (lambda: (None, None))
         self._runtime = runtime
         self._installed = False
         self._window_type = None
@@ -209,6 +238,22 @@ class QueueUI(object):
                 return info
             result = dict(info or {})
             result['description'] = adapter._endpoint()
+            # A LAN room has no privacy, no room comment and no training room
+            # to create.  Report all three as fixed so the stock view offers
+            # the map and the battle time only.  ``__isCreateRequest`` stays
+            # true, so the stock ``getInfo`` above never asks a prebattle
+            # entity this client does not have.
+            result['canChangeComment'] = False
+            result['canMakeOpenedClosed'] = False
+            result['privacy'] = False
+            result['create'] = False
+            selected_map, selected_round_seconds = adapter._selection()
+            arena = map_catalog.arena_type_id(
+                arena_type.g_cache, selected_map, adapter._map_pool())
+            if arena is not None:
+                result['arena'] = arena
+            if selected_round_seconds:
+                result['timeout'] = int(selected_round_seconds) // 60
             return result
 
         def wrapped_update(window, arena, round_length, is_private, comment):
@@ -219,7 +264,11 @@ class QueueUI(object):
                                                  adapter._map_pool())
             if map_name is None:
                 return False
-            accepted = adapter._request_start(map_name, comment)
+            if adapter._on_select is not None:
+                accepted = adapter._on_select(
+                    map_name, round_seconds(round_length))
+            else:
+                accepted = adapter._request_start(map_name, comment)
             if accepted is False:
                 return False
             # This method is entered from Scaleform's native event dispatcher.

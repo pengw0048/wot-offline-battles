@@ -64,7 +64,6 @@ PANEL_RAISE_PIXELS = 24
 POINTER_TICK_SECONDS = 0.03
 RANDOM_MAP_OPTION = 'server_random'
 
-_HOST_CONTROLS = ('previous', 'map', 'next', 'start')
 _TEAM_SELECT_CONTROLS = ('team1', 'team2', 'team_random')
 _TEAM_SELECT_ACTIONS = {
     'team1': 1, 'team_random': 0, 'team2': 2,
@@ -108,6 +107,23 @@ def friendly_map_name(map_name):
         parts = parts[1:]
     return prefix + (' '.join([part.capitalize() for part in parts]) or
                      'Unknown')
+
+
+def friendly_round_length(seconds):
+    """Return the battle time suffix for the start button, or ''.
+
+    The stock map window owns this value.  A room whose owner never published
+    one keeps the plain button rather than showing an invented round length.
+    """
+    if isinstance(seconds, bool) or seconds is None:
+        return ''
+    try:
+        minutes = int(seconds) // 60
+    except (TypeError, ValueError, OverflowError):
+        return ''
+    if minutes <= 0:
+        return ''
+    return '  -  %d MIN' % minutes
 
 
 def friendly_bot_tier_mode(mode):
@@ -308,7 +324,8 @@ class WaitingRoomUI(object):
                  request_team=None, team_status=None,
                  request_team_size=None, initial_map=None,
                  on_map_selected=None, bot_tier_status=None,
-                 request_bot_tier_mode=None):
+                 request_bot_tier_mode=None, open_map_picker=None,
+                 round_seconds=None):
         self._request_start = request_start
         self._map_pool = map_pool
         self._status = status or (lambda: '')
@@ -321,6 +338,13 @@ class WaitingRoomUI(object):
         self._bot_tier_status = bot_tier_status or (lambda: {})
         self._request_bot_tier_mode = request_bot_tier_mode
         self._on_map_selected = on_map_selected
+        # The stock map window is the room's map browser: it presents the
+        # #1513 map images this native surface cannot draw.  Its owner opens
+        # it, because the room must release the screen and the native cursor
+        # first - the lobby movie and every Scaleform view inside it draw at
+        # z 0.5, behind this room at z 0.1.
+        self._open_map_picker = open_map_picker
+        self._round_seconds = round_seconds or (lambda: None)
         self._surface = surface
         self._panel = None
         self._controls = {}
@@ -383,9 +407,8 @@ class WaitingRoomUI(object):
         make_control('tier_previous', (-0.72, 0.28, CONTROL_Z), 0.20, 0.16)
         make_control('tier', (0.0, 0.28, CONTROL_Z), 1.15, 0.16)
         make_control('tier_next', (0.72, 0.28, CONTROL_Z), 0.20, 0.16)
-        make_control('previous', (-0.72, 0.04, CONTROL_Z), 0.20, 0.16)
-        make_control('map', (0.0, 0.04, CONTROL_Z), 1.15, 0.16)
-        make_control('next', (0.72, 0.04, CONTROL_Z), 0.20, 0.16)
+        make_control('map', (-0.30, 0.04, CONTROL_Z), 1.00, 0.16)
+        make_control('random', (0.62, 0.04, CONTROL_Z), 0.56, 0.16)
         make_control('team1_down', (-0.82, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team1_up', (-0.22, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team2_down', (0.22, -0.18, CONTROL_Z), 0.12, 0.14)
@@ -407,11 +430,9 @@ class WaitingRoomUI(object):
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('tier_next', '>', (0.72, 0.28, 0.0), 0.18, 0.10,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('previous', '<', (-0.72, 0.04, 0.0), 0.18, 0.10,
+        make_label('map', '', (-0.30, 0.04, 0.0), 0.96, 0.10,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('map', '', (0.0, 0.04, 0.0), 1.10, 0.10,
-                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('next', '>', (0.72, 0.04, 0.0), 0.18, 0.10,
+        make_label('random', 'RANDOM MAP', (0.62, 0.04, 0.0), 0.52, 0.10,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team1_down', '-', (-0.82, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
@@ -540,6 +561,15 @@ class WaitingRoomUI(object):
             except Exception as error:
                 _log('LAN waiting room could not save the selected map: %s' %
                      error)
+        return True
+
+    def select_map(self, map_name):
+        """Adopt one map chosen outside the room, such as in that window."""
+        if not map_name:
+            return False
+        self._set_selected_map(map_name)
+        self._message = ''
+        self.refresh()
         return True
 
     def open(self):
@@ -936,11 +966,15 @@ class WaitingRoomUI(object):
         else:
             self._set_text('map', lines[2] if len(lines) > 2 else
                            'The room host starts the battle.')
+        self._set_text('start', 'START BATTLE%s' % friendly_round_length(
+            self._round_seconds()))
         self._set_text('message', self._message)
+        random_supported = bool(is_host and self._random_supported())
         for role, component in self._controls.items():
             visible = (team_supported if role in _TEAM_SELECT_CONTROLS else
                        team_size_supported if role in _TEAM_SIZE_CONTROLS else
                        tier_supported if role in _BOT_TIER_CONTROLS else
+                       random_supported if role == 'random' else
                        role == 'close' or is_host)
             self._set(component, 'visible', visible)
             label = self._labels.get(role)
@@ -993,10 +1027,10 @@ class WaitingRoomUI(object):
                 -1 if role == 'tier_previous' else 1)
         if not self._host():
             return False
-        if role == 'previous':
-            return self._cycle(-1)
-        if role in ('next', 'map'):
-            return self._cycle(1)
+        if role == 'map':
+            return self._open_map_window()
+        if role == 'random':
+            return self._select_random_map()
         if role == 'start':
             return self._start()
         return False
@@ -1094,17 +1128,28 @@ class WaitingRoomUI(object):
         self.refresh()
         return True
 
-    def _cycle(self, step):
-        options = self._options()
-        if not options:
+    def _open_map_window(self):
+        """Ask this room's owner to raise the stock map window."""
+        if not self._options():
             self._message = 'The server has not published its map list yet.'
             self.refresh()
             return False
-        try:
-            index = options.index(self._selected_map)
-        except ValueError:
-            index = 0
-        self._set_selected_map(options[(index + int(step)) % len(options)])
+        if not callable(self._open_map_picker):
+            self._message = 'The stock map window is unavailable.'
+            self.refresh()
+            return False
+        if self._open_map_picker() is False:
+            self._message = 'The stock map window could not open.'
+            self.refresh()
+            return False
+        return True
+
+    def _select_random_map(self):
+        if not self._random_supported():
+            self._message = 'This LAN server does not offer a random map.'
+            self.refresh()
+            return False
+        self._set_selected_map(RANDOM_MAP_OPTION)
         self._message = ''
         self.refresh()
         return True

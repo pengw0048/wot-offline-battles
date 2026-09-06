@@ -464,6 +464,18 @@ class LANSession(object):
         self._picker_callback_id = None
         self._picker_close_callback_id = None
         self._picker_cleanup_pending = False
+        # The stock map window is the room's map browser.  It is a Scaleform
+        # view inside the lobby movie, so it can only be seen and clicked
+        # while the self-drawn room has released the screen and the cursor.
+        self._map_window = None
+        self._map_window_open = False
+        self._map_window_unavailable = False
+        self._map_window_close_callback_id = None
+        self._map_window_reopen_callback_id = None
+        self._room_hidden_for_map_window = False
+        self._round_seconds = int(
+            self._room_preferences.get('round_seconds') or
+            queue_ui.DEFAULT_ROUND_SECONDS)
         self._battle_start_callback_id = None
         self._retry_callback_id = None
         self._retry_token = None
@@ -873,6 +885,7 @@ class LANSession(object):
         self._cancel_retry_callback()
         self._cancel_postbattle_callback()
         self._cancel_picker_close_callback()
+        self._retire_map_window()
         self._cancel_round_end_watchdog()
         self._clear_pending_battle_start()
         client = self.client
@@ -1026,6 +1039,7 @@ class LANSession(object):
 
     def leave_room(self):
         """Leave the LAN room and return to the garage."""
+        self._retire_map_window()
         self._picker_open = False
         self._picker_dismissed = True
         self._cancel_retry_callback()
@@ -1285,6 +1299,26 @@ class LANSession(object):
         self._room_preferences['map'] = map_name
         return self._save_room_preferences()
 
+    def _remember_round_seconds(self, seconds):
+        """Persist the battle time the stock map window published."""
+        if isinstance(seconds, bool):
+            return False
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (seconds < queue_ui.MIN_ROUND_SECONDS or
+                seconds > queue_ui.MAX_ROUND_SECONDS):
+            return False
+        self._round_seconds = seconds
+        if self._room_preferences.get('round_seconds') == seconds:
+            return True
+        self._room_preferences['round_seconds'] = seconds
+        return self._save_room_preferences()
+
+    def _round_seconds_value(self):
+        return self._round_seconds
+
     def _remember_team(self, team):
         try:
             team = int(team)
@@ -1352,6 +1386,161 @@ class LANSession(object):
             self._queue = surface
         return self._queue
 
+    def _ensure_map_window(self):
+        """Install the stock map window the self-drawn room browses with."""
+        if self._map_window is not None:
+            return self._map_window
+        if self._map_window_unavailable or self._queue_factory is None:
+            return None
+        if not callable(getattr(self._queue, 'select_map', None)):
+            # The fallback surface already is the stock map window.
+            return None
+        try:
+            window = self._queue_factory(
+                self.request_start, self._map_pool_value,
+                endpoint=self._picker_description,
+                on_close=self._on_map_window_closed,
+                on_select=self._on_map_window_selected,
+                selection=self._map_window_selection)
+            window.install()
+        except Exception as error:
+            self._map_window_unavailable = True
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the stock map window is unavailable, '
+                'keeping the room selection: %s\n' % error)
+            return None
+        self._map_window = window
+        return window
+
+    def _map_window_selection(self):
+        """Report the choice the stock map window should open on."""
+        return self._room_preferences.get('map'), self._round_seconds
+
+    def _open_map_window(self):
+        """Hide the room and raise the stock map window over the lobby."""
+        if (self._stopped or self._map_window_open or
+                self.state != 'waiting' or not self._is_local_host()):
+            return False
+        room = self._queue
+        if room is None or not self._picker_open:
+            return False
+        window = self._ensure_map_window()
+        if window is None:
+            return False
+        # The room draws at z 0.1, in front of the whole lobby movie, and it
+        # owns the native cursor while it is open.  A Scaleform view is only
+        # visible and clickable once the room has released both.
+        if room.close() is False:
+            self._picker_cleanup_pending = True
+            return False
+        self._room_hidden_for_map_window = True
+        if not self._picker_opener():
+            self._reopen_room_after_map_window(immediate=True)
+            return False
+        self._map_window_open = True
+        return True
+
+    def _on_map_window_selected(self, map_name, round_seconds=None):
+        """Adopt one stock-window choice instead of starting the battle."""
+        if self._stopped:
+            return False
+        self._remember_map(map_name)
+        if round_seconds is not None:
+            self._remember_round_seconds(round_seconds)
+        select = getattr(self._queue, 'select_map', None)
+        if callable(select):
+            select(map_name)
+        # This runs inside the Scaleform event dispatcher, so the view may
+        # only be destroyed after it regains control.
+        self._close_map_window_after_event()
+        return True
+
+    def _on_map_window_closed(self):
+        """Follow the stock window back to the room, however it closed."""
+        self._map_window_open = False
+        self._cancel_map_window_close_callback()
+        self._reopen_room_after_map_window()
+
+    def _cancel_map_window_close_callback(self):
+        callback_id = self._map_window_close_callback_id
+        self._map_window_close_callback_id = None
+        if callback_id is not None and callable(self._cancel_callback):
+            self._cancel_callback(callback_id)
+
+    def _cancel_map_window_reopen_callback(self):
+        callback_id = self._map_window_reopen_callback_id
+        self._map_window_reopen_callback_id = None
+        if callback_id is not None and callable(self._cancel_callback):
+            self._cancel_callback(callback_id)
+
+    def _close_map_window_after_event(self):
+        """Close the stock window after its current event stack returns."""
+        if self._map_window_close_callback_id is not None:
+            return True
+        if not callable(self._callback):
+            return False
+
+        def close_map_window():
+            self._map_window_close_callback_id = None
+            if not self._stopped:
+                self._close_map_window()
+
+        self._map_window_close_callback_id = self._callback(
+            0.0, close_map_window)
+        return True
+
+    def _close_map_window(self):
+        window = self._map_window
+        if window is None or not self._map_window_open:
+            return False
+        # The stock close hook re-enters ``_on_map_window_closed``, which is
+        # what clears the open flag and asks for the room again.
+        return bool(window.close())
+
+    def _retire_map_window(self):
+        """Close the stock window and drop any pending return to the room.
+
+        Returns whether the room was still hidden behind that window, which
+        means its native roots and cursor were already released.
+        """
+        self._cancel_map_window_close_callback()
+        hidden = self._room_hidden_for_map_window
+        try:
+            self._close_map_window()
+        finally:
+            self._cancel_map_window_reopen_callback()
+            self._room_hidden_for_map_window = False
+        return hidden
+
+    def _reopen_room_after_map_window(self, immediate=False):
+        if not self._room_hidden_for_map_window:
+            return False
+        if immediate or not callable(self._callback):
+            return self._reopen_room()
+        if self._map_window_reopen_callback_id is not None:
+            return True
+        generation = self._client_generation
+
+        def reopen():
+            self._map_window_reopen_callback_id = None
+            if self._stopped or generation != self._client_generation:
+                return
+            self._reopen_room()
+
+        self._map_window_reopen_callback_id = self._callback(0.0, reopen)
+        return True
+
+    def _reopen_room(self):
+        """Take the screen and the native cursor back from the window."""
+        self._room_hidden_for_map_window = False
+        room = self._queue
+        if (room is None or self._stopped or self.state != 'waiting' or
+                self._picker_dismissed):
+            self._picker_open = False
+            return False
+        self._picker_open = bool(room.open())
+        return self._picker_open
+
     def _ensure_queue_screen(self):
         if self._queue_screen is None and self._queue_screen_factory is not None:
             try:
@@ -1401,6 +1590,8 @@ class LANSession(object):
                     'request_bot_tier_mode': self.set_bot_tier_mode,
                     'initial_map': self._room_preferences.get('map'),
                     'on_map_selected': self._remember_map,
+                    'open_map_picker': self._open_map_window,
+                    'round_seconds': self._round_seconds_value,
                 })
             room = self._room_factory(
                 self.request_start, self._map_pool_value, **options)
@@ -1443,6 +1634,12 @@ class LANSession(object):
         return bool(getattr(self._queue, 'guest_view', False))
 
     def _refresh_surface(self):
+        if self._map_window_open:
+            # The room is hidden behind the stock window, so the window is the
+            # surface that has to follow a changed server map pool.
+            refresh = getattr(self._map_window, 'refresh', None)
+            if callable(refresh):
+                return refresh()
         refresh = getattr(self._queue, 'refresh', None)
         if callable(refresh):
             return refresh()
@@ -1636,8 +1833,15 @@ class LANSession(object):
 
     def _close_picker(self):
         self._cancel_picker_callback()
+        room_was_hidden = self._retire_map_window()
         queue = self._queue
         if queue is None:
+            self._picker_open = False
+            self._picker_cleanup_pending = False
+            return True
+        if room_was_hidden:
+            # The room released its native roots and the cursor when the stock
+            # map window took the screen; there is nothing left to close.
             self._picker_open = False
             self._picker_cleanup_pending = False
             return True
@@ -1731,7 +1935,8 @@ class LANSession(object):
                 self._endpoint_value())
             self._close_picker_after_event()
             return True
-        accepted = bool(self.client.request_start(map_name))
+        accepted = bool(self.client.request_start(
+            map_name, self._round_seconds))
         if accepted:
             self._start_requested = True
             self._pending_map = None
@@ -1829,7 +2034,8 @@ class LANSession(object):
                         'The LAN server does not offer the selected map.')
                     self._sync_waiting_surface(previous_host_player_id)
                     return
-                if self.client.request_start(pending_map):
+                if self.client.request_start(pending_map,
+                                             self._round_seconds):
                     self._start_requested = True
                     self.state = 'awaiting_battle_start'
                     self._close_picker()
@@ -2419,6 +2625,15 @@ class LANSession(object):
                         'waiting-room uninstall remains pending')
             except Exception as error:
                 errors.append(error)
+        # The map window adapter patches the stock view class, so it has to be
+        # retired even when this session never opened it.
+        if picker_closed and self._map_window is not None:
+            try:
+                self._map_window.uninstall()
+            except Exception as error:
+                errors.append(error)
+            else:
+                self._map_window = None
         if picker_closed and self._queue_screen is not None:
             try:
                 if self._queue_screen.uninstall() is False:

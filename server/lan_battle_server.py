@@ -81,6 +81,12 @@ MAX_TICK_FAILURE_DIAGNOSTIC_CHARS = 512
 MAX_CONSECUTIVE_TICK_FAILURES = 2
 PREBATTLE_SECONDS = 10.0
 BATTLE_DURATION_SECONDS = 900.0
+# Exact #1513 ``getTrainingBattleRoundLimits`` offers 300..1800 s to a
+# plain account and 60..14400 s to one with the daily-bonus attribute.
+# The room accepts that whole stock range for one requested round and
+# keeps 900 s for a start request that carries no round length.
+MIN_BATTLE_DURATION_SECONDS = 60
+MAX_BATTLE_DURATION_SECONDS = 14400
 PLAYER_DROWNING_SECONDS = 10.0
 PLAYER_OVERTURN_IGNORE_SECONDS = 0.10
 PLAYER_OVERTURN_DEATH_SECONDS = 30.0
@@ -2016,6 +2022,8 @@ class BattleState:
         self.phase = "waiting"
         self.round_id = 1
         self.state_revision = 0
+        # One accepted start request owns the round length.
+        self.battle_duration_seconds = BATTLE_DURATION_SECONDS
         self.host_player_id = None
         self.bot_roster = self._new_bot_roster()
         self.bot_authority_id = None
@@ -3277,7 +3285,24 @@ class BattleState:
             message.update(self._authority_fields())
             return message
 
-    def request_start(self, player_id, requested_map=None):
+    @staticmethod
+    def _requested_battle_duration(requested_round_seconds):
+        """Return the round length one start request asks for, or None.
+
+        The stock map window publishes whole minutes, so a start request that
+        carries no round length keeps the default round.
+        """
+        if requested_round_seconds is None:
+            return BATTLE_DURATION_SECONDS
+        try:
+            return float(_exact_int(requested_round_seconds,
+                                    MIN_BATTLE_DURATION_SECONDS,
+                                    MAX_BATTLE_DURATION_SECONDS))
+        except ValueError:
+            return None
+
+    def request_start(self, player_id, requested_map=None,
+                      requested_round_seconds=None):
         with self.lock:
             player = self.players.get(player_id)
             if player is None or not player.connected:
@@ -3286,6 +3311,10 @@ class BattleState:
                 return None, "already_started"
             if player_id != self.host_player_id:
                 return None, "host_only"
+            battle_duration_seconds = self._requested_battle_duration(
+                requested_round_seconds)
+            if battle_duration_seconds is None:
+                return None, "invalid_round_length"
             if (self.simulation_worker is None or
                     not self.simulation_worker.connected):
                 return None, "simulation_worker_required"
@@ -3366,6 +3395,9 @@ class BattleState:
                     if requested_map not in active_map_pool:
                         return None, "invalid_map"
                     self.map_name = requested_map
+            # Every accepted start owns the round length, so a host that stops
+            # publishing one returns the room to the default round.
+            self.battle_duration_seconds = battle_duration_seconds
             connected = [p for p in self.players.values() if p.connected]
             for participant in connected:
                 if not self._install_player_equipments(participant):
@@ -3561,7 +3593,7 @@ class BattleState:
             "authority_epoch": self.authority_epoch,
             "server_time_ms": self._server_time_ms(),
             "countdown_seconds": PREBATTLE_SECONDS,
-            "battle_duration_seconds": BATTLE_DURATION_SECONDS,
+            "battle_duration_seconds": self.battle_duration_seconds,
             "timing": self._timing_payload(),
         }
         live_message.update(self._authority_fields())
@@ -3579,7 +3611,7 @@ class BattleState:
     def _timing_payload(self):
         """Return server-authoritative phase time as relative milliseconds."""
         prebattle_ticks = int(round(PREBATTLE_SECONDS * TICK_HZ))
-        battle_ticks = int(round(BATTLE_DURATION_SECONDS * TICK_HZ))
+        battle_ticks = int(round(self.battle_duration_seconds * TICK_HZ))
         total_ticks = prebattle_ticks + battle_ticks
         tick = max(0, int(self.tick))
         if self.phase == "loading":
@@ -3600,7 +3632,7 @@ class BattleState:
                              (total_ticks - max(tick, prebattle_ticks)) /
                              TICK_HZ))),
             "duration_ms": int(round(
-                BATTLE_DURATION_SECONDS * 1000.0)),
+                self.battle_duration_seconds * 1000.0)),
         }
 
     def mark_battle_ready(self, player_id, message):
@@ -7929,8 +7961,8 @@ class BattleState:
             stun_end_server_time_ms = _exact_int(
                 raw.get("stun_end_server_time_ms"),
                 int(stun_now_ms) + 1,
-                int(round((PREBATTLE_SECONDS + BATTLE_DURATION_SECONDS) *
-                          1000.0)))
+                int(round((PREBATTLE_SECONDS +
+                           self.battle_duration_seconds) * 1000.0)))
         return {
             "target_kind": target_kind, "target_id": target_id,
             "target": target, "target_team": target_team,
@@ -11189,8 +11221,8 @@ class BattleState:
         """
         end_server_time_ms = _exact_int(
             end_server_time_ms, 1,
-            int(round((PREBATTLE_SECONDS + BATTLE_DURATION_SECONDS) *
-                      1000.0)))
+            int(round((PREBATTLE_SECONDS +
+                       self.battle_duration_seconds) * 1000.0)))
         state = self._vehicle_stun_state(target)
         if state is None or not state["alive"]:
             return False
@@ -12581,7 +12613,8 @@ class BattleState:
             self._prune_orphaned_bot_launch_edges()
             if (self.battle_result is None and
                     self.tick >= int(round(
-                        (PREBATTLE_SECONDS + BATTLE_DURATION_SECONDS) *
+                        (PREBATTLE_SECONDS +
+                         self.battle_duration_seconds) *
                         TICK_HZ))):
                 self._finish_battle(0, "battle_timeout", 0)
             self._update_capture()
@@ -13767,7 +13800,8 @@ class ClientHandler(socketserver.BaseRequestHandler):
                                         len(server.state.players)))
                         elif message_type == "start_battle":
                             start_message, start_error = server.state.request_start(
-                                player.player_id, message.get("map"))
+                                player.player_id, message.get("map"),
+                                message.get("round_seconds"))
                             if start_message is None:
                                 player.send({
                                     "type": "start_denied",

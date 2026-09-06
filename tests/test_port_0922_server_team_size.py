@@ -8,7 +8,8 @@ SERVER_ROOT = Path(__file__).resolve().parents[1] / 'server'
 sys.path.insert(0, str(SERVER_ROOT))
 
 from lan_battle_server import (  # noqa: E402
-    BattleState, BOT_CALLSIGNS_0922, CLIENT_BUILD_0922,
+    BattleState, BATTLE_DURATION_SECONDS, BOT_CALLSIGNS_0922,
+    CLIENT_BUILD_0922,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
     HUMAN_RAM_TIMELINE_CAPABILITY, PROJECTILE_CAPABILITY,
     MODERN_VISIBLE_MESSAGE_TYPES, PLAYER_ENVIRONMENT_CAPABILITY,
@@ -499,6 +500,53 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertEqual('05_prohorovka', state.map_name)
         self.assertEqual('05_prohorovka', start['map'])
         choose.assert_any_call(tuple(state._active_map_pool()))
+
+    def test_one_start_request_owns_the_round_length(self):
+        state = BattleState(map_name='01_karelia', team_size=1)
+        _attach_worker(state)
+        player, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
+        self.assertIsNone(error)
+        self.assertEqual(BATTLE_DURATION_SECONDS,
+                         state.battle_duration_seconds)
+
+        start, error = state.request_start(player.player_id, '01_karelia',
+                                           1200)
+
+        self.assertIsNone(error)
+        self.assertEqual(1200.0, state.battle_duration_seconds)
+        timing = state._timing_payload()
+        self.assertEqual(1200000, timing['duration_ms'])
+
+    def test_a_start_without_a_round_length_keeps_the_default_round(self):
+        state = BattleState(map_name='01_karelia', team_size=1)
+        _attach_worker(state)
+        player, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
+        self.assertIsNone(error)
+        state.battle_duration_seconds = 1800.0
+
+        start, error = state.request_start(player.player_id, '01_karelia')
+
+        self.assertIsNone(error)
+        self.assertEqual(BATTLE_DURATION_SECONDS,
+                         state.battle_duration_seconds)
+
+    def test_an_out_of_range_round_length_is_denied_before_the_round(self):
+        state = BattleState(map_name='01_karelia', team_size=1)
+        _attach_worker(state)
+        player, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1, 1))
+        self.assertIsNone(error)
+
+        for value in (59, 14401, 'ten', 900.0, True, False):
+            start, error = state.request_start(
+                player.player_id, '01_karelia', value)
+            self.assertIsNone(start, value)
+            self.assertEqual('invalid_round_length', error)
+        self.assertEqual('waiting', state.phase)
+        self.assertEqual(BATTLE_DURATION_SECONDS,
+                         state.battle_duration_seconds)
 
     def test_unknown_start_map_remains_fail_closed(self):
         state = BattleState(

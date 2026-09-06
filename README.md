@@ -22,8 +22,9 @@ and battle logic, a small LAN server and a launcher.
      `192.168.1.20`.
 4. Click **Start game**. In the garage, fit a tank and click **Battle!**.
    Everyone lands in the LAN waiting room over the stock queue screen. The
-   host picks the map and clicks **START BATTLE**. **LEAVE** returns you to
-   the garage.
+   host picks the map - **RANDOM MAP**, or **MAP** to browse the client's own
+   map window and choose a battle time - and clicks **START BATTLE**.
+   **LEAVE** returns you to the garage.
 
 When you host, approve the UAC prompt that opens TCP 28782 for the launcher.
 Run the server only on a network you trust.

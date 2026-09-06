@@ -57,6 +57,25 @@ def build(arena_cache, map_pool):
     return MapCatalog(rows)
 
 
+def arena_type_id(arena_cache, map_name, map_pool):
+    """Return the UI arena id that presents one selectable geometry."""
+    if not map_name:
+        return None
+    name = _text(map_name)
+    allowed = _allowed_names(map_pool)
+    if allowed is not None and name not in allowed:
+        return None
+    items = getattr(arena_cache, 'iteritems', arena_cache.items)
+    keys = [key for key, arena_type in items()
+            if getattr(arena_type, 'gameplayName', None) == 'ctf' and
+            _text(getattr(arena_type, 'geometryName', '')) == name]
+    if not keys:
+        return None
+    # One geometry can carry several arena types.  Present the same one the
+    # sorted window rows would, so a reopened window keeps its selection.
+    return sorted(keys)[0]
+
+
 def geometry_name(arena_cache, arena_type_id, map_pool):
     """Resolve one UI arena id only when it remains selectable by policy."""
     try:
