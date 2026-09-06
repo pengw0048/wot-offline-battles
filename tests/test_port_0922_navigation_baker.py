@@ -536,6 +536,10 @@ class CompiledSpace0922Test(unittest.TestCase):
             graph_path = graph_root / record['file']
             with self.subTest(map=record['map']):
                 self.assertEqual(record['map'], graph_path.stem)
+                graph = json.loads(graph_path.read_text())
+                self.assertEqual(
+                    baker.SHALLOW_WATER_THRESHOLD,
+                    graph['bake']['shallow_water_threshold'])
                 self.assertEqual(
                     record['sha256'],
                     hashlib.sha256(graph_path.read_bytes()).hexdigest())
