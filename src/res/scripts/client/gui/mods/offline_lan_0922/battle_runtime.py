@@ -21790,6 +21790,13 @@ class BattleRuntime(object):
 
     def _apply_spot_presentation(self, record, entity, remembered):
         """Publish a split spotting state through the legacy two-arg seam."""
+        if (not self._record_alive(record, entity) and
+                record.get('dead_marker_known', False)):
+            # Retail does not withdraw an existing dead marker when the live
+            # spotting clock expires.  Keep team knowledge of a wreck once
+            # the target was visible at its death; the ordinary vehicle AOI
+            # below still owns whether its 3D marker is present in the world.
+            remembered = True
         model_visible, marker_visible = self._spot_presentation_visibility(
             entity, remembered,
             was_model_visible=bool(record.get('spot_visible', False)))
@@ -22491,8 +22498,7 @@ class BattleRuntime(object):
         """Mirror ``Vehicle.__onVehicleDeath`` so the marker takes its dead
         style.  ``immediate`` is False for a vehicle that just died and True
         for one that was already dead when its visual started."""
-        if (record.get('local') or record.get('native_remote') or
-                not record.get('presentation')):
+        if (record.get('local') or not record.get('presentation')):
             return False
         provider = getattr(self._avatar, 'guiSessionProvider', None)
         shared = getattr(provider, 'shared', None)
@@ -22615,6 +22621,13 @@ class BattleRuntime(object):
         entity = self._server_entity(engine_id)
         if entity is None:
             return
+        if dead and not previous_dead and not record.get('local'):
+            # This is the last stable point before native death callbacks can
+            # replace the compound.  Snapshot the existing team-knowledge
+            # gate so a visible enemy keeps its retail dead marker, while a
+            # blind death cannot disclose a marker.
+            record['dead_marker_known'] = \
+                self._combat_target_is_spotted(record)
         self._last_health[engine_id] = signature
         previous = getattr(entity, 'health', health)
         if (dead and not previous_dead and
@@ -22733,7 +22746,11 @@ class BattleRuntime(object):
                 self._clear_target_outline()
             if not suppress_combat_presentation:
                 self._release_target_lock(engine_id)
-                self._present_vehicle_dead(record, False)
+                if not record.get('native_remote'):
+                    # A stock Vehicle already ran __onVehicleDeath from its
+                    # health/crew callback.  Synthetic remotes need the same
+                    # feedback signal explicitly.
+                    self._present_vehicle_dead(record, False)
         if record.get('local'):
             if dead:
                 self._local_speed = 0.0
