@@ -505,7 +505,9 @@ class BotChatDirector(object):
         """Schedule the answers one human line earns."""
         team = int(team)
         if self._backend is None:
-            return {"kind": ADDRESS_NONE, "bot_ids": []}
+            return {"kind": ADDRESS_NONE, "bot_ids": [], "scheduled": 0,
+                    "ask": None}
+        scheduled_before = len(self._pending)
         ask = read_request(text)
         asked_by = (snapshot.get("speaker") or {}).get("player_id")
         address = self.resolve_address(text, team, snapshot)
@@ -517,7 +519,7 @@ class BotChatDirector(object):
             self._thread(team, tick)["last_tick"] = tick
         bots = self._team_bots(team, snapshot)
         if not bots:
-            return address
+            return self._admitted(address, scheduled_before, ask)
         addressed = [bot_id for bot_id in address["bot_ids"]
                      if self._can_speak(tick, bot_id)]
         if addressed:
@@ -528,22 +530,35 @@ class BotChatDirector(object):
                     self._schedule(tick, bot_id, team, TRIGGER_REPLY,
                                    address["kind"], snapshot, ask=ask,
                                    asked_by=asked_by)
-            return address
+            return self._admitted(address, scheduled_before, ask)
         # Nobody was named.  Peng's choice is that an open remark usually
         # still gets an answer, and an interesting one may get two.
         if self._rng.random() > self._open_probability(text):
-            return address
+            return self._admitted(address, scheduled_before, ask)
         pool = [bot for bot in self._by_relevance(bots, snapshot)
                 if self._can_speak(tick, bot["id"])]
         if not pool:
-            return address
+            return self._admitted(address, scheduled_before, ask)
         self._schedule(tick, pool[0]["id"], team, TRIGGER_REPLY,
                        ADDRESS_NONE, snapshot, ask=ask, asked_by=asked_by)
         if len(pool) > 1 and self._rng.random() < SECOND_SPEAKER_PROBABILITY:
             self._schedule(tick, pool[1]["id"], team, TRIGGER_REPLY,
                            ADDRESS_NONE, snapshot, ask=ask,
                            asked_by=asked_by)
-        return address
+        return self._admitted(address, scheduled_before, ask)
+
+    def _admitted(self, address, scheduled_before, ask=None):
+        """Describe what one human line produced, for the room's log.
+
+        A battle where nobody answers has no evidence in it otherwise: the
+        line either never arrived, addressed nobody, was addressed and
+        declined, or asked for something no Bot agreed to, and those need
+        telling apart.
+        """
+        result = dict(address)
+        result["scheduled"] = len(self._pending) - scheduled_before
+        result["ask"] = (ask or {}).get("request")
+        return result
 
     @staticmethod
     def _open_probability(text):

@@ -3356,10 +3356,17 @@ class LANClient(object):
     def send_team_chat(self, text):
         from gui.mods.offline_lan_0922.tactical_radio import (
             is_valid_team_chat_text)
+        # A battle where nobody answers needs to distinguish a line that was
+        # never sent from one the room ignored, and only this end can say
+        # which.
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
+            print('[Offline LAN 0.9.22] team chat not sent: '
+                  'ready=%s phase=%s worker=%s' % (
+                      self.ready, self.phase, self.is_bot_authority()))
             return False
         if not is_valid_team_chat_text(text):
+            print('[Offline LAN 0.9.22] team chat refused: unusable text')
             return False
         if self._team_chat_round != self.round_id:
             self._team_chat_round = self.round_id
@@ -3371,6 +3378,8 @@ class LANClient(object):
                            'chat_seq': sequence, 'text': text}):
             return False
         self._team_chat_seq = sequence
+        print('[Offline LAN 0.9.22] team chat sent seq=%d round=%s' % (
+            sequence, self.round_id))
         return sequence
 
     def send_bot_observation(self, contacts, affordances=None):

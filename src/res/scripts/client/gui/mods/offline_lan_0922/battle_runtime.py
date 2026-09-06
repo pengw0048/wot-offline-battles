@@ -3449,6 +3449,12 @@ class BattleRuntime(object):
         if result:
             seen[key] = message['chat_seq']
             self._team_chat_seen = seen
+        else:
+            # The stock channel refused it. That is invisible in the battle,
+            # so it has to be visible in the log.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] team chat from %s %s was not shown\n'
+                % (issuer_kind, message.get('issuer_id')))
         return result
 
     def on_team_command(self, message):

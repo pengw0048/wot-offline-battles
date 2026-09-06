@@ -5470,11 +5470,24 @@ class BattleState:
         """Let the Bot conversation react to one relayed human line."""
         if self.battle_result is not None:
             return
+        if not self.bot_chat.enabled():
+            _server_log("TEAM CHAT id=%d team=%d relayed; Bot chat is off"
+                        % (issuer.player_id, issuer.team))
+            return
         try:
-            self.bot_chat.observe_player_line(
+            outcome = self.bot_chat.observe_player_line(
                 self.tick, int(issuer.team), text,
                 self._bot_chat_snapshot_locked(
                     self._bot_chat_speaker_locked(issuer), with_bounds=True))
+            # Whether a line reached the room, who it was taken to address,
+            # and how many Bots were given one to answer. Without this a
+            # battle where nobody replies has no evidence in it at all.
+            _server_log(
+                "TEAM CHAT id=%d team=%d address=%s bots=%s ask=%s "
+                "replies=%d" % (
+                    issuer.player_id, issuer.team, outcome.get("kind"),
+                    outcome.get("bot_ids"), outcome.get("ask"),
+                    outcome.get("scheduled", 0)))
         except Exception as error:
             # A conversation fault is contained to this line.  It must never
             # cost the team its chat relay or fault the round.
