@@ -701,6 +701,36 @@ class _VehicleDecal(object):
         self.hull_node.detach(self.decal)
 
 
+class _VehicleBoundEffects(object):
+    """``helpers.bound_effects.ModelBoundEffects`` over one vehicle compound.
+
+    #1513 fills ``armorSplashHit`` with a single ``splashSound``, and
+    ``_NodeSoundEffectDesc.create`` returns without playing anything unless
+    ``entity`` is a live, started vehicle, so reproduce that guard here: only
+    a call carrying the owning entity reaches ``played``.
+    """
+
+    def __init__(self, owner):
+        self._owner = owner
+        self.calls = []
+        self.played = []
+
+    def addNew(self, matProv, effectsList, keyPoints, waitForKeyOff=False,
+               **args):
+        return self.addNewToNode(
+            '', matProv, effectsList, keyPoints, waitForKeyOff, **args)
+
+    def addNewToNode(self, node, matProv, effectsList, keyPoints,
+                     waitForKeyOff=False, **args):
+        self.calls.append((node, matProv, effectsList, keyPoints, args))
+        entity = args.get('entity')
+        if (entity is not None and entity.isStarted and
+                entity.isAlive()):
+            self.played.append((node, effectsList, args.get('damageFactor')))
+        return types.SimpleNamespace(
+            stop=lambda **unused: None, keyOff=lambda: None)
+
+
 class _Vehicle(object):
     def __init__(self, entity_id, descriptor, position, rotation, properties):
         self.id = entity_id
@@ -731,7 +761,9 @@ class _Vehicle(object):
         self.custom_effects = _CustomEffectManager()
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_DUST)
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_EXHAUST)
+        self.bound_effects = _VehicleBoundEffects(self)
         self.appearance = types.SimpleNamespace(
+            boundEffects=self.bound_effects,
             compoundModel=self.model, turretMatrix=_Matrix(),
             gunMatrix=_Matrix(),
             highlighter=types.SimpleNamespace(enabled=False),
@@ -12530,9 +12562,117 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._present_combat_hit(
             event, target_record, attacker_record, 11))
 
+        # Exact #1513 ``showSplashHitEffect`` binds armorSplashHit to the
+        # target's own hull node and hands its ``splashSound`` the entity.
+        battle._avatar.terrainEffects.addNew.assert_not_called()
+        self.assertEqual(
+            [('hull', 'splashFx', 8.0)], target.bound_effects.played)
+        node, matrix, effects, stages, args = target.bound_effects.calls[0]
+        self.assertEqual(('hull', 'splashFx', 'splashStages'),
+                         (node, effects, stages))
+        self.assertIs(target, args['entity'])
+        translation = matrix.translation
+        self.assertEqual(
+            (0.0, 0.0, 0.0),
+            (translation.x, translation.y, translation.z))
+
+    def test_he_splash_on_a_dead_target_presents_nothing(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 0})
+        target.health = 0
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'state': {'health': 0, 'alive': False},
+            'kind': 'bot', 'network_id': 1, 'local': False,
+            'spot_visible': True}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        event = {
+            'kind': 'bot_bot_hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 40, 'source': 'shot',
+            'splash': True}
+
+        # Retail reaches showSplashHitEffect only past showDamageFromExplosion's
+        # own isAlive gate.
+        self.assertFalse(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+        self.assertEqual([], target.bound_effects.calls)
+        battle._avatar.terrainEffects.addNew.assert_not_called()
+
+    def test_direct_hit_effect_carries_the_stock_sound_identity(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'spot_visible': True,
+            'state': {'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 1, 'local': False}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'player', 'network_id': 2, 'local': True}
+        event = {
+            'kind': 'hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 250, 'source': 'shot'}
+
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+
+        # #1513's armour-hit sound is the impact trio.  Without these four
+        # arguments _SoundEffectDesc.create always resolves impactNPC_NPC,
+        # the mix meant for two other tanks, instead of the player's own
+        # impactPC_NPC.
         effect = battle._avatar.terrainEffects.addNew.call_args
-        self.assertEqual(('splashFx', 'splashStages'),
-                         (effect.args[1], effect.args[2]))
+        self.assertEqual(11, effect.kwargs['attackerID'])
+        self.assertEqual(10, effect.kwargs['entity_id'])
+        self.assertFalse(effect.kwargs['isPlayerVehicle'])
+        self.assertAlmostEqual(50.0, effect.kwargs['damageFactor'])
+        self.assertIs(effect.kwargs['dir'], effect.kwargs['hitdir'])
+
+    def test_hit_on_the_player_reports_the_player_as_the_effect_target(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        battle._local_position = (0.0, 0.0, 0.0)
+        target_record = {
+            'engine_id': 10, 'state': {'health': 500},
+            'kind': 'player', 'network_id': 1, 'local': True}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        event = {
+            'kind': 'bot_human_hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 1, 'damage': 0, 'source': 'shot'}
+
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+
+        effect = battle._avatar.terrainEffects.addNew.call_args
+        self.assertEqual(11, effect.kwargs['attackerID'])
+        self.assertEqual(10, effect.kwargs['entity_id'])
+        self.assertTrue(effect.kwargs['isPlayerVehicle'])
+        self.assertEqual(0.0, effect.kwargs['damageFactor'])
 
     def test_self_splash_with_degenerate_direction_is_presentation_safe(self):
         runtime = _runtime()
@@ -12553,7 +12693,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._present_combat_hit(
             event, record, record, 10))
 
-        battle._avatar.terrainEffects.addNew.assert_called_once()
+        self.assertEqual(1, len(vehicle.bound_effects.played))
         self.assertEqual([], battle._avatar.hit_directions)
 
     def test_visible_remote_combat_keeps_the_vehicle_impact_effect(self):
