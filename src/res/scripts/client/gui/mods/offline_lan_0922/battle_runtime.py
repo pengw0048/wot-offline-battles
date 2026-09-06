@@ -425,6 +425,23 @@ _PROJECTILE_METRIC_NAMES = (
     'candidates')
 
 
+def _combat_log_lines(prefix, kind, record):
+    """Keep each native log line below #1513's observed 8 KiB limit."""
+    payload = json.dumps(record, sort_keys=True, separators=(',', ':'))
+    line = prefix + kind + ' ' + payload + '\n'
+    if len(line) <= 7168:
+        return line
+    # JSON is ASCII here. Even escaping every byte of one chunk again stays
+    # below the native limit, with room for the engine's own log prefix.
+    chunks = [payload[index:index + 2500]
+              for index in range(0, len(payload), 2500)]
+    return ''.join(prefix + kind + '_part ' + json.dumps({
+        'schema': 2, 'part': index + 1, 'parts': len(chunks),
+        'data': chunk,
+    }, sort_keys=True, separators=(',', ':')) + '\n'
+        for index, chunk in enumerate(chunks))
+
+
 class _FrameDiagnostics(object):
     """Correlate one callback's work with the following render interval."""
 
@@ -969,21 +986,24 @@ class _FrameDiagnostics(object):
                              probe_durations.get(name, 0.0)))
                               for name in PROBE_KINDS)))
             if context.get('role') == 'worker':
-                trace = {
-                    'schema': 1, 'window': self._window_id, 'rank': rank,
-                    'round': context.get('round'), 'map': context.get('map'),
-                    'focus': self._compact_frame(row),
-                }
+                frames = [('focus', 0, self._compact_frame(row))]
                 if rank == 1:
-                    trace['previous'] = row.get('previous', ())
-                    trace['following'] = row.get('following', ())
-                lines.append(prefix + 'combat_trace ' + json.dumps(
-                    trace, sort_keys=True, separators=(',', ':')) + '\n')
+                    for relation in ('previous', 'following'):
+                        frames.extend((relation, index, frame)
+                                      for index, frame in enumerate(
+                                          row.get(relation, ())))
+                for relation, index, frame in frames:
+                    lines.append(_combat_log_lines(prefix, 'combat_trace', {
+                        'schema': 2, 'window': self._window_id, 'rank': rank,
+                        'round': context.get('round'),
+                        'map': context.get('map'), 'relation': relation,
+                        'index': index, 'frame': frame,
+                    }))
         for capture in self._combat_completed:
-            lines.append(prefix + 'combat_summary ' + json.dumps({
-                'schema': 1, 'round': self._last_context.get('round'),
+            lines.append(_combat_log_lines(prefix, 'combat_summary', {
+                'schema': 2, 'round': self._last_context.get('round'),
                 'map': self._last_context.get('map'), 'capture': capture,
-            }, sort_keys=True, separators=(',', ':')) + '\n')
+            }))
         return ''.join(lines)
 
     def finish(self, frame_id, entry_wall, tick_dt, motion_dt, stages,
@@ -13381,6 +13401,7 @@ class BattleRuntime(object):
             return None
         return self._server_entity(record.get('engine_id'))
 
+    @timed('projectile.sticker')
     def _projectile_damage_sticker(self, record, target, shot, start, end,
                                    collisions, result, historic=False):
         """Encode one direct hit against the exact sampled component pose."""
@@ -13429,7 +13450,10 @@ class BattleRuntime(object):
                     decoded_start is None or decoded_end is None or
                     decoded_start == decoded_end or
                     not callable(local_hit_test) or
-                    not local_hit_test(decoded_start, decoded_end)):
+                    not timed_call(
+                        getattr(self, '_combat_diagnostics', None),
+                        'native.projectile.sticker', local_hit_test,
+                        decoded_start, decoded_end)):
                 return None
             return encoded
         except Exception:
@@ -13615,6 +13639,7 @@ class BattleRuntime(object):
 
     @timed('projectile.direct')
     def _projectile_direct_effect(self, meta, state, terminal_data):
+        diagnostic = getattr(self, '_combat_diagnostics', None)
         target_key = terminal_data.get('target_key')
         record = self._records.get(target_key)
         source = self._projectile_source_entity(meta)
@@ -13653,7 +13678,9 @@ class BattleRuntime(object):
         factor = terminal_data.get('penetration_factor')
         range_distance = projectile_range_distance(
             state, terminal_data['impact'])
-        contact = combat_rules.resolve_armor_contact(
+        contact = timed_call(
+            diagnostic, 'projectile.armour_resolve',
+            combat_rules.resolve_armor_contact,
             shot, range_distance, collisions,
             pierce_loss=terminal_data.get('piercing_loss', 0.0),
             penetration_factor=factor,
@@ -13733,17 +13760,22 @@ class BattleRuntime(object):
         if int(result) == 0:
             damage = 0
             hull_damage = 0
-        self._install_critical_equipment_effects(record, critical_target)
+        timed_call(diagnostic, 'projectile.critical_equipment',
+                   self._install_critical_equipment_effects,
+                   record, critical_target)
         if int(result) != 0 and is_he:
             damage, critical, critical_delta = (
-                critical_damage.propose_explosion(
+                timed_call(diagnostic, 'projectile.critical_explosion',
+                    critical_damage.propose_explosion,
                     critical_target, layers, critical_impact,
                     explosion_direction, damage, legacy_shell,
                     attacker_id, deadeye=deadeye, with_delta=True,
                     allow_interior=(int(result) == 2 or
                                     blast_contact is not None)))
         elif int(result) != 0:
-            damage, critical, critical_delta = critical_damage.propose_direct(
+            damage, critical, critical_delta = timed_call(
+                diagnostic, 'projectile.critical_direct',
+                critical_damage.propose_direct,
                 critical_target, layers, trace_start, trace_end, damage,
                 legacy_shell, attacker_id, penetrated=int(result) == 2,
                 deadeye=deadeye, with_delta=True,
@@ -15069,6 +15101,36 @@ class BattleRuntime(object):
             return False
         return probe.stop(reason)
 
+    def _prewarm_critical_layout(self):
+        """Build at most one ready vehicle's hit layout per countdown frame."""
+        if (not self._worker_mode or self._battle_live or
+                self._prebattle_deadline is None):
+            return False
+        for key in sorted(self._records):
+            record = self._records[key]
+            if (not record.get('ready') or record.get('tombstone') or
+                    record.get('local')):
+                continue
+            entity = self._server_entity(record.get('engine_id'))
+            if entity is None or not getattr(entity, 'isStarted', False):
+                continue
+            descriptor = getattr(entity, 'typeDescriptor', None)
+            if (descriptor is None or
+                    record.get('critical_layout_prewarmed') is descriptor):
+                continue
+            try:
+                completed = critical_damage.prewarm_layout(descriptor)
+            except Exception as error:
+                # Prewarming must not block the match or repeatedly retry a
+                # broken layout. The shot path retains its own normal guards.
+                completed = True
+                self._warn_optional_failure(
+                    'critical layout prewarm for %s' % key, error)
+            if completed:
+                record['critical_layout_prewarmed'] = descriptor
+                return True
+        return False
+
     def _frame(self):
         if self.state != 'running':
             return
@@ -15220,6 +15282,10 @@ class BattleRuntime(object):
                     # Tree registration is likewise a countdown optimisation.
                     # A broken native registry must not prevent battle start.
                     pass
+            try:
+                self._prewarm_critical_layout()
+            except Exception as error:
+                self._warn_optional_failure('critical layout prewarm', error)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['prewarm'] = max(0.0, next_boundary - boundary)

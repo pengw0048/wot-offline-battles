@@ -80,6 +80,9 @@ class TerrainGrid(object):
 		(-1, 0, 1.0),                         (1, 0, 1.0),
 		(-1, 1, SQRT_TWO),  (0, 1, 1.0),  (1, 1, SQRT_TWO),
 	)
+	_NEIGHBOUR_BITS = dict(((dx, dz), 1 << index)
+		for index, (dx, dz, unused_length) in enumerate(_NEIGHBOURS))
+	_LINK_COUNTS = tuple(bin(mask).count('1') for mask in range(256))
 
 	def __init__(self, ground_probe, obstacle_probe=None, bounds=None,
 			cell_size=18.0, max_grade_up=0.48, max_grade_down=0.38,
@@ -583,15 +586,25 @@ class TerrainGrid(object):
 			return None
 		dx = next_cell[0] - cell[0]
 		dz = next_cell[1] - cell[1]
-		direction_index = None
-		for candidate, neighbour in enumerate(self._NEIGHBOURS):
-			if neighbour[0] == dx and neighbour[1] == dz:
-				direction_index = candidate
-				break
-		if (direction_index is None or
-				not (int(self._baked_links[index]) & (1 << direction_index))):
+		bit = self._NEIGHBOUR_BITS.get((dx, dz), 0)
+		if not (int(self._baked_links[index]) & bit):
 			return None
 		return float(self._baked_heights[next_index]) / 1000.0
+
+	def _baked_neighbours(self, cell):
+		"""Read one cell's immutable link mask once per A* expansion."""
+		index = self._baked_index(cell)
+		if index is None:
+			return
+		mask = int(self._baked_links[index])
+		for direction, (dx, dz, length) in enumerate(self._NEIGHBOURS):
+			if not (mask & (1 << direction)):
+				continue
+			next_cell = (cell[0] + dx, cell[1] + dz)
+			next_index = self._baked_index(next_cell)
+			if next_index is not None:
+				yield (dx, dz, length, next_cell,
+				       float(self._baked_heights[next_index]) / 1000.0)
 
 	def _baked_link_count(self, cell):
 		"""Return the number of independently baked exits from one safe cell."""
@@ -599,11 +612,7 @@ class TerrainGrid(object):
 		if index is None:
 			return 0
 		mask = int(self._baked_links[index]) & 0xff
-		count = 0
-		while mask:
-			count += mask & 1
-			mask >>= 1
-		return count
+		return self._LINK_COUNTS[mask]
 
 	def _baked_clearance_penalty(self, cell):
 		"""Prefer the middle of a proved corridor without inventing new links.
@@ -794,12 +803,22 @@ class TerrainGrid(object):
 				reached = current
 				break
 			current_y = heights[current]
-			for offset_x, offset_z, length_scale in self._NEIGHBOURS:
-				next_cell = (current[0] + offset_x, current[1] + offset_z)
-				next_y = self._edge(current, current_y, next_cell)
+			grade_limit = (self._baked_max_grade if self.prebaked else
+			               min(self.max_grade_up, self.max_grade_down))
+			grade_divisor = max(0.05, grade_limit)
+			if self.prebaked:
+				neighbours = self._baked_neighbours(current)
+			else:
+				neighbours = ((dx, dz, length,
+					(current[0] + dx, current[1] + dz),
+					self._edge(current, current_y,
+					           (current[0] + dx, current[1] + dz)))
+					for dx, dz, length in self._NEIGHBOURS)
+			for offset_x, offset_z, length_scale, next_cell, next_y in neighbours:
 				if next_y is None:
 					continue
-				edge_key = tuple(sorted((current, next_cell)))
+				edge_key = (tuple(sorted((current, next_cell)))
+				            if hard_edge_penalties or edge_penalties else None)
 				if (hard_edge_penalties and
 						edge_key in hard_edge_penalties):
 					continue
@@ -813,9 +832,7 @@ class TerrainGrid(object):
 				run = self.cell_size * length_scale
 				delta_y = next_y - current_y
 				slope = abs(delta_y) / max(run, 0.1)
-				grade_limit = (self._baked_max_grade if self.prebaked else
-				               min(self.max_grade_up, self.max_grade_down))
-				slope_ratio = slope / max(0.05, grade_limit)
+				slope_ratio = slope / grade_divisor
 				# Risk rises non-linearly near the controllable-grade limit.  A
 				# downhill edge costs a little more because braking and lateral
 				# slide leave less recovery room than climbing the same surface.
@@ -828,7 +845,8 @@ class TerrainGrid(object):
 				new_cost = (cost_so_far[current] + run + slope_cost +
 				            self._penalty(
 				                next_cell, avoid_points, prefer_clearance) +
-				            self._failed_edge_penalty(current, next_cell, now) +
+				            (self._failed_edge_penalty(current, next_cell, now)
+				             if self._failed_edges else 0.0) +
 				            local_penalty)
 				if next_cell not in cost_so_far or new_cost < cost_so_far[next_cell]:
 					cost_so_far[next_cell] = new_cost

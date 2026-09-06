@@ -17386,6 +17386,16 @@ class BotRuntimeTests(unittest.TestCase):
             self.assertFalse(target['fresh_visible'])
             self.assertEqual((10.0, 1.0, 20.0), target['position'])
             self.assertEqual(0.3, target['gun_pitch'])
+        hidden[0].update(x=999.0, gun_pitch=2.0,
+                         direct_visible=True, fresh_visible=True)
+        hidden_again, unused = runtime._contacts_for(
+            {'id': 13, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        for target in hidden_again:
+            self.assertFalse(target['direct_visible'])
+            self.assertFalse(target['fresh_visible'])
+            self.assertEqual(10.0, target['x'])
+            self.assertEqual(0.3, target['gun_pitch'])
         post_motion, unused = runtime._contacts_for(
             {'id': 14, 'team': 1}, [player], 1.0,
             visibility_tick=tick, processed_bot_ids=set((25,)))
@@ -17396,7 +17406,7 @@ class BotRuntimeTests(unittest.TestCase):
             {'id': 15, 'team': 1}, [player], 1.1,
             visibility_tick={}, processed_bot_ids=set())
         self.assertEqual([70.0, 40.0], [target['x'] for target in next_tick])
-        self.assertEqual(10, len(sight_calls))
+        self.assertEqual(12, len(sight_calls))
         for pose in remembered.values():
             self.assertEqual(10.0, pose['x'])
             self.assertEqual(0.3, pose['gun_pitch'])
@@ -17488,6 +17498,136 @@ class BotRuntimeTests(unittest.TestCase):
         runtime._service_shot_lane_work(
             1.1, 0.0, team_visibility, [], {}, set((11, 25)), {}, [16])
         self.assertNotIn(key, runtime._shot_lane_work_set)
+
+    def test_lane_range_rejects_leave_service_slots_for_nearby_targets(self):
+        calls = []
+        runtime = self.module.BotRuntime(
+            1, firing_lane_probe=lambda source, target: calls.append(
+                (source['id'], target['network_id'], target['position'])) or True)
+        runtime.states = {11: {
+            'id': 11, 'team': 1, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0}}
+        for target_id in range(21, 61):
+            runtime.states[target_id] = {
+                'id': target_id, 'team': 2, 'alive': True,
+                'x': 1000.0 if target_id < 41 else 50.0,
+                'y': 0.0, 'z': 0.0}
+        runtime._shot_los_phase = lambda unused: 0.0
+        visible = dict(((1, 'bot', target_id), True)
+                       for target_id in range(21, 61))
+        resolved = []
+        original = runtime._shot_lane_live_records
+        def resolve(key, *args):
+            resolved.append(key)
+            return original(key, *args)
+        runtime._shot_lane_live_records = resolve
+        budget = [16]
+        pending = runtime._service_shot_lane_work(
+            1.0, 1.0, visible, [], {}, set(), {(11, 'bot', 21): 0}, budget)
+
+        self.assertEqual(4, pending)
+        self.assertEqual(16, len(resolved))
+        self.assertEqual(16, len(calls))
+        self.assertEqual(0, budget[0])
+        self.assertTrue(all(row[2] == (50.0, 0.0, 0.0) for row in calls))
+        self.assertEqual(36, runtime._shot_lane_completed_pairs)
+        self.assertTrue(all(runtime._shot_los_cache[(11, 'bot', target_id)] ==
+                            (1.0, False) for target_id in range(21, 41)))
+        # A new cycle resolves current poses, including a formerly far target
+        # selected for firing. No enqueue-time geometry survives movement.
+        runtime.states[21]['x'] = 25.0
+        runtime._service_shot_lane_work(
+            2.0, 2.0, visible, [], {}, set(), {(11, 'bot', 21): 0}, [16])
+        self.assertEqual((11, 21, (25.0, 0.0, 0.0)), calls[16])
+
+    def test_lane_range_gate_preserves_enemy_incoming_probe(self):
+        incoming = []
+        outgoing = []
+        runtime = self.module.BotRuntime(
+            1, firing_lane_probe=lambda *args: outgoing.append(args) or True,
+            incoming_lane_probe=lambda source, target: incoming.append(
+                (source['x'], target['position'])) or True)
+        runtime.states = {
+            11: {'id': 11, 'team': 1, 'alive': True,
+                 'x': 0.0, 'y': 0.0, 'z': 0.0},
+            21: {'id': 21, 'team': 2, 'alive': True,
+                 'x': 1000.0, 'y': 0.0, 'z': 0.0}}
+        runtime._incoming_lane_budget = 1
+        runtime._shot_los_phase = lambda unused: 0.0
+        budget = [16]
+        pending = runtime._service_shot_lane_work(
+            1.0, 1.0, {(1, 'bot', 21): True}, [], {}, set(), {}, budget)
+        self.assertEqual(0, pending)
+        self.assertEqual([], outgoing)
+        self.assertEqual([(0.0, (1000.0, 0.0, 0.0))], incoming)
+        self.assertEqual(16, budget[0])
+        self.assertEqual((1.0, True), runtime._incoming_lanes[(11, 'bot', 21)])
+        self.assertEqual((1.0, False), runtime._shot_los_cache[(11, 'bot', 21)])
+
+    def test_lane_range_gate_matches_human_bot_and_spg_distance_boundaries(self):
+        for kind in ('bot', 'human'):
+            for class_tag, limit in (
+                    ('mediumTank', self.module.SHOT_LANE_QUERY_DISTANCE),
+                    ('SPG', self.module.SPG_SHOT_LANE_QUERY_DISTANCE)):
+                for offset in (-0.001, 0.0, 0.001):
+                    with self.subTest(kind=kind, class_tag=class_tag, offset=offset):
+                        calls = []
+                        runtime = self.module.BotRuntime(
+                            1, firing_lane_probe=lambda *args:
+                                calls.append(args) or True)
+                        runtime.states = {11: {
+                            'id': 11, 'team': 1, 'alive': True,
+                            'x': 0.0, 'y': 0.0, 'z': 0.0,
+                            'profile': {'class_tag': class_tag}}}
+                        target = {'id': 21, 'team': 2, 'alive': True,
+                                  'x': limit + offset, 'y': 0.0, 'z': 0.0}
+                        players = [_admit_player(target)] if kind == 'human' else []
+                        if kind == 'bot':
+                            runtime.states[21] = target
+                        runtime._shot_los_phase = lambda unused: 0.0
+                        budget = [1]
+                        pending = runtime._service_shot_lane_work(
+                            1.0, 1.0, {(1, kind, 21): True}, players,
+                            {}, set(), {}, budget)
+                        self.assertEqual(0, pending)
+                        self.assertEqual(int(offset <= 0.0), len(calls))
+                        self.assertEqual((1.0, offset <= 0.0),
+                                         runtime._shot_los_cache[(11, kind, 21)])
+
+    def test_future_and_stale_cover_jobs_leave_the_lane_window_available(self):
+        for ready, stale, expected in ((1.5, False, 'lane'),
+                                       (0.5, True, 'lane'),
+                                       (0.5, False, 'cover')):
+            with self.subTest(ready=ready, stale=stale):
+                calls = []
+                runtime = self.module.BotRuntime(
+                    1, descriptor_resolver=lambda unused: _combat_descriptor(),
+                    adapter_factory=lambda *args, **kwargs:
+                        _FixedAdapter(self._stationary_command()),
+                    direction_probe=lambda *args: {'clear': True, 'slope': 0.0},
+                    visibility_probe=lambda *args: True,
+                    firing_lane_probe=lambda *args: True,
+                    cover_probe=lambda *args: calls.append('cover') or (),
+                    ground_probe=lambda *args: 0.0,
+                    physics_ground_probe=lambda *args: 0.0,
+                    spawn_resolver=_spawn_resolver, native_motion=True,
+                    baked_graph=_graph(), control_seconds=0.1)
+                runtime.battle_start(dict(self.start, bots=[
+                    {'id': 11, 'team': 1, 'slot': 0, 'name': 'CoverSource'},
+                    {'id': 12, 'team': 2, 'slot': 0, 'name': 'CoverTarget'}]))
+                runtime.debug_logging = False
+                source = dict(runtime.states[11], team=2 if stale else 1)
+                target = {'kind': 'bot', 'network_id': 12}
+                key = (source['team'], 'bot', 12)
+                runtime._visible_target_poses[key] = dict(runtime.states[12])
+                runtime._renew_team_spot(key, 1.0)
+                runtime._cover_queue = [(ready, 11, source, target, (0, 0, 0), ())]
+                runtime._next_cover_refresh = 100.0
+                runtime._service_shot_lane_work = lambda *args: (
+                    calls.append('lane') or 0)
+                runtime.update(0.1, 1.0)
+                self.assertEqual([expected], calls)
+                self.assertEqual(int(ready > 1.0), len(runtime._cover_queue))
 
     def test_lane_budget_debt_counts_only_due_native_work(self):
         native_calls = []

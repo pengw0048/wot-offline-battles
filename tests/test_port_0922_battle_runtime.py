@@ -6049,8 +6049,17 @@ class BattleRuntimeContractTests(unittest.TestCase):
     def test_worker_trace_keeps_the_slow_frames_neighbours_without_recursion(self):
         wall = [0.0]
         payloads = []
+
+        def native_log(payload):
+            # #1513 clips a single log line at 8 KiB, including its prefix.
+            payloads.append(''.join(line[:8091] + '\n'
+                                    for line in payload.splitlines()))
+
+        detail_stages = dict(('stage.%02d' % index, {
+            'calls': 29, 'total': 0.123456789, 'self': 0.0987654321,
+            'max': 0.0123456789}) for index in range(45))
         diagnostics = _FrameDiagnostics(
-            clock=lambda: wall[0], writer=payloads.append, window_seconds=30.0)
+            clock=lambda: wall[0], writer=native_log, window_seconds=30.0)
         for frame, gap in enumerate((0.02, 0.02, 0.02, 0.4, 0.08, 0.03, 0.02, 0.02), 1):
             entry = wall[0]
             frame_id = diagnostics.begin(entry, gap)
@@ -6058,21 +6067,47 @@ class BattleRuntimeContractTests(unittest.TestCase):
             diagnostics.finish(
                 frame_id, entry, gap, gap, {'bots_update': 0.003}, {},
                 {'role': 'worker', 'round': 7, 'authority_time': entry},
-                combat={'frame': frame, 'stages': {}})
+                combat={'frame': frame, 'stages': detail_stages})
             wall[0] = entry + gap
         diagnostics.begin(wall[0], 0.02)
         diagnostics.flush()
         rows = [json.loads(line.split('combat_trace ', 1)[1])
                 for line in ''.join(payloads).splitlines()
                 if 'combat_trace ' in line]
-        slow = rows[0]
-        self.assertEqual(4, slow['focus']['cause'])
-        self.assertEqual(400.0, slow['focus']['gap_ms'])
-        self.assertEqual([1, 2, 3], [row['cause'] for row in slow['previous']])
-        self.assertEqual([5, 6, 7], [row['cause'] for row in slow['following']])
-        self.assertEqual(4, slow['focus']['detail']['frame'])
-        self.assertNotIn('previous', slow['previous'][0])
+        slow = rows[0]['frame']
+        self.assertEqual(2, rows[0]['schema'])
+        self.assertEqual(4, slow['cause'])
+        self.assertEqual(400.0, slow['gap_ms'])
+        self.assertEqual([1, 2, 3], [row['frame']['cause'] for row in rows
+                                   if row['relation'] == 'previous'])
+        self.assertEqual([5, 6, 7], [row['frame']['cause'] for row in rows
+                                   if row['relation'] == 'following'])
+        self.assertEqual(4, slow['detail']['frame'])
+        for row in rows:
+            self.assertEqual(detail_stages, row['frame']['detail']['stages'])
+            self.assertNotIn('previous', row['frame'])
         self.assertLessEqual(len(diagnostics._recent_frames), 3)
+
+    def test_oversized_combat_records_reassemble_below_native_log_limit(self):
+        from gui.mods.offline_lan_0922.battle_runtime import _combat_log_lines
+        prefix = '[Offline LAN 0.9.22] PERF '
+        record = {'schema': 2, 'window': 7, 'frame': {
+            'stages': dict(('stage.%d' % index, {'calls': index})
+                           for index in range(300)),
+            'escaped': '\\"\n\u4e2d' * 4000}}
+        for kind in ('combat_trace', 'combat_summary'):
+            with self.subTest(kind=kind):
+                lines = _combat_log_lines(prefix, kind, record).splitlines()
+                self.assertGreater(len(lines), 1)
+                self.assertLessEqual(max(map(len, lines)), 7168)
+                parts = [json.loads(line.split(kind + '_part ', 1)[1])
+                         for line in lines]
+                self.assertEqual(list(range(1, len(parts) + 1)),
+                                 [part['part'] for part in parts])
+                self.assertTrue(all(part['parts'] == len(parts)
+                                    for part in parts))
+                self.assertEqual(record, json.loads(''.join(
+                    part['data'] for part in parts)))
 
     def test_frame_diagnostic_percentile_storage_is_bounded(self):
         diagnostics = _FrameDiagnostics(
@@ -13187,6 +13222,71 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._update_spotting.assert_called_once_with(
             10.0, hud_only=True)
         battle._schedule.assert_called_once_with(0.0, battle._frame)
+
+    def test_critical_layout_prewarm_is_bounded_ready_and_countdown_owned(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        battle._battle_live = False
+        battle._prebattle_deadline = 20.0
+        entities = {index: types.SimpleNamespace(
+            isStarted=index != 1, typeDescriptor=object())
+                    for index in range(1, 7)}
+        battle._server_entity = entities.get
+        battle._records = {str(index): {
+            'engine_id': index, 'ready': index != 2,
+            'tombstone': index == 3, 'local': index == 4}
+                           for index in range(1, 7)}
+        module = sys.modules[BattleRuntime.__module__]
+        with mock.patch.object(module.critical_damage, 'prewarm_layout',
+                               return_value=True) as warm:
+            self.assertTrue(battle._prewarm_critical_layout())
+            warm.assert_called_once_with(entities[5].typeDescriptor)
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertEqual(2, warm.call_count)
+            self.assertEqual((entities[6].typeDescriptor,), warm.call_args[0])
+            self.assertFalse(battle._prewarm_critical_layout())
+            self.assertEqual(2, warm.call_count)
+            entities[1].isStarted = True
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertEqual((entities[1].typeDescriptor,), warm.call_args[0])
+            entities[1].typeDescriptor = object()
+            battle._battle_live = True
+            self.assertFalse(battle._prewarm_critical_layout())
+            self.assertEqual(3, warm.call_count)
+            battle._battle_live = False
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertEqual(4, warm.call_count)
+            battle._records['2']['ready'] = True
+            battle._worker_mode = False
+            self.assertFalse(battle._prewarm_critical_layout())
+            self.assertEqual(4, warm.call_count)
+
+    def test_critical_layout_prewarm_contains_failure_and_skips_pending_bounds(self):
+        battle = BattleRuntime(_runtime())
+        battle._worker_mode = True
+        battle._battle_live = False
+        battle._prebattle_deadline = 20.0
+        descriptors = [object() for unused in range(3)]
+        battle._records = {str(index): {'engine_id': index, 'ready': True}
+                           for index in range(3)}
+        battle._server_entity = lambda index: types.SimpleNamespace(
+            isStarted=True, typeDescriptor=descriptors[index])
+        module = sys.modules[BattleRuntime.__module__]
+        with mock.patch.object(module.critical_damage, 'prewarm_layout',
+                               side_effect=[False, RuntimeError('bounds failed'),
+                                            False, True, True]) as warm:
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertNotIn('critical_layout_prewarmed', battle._records['0'])
+            self.assertIs(descriptors[1],
+                          battle._records['1']['critical_layout_prewarmed'])
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertIs(descriptors[2],
+                          battle._records['2']['critical_layout_prewarmed'])
+            self.assertTrue(battle._prewarm_critical_layout())
+            self.assertIs(descriptors[0],
+                          battle._records['0']['critical_layout_prewarmed'])
+            self.assertFalse(battle._prewarm_critical_layout())
+            self.assertEqual(5, warm.call_count)
 
     def test_countdown_tree_prewarm_does_not_require_bot_runtime(self):
         runtime = _runtime()

@@ -5187,6 +5187,10 @@ class BotRuntime(object):
             visibility_tick.setdefault('target_pose_snapshots', {})
             if isinstance(visibility_tick, dict) else None)
 
+        hidden_templates = (
+            visibility_tick.setdefault('hidden_target_templates', {})
+            if isinstance(visibility_tick, dict) else {})
+
         def resolve_source_view_range():
             if source_view_range[0] is None:
                 source_view_range[0] = self._source_view_range(
@@ -5202,6 +5206,20 @@ class BotRuntime(object):
                 target.update(remembered)
                 return True
             remembered = self._visible_target_poses.get(key)
+            cache_key = (source_team, id(template), id(remembered))
+            cached = hidden_templates.get(cache_key)
+            if cached is not None:
+                # Retain the original objects with the projection: identities
+                # cannot be recycled during this slice. Only pose removal and
+                # the team's remembered pose are shared, never observer flags.
+                visible = bool(target['visible'] and remembered is not None)
+                direct = target['direct_visible']
+                fresh = target['fresh_visible']
+                target.clear()
+                target.update(cached[2])
+                target.update(visible=visible, direct_visible=direct,
+                              fresh_visible=fresh)
+                return visible
             # Discard every live pose field first: an old observation can lack
             # articulation or velocity that the current hidden entity has.
             for name in _TARGET_POSE_FIELDS:
@@ -5216,8 +5234,12 @@ class BotRuntime(object):
                     'yaw': 0.0, 'speed': 0.0,
                 })
                 target['visible'] = False
-                return False
-            target.update(remembered)
+            else:
+                target.update(remembered)
+            projection = dict(target)
+            for name in ('visible', 'direct_visible', 'fresh_visible'):
+                projection.pop(name, None)
+            hidden_templates[cache_key] = (template, remembered, projection)
             return bool(target.get('visible'))
 
         def visible_to_team(target):
@@ -9065,6 +9087,21 @@ class BotRuntime(object):
                 if diagnostic is not None:
                     diagnostic.count('lane_attempt_not_due')
                 return False
+            target_distance = _distance(
+                _position(source), _position(raw_target))
+            incoming_due = bool(self._incoming_lane_budget and
+                                callable(self.incoming_lane_probe))
+            if (target_distance > self._shot_lane_query_distance(source) and
+                    not incoming_due):
+                # Resolve cheap range rejects at the current service pose,
+                # before copying a full job or spending a native-work slot.
+                # Keep the independent enemy -> own-body probe: the enemy's
+                # gun can reach farther than this source's outgoing lane.
+                self._shot_los_cache[key] = (now, False)
+                self._shot_los_deadlines[key] = cycle_time
+                self._shot_lane_completed_pairs += 1
+                retire(key, 'distance')
+                return False
             if materialized[0] >= maximum_jobs:
                 return False
             source, target, target_key = self._shot_lane_live_records(
@@ -9081,8 +9118,7 @@ class BotRuntime(object):
             # Only this direct-spot-gated queue may inspect incoming geometry.
             # One extra pair per control callback keeps advisory threat work
             # bounded independently of the final-shot safety checks.
-            if (self._incoming_lane_budget and
-                    callable(self.incoming_lane_probe)):
+            if incoming_due:
                 self._incoming_lane_budget -= 1
                 probe_started = self._probe_started()
                 self._probe_totals[1] += 1
@@ -9094,12 +9130,11 @@ class BotRuntime(object):
                     self._probe_finished(1, probe_started)
                 if incoming is not None:
                     self._incoming_lanes[key] = (now, bool(incoming))
-            # Count identities resolved at service time separately from the
-            # native budget. A distant pure-data rejection is still one
-            # bounded job even though it consumes no collision ray.
+            # Bound full current-pose jobs, including the independent incoming
+            # probe. Pure outgoing range rejects above need no such slot.
             materialized[0] += 1
             probes_before = self._probe_totals[1]
-            distance_cache = [None]
+            distance_cache = [target_distance]
             self._refresh_shot_clear(
                 source, target, now, cycle_time, probe_budget,
                 lane_key=key, distance_cache=distance_cache)
@@ -9170,14 +9205,8 @@ class BotRuntime(object):
             cached = self._shot_los_cache.get(key)
             if cached is not None and cached[0] > window_start + 1e-9:
                 continue
-            profile = source.get('profile')
-            profile = profile if isinstance(profile, dict) else {}
-            query_distance = (
-                SPG_SHOT_LANE_QUERY_DISTANCE
-                if str(profile.get('class_tag') or '') == 'SPG'
-                else SHOT_LANE_QUERY_DISTANCE)
             if _distance(_position(source), _position(raw_target)) <= \
-                    query_distance:
+                    self._shot_lane_query_distance(source):
                 budget_deferred += 1
         self._shot_lane_budget_deferred_attempts += budget_deferred
         if diagnostic is not None:
@@ -9216,6 +9245,14 @@ class BotRuntime(object):
                         selected == (target_kind, int(target_id)))
         return True
 
+    @staticmethod
+    def _shot_lane_query_distance(source):
+        profile = source.get('profile')
+        profile = profile if isinstance(profile, dict) else {}
+        return (SPG_SHOT_LANE_QUERY_DISTANCE
+                if str(profile.get('class_tag') or '') == 'SPG'
+                else SHOT_LANE_QUERY_DISTANCE)
+
     def _shot_clear(self, source, target, now, force=False,
                     probe_budget=None, lane_key=None, distance_cache=None):
         """Probe a current static firing lane independently from team spotting."""
@@ -9229,12 +9266,7 @@ class BotRuntime(object):
             target_distance = _distance(_position(source), target_position)
             if distance_cache is not None:
                 distance_cache[0] = target_distance
-        profile = source.get('profile')
-        profile = profile if isinstance(profile, dict) else {}
-        query_distance = (SPG_SHOT_LANE_QUERY_DISTANCE
-                          if str(profile.get('class_tag') or '') == 'SPG'
-                          else SHOT_LANE_QUERY_DISTANCE)
-        if target_distance > query_distance:
+        if target_distance > self._shot_lane_query_distance(source):
             self._shot_los_cache[key] = (_number(now), False)
             return False
         cached = self._shot_los_cache.get(key)
@@ -10203,6 +10235,20 @@ class BotRuntime(object):
             (self._refresh_control_this_step,
              self._publish_control_this_step) = previous
 
+    def _cover_job_current(self, job, now):
+        unused_ready, bot_id, source, target, unused_route, unused_allies = job
+        current_source = self.states.get(int(bot_id))
+        target_key = (source.get('team'), target.get('kind', 'human'),
+                      int(target.get('network_id', 0)))
+        remembered = self._visible_target_poses.get(target_key)
+        current = bool(
+            current_source is not None and
+            current_source.get('alive', True) and
+            current_source.get('team') == source.get('team') and
+            remembered is not None and
+            self._team_spot_time_left(target_key, now) > 0.0)
+        return current, current_source, remembered
+
     @timed('bot.slice')
     def _update_once(self, frame_step, now, players=None, neighbours=None):
         """Advance one stable authority substep and preserve its events."""
@@ -10244,9 +10290,13 @@ class BotRuntime(object):
         collect_observation = publish and observation_due
         shot_lane_refresh_time = self._next_shot_lane_refresh
         shot_lane_refresh_due = now >= shot_lane_refresh_time
+        cover_reserved = bool(
+            refresh_control and self._cover_queue and
+            now + 1e-9 >= self._cover_queue[0][0] and
+            self._cover_job_current(self._cover_queue[0], now)[0])
         refresh_shot_lanes = (
             refresh_control and
-            not self._cover_queue and
+            not cover_reserved and
             (shot_lane_refresh_due or
              (shot_lane_refresh_time > 0.0 and
               now + SHOT_LANE_REFRESH_SECONDS + 1e-9 >=
@@ -11324,7 +11374,7 @@ class BotRuntime(object):
             if self._combat_diagnostics is not None:
                 self._combat_diagnostics.queue_state(
                     now, None, selected_lane_priorities,
-                    cover_blocked=refresh_control and bool(self._cover_queue))
+                    cover_blocked=cover_reserved)
         if (shot_lane_refresh_due and refresh_shot_lanes and
                 shot_lanes_ready):
             self._next_shot_lane_refresh = (
@@ -11358,16 +11408,8 @@ class BotRuntime(object):
             ready_at, bot_id, source, target, route, allies = \
                 self._cover_queue[0]
             if now + 1e-9 >= ready_at:
-                del self._cover_queue[0]
-                current_source = self.states.get(int(bot_id))
-                target_key = (source.get('team'), target.get('kind', 'human'),
-                              int(target.get('network_id', 0)))
-                remembered = self._visible_target_poses.get(target_key)
-                current = (current_source is not None and
-                           current_source.get('alive', True) and
-                           current_source.get('team') == source.get('team') and
-                           remembered is not None and
-                           self._team_spot_time_left(target_key, now) > 0.0)
+                current, current_source, remembered = self._cover_job_current(
+                    self._cover_queue.pop(0), now)
                 if current:
                     source = _copy_runtime_state(current_source)
                     target = dict(target)
