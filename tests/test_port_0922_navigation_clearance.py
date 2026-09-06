@@ -7,7 +7,10 @@ PORT_ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SCRIPTS = PORT_ROOT / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
-from gui.mods.offline_lan_0922.ai.navigation import TerrainGrid, TerrainNavigator
+from gui.mods.offline_lan_0922.ai.navigation import (
+    BAKED_SHALLOW_WATER, MAX_BAKED_CORRIDOR_CACHE,
+    TerrainGrid, TerrainNavigator,
+)
 
 
 DIRECTIONS = (
@@ -53,6 +56,68 @@ def _graph(width, height, open_cells):
 
 
 class BakedClearanceNavigationTests(unittest.TestCase):
+    def test_baked_corridor_reuse_keeps_world_bounds_and_live_penalties(self):
+        graph = _graph(4, 1, ((x, 0) for x in range(4)))
+        grid = TerrainGrid(lambda *unused: 0.0, baked_graph=graph)
+        scans = []
+        original = grid._baked_segment_cells
+
+        def scan(start, end):
+            scans.append((start, end))
+            return original(start, end)
+
+        grid._baked_segment_cells = scan
+        start, end = (0.0, 0.0, 0.0), (12.0, 0.0, 0.0)
+        self.assertTrue(grid.dry_segment_clear(start, end, 1.0))
+        self.assertTrue(grid.dry_segment_clear(
+            (0.2, 4.0, 0.0), (11.9, 6.0, 0.0), 1.1))
+        self.assertEqual(1, len(scans))
+        # This point still rounds into the same end cell but is outside the
+        # authored world rectangle, so a cached clear corridor cannot admit it.
+        self.assertFalse(grid.segment_clear(start, (12.1, 0.0, 0.0)))
+        grid._failed_edges[((0, 0), (1, 0))] = (3.0, 100.0)
+        self.assertFalse(grid.dry_segment_clear(start, end, 2.0))
+        self.assertTrue(grid.dry_segment_clear(start, end, 3.0))
+        self.assertEqual(1, len(scans))
+
+    def test_baked_corridor_reuse_keeps_directional_links_and_ford_exit(self):
+        graph = _graph(4, 1, ((x, 0) for x in range(4)))
+        graph['hazards'] = (BAKED_SHALLOW_WATER, 0, 0, 0)
+        links = list(graph['links'])
+        links[3] = 0
+        graph['links'] = tuple(links)
+        grid = TerrainGrid(lambda *unused: 0.0, baked_graph=graph)
+        start, end = (0.0, 0.0, 0.0), (12.0, 0.0, 0.0)
+        for unused in range(2):
+            self.assertTrue(grid.dry_segment_clear(start, end, 1.0))
+            self.assertFalse(grid.segment_clear(end, start))
+            self.assertTrue(grid.segment_has_baked_hazard(
+                end, start, BAKED_SHALLOW_WATER))
+            self.assertFalse(grid.segment_has_baked_hazard(
+                start, end, BAKED_SHALLOW_WATER))
+        # Installing another map must not inherit the old map's clear result.
+        replacement = _graph(4, 1, ((0, 0), (3, 0)))
+        grid._install_baked_graph(replacement)
+        self.assertFalse(grid.segment_clear(start, end))
+        self.assertTrue(grid.segment_has_baked_hazard(start, end, 0))
+
+    def test_baked_corridor_cache_stays_bounded_as_routes_change(self):
+        graph = _graph(48, 48, (
+            (x, z) for z in range(48) for x in range(48)))
+        grid = TerrainGrid(lambda *unused: 0.0, baked_graph=graph)
+        start = (0.0, 0.0, 0.0)
+        for z in range(48):
+            for x in range(48):
+                end = (x * 4.0, 0.0, z * 4.0)
+                self.assertTrue(grid.dry_segment_clear(start, end, 1.0))
+        self.assertEqual(MAX_BAKED_CORRIDOR_CACHE,
+                         len(grid._baked_corridor_cache))
+        self.assertEqual(MAX_BAKED_CORRIDOR_CACHE,
+                         len(grid._baked_corridor_order))
+        self.assertTrue(grid.dry_segment_clear(start, (4.0, 0.0, 0.0), 2.0))
+        self.assertEqual(MAX_BAKED_CORRIDOR_CACHE,
+                         len(grid._baked_corridor_cache))
+
     def test_wide_corridor_path_moves_off_the_exposed_edge(self):
         graph = _graph(21, 5, (
             (x, z) for z in range(5) for x in range(21)))

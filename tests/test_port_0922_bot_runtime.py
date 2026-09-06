@@ -12531,6 +12531,43 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertGreater(
             abs(runtime.states[11]['x'] - runtime.states[12]['x']), 2.0)
 
+    def test_contact_broadphase_skips_distant_bodies_and_keeps_residual_push(self):
+        runtime = self.module.BotRuntime(1)
+        runtime._clear = lambda *unused: True
+        state = {
+            'id': 11, 'team': 1, 'slot': 0, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'mass': 25000.0,
+            'collision_shape': self.module.tank_collision.DEFAULT_SHAPE,
+            'speed': 0.0, 'push_x': 2.0, 'push_z': -1.0,
+        }
+        peer = dict(state, id=12, team=2, x=20.0, push_x=0.0, push_z=0.0)
+        runtime.states = {11: state, 12: peer}
+        runtime._ram_contacts = frozenset(((11, 12),))
+        calls = []
+        original = self.module.tank_collision.resolve_tank
+
+        def resolve(own, others, **kwargs):
+            calls.append((own['id'], tuple(other['id'] for other in others)))
+            return original(own, others, **kwargs)
+
+        self.module.tank_collision.resolve_tank = resolve
+        try:
+            self.assertEqual([], runtime._resolve_tank_contacts([], 1.0, 0.1))
+            self.assertEqual([], calls)
+            self.assertAlmostEqual(0.2, state['x'])
+            self.assertAlmostEqual(-0.1, state['z'])
+            self.assertAlmostEqual(2.0 * 0.9 ** 6, state['push_x'])
+            self.assertAlmostEqual(-1.0 * 0.9 ** 6, state['push_z'])
+            self.assertFalse(runtime._ram_contacts)
+            # Broad phase uses each mounted hull's size, including a wreck;
+            # it must never assume that all tanks fit a default-size circle.
+            peer.update(alive=False, collision_shape=(20.0, 3.5, -0.8, 2.0))
+            runtime._resolve_tank_contacts([], 1.1, 0.1)
+            self.assertEqual([(11, (12,))], calls)
+        finally:
+            self.module.tank_collision.resolve_tank = original
+
     def test_bot_push_decay_is_equal_across_render_rates(self):
         def run_for_one_second(frame_rate):
             runtime = self.module.BotRuntime(1)
@@ -14560,6 +14597,11 @@ class BotRuntimeTests(unittest.TestCase):
                 z=float(index * 100))
             self.runtime.states[state['id']] = state
 
+        pose_fields = ('x', 'y', 'z', 'yaw', 'speed', 'push_x', 'push_z')
+        poses_before = dict(
+            (bot_id, tuple(state[name] for name in pose_fields))
+            for bot_id, state in self.runtime.states.items())
+
         candidate_counts = []
         original = self.module.tank_collision.resolve_tank
 
@@ -14580,8 +14622,10 @@ class BotRuntimeTests(unittest.TestCase):
         finally:
             self.module.tank_collision.resolve_tank = original
 
-        self.assertEqual(29, len(candidate_counts))
-        self.assertEqual({0}, set(candidate_counts))
+        self.assertEqual([], candidate_counts)
+        self.assertEqual(poses_before, dict(
+            (bot_id, tuple(state[name] for name in pose_fields))
+            for bot_id, state in self.runtime.states.items()))
 
     def test_authority_failover_resumes_server_fire_sequence(self):
         waiting = dict(self.start, bot_authority_id=2)
@@ -17175,6 +17219,62 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             set((('bot', 25, False), ('bot', 25, True))),
             set(tick['target_templates']))
+
+    def test_contact_pose_reuse_preserves_observer_and_motion_boundaries(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        bot = {'id': 25, 'team': 2, 'alive': True,
+               'x': 10.0, 'y': 1.0, 'z': 20.0, 'yaw': 0.2,
+               'velocity': (1.0, 0.0, 2.0), 'gun_pitch': 0.3}
+        player = _admit_player(dict(bot, id=2))
+        runtime.states = {25: bot}
+        sight_calls = []
+
+        def visible(source, target, *unused):
+            sight_calls.append((source['id'], target['kind']))
+            return source['id'] != 13
+
+        runtime._visible = visible
+        tick = {}
+        first, unused = runtime._contacts_for(
+            {'id': 11, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+        remembered = dict(runtime._visible_target_poses)
+        # Observer-local edits must never contaminate the shared projection.
+        first[0].update(x=999.0, gun_pitch=2.0)
+        second, unused = runtime._contacts_for(
+            {'id': 12, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+        for target in second:
+            key = (1, target['kind'], target['network_id'])
+            self.assertIs(remembered[key], runtime._visible_target_poses[key])
+            self.assertEqual((10.0, 1.0, 20.0), target['position'])
+            self.assertEqual(0.3, target['gun_pitch'])
+
+        bot.update(x=40.0, gun_pitch=0.6)
+        player.update(x=70.0, gun_pitch=0.9)
+        hidden, unused = runtime._contacts_for(
+            {'id': 13, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        for target in hidden:
+            self.assertFalse(target['direct_visible'])
+            self.assertFalse(target['fresh_visible'])
+            self.assertEqual((10.0, 1.0, 20.0), target['position'])
+            self.assertEqual(0.3, target['gun_pitch'])
+        post_motion, unused = runtime._contacts_for(
+            {'id': 14, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        self.assertEqual([10.0, 40.0], [target['x'] for target in post_motion])
+        self.assertEqual([0.3, 0.6],
+                         [target['gun_pitch'] for target in post_motion])
+        next_tick, unused = runtime._contacts_for(
+            {'id': 15, 'team': 1}, [player], 1.1,
+            visibility_tick={}, processed_bot_ids=set())
+        self.assertEqual([70.0, 40.0], [target['x'] for target in next_tick])
+        self.assertEqual(10, len(sight_calls))
+        for pose in remembered.values():
+            self.assertEqual(10.0, pose['x'])
+            self.assertEqual(0.3, pose['gun_pitch'])
 
     def test_compact_human_target_keeps_dynamic_spotting_contract(self):
         runtime = self.module.BotRuntime(
