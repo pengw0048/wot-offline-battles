@@ -2,6 +2,9 @@ from __future__ import print_function
 
 """Authority-side, engine-free bridge from v5 bots to the local AI package."""
 
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    observed, observed_call, current as current_combat, count as combat_count)
+
 import copy
 import math
 import random
@@ -790,6 +793,7 @@ def _critical_parts(state):
     return _parse_critical_parts(critical)
 
 
+@observed('bot.critical_prepare')
 def _cache_critical_parts_for_tick(state):
     """Parse one stable post-repair payload for the current Bot tick."""
     critical = state.get('critical')
@@ -802,6 +806,7 @@ def _clear_critical_parts_tick_cache(state):
     state.pop(_CRITICAL_PARTS_TICK_CACHE, None)
 
 
+@observed('bot.state_copy')
 def _copy_runtime_state(state):
     """Copy authority state without private runtime-only caches."""
     copied = dict(state)
@@ -810,6 +815,7 @@ def _copy_runtime_state(state):
     return copied
 
 
+@observed('bot.critical_factor')
 def _critical_factor(state, descriptor, stat):
     devices, destroyed, crew_ko, yellow = _critical_parts(state)
     return (device_damage.crew_stat_factor(crew_ko, stat) *
@@ -2631,12 +2637,15 @@ class BotRuntime(object):
             return abs(_number(result.get('slope', 0.0))) <= 0.55
         return bool(result)
 
+    @observed('bot.parameters')
     def _physics_params_for(self, bot_id):
         """Return one Bot's installed physics, rebuilding only its cache."""
         bot_id = int(bot_id)
         params = self._physics_params.get(bot_id)
         if params is not None:
+            combat_count('physics_parameters_cached')
             return params
+        combat_count('physics_parameters_rebuilt')
         descriptor = self._descriptors.get(bot_id)
         if descriptor is None or (isinstance(descriptor, dict) and
                                   not descriptor):
@@ -2663,6 +2672,7 @@ class BotRuntime(object):
             state['grounded_once'] = False
 
     @staticmethod
+    @observed('bot.pose_snapshot')
     def _snapshot_bot_suspension_state(state):
         """Freeze the suspension-owned pose at a rollback boundary."""
         snapshot = {}
@@ -2844,6 +2854,7 @@ class BotRuntime(object):
         self._equipment_now += max(0.0, step)
         return self._equipment_now
 
+    @observed('bot.equipment_pack')
     def _publish_equipment_state(self, state):
         bot_id = int(state['id'])
         states = self._equipment_states.get(bot_id, ())
@@ -2878,6 +2889,7 @@ class BotRuntime(object):
             equipment.trusted_snapshot_edge(self._equipment_now)
             for equipment in self._equipment_states.get(int(bot_id), ()))
 
+    @observed('bot.publication_signature')
     def _current_publication_edge_signature(
             self, states, launches, ram_reports):
         """Describe every non-coalescible worker-owned publication edge."""
@@ -2962,6 +2974,7 @@ class BotRuntime(object):
             int(state['id']), state, siege_state)
         return True
 
+    @observed('bot.siege_tick')
     def _advance_bot_siege(self, state, step):
         pair = self._descriptor_pairs.get(int(state['id']))
         if pair is None or pair[1] is None:
@@ -3005,6 +3018,7 @@ class BotRuntime(object):
             SIEGE_LONG_TRAVEL_METRES)
         return legal_target and not long_travel
 
+    @observed('bot.siege_intent')
     def _update_bot_siege_intent(self, state, command, target, step):
         pair = self._descriptor_pairs.get(int(state['id']))
         if pair is None or pair[1] is None:
@@ -3638,6 +3652,7 @@ class BotRuntime(object):
         self._turn_speeds[int(state['id'])] = 0.0
         return True
 
+    @observed('bot.combat_pack')
     def _mark_combat_publication(self, state):
         sync = self._combat_sync_state(state)
         signature = _combat_signature(state)
@@ -3943,6 +3958,7 @@ class BotRuntime(object):
         self._publish_equipment_state(state)
         return effects
 
+    @observed('bot.critical_tick')
     def _advance_bot_critical(self, state, step, now, record_step=True,
                               advance_fire=True, equipment_effects=None):
         # Repair, consumables and fire may replace the canonical payload. Never
@@ -4027,6 +4043,7 @@ class BotRuntime(object):
                  tuple(dict(effect) for effect in equipment_effects)))
         return changed
 
+    @observed('bot.drowning')
     def _advance_bot_drowning(self, state, step):
         """Apply #1513 WaterSensor danger and its ten-second death clock."""
         if (not state.get('alive', False) or
@@ -4073,6 +4090,7 @@ class BotRuntime(object):
         state['target_id'] = None
         return True
 
+    @observed('bot.overturn')
     def _advance_bot_overturn(self, state, step):
         """Apply #1513 overturn warning, input lock and terminal countdown."""
         if (not state.get('alive', False) or
@@ -5460,6 +5478,7 @@ class BotRuntime(object):
         return refreshed
 
     @staticmethod
+    @observed('motion.receipt_contains')
     def _world_receipt_contains(receipt, position, travel_yaw, speed, dt):
         """Return whether exact typed rays still contain this hull sweep.
 
@@ -5469,14 +5488,17 @@ class BotRuntime(object):
         may retain it while the current hull sweep remains a strict subset.
         """
         if not isinstance(receipt, dict):
+            combat_count('receipt_missing')
             return False
         origin = receipt.get('origin')
         if not isinstance(origin, (list, tuple)) or len(origin) != 3:
+            combat_count('receipt_origin_invalid')
             return False
         receipt_yaw = _number(receipt.get('yaw'))
         receipt_sign = int(_number(receipt.get('direction')))
         current_sign = -1 if _number(speed) < 0.0 else 1
         if receipt_sign not in (-1, 1) or receipt_sign != current_sign:
+            combat_count('receipt_direction_changed')
             return False
         rdx = _number(position[0]) - _number(origin[0])
         rdy = abs(_number(position[1]) - _number(origin[1]))
@@ -5490,11 +5512,19 @@ class BotRuntime(object):
         frame_step = max(0.0, min(0.2, _number(dt)))
         current_reach = max(
             0.4, abs(_number(speed)) * frame_step + 0.2)
-        return bool(
+        contained = bool(
             receipt_forward >= -0.0001 and
             receipt_forward + leading + current_reach <= distance and
             rdy <= 0.0001 and receipt_lateral <= 0.0001 and
             receipt_angle <= 0.00001)
+        if current_combat() is not None:
+            reason = ('hit' if contained else
+                      'behind' if receipt_forward < -0.0001 else
+                      'reach' if receipt_forward + leading + current_reach >
+                      distance else 'height' if rdy > 0.0001 else
+                      'lateral' if receipt_lateral > 0.0001 else 'yaw')
+            combat_count('receipt_contains_' + reason)
+        return contained
 
     @staticmethod
     def _world_receipt_refresh_due(receipt, position, travel_yaw, speed, dt):
@@ -5535,20 +5565,24 @@ class BotRuntime(object):
         return None
 
     @staticmethod
+    @observed('motion.cache_check')
     def _motion_probe_reusable(cached, position, travel_yaw, speed, now,
                                settled=False, dt=None,
                                ignore_deadline=False):
         """Prove that a cached hull corridor still contains this motion ray."""
         if not isinstance(cached, dict):
+            combat_count('motion_cache_missing')
             return False
         if isinstance(cached.get('result'), dict) and cached['result'].get(
                 'deferred', False):
             # Exhausting the shared native recast budget proves neither a wall
             # nor a soft path. Retry next frame instead of pinning this Bot's
             # fixed-id cache to a false answer.
+            combat_count('motion_cache_deferred')
             return False
         sample_position = cached.get('position')
         if not isinstance(sample_position, (list, tuple)) or len(sample_position) != 3:
+            combat_count('motion_cache_pose_invalid')
             return False
         sample_yaw = _number(cached.get('yaw'))
         dx = _number(position[0]) - _number(sample_position[0])
@@ -5562,11 +5596,15 @@ class BotRuntime(object):
         # established slope while its pose and heading stay exact; the first
         # movement, turn, collision push or slide restores the normal expiry.
         if settled:
-            return bool(
+            reusable = bool(
                 abs(forward) <= 0.05 and lateral <= 0.05 and dy <= 0.05 and
                 angle <= 0.005)
+            combat_count('motion_cache_settled_hit' if reusable else
+                         'motion_cache_settled_pose_changed')
+            return reusable
         if (not ignore_deadline and
                 now >= cached.get('deadline', 0.0)):
+            combat_count('motion_cache_deadline')
             return False
         lookahead = 20.0 if abs(_number(speed)) > 5.0 else 15.0
         forward_budget = MOTION_PROBE_FORWARD_BUDGET
@@ -5590,12 +5628,19 @@ class BotRuntime(object):
             -0.1 <= forward <= forward_budget and
             lateral + heading_drift <= MOTION_PROBE_LATERAL_BUDGET)
         if not reusable:
+            if current_combat() is not None:
+                combat_count('motion_cache_' + (
+                    'behind' if forward < -0.1 else
+                    'reach' if forward > forward_budget else
+                    'lateral_or_heading'))
             return False
         receipt = (cached.get('result') or {}).get('world_receipt')
         if (receipt is not None and
                 not BotRuntime._world_receipt_contains(
                     receipt, position, travel_yaw, speed, dt)):
+            combat_count('motion_cache_exact_receipt_rejected')
             return False
+        combat_count('motion_cache_hit')
         return True
 
     @staticmethod
@@ -5624,6 +5669,7 @@ class BotRuntime(object):
         return self._motion_probe_reusable(
             cached, position, travel_yaw, speed, now, False, dt)
 
+    @observed('motion.corridor_check')
     def motion_world_corridor_reusable(self, bot_id, position, travel_yaw,
                                        speed, now, dt):
         """Reuse exact rays or a generic sweep awaiting its exact receipt.
@@ -5689,6 +5735,7 @@ class BotRuntime(object):
             })
         return result
 
+    @observed('bot.traffic_snapshot')
     def _traffic_snapshot(self, supplied):
         """Build one immutable local-traffic snapshot for this authority tick."""
         bodies = {}
@@ -6074,6 +6121,7 @@ class BotRuntime(object):
             return 1
         return 2
 
+    @observed('bot.corridor_hazards')
     def _planner_corridor_clear(self, position, yaw, speed,
                                 wet_escape=False, allow_shallow=False,
                                 hazard_only=False):
@@ -6220,6 +6268,7 @@ class BotRuntime(object):
                 'bot passive motion resolver returned an invalid status')
         return status
 
+    @observed('bot.contact_response')
     def _hard_contact_response(self, state, position, yaw, speed,
                                descriptor, step, now):
         """Probe the shared glancing paths and apply copied hull damping."""
@@ -6811,6 +6860,7 @@ class BotRuntime(object):
             max(0.0, z + extent_z - maximum_z),
         )
 
+    @observed('bot.boundary')
     def _baked_pose_progress_clear(self, state, before_position, before_yaw,
                                    after_position, after_yaw):
         """Allow a legal pose or recovery that worsens no boundary edge."""
@@ -7233,6 +7283,7 @@ class BotRuntime(object):
         bot_state['_route_lane_goal'] = tuple(goal)
         return (tuple(goal), (0, 0))
 
+    @observed('bot.route_lane')
     def _route_lane_target(
             self, bot_id, position, goal, selected, strategic, now):
         """Offset one proved non-join route target through its stable lane."""
@@ -7369,6 +7420,7 @@ class BotRuntime(object):
         own['_radio_ground_goal'] = (key, result)
         return result
 
+    @observed('bot.navigation_target')
     def _navigation_target(self, bot_id, position, goal, strategic, state):
         mode = strategic.get('combat_mode', 'route')
         stop_at_goal = mode not in ('route', 'advance')
@@ -7526,6 +7578,7 @@ class BotRuntime(object):
             current = following
         return float('inf')
 
+    @observed('bot.stopping_distance')
     def _cached_traffic_stopping_distance(
             self, source, command, physics_params):
         """Memoize the exact coast integral for unchanged physical inputs."""
@@ -10140,6 +10193,7 @@ class BotRuntime(object):
         self._queue_pending_launch(launch)
         return True
 
+    @observed('bot.fire')
     def _fire(self, state, gun_state, reload_factor, descriptor,
               launch_receipt=None, ammo_state=None, launch_preview=None,
               launch_time_us=None):
@@ -10215,6 +10269,7 @@ class BotRuntime(object):
         burst_state.publish(state)
         return True
 
+    @observed('bot.burst_tick')
     def _advance_active_burst(
             self, state, gun_state, ammo_state, reload_factor, descriptor,
             target, ballistic_solution, step, destroyed_devices,
@@ -10330,6 +10385,8 @@ class BotRuntime(object):
                     return []
             elif self._accumulator + 1e-9 < self._control_seconds:
                 return []
+            if self._combat_diagnostics is not None:
+                self._combat_diagnostics.begin_control()
             # Exact world-receipt work is capped per render callback, not per
             # control step. Do not open an empty receipt frame on intervening
             # high-FPS callbacks: finishing one without a control step would
@@ -10401,14 +10458,19 @@ class BotRuntime(object):
         if scan is None:
             return False
         scanned = False
+        diagnostic = current_combat()
         for state in self._ordered_states():
             if (not state['alive'] or state['health'] <= 0.0 or
                     abs(state['speed']) < DESTRUCTIBLE_SCAN_MIN_SPEED):
                 continue
+            if diagnostic is not None:
+                diagnostic.actor(state['id'])
             scan(
                 state['id'], (state['x'], state['y'], state['z']),
                 state['yaw'], state['speed'])
             scanned = True
+        if diagnostic is not None:
+            diagnostic.actor(None)
         return scanned
 
     def _run_update_once(self, frame_step, now, players, neighbours,
@@ -10445,6 +10507,10 @@ class BotRuntime(object):
         """Advance one stable authority substep and preserve its events."""
         publish = bool(self._publish_control_this_step)
         refresh_control = bool(self._refresh_control_this_step)
+        diagnostic = self._combat_diagnostics
+        if diagnostic is not None and diagnostic.active:
+            diagnostic.begin_slice(frame_step, refresh_control, publish)
+        diagnostic = current_combat()
         if self._combat_diagnostics is not None:
             self._combat_diagnostics.count(
                 'bot_control_refreshes', int(refresh_control))
@@ -10528,6 +10594,9 @@ class BotRuntime(object):
         siege_locked_poses = {}
         integrated = set()
         for state in self.states.values():
+            if diagnostic is not None:
+                diagnostic.actor(state['id'])
+                diagnostic.phase('bot.prepare')
             if not state['alive']:
                 self._cancel_active_burst(state)
                 continue
@@ -10566,6 +10635,8 @@ class BotRuntime(object):
                 self._snapshot_bot_suspension_state(state)
             tick_safe[state['id']] = prebaked_navigation.pose_is_safe(
                 self.baked_graph, position, shoulder_cells=0)
+            if diagnostic is not None:
+                diagnostic.phase('bot.command')
             server_order = self._server_orders.get(state['id'])
             decide_with_order = getattr(self.adapter, 'decide_with_order', None)
             cache_key = (('server', self._server_order_tokens.get(
@@ -10579,6 +10650,16 @@ class BotRuntime(object):
                 refresh_control and
                 (not decision_cache_valid or
                  now >= decision_cache[1]))
+            if diagnostic is not None:
+                diagnostic.count(
+                    'decision_refresh' if decision_due else
+                    'decision_reused' if decision_cache_valid else
+                    'decision_physical_hold')
+                if decision_due:
+                    diagnostic.count(
+                        'decision_deadline' if decision_cache_valid else
+                        'decision_cache_missing' if decision_cache is None else
+                        'decision_order_changed')
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -10761,6 +10842,8 @@ class BotRuntime(object):
             # bot observes poses integrated by earlier bots in this same tick.
             # Human records do not change inside update, so index them once at
             # the first live bot instead of rebuilding the map for every bot.
+            if diagnostic is not None:
+                diagnostic.phase('bot.target_refresh')
             if live_players is None:
                 live_players = self._index_live_players(players)
             if refresh_shot_lanes and not collect_observation:
@@ -10832,6 +10915,8 @@ class BotRuntime(object):
                 self._update_bot_siege_intent(
                     state, command, target, step) or
                 siege_motion_locked)
+            if diagnostic is not None:
+                diagnostic.phase('bot.weapon_prepare')
             descriptor = self._descriptors.get(state['id'], {})
             profile = state.get('profile')
             profile = profile if isinstance(profile, dict) else {}
@@ -10888,6 +10973,8 @@ class BotRuntime(object):
                     command['throttle'] = 0.0
                     command['turn'] = 0.0
                     command['movement_intent'] = False
+            if diagnostic is not None:
+                diagnostic.phase('bot.motion_prepare')
             throttle = max(-1.0, min(1.0, command['throttle']))
             turn = max(-1.0, min(1.0, command.get('turn', 0.0)))
             aim_fallback = (target.get('position') if target is not None
@@ -11226,6 +11313,8 @@ class BotRuntime(object):
             self._log_motion_stall(
                 state, command, throttle, turn, path_clear, motion_probe, now,
                 pose_frozen)
+            if diagnostic is not None:
+                diagnostic.phase('bot.integrate')
             if not self.native_motion:
                 params = self._physics_params_for(state['id'])
                 # The selected corridor's ground sample is also the copied
@@ -11411,6 +11500,8 @@ class BotRuntime(object):
                         bot_id = int(state['id'])
                         self._hard_contact_grinds[bot_id] = max(
                             0, self._hard_contact_grinds.get(bot_id, 0) - 1)
+            if diagnostic is not None:
+                diagnostic.phase('bot.aim_fire')
             ammo_state.publish(state)
             ballistic_solution, local_action_fresh = \
                 self._cadenced_ballistic_solution(
@@ -11528,6 +11619,8 @@ class BotRuntime(object):
                         # moving SPG must discard it and prove the next shot
                         # again after its normal safe-driver motion completes.
                         self._cancel_artillery_intent(state['id'])
+            if diagnostic is not None:
+                diagnostic.phase('bot.cover_prepare')
             mode = command.get('combat_mode')
             if (collect_cover_jobs and
                     target is not None and target.get('visible') and
@@ -11543,6 +11636,8 @@ class BotRuntime(object):
                                    command.get('move_position', position)))
             _clear_critical_parts_tick_cache(state)
             processed_bot_ids.add(int(state['id']))
+        if diagnostic is not None:
+            diagnostic.actor(None)
         # A static firing lane is useful only while the team has a current
         # direct spot. Keep one queue of compact identities across callbacks;
         # resolve at most the bounded service cohort against current poses.
@@ -11649,6 +11744,8 @@ class BotRuntime(object):
         ballistic_ticks = {}
         for state in ordered_states:
             if state.get('alive', True) and state['id'] in integrated:
+                if diagnostic is not None:
+                    diagnostic.actor(state['id'])
                 attempted_yaw = attempted_yaws.get(
                     state['id'], state.get('yaw', 0.0))
                 was_airborne = bool(state.get('airborne', False))
@@ -11660,6 +11757,8 @@ class BotRuntime(object):
                     was_airborne or state.get('airborne', False))
                 settled_poses[state['id']] = _position(state)
                 slope_candidates.append(state)
+        if diagnostic is not None:
+            diagnostic.actor(None)
         # Ram vertical overlap and native plate proof must use this slice's
         # settled Y/pitch/roll, not the previous suspension pose. Resolve the
         # complete roster only after every live body reaches that boundary.
@@ -11688,6 +11787,8 @@ class BotRuntime(object):
             # bounded proximity validation and silently discard a real hit.
             publish = True
         for state in slope_candidates:
+            if diagnostic is not None:
+                diagnostic.actor(state['id'])
             bot_id = int(state['id'])
             attempted_yaw = attempted_yaws.get(
                 bot_id, state.get('yaw', 0.0))
@@ -11717,6 +11818,8 @@ class BotRuntime(object):
                     (tick_suspension_states.get(bot_id)
                      if self._suspension_params.get(bot_id) is not None
                      else None))
+        if diagnostic is not None:
+            diagnostic.actor(None)
         self._alive_bot_ticks += len(slope_candidates)
         if refresh_control and slope_candidates:
             start = self._slope_pose_cursor % len(slope_candidates)
@@ -11739,16 +11842,21 @@ class BotRuntime(object):
         wire_states = []
         launches = [dict(launch) for launch in self._pending_launches]
         for state in self._ordered_states():
+            if diagnostic is not None:
+                diagnostic.actor(state['id'])
             burst_state = self._burst_states.get(int(state['id']))
             if burst_state is not None:
                 burst_state.publish(state)
             self._publish_equipment_state(state)
-            projected = lan_client.project_owned_bot_state(state)
+            projected = observed_call(
+                'bot.wire_projection', lan_client.project_owned_bot_state, state)
             if projected is None:
                 raise RuntimeError('bot publication projection failed')
             if 'equipment_states' in projected:
                 self._equipment_wire_exposed_in_update.add(int(state['id']))
             wire_states.append(projected)
+        if diagnostic is not None:
+            diagnostic.actor(None)
         self._sample_time_us = step_end_time_us
         edge_sample_time_us, edge_revision = self._mark_publication_edge(
             ordered_states, launches, self._pending_ram_reports,

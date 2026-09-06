@@ -6,6 +6,8 @@ movement command, and optional fire intent.  The caller remains responsible
 for visibility, collision probes, and applying commands to any client entity.
 """
 
+from gui.mods.offline_lan_0922.worker_diagnostics import observed
+
 import math
 
 from gui.mods.offline_lan_0922.ai.driver import (
@@ -87,6 +89,7 @@ class BotAdapter(object):
         return self._drive_order(
             bot_id, state, position, strategic, direction_clear)
 
+    @observed('driver.order')
     def _drive_order(self, bot_id, state, position, strategic,
                      direction_clear):
         aim_position = strategic.get('aim_position')

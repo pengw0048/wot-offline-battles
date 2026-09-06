@@ -19,6 +19,8 @@ This module must stay importable with nothing but the stdlib: it sits right
 above paths.py at the bottom of the offhangar import graph.
 '''
 
+from gui.mods.offline_lan_0922.worker_diagnostics import observed
+
 import math
 
 # ---- Wargaming's own tuning, extracted from scripts/common/physics_shared.pyc
@@ -399,6 +401,7 @@ def _native_power_ratio(td, power_w):
 	return 1.0
 
 
+@observed('physics.derive_params')
 def derive_params(td, factors=None):
 	'''Real per-vehicle parameter set from a VehicleDescr. Every consumer
 	(player tick, each bot) MUST source its numbers from here - this is the
@@ -1773,6 +1776,7 @@ def _grip_decel(p, slope_pitch):
 	return slope_cohesion(ny) * GRAVITY * (ny if ny > 0.1 else 0.1)
 
 
+@observed('physics.longitudinal')
 def longitudinal_step(p, v, throttle, steering, slope_pitch, dt,
                       airborne=False, terrainIdx=0, handbrake=False):
 	'''One integration step of forward (along-hull) speed. Returns the new v.
@@ -1924,6 +1928,7 @@ def longitudinal_step(p, v, throttle, steering, slope_pitch, dt,
 	return nv
 
 
+@observed('physics.traverse')
 def traverse_step(p, omega, steer_dir, v, dt, terrainIdx=0, drive_intent=0.0):
 	'''One integration step of hull rotation speed (rad/s). WG 0.8.2: driving
 	speed does NOT slow the traverse (SPEED_AFFECT_ROT_DECREASE = 0.0) and the

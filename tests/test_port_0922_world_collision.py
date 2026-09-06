@@ -95,6 +95,38 @@ class _ItemMatrix(object):
 
 class WorldCollisionTests(unittest.TestCase):
 
+    def test_combat_timing_preserves_recasts_and_every_native_argument(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+
+        def snapshot(result):
+            verdict, native = result
+            calls = []
+            for call in native.call_args_list:
+                calls.append(tuple(
+                    (value.x, value.y, value.z) if isinstance(value, _Vector)
+                    else value for value in call.args))
+            return verdict, calls
+
+        for centers, wall in (((2.0,), None), ((2.0, 5.0), 8.0),
+                              ((2.0, 3.0, 4.0, 5.0, 6.0), None)):
+            with self.subTest(centers=centers, wall=wall):
+                baseline = snapshot(self._run_soft_recast(centers, wall))
+                diagnostic = worker_diagnostics.WorkerCombatDiagnostics(
+                    lambda: 1.0)
+                diagnostic.begin_frame(1, 10.0, 'collision')
+                measured = snapshot(worker_diagnostics.call(
+                    diagnostic, 'bot.physics', self._run_soft_recast,
+                    centers, wall))
+                row = diagnostic.finish_frame()
+                self.assertEqual(baseline, measured)
+                self.assertEqual(len(measured[1]),
+                                 sum(value['calls'] for name, value in
+                                     row['stages'].items() if name in (
+                                         'native.motion.ray',
+                                         'native.destructible.ray')))
+                self.assertIn('motion.destroy_recast', row['stages'])
+                self.assertIsNone(worker_diagnostics.current())
+
     def setUp(self):
         destructibles_sensor.set_diagnostics(False)
 

@@ -8,6 +8,9 @@ The implementation is engine-free; the caller supplies terrain and collision
 probes so it can be tested outside the legacy client.
 """
 
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    observed, count as combat_count)
+
 import heapq
 import math
 from collections import deque
@@ -793,6 +796,7 @@ class TerrainGrid(object):
 			if queued_cost != cost_so_far.get(current):
 				continue
 			expansions += 1
+			combat_count('nav_astar_expansions')
 			goal_distance = math.sqrt(
 				(current[0] - goal_cell[0]) ** 2 +
 				(current[1] - goal_cell[1]) ** 2)
@@ -903,6 +907,7 @@ class TerrainGrid(object):
 		yield self._smooth(
 			tuple(path), now, prefer_clearance, hard_edge_penalties)
 
+	@observed('nav.smooth')
 	def _smooth(self, path, now=0.0, prefer_clearance=False,
 			edge_penalties=None):
 		if len(path) < 3:
@@ -1056,6 +1061,7 @@ class TerrainNavigator(object):
 				for state in self.bot_direct_progress.values()),
 		}
 
+	@observed('nav.fallback')
 	def _fallback_target(self, bot_id, current, goal, now, avoid_points, state,
 			allow_safe_local=True):
 		"""Keep moving without treating an unproved long segment as drivable.
@@ -1093,6 +1099,7 @@ class TerrainNavigator(object):
 		self._set_fallback_mode(bot_id, 'reactive')
 		return tuple(goal)
 
+	@observed('nav.pending')
 	def _pending_target(self, bot_id, current, goal, now, state,
 			avoid_points=None, allow_last_target=True,
 			immediate_safe_local=False):
@@ -1231,6 +1238,7 @@ class TerrainNavigator(object):
 		state['replans'] = int(state.get('replans', 0)) + 1
 		return tuple(escape)
 
+	@observed('nav.macro_replan')
 	def _start_macro_replan(self, bot_id, state, current, target, now):
 		"""Reroute one bot without changing shared terrain or hazard state."""
 		escape = self.grid.safe_local_target(
@@ -1462,8 +1470,10 @@ class TerrainNavigator(object):
 		self.paths[key] = path
 		self.path_times[key] = float(now)
 		if path:
+			combat_count('nav_search_completed')
 			self.search_completed += 1
 		else:
+			combat_count('nav_search_failed')
 			self.search_failed += 1
 
 	def _cancel_bot_searches(self, bot_id, keep_key=None, kind=None):
@@ -1480,6 +1490,7 @@ class TerrainNavigator(object):
 				owned = False
 			if (owned and key != keep_key and
 					(kind is None or path_key[0] == kind)):
+				combat_count('nav_search_superseded')
 				self.searches.pop(key, None)
 				self.search_times.pop(key, None)
 
@@ -1524,6 +1535,7 @@ class TerrainNavigator(object):
 		self.search_frame_serial += 1
 		self._accrue_search_credit(elapsed)
 
+	@observed('nav.search_batch')
 	def _advance_searches(self, now):
 		"""Give every pending A* task a deterministic fair frame share.
 
@@ -1538,6 +1550,7 @@ class TerrainNavigator(object):
 		if not self.search_frame_open:
 			self._begin_automatic_frame(now)
 		if self.search_processed_frame == self.search_frame_serial:
+			combat_count('nav_batch_already_processed')
 			return
 		self.search_processed_frame = self.search_frame_serial
 		self.search_frame_time = float(now)
@@ -1554,6 +1567,7 @@ class TerrainNavigator(object):
 			max(0, int(self.search_credit)),
 			max(0, int(self.search_frame_budget)))
 		processed = 0
+		combat_count('nav_batch_pending_jobs', len(queue))
 		while budget > 0 and queue:
 			key = queue.pop(0)
 			search = self.searches.get(key)
@@ -1571,6 +1585,9 @@ class TerrainNavigator(object):
 		self.search_frame_budget = max(
 			0, int(self.search_frame_budget) - processed)
 		self.search_next_key = queue[0] if queue else None
+		combat_count('nav_search_steps', processed)
+		if queue and budget <= 0:
+			combat_count('nav_batch_budget_exhausted')
 		self._trim_cache(now)
 
 	def tick(self, now):
@@ -1586,6 +1603,7 @@ class TerrainNavigator(object):
 				self._active_macro_edge_penalties(bot_id, now)
 			self.grid.trim_caches()
 
+	@observed('nav.path')
 	def _path(self, path_key, start, goal, now, avoid_points):
 		key = self._cache_key(path_key, goal)
 		owner = self._path_owner(path_key)
@@ -1611,13 +1629,17 @@ class TerrainNavigator(object):
 					not self.grid.path_has_edge_penalty(
 						path, hard_edge_penalties)):
 				self.path_times[key] = float(now)
+				combat_count('nav_path_cached')
 				return key, path
 			if path:
+				combat_count('nav_path_penalty_invalidated')
 				del self.paths[key]
 				self.path_times.pop(key, None)
 			else:
 				if float(now) - self.path_times.get(key, 0.0) < 8.0:
+					combat_count('nav_failed_path_cooldown')
 					return key, path
+				combat_count('nav_failed_path_retry')
 				del self.paths[key]
 				self.path_times.pop(key, None)
 				self.grid.clear_negative_cache()
@@ -1637,6 +1659,7 @@ class TerrainNavigator(object):
 				path = (tuple(start), tuple(goal))
 				self.paths[key] = path
 				self.path_times[key] = float(now)
+				combat_count('nav_path_direct')
 				return key, path
 			# Moving tanks do not belong in a cached static terrain path. Including all
 			# 28 peers made every expansion scan transient positions, permanently baked
@@ -1650,6 +1673,9 @@ class TerrainNavigator(object):
 				hard_edge_penalties=hard_edge_penalties)
 			self.searches[key] = search
 			self.search_times[key] = float(now)
+			combat_count('nav_search_created')
+		else:
+			combat_count('nav_search_retained')
 		self._advance_searches(now)
 		if key in self.paths:
 			return key, self.paths[key]
@@ -1707,6 +1733,7 @@ class TerrainNavigator(object):
 		return self.grid.segment_has_baked_hazard(
 			path[index - 1], target, BAKED_SHALLOW_WATER)
 
+	@observed('nav.lookahead')
 	def _lookahead_index(self, current, path, index, path_key, now,
 			lookahead_distance):
 		"""Select a proved corridor point far enough ahead for current speed."""
@@ -1739,6 +1766,7 @@ class TerrainNavigator(object):
 				break
 		return lookahead
 
+	@observed('nav.next_target')
 	def next_target(self, bot_id, current, goal, path_key, now,
 			anchor=None, avoid_points=None, lookahead_distance=None,
 			movement_intent=True):
@@ -1791,6 +1819,8 @@ class TerrainNavigator(object):
 		request_transition = bool(had_request and request_changed)
 		allow_pending_last_target = True
 		if request_changed:
+			combat_count('nav_request_changed' if had_request else
+			             'nav_request_first')
 			# A new route segment or combat target is not evidence that the previous
 			# request stalled. A locally safe old target may bridge an asynchronous
 			# search only when it still advances the new intent.

@@ -601,6 +601,50 @@ be incomplete. `PERF combat_summary` reports each closed capture's stage
 totals, frame/time span, queue maxima, and counters. Detailed clocks are
 inactive between captures; the small frame ring remains available.
 
+The deeper Bot probes sample one callback per group of four control callbacks,
+rotating the selected slot across groups and including every Bot and catch-up
+slice in that callback. Selection follows actual Bot control work, so
+render-frame cadence cannot alias away all samples; rotation also spreads
+samples across slower decision phases. Existing
+coarse stages and lane-ledger accounting remain active throughout each capture.
+`detail_sampled` labels individual frames; a capture's `detail.frames`,
+`detail.stages` and `detail.counts` describe only that matched sample. Use these
+matched totals for the detailed cost breakdown; do not compare a sampled child
+total directly to an all-frame parent total or treat sampled counts as a census.
+The sampling reduces average observer cost; it cannot remove observer overhead
+from an individual sampled frame. An unsampled slow frame retains coarse timing.
+
+The new scopes separate Bot state/critical/parameter preparation, pose copying,
+longitudinal and traverse integration, publication, route selection, shared A*
+work, local driving, world-collision preparation, ground profiles, and
+destructible registration/candidate scans. `native.motion.ray/ground` and
+`native.destructible.*` time existing native calls with their original arguments
+and exception behavior. Reason counters distinguish expired or geometrically
+invalid motion receipts, superseded/failed/retained path requests, A* expansions,
+streaming misses, and empty-cell reuse. Same-geometry counters identify repeated
+ray or hull-box inputs within a Bot slice; they do not prove that intervening
+world mutations made reuse safe.
+
+`slices` records elapsed authority time, control refresh and publication intent
+at slice entry; a later contact barrier can still require an extra publication.
+The bounded `actors` rows identify Bot IDs and slices, with at most six reported
+per frame and 64 Bots in a capture summary. A frame tracks at most 128 Bot/slice
+pairs and 2048 geometry keys; overflow counters expose dropped diagnostic detail.
+`bot.actor` self time is residual work inside that Bot's block. Shared navigator
+batch time is attributed to its initiating caller, not exclusively to that
+Bot's own search. Pure-helper observation is bound only during synchronous owned
+calls on the current thread and restored on return, exception or reentry; it
+installs no native hooks and retains no entities or native vectors.
+
+`tools/benchmark_bot_workload.py --scenario combat` runs the real copied Bot,
+world-collision, ground and destructible-scan Python paths with deterministic
+native test seams, a finite hard wall, and nearby opposing teams. It includes
+spotting, lanes and acknowledged fire admission; projectile terminal processing
+has separate human/Bot pipeline parity tests. `--diagnostics` enables the shipped
+one-in-four detail sample; `--diagnostic-stride 1` measures full-detail overhead.
+Identical snapshot output includes every native collision call's geometry. This
+synthetic workload is not a captured-battle replay or a Windows performance test.
+
 The supplemental-lane shadow ledger retains at most 1024 identities and
 records actual enqueue-to-completion wait separately from phase-deadline
 overdue time and the existing whole-refresh-cycle overdue metric. It counts

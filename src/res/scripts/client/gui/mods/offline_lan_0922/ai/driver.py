@@ -6,6 +6,8 @@ for the current collision/terrain query; this module chooses only throttle and
 steering, so it is safe to exercise outside the BigWorld client.
 """
 
+from gui.mods.offline_lan_0922.worker_diagnostics import observed
+
 import math
 
 
@@ -317,6 +319,7 @@ class LocalDriver(object):
 				return False
 		return True
 
+	@observed('driver.reverse_contacts')
 	def _reverse_blocked_by_vehicle(self, position, yaw, neighbours,
 			half_length, half_width):
 		"""Reject a blind reverse whose reachable hull sweep is occupied.
@@ -401,6 +404,7 @@ class LocalDriver(object):
 					continue
 		return occupied
 
+	@observed('driver.recovery')
 	def _select_recovery_side(self, state, position, yaw, neighbours,
 			half_length, half_width):
 		"""Prefer the less occupied pivot arc, then use stable slot parity."""
@@ -414,6 +418,7 @@ class LocalDriver(object):
 			return 1.0
 		return self._fallback_recovery_side(state)
 
+	@observed('driver.choose_yaw')
 	def _choose_yaw(self, state, desired_yaw, direction_clear):
 		# Teammate proximity never replaces the route with a repulsion heading.
 		# Crossing priority is coordinated separately; real contact owns overlap.
@@ -439,6 +444,7 @@ class LocalDriver(object):
 				return candidate
 		return None
 
+	@observed('driver.drive')
 	def drive(self, bot_id, team_slot, position, yaw, speed, dt, target,
 			neighbours, direction_clear, velocity=None,
 			half_length=3.5, half_width=1.7,

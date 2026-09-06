@@ -5,6 +5,10 @@ The three sensor bodies below are dedented copies from ``offline_battle.py``.
 Only their former closure dependencies are supplied at module scope.
 """
 
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    observed, observed_call, observed_ray,
+    current as current_combat, count as combat_count)
+
 _event_sink = None
 
 _DESTRUCTIBLE_BIN_METRES = 8.0
@@ -573,6 +577,7 @@ def _item_name_cache_victim_1513(cache):
 		key=lambda value: (int(value[1].get('last_access', 0)), value[0]))[0]
 
 
+@observed('destructible.name_alignment')
 def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 		native_count, names):
 	"""Incrementally rebuild one chunk's exact per-item native filenames.
@@ -710,7 +715,9 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 			_release_item_name_query_focus_1513(space_id, chunk_id)
 			return entry['result']
 		try:
-			native_type = query(space_id, chunk_id, item_index, -1)
+			native_type = observed_call(
+				'native.destructible.category', query,
+				space_id, chunk_id, item_index, -1)
 		except Exception as error:
 			# The native name loop resolves through the same provider and omits
 			# this item.  Preserve that alignment fact, but quarantine the live
@@ -747,6 +754,7 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 	return entry['result']
 
 
+@observed('destructible.chunk_names')
 def _chunk_native_name_list_1513(bigworld, space_id, chunk_id, native_count):
 	"""Read and validate one chunk's possibly compacted native name list.
 
@@ -766,11 +774,14 @@ def _chunk_native_name_list_1513(bigworld, space_id, chunk_id, native_count):
 	entry = cache.get(key)
 	if entry is not None:
 		if entry['native_count'] == int(native_count):
+			combat_count('destructible_name_list_cached')
 			_touch_item_name_cache_entry_1513(entry)
 			return entry['names'], 'ready'
 		cache.pop(key, None)
 	try:
-		names = bigworld.wg_getChunkDestrFilenames(space_id, chunk_id)
+		names = observed_call(
+			'native.destructible.filenames',
+			bigworld.wg_getChunkDestrFilenames, space_id, chunk_id)
 	except Exception as error:
 		_isolate_destructible_1513(
 			'filename_query', chunk_id, detail=error)
@@ -1417,6 +1428,7 @@ def _spatial_revision_1513():
 
 
 def _receipt_stat_1513(name, amount=1):
+	combat_count('destructible_receipt_' + name, amount)
 	stats = globals().setdefault('g_offh_destr_receipt_stats', {})
 	stats[name] = int(stats.get(name, 0)) + int(amount)
 
@@ -1585,6 +1597,7 @@ def _receipt_cache_delete_1513(name, key):
 	return True
 
 
+@observed('destructible.empty_contact_check')
 def _empty_contact_receipt_valid_1513(key):
 	name = 'g_offh_destr_empty_contact_receipts'
 	state = globals().get(name)
@@ -1630,6 +1643,7 @@ def _proximity_receipt_key_1513(spaceID, current_chunk, pos, vehicle_box):
 		_bin_rectangle_signature_1513(_box_xz_bounds(vehicle_box)))
 
 
+@observed('destructible.empty_proximity_check')
 def _empty_proximity_receipt_valid_1513(
 		key, manager, chunk_registry):
 	"""Reuse only a complete, unchanged streamed empty-cell receipt."""
@@ -1674,6 +1688,7 @@ def _nearby_destructibles(registry, pos, vehicle_box=None):
 				if item[0] in seen:
 					continue
 				seen.add(item[0])
+				combat_count('destructible_nearby_items')
 				yield item
 
 def _symmetric_quantize(value, scale):
@@ -2030,7 +2045,9 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 			chunk_id, item_index):
 		return None
 	try:
-		chunk_matrix = BigWorld.wg_getChunkMatrix(spaceID, chunk_id)
+		chunk_matrix = observed_call(
+			'native.destructible.chunk_matrix', BigWorld.wg_getChunkMatrix,
+			spaceID, chunk_id)
 		chunk_translation = getattr(chunk_matrix, 'translation', None)
 	except Exception as error:
 		_isolate_destructible_1513(
@@ -2039,7 +2056,8 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 	if chunk_translation is None:
 		return None
 	try:
-		matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+		matrix = Math.Matrix(observed_call(
+			'native.destructible.item_matrix', BigWorld.wg_getDestructibleMatrix,
 			spaceID, chunk_id, item_index))
 	except Exception as error:
 		_isolate_destructible_1513(
@@ -2264,6 +2282,7 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 
 
 @_batched_spatial_mutations_1513
+@observed('destructible.stream_motion')
 def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
 	"""Live-validate catalog wires covering one exact vehicle sweep."""
 	catalog = _destructible_catalog or {}
@@ -2276,7 +2295,9 @@ def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
 			catalog.get('baked_shot_bins', {}).get(bin_key, ()))
 	instances = globals().get('g_offh_destr_instances', {})
 	for identity in sorted(identities):
+		combat_count('destructible_stream_candidates')
 		if identity not in instances:
+			combat_count('destructible_stream_missing')
 			_stream_baked_shot_instance_1513(spaceID, identity)
 
 
@@ -2543,6 +2564,7 @@ def _point_near_tree_sweep_1513(x, z, sweep_box,
 		contact_radius * contact_radius + 1.0e-8)
 
 
+@observed('destructible.tree_candidates')
 def _tree_candidates_for_sweeps_1513(
 		chunk_id, registry, sweep_boxes, tree_type,
 		contact_radius=_SOLID_CONTACT_RADIUS_1513):
@@ -2615,6 +2637,7 @@ def _vehicle_contact_box(pos, yaw, bbox, epsilon=0.075, travel=0.0,
 	return center, half_axes
 
 
+@observed('destructible.intersections')
 def _catalog_intersections(world_boxes, vehicle_box):
 	result = []
 	for world_box in world_boxes:
@@ -2781,7 +2804,11 @@ def clear_local_prediction(token):
 	return changed
 
 
+@observed('destructible.contact_candidates')
 def _catalog_contact_candidates(vehicle_box):
+	diagnostic = current_combat()
+	if diagnostic is not None:
+		diagnostic.geometry('destructible_contact_box', vehicle_box)
 	instances = globals().get('g_offh_destr_instances', {})
 	contact_bins = globals().get('g_offh_destr_contact_bins', {})
 	bounds = _box_xz_bounds(vehicle_box)
@@ -2796,10 +2823,12 @@ def _catalog_contact_candidates(vehicle_box):
 		if members:
 			had_members = True
 		for chunk_id, item_index in sorted(members):
+			combat_count('destructible_contact_bin_items')
 			identity = (int(chunk_id), int(item_index))
 			if _destructible_isolated_1513(*identity):
 				continue
 			if identity in seen:
+				combat_count('destructible_contact_duplicate_bin_item')
 				continue
 			seen.add(identity)
 			instance = instances.get(identity)
@@ -2819,6 +2848,7 @@ def _catalog_contact_candidates(vehicle_box):
 			'g_offh_destr_empty_contact_receipts', receipt_key,
 			{'cell_signature': _spatial_cell_signature_1513((receipt_key,))},
 			_EMPTY_CONTACT_RECEIPT_LIMIT)
+	combat_count('destructible_contact_candidates', len(candidates))
 	return candidates
 
 
@@ -2998,7 +3028,8 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			if not recast_budget or int(recast_budget[0]) <= 0:
 				return 'pending_hard' if pending_contact else 'deferred'
 			recast_budget[0] = int(recast_budget[0]) - 1
-		current_hit = BigWorld.wg_collideSegment(
+		current_hit = observed_ray(
+			'native.destructible.ray', BigWorld.wg_collideSegment,
 			spaceID, next_start, segment_end, 128)
 		if current_hit is None:
 			return 'kinetic' if kinetic_contact else True
@@ -3202,6 +3233,7 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04,
 	return False
 
 
+@observed('destructible.hull_guard')
 def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04,
 		motion_yaw=None):
 	"""Cheap contact-bin guard for the copied player/Bot pose integrators."""
@@ -3235,6 +3267,7 @@ def _catalog_motion_result(status, token=None, accepted_now=False,
 	return legacy_status if return_status else legacy_status != 'clear'
 
 
+@observed('destructible.motion')
 def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		return_status=False, dt=0.04, kinetic_speed=None,
 		return_detail=False, kinetic_commit=False, commit_enabled=True,
@@ -3638,6 +3671,7 @@ def _falling_native_state_1513(spaceID, chunkID, itemIndex, math_module):
 
 
 @_batched_spatial_mutations_1513
+@observed('destructible.falling_refresh')
 def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 	"""Follow each destroyed falling atom's live native transform exactly."""
 	instances = globals().get('g_offh_destr_instances', {})
@@ -3703,7 +3737,8 @@ def _refresh_destroyed_falling_instances_1513(spaceID, authority, now):
 			active[identity]['last_refresh'] = float(now)
 			continue
 		try:
-			matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+			matrix = Math.Matrix(observed_call(
+				'native.destructible.item_matrix', BigWorld.wg_getDestructibleMatrix,
 				spaceID, chunk_id, item_index))
 		except Exception as error:
 			_isolate_destructible_1513(
@@ -4286,6 +4321,7 @@ def prewarm_tree_registry(spaceID, pos, yaw, td=None, now=None,
 	}
 
 
+@observed('destructible.tree_motion')
 def _tree_motion_resolution_1513(
 		spaceID, start_pos, start_yaw, end_pos, end_yaw, speed, td, now,
 		dt, requested_chunks=None):
@@ -4478,9 +4514,11 @@ def _trusted_tree_event_position_1513(
 	try:
 		import BigWorld
 		import Math
-		chunk_matrix = Math.Matrix(BigWorld.wg_getChunkMatrix(
+		chunk_matrix = Math.Matrix(observed_call(
+			'native.destructible.chunk_matrix', BigWorld.wg_getChunkMatrix,
 			spaceID, identity[0]))
-		item_matrix = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+		item_matrix = Math.Matrix(observed_call(
+			'native.destructible.item_matrix', BigWorld.wg_getDestructibleMatrix,
 			spaceID, identity[0], identity[1]))
 		chunk_translation = chunk_matrix.translation
 		item_translation = item_matrix.translation
@@ -4736,6 +4774,7 @@ def commit_tree_contacts(
 
 
 @_batched_spatial_mutations_1513
+@observed('destructible.body_scan')
 def _fell_trees_near(
 		spaceID, pos, yaw, vel, td=None, registration_only=False,
 		priority_chunks=None):
@@ -4863,6 +4902,7 @@ def _fell_trees_near(
 				-_prewarm_priority.get(cid, (0.0, 0.0))[0],
 				-_prewarm_priority.get(cid, (0.0, 0.0))[1], cid))
 		for cid in _cid_order:
+			combat_count('destructible_body_chunks')
 			if _destructible_isolated_1513(cid):
 				continue
 			registry = _st['chunks'].get(cid)
@@ -4873,6 +4913,7 @@ def _fell_trees_near(
 				_drop_streamed_chunk_registry_1513(_st, cid)
 				registry = None
 			if registry is None:
+				combat_count('destructible_body_unregistered_chunk')
 				if _native_count is None:
 					if _destructible_isolated_1513(cid):
 						continue
@@ -4917,7 +4958,8 @@ def _fell_trees_near(
 				}
 				_retry_registry = False
 				try:
-					_cm_t = BigWorld.wg_getChunkMatrix(
+					_cm_t = observed_call(
+						'native.destructible.chunk_matrix', BigWorld.wg_getChunkMatrix,
 						spaceID, cid).translation
 				except Exception as error:
 					_isolate_destructible_1513(
@@ -4940,7 +4982,8 @@ def _fell_trees_near(
 							(_baked_slot is not None and
 								_baked_slot.get('kind') == 'falling'))
 						try:
-							_m = Math.Matrix(BigWorld.wg_getDestructibleMatrix(
+							_m = Math.Matrix(observed_call(
+								'native.destructible.item_matrix', BigWorld.wg_getDestructibleMatrix,
 								spaceID, cid, _ti))
 						except Exception as error:
 							_isolate_destructible_1513(
@@ -5726,7 +5769,8 @@ def _try_destroy_solid_hit(spaceID, segment_start, hit_pt, surf_normal,
 			_probes += ((hit_pt + _incoming.scale(3.0),
 				hit_pt - _incoming.scale(2.0)),)
 		for _seg_a, _seg_b in _probes:
-			_mi = BigWorld.wg_getMatInfoNearPoint(
+			_mi = observed_call(
+				'native.destructible.material', BigWorld.wg_getMatInfoNearPoint,
 				spaceID, _seg_a, _seg_b, hit_pt, lambda *a: False)
 			_decoded = _decode_mat_info_1513(_mi)
 			if not _solid_destructible_candidate_1513(
