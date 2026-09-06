@@ -393,6 +393,53 @@ class LocalDriver(object):
 				continue
 		return None
 
+	def _static_hull_ahead(self, position, candidate_yaw, neighbours,
+			half_length, half_width):
+		"""Reject a candidate whose near hull sweep is occupied by a wreck.
+
+		Living traffic is deliberately not a steering veto: it clears by itself
+		and the simultaneous contact solver owns the impending collision. A
+		destroyed hull never moves and never yields, so a heading that ends
+		inside one is not a direction this tank can drive, and re-selecting it
+		is exactly the visible grind against a corpse. Only a neighbour that
+		explicitly reports itself dead is treated this way, so a caller that
+		does not publish aliveness keeps the previous behaviour.
+
+		The reach matches the reverse check: this is the space the hull is
+		about to enter, not a long-range forecast, so a wreck further along the
+		route never withdraws a heading that is still usable.
+		"""
+		reach = half_length * 1.6
+		sweep = (
+			float(position[0]) + math.sin(candidate_yaw) * reach * 0.5,
+			float(position[1]),
+			float(position[2]) + math.cos(candidate_yaw) * reach * 0.5)
+		sweep_length = half_length + reach * 0.5
+		for neighbour in neighbours or ():
+			if not isinstance(neighbour, dict) or neighbour.get('alive', True):
+				continue
+			other = self._neighbour_position(neighbour)
+			if other is None:
+				continue
+			try:
+				if abs(float(other[1]) - float(position[1])) > 5.0:
+					continue
+			except Exception:
+				pass
+			try:
+				other_yaw = float(neighbour.get('yaw', 0.0) or 0.0)
+				other_length = float(
+					neighbour.get('half_length', half_length) or half_length)
+				other_width = float(
+					neighbour.get('half_width', half_width) or half_width)
+				if self._obb_overlap(
+						sweep, float(candidate_yaw), sweep_length, half_width,
+						other, other_yaw, other_length, other_width):
+					return True
+			except Exception:
+				continue
+		return False
+
 	def _recovery_occupancy(self, position, yaw, direction, neighbours,
 			half_length, half_width):
 		"""Count occupied sampled poses in one in-place recovery turn."""
@@ -466,7 +513,9 @@ class LocalDriver(object):
 		return True
 
 	@observed('driver.choose_yaw')
-	def _choose_yaw(self, state, desired_yaw, direction_clear):
+	def _choose_yaw(self, state, desired_yaw, direction_clear,
+			position=None, neighbours=None,
+			half_length=3.5, half_width=1.7):
 		# Teammate proximity never replaces the route with a repulsion heading.
 		# Crossing priority is coordinated separately; real contact owns overlap.
 		candidates = []
@@ -484,7 +533,10 @@ class LocalDriver(object):
 		# Probe in score order and return the first fully viable direction. Most
 		# frames need one terrain ray set instead of probing all seven candidates.
 		for unused_score, candidate in candidates:
-			if self._clear(direction_clear, candidate):
+			if (self._clear(direction_clear, candidate) and
+					not (position is not None and self._static_hull_ahead(
+						position, candidate, neighbours,
+						half_length, half_width))):
 				state['steering_reason'] = (
 					'route' if abs(_angle_delta(candidate, desired_yaw)) <= 0.05
 					else 'obstacle')
@@ -693,11 +745,15 @@ class LocalDriver(object):
 		if (old_yaw is not None and state['plan_age'] < hold_seconds and
 				abs(_angle_delta(desired_yaw, old_yaw)) < 2.15 and
 				self._failure_penalty(state, old_yaw) <= 0.0 and
-				self._clear(direction_clear, old_yaw)):
+				self._clear(direction_clear, old_yaw) and
+				not self._static_hull_ahead(
+					position, old_yaw, neighbours,
+					own_half_length, own_half_width)):
 			chosen_yaw = old_yaw
 		if chosen_yaw is None:
 			chosen_yaw = self._choose_yaw(
-				state, desired_yaw, direction_clear)
+				state, desired_yaw, direction_clear, position, neighbours,
+				own_half_length, own_half_width)
 			state['plan_age'] = 0.0
 		if chosen_yaw is None:
 			# No forward ray is usable.  Start a timed recovery on the next tick
