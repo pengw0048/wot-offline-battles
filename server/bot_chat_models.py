@@ -16,7 +16,14 @@ resolved from "latest" so a working install cannot change under a player.
 
 MODELSCOPE = "modelscope"
 HUGGINGFACE = "huggingface"
+GITHUB = "github"
 SOURCES = (MODELSCOPE, HUGGINGFACE)
+# The runtime's upstream home is GitHub, which is the least reliable host in
+# this catalogue from mainland China.  A ModelScope repository mirrors the
+# pinned release assets byte for byte, so the same digest validates either
+# and a stale or wrong mirror fails integrity rather than installing
+# something else.
+RUNTIME_SOURCES = (MODELSCOPE, GITHUB)
 
 # ``FilePath`` serves the LFS object directly, which is what makes ModelScope
 # usable without its SDK.
@@ -89,7 +96,10 @@ DEFAULT_TIER_KEY = "qwen3-0.6b"
 
 RUNTIME_BUILD = "b10819"
 RUNTIME_LICENSE = "MIT"
-_RUNTIME_URL = (
+# Redistributing the MIT-licensed binaries only requires the licence to
+# travel with them, so the mirror carries llama.cpp's LICENSE file too.
+RUNTIME_MODELSCOPE_REPO = "pengw0048/wot-offline-battles-llama-runtime"
+_RUNTIME_GITHUB_URL = (
     "https://github.com/ggml-org/llama.cpp/releases/download/%s/%s")
 RUNTIME_ASSETS = {
     "x64": {
@@ -154,9 +164,16 @@ def runtime_asset(arch):
     return dict(entry) if entry else None
 
 
-def runtime_url(arch):
-    """Return the pinned runtime download URL, or None."""
+def runtime_url(arch, source=MODELSCOPE):
+    """Return one pinned runtime download URL, or None.
+
+    ModelScope is the default for the same reason it leads the model list.
+    Both mirrors serve the identical archive, so a caller may try either and
+    validate the result against one ``sha256``.
+    """
     entry = runtime_asset(arch)
-    if entry is None:
+    if entry is None or source not in RUNTIME_SOURCES:
         return None
-    return _RUNTIME_URL % (RUNTIME_BUILD, entry["file"])
+    if source == MODELSCOPE:
+        return _MODELSCOPE_URL % (RUNTIME_MODELSCOPE_REPO, entry["file"])
+    return _RUNTIME_GITHUB_URL % (RUNTIME_BUILD, entry["file"])

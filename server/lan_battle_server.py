@@ -14473,11 +14473,12 @@ def print_bot_chat_catalogue(stream=None):
               % platform.machine(), file=stream)
         return
     asset = bot_chat_models.runtime_asset(arch)
-    print("runtime %-5s %6.0f MB  %s" % (
-        arch, asset["size"] / 1048576.0, bot_chat_models.RUNTIME_LICENSE),
-        file=stream)
-    print("       %-12s %s" % ("github", bot_chat_models.runtime_url(arch)),
-          file=stream)
+    print("runtime       %-5s %-7s %6.0f MB  %s" % (
+        arch, bot_chat_models.RUNTIME_BUILD, asset["size"] / 1048576.0,
+        bot_chat_models.RUNTIME_LICENSE), file=stream)
+    for source in bot_chat_models.RUNTIME_SOURCES:
+        print("       %-12s %s" % (
+            source, bot_chat_models.runtime_url(arch, source)), file=stream)
 
 
 def main():
