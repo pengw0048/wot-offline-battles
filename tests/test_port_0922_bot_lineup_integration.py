@@ -257,6 +257,12 @@ class BotLineupIntegrationTests(unittest.TestCase):
             6: types.SimpleNamespace(
                 name='ussr:R99_SecretTank', level=8,
                 tags=('mediumTank', 'secret')),
+            7: types.SimpleNamespace(
+                name='ussr:R07_T-34-85_bootcamp', level=2,
+                tags=('mediumTank', 'secret')),
+            8: types.SimpleNamespace(
+                name='ussr:R45_IS-7_fallout', level=10,
+                tags=('heavyTank', 'fallout', 'secret')),
         }
         runtime = types.SimpleNamespace(
             nations=types.SimpleNamespace(
@@ -264,6 +270,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
             vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
                 getList=lambda unused_nation_id: entries)))
 
+        # A hidden entry keeps its own honest level and name, so it stays in
+        # every catalogue.  The Bootcamp copy publishes the tier 6 T-34-85 at
+        # level 2 and the Fallout copy is event content; neither may reach the
+        # garage, the waiting-room roster, or a tier-matched Bot lineup.
         self.assertEqual(
             ['ussr:R11_MS-1', 'ussr:R99_SecretTank'],
             [row['name'] for row in
@@ -273,6 +283,29 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 vehicle_configuration.is_standard_battle_vehicle(entry))
         self.assertTrue(vehicle_configuration.is_standard_battle_vehicle(
             entries[6]))
+        for key in (7, 8):
+            self.assertFalse(
+                vehicle_configuration.is_standard_battle_vehicle(
+                    entries[key]))
+            self.assertFalse(bot_lineup_profiles.vehicle_choice_is_eligible({
+                'nation': entries[key].name.split(':')[0],
+                'vehicle': entries[key].name.split(':')[1],
+                'tags': entries[key].tags,
+            }))
+
+    def test_launcher_bot_selector_shares_the_mod_exclusion_rule(self):
+        self.assertEqual(
+            frozenset(vehicle_configuration.NON_STANDARD_BATTLE_TAGS),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
+        self.assertEqual(
+            frozenset(vehicle_configuration.NON_STANDARD_BATTLE_NAMES),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
+        self.assertEqual(
+            tuple(vehicle_configuration.CLONE_NAME_SUFFIXES),
+            tuple(bot_lineup_profiles.CLONE_BOT_VEHICLE_SUFFIXES_0922))
+        self.assertEqual(
+            vehicle_configuration.CATALOGUE_VISIBILITY_TAG,
+            bot_lineup_profiles.CATALOGUE_VISIBILITY_TAG_0922)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{

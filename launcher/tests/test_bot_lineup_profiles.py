@@ -35,7 +35,7 @@ class BotLineupProfilesTests(unittest.TestCase):
             {"nation": "usa", "vehicle": "T23", "tags": ()},
             {"nation": "germany",
              "vehicle": "G138_VK168_02_Mauerbrecher", "tags": ()},
-            {"nation": "ussr", "vehicle": "R04_T-34",
+            {"nation": "ussr", "vehicle": "R98_T44_85",
              "tags": ("secret",)},
             {"nation": "ussr", "vehicle": "Observer",
              "tags": ("observer",)},
@@ -45,10 +45,16 @@ class BotLineupProfilesTests(unittest.TestCase):
              "tags": ("event_battles",)},
             {"nation": "germany", "vehicle": "IgrTank",
              "tags": ("premiumIGR",)},
+            {"nation": "ussr", "vehicle": "R07_T-34-85_bootcamp",
+             "tags": ("mediumTank", "secret")},
+            {"nation": "ussr", "vehicle": "R45_IS-7_fallout",
+             "tags": ("heavyTank", "fallout", "secret")},
         ]
 
+        # A hidden entry with an honest level and name stays selectable; the
+        # Bootcamp and Fallout copies of a real tank do not.
         self.assertEqual(
-            ["ussr:R11_MS-1"],
+            ["ussr:R11_MS-1", "ussr:R98_T44_85"],
             [choice["type_name"] for choice in
              bot_lineup_profiles.eligible_vehicle_choices(choices)])
 
