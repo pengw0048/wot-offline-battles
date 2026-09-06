@@ -400,6 +400,42 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(director.recent_lines(1), [])
 
 
+class AdmissionReportTest(unittest.TestCase):
+    """A battle where nobody answers must leave evidence of which case it was."""
+
+    def setUp(self):
+        self.snapshot = _snapshot(_roster())
+
+    def test_an_addressed_line_reports_who_and_how_many(self):
+        director = _director()
+        outcome = director.observe_player_line(
+            0, 1, '那个t34 过来', self.snapshot)
+        self.assertEqual(ADDRESS_VEHICLE, outcome['kind'])
+        self.assertEqual([1], outcome['bot_ids'])
+        self.assertGreaterEqual(outcome['scheduled'], 1)
+
+    def test_a_line_nobody_answers_reports_zero(self):
+        director = _director(value=1.0)
+        outcome = director.observe_player_line(
+            0, 1, '这局有点难打', self.snapshot)
+        self.assertEqual(ADDRESS_NONE, outcome['kind'])
+        self.assertEqual(0, outcome['scheduled'])
+
+    def test_a_line_with_the_feature_off_reports_zero(self):
+        director = BotChatDirector(_ScriptedRandom(), tick_hz=30.0)
+        director.reset_round(7)
+        outcome = director.observe_player_line(
+            0, 1, '那个t34 过来', self.snapshot)
+        self.assertEqual(0, outcome['scheduled'])
+
+    def test_a_team_with_no_living_bots_reports_zero(self):
+        dead = [dict(bot, alive=False) for bot in _roster()]
+        director = _director()
+        outcome = director.observe_player_line(
+            0, 1, '那个t34 过来', _snapshot(dead))
+        self.assertEqual(0, outcome['scheduled'])
+
+
 class NoBackendTest(unittest.TestCase):
     """With no optional model installed the feature is simply off."""
 
