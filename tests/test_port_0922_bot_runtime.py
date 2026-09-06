@@ -12531,6 +12531,43 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertGreater(
             abs(runtime.states[11]['x'] - runtime.states[12]['x']), 2.0)
 
+    def test_contact_broadphase_skips_distant_bodies_and_keeps_residual_push(self):
+        runtime = self.module.BotRuntime(1)
+        runtime._clear = lambda *unused: True
+        state = {
+            'id': 11, 'team': 1, 'slot': 0, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+            'mass': 25000.0,
+            'collision_shape': self.module.tank_collision.DEFAULT_SHAPE,
+            'speed': 0.0, 'push_x': 2.0, 'push_z': -1.0,
+        }
+        peer = dict(state, id=12, team=2, x=20.0, push_x=0.0, push_z=0.0)
+        runtime.states = {11: state, 12: peer}
+        runtime._ram_contacts = frozenset(((11, 12),))
+        calls = []
+        original = self.module.tank_collision.resolve_tank
+
+        def resolve(own, others, **kwargs):
+            calls.append((own['id'], tuple(other['id'] for other in others)))
+            return original(own, others, **kwargs)
+
+        self.module.tank_collision.resolve_tank = resolve
+        try:
+            self.assertEqual([], runtime._resolve_tank_contacts([], 1.0, 0.1))
+            self.assertEqual([], calls)
+            self.assertAlmostEqual(0.2, state['x'])
+            self.assertAlmostEqual(-0.1, state['z'])
+            self.assertAlmostEqual(2.0 * 0.9 ** 6, state['push_x'])
+            self.assertAlmostEqual(-1.0 * 0.9 ** 6, state['push_z'])
+            self.assertFalse(runtime._ram_contacts)
+            # Broad phase uses each mounted hull's size, including a wreck;
+            # it must never assume that all tanks fit a default-size circle.
+            peer.update(alive=False, collision_shape=(20.0, 3.5, -0.8, 2.0))
+            runtime._resolve_tank_contacts([], 1.1, 0.1)
+            self.assertEqual([(11, (12,))], calls)
+        finally:
+            self.module.tank_collision.resolve_tank = original
+
     def test_bot_push_decay_is_equal_across_render_rates(self):
         def run_for_one_second(frame_rate):
             runtime = self.module.BotRuntime(1)

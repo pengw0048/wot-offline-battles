@@ -10,6 +10,7 @@ probes so it can be tested outside the legacy client.
 
 import heapq
 import math
+from collections import deque
 
 from gui.mods.offline_lan_0922.ai.driver import (
 	FIRST_CANDIDATE_OFFSET, WAYPOINT_ARRIVAL_RADIUS)
@@ -20,6 +21,8 @@ BAKED_FATAL_HAZARDS = 1 | 2
 # Shallow water remains passable when no dry route exists, but the baked graph
 # assigns it a large traction/risk cost so ordinary shortcuts stay on land.
 BAKED_SHALLOW_WATER = 4
+# Cache compact answers, not crossed-cell lists, in the 32-bit worker.
+MAX_BAKED_CORRIDOR_CACHE = 2048
 BAKED_SHALLOW_WATER_PENALTY = 4.0
 BAKED_EDGE_CLEARANCE_WEIGHT = 0.20
 BAKED_FORMAT_NAME = 'offline-lan-0922-navgraph'
@@ -131,6 +134,8 @@ class TerrainGrid(object):
 		self._baked_max_grade = max(0.05, float(bake.get('max_grade', 0.30)))
 		self.bounds = tuple(graph.get('bounds') or self.bounds or ()) or None
 		self.prebaked = True
+		self._baked_corridor_cache = {}
+		self._baked_corridor_order = deque()
 
 	def cell_for(self, point):
 		origin_x, origin_z = self._baked_origin if self.prebaked else (0.0, 0.0)
@@ -333,20 +338,43 @@ class TerrainGrid(object):
 			cells.append((x, z))
 		return tuple(cells)
 
+	def _baked_corridor(self, start, end):
+		"""Share immutable directed link/hazard answers for one grid corridor.
+
+		Baked traversal depends on the endpoint cells, not each observer's
+		sub-cell position. Keep world bounds and short-distance checks in their
+		callers, and never cache live failed-edge penalties or native probes.
+		"""
+		key = (self.cell_for(start), self.cell_for(end))
+		cached = self._baked_corridor_cache.get(key)
+		if cached is not None:
+			return cached
+		cells = self._baked_segment_cells(start, end)
+		clear = bool(cells)
+		hazards = 0 if cells else None
+		for offset in range(1, len(cells)):
+			cell = cells[offset]
+			index = self._baked_index(cell)
+			if index is None:
+				clear, hazards = False, None
+				break
+			hazards |= int(self._baked_hazards[index])
+			if clear and self._baked_edge_height(cells[offset - 1], cell) is None:
+				clear = False
+		result = (clear, hazards)
+		if len(self._baked_corridor_cache) >= MAX_BAKED_CORRIDOR_CACHE:
+			self._baked_corridor_cache.pop(self._baked_corridor_order.popleft())
+		self._baked_corridor_cache[key] = result
+		self._baked_corridor_order.append(key)
+		return result
+
 	def segment_has_baked_hazard(self, start, end, hazard_mask):
 		"""Check cells entered by a shortcut without trapping a tank at its start."""
 		if not self.prebaked:
 			return False
-		cells = self._baked_segment_cells(start, end)
-		if not cells:
-			return True
-		# Exclude the start cell so a tank already on a shallow ford may leave it.
-		for cell in cells[1:]:
-			index = self._baked_index(cell)
-			if (index is None or
-					int(self._baked_hazards[index]) & int(hazard_mask)):
-				return True
-		return False
+		unused_clear, hazards = self._baked_corridor(start, end)
+		# The summary excludes the occupied start cell so a tank can leave a ford.
+		return hazards is None or bool(hazards & int(hazard_mask))
 
 	def baked_hazard_cells(self, start, end, hazard_mask):
 		"""Return entered hazard cells, or ``None`` for an invalid corridor."""
@@ -434,15 +462,7 @@ class TerrainGrid(object):
 		if distance < 0.25:
 			return True
 		if self.prebaked:
-			cells = self._baked_segment_cells(start, end)
-			if not cells:
-				return False
-			if len(cells) == 1:
-				return True
-			for old_cell, cell in zip(cells, cells[1:]):
-				if self._baked_edge_height(old_cell, cell) is None:
-					return False
-			return True
+			return self._baked_corridor(start, end)[0]
 		start_key = self._point_key(start)
 		end_key = self._point_key(end)
 		key = (start_key, end_key)

@@ -256,6 +256,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
         next_point = path[pivot + 1]
         cell = navigator.grid.cell_for(next_point)
         graph['hazards'][cell[1] * graph['width'] + cell[0]] = 4
+        navigator.grid._install_baked_graph(graph)
         selected = navigator.next_target(7, path[pivot], path[-1], key, 1.0)
         self.assertEqual(next_point, selected)
         self.assertEqual(next_point,
@@ -292,6 +293,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
         next_point = path[pivot + 1]
         cell = navigator.grid.cell_for(next_point)
         graph['hazards'][cell[1] * graph['width'] + cell[0]] = 4
+        navigator.grid._install_baked_graph(graph)
         self.assertEqual(next_point, navigator.next_target(
             7, path[pivot], path[-1], key, 1.0))
 

@@ -8000,12 +8000,14 @@ class BotRuntime(object):
 
         by_id = dict((tank['id'], tank) for tank in tanks)
         collision_bodies = {}
+        collision_radii = {}
         maximum_radius = 4.0
         for tank in tanks:
-            shape = tank.get('shape') or tank_collision.DEFAULT_SHAPE
+            shape = tank_collision._tank_shape(tank)
             radius = math.sqrt(
                 shape[0] * shape[0] + shape[1] * shape[1])
             maximum_radius = max(maximum_radius, radius)
+            collision_radii[tank['id']] = radius
             collision_bodies[tank['id']] = {
                 'position': (tank['x'], tank['y'], tank['z'])}
         collision_index = tank_collision.build_spatial_index(
@@ -8047,6 +8049,7 @@ class BotRuntime(object):
                 continue
             candidate_ids = tank_collision.nearby_ids(
                 collision_index, own['x'], own['z'])
+            own_radius = collision_radii[own['id']]
             others = []
             for tank_id in candidate_ids:
                 if tank_id == own['id'] or tank_id not in by_id:
@@ -8055,7 +8058,26 @@ class BotRuntime(object):
                 if pair in receipt_pairs:
                     continue
                 other = by_id[tank_id]
+                # The spatial bucket is deliberately conservative. Apply the
+                # resolver's existing circle exclusion using radii computed
+                # once for these frozen bodies, before parsing each distant
+                # peer again for every observing hull.
+                dx = own['x'] - other['x']
+                dz = own['z'] - other['z']
+                reach = (own_radius + collision_radii[tank_id] +
+                         tank_collision.CONTACT_BROADPHASE_PADDING)
+                if dx * dx + dz * dz > reach * reach:
+                    continue
                 others.append(other)
+            if not others:
+                # A separated tank still owns residual contact momentum and
+                # must advance/decay it through the same world collision gate.
+                if state.get('push_x', 0.0) or state.get('push_z', 0.0):
+                    self._apply_tank_contact_response(state, {
+                        'correction': (0.0, 0.0),
+                        'delta_velocity': (0.0, 0.0),
+                    }, step)
+                continue
             resolve_kwargs = {
                 'now': now,
                 'ram_cooldowns': self._ram_cooldowns,

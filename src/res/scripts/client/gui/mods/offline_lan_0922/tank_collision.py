@@ -33,6 +33,7 @@ POSITION_SLOP = 0.01
 # the centimetre.
 RAM_CONTACT_POINT_SLOP = 0.75
 POSITION_PERCENT = 0.95
+CONTACT_BROADPHASE_PADDING = 0.25
 _SHAPE_CACHE = {}
 SPATIAL_CELL_SIZE = 24.0
 
@@ -687,7 +688,7 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
         other_radius = math.sqrt(
             other_shape[0] * other_shape[0] +
             other_shape[1] * other_shape[1])
-        maximum_distance = own_radius + other_radius + 0.25
+        maximum_distance = own_radius + other_radius + CONTACT_BROADPHASE_PADDING
         if (center_dx * center_dx + center_dz * center_dz >
                 maximum_distance * maximum_distance):
             continue
