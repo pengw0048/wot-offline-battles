@@ -48,13 +48,16 @@ TEAM_BUDGET_SECONDS = 20.0
 MAX_CONVERSATION_HOPS = 2
 HOP_PROBABILITY = (0.55, 0.3)
 
-# A generating backend is asked when the line is scheduled and states how
-# long it wants.  Ordinary reply pacing already covers a fast machine, so
-# this only matters for a slow one, and the cap bounds how long a hung
-# generator can hold a scheduled line before it is abandoned.  A late answer
-# still reads as a teammate who took their time; an abandoned one reads as a
-# feature that does not work.
+# How long a backend may ask the director to hold a line before first
+# looking for its text.  This bounds the initial wait only: a line whose
+# text is not ready yet keeps waiting for as long as it is still being
+# written, because a late answer still reads as a teammate who took their
+# time and an abandoned one reads as a feature that does not work.
 MAX_PREFETCH_WAIT_SECONDS = 30.0
+# How often a line whose text has not arrived yet is looked at again. The
+# estimate that scheduled it is only an estimate, and abandoning a line the
+# moment it is late throws away work that is about to finish.
+PREFETCH_RETRY_SECONDS = 0.5
 
 # Peng's product choice: most lines get an answer, and an interesting line may
 # get more than one.  Silence stays legal, it is simply not the default.
@@ -641,6 +644,7 @@ class BotChatDirector(object):
                 float(getattr(self._backend, "latency_hint_seconds", 0.0))))
         self._pending.append({
             "due_tick": int(tick) + self._ticks(delay),
+            "scheduled_tick": int(tick),
             "bot_id": int(bot_id),
             "team": int(team),
             "trigger": trigger,
@@ -696,6 +700,9 @@ class BotChatDirector(object):
             # A backend failure is contained to this one line.  It must never
             # silence the team for the rest of the round or fault the tick.
             return None
+        # Waiting comes first: an unfinished line has no marker to read.
+        if not text and self._still_writing(tick, entry, request):
+            return None
         text, marker = parse_marker(text)
         text = clamp_chat_text(text)
         if text is None:
@@ -736,6 +743,27 @@ class BotChatDirector(object):
                 return None
             order["cell_index"] = int(index)
         return order
+
+    def _still_writing(self, tick, entry, request):
+        """Put a late line back rather than throwing its answer away.
+
+        There is deliberately no deadline here. A guessed one has twice now
+        discarded an answer that was seconds from being finished, and the
+        honest boundary is whether the backend is still writing at all: it
+        stops saying so when the generation completes or its own request
+        times out, and the line is dropped on the next look.
+        """
+        pending = getattr(self._backend, "pending", None)
+        if pending is None:
+            return False
+        try:
+            if not pending(request):
+                return False
+        except Exception:
+            return False
+        entry["due_tick"] = tick + self._ticks(PREFETCH_RETRY_SECONDS)
+        self._pending.append(entry)
+        return True
 
     def _address_prefix(self, address_kind, snapshot):
         """Name the human back only when they named a Bot first."""

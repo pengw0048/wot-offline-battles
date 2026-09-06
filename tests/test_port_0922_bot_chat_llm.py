@@ -485,7 +485,8 @@ class DirectorIntegrationTest(unittest.TestCase):
                 for line in director.tick(tick, self.snapshot)]
         self.assertEqual(['模型写的'], [line['text'] for line in late])
 
-    def test_a_hung_generator_cannot_hold_a_line_forever(self):
+    def test_a_backend_asking_for_too_long_is_still_bounded(self):
+        # The initial hold is capped even when a backend asks for minutes.
         backend = _StubBackend('模型写的', latency_hint_seconds=600.0)
         director = self._director(backend)
         director.observe_player_line(0, 1, '那个t34 回来一下', self.snapshot)
@@ -493,6 +494,56 @@ class DirectorIntegrationTest(unittest.TestCase):
         published = [(tick, line) for tick in range(0, cap)
                      for line in director.tick(tick, self.snapshot)]
         self.assertTrue(published)
+
+    def test_a_line_still_being_written_is_waited_for(self):
+        # A first line on a slow machine was always discarded: the estimate
+        # that scheduled it was shorter than the generation it was waiting on.
+        class _Slow(object):
+            latency_hint_seconds = 2.0
+
+            def __init__(self):
+                self.ready_at = 400
+                self.tick = 0
+                self.asked = 0
+
+            def prefetch(self, request):
+                pass
+
+            def pending(self, request):
+                return self.tick < self.ready_at
+
+            def compose(self, request):
+                self.asked += 1
+                return '慢慢写完的' if self.tick >= self.ready_at else None
+
+        backend = _Slow()
+        director = self._director(backend)
+        director.observe_player_line(0, 1, '那个t34 回来一下', self.snapshot)
+        published = []
+        for tick in range(0, 600):
+            backend.tick = tick
+            published.extend(director.tick(tick, self.snapshot))
+        self.assertEqual(['慢慢写完的'], [line['text'] for line in published])
+        self.assertGreater(backend.asked, 1)
+
+    def test_a_line_the_backend_gave_up_on_is_dropped(self):
+        class _GaveUp(object):
+            latency_hint_seconds = 2.0
+
+            def prefetch(self, request):
+                pass
+
+            def pending(self, request):
+                return False
+
+            def compose(self, request):
+                return None
+
+        director = self._director(_GaveUp())
+        director.observe_player_line(0, 1, '那个t34 回来一下', self.snapshot)
+        published = [line for tick in range(0, 900)
+                     for line in director.tick(tick, self.snapshot)]
+        self.assertEqual([], published)
 
     def test_a_model_that_writes_nothing_says_nothing(self):
         director = self._director(_StubBackend(None))
