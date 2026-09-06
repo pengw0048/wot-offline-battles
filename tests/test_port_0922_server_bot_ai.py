@@ -1420,6 +1420,50 @@ class ServerBotTacticsTests(unittest.TestCase):
             [-200.0, -400.0, -100.0, -300.0],
             order['move_area_bounds'])
 
+    def test_radio_movement_order_replaces_nonurgent_combat_movement(self):
+        team_order = {
+            'command_id': '1:1:1',
+            'command': 'BACKTOBASE',
+            'team': 1,
+            'issuer_id': 1,
+            'issued_tick': 100,
+            'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+        defense = {
+            'capture_bases': {
+                '1': [{'id': '1:0', 'x': -25.0, 'y': 0.0, 'z': -450.0}],
+            },
+        }
+        bot = {
+            'id': 11, 'team': 1,
+            'state': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+        }
+        nonurgent_modes = (
+            'engage', 'advance_contact', 'support_hold', 'flank',
+            'take_cover', 'cover_hold', 'cover_peek', 'cover_return',
+            'withdraw',
+        )
+
+        for mode in nonurgent_modes:
+            with self.subTest(mode=mode):
+                order = {
+                    'combat_mode': mode,
+                    'route_anchor': {'x': 0.0, 'y': 0.0, 'z': -100.0},
+                    'move_position': {'x': 12.0, 'y': 0.0, 'z': 0.0},
+                    'face_position': {'x': 18.0, 'y': 0.0, 'z': 4.0},
+                    'throttle_override': 0.0,
+                }
+
+                BotPlanner._apply_team_order(
+                    order, bot, team_order, [], defense)
+
+                self.assertEqual('team_back_to_base', order['combat_mode'])
+                self.assertEqual(
+                    {'x': -25.0, 'y': 0.0, 'z': -450.0},
+                    order['move_position'])
+                self.assertIsNone(order['throttle_override'])
+
     def test_radio_does_not_override_local_survival(self):
         planner = BotPlanner()
         contact = _contact(2, 0, 150, [11])

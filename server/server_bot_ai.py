@@ -509,8 +509,7 @@ class BotPlanner(object):
         protected_modes = (
             "base_defense", "low_health_retreat", "low_health_defend",
             "under_fire_withdraw", "under_fire_hold",
-            "crossfire_withdraw", "crossfire_hold", "take_cover",
-            "cover_hold", "cover_peek", "cover_return", "withdraw",
+            "crossfire_withdraw", "crossfire_hold",
         )
         if order.get("combat_mode") in protected_modes:
             return order
