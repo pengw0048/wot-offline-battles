@@ -149,11 +149,25 @@ def effective_params():
     }
 
 
-def bot_default_crew_factors(unused_descriptor, crew=None):
-    """Exact factor shape supplied by #1513 to pure-Python Bot fixtures."""
+# #1513's own effective level for a generated default crew: the crew level
+# plus the commander's ten percent share of it.
+_COMMANDER_SHARE = 1.1
+_MAX_CREW_FACTOR = 0.57 + 0.0043 * 100.0 * _COMMANDER_SHARE
+
+
+def bot_default_crew_factors(unused_descriptor, crew=None, crew_level=None):
+    """Exact factor shape supplied by #1513 to pure-Python Bot fixtures.
+
+    ``crew_level`` reproduces the native chain's response to a generated
+    default crew trained below the maximum, so a Bot skill tier has to reach
+    the factor boundary for a fixture to see it.  ``None`` keeps the maximum
+    and therefore the exact values every existing fixture already asserts.
+    """
     if crew is not None:
         raise AssertionError('Bot fixtures require the plain default crew')
-    crew_factor = 0.57 + 0.0043 * 110.0
+    level = (100.0 if crew_level is None else
+             max(50.0, min(100.0, float(crew_level))))
+    crew_factor = 0.57 + 0.0043 * level * _COMMANDER_SHARE
     crew_multiplier = 1.0 / crew_factor
     return {
         'turret/rotationSpeed': crew_factor,
@@ -166,7 +180,7 @@ def bot_default_crew_factors(unused_descriptor, crew=None):
         'engine/power': 1.0,
         'chassis/terrainResistance': (1.0, 1.0, 1.0),
         'radio/distance': 1.0,
-        'circularVisionRadius': 1.0,
+        'circularVisionRadius': crew_factor / _MAX_CREW_FACTOR,
         'camouflage': 0.57,
     }
 

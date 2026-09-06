@@ -50,6 +50,7 @@ from gui.mods.offline_lan_0922 import tank_collision
 from gui.mods.offline_lan_0922.battle_achievements import (
     ACHIEVEMENT_CONDITIONS, AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES,
     award_battle_achievements)
+from gui.mods.offline_lan_0922 import bot_gunnery
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922 import equipment_mechanics
@@ -206,6 +207,7 @@ MODERN_VISIBLE_MESSAGE_TYPES = frozenset((
     "battle_ready", "leave_battle",
     "battle_receipt_ack", "descriptor_catalog", "select_vehicle",
     "select_team", "set_team_size", "set_bot_tier_mode",
+    "set_bot_skill_mode",
     "ping", "leave",
     "track_repair",
     "equipment_intent",
@@ -2004,7 +2006,8 @@ class BattleState:
     def __init__(self, map_name=DEFAULT_MAP, max_players=30, clock=None,
                  team_size=15,
                  receipt_state_path=None, team1_size=None, team2_size=None,
-                 bot_tier_mode='random', bot_lineup=None):
+                 bot_tier_mode='random', bot_lineup=None,
+                 bot_skill_mode=None):
         self.map_option = map_name
         self.map_name = self._choose_map()
         self.client_build = None
@@ -2017,6 +2020,8 @@ class BattleState:
         self.team_sizes = {1: team1_size, 2: team2_size}
         self.bot_tier_mode = bot_planner.normalize_bot_tier_mode(
             bot_tier_mode)
+        self.bot_skill_mode = bot_gunnery.normalize_skill_mode(
+            bot_skill_mode)
         self.bot_lineup = self._normalize_bot_lineup(bot_lineup)
         # Keep the old scalar on the wire for older protocol-v5 consumers.
         # New consumers use team_sizes; max remains a safe roster upper bound.
@@ -2158,21 +2163,32 @@ class BattleState:
             team = _exact_int(raw.get("team"), 1, 2)
             slot = _exact_int(raw.get("slot"), 0, 14)
             vehicle = raw.get("vehicle")
-            if (not isinstance(vehicle, str) or len(vehicle) > 96 or
-                    vehicle.count(":") != 1):
-                raise ValueError("invalid Bot lineup vehicle")
-            nation, vehicle_name = vehicle.split(":", 1)
-            if (re.fullmatch(r"[a-z][a-z0-9_]*", nation) is None or
-                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*",
-                                 vehicle_name) is None):
-                raise ValueError("invalid Bot lineup vehicle")
+            skill = raw.get("skill")
+            if vehicle is None and skill is None:
+                raise ValueError("empty Bot lineup entry")
+            if vehicle is not None:
+                if (not isinstance(vehicle, str) or len(vehicle) > 96 or
+                        vehicle.count(":") != 1):
+                    raise ValueError("invalid Bot lineup vehicle")
+                nation, vehicle_name = vehicle.split(":", 1)
+                if (re.fullmatch(r"[a-z][a-z0-9_]*", nation) is None or
+                        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*",
+                                     vehicle_name) is None):
+                    raise ValueError("invalid Bot lineup vehicle")
             key = (team, slot)
             if key in seen:
                 raise ValueError("duplicate Bot lineup slot")
             seen.add(key)
-            result.append({
-                "team": team, "slot": slot, "vehicle": vehicle,
-            })
+            # A slot may pin its vehicle, its gunnery tier, or both.  What
+            # it leaves out stays with the room's own presets.
+            entry = {"team": team, "slot": slot}
+            if vehicle is not None:
+                entry["vehicle"] = vehicle
+            if skill is not None:
+                if skill not in bot_gunnery.SKILL_TIERS:
+                    raise ValueError("invalid Bot lineup skill")
+                entry["skill"] = skill
+            result.append(entry)
         return sorted(result, key=lambda item: (item["team"], item["slot"]))
 
     def _load_result_receipts(self):
@@ -2816,6 +2832,24 @@ class BattleState:
             self.state_revision += 1
             return True, None
 
+    def set_bot_skill_mode(self, player_id, requested_mode):
+        """Let only the room host choose the next round's Bot skill preset."""
+        with self.lock:
+            player = self.players.get(player_id)
+            if (player is None or not player.connected or
+                    self.phase != "waiting"):
+                return False, "not_waiting"
+            if player_id != self.host_player_id:
+                return False, "host_only"
+            mode = bot_gunnery.normalize_skill_mode(requested_mode)
+            if mode != requested_mode:
+                return False, "invalid_mode"
+            if mode == self.bot_skill_mode:
+                return True, None
+            self.bot_skill_mode = mode
+            self.state_revision += 1
+            return True, None
+
     def set_bot_tier_mode(self, player_id, requested_mode):
         """Let only the room host choose the next round's Bot tier preset."""
         with self.lock:
@@ -3289,6 +3323,7 @@ class BattleState:
                 "team_size": self.team_size,
                 "team_sizes": self._team_sizes_wire(),
                 "bot_tier_mode": self.bot_tier_mode,
+                "bot_skill_mode": self.bot_skill_mode,
                 "players": [self._public_player(p)
                             for p in self.players.values() if p.connected],
             }
@@ -3393,7 +3428,7 @@ class BattleState:
                     self.vehicle_catalogs.get(self.host_player_id))
                 if any(
                         raw["vehicle"] not in allowed_names
-                        for raw in self.bot_lineup):
+                        for raw in self.bot_lineup if "vehicle" in raw):
                     return None, "invalid_bot_lineup"
             if requested_map not in (None, ""):
                 requested_map = str(requested_map)
@@ -3443,6 +3478,7 @@ class BattleState:
                 "team_size": self.team_size,
                 "team_sizes": self._team_sizes_wire(),
                 "bot_tier_mode": self.bot_tier_mode,
+                "bot_skill_mode": self.bot_skill_mode,
                 "bot_lineup": list(self.bot_lineup),
                 "bot_authority_id": self.bot_authority_id,
                 "bot_manifest": list(self.bot_manifest),
@@ -4122,6 +4158,7 @@ class BattleState:
                 "team_size": self.team_size,
                 "team_sizes": self._team_sizes_wire(),
                 "bot_tier_mode": self.bot_tier_mode,
+                "bot_skill_mode": self.bot_skill_mode,
                 "bot_lineup": list(self.bot_lineup),
                 "bot_authority_id": self.bot_authority_id,
                 "bot_manifest": takeover_manifest,
@@ -4334,6 +4371,12 @@ class BattleState:
                     "profile": self._sanitize_bot_profile(raw.get("profile")),
                     "route": route,
                 }
+                if 'skill' in raw:
+                    if raw['skill'] not in bot_gunnery.SKILL_TIERS:
+                        return False
+                    # Keep the worker's resolved tier on canonical identity;
+                    # snapshots and takeover messages are rebuilt from it.
+                    entry['skill'] = raw['skill']
                 manifest.append(entry)
                 states[bot_id] = self._sanitize_bot_state(
                     raw, entry, self.bot_states.get(bot_id))
@@ -13138,6 +13181,7 @@ class BattleState:
                     "team_size": self.team_size,
                     "team_sizes": self._team_sizes_wire(),
                     "bot_tier_mode": self.bot_tier_mode,
+                    "bot_skill_mode": self.bot_skill_mode,
                     "bot_lineup": list(self.bot_lineup),
                     "bot_authority_id": self.bot_authority_id,
                     "authority_epoch": self.authority_epoch,
@@ -13200,6 +13244,7 @@ class ClientHandler(socketserver.BaseRequestHandler):
             "team_size": state.team_size,
             "team_sizes": state._team_sizes_wire(),
             "bot_tier_mode": state.bot_tier_mode,
+            "bot_skill_mode": state.bot_skill_mode,
         }
         message.update(state._authority_fields())
         return message
@@ -13633,6 +13678,7 @@ class ClientHandler(socketserver.BaseRequestHandler):
                         "team_size": server.state.team_size,
                         "team_sizes": server.state._team_sizes_wire(),
                         "bot_tier_mode": server.state.bot_tier_mode,
+                        "bot_skill_mode": server.state.bot_skill_mode,
                     }
                     welcome_message.update({
                         "authority_epoch": server.state.authority_epoch,
@@ -13901,6 +13947,28 @@ class ClientHandler(socketserver.BaseRequestHandler):
                                     "size": message.get("size"),
                                     "team_sizes": server.state._team_sizes_wire(),
                                 })
+                        elif message_type == "set_bot_skill_mode":
+                            accepted, mode_error = \
+                                server.state.set_bot_skill_mode(
+                                    player.player_id, message.get("mode"))
+                            if accepted:
+                                _server_log(
+                                    "BOT SKILL MODE id=%d mode=%s" % (
+                                        player.player_id,
+                                        server.state.bot_skill_mode))
+                                server.state.broadcast_current_roster()
+                            else:
+                                player.send({
+                                    "type": "bot_skill_mode_denied",
+                                    "protocol": PROTOCOL_VERSION,
+                                    "round_id": server.state.round_id,
+                                    "state_revision":
+                                        server.state.state_revision,
+                                    "code": mode_error,
+                                    "mode": message.get("mode"),
+                                    "bot_skill_mode":
+                                        server.state.bot_skill_mode,
+                                })
                         elif message_type == "set_bot_tier_mode":
                             accepted, mode_error = server.state.set_bot_tier_mode(
                                 player.player_id, message.get("mode"))
@@ -14107,6 +14175,7 @@ def run_server(host, port, map_name, max_players,
                team_size=15, receipt_state_path=None,
                team1_size=None, team2_size=None,
                bot_tier_mode="random", bot_lineup=None,
+               bot_skill_mode=None,
                vehicle_overlay_root=None):
     if receipt_state_path is None:
         receipt_state_path = _default_result_receipt_state_path(port)
@@ -14115,7 +14184,8 @@ def run_server(host, port, map_name, max_players,
                         receipt_state_path=receipt_state_path,
                         team1_size=team1_size, team2_size=team2_size,
                         bot_tier_mode=bot_tier_mode,
-                        bot_lineup=bot_lineup)
+                        bot_lineup=bot_lineup,
+                        bot_skill_mode=bot_skill_mode)
     if vehicle_overlay_root:
         try:
             overlay = VehicleOverlayStore(vehicle_overlay_root)

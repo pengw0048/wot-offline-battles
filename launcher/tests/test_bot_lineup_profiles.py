@@ -15,6 +15,59 @@ class BotLineupProfilesTests(unittest.TestCase):
               "vehicle": "germany:G81_Pz_IV_AusfH"}],
             bot_lineup_profiles.assignments_for(store, name))
 
+    def test_profile_persists_a_vehicle_and_a_skill_tier_together(self):
+        store, name = bot_lineup_profiles.create(
+            bot_lineup_profiles.empty_store(), "City duel")
+        store = bot_lineup_profiles.set_assignment(
+            store, name, 2, 3, "germany:G81_Pz_IV_AusfH", "veteran")
+
+        self.assertEqual(
+            [{"team": 2, "slot": 3,
+              "vehicle": "germany:G81_Pz_IV_AusfH", "skill": "veteran"}],
+            bot_lineup_profiles.assignments_for(store, name))
+
+    def test_a_slot_may_pin_only_its_skill_tier(self):
+        store, name = bot_lineup_profiles.create(
+            bot_lineup_profiles.empty_store(), "City duel")
+        store = bot_lineup_profiles.set_assignment(
+            store, name, 1, 0, None, "rookie")
+
+        self.assertEqual(
+            [{"team": 1, "slot": 0, "skill": "rookie"}],
+            bot_lineup_profiles.assignments_for(store, name))
+
+    def test_a_profile_saved_before_skill_tiers_still_loads(self):
+        store = bot_lineup_profiles.normalize_store({
+            "schema": 1,
+            "profiles": [{
+                "name": "Old profile",
+                "assignments": [{
+                    "team": 1, "slot": 0,
+                    "vehicle": "germany:G81_Pz_IV_AusfH",
+                }],
+            }],
+        })
+
+        self.assertEqual(
+            [{"team": 1, "slot": 0,
+              "vehicle": "germany:G81_Pz_IV_AusfH"}],
+            bot_lineup_profiles.assignments_for(store, "Old profile"))
+
+    def test_an_unsupported_skill_tier_is_rejected_instead_of_degrading(self):
+        self.assertEqual(
+            bot_lineup_profiles.empty_store(),
+            bot_lineup_profiles.normalize_store({
+                "schema": 1,
+                "profiles": [{
+                    "name": "Old profile",
+                    "assignments": [{
+                        "team": 1, "slot": 0,
+                        "vehicle": "germany:G81_Pz_IV_AusfH",
+                        "skill": "perfect",
+                    }],
+                }],
+            }))
+
     def test_unqualified_saved_vehicle_is_rejected_instead_of_degrading(self):
         self.assertEqual(
             bot_lineup_profiles.empty_store(),

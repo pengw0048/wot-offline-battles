@@ -1973,9 +1973,15 @@ def _mounted_current_vehicle_module():
     return current_vehicle
 
 
-def _plain_bot_factors(unused_descriptor):
-    """Exact-client factor shape for unrelated pure-Python startup tests."""
-    crew_factor = 0.57 + 0.0043 * 110.0
+def _plain_bot_factors(unused_descriptor, crew_level=None):
+    """Exact-client factor shape for unrelated pure-Python startup tests.
+
+    ``crew_level`` follows the Bot skill tier's trained crew, exactly like
+    ``effective_params_fixture.bot_default_crew_factors``.
+    """
+    level = (100.0 if crew_level is None else
+             max(50.0, min(100.0, float(crew_level))))
+    crew_factor = 0.57 + 0.0043 * level * 1.1
     crew_multiplier = 1.0 / crew_factor
     return {
         'turret/rotationSpeed': crew_factor,
@@ -1988,7 +1994,7 @@ def _plain_bot_factors(unused_descriptor):
         'engine/power': 1.0,
         'chassis/terrainResistance': (1.0, 1.0, 1.0),
         'radio/distance': 1.0,
-        'circularVisionRadius': 1.0,
+        'circularVisionRadius': crew_factor / (0.57 + 0.0043 * 110.0),
         'camouflage': 0.57,
     }
 
