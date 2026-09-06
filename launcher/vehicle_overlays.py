@@ -69,8 +69,9 @@ _VEHICLE_CATALOG_PREFIX = re.compile(r"^[A-Za-z]{1,2}[0-9]{2,3}_")
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _NON_EDITABLE_VEHICLE_TAGS = frozenset((
-    "event_battles", "premiumIGR", "observer", "unrecoverable"))
-_NON_EDITABLE_VEHICLES = frozenset(("usa:T23",))
+    "event_battles", "premiumIGR", "observer"))
+_NON_EDITABLE_VEHICLE_SUFFIXES = ("_bot", "_training")
+_NON_EDITABLE_VEHICLES = frozenset(("germany:Env_Artillery",))
 
 _TYPE_NAMES = {
     packed_xml.TYPE_STRING: "string",
@@ -894,7 +895,9 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
             type_name = "%s:%s" % (roster_nation, vehicle)
             record["selectable"] = bool(
                 not _NON_EDITABLE_VEHICLE_TAGS.intersection(record["tags"]) and
-                type_name not in _NON_EDITABLE_VEHICLES)
+                not ("secret" in record["tags"] and (
+                    type_name in _NON_EDITABLE_VEHICLES or
+                    type_name.endswith(_NON_EDITABLE_VEHICLE_SUFFIXES))))
             records.append(record)
     return sorted(records, key=lambda record: (
         record["nation"], record["vehicle"], record["member"]))

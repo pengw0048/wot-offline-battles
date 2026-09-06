@@ -20,15 +20,20 @@ UNUSABLE_BOT_VEHICLES_0922 = frozenset((
 # The exact set vehicle_configuration.NON_STANDARD_BATTLE_TAGS applies in the
 # mod, bound by a parity test.  ``secret`` is deliberately absent: a hidden
 # entry with an honest level and name stays selectable, and only the Bootcamp
-# clones below and the ``fallout`` copies are withheld.
+# clones below and the ``fallout`` copies are withheld.  ``unrecoverable`` is
+# absent for the same reason the mod drops it: #1513 reads that tag only in
+# its sold-vehicle and sold-crew restore rules.
 NON_STANDARD_BOT_TAGS_0922 = frozenset((
-    "event_battles", "premiumIGR", "observer", "unrecoverable", "fallout",
+    "event_battles", "premiumIGR", "observer", "fallout",
 ))
-NON_STANDARD_BOT_VEHICLES_0922 = frozenset(("usa:T23",))
 # #1513 publishes every ``_bootcamp`` tutorial copy at level 2 while it keeps
 # the original hull, so offering one as a Bot puts a tier 6 tank in a tier 2
 # slot.  Stock hides them with ``secret`` and this name suffix alone.
 CLONE_BOT_VEHICLE_SUFFIXES_0922 = ("_bootcamp",)
+# The tutorial and Bot placeholders, and the artillery strike emitter, are
+# the entries no roster may field.  Stock hides them the same way.
+NON_BATTLE_ENTITY_BOT_SUFFIXES_0922 = ("_bot", "_training")
+NON_BATTLE_ENTITY_BOT_VEHICLES_0922 = frozenset(("germany:Env_Artillery",))
 CATALOGUE_VISIBILITY_TAG_0922 = "secret"
 
 _NATION = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -90,11 +95,12 @@ def vehicle_choice_is_eligible(choice):
     if not isinstance(tags, (list, tuple, set, frozenset)):
         raise BotLineupProfileError("The vehicle tags are invalid.")
     tags = set(str(tag) for tag in tags)
-    if (CATALOGUE_VISIBILITY_TAG_0922 in tags and
-            type_name.endswith(CLONE_BOT_VEHICLE_SUFFIXES_0922)):
+    if CATALOGUE_VISIBILITY_TAG_0922 in tags and (
+            type_name.endswith(CLONE_BOT_VEHICLE_SUFFIXES_0922) or
+            type_name.endswith(NON_BATTLE_ENTITY_BOT_SUFFIXES_0922) or
+            type_name in NON_BATTLE_ENTITY_BOT_VEHICLES_0922):
         return False
     return (not NON_STANDARD_BOT_TAGS_0922.intersection(tags) and
-            type_name not in NON_STANDARD_BOT_VEHICLES_0922 and
             type_name not in UNUSABLE_BOT_VEHICLES_0922)
 
 

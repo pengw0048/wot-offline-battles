@@ -3,12 +3,22 @@
 
 # ``fallout`` is the stock #1513 tag name; gui/shared/gui_items/Vehicle.py
 # declares it in VEHICLE_TAGS next to the other exclusions listed here.
+# ``unrecoverable`` is not one of them.  #1513 reads that tag only in
+# items/vehicles.py ``isRestorable``, items/tankmen.py
+# ``TankmanDescr.isRestorable`` and gui/shared/gui_items/Vehicle.py
+# ``isUnrecoverable``: it decides whether a sold vehicle or crew can be
+# bought back, never whether the vehicle may enter a battle.  Reading it as
+# an eligibility rule withheld 17 shipped tanks, among them
+# ``japan:J29_Nameless`` and ``japan:J30_Edelweiss``.
 NON_STANDARD_BATTLE_TAGS = frozenset((
-    'event_battles', 'premiumIGR', 'observer', 'unrecoverable', 'fallout'))
-NON_STANDARD_BATTLE_NAMES = frozenset(('usa:T23',))
+    'event_battles', 'premiumIGR', 'observer', 'fallout'))
 # The Bootcamp tutorial copies are the one clone family stock gives no tag of
 # its own: it hides them with ``secret`` plus this item_defs name suffix.
 CLONE_NAME_SUFFIXES = ('_bootcamp',)
+# The tutorial and Bot placeholders stock drives itself, and the artillery
+# strike emitter, are hidden the same way: ``secret`` and an item_defs name.
+NON_BATTLE_ENTITY_SUFFIXES = ('_bot', '_training')
+NON_BATTLE_ENTITY_NAMES = frozenset(('germany:Env_Artillery',))
 CATALOGUE_VISIBILITY_TAG = 'secret'
 
 
@@ -28,23 +38,40 @@ def is_clone_of_a_standard_vehicle(name, tags):
         str(name or '').endswith(CLONE_NAME_SUFFIXES))
 
 
+def is_non_battle_entity(name, tags):
+    """Return whether this entry is a helper the player never drives.
+
+    #1513 ``list.xml`` carries 19 of them: 11 ``_bot`` and 6 ``_training``
+    placeholders stock drives in the tutorial, ``germany:Env_Artillery``,
+    whose shell has no renderable projectile, and ``ussr:Observer``, which
+    the ``observer`` tag already excludes.  Every one of them also carries
+    ``secret``, so requiring the tag keeps the rule from hiding a shipped
+    vehicle whose item_defs name happens to end the same way.
+    """
+    name = str(name or '')
+    return bool(
+        CATALOGUE_VISIBILITY_TAG in tags and (
+            name in NON_BATTLE_ENTITY_NAMES or
+            name.endswith(NON_BATTLE_ENTITY_SUFFIXES)))
+
+
 def is_standard_battle_vehicle(vehicle_type):
     """Return whether #1513 exposes this type to ordinary tank battles.
 
-    The stock catalogue also contains observer, event, IGR and unrecoverable
-    environment helper entities.  Some of them can be constructed in the
-    garage but omit resources required by ``Vehicle.prerequisites``;
-    ``Env_Artillery`` is one example whose shell has no renderable projectile.
-    ``secret`` alone is only a catalogue-visibility tag: a hidden entry whose
-    own level and name are honest stays playable, and only the clones above
-    and the ``fallout`` event copies are withheld.
+    The stock catalogue also contains observer, event and IGR entries, and
+    the helper entities above, which can be constructed in the garage but
+    omit resources required by ``Vehicle.prerequisites``.  ``secret`` alone
+    is only a catalogue-visibility tag: a hidden entry whose own level and
+    name are honest stays playable, and only the clones, the ``fallout``
+    event copies and those helpers are withheld.
     """
     name = str(getattr(vehicle_type, 'name', '') or '')
     tags = set(getattr(vehicle_type, 'tags', ()) or ())
     return bool(
-        name and name not in NON_STANDARD_BATTLE_NAMES and
+        name and
         not NON_STANDARD_BATTLE_TAGS.intersection(tags) and
-        not is_clone_of_a_standard_vehicle(name, tags))
+        not is_clone_of_a_standard_vehicle(name, tags) and
+        not is_non_battle_entity(name, tags))
 
 
 def _sort_text(value):
