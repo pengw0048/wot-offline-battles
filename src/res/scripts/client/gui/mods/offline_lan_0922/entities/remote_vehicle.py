@@ -81,17 +81,25 @@ def set_model_attachment_visibility(model, visible):
 # One line per process for each stock surface the runtime could not reach.
 _ground_effect_gate_reported = False
 _ground_decal_gate_reported = False
+_ground_traces_gate_reported = False
+_ground_traces_rebuild_reported = False
 _ground_effect_failure_reported = False
 _ground_decal_failure_reported = False
+_ground_traces_failure_reported = False
 
 
 def _report_ground_gate_failure(kind, error):
     """Log one bounded failure for an optional stock presentation owner."""
     global _ground_effect_failure_reported, _ground_decal_failure_reported
+    global _ground_traces_failure_reported
     if kind == 'effects':
         if _ground_effect_failure_reported:
             return False
         _ground_effect_failure_reported = True
+    elif kind == 'traces':
+        if _ground_traces_failure_reported:
+            return False
+        _ground_traces_failure_reported = True
     else:
         if _ground_decal_failure_reported:
             return False
@@ -307,18 +315,119 @@ def clear_ground_decal_visibility_state(appearance):
     return reached
 
 
+# Sentinel for an appearance that has no stock traces component field at
+# all, which must not be confused with a component this gate removed.
+_TRACES_FIELD_ABSENT = object()
+
+# The exact #1513 module that owns traces assembly, resolved on first use so
+# this module keeps importing outside a client process.
+_stock_traces_assembler = None
+
+
+def _traces_assembler():
+    """Return the exact #1513 ``vehicle_systems.model_assembler`` module."""
+    global _stock_traces_assembler
+    if _stock_traces_assembler is None:
+        from vehicle_systems import model_assembler
+        _stock_traces_assembler = model_assembler
+    return _stock_traces_assembler
+
+
+def set_vehicle_traces_visibility(appearance, visible):
+    """Own the ground track marks no stock compound draw flag reaches.
+
+    #1513 gives every non-damaged vehicle a ``Vehicular.VehicleTraces``
+    component: ``vehicle_assembler._assembleParts`` ->
+    ``__assembleNonDamagedOnly`` -> ``model_assembler.assembleVehicleTraces``.
+    It prints terrain track decals from ``filter.movementInfo`` and reads no
+    compound draw flag, so ``Vehicle.show`` and
+    ``CompoundAppearance.changeVisibility`` leave an unspotted enemy drawing
+    a trail of track marks over ground the player may not see.  The SPG
+    strategic camera looks straight down at exactly that ground, which is
+    where the leak reads as a wallhack.
+
+    Retail never has to solve this: an unspotted enemy is outside the client
+    AOI, so neither its entity nor its traces component exists, and its trail
+    disappears with it.  Reproduce that state through the exact stock pair.
+    ``CompoundAppearance.__prepareSystemsForDamagedVehicle`` already assigns
+    ``vehicleTraces = None`` on a live, activated appearance, and the only
+    other stock reader, ``__updateCurrTerrainMatKinds``, tests the attribute
+    against None on every terrain sample, so a living vehicle without the
+    component is a state this build already supports.  Reveal re-runs the
+    exact stock assembly call; both of its inputs are still live on the
+    appearance (``filter`` and ``lodCalculator.lodStateLink``, which
+    ``_assembleParts`` reads from the same two places).
+
+    A wreck carries no traces in stock either, and the caller keeps a
+    destroyed vehicle drawn, so never assemble onto a damaged model.
+    """
+    global _ground_traces_gate_reported, _ground_traces_rebuild_reported
+    if appearance is None:
+        return False
+    visible = bool(visible)
+    traces = getattr(appearance, 'vehicleTraces', _TRACES_FIELD_ABSENT)
+    if traces is _TRACES_FIELD_ABSENT:
+        if not _ground_traces_gate_reported:
+            _ground_traces_gate_reported = True
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] compound appearance exposes no vehicle '
+                'traces component; a hidden vehicle may still print track '
+                'marks\n')
+        return False
+    if not visible:
+        if traces is None:
+            return True
+        try:
+            # Stock's own retire line.  The descriptor removes the component
+            # from the native system before the field goes to None, so a
+            # partial failure cannot leave a detached component drawing.
+            appearance.vehicleTraces = None
+        except Exception as error:
+            _report_ground_gate_failure('traces', error)
+            return False
+        return True
+    if traces is not None:
+        return True
+    damage_state = getattr(appearance, 'damageState', None)
+    is_damaged = getattr(damage_state, 'isCurrentModelDamaged', None)
+    vehicle_filter = getattr(appearance, 'filter', None)
+    lod_state_link = getattr(
+        getattr(appearance, 'lodCalculator', None), 'lodStateLink', None)
+    if is_damaged is None or vehicle_filter is None or lod_state_link is None:
+        if not _ground_traces_rebuild_reported:
+            _ground_traces_rebuild_reported = True
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] compound appearance cannot rebuild its '
+                'vehicle traces; a revealed vehicle may print no track '
+                'marks\n')
+        return False
+    if is_damaged:
+        return True
+    try:
+        _traces_assembler().assembleVehicleTraces(
+            appearance, vehicle_filter, lod_state_link)
+    except Exception as error:
+        # Assembly builds a fresh component and publishes it last, so a
+        # failure leaves the field None and the next reveal may retry.
+        _report_ground_gate_failure('traces', error)
+        return False
+    return True
+
+
 def close_stock_presentation_extras(appearance, visible):
     """Apply every draw gate the stock compound flags do not cover.
 
     ``changeVisibility`` writes ``compoundModel.visible``, the stickers and
-    the crashed-track controller.  It reaches neither the node attachments nor
-    the camera-distance effect selectors, and both keep drawing over a hidden
-    enemy.  Each surface is optional on its own: a build that does not expose
-    one logs a single line and the round continues.
+    the crashed-track controller.  It reaches neither the node attachments,
+    the camera-distance effect selectors nor the terrain traces component,
+    and all three keep drawing over a hidden enemy.  Each surface is optional
+    on its own: a build that does not expose one logs a single line and the
+    round continues.
     """
     if appearance is None:
         return False
     reached = set_ground_decal_visibility(appearance, visible)
+    reached = set_vehicle_traces_visibility(appearance, visible) or reached
     if not visible:
         reached = stop_ground_effects(appearance) or reached
     return reached
