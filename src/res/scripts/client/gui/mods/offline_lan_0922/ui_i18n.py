@@ -31,6 +31,12 @@ def tr(source):
 
 
 _ZH = {
+    'RANDOM MAP': u'随机地图',
+    'CHOOSE MAP': u'选择地图',
+    '  -  %d MIN': u'  -  %d 分钟',
+    'The stock map window is unavailable.': u'原版地图窗口不可用。',
+    'The stock map window could not open.': u'无法打开原版地图窗口。',
+    'This LAN server does not offer a random map.': u'此服务器不支持随机地图。',
     'LAN WAITING ROOM': u'局域网等待房间',
     'TEAM 1': u'队伍 1',
     'TEAM 2': u'队伍 2',

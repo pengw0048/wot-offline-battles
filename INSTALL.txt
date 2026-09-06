@@ -39,9 +39,11 @@ Play
    The battle runs the tank the garage fitted, with its modules, health, armour
    and gun.
 3. Every player sees the waiting room, drawn over the stock battle queue
-   screen. The first player is the room host: the host selects a standard map
-   with < and >, then clicks START BATTLE. LEAVE closes the room and returns
-   you to the garage.
+   screen. The first player is the room host. RANDOM MAP lets the server pick;
+   MAP opens the client's own map window, where the host picks a standard map
+   and a battle time and confirms. The room comes back with that choice, and
+   START BATTLE starts it. LEAVE closes the room and returns you to the
+   garage.
 4. The server fills each team to WOT_0922_TEAM_SIZE total tanks, including
    human players (1 through 15, default 15). Set that environment variable in
    the batch file that starts the server. Movement and firing unlock when the

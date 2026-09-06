@@ -1058,11 +1058,17 @@ crosses the Account-to-Avatar boundary. There is no synchronous-close fallback.
 The LAN room is now presented with the port's own native components. The stock
 map window described above remains the fallback for a client that cannot build
 them. The room carries the waiting-room presentation design reviewed in the
-retired predecessor source history: the live room status, one map selector
-limited to the server map pool, one start button for the host and one close
-control. It also presents the players who wait for
+retired predecessor source history: the live room status, a map choice limited
+to the server map pool, one start button for the host and one close control.
+It also presents the players who wait for
 the host, which the stock window cannot do. The desktop launcher owns the
 server address before the client starts, so the room never edits an endpoint.
+
+The map choice itself is made in the stock window, because this native surface
+cannot draw the client's map images. The room offers `RANDOM MAP`, which
+selects the server's own random option, and `MAP`, which hands the browse to
+that window. The battle time the window publishes travels with the next start
+request and becomes the round length the server counts down.
 
 Every native call is proved in exact build #1513:
 
@@ -1108,6 +1114,36 @@ so the room sets it optionally and logs a skip.
 Static inspection cannot prove that a native component receives mouse events
 while the Scaleform lobby is displayed. The room logs the surface it built, and
 a client that raises during construction keeps the stock map window.
+
+### Handing the screen to the stock map window
+
+The lobby movie draws at z 0.5 and this room at z 0.1, so the room covers every
+Scaleform view inside that movie, and it owns the native cursor while it is
+open. The room therefore never opens the map window itself: it asks its owner,
+which closes the room first - releasing its roots and restoring exactly the
+cursor state the lobby had - and only then calls `loadView`. The window's own
+close hook runs before the Scaleform view finishes tearing itself down, so the
+room is reopened from a `BigWorld.callback(0.0, ...)` after that, fenced by the
+client generation and the waiting state. Cancelling that reopen is part of
+every teardown: a battle start, a leave and a stop each retire the window and
+drop the pending return to the room.
+
+The window is the exact `TrainingSettingsWindow` already described above, with
+`isCreateRequest` still true, so its stock `getInfo` never asks for a prebattle
+entity this client does not have. The adapter then reports `canChangeComment`,
+`canMakeOpenedClosed`, `privacy` and `create` as false, and opens the view on
+the room's current arena and battle time. Whether that stock view hides or only
+disables the three fixed controls is a property of `gui.pkg`, not of any client
+script, and remains unproved until it is seen on the exact Windows client.
+
+`updateTrainingRoom` is the single Scaleform-to-Python call of that view
+(`TrainingWindowMeta`). In this mode it records the map and the battle time and
+returns to the room instead of starting the battle. The battle time arrives in
+whole minutes inside the exact `getTrainingBattleRoundLimits` range: 300..1800
+seconds for a plain account and 60..14400 seconds for one carrying
+`ACCOUNT_ATTR.DAILY_BONUS_1`. The LAN server accepts that same range for one
+round, denies anything else as `invalid_round_length`, and keeps 900 seconds
+for a start request that carries no round length.
 
 ## Battle and entity lifecycle
 

@@ -469,12 +469,19 @@ def save_endpoint(host, port, path=ENDPOINT_PATH):
     return True
 
 
+# The stock map window publishes whole minutes inside the exact #1513
+# ``getTrainingBattleRoundLimits`` range.
+MIN_ROUND_SECONDS = 60
+MAX_ROUND_SECONDS = 14400
+
+
 def _empty_waiting_room_state():
     return {
         'schema': 1,
         'map': None,
         'team': 0,
         'team_sizes': {},
+        'round_seconds': None,
     }
 
 
@@ -497,6 +504,18 @@ def _normalise_waiting_room_state(value):
     if team not in (0, 1, 2):
         raise ValueError('LAN waiting room team is invalid')
     state['team'] = team
+    round_seconds = value.get('round_seconds')
+    if round_seconds is not None:
+        if isinstance(round_seconds, bool):
+            raise ValueError('LAN waiting room round length is invalid')
+        try:
+            round_seconds = int(round_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('LAN waiting room round length is invalid')
+        if (round_seconds < MIN_ROUND_SECONDS or
+                round_seconds > MAX_ROUND_SECONDS):
+            raise ValueError('LAN waiting room round length is invalid')
+        state['round_seconds'] = round_seconds
     sizes = value.get('team_sizes') or {}
     if not isinstance(sizes, dict):
         raise ValueError('LAN waiting room team sizes are invalid')
@@ -535,6 +554,7 @@ def save_waiting_room_state(value, path=WAITING_ROOM_STATE_PATH):
             'schema': 1,
             'map': state['map'],
             'team': state['team'],
+            'round_seconds': state['round_seconds'],
             'team_sizes': dict((str(team), size) for team, size in
                                state['team_sizes'].items()),
         }

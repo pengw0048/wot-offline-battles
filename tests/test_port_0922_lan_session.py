@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import importlib.util
 import os
 from pathlib import Path
@@ -75,6 +76,7 @@ class _Client(object):
         self.stop_calls = 0
         self.leave_calls = 0
         self.requests = []
+        self.round_requests = []
         self.selections = []
         self.team_selections = []
         self.team_size_selections = []
@@ -87,8 +89,9 @@ class _Client(object):
     def stop(self):
         self.stop_calls += 1
 
-    def request_start(self, map_name):
+    def request_start(self, map_name, round_seconds=None):
         self.requests.append(map_name)
+        self.round_requests.append(round_seconds)
         return True
 
     def leave_battle(self):
@@ -130,11 +133,14 @@ class _Client(object):
 
 
 class _Queue(object):
-    def __init__(self, request_start, map_pool, endpoint=None, on_close=None):
+    def __init__(self, request_start, map_pool, endpoint=None, on_close=None,
+                 on_select=None, selection=None):
         self.request_start = request_start
         self.map_pool = map_pool
         self.endpoint = endpoint
         self.on_close = on_close
+        self.on_select = on_select
+        self.selection = selection
         self.install_calls = 0
         self.uninstall_calls = 0
         self.close_calls = 0
@@ -147,7 +153,12 @@ class _Queue(object):
         self.uninstall_calls += 1
 
     def close(self):
+        # The stock window notifies its owner from inside its own close hook,
+        # before the Scaleform view finishes tearing itself down.
         self.close_calls += 1
+        if callable(self.on_close):
+            self.on_close()
+        return True
 
     def refresh(self):
         self.refresh_calls += 1
@@ -2580,13 +2591,17 @@ class _Room(object):
     guest_view = True
 
     def __init__(self, request_start, map_pool, status=None, on_close=None,
-                 host=None, random_supported=None):
+                 host=None, random_supported=None, open_map_picker=None,
+                 round_seconds=None, **unused_options):
         self.request_start = request_start
         self.map_pool = map_pool
         self.status = status
         self.on_close = on_close
         self.host = host
         self.random_supported = random_supported
+        self.open_map_picker = open_map_picker
+        self.round_seconds = round_seconds
+        self.selected_maps = []
         self.install_calls = 0
         self.open_calls = 0
         self.close_calls = 0
@@ -2606,6 +2621,10 @@ class _Room(object):
 
     def refresh(self):
         self.refresh_calls += 1
+        return True
+
+    def select_map(self, map_name):
+        self.selected_maps.append(map_name)
         return True
 
     def uninstall(self):
@@ -2776,3 +2795,199 @@ class LANSessionRoomTests(unittest.TestCase):
         self.assertEqual([], self.rooms)
         self.assertEqual(1, len(self.queues))
         self.assertEqual([True], self.opens)
+
+
+class LANSessionMapWindowTests(unittest.TestCase):
+    """The room browses maps in the stock window, then takes the screen back."""
+
+    def setUp(self):
+        self.module = _load()
+        self.preferences = {
+            'schema': 1, 'map': None, 'team': 0, 'team_sizes': {}}
+        self.module.port_config.load_waiting_room_state = mock.Mock(
+            return_value=self.preferences)
+        self.saved = []
+        self.module.port_config.save_waiting_room_state = mock.Mock(
+            side_effect=lambda value: self.saved.append(dict(value)) or True)
+        self.clients = []
+        self.queues = []
+        self.rooms = []
+        self.opens = []
+        self.scheduled = OrderedDict()
+        self.next_handle = 0
+        self.open_result = True
+
+        def client_factory(*args, **kwargs):
+            client = _Client(*args, **kwargs)
+            self.clients.append(client)
+            return client
+
+        def queue_factory(*args, **kwargs):
+            queue = _Queue(*args, **kwargs)
+            self.queues.append(queue)
+            return queue
+
+        def room_factory(*args, **kwargs):
+            room = _Room(*args, **kwargs)
+            self.rooms.append(room)
+            return room
+
+        def schedule(unused_delay, function):
+            self.next_handle += 1
+            self.scheduled[self.next_handle] = function
+            return self.next_handle
+
+        self.session = self.module.LANSession(
+            {'host': '10.0.0.5', 'port': 28782, 'name': 'P',
+             'vehicle': 'ussr:MS-1'},
+            client_factory=client_factory, queue_factory=queue_factory,
+            room_factory=room_factory,
+            picker_opener=lambda: self.opens.append(True) or self.open_result,
+            callback=schedule,
+            cancel_callback=lambda handle: self.scheduled.pop(handle, None),
+            battle_runtime=_BattleRuntime(),
+            vehicle_provider=lambda: ('ussr:R11_MS-1', 90),
+            status_notifier=lambda unused_message: None)
+        self.assertTrue(self.session.start())
+        self.session._picker_requested = True
+        self.client = self.clients[0]
+        self.client.ready = True
+        self.client.phase = 'waiting'
+        self.client.host_player_id = self.client.player_id
+        self.client.on_event('welcome', {
+            'phase': 'waiting',
+            'map_pool': ['01_karelia', '05_prohorovka']})
+        self.room = self.rooms[0]
+
+    def _run_callbacks(self):
+        """Run exactly the callbacks still scheduled, in order."""
+        pending = list(self.scheduled.values())
+        self.scheduled.clear()
+        for callback in pending:
+            callback()
+        return len(pending)
+
+    def _open_window(self):
+        self.assertTrue(self.session._open_map_window())
+        return self.queues[0]
+
+    def test_the_map_button_releases_the_room_before_the_stock_window(self):
+        window = self._open_window()
+
+        # The room draws in front of the whole lobby movie and owns the native
+        # cursor, so it has to close before the Scaleform view is raised.
+        self.assertEqual(1, self.room.close_calls)
+        self.assertEqual([True], self.opens)
+        self.assertEqual(1, window.install_calls)
+        self.assertTrue(self.session._map_window_open)
+        self.assertTrue(self.session._room_hidden_for_map_window)
+        self.assertEqual((None, 900), window.selection())
+
+    def test_a_chosen_map_returns_to_the_room_without_starting(self):
+        window = self._open_window()
+
+        self.assertTrue(window.on_select('05_prohorovka', 1200))
+
+        self.assertEqual(['05_prohorovka'], self.room.selected_maps)
+        self.assertEqual([], self.client.requests)
+        self.assertEqual(1200, self.session._round_seconds)
+        self.assertEqual('05_prohorovka', self.saved[-1]['map'])
+        self.assertEqual(1200, self.saved[-1]['round_seconds'])
+
+        # The view is destroyed after its own event stack returns, and the
+        # room only takes the cursor back on the tick after that.
+        self.assertEqual(0, window.close_calls)
+        self.assertEqual(1, self._run_callbacks())
+        self.assertEqual(1, window.close_calls)
+        self.assertEqual(1, self.room.open_calls)
+        self.assertEqual(1, self._run_callbacks())
+        self.assertEqual(2, self.room.open_calls)
+        self.assertTrue(self.session._picker_open)
+        self.assertFalse(self.session._map_window_open)
+        self.assertFalse(self.session._room_hidden_for_map_window)
+
+    def test_the_chosen_battle_time_reaches_the_server(self):
+        window = self._open_window()
+        window.on_select('05_prohorovka', 1200)
+        self._run_callbacks()
+        self._run_callbacks()
+
+        self.assertTrue(self.session.request_start('05_prohorovka'))
+
+        self.assertEqual(['05_prohorovka'], self.client.requests)
+        self.assertEqual([1200], self.client.round_requests)
+
+    def test_closing_the_window_without_a_choice_restores_the_room(self):
+        window = self._open_window()
+
+        window.on_close()
+
+        self.assertEqual(1, self._run_callbacks())
+        self.assertEqual(2, self.room.open_calls)
+        self.assertEqual([], self.room.selected_maps)
+        self.assertTrue(self.session._picker_open)
+
+    def test_a_refused_stock_window_returns_to_the_room_at_once(self):
+        self.open_result = False
+
+        self.assertFalse(self.session._open_map_window())
+
+        self.assertEqual(2, self.room.open_calls)
+        self.assertTrue(self.session._picker_open)
+        self.assertFalse(self.session._map_window_open)
+
+    def test_battle_start_retires_the_window_and_never_reopens_the_room(self):
+        window = self._open_window()
+
+        self.assertTrue(self.session._close_picker())
+
+        self.assertEqual(1, window.close_calls)
+        self.assertFalse(self.session._picker_open)
+        self.assertFalse(self.session._picker_cleanup_pending)
+        self.assertFalse(self.session._room_hidden_for_map_window)
+        # The room was already closed for the window; closing it again would
+        # report a failed native cleanup that never happened.
+        self.assertEqual(1, self.room.close_calls)
+        self.assertEqual(0, self._run_callbacks())
+        self.assertEqual(1, self.room.open_calls)
+
+    def test_leaving_the_room_from_the_window_stops_the_reopen(self):
+        window = self._open_window()
+
+        self.assertTrue(self.session.leave_room())
+
+        self.assertEqual(1, window.close_calls)
+        self.assertEqual(0, self._run_callbacks())
+        self.assertEqual(1, self.room.open_calls)
+        self.assertEqual('ready_to_join', self.session.state)
+
+    def test_an_incomplete_room_close_keeps_the_room_and_the_screen(self):
+        self.room.close = mock.Mock(return_value=False)
+
+        self.assertFalse(self.session._open_map_window())
+
+        # The room still owns native roots or the cursor, so the Scaleform
+        # view must not be raised behind it.
+        self.assertEqual([], self.opens)
+        self.assertFalse(self.session._map_window_open)
+        self.assertFalse(self.session._room_hidden_for_map_window)
+        self.assertTrue(self.session._picker_cleanup_pending)
+        self.assertTrue(self.session._picker_open)
+
+    def test_a_guest_never_opens_the_stock_map_window(self):
+        self.session._host_player_id = 'other'
+
+        self.assertFalse(self.session._open_map_window())
+
+        self.assertEqual([], self.queues)
+        self.assertEqual(0, self.room.close_calls)
+
+    def test_the_window_adapter_is_uninstalled_with_the_session(self):
+        window = self._open_window()
+        window.on_close()
+        self._run_callbacks()
+
+        self.session.stop(show_login=False, restore_account=False)
+
+        self.assertEqual(1, window.uninstall_calls)
+        self.assertIsNone(self.session._map_window)

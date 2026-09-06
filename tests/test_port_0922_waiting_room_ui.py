@@ -183,6 +183,10 @@ class WaitingRoomTests(unittest.TestCase):
     def _visible(self, role):
         return self.room._controls[role].properties['visible']
 
+    @staticmethod
+    def _label_of(room, role):
+        return room._labels[role].properties['text']
+
     def _root_count(self, room=None):
         """The room panel plus one root per arrow row."""
         return 1 + len((room or self.room)._pointer_parts)
@@ -237,9 +241,10 @@ class WaitingRoomTests(unittest.TestCase):
 
     def test_the_host_sees_the_map_selector_and_start_button(self):
         self.room.open()
-        for role in ('previous', 'map', 'next', 'start'):
+        for role in ('map', 'random', 'start'):
             self.assertTrue(self._visible(role), role)
         self.assertEqual('MAP: Random', self._label('map'))
+        self.assertEqual('START BATTLE', self._label('start'))
         self.assertEqual('LAN SERVER: 10.0.0.5:28782', self._label('room'))
         self.assertEqual('PLAYERS (2): Host, Guest', self._label('players'))
 
@@ -251,8 +256,74 @@ class WaitingRoomTests(unittest.TestCase):
         self.assertTrue(self.room.activate('start'))
         self.assertEqual([self.module.RANDOM_MAP_OPTION], self.started)
 
-        self.assertTrue(self.room.activate('next'))
-        self.assertEqual('MAP: 01 - Karelia', self._label('map'))
+    def test_the_map_button_asks_its_owner_for_the_stock_map_window(self):
+        opened = []
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface,
+            open_map_picker=lambda: opened.append(1) or True)
+
+        self.assertTrue(room.open())
+        self.assertTrue(room.activate('map'))
+        self.assertEqual([1], opened)
+        # The window owns the choice; the room must not cycle one itself.
+        self.assertEqual(self.module.RANDOM_MAP_OPTION, room._selected_map)
+
+    def test_a_refused_map_window_reports_it_and_keeps_the_selection(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, open_map_picker=lambda: False)
+
+        self.assertTrue(room.open())
+        self.assertFalse(room.activate('map'))
+        self.assertEqual('The stock map window could not open.',
+                         room._labels['message'].properties['text'])
+        self.assertEqual(self.module.RANDOM_MAP_OPTION, room._selected_map)
+
+    def test_the_map_window_choice_becomes_the_room_selection(self):
+        selected = []
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, on_map_selected=selected.append,
+            round_seconds=lambda: 1200)
+
+        self.assertTrue(room.open())
+        self.assertTrue(room.select_map('05_prohorovka'))
+        self.assertEqual('05_prohorovka', room._selected_map)
+        self.assertEqual([self.module.RANDOM_MAP_OPTION, '05_prohorovka'],
+                         selected)
+        self.assertEqual('MAP: 05 - Prohorovka', self._label_of(room, 'map'))
+        self.assertEqual('START BATTLE  -  20 MIN',
+                         self._label_of(room, 'start'))
+        self.assertTrue(room.activate('start'))
+        self.assertEqual(['05_prohorovka'], self.started)
+
+    def test_the_random_button_selects_the_wire_random_name(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, initial_map='01_karelia')
+
+        self.assertTrue(room.open())
+        self.assertEqual('01_karelia', room._selected_map)
+        self.assertTrue(room.activate('random'))
+        self.assertEqual(self.module.RANDOM_MAP_OPTION, room._selected_map)
+        self.assertEqual('MAP: Random', self._label_of(room, 'map'))
+
+    def test_the_random_button_is_hidden_without_server_support(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, random_supported=lambda: False)
+
+        self.assertTrue(room.open())
+        self.assertFalse(room._controls['random'].properties['visible'])
+        self.assertTrue(room._controls['map'].properties['visible'])
+        self.assertFalse(room.activate('random'))
+        self.assertEqual('01_karelia', room._selected_map)
 
     def test_random_is_hidden_when_the_server_does_not_advertise_it(self):
         room = self.module.WaitingRoomUI(
@@ -276,8 +347,8 @@ class WaitingRoomTests(unittest.TestCase):
         self.assertTrue(room.open())
         self.assertEqual('05_prohorovka', room._selected_map)
         self.assertEqual([], selected)
-        self.assertTrue(room.activate('next'))
-        self.assertEqual([self.module.RANDOM_MAP_OPTION], selected)
+        self.assertTrue(room.select_map('01_karelia'))
+        self.assertEqual(['01_karelia'], selected)
 
     def test_unavailable_saved_map_falls_back_and_updates_the_saved_choice(self):
         selected = []

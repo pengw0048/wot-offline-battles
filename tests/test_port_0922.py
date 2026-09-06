@@ -688,6 +688,7 @@ class PortConfigTests(unittest.TestCase):
                 'map': '05_prohorovka',
                 'team': 2,
                 'team_sizes': {1: 4, 2: 9},
+                'round_seconds': 1200,
             }
 
             self.assertTrue(config_module.save_waiting_room_state(
@@ -697,8 +698,35 @@ class PortConfigTests(unittest.TestCase):
                 choices, config_module.load_waiting_room_state(path))
             self.assertEqual(
                 {'schema': 1, 'map': '05_prohorovka', 'team': 2,
+                 'round_seconds': 1200,
                  'team_sizes': {'1': 4, '2': 9}},
                 json.loads(Path(path).read_text(encoding='utf-8')))
+
+    def test_a_state_without_a_round_length_keeps_the_default_round(self):
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'waiting_room_state.json'
+            path.write_text(
+                '{"schema": 1, "map": "01_karelia", "team": 0, '
+                '"team_sizes": {}}', encoding='utf-8')
+
+            state = config_module.load_waiting_room_state(str(path))
+
+            self.assertIsNone(state['round_seconds'])
+
+    def test_an_out_of_range_round_length_falls_back_to_the_defaults(self):
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'waiting_room_state.json'
+            path.write_text(
+                '{"schema": 1, "map": "01_karelia", "team": 0, '
+                '"team_sizes": {}, "round_seconds": 14401}',
+                encoding='utf-8')
+
+            self.assertEqual(
+                {'schema': 1, 'map': None, 'team': 0, 'team_sizes': {},
+                 'round_seconds': None},
+                config_module.load_waiting_room_state(str(path)))
 
     def test_invalid_waiting_room_state_falls_back_without_blocking_login(self):
         config_module = _load_port_source('config')
@@ -709,7 +737,8 @@ class PortConfigTests(unittest.TestCase):
                 '"team_sizes": {"1": 99}}', encoding='utf-8')
 
             self.assertEqual(
-                {'schema': 1, 'map': None, 'team': 0, 'team_sizes': {}},
+                {'schema': 1, 'map': None, 'team': 0, 'team_sizes': {},
+                 'round_seconds': None},
                 config_module.load_waiting_room_state(str(path)))
 
     def test_legacy_user_state_is_copied_without_deleting_the_old_file(self):
@@ -5694,6 +5723,14 @@ class LANClientTests(unittest.TestCase):
         queued = client._outbound_queue[-1][1]
         self.assertEqual('start_battle', queued['type'])
         self.assertEqual('04_himmelsdorf', queued['map'])
+        self.assertNotIn('round_seconds', queued)
+        # The stock map window's battle time travels with the start request.
+        self.assertTrue(client.request_start('04_himmelsdorf', 1200))
+        self.assertEqual(1200, client._outbound_queue[-1][1]['round_seconds'])
+        for value in (59, 14401, 'ten', True):
+            self.assertFalse(
+                client.request_start('04_himmelsdorf', value), value)
+        self.assertEqual(1200, client._outbound_queue[-1][1]['round_seconds'])
         self.assertEqual(['welcome', 'roster'],
                          [item[0] for item in events])
 
