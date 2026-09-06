@@ -193,7 +193,7 @@ class AuthorityWorkerLANClient(LANClient):
         """Queue one worker-owned message as immutable encoded wire bytes."""
         return self._send_preencoded_trusted(message)
 
-    def send_projected_bot_state(self, bots, sample_time_us=None,
+    def send_projected_bot_state(self, rows, sample_time_us=None,
                                  source_batch_horizon_us=None,
                                  human_ram_armors=None,
                                  edge_sample_time_us=None,
@@ -207,7 +207,7 @@ class AuthorityWorkerLANClient(LANClient):
                 edge_revision is None or edge_revision < 1):
             return False
         message = {
-            'type': 'bot_state', 'round_id': self.round_id, 'bots': bots}
+            'type': 'bot_state', 'round_id': self.round_id, 'rows': rows}
         if sample_time_us is not None:
             sample_time_us = _exact_int(sample_time_us)
             if (sample_time_us is None or

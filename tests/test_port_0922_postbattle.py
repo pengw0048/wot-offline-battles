@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+
+import bot_state_rows
 from unittest import mock
 import zlib
 
@@ -612,7 +614,7 @@ class PostBattleContractTests(unittest.TestCase):
             [(value['avatarDamageDealt'], value['avatarKills'])
              for value in avatar_calls])
         self.assertEqual(3, vehicle_calls[0]['killerID'])
-        self.assertEqual((60002, b'Atlas-17'), common['bots'][3])
+        self.assertEqual((60002, b'Atlas-17'), bot_state_rows.bots(common)[3])
 
     def test_server_receipt_survives_graceful_early_leave_and_is_idempotent(self):
         state = BattleState(map_name='01_karelia')

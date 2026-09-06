@@ -18,6 +18,7 @@ from gui.mods.offline_lan_0922.ai.navigation import (
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import ballistics
 from gui.mods.offline_lan_0922 import bot_gunnery
+from gui.mods.offline_lan_0922 import bot_state_codec
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import effective_params
@@ -1246,7 +1247,12 @@ class _BotGunState(object):
                     reload_time < 0.0 or reload_time > reload_duration):
                 raise ValueError('bot reload progress is invalid')
             expected_duration = self.duration(reload_factor)
-            tolerance = max(1.0, expected_duration) * 1.0e-9
+            # This proves the restored clock belongs to the installed gun, so
+            # it must not be tighter than the wire's own quantum: a reload
+            # duration crosses the LAN as a fixed-point number of microseconds.
+            tolerance = max(
+                max(1.0, expected_duration) * 1.0e-9,
+                2.0 * bot_state_codec.SECONDS_QUANTUM)
             if abs(reload_duration - expected_duration) > tolerance:
                 raise ValueError(
                     'bot reload duration disagrees with installed gun')
@@ -11891,25 +11897,26 @@ class BotRuntime(object):
         if not publish:
             self._sample_time_us = step_end_time_us
             return []
-        wire_states = []
+        wire_rows = []
         launches = [dict(launch) for launch in self._pending_launches]
         for state in self._ordered_states():
             burst_state = self._burst_states.get(int(state['id']))
             if burst_state is not None:
                 burst_state.publish(state)
             self._publish_equipment_state(state)
-            projected = lan_client.project_owned_bot_state(state)
-            if projected is None:
+            try:
+                row = bot_state_codec.encode_row(state)
+            except bot_state_codec.BotStateCodecError:
                 raise RuntimeError('bot publication projection failed')
-            if 'equipment_states' in projected:
+            if 'equipment_states' in state:
                 self._equipment_wire_exposed_in_update.add(int(state['id']))
-            wire_states.append(projected)
+            wire_rows.append(row)
         self._sample_time_us = step_end_time_us
         edge_sample_time_us, edge_revision = self._mark_publication_edge(
             ordered_states, launches, self._pending_ram_reports,
             self._sample_time_us)
         publication = {
-            'type': 'bot_state', 'bots': wire_states,
+            'type': 'bot_state', 'rows': wire_rows,
             'sample_time_us': self._sample_time_us,
             'edge_sample_time_us': edge_sample_time_us,
             'edge_revision': edge_revision,

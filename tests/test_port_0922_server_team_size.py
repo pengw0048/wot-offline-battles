@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 import unittest
+
+import bot_state_rows
 from unittest import mock
 
 
@@ -253,7 +255,7 @@ class ServerTeamSizeTests(unittest.TestCase):
         occupied = {(player.team, player.slot) for player in players}
         self.assertFalse(occupied & {
             (bot['team'], bot['slot']) for bot in state.bot_roster})
-        self.assertEqual(8 - len(players), len(start['bots']))
+        self.assertEqual(8 - len(players), len(bot_state_rows.bots(start)))
 
     def test_worker_drowning_proposal_is_committed_without_descriptors(self):
         state = BattleState(team_size=1)
@@ -449,7 +451,7 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(1, random_player.team)
         self.assertEqual(1, random_player.slot)
-        self.assertEqual(1, len(first_start['bots']))
+        self.assertEqual(1, len(bot_state_rows.bots(first_start)))
 
         state._reset_round()
         self.assertEqual((0, -1), (
@@ -467,7 +469,7 @@ class ServerTeamSizeTests(unittest.TestCase):
         human_slots = {
             (player.team, player.slot) for player in state.players.values()}
         bot_slots = {
-            (bot['team'], bot['slot']) for bot in second_start['bots']}
+            (bot['team'], bot['slot']) for bot in bot_state_rows.bots(second_start)}
         self.assertFalse(human_slots & bot_slots)
         self.assertEqual(1, len(bot_slots))
 
@@ -492,7 +494,7 @@ class ServerTeamSizeTests(unittest.TestCase):
         start, error = state.request_start(host.player_id)
         self.assertIsNone(error)
         self.assertEqual({'1': 2, '2': 5}, start['team_sizes'])
-        self.assertEqual(7 - 1, len(start['bots']))
+        self.assertEqual(7 - 1, len(bot_state_rows.bots(start)))
 
     def test_non_host_cannot_resize_a_team(self):
         state = BattleState(team_size=3)

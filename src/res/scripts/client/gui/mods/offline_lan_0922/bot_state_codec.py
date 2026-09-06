@@ -17,9 +17,11 @@ Both peers import this module: the worker through the client script root inside
 the game, the server through the same path on ``sys.path``.  It is the single
 source of truth for the layout, and it must parse and run on CPython 2.7.
 
-Per-vehicle constants (equipment contracts, device maximum HP, crew roster) ride
-``bot_manifest`` once per round instead of every row; ``decode_row`` rejoins them
-so the decoded mapping keeps the exact shape the rest of the server expects.
+The immutable consumable contracts ride ``bot_manifest`` once per round instead
+of every row, because they were the largest part of the old encoding and never
+change; ``decode_row`` rejoins them. The critical ledger stays self-contained:
+its device maxima and crew roster feed a publication signature that both peers
+compare, so a row carries them rather than depending on a second message.
 """
 
 import math
@@ -43,7 +45,7 @@ MAX_EQUIPMENT = 3
 POSITION_SCALE = 10000        # round(v, 4)
 ANGLE_SCALE = 100000          # round(v, 5)
 SPEED_SCALE = 10000           # round(v, 4)
-SECONDS_SCALE = 10000         # reload/burst clocks
+SECONDS_SCALE = 1000000       # reload, burst and consumable clocks
 FIRE_CLOCK_SCALE = 1000000    # round(v, 6)
 DEVICE_HP_SCALE = 1000        # round(v, 3)
 
@@ -62,6 +64,23 @@ F_MOVING_FORWARD = 1 << 10
 F_MOVING_BACKWARD = 1 << 11
 F_TURNING_LEFT = 1 << 12
 F_TURNING_RIGHT = 1 << 13
+F_HAS_BURST = 1 << 14
+F_HAS_CLIP = 1 << 15
+F_HAS_SIEGE = 1 << 16
+
+# Groups the previous mapping contract could leave out entirely, which meant
+# "keep the state the server already admitted". A positional row always has the
+# columns, so a presence bit carries that distinction instead.
+OPTIONAL_GROUPS = (
+    (F_HAS_AMMO, ('ammo_remaining', 'next_shell_index',
+                  'ammo_reload_pending')),
+    (F_HAS_BURST, ('burst_active', 'burst_group_seq', 'burst_count',
+                   'burst_next_index', 'burst_shell_index',
+                   'burst_interval', 'burst_time_left')),
+    (F_HAS_CLIP, ('clip', 'clip_size')),
+    (F_HAS_SIEGE, ('siege_state', 'siege_time_left_ms',
+                   'siege_transition_total_ms')),
+)
 
 # Scalar columns, in row order, as (name, scale). ``scale`` None means the
 # field is already an exact integer.
@@ -123,6 +142,10 @@ CLAMPS = {
 }
 
 MISSING = -1
+_INFINITY = float('inf')
+
+# The coarsest quantum any second-valued column is carried at.
+SECONDS_QUANTUM = 1.0 / SECONDS_SCALE
 
 
 class BotStateCodecError(ValueError):
@@ -132,6 +155,8 @@ class BotStateCodecError(ValueError):
 def _fixed(value, scale, bounds=None):
     """Round half away from zero so 2.7 and 3.x encode the same integer."""
     number = float(value)
+    if number != number or number in (_INFINITY, -_INFINITY):
+        raise BotStateCodecError('bot state column is not finite')
     if bounds is not None:
         number = max(bounds[0], min(number, bounds[1]))
     scaled = number * scale
@@ -156,6 +181,23 @@ def _exact(value):
     return result
 
 
+def _crew_mask(names):
+    mask = 0
+    for name in names or ():
+        name = str(name)
+        if name not in CREW_NAMES:
+            raise BotStateCodecError('unknown crew member')
+        mask |= 1 << CREW_NAMES.index(name)
+    return mask
+
+
+def _crew_names(mask):
+    if mask < 0 or mask >> len(CREW_NAMES):
+        raise BotStateCodecError('crew mask is out of range')
+    return [name for index, name in enumerate(CREW_NAMES)
+            if mask & (1 << index)]
+
+
 def encode_row(state):
     """Encode one worker-owned Bot state as a positional integer row."""
     if not isinstance(state, dict):
@@ -163,9 +205,10 @@ def encode_row(state):
     critical = state.get('critical')
     equipment = state.get('equipment_states')
     ammo = state.get('ammo_remaining')
-    has_shot = 'shot_yaw' in state and 'shot_pitch' in state
-    if has_shot != ('shot_pitch' in state and 'shot_yaw' in state):
+    has_yaw = 'shot_yaw' in state
+    if has_yaw != ('shot_pitch' in state):
         raise BotStateCodecError('bot shot angles must be an atomic pair')
+    has_shot = has_yaw
     movement = float(state.get('movement_dir', 0.0) or 0.0)
     rotation = float(state.get('rotation_dir', 0.0) or 0.0)
     flags = 0
@@ -185,10 +228,14 @@ def encode_row(state):
             flags |= F_AMMO_RACK_DEATH
     if equipment is not None:
         flags |= F_HAS_EQUIPMENT
-    if ammo is not None:
-        flags |= F_HAS_AMMO
     if has_shot:
         flags |= F_HAS_SHOT_ANGLES
+    for bit, names in OPTIONAL_GROUPS:
+        present = [name in state for name in names]
+        if all(present):
+            flags |= bit
+        elif any(present):
+            raise BotStateCodecError('bot state group is incomplete')
     if movement > 0.01:
         flags |= F_MOVING_FORWARD
     elif movement < -0.01:
@@ -218,7 +265,7 @@ def encode_row(state):
         else:
             row.append(_fixed(value, scale, CLAMPS.get(name)))
 
-    if ammo is not None:
+    if flags & F_HAS_AMMO:
         shells = list(ammo)
         if len(shells) > MAX_SHELL_TYPES:
             raise BotStateCodecError('bot carries too many shell types')
@@ -238,20 +285,18 @@ def encode_row(state):
             records.append((
                 DEVICE_NAMES.index(name),
                 _fixed(record.get('hp', 0.0), DEVICE_HP_SCALE),
+                _fixed(record.get('max_hp', 1.0), DEVICE_HP_SCALE),
                 DEVICE_STATES.index(state_name)))
         records.sort()
         row.append(len(records))
-        for slot, hp, device_state in records:
+        for slot, hp, maximum, device_state in records:
             row.append(slot)
             row.append(hp)
+            row.append(maximum)
             row.append(device_state)
-        crew_mask = 0
-        for name in critical.get('crew_ko') or ():
-            name = str(name)
-            if name not in CREW_NAMES:
-                raise BotStateCodecError('unknown knocked-out crew member')
-            crew_mask |= 1 << CREW_NAMES.index(name)
-        row.append(crew_mask)
+        row.append(_crew_mask(critical.get('crew_ko')))
+        roster = critical.get('crew_roster')
+        row.append(-1 if roster is None else _crew_mask(roster))
 
     if equipment is not None:
         snapshots = list(equipment)
@@ -321,6 +366,10 @@ def decode_row(row, static):
     if not flags & F_HAS_SHOT_ANGLES:
         del result['shot_yaw']
         del result['shot_pitch']
+    for bit, names in OPTIONAL_GROUPS:
+        if not flags & bit:
+            for name in names:
+                result.pop(name, None)
 
     cursor = _Cursor(row)
     if flags & F_HAS_AMMO:
@@ -330,7 +379,6 @@ def decode_row(row, static):
         result['ammo_remaining'] = [cursor.take() for unused in range(count)]
 
     if flags & F_HAS_CRITICAL:
-        maxima = (static or {}).get('device_max_hp') or {}
         count = cursor.take()
         if not 0 <= count <= len(DEVICE_NAMES):
             raise BotStateCodecError('bot device count is out of range')
@@ -339,6 +387,7 @@ def decode_row(row, static):
         for unused in range(count):
             slot = cursor.take()
             hp = cursor.take()
+            maximum = cursor.take()
             device_state = cursor.take()
             if (not 0 <= slot < len(DEVICE_NAMES) or
                     not 0 <= device_state < len(DEVICE_STATES)):
@@ -348,24 +397,22 @@ def decode_row(row, static):
             devices.append({
                 'name': name,
                 'hp': _real(hp, DEVICE_HP_SCALE),
-                'max_hp': float(maxima.get(name, 1.0)),
+                'max_hp': _real(maximum, DEVICE_HP_SCALE),
                 'state': state_name,
             })
             if state_name == 'destroyed':
                 destroyed.append(name)
-        crew_mask = cursor.take()
         critical = {
             'devices': devices,
             'destroyed': destroyed,
-            'crew_ko': [name for index, name in enumerate(CREW_NAMES)
-                        if crew_mask & (1 << index)],
+            'crew_ko': _crew_names(cursor.take()),
             'fire': bool(flags & F_FIRE),
             'ammo_rack_death': bool(flags & F_AMMO_RACK_DEATH),
             'events': [],
         }
-        roster = (static or {}).get('crew_roster')
-        if roster:
-            critical['crew_roster'] = list(roster)
+        roster_mask = cursor.take()
+        if roster_mask >= 0:
+            critical['crew_roster'] = _crew_names(roster_mask)
         result['critical'] = critical
 
     if flags & F_HAS_EQUIPMENT:

@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 import unittest
+
+import bot_state_rows
 from unittest import mock
 
 
@@ -18,7 +20,7 @@ from gui.mods.offline_lan_0922.lan_client import (
     _canonical_runtime_vehicle_row,
     _project_human_ram_armors, _projectile_wire_round,
     _strict_projectile_effect,
-    _valid_player_environment_contract, project_bot_state)
+    _valid_player_environment_contract)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
@@ -102,8 +104,8 @@ class LanProtocolTests(unittest.TestCase):
         self.assertTrue(self.client.leave_battle())
         worker = self._worker_client()
         self.assertTrue(worker.send_bot_manifest([{'id': 1}] * 40))
-        self.assertTrue(worker.send_bot_state([{
-            'id': 1, 'reload_time': 0.5, 'reload_duration': 0.5}]))
+        self.assertTrue(worker.send_bot_state(bot_state_rows.rows([{
+            'id': 1, 'reload_time': 0.5, 'reload_duration': 0.5}])))
         self.assertTrue(worker.send_bot_observation([{}] * 70, [{}] * 20))
         self.assertTrue(worker.send_bot_ram(
             1, 'human', 2, 4, 620, 880))
@@ -118,7 +120,7 @@ class LanProtocolTests(unittest.TestCase):
             'fall_yaw': 0.5, 'speed': 12.0, 'is_shot': False}))
         self.assertTrue(worker.send_battle_result(1, 'elimination'))
         self.assertEqual('leave_battle', self.sent[0]['type'])
-        self.assertEqual(30, len(self.sent[1]['bots']))
+        self.assertEqual(30, len(bot_state_rows.bots(self.sent[1])))
         self.assertEqual(64, len(self.sent[3]['contacts']))
         self.assertEqual('bot_ram_report', self.sent[4]['type'])
         self.assertEqual(620, self.sent[4]['damage_to_bot'])
@@ -148,7 +150,7 @@ class LanProtocolTests(unittest.TestCase):
         self.assertIsNone(_project_human_ram_armors([
             dict(result, first_id=2, second_id=1)]))
         self.assertTrue(worker.send_projected_bot_state(
-            [], sample_time_us=40000,
+            bot_state_rows.rows([]), sample_time_us=40000,
             source_batch_horizon_us=40000,
             edge_sample_time_us=40000, edge_revision=1,
             human_ram_armors=[result]))
@@ -388,10 +390,10 @@ class LanProtocolTests(unittest.TestCase):
             'vehicle': 'ussr:R11_MS-1', 'max_health': 500,
         }
 
-        projected = project_bot_state(source)
+        projected = bot_state_rows.decoded(bot_state_rows.rows([source]), 0)
         self.assertEqual(6.25, projected['speed'])
         sanitized = BattleState._sanitize_bot_state(
-            projected, identity, None)
+            projected, identity, None, trusted=True)
         self.assertEqual(6.25, sanitized['speed'])
 
         events = SnapshotSync(
@@ -636,7 +638,7 @@ class LanProtocolTests(unittest.TestCase):
     def test_only_authority_can_send_bot_or_rule_messages(self):
         self.client.bot_authority_id = 2
         self.assertFalse(self.client.send_bot_manifest([{'id': 1}]))
-        self.assertFalse(self.client.send_bot_state([{'id': 1}]))
+        self.assertFalse(self.client.send_bot_state(bot_state_rows.rows([{'id': 1}])))
         self.assertFalse(self.client.send_bot_observation([{}]))
         self.assertFalse(self.client.send_bot_ram(
             1, 'human', 2, 1, 20, 80))

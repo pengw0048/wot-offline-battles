@@ -32,11 +32,7 @@ CONTRACTS = (
     _contract('largeMedkit', 'medkit', ('equipment', 'medkit')),
     _contract('largeRepairkit', 'repairkit', ('equipment', 'repairkit')),
 )
-STATIC = {
-    'equipment_contracts': CONTRACTS,
-    'device_max_hp': dict((name, 160.0) for name in codec.DEVICE_NAMES),
-    'crew_roster': list(codec.CREW_NAMES),
-}
+STATIC = {'equipment_contracts': CONTRACTS}
 
 
 def _equipment_snapshot(uses=1, cooldown=0.0, active=False,
@@ -147,6 +143,7 @@ class BotStateCodecTest(unittest.TestCase):
             ],
             'destroyed': ['leftTrackHealth'],
             'crew_ko': ['gunner1', 'loader2'],
+            'crew_roster': ['commander', 'driver', 'gunner1', 'loader2'],
             'fire': True, 'ammo_rack_death': False, 'events': [],
         })
         critical = codec.decode_row(
@@ -162,7 +159,9 @@ class BotStateCodecTest(unittest.TestCase):
         self.assertIs(critical['fire'], True)
         self.assertIs(critical['ammo_rack_death'], False)
         self.assertEqual(critical['events'], [])
-        self.assertEqual(critical['crew_roster'], list(codec.CREW_NAMES))
+        self.assertEqual(
+            ['commander', 'driver', 'gunner1', 'loader2'],
+            critical['crew_roster'])
 
     def test_equipment_rejoins_the_round_contract(self):
         state = _bot_state(equipment_states=[
@@ -189,6 +188,35 @@ class BotStateCodecTest(unittest.TestCase):
         self.assertIs(decoded['alive'], False)
         self.assertEqual(decoded['health'], 0)
         self.assertEqual(decoded['death_reason'], 1)
+
+    def test_absent_groups_stay_absent_so_the_server_keeps_its_state(self):
+        """A row must still express "I published no burst, clip or Siege".
+
+        The mapping form left the whole group out and the server kept the
+        state it had already admitted. A positional row always has the
+        columns, so the presence bits carry that distinction; without them a
+        Bot with no burst clock would publish an empty magazine and its shots
+        would never be admitted.
+        """
+        state = _bot_state()
+        for name in ('burst_active', 'burst_group_seq', 'burst_count',
+                     'burst_next_index', 'burst_shell_index',
+                     'burst_interval', 'burst_time_left',
+                     'clip', 'clip_size', 'siege_state',
+                     'siege_time_left_ms', 'siege_transition_total_ms'):
+            del state[name]
+        decoded = codec.decode_row(codec.encode_row(state), STATIC)
+        for name in ('burst_active', 'burst_group_seq', 'clip', 'clip_size',
+                     'siege_state', 'siege_time_left_ms'):
+            self.assertNotIn(name, decoded)
+        self.assertEqual(decoded['fire_seq'], state['fire_seq'])
+        self.assertEqual(decoded['health'], state['health'])
+
+    def test_a_half_published_group_is_refused(self):
+        state = _bot_state()
+        del state['clip_size']
+        with self.assertRaises(codec.BotStateCodecError):
+            codec.encode_row(state)
 
     def test_truncated_and_overlong_rows_are_refused(self):
         row = codec.encode_row(_bot_state())

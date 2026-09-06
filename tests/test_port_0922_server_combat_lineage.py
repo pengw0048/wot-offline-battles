@@ -5,6 +5,8 @@ import sys
 import types
 import unittest
 
+import bot_state_rows
+
 
 PORT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = (PORT_ROOT / 'src' / 'res' / 'scripts' / 'client' /
@@ -209,7 +211,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         server.bot_authority_id = 1
         server.bot_roster = list(roster)
         self.assertTrue(server.update_bot_manifest(1, {
-            'round_id': server.round_id, 'bots': manifest['bots']}))
+            'round_id': server.round_id, 'bots': bot_state_rows.bots(manifest)}))
         return runtime, server, roster
 
     def test_same_source_batch_horizon_preserves_slow_callback_burst_edges(
@@ -252,20 +254,20 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         # One slow worker callback can expose its first physical edge before
         # the callback's final source horizon. The later publication belongs
         # to the same callback even though almost no server wall time elapsed.
-        self.assertTrue(server.update_bot_states(1, {
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
             'round_id': server.round_id,
             'bots': publication(1, 44, 2, True, 1, 0.1),
             'sample_time_us': 200000,
             'source_batch_horizon_us': 1000000,
-        }), server.last_bot_state_reject)
+        })), server.last_bot_state_reject)
         first_mapped_time_us = server.bot_state_time_us
 
-        self.assertTrue(server.update_bot_states(1, {
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
             'round_id': server.round_id,
             'bots': publication(3, 42, 0, False, 3, 0.0),
             'sample_time_us': 1000000,
             'source_batch_horizon_us': 1000000,
-        }), server.last_bot_state_reject)
+        })), server.last_bot_state_reject)
 
         launches = sorted(server.bot_pending_projectile_launches)
         metadata = server.bot_pending_projectile_metadata
@@ -294,11 +296,11 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         human = _human()
         first = runtime.update(
             1.0 / 24.0, 1.0, players=[human])[0]
-        self.assertTrue(server.update_bot_states(1, {
-            'round_id': server.round_id, 'bots': first['bots'],
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
+            'round_id': server.round_id, 'bots': bot_state_rows.bots(first),
             'sample_time_us': first['sample_time_us'],
             'source_batch_horizon_us':
-                first['source_batch_horizon_us']}))
+                first['source_batch_horizon_us']})))
 
         critical = {
             'devices': [{
@@ -323,27 +325,27 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         })
         repeated = runtime.update(
             1.0 / 24.0, 1.1, players=[human])[0]
-        wire = next(bot for bot in repeated['bots'] if bot['id'] == 11)
+        wire = next(bot for bot in bot_state_rows.bots(repeated) if bot['id'] == 11)
         self.assertEqual(['driver', 'gunner1'],
                          wire['critical']['crew_roster'])
         self.assertEqual(0, wire['combat_seq'])
-        self.assertTrue(server.update_bot_states(1, {
-            'round_id': server.round_id, 'bots': repeated['bots'],
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
+            'round_id': server.round_id, 'bots': bot_state_rows.bots(repeated),
             'sample_time_us': repeated['sample_time_us'],
             'source_batch_horizon_us':
                 repeated['source_batch_horizon_us'],
-        }), server.last_bot_state_reject)
+        })), server.last_bot_state_reject)
         for frame in range(1, 25):
             publication = runtime.update(
                 1.0 / 24.0, 1.1 + frame / 24.0,
                 players=[human])[0]
-            self.assertTrue(server.update_bot_states(1, {
+            self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
                 'round_id': server.round_id,
-                'bots': publication['bots'],
+                'bots': bot_state_rows.bots(publication),
                 'sample_time_us': publication['sample_time_us'],
                 'source_batch_horizon_us':
                     publication['source_batch_horizon_us'],
-            }), server.last_bot_state_reject)
+            })), server.last_bot_state_reject)
             if server.bot_pending_projectile_launches:
                 break
         self.assertTrue(any(

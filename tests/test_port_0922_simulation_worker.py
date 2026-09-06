@@ -6,6 +6,8 @@ import sys
 import threading
 import time
 import unittest
+
+import bot_state_rows
 from unittest import mock
 
 
@@ -683,7 +685,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -715,7 +717,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -779,7 +781,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -834,7 +836,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -906,7 +908,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(player.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -945,7 +947,7 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertIsNone(error)
         start, error = state.request_start(first.player_id)
         self.assertIsNone(error)
-        manifest = _manifest(start['bots'])
+        manifest = _manifest(bot_state_rows.bots(start))
         self.assertTrue(state.update_bot_manifest(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'round_id': state.round_id, 'bots': manifest,
@@ -1050,7 +1052,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
             'type': 'start_battle', 'round_id': self.state.round_id})
         player.receive_until('battle_start')
         worker_start = worker.receive_until('battle_start')
-        manifest = _manifest(worker_start['bots'])
+        manifest = _manifest(bot_state_rows.bots(worker_start))
         worker.send({
             'type': 'bot_manifest', 'round_id': self.state.round_id,
             'bots': manifest,
@@ -1210,7 +1212,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         self.assertNotIn(SIMULATION_WORKER_AUTHORITY_ID,
                          self.state.round_participants)
 
-        manifest = _manifest(worker_start['bots'])
+        manifest = _manifest(bot_state_rows.bots(worker_start))
         worker.send({
             'type': 'bot_manifest', 'round_id': self.state.round_id,
             'bots': manifest,
@@ -1230,7 +1232,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         publication = _bot_publication(manifest, x_offset=1.0)
         player.send({
             'type': 'bot_state', 'round_id': self.state.round_id,
-            'bots': publication})
+            'rows': bot_state_rows.rows(publication)})
         player.send({'type': 'ping', 'seq': 2})
         player.receive_until('pong')
         # Modern visible commands are rejected by the dispatcher before
@@ -1240,7 +1242,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
 
         worker.send({
             'type': 'bot_state', 'round_id': self.state.round_id,
-            'bots': publication})
+            'rows': bot_state_rows.rows(publication)})
         worker.send({'type': 'ping', 'seq': 3})
         worker.receive_until('pong')
         self.assertEqual(revision + 1, self.state.bot_state_revision)
@@ -1287,7 +1289,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         rejected_publication = _bot_publication(manifest, x_offset=2.0)
         player.send({
             'type': 'bot_state', 'round_id': self.state.round_id,
-            'bots': rejected_publication})
+            'rows': bot_state_rows.rows(rejected_publication)})
         player.send({'type': 'ping', 'seq': 5})
         player.receive_until('pong')
         self.assertNotEqual(2.0 + manifest[0]['x'],
@@ -1305,7 +1307,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
             'type': 'start_battle', 'round_id': self.state.round_id})
         player.receive_until('battle_start')
         worker_start = worker.receive_until('battle_start')
-        manifest = _manifest(worker_start['bots'])
+        manifest = _manifest(bot_state_rows.bots(worker_start))
         worker.send({
             'type': 'bot_manifest', 'round_id': self.state.round_id,
             'bots': manifest,
@@ -1349,7 +1351,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         publication = _bot_publication(manifest)
         worker.send({
             'type': 'bot_state', 'round_id': self.state.round_id,
-            'bots': publication,
+            'rows': bot_state_rows.rows(publication),
         })
         worker.send({'type': 'ping', 'seq': 1})
         worker.receive_until('pong')
@@ -1359,18 +1361,21 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         rejected[0]['combat_seq'] = 2
         worker.send({
             'type': 'bot_state', 'round_id': self.state.round_id,
-            'bots': rejected,
+            'rows': bot_state_rows.rows(rejected),
         })
         worker.send({'type': 'ping', 'seq': 2})
         self.assertEqual(2, worker.receive_until('pong')['seq'])
 
+        # The publication lands: one Bot's combat contract is contained to
+        # that Bot rather than costing the batch, the worker or the round.
         self.assertIsNotNone(self.state.simulation_worker)
         self.assertIsNone(self.state.battle_result)
-        self.assertEqual(1, self.state.bot_state_revision)
-        self.assertEqual('combat_contract',
-                         self.state.last_bot_state_reject_code)
-        self.assertNotEqual(99.0 + manifest[0]['x'],
-                            self.state.bot_states[manifest[0]['id']]['x'])
+        self.assertEqual(2, self.state.bot_state_revision)
+        self.assertEqual('', self.state.last_bot_state_reject_code)
+        self.assertEqual(99.0 + manifest[0]['x'],
+                         self.state.bot_states[manifest[0]['id']]['x'])
+        self.assertEqual(
+            0, self.state.bot_states[manifest[0]['id']]['combat_ack_seq'])
 
     def test_silent_open_worker_timeout_terminates_round(self):
         with mock.patch.object(
@@ -1487,7 +1492,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
 
             worker.send({
                 'type': 'bot_state', 'round_id': self.state.round_id,
-                'bots': _bot_publication(manifest),
+                'rows': bot_state_rows.rows(_bot_publication(manifest)),
             })
             worker.send({'type': 'ping', 'seq': 0})
             self.assertEqual(0, worker.receive_until('pong')['seq'])

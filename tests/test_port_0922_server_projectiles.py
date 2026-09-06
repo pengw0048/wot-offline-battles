@@ -5,6 +5,8 @@ import sys
 import threading
 import types
 import unittest
+
+import bot_state_rows
 from unittest import mock
 
 
@@ -2427,7 +2429,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         handler = object.__new__(ClientHandler)
 
         self.assertFalse(handler._dispatch_simulation_worker_message(
-            types.SimpleNamespace(state=state), worker, launch))
+            types.SimpleNamespace(state=state), worker, bot_state_rows.publication(launch)))
 
         terminal = {
             'type': 'fire_intent_result', 'round_id': state.round_id,
@@ -2454,7 +2456,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         malformed['direct']['damage'] = 1
 
         self.assertFalse(handler._dispatch_simulation_worker_message(
-            types.SimpleNamespace(state=state), worker, malformed))
+            types.SimpleNamespace(state=state), worker, bot_state_rows.publication(malformed)))
         self.assertIs(state.simulation_worker, worker)
         self.assertTrue(worker.connected)
         self.assertEqual(0, record['ricochet_count'])
@@ -2471,7 +2473,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             '1:p:1:1', direct=_effect(target_id=1))
 
         self.assertFalse(handler._dispatch_simulation_worker_message(
-            types.SimpleNamespace(state=state), worker, malformed))
+            types.SimpleNamespace(state=state), worker, bot_state_rows.publication(malformed)))
 
         self.assertIs(state.simulation_worker, worker)
         self.assertTrue(worker.connected)
@@ -2640,16 +2642,16 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         }
         first = dict(publication, fire_seq=0)
         self.assertTrue(state.update_bot_states(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            SIMULATION_WORKER_AUTHORITY_ID, bot_state_rows.publication({
             'round_id': 1, 'sample_time_us': 100000,
             'source_batch_horizon_us': 200000,
-            'bots': [first]}),
+            'bots': [first]})),
             state.last_bot_state_reject)
         self.assertTrue(state.update_bot_states(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            SIMULATION_WORKER_AUTHORITY_ID, bot_state_rows.publication({
             'round_id': 1, 'sample_time_us': 200000,
             'source_batch_horizon_us': 200000,
-            'bots': [publication]}),
+            'bots': [publication]})),
             state.last_bot_state_reject)
         self.assertEqual(
             state._server_time_ms() * 1000 - 200000,
@@ -2680,10 +2682,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
 
         next_publication = dict(publication, fire_seq=2)
         self.assertTrue(state.update_bot_states(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            SIMULATION_WORKER_AUTHORITY_ID, bot_state_rows.publication({
             'round_id': 1, 'sample_time_us': 300000,
             'source_batch_horizon_us': 300000,
-            'bots': [next_publication]}),
+            'bots': [next_publication]})),
             state.last_bot_state_reject)
         future = _launch(
             shooter_id=16, shooter_kind='bot', shot_seq=2,
