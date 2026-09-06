@@ -48,6 +48,8 @@ class ModLanguageTests(unittest.TestCase):
         font = ET.parse(path).getroot()
         self.assertEqual('Microsoft YaHei',
                          font.findtext('creation/sourceFont'))
+        self.assertEqual('U+FF1F',
+                         font.findtext('creation/widestChar'))
         self.assertIsNone(font.find('generated'))
         self.assertIsNone(font.find('creation/startChar'))
         self.assertIsNone(font.find('creation/endChar'))

@@ -2,6 +2,7 @@
     <creation>
         <sourceFont>Microsoft YaHei</sourceFont>
         <sourceFontSize>16</sourceFontSize>
+        <widestChar>U+FF1F</widestChar>
         <effectsMargin>1</effectsMargin>
         <textureMargin>1</textureMargin>
         <dropShadow>false</dropShadow>
