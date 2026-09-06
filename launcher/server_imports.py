@@ -19,6 +19,7 @@ import json
 import math
 import os
 import pickle
+import platform
 import random
 import re
 import socket
@@ -31,6 +32,8 @@ import traceback
 import types
 import typing
 import unicodedata
+import urllib.error
+import urllib.request
 import uuid
 import weakref
 import zlib
@@ -49,6 +52,7 @@ SERVER_STDLIB_MODULES = (
     math.__name__,
     os.__name__,
     pickle.__name__,
+    platform.__name__,
     random.__name__,
     re.__name__,
     socket.__name__,
@@ -61,6 +65,7 @@ SERVER_STDLIB_MODULES = (
     types.__name__,
     typing.__name__,
     unicodedata.__name__,
+    urllib.__name__,
     uuid.__name__,
     weakref.__name__,
     zlib.__name__,

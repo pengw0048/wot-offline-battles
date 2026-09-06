@@ -16,6 +16,8 @@ CLIENT_DIR = "client"
 PAYLOAD_FILES = {
     "0.9.22": (
         "server/bot_chat.py",
+        "server/bot_chat_llm.py",
+        "server/bot_chat_models.py",
         "server/lan_battle_server.py",
         "server/offline_rewards.py",
         "server/server_bot_ai.py",

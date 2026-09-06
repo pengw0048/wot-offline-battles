@@ -23,6 +23,7 @@ import math
 import random
 import re
 import os
+import platform
 import sys
 import socket
 import socketserver
@@ -40,6 +41,8 @@ if _CLIENT_SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, _CLIENT_SCRIPT_ROOT)
 
 import bot_chat
+import bot_chat_llm
+import bot_chat_models
 from server_bot_ai import BotPlanner
 from offline_rewards import compute_offline_rewards
 from vehicle_overlay_store import (
@@ -80,6 +83,10 @@ BOT_PLANNER_INTERVAL_TICKS = max(1, int(round(TICK_HZ)))
 BOT_CHAT_INTERVAL_TICKS = max(1, int(round(TICK_HZ / 2.0)))
 # A Bot reports its own damage once per round, below this fraction.
 BOT_CHAT_LOW_HEALTH_FRACTION = 0.3
+# The optional local chat model.  The launcher installs both halves and names
+# them here; with either missing the feature is simply off and Bots are quiet.
+BOT_CHAT_RUNTIME_ENV = "WOT_BOT_CHAT_RUNTIME"
+BOT_CHAT_MODEL_ENV = "WOT_BOT_CHAT_MODEL"
 REPLICA_SNAPSHOT_HZ = 15.0
 REPLICA_SNAPSHOT_TICKS = max(
     1, int(round(TICK_HZ / REPLICA_SNAPSHOT_HZ)))
@@ -14321,7 +14328,8 @@ def run_server(host, port, map_name, max_players,
                team_size=15, receipt_state_path=None,
                team1_size=None, team2_size=None,
                bot_tier_mode="random", bot_lineup=None,
-               vehicle_overlay_root=None):
+               vehicle_overlay_root=None,
+               bot_chat_runtime=None, bot_chat_model=None):
     if receipt_state_path is None:
         receipt_state_path = _default_result_receipt_state_path(port)
     state = BattleState(map_name=map_name, max_players=max_players,
@@ -14344,6 +14352,10 @@ def run_server(host, port, map_name, max_players,
             _server_log("VEHICLE OVERLAY none; the room runs stock data")
     else:
         overlay = VehicleOverlayStore()
+    bot_chat_generator = configured_bot_chat(
+        state, bot_chat_runtime, bot_chat_model)
+    if bot_chat_generator is not None:
+        bot_chat_generator.start()
     tcp_server = ThreadedTCPServer((host, port), ClientHandler)
     tcp_server.game_server = type("GameServer", (), {
         "state": state,
@@ -14369,10 +14381,103 @@ def run_server(host, port, map_name, max_players,
         print("\nStopping server", flush=True)
     finally:
         state.running = False
+        # The generator is a child process holding the model in memory. It
+        # must not outlive the room that started it.
+        if bot_chat_generator is not None:
+            bot_chat_generator.stop()
         shutdown_controller.request()
         tcp_server.server_close()
         thread.join(2.0)
         shutdown_controller.wait(2.0)
+
+
+class BotChatGenerator(object):
+    """Attach the optional local model to one room, off every hot path.
+
+    Loading a model takes seconds and a first reply takes more.  Nothing in
+    the battle waits for either: until the generator answers its health
+    check, the director has no backend and every Bot stays quiet.
+    """
+
+    def __init__(self, state, executable, model_path):
+        self._state = state
+        self._supervisor = bot_chat_llm.LlamaServerSupervisor(
+            executable, model_path, log=_server_log)
+        self._backend = None
+        self._thread = None
+
+    @property
+    def supervisor(self):
+        return self._supervisor
+
+    def start(self):
+        """Launch the generator and attach it once it is ready."""
+        if not self._supervisor.available():
+            _server_log(
+                "BOT CHAT disabled: runtime or model is not installed")
+            return False
+        if not self._supervisor.start():
+            return False
+        self._thread = threading.Thread(
+            target=self._attach, name="bot-chat-start", daemon=True)
+        self._thread.start()
+        return True
+
+    def _attach(self):
+        if not self._supervisor.wait_ready():
+            self._supervisor.stop()
+            return
+        backend = bot_chat_llm.LlamaChatBackend(
+            self._supervisor.endpoint, log=_server_log)
+        backend.start()
+        self._backend = backend
+        with self._state.lock:
+            self._state.bot_chat.set_backend(backend)
+        _server_log("BOT CHAT ready at %s" % self._supervisor.endpoint)
+
+    def stop(self):
+        """Detach and terminate, leaving no process holding the model."""
+        with self._state.lock:
+            self._state.bot_chat.set_backend(None)
+        backend, self._backend = self._backend, None
+        if backend is not None:
+            backend.stop()
+        self._supervisor.stop()
+
+
+def configured_bot_chat(state, executable=None, model_path=None):
+    """Return the configured generator for one room, or None when it is off."""
+    executable = str(
+        executable or os.environ.get(BOT_CHAT_RUNTIME_ENV, "")).strip()
+    model_path = str(
+        model_path or os.environ.get(BOT_CHAT_MODEL_ENV, "")).strip()
+    if not executable or not model_path:
+        return None
+    return BotChatGenerator(state, executable, model_path)
+
+
+def print_bot_chat_catalogue(stream=None):
+    """Print what the optional chat model download offers, and from where."""
+    stream = stream or sys.stdout
+    arch = bot_chat_models.runtime_arch(platform.machine())
+    for entry in bot_chat_models.MODEL_TIERS:
+        print("%-6s %-5s %-8s %6.0f MB  %s" % (
+            entry["key"], entry["parameters"], entry["quantization"],
+            entry["size"] / 1048576.0, entry["license"]), file=stream)
+        for source in bot_chat_models.SOURCES:
+            print("       %-12s %s" % (
+                source, bot_chat_models.model_url(entry["key"], source)),
+                file=stream)
+    if arch is None:
+        print("runtime: no CPU build is published for this machine (%s)"
+              % platform.machine(), file=stream)
+        return
+    asset = bot_chat_models.runtime_asset(arch)
+    print("runtime %-5s %6.0f MB  %s" % (
+        arch, asset["size"] / 1048576.0, bot_chat_models.RUNTIME_LICENSE),
+        file=stream)
+    print("       %-12s %s" % ("github", bot_chat_models.runtime_url(arch)),
+          file=stream)
 
 
 def main():
@@ -14393,11 +14498,27 @@ def main():
     parser.add_argument(
         "--team-2-size", type=int, choices=range(1, 16), default=None,
         help="total Team 2 tanks, including players")
+    parser.add_argument(
+        "--bot-chat-runtime", default=None,
+        help="path to llama-server for optional Bot chat (default: $%s)"
+             % BOT_CHAT_RUNTIME_ENV)
+    parser.add_argument(
+        "--bot-chat-model", default=None,
+        help="path to the GGUF model for optional Bot chat (default: $%s)"
+             % BOT_CHAT_MODEL_ENV)
+    parser.add_argument(
+        "--list-chat-models", action="store_true",
+        help="print the optional Bot chat downloads and their mirrors")
     args = parser.parse_args()
+    if args.list_chat_models:
+        print_bot_chat_catalogue()
+        return
     run_server(
         args.host, args.port, args.map_name, args.max_players,
         team_size=args.team_size,
-        team1_size=args.team_1_size, team2_size=args.team_2_size)
+        team1_size=args.team_1_size, team2_size=args.team_2_size,
+        bot_chat_runtime=args.bot_chat_runtime,
+        bot_chat_model=args.bot_chat_model)
 
 
 if __name__ == "__main__":

@@ -89,7 +89,7 @@ def _director(value=0.0, choice_index=0, backend=None):
     return director
 
 
-def _drain(director, snapshot, start=0, stop=600):
+def _drain(director, snapshot, start=0, stop=1200):
     published = []
     for tick in range(start, stop):
         published.extend(director.tick(tick, snapshot))
@@ -400,6 +400,31 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(director.recent_lines(1), [])
 
 
+class NoBackendTest(unittest.TestCase):
+    """With no optional model installed the feature is simply off."""
+
+    def setUp(self):
+        self.snapshot = _snapshot(_roster())
+
+    def _director(self):
+        director = BotChatDirector(_ScriptedRandom(), tick_hz=30.0)
+        director.reset_round(7)
+        return director
+
+    def test_no_backend_reports_disabled(self):
+        self.assertFalse(self._director().enabled())
+
+    def test_no_backend_schedules_nothing_for_a_human_line(self):
+        director = self._director()
+        director.observe_player_line(0, 1, '那个t34 过来', self.snapshot)
+        self.assertEqual([], _drain(director, self.snapshot))
+
+    def test_no_backend_refuses_an_event(self):
+        director = self._director()
+        self.assertFalse(
+            director.observe_event(0, 1, TRIGGER_KILL, 2, self.snapshot))
+
+
 class ClampTest(unittest.TestCase):
     def test_whitespace_is_collapsed(self):
         self.assertEqual(clamp_chat_text('  收到   ,  这就去 '), '收到 , 这就去')
@@ -418,13 +443,14 @@ class ClampTest(unittest.TestCase):
 class DeterminismTest(unittest.TestCase):
     def test_one_seed_replays_one_transcript(self):
         def transcript():
-            director = BotChatDirector(random.Random(2024), tick_hz=30.0)
+            director = BotChatDirector(random.Random(2024), tick_hz=30.0,
+                                       backend=_CountingBackend())
             director.reset_round(7)
             snapshot = _snapshot(_roster())
             director.observe_player_line(0, 1, '那个t34 过来', snapshot)
             director.observe_player_line(200, 1, '这局有点难打', snapshot)
             return [(tick, line['bot_id'], line['text'])
-                    for tick in range(0, 900)
+                    for tick in range(0, 1600)
                     for line in director.tick(tick, snapshot)]
 
         first = transcript()

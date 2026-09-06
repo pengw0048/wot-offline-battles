@@ -12,9 +12,10 @@ the director returns the lines to publish.  One round therefore replays
 identically in tests, which is what keeps the conversation rules provable
 while the line text itself stays replaceable.
 
-``compose`` on the line backend is the seam a local language model plugs into
-later.  ``TemplateLineBackend`` is the shipped default and the only backend
-that works with no optional download installed.
+A line backend writes the text.  Without one -- which is what an install
+with no optional model downloaded looks like -- the director schedules
+nothing and every Bot stays quiet.  There is deliberately no second line
+source: a canned stand-in would only make a broken model look healthy.
 """
 
 import re
@@ -23,10 +24,15 @@ import unicodedata
 
 # Conversation pacing, in seconds.  The director converts these with the
 # caller's tick rate so the server stays the single owner of TICK_HZ.
-REPLY_DELAY_MIN_SECONDS = 0.8
-REPLY_DELAY_MAX_SECONDS = 2.6
-HOP_DELAY_MIN_SECONDS = 1.2
-HOP_DELAY_MAX_SECONDS = 3.4
+#
+# A teammate reads the channel, decides to answer, and types a line of
+# Chinese while driving.  Ten seconds is ordinary, and an instant answer is
+# the thing that reads as a machine.  The generous window is also what gives
+# a small local model room to finish without anybody waiting on it.
+REPLY_DELAY_MIN_SECONDS = 1.5
+REPLY_DELAY_MAX_SECONDS = 9.0
+HOP_DELAY_MIN_SECONDS = 2.0
+HOP_DELAY_MAX_SECONDS = 11.0
 THREAD_SILENCE_SECONDS = 20.0
 BOT_COOLDOWN_SECONDS = 9.0
 
@@ -41,6 +47,12 @@ TEAM_BUDGET_SECONDS = 20.0
 # capped and each further hop is less likely than the last.
 MAX_CONVERSATION_HOPS = 2
 HOP_PROBABILITY = (0.55, 0.3)
+
+# A generating backend is asked when the line is scheduled and states how
+# long it wants.  Ordinary reply pacing already covers a small local model,
+# so this only matters for a slow one, and the cap bounds how long a hung
+# generator can hold a scheduled line before it is abandoned.
+MAX_PREFETCH_WAIT_SECONDS = 15.0
 
 # Peng's product choice: most lines get an answer, and an interesting line may
 # get more than one.  Silence stays legal, it is simply not the default.
@@ -214,102 +226,13 @@ def clamp_chat_text(value):
     return text or None
 
 
-class TemplateLineBackend(object):
-    """Compose one line from shipped persona templates.
-
-    This backend is what a player gets with no optional model installed, so
-    it is a product surface rather than a placeholder.  It stays deliberately
-    small: variety comes from persona and trigger, and the director's own
-    repeat filter keeps a pool from sounding like a loop.
-    """
-
-    _COMMON = {
-        TRIGGER_REPLY: ("收到", "明白", "好", "在的", "听到了"),
-        TRIGGER_HOP: ("同上", "我也这么想", "+1", "有道理"),
-        TRIGGER_KILL: ("打掉一个", "拿下了", "少一个"),
-        TRIGGER_DOWN: ("我没了", "被打死了", "下课了"),
-        TRIGGER_ALLY_DOWN: ("队友没了", "少一个人了", "那边塌了"),
-        TRIGGER_LOW_HEALTH: ("我血不多了", "残血了", "血皮，别指望我"),
-    }
-
-    _PERSONA = {
-        PERSONA_TACTICAL: {
-            TRIGGER_REPLY: ("收到，这就去", "明白，交给我", "好，我压上去"),
-            TRIGGER_HOP: ("那我走前面", "我掩护", "跟上就行"),
-            TRIGGER_KILL: ("一炮带走", "干净利落", "下一个"),
-            TRIGGER_DOWN: ("失误了", "算我一个", "这波我亏了"),
-            TRIGGER_ALLY_DOWN: ("补上去", "别让他白死", "顶住"),
-            TRIGGER_LOW_HEALTH: ("血不多，但还能打", "残血，我卖头"),
-        },
-        PERSONA_SLACKER: {
-            TRIGGER_REPLY: ("哦，好吧", "行行行，来了", "别催，在路上"),
-            TRIGGER_HOP: ("他说得对", "听他的", "我随便"),
-            TRIGGER_KILL: ("哎，蒙中了", "运气好"),
-            TRIGGER_DOWN: ("下班了", "行吧，先歇会", "早知道不冲了"),
-            TRIGGER_ALLY_DOWN: ("哎呀", "有点惨"),
-            TRIGGER_LOW_HEALTH: ("我这血够呛", "别撞我，一下就没"),
-        },
-        PERSONA_MECHANIC: {
-            TRIGGER_REPLY: ("等我装填完", "好，装填还有几秒", "收到，修完就来"),
-            TRIGGER_HOP: ("同意", "他说的对"),
-            TRIGGER_KILL: ("这发打进去了", "弹药没白带"),
-            TRIGGER_DOWN: ("弹药架爆了", "履带先没的"),
-            TRIGGER_ALLY_DOWN: ("那边压力大", "得有人补位"),
-            TRIGGER_LOW_HEALTH: ("履带又掉了", "车不行了"),
-        },
-        PERSONA_SCOUT: {
-            TRIGGER_REPLY: ("收到，我去看一眼", "明白，先探路", "好，我亮一下"),
-            TRIGGER_HOP: ("我确认一下", "看到了"),
-            TRIGGER_KILL: ("点掉一个", "打中了"),
-            TRIGGER_DOWN: ("被抓到了", "亮太久了"),
-            TRIGGER_ALLY_DOWN: ("那边有埋伏", "小心侧面"),
-            TRIGGER_LOW_HEALTH: ("我血皮，退了", "先撤，别暴露"),
-        },
-        PERSONA_POETIC: {
-            TRIGGER_REPLY: ("好", "这就来", "听见了"),
-            TRIGGER_HOP: ("是这个道理", "我也这么觉得"),
-            TRIGGER_KILL: ("走一个", "落幕了"),
-            TRIGGER_DOWN: ("我先走一步", "到此为止"),
-            TRIGGER_ALLY_DOWN: ("可惜了", "又少一个"),
-            TRIGGER_LOW_HEALTH: ("撑不了多久", "血快见底了"),
-        },
-    }
-
-    def compose(self, request):
-        """Return one line for this request, or None to stay silent."""
-        trigger = request.get("trigger")
-        persona = request.get("persona") or PERSONA_PLAIN
-        rng = request["rng"]
-        pools = []
-        persona_pool = self._PERSONA.get(persona, {}).get(trigger)
-        if persona_pool:
-            pools.append(persona_pool)
-        common_pool = self._COMMON.get(trigger)
-        if common_pool:
-            pools.append(common_pool)
-        if not pools:
-            return None
-        # Persona lines are the point of the feature, so they are drawn first
-        # and the neutral pool only widens the choice.
-        candidates = list(pools[0])
-        if len(pools) > 1 and rng.random() < 0.3:
-            candidates = list(pools[1])
-        recent = set(request.get("recent_texts") or ())
-        fresh = [line for line in candidates if line not in recent]
-        chosen = rng.choice(fresh or candidates)
-        prefix = request.get("address_prefix")
-        if prefix and rng.random() < 0.5:
-            chosen = "%s %s" % (prefix, chosen)
-        return chosen
-
-
 class BotChatDirector(object):
     """Own the team-chat conversation for every Bot in one round."""
 
     def __init__(self, rng, tick_hz=30.0, backend=None):
         self._rng = rng
         self._tick_hz = float(tick_hz)
-        self._backend = backend or TemplateLineBackend()
+        self._backend = backend
         self._round_id = None
         self._personas = {}
         self._pending = []
@@ -318,6 +241,7 @@ class BotChatDirector(object):
         self._budget = {}
         self._bot_last_line = {}
         self._team_last_line = {}
+        self._request_seq = 0
 
     # -- lifecycle ------------------------------------------------------
 
@@ -331,10 +255,15 @@ class BotChatDirector(object):
         self._budget = {}
         self._bot_last_line = {}
         self._team_last_line = {}
+        self._request_seq = 0
 
     def set_backend(self, backend):
         """Swap the line source without disturbing an active conversation."""
-        self._backend = backend or TemplateLineBackend()
+        self._backend = backend
+
+    def enabled(self):
+        """Return whether any backend can write a line at all."""
+        return self._backend is not None
 
     def _ticks(self, seconds):
         return max(1, int(round(float(seconds) * self._tick_hz)))
@@ -479,6 +408,8 @@ class BotChatDirector(object):
     def observe_player_line(self, tick, team, text, snapshot):
         """Schedule the answers one human line earns."""
         team = int(team)
+        if self._backend is None:
+            return {"kind": ADDRESS_NONE, "bot_ids": []}
         address = self.resolve_address(text, team, snapshot)
         self._remember(team, snapshot.get("speaker", {}).get("name"), text)
         if address["kind"] in (ADDRESS_CALLSIGN, ADDRESS_VEHICLE,
@@ -497,7 +428,7 @@ class BotChatDirector(object):
                                else SECOND_SPEAKER_PROBABILITY)
                 if self._rng.random() <= probability:
                     self._schedule(tick, bot_id, team, TRIGGER_REPLY,
-                                   address["kind"])
+                                   address["kind"], snapshot)
             return address
         # Nobody was named.  Peng's choice is that an open remark usually
         # still gets an answer, and an interesting one may get two.
@@ -508,10 +439,10 @@ class BotChatDirector(object):
         if not pool:
             return address
         self._schedule(tick, pool[0]["id"], team, TRIGGER_REPLY,
-                       ADDRESS_NONE)
+                       ADDRESS_NONE, snapshot)
         if len(pool) > 1 and self._rng.random() < SECOND_SPEAKER_PROBABILITY:
             self._schedule(tick, pool[1]["id"], team, TRIGGER_REPLY,
-                           ADDRESS_NONE)
+                           ADDRESS_NONE, snapshot)
         return address
 
     @staticmethod
@@ -529,8 +460,9 @@ class BotChatDirector(object):
 
     def observe_event(self, tick, team, trigger, bot_id, snapshot):
         """Let a battle event start a line without any human speaking."""
-        if trigger not in (TRIGGER_KILL, TRIGGER_DOWN, TRIGGER_ALLY_DOWN,
-                           TRIGGER_LOW_HEALTH):
+        if self._backend is None or trigger not in (
+                TRIGGER_KILL, TRIGGER_DOWN, TRIGGER_ALLY_DOWN,
+                TRIGGER_LOW_HEALTH):
             return False
         team = int(team)
         if bot_id is None:
@@ -542,15 +474,50 @@ class BotChatDirector(object):
             return False
         if self._rng.random() > EVENT_REPLY_PROBABILITY:
             return False
-        self._schedule(tick, bot_id, team, trigger, ADDRESS_NONE)
+        self._schedule(tick, bot_id, team, trigger, ADDRESS_NONE, snapshot)
         return True
 
-    def _schedule(self, tick, bot_id, team, trigger, address_kind, hop=0):
+    def _build_request(self, bot, team, trigger, address_kind, snapshot):
+        """Describe one line completely enough for any backend to write it."""
+        self._request_seq += 1
+        return {
+            "request_id": self._request_seq,
+            "trigger": trigger,
+            "persona": self.persona(bot["id"], bot.get("name")),
+            "address_kind": address_kind,
+            "address_prefix": self._address_prefix(address_kind, snapshot),
+            "speaker": dict(snapshot.get("speaker") or {}),
+            "bot": bot,
+            "recent_texts": [record["text"]
+                             for record in self._recent.get(team, ())],
+            "recent": list(self._recent.get(team, ())),
+            "rng": self._rng,
+        }
+
+    def _schedule(self, tick, bot_id, team, trigger, address_kind, snapshot,
+                  hop=0):
+        bot = self._find_bot(bot_id, snapshot)
+        if bot is None:
+            return
         delay_min, delay_max = ((HOP_DELAY_MIN_SECONDS, HOP_DELAY_MAX_SECONDS)
                                 if hop else
                                 (REPLY_DELAY_MIN_SECONDS,
                                  REPLY_DELAY_MAX_SECONDS))
         delay = self._rng.uniform(delay_min, delay_max)
+        request = self._build_request(bot, team, trigger, address_kind,
+                                      snapshot)
+        # Hand a generating backend the work now, and hold the line back long
+        # enough for it to finish.  ``rng`` is deliberately not shared across
+        # a thread boundary: a backend copies what it needs.
+        prefetch = getattr(self._backend, "prefetch", None)
+        if prefetch is not None:
+            try:
+                prefetch(request)
+            except Exception:
+                pass
+            delay = max(delay, min(
+                MAX_PREFETCH_WAIT_SECONDS,
+                float(getattr(self._backend, "latency_hint_seconds", 0.0))))
         self._pending.append({
             "due_tick": int(tick) + self._ticks(delay),
             "bot_id": int(bot_id),
@@ -558,6 +525,7 @@ class BotChatDirector(object):
             "trigger": trigger,
             "address_kind": address_kind,
             "hop": int(hop),
+            "request": request,
         })
         # Reserve the slot now.  Without this, one burst of admissions would
         # schedule every Bot before any of them has spoken.
@@ -592,19 +560,15 @@ class BotChatDirector(object):
             return None
         if entry["trigger"] != TRIGGER_DOWN and not bot.get("alive"):
             return None
-        if not self._spend_budget(tick, team):
+        if self._backend is None or not self._budget_available(tick, team):
             return None
-        request = {
-            "trigger": entry["trigger"],
-            "persona": self.persona(bot["id"], bot.get("name")),
-            "address_kind": entry["address_kind"],
-            "address_prefix": self._address_prefix(entry, snapshot),
-            "bot": bot,
-            "recent_texts": [record["text"]
-                             for record in self._recent.get(team, ())],
-            "recent": list(self._recent.get(team, ())),
-            "rng": self._rng,
-        }
+        # The request was frozen when the line was scheduled so a generating
+        # backend could start early.  Only the facts that move are refreshed.
+        request = entry["request"]
+        request["bot"] = bot
+        request["recent_texts"] = [record["text"]
+                                   for record in self._recent.get(team, ())]
+        request["recent"] = list(self._recent.get(team, ()))
         try:
             text = self._backend.compose(request)
         except Exception:
@@ -617,6 +581,7 @@ class BotChatDirector(object):
         if any(text == record["text"]
                for record in list(self._recent.get(team, ()))[-3:]):
             return None
+        self._spend_budget(tick, team)
         self._remember(team, bot.get("name"), text)
         self._bot_last_line[bot["id"]] = tick
         self._team_last_line[team] = tick
@@ -624,9 +589,9 @@ class BotChatDirector(object):
         self._maybe_hop(tick, entry, snapshot)
         return {"bot_id": bot["id"], "team": team, "text": text}
 
-    def _address_prefix(self, entry, snapshot):
+    def _address_prefix(self, address_kind, snapshot):
         """Name the human back only when they named a Bot first."""
-        if entry["address_kind"] not in (ADDRESS_CALLSIGN, ADDRESS_VEHICLE):
+        if address_kind not in (ADDRESS_CALLSIGN, ADDRESS_VEHICLE):
             return None
         speaker = snapshot.get("speaker") or {}
         name = speaker.get("name")
@@ -647,7 +612,7 @@ class BotChatDirector(object):
             return
         speaker = self._rng.choice(candidates)
         self._schedule(tick, speaker["id"], team, TRIGGER_HOP,
-                       ADDRESS_NONE, hop=hop + 1)
+                       ADDRESS_NONE, snapshot, hop=hop + 1)
 
     # -- budgets and threads --------------------------------------------
 
@@ -657,16 +622,17 @@ class BotChatDirector(object):
         return (last is None or
                 tick - last >= self._ticks(BOT_COOLDOWN_SECONDS))
 
-    def _spend_budget(self, tick, team):
+    def _budget_available(self, tick, team):
+        """Return whether this team may still publish inside the window."""
         window = self._ticks(TEAM_BUDGET_SECONDS)
         spent = [stamp for stamp in self._budget.get(team, ())
                  if tick - stamp < window]
-        if len(spent) >= TEAM_BUDGET_LINES:
-            self._budget[team] = spent
-            return False
-        spent.append(tick)
         self._budget[team] = spent
-        return True
+        return len(spent) < TEAM_BUDGET_LINES
+
+    def _spend_budget(self, tick, team):
+        """Charge one published line against the team's window."""
+        self._budget.setdefault(team, []).append(tick)
 
     def _thread(self, team, tick):
         thread = self._threads.get(team)

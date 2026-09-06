@@ -65,6 +65,26 @@ Official information is available from the
 [ProcDump documentation](https://learn.microsoft.com/en-us/sysinternals/downloads/procdump)
 and [Sysinternals licensing FAQ](https://learn.microsoft.com/en-us/sysinternals/license-faq).
 
+## Optional local chat model and inference runtime
+
+The optional Bot team-chat feature is off unless a player chooses to install
+it, and neither half is distributed with this project.
+
+When a player enables it, the launcher downloads a Qwen2.5-Instruct model in
+GGUF form, published by Alibaba Cloud's Qwen team under the Apache License
+2.0. The same file is offered from
+[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF)
+and [Hugging Face](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF);
+ModelScope is listed first because it is reachable from mainland China. Both
+mirrors were verified to serve the identical file, and the exact repositories,
+file names, sizes and SHA-256 digests are pinned in
+[`server/bot_chat_models.py`](server/bot_chat_models.py).
+
+Inference runs in a separate `llama-server` process from
+[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp), distributed
+under the MIT License. The launcher downloads the pinned CPU-only Windows
+build from that project's official release assets.
+
 ## Wargaming intellectual property
 
 This project is an unofficial compatibility modification. It does not include
