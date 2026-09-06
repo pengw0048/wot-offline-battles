@@ -77,6 +77,16 @@ BOT_PLANNER_INTERVAL_TICKS = max(1, int(round(TICK_HZ)))
 REPLICA_SNAPSHOT_HZ = 15.0
 REPLICA_SNAPSHOT_TICKS = max(
     1, int(round(TICK_HZ / REPLICA_SNAPSHOT_HZ)))
+# A lineage section is recorded as delivered when its payload reaches the
+# socket, and no replica acknowledges it. One frame a client could not consume
+# therefore used to cost it that section for the rest of the round: a lost
+# manifest froze its whole roster, and a lost destructible revision left it
+# drawing a wall the world no longer has. Republish each section on a slow
+# cadence so any single loss heals. The rosters are at most thirty rows; the
+# destructible ledger holds only what has actually been reported destroyed.
+BOT_MANIFEST_REFRESH_TICKS = max(1, int(round(TICK_HZ * 5.0)))
+BOT_ORDER_REFRESH_TICKS = max(1, int(round(TICK_HZ * 5.0)))
+DESTRUCTIBLE_REFRESH_TICKS = max(1, int(round(TICK_HZ * 10.0)))
 RESULT_RESET_SECONDS = 5.0
 MAX_TICK_FAILURE_DIAGNOSTIC_CHARS = 512
 MAX_CONSECUTIVE_TICK_FAILURES = 2
@@ -1975,6 +1985,9 @@ class Player(_EndpointSendMixin):
     bot_manifest_round_id_sent: int = -1
     bot_manifest_authority_epoch_sent: int = -1
     bot_manifest_revision_sent: int = -1
+    bot_manifest_tick_sent: int = -1
+    bot_order_tick_sent: int = -1
+    destructible_tick_sent: int = -1
 
 
 @dataclass
@@ -2000,6 +2013,9 @@ class SimulationWorker(_EndpointSendMixin):
     bot_manifest_round_id_sent: int = -1
     bot_manifest_authority_epoch_sent: int = -1
     bot_manifest_revision_sent: int = -1
+    bot_manifest_tick_sent: int = -1
+    bot_order_tick_sent: int = -1
+    destructible_tick_sent: int = -1
 
 
 class BattleState:
@@ -3194,11 +3210,17 @@ class BattleState:
             player.gun_pitch = 0.0
             player.bot_order_revision_sent = -1
             player.destructible_revision_sent = -1
+            player.bot_manifest_tick_sent = -1
+            player.bot_order_tick_sent = -1
+            player.destructible_tick_sent = -1
             player.battle_ready_round = 0
         worker = self.simulation_worker
         if worker is not None and worker.connected:
             worker.bot_order_revision_sent = -1
             worker.destructible_revision_sent = -1
+            worker.bot_manifest_tick_sent = -1
+            worker.bot_order_tick_sent = -1
+            worker.destructible_tick_sent = -1
             worker.battle_ready_round = 0
             worker.simulation_progress_round_id = 0
             worker.simulation_progress_authority_epoch = -1
@@ -12866,7 +12888,9 @@ class BattleState:
                 player.bot_manifest_revision_sent !=
                 snapshot_manifest_revision or
                 player.bot_manifest_authority_epoch_sent !=
-                snapshot_authority_epoch)
+                snapshot_authority_epoch or
+                snapshot_tick - player.bot_manifest_tick_sent >=
+                BOT_MANIFEST_REFRESH_TICKS)
             supports_lean_manifest = bool(
                 LEAN_SNAPSHOT_MANIFEST_CAPABILITY in player.capabilities)
             snapshot_due = bool(
@@ -12885,12 +12909,16 @@ class BattleState:
             needs_manifest = snapshot_lineage_due
             includes_manifest = bool(
                 needs_manifest or not supports_lean_manifest)
-            needs_orders = (
+            needs_orders = bool(
                 player.bot_order_revision_sent !=
-                snapshot_order_revision)
-            needs_destructibles = (
+                snapshot_order_revision or
+                snapshot_tick - player.bot_order_tick_sent >=
+                BOT_ORDER_REFRESH_TICKS)
+            needs_destructibles = bool(
                 player.destructible_revision_sent !=
-                snapshot_destructible_revision)
+                snapshot_destructible_revision or
+                snapshot_tick - player.destructible_tick_sent >=
+                DESTRUCTIBLE_REFRESH_TICKS)
             if (not includes_manifest or needs_orders or
                     needs_destructibles):
                 outgoing = dict(snapshot)
@@ -12916,7 +12944,12 @@ class BattleState:
                 if offered:
                     player.snapshot_round_id_sent = snapshot_round_id
                     player.snapshot_tick_sent = snapshot_tick
+                    if needs_orders:
+                        player.bot_order_tick_sent = snapshot_tick
+                    if needs_destructibles:
+                        player.destructible_tick_sent = snapshot_tick
                     if needs_manifest:
+                        player.bot_manifest_tick_sent = snapshot_tick
                         player.bot_manifest_round_id_sent = (
                             snapshot_round_id)
                         player.bot_manifest_authority_epoch_sent = (
