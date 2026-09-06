@@ -228,14 +228,17 @@ class VehicleOverlayTest(unittest.TestCase):
                 (b"shortUserString", scalar(
                     packed.TYPE_STRING, b"#ussr_vehicles:R11_MS-1_short")),
                 (b"tags", scalar(packed.TYPE_STRING, b"lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 1)),
             ])),
             (b"R12_Test", element([
                 (b"tags", scalar(
                     packed.TYPE_STRING, b"secret lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 3)),
             ])),
             (b"Observer", element([
                 (b"tags", scalar(
                     packed.TYPE_STRING, b"secret observer lightTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 1)),
             ])),
         ])
         return {
@@ -283,6 +286,7 @@ class VehicleOverlayTest(unittest.TestCase):
         roster.children.append((b"R13_Siege", element([
             (b"tags", scalar(
                 packed.TYPE_STRING, b"AT-SPG siegeMode")),
+            (b"level", scalar(packed.TYPE_INTEGER, 8)),
         ])))
         self.members[self.LIST] = packed.write_packed_xml(roster)
         self.members[self.SIEGE_VEHICLE] = packed.write_packed_xml(normal)
@@ -771,6 +775,37 @@ class VehicleOverlayTest(unittest.TestCase):
         self.assertEqual("R11_MS-1", ms1["vehicle"])
         self.assertEqual(self.VEHICLE, ms1["member"])
         self.assertIn("lightTank", ms1["tags"])
+        self.assertEqual("lightTank", ms1["vehicleClass"])
+        self.assertEqual(1, ms1["level"])
+
+    def test_roster_reports_the_stock_class_tag_and_tier_for_each_vehicle(
+            self):
+        roster = packed.read_packed_xml(self.members[self.LIST])
+        # A roster entry with no class tag and a non-integer tier is still
+        # offered; only the two list filters cannot place it.
+        roster.children.append((b"R14_Unclassified", element([
+            (b"tags", scalar(packed.TYPE_STRING, b"HD")),
+            (b"level", scalar(packed.TYPE_STRING, b"6")),
+        ])))
+        self.members[self.LIST] = packed.write_packed_xml(roster)
+        self.members[
+            "scripts/item_defs/vehicles/ussr/R14_Unclassified.xml"] = (
+                self.members[self.VEHICLE])
+        self._write_package()
+
+        with mock.patch.object(
+                vehicle_overlays, "_vehicle_translations", return_value=None):
+            choices = dict(
+                (choice["vehicle"], choice)
+                for choice in vehicle_overlays.list_vehicle_choices(self.game))
+
+        self.assertEqual(
+            ("lightTank", 3), (choices["R12_Test"]["vehicleClass"],
+                               choices["R12_Test"]["level"]))
+        self.assertEqual(
+            (None, None), (choices["R14_Unclassified"]["vehicleClass"],
+                           choices["R14_Unclassified"]["level"]))
+        self.assertNotIn("Observer", choices)
 
     def test_type_5_heavy_is_read_from_the_japanese_roster(self):
         class _Translations(object):
@@ -792,6 +827,7 @@ class VehicleOverlayTest(unittest.TestCase):
                     packed.TYPE_STRING,
                     b"#japan_vehicles:J20_Type_2605_short")),
                 (b"tags", scalar(packed.TYPE_STRING, b"heavyTank")),
+                (b"level", scalar(packed.TYPE_INTEGER, 10)),
             ])),
         ])
         self.members[list_member] = packed.write_packed_xml(roster)
@@ -808,6 +844,8 @@ class VehicleOverlayTest(unittest.TestCase):
                      if choice["vehicle"] == "J20_Type_2605")
         self.assertEqual("五式重战", type5["label"])
         self.assertEqual(vehicle_member, type5["member"])
+        self.assertEqual("heavyTank", type5["vehicleClass"])
+        self.assertEqual(10, type5["level"])
 
     def test_catalog_prefix_is_hidden_only_in_human_facing_fields(self):
         record = vehicle_overlays._choice_record(
