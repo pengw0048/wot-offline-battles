@@ -6039,6 +6039,11 @@ class BattleState:
         admitted, and no projectile edge is derived from a state it refused.
         """
         result = dict(previous) if previous else {}
+        # The ledgers this holds must not alias the retired state; every other
+        # path here produces fresh containers.
+        for name in ("critical", "equipment_states", "ammo_remaining"):
+            if name in result:
+                result[name] = copy.deepcopy(result[name])
         max_health = int(identity.get("max_health", 1000))
         health = max(0, min(int(raw["health"]), max_health))
         if previous is not None:
@@ -6320,15 +6325,14 @@ class BattleState:
                 try:
                     current = self._sanitize_bot_state(
                         raw, identity, previous, trusted=True)
-                    self._reconcile_modern_bot_combat(
-                        raw, previous, current)
                 except ValueError as error:
-                    # One Bot's combat or inventory contract cannot hold the
-                    # whole publication. Rejecting the batch would also leave
-                    # this Bot's stored state behind its own next publication,
+                    # One Bot's own state contract cannot hold the whole
+                    # publication. Rejecting the batch would also leave this
+                    # Bot's stored state behind its own next publication,
                     # which repeats the same failure and freezes it for the
-                    # rest of the round. Keep the Bot moving on its published
-                    # pose and carry its previous combat ledger forward.
+                    # rest of the round while every other Bot loses the tick
+                    # too. Keep the Bot moving on its published pose and carry
+                    # its previous ledgers forward.
                     _server_log_limited(
                         "bot-state-contract:%d" % bot_id,
                         "BOT STATE contained bot=%s client_fire=%s "
@@ -6337,6 +6341,46 @@ class BattleState:
                             (previous or {}).get("fire_seq", 0), error))
                     current = self._contained_bot_state(
                         raw, identity, previous)
+                else:
+                    try:
+                        self._reconcile_modern_bot_combat(
+                            raw, previous, current)
+                    except ValueError as error:
+                        # The state itself is well formed; only its combat
+                        # lineage is not the one the server holds. Fence the
+                        # combat ledger exactly like a lost ordering race, and
+                        # open a new canonical revision so the authority
+                        # rebases onto it. Without that new base the authority
+                        # keeps proposing past a sequence the server will
+                        # never acknowledge and this Bot's combat state stays
+                        # frozen for the rest of the round.
+                        _server_log_limited(
+                            "bot-combat-contract:%d" % bot_id,
+                            "BOT STATE combat rebased bot=%s client_base=%s "
+                            "server_base=%s client_seq=%s server_ack=%s "
+                            "reason=%s" % (
+                                bot_id, raw.get("combat_base_revision"),
+                                (previous or {}).get(
+                                    "combat_base_revision", 0),
+                                raw.get("combat_seq"),
+                                (previous or {}).get("combat_ack_seq", 0),
+                                error))
+                        if previous is None:
+                            current = self._contained_bot_state(
+                                raw, identity, previous)
+                        else:
+                            self._copy_bot_combat(current, previous)
+                            proposed_base = raw.get(
+                                "combat_base_revision", 0)
+                            if not isinstance(proposed_base, int) or \
+                                    isinstance(proposed_base, bool):
+                                proposed_base = 0
+                            revision = max(
+                                int(current.get("combat_revision", 0)),
+                                int(current.get("combat_base_revision", 0)),
+                                proposed_base) + 1
+                            current["combat_revision"] = revision
+                            current["combat_base_revision"] = revision
                 rebase_fire_gap = bool(
                     source_clock_rebase and previous is not None and
                     int(current.get("fire_seq", 0)) >
@@ -6353,17 +6397,19 @@ class BattleState:
                             previous, current)
                         self._validate_bot_ammo_transition(previous, current)
                     except ValueError as error:
-                        # Same containment as the combat contract above: hold
-                        # this Bot's magazine on its last admitted state and
-                        # derive no projectile edge from one the server could
-                        # not accept, but keep it and every other Bot moving.
+                        # The published magazine and burst clock do not follow
+                        # from the last ones the server admitted, which a
+                        # coalesced publication spanning an unobserved shot
+                        # already produces legally.  Holding the old magazine
+                        # would make every later publication disagree with it
+                        # the same way, so this Bot would never fire again.
+                        # Take the complete published inventory as the new
+                        # trusted baseline exactly like the rebase above, and
+                        # never invent projectile edges for the gap.
                         _server_log_limited(
                             "bot-ammo-contract:%d" % bot_id,
-                            "BOT STATE contained bot=%s reason=%s" % (
+                            "BOT STATE rebased bot=%s reason=%s" % (
                                 bot_id, error))
-                        current = self._contained_bot_state(
-                            raw, identity, previous)
-                        next_states[bot_id] = current
                         burst_edges = ()
                 previous_fire = int((previous or {}).get("fire_seq", 0))
                 if (previous is not None and

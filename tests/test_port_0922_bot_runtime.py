@@ -932,12 +932,15 @@ class ServerBotStateRevisionTests(unittest.TestCase):
         self.assertEqual(2, server.bot_state_revision)
         self.assertEqual(0.8, server.bot_states[11]['x'])
 
-    def test_one_bot_contract_failure_never_stops_the_other_bots(self):
-        """A per-Bot contract failure is contained to that Bot's ledgers.
+    def test_a_fenced_bot_combat_lineage_reopens_instead_of_freezing(self):
+        """A combat lineage the server cannot follow rebases the authority.
 
-        Rejecting the publication would also leave the Bot's stored state
-        behind its own next publication, so the same failure would repeat and
-        freeze it -- and every other Bot -- for the rest of the round.
+        Rejecting the publication would leave this Bot's stored state behind
+        its own next publication, so the same failure would repeat and freeze
+        it -- and every other Bot -- for the rest of the round. Holding the
+        acknowledged sequence without opening a new canonical revision has the
+        same shape: the authority keeps proposing past a sequence the server
+        will never acknowledge.
         """
         now = [100.0]
         server, _, unused_socket = self._server(
@@ -954,34 +957,30 @@ class ServerBotStateRevisionTests(unittest.TestCase):
         admitted = copy.deepcopy(server.bot_states[11])
         revision = server.bot_state_revision
 
-        for offset, (field, mutate) in enumerate((
-                ('combat_seq', lambda bot: bot.__setitem__(
-                    'combat_seq', bot['combat_ack_seq'] + 2)),
-                ('ammo_remaining', lambda bot: bot.__setitem__(
-                    'ammo_remaining',
-                    [bot['ammo_remaining'][0] + 1] +
-                    list(bot['ammo_remaining'][1:]))))):
-            now[0] = 100.210 + offset * 0.005
-            broken = self._publication(server, 1.5 + offset)
-            broken['sample_time_us'] = 50000 + offset * 10000
-            broken['source_batch_horizon_us'] = broken['sample_time_us']
-            mutate(broken['bots'][0])
-            self.assertTrue(server.update_bot_states(
-                SIMULATION_WORKER_AUTHORITY_ID,
-                bot_state_rows.publication(broken)),
-                'a single Bot contract must not cost the publication')
-            current = server.bot_states[11]
-            self.assertEqual(1.5 + offset, current['x'], field)
-            self.assertEqual(admitted['fire_seq'], current['fire_seq'], field)
-            self.assertEqual(
-                admitted['ammo_remaining'], current['ammo_remaining'], field)
-            self.assertEqual(
-                admitted['combat_ack_seq'], current['combat_ack_seq'], field)
-            self.assertGreater(server.bot_state_revision, revision)
-            revision = server.bot_state_revision
+        now[0] = 100.210
+        broken = self._publication(server, 1.5)
+        broken['sample_time_us'] = 50000
+        broken['source_batch_horizon_us'] = 50000
+        bot_state_rows.bots(broken)[0]['combat_seq'] = (
+            admitted['combat_ack_seq'] + 2)
+        self.assertTrue(server.update_bot_states(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            bot_state_rows.publication(broken)),
+            'a single Bot contract must not cost the publication')
+        fenced = server.bot_states[11]
+        self.assertEqual(1.5, fenced['x'])
+        self.assertEqual(
+            admitted['combat_ack_seq'], fenced['combat_ack_seq'])
+        self.assertEqual(admitted['critical'], fenced['critical'])
+        self.assertGreater(
+            fenced['combat_base_revision'],
+            admitted['combat_base_revision'])
+        self.assertEqual(
+            fenced['combat_revision'], fenced['combat_base_revision'])
+        self.assertGreater(server.bot_state_revision, revision)
 
-        # The Bot is still live authority, not frozen: a well formed
-        # publication resumes immediately.
+        # That new base is what the authority rebases onto, so its very next
+        # proposal is contiguous again and the Bot is live authority.
         now[0] = 100.240
         healthy = self._publication(server, 3.0)
         healthy['sample_time_us'] = 90000
@@ -992,6 +991,68 @@ class ServerBotStateRevisionTests(unittest.TestCase):
             server.last_bot_state_reject)
         self.assertEqual(3.0, server.bot_states[11]['x'])
         self.assertEqual('', server.last_bot_state_reject_code)
+
+    def test_a_disagreeing_bot_magazine_rebases_so_the_bot_fires_again(self):
+        """An inventory step the server cannot derive becomes the new baseline.
+
+        Holding the previously admitted magazine would make every later
+        publication disagree with it exactly the same way, so the Bot would
+        never have another shot admitted for the rest of the round.
+        """
+        now = [100.0]
+        server, _, unused_socket = self._server(
+            clock=lambda: now[0],
+            before_manifest=lambda: now.__setitem__(0, 100.025))
+        now[0] = 100.200
+        baseline = self._publication(server, 0.4)
+        baseline['sample_time_us'] = 40000
+        baseline['source_batch_horizon_us'] = 40000
+        self.assertTrue(server.update_bot_states(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            bot_state_rows.publication(baseline)),
+            server.last_bot_state_reject)
+        revision = server.bot_state_revision
+
+        now[0] = 100.210
+        broken = self._publication(server, 1.5)
+        broken['sample_time_us'] = 50000
+        broken['source_batch_horizon_us'] = 50000
+        bot = bot_state_rows.bots(broken)[0]
+        bot['fire_seq'] = int(bot['fire_seq']) + 1
+        bot['ammo_reload_pending'] = True
+        bot['clip'] = 0
+        bot.update(BattleState._ordinary_bot_burst(bot['fire_seq'], 0))
+        self.assertTrue(server.update_bot_states(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            bot_state_rows.publication(broken)),
+            'a single Bot contract must not cost the publication')
+        contained = server.bot_states[11]
+        self.assertEqual(1.5, contained['x'])
+        self.assertEqual(bot['fire_seq'], contained['fire_seq'])
+        self.assertEqual(bot['ammo_remaining'], contained['ammo_remaining'])
+        # No projectile edge is invented from a step the server could not
+        # derive; only the inventory it now trusts is carried forward.
+        self.assertEqual(set(), server.bot_pending_projectile_launches)
+        self.assertGreater(server.bot_state_revision, revision)
+
+        # The very next legal shot from that baseline is admitted and launches.
+        now[0] = 100.240
+        healthy = self._publication(server, 3.0)
+        healthy['sample_time_us'] = 90000
+        healthy['source_batch_horizon_us'] = 90000
+        bot = bot_state_rows.bots(healthy)[0]
+        shot_seq = int(bot['fire_seq']) + 1
+        bot['fire_seq'] = shot_seq
+        bot['ammo_remaining'] = [int(bot['ammo_remaining'][0]) - 1]
+        bot['ammo_reload_pending'] = True
+        bot['clip'] = 0
+        bot.update(BattleState._ordinary_bot_burst(shot_seq, 0))
+        self.assertTrue(server.update_bot_states(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            bot_state_rows.publication(healthy)),
+            server.last_bot_state_reject)
+        self.assertEqual('', server.last_bot_state_reject_code)
+        self.assertIn((11, shot_seq), server.bot_pending_projectile_launches)
 
     def test_dispatcher_counts_validated_clock_rebase_as_advancement(self):
         now = [100.0]
@@ -12085,6 +12146,96 @@ class BotRuntimeTests(unittest.TestCase):
                 published['combat_seq'],
                 server.bot_states[11]['combat_ack_seq'])
         self.assertEqual(700, server.bot_states[11]['health'])
+
+    def test_a_server_fenced_combat_lineage_is_rebased_by_the_authority(self):
+        """The server's fence must close its own gap, not freeze the Bot.
+
+        When the server cannot follow a Bot's combat lineage it holds the
+        acknowledged sequence and opens a new canonical revision. That new base
+        is only useful if the authority actually rebases onto it; otherwise the
+        authority keeps proposing past a sequence the server will never
+        acknowledge and the Bot's combat state is frozen for the round.
+        """
+        descriptor = _critical_descriptor()
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: descriptor,
+            adapter_factory=lambda *args, **kwargs: _Adapter(*args),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        manifest_message = runtime.battle_start(self.start)[0]
+        server = BattleState(map_name='01_karelia')
+        server.client_build = CLIENT_BUILD_0922
+        server.phase = 'battle'
+        server.tick = 100000
+        server.round_id = self.start['round_id']
+        server.players[1] = Player(
+            1, object(), ('127.0.0.1', 1), team=1, slot=0)
+        server.bot_authority_id = 1
+        server.bot_roster = list(bot_state_rows.bots(self.start))
+        self.assertTrue(server.update_bot_manifest(1, {
+            'round_id': server.round_id,
+            'bots': bot_state_rows.bots(manifest_message),
+        }))
+        burning = _critical_payload({
+            'name': 'fuelTankHealth', 'hp': 0.0, 'max_hp': 100.0,
+            'state': 'destroyed'}, destroyed=['fuelTankHealth'], fire=True)
+        runtime.apply_snapshot({
+            'server_tick': 1,
+            'bots': [_snapshot_bot(
+                health=950, critical=burning,
+                revision=1, base_revision=1)]})
+
+        # Mirror that external hit as the server's canonical combat base, so
+        # the only thing the server cannot follow below is the sequence.
+        server.bot_states[11].update(
+            health=950, display_health=950, critical=dict(burning),
+            combat_revision=1, combat_base_revision=1, combat_ack_seq=0,
+            combat_fire_elapsed=0.0, combat_fire_timer=0.0)
+        publication_message = runtime.update(.20, .20)[0]
+        published = bot_state_rows.bots(publication_message)[0]
+        self.assertEqual(1, published['combat_seq'])
+        server_base = server.bot_states[11]['combat_base_revision']
+
+        # A proposal that skips a sequence the server never acknowledged.
+        published['combat_seq'] = (
+            server.bot_states[11]['combat_ack_seq'] + 2)
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
+            'round_id': server.round_id,
+            'bots': [published],
+        })), server.last_bot_state_reject)
+        fenced = server.bot_states[11]
+        self.assertEqual(0, fenced['combat_ack_seq'])
+        self.assertGreater(fenced['combat_base_revision'], server_base)
+        self.assertEqual(
+            fenced['combat_revision'], fenced['combat_base_revision'])
+
+        # The authority accepts that new base and resets its own sequence to
+        # the server's ack, so the very next proposal is contiguous again.
+        runtime.apply_snapshot({
+            'server_tick': 2, 'bots': [dict(fenced)]})
+        sync = runtime._combat_sync[11]
+        self.assertEqual(fenced['combat_ack_seq'], sync['next_seq'])
+        self.assertEqual(
+            fenced['combat_base_revision'], sync['base_revision'])
+        self.assertEqual([], sync['pending'])
+
+        # This Bot's combat is live for the rest of the round: its fire clock
+        # keeps advancing on the fenced base, and the very next proposal is
+        # ack+1 and acknowledged.
+        recovered_message = runtime.update(.20, .40)[0]
+        recovered = bot_state_rows.bots(recovered_message)[0]
+        self.assertEqual(
+            fenced['combat_ack_seq'] + 1, recovered['combat_seq'])
+        self.assertTrue(server.update_bot_states(1, bot_state_rows.publication({
+            'round_id': server.round_id,
+            'bots': bot_state_rows.bots(recovered_message),
+        })), server.last_bot_state_reject)
+        self.assertEqual('', server.last_bot_state_reject_code)
+        self.assertEqual(
+            recovered['combat_seq'],
+            server.bot_states[11]['combat_ack_seq'])
 
     def test_external_base_replay_waits_for_wire_before_reserving_sequence(self):
         descriptor = _critical_descriptor()
