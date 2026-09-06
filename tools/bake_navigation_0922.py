@@ -55,6 +55,21 @@ NAVIGATION_BASELINE_SHA256 = {
         'f6b71578f032a0fa1e442ebf7fc241a23d76171c8ea72cbde5ca728591e4d9e0'),
 }
 
+# Ordinary #1513 navigable water is not a navigation hazard.  The 0.8.2
+# baseline flagged every cell deeper than 0.12 m as shallow water, which cost
+# five times the cell length in A*, closed the shortcut, smoothing, pending,
+# route-lane and spawn-chord checks across it, and clamped the driver fan to
+# the controlled-ford cone.  Bots therefore queued on the dry bank of a 20 cm
+# ditch: the fan veto fires from dry ground looking in, while a hull already
+# standing in the water falls through to the native probe and drives freely.
+# bot_runtime.BOT_WATER_AVOID_DEPTH has always accepted water up to the
+# baseline's own WATER_DEPTH_LIMIT, so the two layers disagreed by 7.5x and
+# the baked class won by short-circuiting the native probe.  Align them on one
+# line: water the baseline itself calls navigable stays plain ground, and
+# HAZARD_SHALLOW_WATER marks only what needed it - a reviewed ford cell that
+# its own scoped depth limit admits beyond WATER_DEPTH_LIMIT.
+SHALLOW_WATER_THRESHOLD = 0.90
+
 _GREAT_WALL_MAP = '59_asia_great_wall'
 _GREAT_WALL_GRID_CELL_SIZE = 4.0
 _GREAT_WALL_ARENA_BOUNDS = (-500.0, -500.0, 500.0, 500.0)
@@ -122,20 +137,20 @@ _REVIEWED_TERRAIN_PATH_CONTRACTS = {
                 (-150.0, 374.0), (-146.0, 374.0),
             ),
             'missing_states': {
-                (-162.0, 366.0): 6,
+                (-162.0, 366.0): 2,
                 (-158.0, 370.0): 1,
                 (-154.0, 370.0): 1,
-                (-150.0, 374.0): 6,
+                (-150.0, 374.0): 2,
             },
             'side_states': {
-                (-162.0, 370.0): 6,
+                (-162.0, 370.0): 2,
                 (-162.0, 362.0): 2,
                 (-158.0, 374.0): 1,
-                (-158.0, 366.0): 6,
+                (-158.0, 366.0): 2,
                 (-154.0, 374.0): 1,
                 (-154.0, 366.0): 1,
-                (-150.0, 378.0): 6,
-                (-150.0, 370.0): 6,
+                (-150.0, 378.0): 2,
+                (-150.0, 370.0): 2,
             },
             'maximum_water_depth': 1.01,
         },
@@ -148,20 +163,20 @@ _REVIEWED_TERRAIN_PATH_CONTRACTS = {
                 (-146.0, -234.0), (-142.0, -234.0),
             ),
             'missing_states': {
-                (-158.0, -242.0): 6,
+                (-158.0, -242.0): 2,
                 (-154.0, -238.0): 1,
                 (-150.0, -238.0): 1,
-                (-146.0, -234.0): 6,
+                (-146.0, -234.0): 2,
             },
             'side_states': {
-                (-158.0, -246.0): 6,
-                (-158.0, -238.0): 6,
+                (-158.0, -246.0): 2,
+                (-158.0, -238.0): 2,
                 (-154.0, -242.0): 1,
                 (-154.0, -234.0): 1,
                 (-150.0, -242.0): 1,
                 (-150.0, -234.0): 1,
-                (-146.0, -238.0): 6,
-                (-146.0, -230.0): 6,
+                (-146.0, -238.0): 2,
+                (-146.0, -230.0): 2,
             },
             'maximum_water_depth': 1.25,
         },
@@ -2358,6 +2373,17 @@ def bake_map_graph(client_root, map_name, output=None, cell_size=4.0):
         original_maps, original_game_version = legacy.MAPS, legacy.GAME_VERSION
         original_format_name, original_format_version = legacy.FORMAT_NAME, legacy.FORMAT_VERSION
         original_expanded_bounds = legacy._expanded_bounds
+        original_shallow_threshold = legacy.SHALLOW_WATER_THRESHOLD
+        if SHALLOW_WATER_THRESHOLD != legacy.WATER_DEPTH_LIMIT:
+            # The two constants must name the same line.  A baseline that
+            # forbids water above one depth while this baker still penalises
+            # water above another reintroduces the split that made bots stall
+            # on a dry bank, so refuse to bake rather than emit a graph whose
+            # hazard class no longer matches the runtime probe.
+            raise UnsafeBakeInputError(
+                'shallow-water threshold %r does not match the baseline '
+                'navigable water limit %r' % (SHALLOW_WATER_THRESHOLD,
+                                              legacy.WATER_DEPTH_LIMIT))
         def target_expanded_bounds(map_config, requested_cell_size):
             return _target_sampling_bounds(
                 map_name, map_config, requested_cell_size)
@@ -2367,6 +2393,7 @@ def bake_map_graph(client_root, map_name, output=None, cell_size=4.0):
             legacy.FORMAT_NAME = 'offline-lan-0922-navgraph'
             legacy.FORMAT_VERSION = 2
             legacy._expanded_bounds = target_expanded_bounds
+            legacy.SHALLOW_WATER_THRESHOLD = SHALLOW_WATER_THRESHOLD
             original_terrain, original_obstacles = legacy.Terrain, legacy.ObstacleField
             original_validate = legacy.validate_graph
             original_bake_routes = legacy.bake_tactical_routes
@@ -2488,6 +2515,7 @@ def bake_map_graph(client_root, map_name, output=None, cell_size=4.0):
             legacy.MAPS, legacy.GAME_VERSION = original_maps, original_game_version
             legacy.FORMAT_NAME, legacy.FORMAT_VERSION = original_format_name, original_format_version
             legacy._expanded_bounds = original_expanded_bounds
+            legacy.SHALLOW_WATER_THRESHOLD = original_shallow_threshold
             legacy.Terrain, legacy.ObstacleField = original_terrain, original_obstacles
             legacy.validate_graph = original_validate
             legacy.bake_tactical_routes = original_bake_routes

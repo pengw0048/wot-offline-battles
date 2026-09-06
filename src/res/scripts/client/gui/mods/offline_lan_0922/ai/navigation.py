@@ -18,8 +18,15 @@ from gui.mods.offline_lan_0922.ai.driver import (
 
 SQRT_TWO = math.sqrt(2.0)
 BAKED_FATAL_HAZARDS = 1 | 2
-# Shallow water remains passable when no dry route exists, but the baked graph
-# assigns it a large traction/risk cost so ordinary shortcuts stay on land.
+# A reviewed ford cell whose scoped depth limit admits it beyond the baked
+# graph's ordinary navigable water limit. It stays passable when no dry route
+# exists, but carries a large traction/risk cost and the controlled-ford
+# discipline below, because such a ford is a hand-authored single-file
+# corridor. Ordinary navigable water carries no hazard bit: the baker and
+# bot_runtime.BOT_WATER_AVOID_DEPTH share one line, and penalising every
+# puddle below it queued whole teams on the dry bank of a 20 cm ditch. A
+# graph baked before that alignment still flags its shallow apron, which
+# only makes these consumers more conservative.
 BAKED_SHALLOW_WATER = 4
 # Cache compact answers, not crossed-cell lists, in the 32-bit worker.
 MAX_BAKED_CORRIDOR_CACHE = 2048

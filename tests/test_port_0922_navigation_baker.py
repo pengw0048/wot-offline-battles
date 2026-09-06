@@ -1199,7 +1199,9 @@ class CompiledSpace0922Test(unittest.TestCase):
             HAZARD_WATER=1,
             HAZARD_EDGE=2,
             HAZARD_SHALLOW_WATER=4,
-            SHALLOW_WATER_THRESHOLD=0.15,
+            # The shipped baker keeps this on the navigable water limit, so
+            # only a reviewed ford's scoped depth can raise the shallow class.
+            SHALLOW_WATER_THRESHOLD=0.9,
             WATER_DEPTH_LIMIT=0.9,
             VEHICLE_HALF_WIDTH=2.15,
             BRIDGE_OBSTACLE_MARGIN=1.0,
@@ -1351,6 +1353,82 @@ class CompiledSpace0922Test(unittest.TestCase):
 
         self.assertEqual(1.0, record['maximum_water_depth'])
         self.assertEqual(4, graph['hazards'][middle])
+        self.assertIsNone(graph['heights_mm'][side])
+        self.assertEqual(1, graph['hazards'][side])
+
+    def test_shallow_water_class_shares_the_baseline_navigable_limit(self):
+        # Ordinary navigable water must not also be a route hazard.  A split
+        # between these two constants is what made bots queue on the dry bank
+        # of a twenty-centimetre ditch while the native probe was willing to
+        # drive it, so the baker refuses to bake when they disagree.
+        legacy = baker._legacy_baker()
+
+        self.assertEqual(legacy.WATER_DEPTH_LIMIT,
+                         baker.SHALLOW_WATER_THRESHOLD)
+        self.assertEqual(0.9, baker.SHALLOW_WATER_THRESHOLD)
+
+    def test_reviewed_contracts_never_expect_shallow_water_on_a_closed_cell(self):
+        # A cell the baker rejected carries only deep water and edge state.
+        # Ordinary navigable water no longer sets HAZARD_SHALLOW_WATER, so a
+        # contract that still expected it would describe a graph this baker
+        # cannot produce and would fail its own pre-mutation assertion.
+        legacy = baker._legacy_baker()
+        contracts = []
+        for records in baker._REVIEWED_TERRAIN_PATH_CONTRACTS.values():
+            contracts.extend(records)
+        for records in baker._REVIEWED_NARROW_CORNER_CONTRACTS.values():
+            contracts.extend(records)
+        self.assertTrue(contracts)
+        for contract in contracts:
+            for key in ('missing_states', 'side_states'):
+                for point, hazard in (contract.get(key) or {}).items():
+                    with self.subTest(contract=contract['id'], point=point):
+                        self.assertFalse(
+                            int(hazard) & legacy.HAZARD_SHALLOW_WATER)
+
+    def test_reviewed_ford_leaves_ordinary_navigable_water_unflagged(self):
+        # One ford, both sides of the limit: the deep cell keeps the shallow
+        # class and its controlled-ford discipline, while the knee-deep cell
+        # the runtime probe would drive without complaint becomes plain ground.
+        graph = self._reviewed_adapter_graph(width=5, height=2)
+        points = ((0.0, 4.0), (4.0, 4.0), (8.0, 4.0), (12.0, 4.0), (16.0, 4.0))
+        for point in (points[0], points[2], points[4]):
+            graph['heights_mm'][self._adapter_index(graph, point)] = 0
+        deep = self._adapter_index(graph, points[1])
+        knee = self._adapter_index(graph, points[3])
+        graph['hazards'][deep] = 1
+        graph['hazards'][knee] = 2
+        side = self._adapter_index(graph, (4.0, 0.0))
+        graph['hazards'][side] = 1
+        contract = {
+            'id': 'test_ford',
+            'kind': 'ford',
+            'points': points,
+            'missing_states': {(4.0, 4.0): 1, (12.0, 4.0): 2},
+            'side_states': {(4.0, 0.0): 1},
+            'maximum_water_depth': 1.1,
+        }
+
+        def water(x, unused_z, unused_ground):
+            if 2.0 <= x <= 6.0:
+                return 1.0
+            if 10.0 <= x <= 14.0:
+                return 0.5
+            return 0.0
+
+        terrain, obstacles, legacy = self._reviewed_adapter_dependencies(
+            water=water,
+            edge=lambda x, unused_z, unused_ground: not 2.0 <= x <= 14.0)
+
+        record = baker.install_reviewed_terrain_path(
+            graph, terrain, obstacles, legacy, contract)
+
+        self.assertEqual(1.0, record['maximum_water_depth'])
+        self.assertEqual(2, record['revived_nodes'])
+        self.assertEqual(legacy.HAZARD_SHALLOW_WATER, graph['hazards'][deep])
+        self.assertEqual(0, graph['hazards'][knee])
+        self.assertEqual(0, graph['heights_mm'][deep])
+        self.assertEqual(0, graph['heights_mm'][knee])
         self.assertIsNone(graph['heights_mm'][side])
         self.assertEqual(1, graph['hazards'][side])
 
