@@ -2108,6 +2108,18 @@ class WindowTest(unittest.TestCase):
                 boundary, wot_launcher.error_reports.ROLE_VISIBLE_CLIENT),
             environment[wot_launcher.CRASH_DUMP_PATH_ENV])
 
+    def test_game_receives_resolved_launcher_language(self):
+        for language in ("zh", "en"):
+            self.window.language = language
+            with mock.patch("wot_launcher.subprocess.Popen",
+                            return_value=_Process(exit_code=0)) as popen, \
+                    mock.patch("core.wait_for_game_exit"):
+                self.window._run_game(
+                    self.settings_dir, core.PORT_0_9_22, core.LOCAL_HOST,
+                    core.DEFAULT_SERVER_PORT)
+            self.assertEqual(language, popen.call_args.kwargs[
+                "env"]["WOT_OFFLINE_UI_LANGUAGE"])
+
     def test_online_0_9_22_starter_receives_dump_destination(self):
         boundary = wot_launcher.error_reports.begin_session(
             self.settings_dir,

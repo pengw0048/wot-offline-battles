@@ -1,0 +1,10 @@
+<offline_lan_cjk.font>
+    <creation>
+        <sourceFont>Microsoft YaHei</sourceFont>
+        <sourceFontSize>16</sourceFontSize>
+        <effectsMargin>1</effectsMargin>
+        <textureMargin>1</textureMargin>
+        <dropShadow>false</dropShadow>
+        <bold>false</bold>
+    </creation>
+</offline_lan_cjk.font>

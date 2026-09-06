@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import types
@@ -2669,6 +2670,20 @@ class LANSessionRoomTests(unittest.TestCase):
         if 'players' in message:
             self.client.roster = list(message['players'])
         self.client.on_event(kind, message)
+
+    def test_chinese_guest_roster_and_denial_keep_player_names(self):
+        with mock.patch.dict(os.environ, {'WOT_OFFLINE_UI_LANGUAGE': 'zh'}):
+            self.emit('welcome', {
+                'phase': 'waiting', 'map_pool': ['01_karelia'],
+                'host_player_id': 'p2',
+                'players': [{'id': 'p1', 'name': '小鹏'},
+                            {'id': 'p2', 'name': '房主'}]})
+            status = self.session._room_status()
+            self.assertIn('玩家（2）：小鹏, 房主', status)
+            self.assertIn('等待 房主 开始战斗', status)
+            self.emit('team_denied', {'code': 'team_full', 'team': 2})
+            self.assertEqual('队伍 2 已满，请选择另一队或随机。',
+                             self.statuses[-1])
 
     def test_incomplete_native_close_keeps_room_owned_for_retry(self):
         self.emit('welcome', {

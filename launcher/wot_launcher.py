@@ -2345,7 +2345,7 @@ class LauncherWindow(object):
             game_root, port_version, paired_worker=paired_worker)
         environment = core.visible_client_environment(
             port_version, host, port, paired_worker=paired_worker,
-            preferred_team=preferred_team)
+            preferred_team=preferred_team, language=self.language)
         if port_version == core.PORT_0_9_22:
             environment = self._crash_capture_environment(
                 environment, error_reports.ROLE_VISIBLE_CLIENT)

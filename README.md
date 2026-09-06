@@ -25,6 +25,13 @@ and battle logic, a small LAN server and a launcher.
    host picks the map and clicks **START BATTLE**. **LEAVE** returns you to
    the garage.
 
+The mod's waiting room and LAN notifications follow the launcher's selected
+English or Simplified Chinese language when you start the game. **Automatic**
+uses the same resolved system language as the launcher. Restart the game after
+changing this selection. Stock garage and battle UI keep the client's language;
+Chinese map labels come from the client's own arena catalog. Direct batch-file
+launches retain English unless `WOT_OFFLINE_UI_LANGUAGE=zh` is set.
+
 When you host, approve the UAC prompt that opens TCP 28782 for the launcher.
 Run the server only on a network you trust.
 

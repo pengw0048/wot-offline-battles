@@ -18,7 +18,8 @@ Exact #1513 evidence for the native surface used here:
   texture name all drew the same white, and the untextured quad drew nothing.
   So every visible rectangle here carries ``system/maps/col_white.dds`` and is
   white, and readable contrast comes from dark ``GUI.Text`` on top.
-- Font ``system/fonts/default_small.font``: package member.
+- Mod-owned font ``system/fonts/offline_lan_cjk.font`` uses Windows
+  Microsoft YaHei with dynamic glyph caching; Windows rendering is pending.
 - ``GUI.addRoot`` / ``GUI.delRoot`` / ``GUI.reSort`` and an overlay at
   ``position.z = 0.1`` with ``focus``, ``moveFocus`` and ``wg_inputKeyMode``:
   ``scripts/client/new_year/fade_window.pyc``.
@@ -40,6 +41,9 @@ Exact #1513 evidence for the native surface used here:
 import sys
 import time
 
+from gui.mods.offline_lan_0922 import ui_i18n
+from gui.mods.offline_lan_0922.ui_i18n import as_text, tr
+
 # An untextured GUI.Simple/GUI.Window draws nothing on this client, and vertex
 # colour is never applied to a textured one, so every visible rectangle is a
 # white col_white quad and contrast comes from GUI.Text.  The panel stays
@@ -51,7 +55,7 @@ CONTROL_TEXTURE = 'system/maps/col_white.dds'
 OUTLINE_TEXTURE = 'system/maps/col_black.dds'
 CONTROL_TEXT_COLOUR = (16, 26, 36, 255)
 CONTROL_HOVER_COLOUR = (14, 82, 140, 255)
-PANEL_FONT = 'default_small.font'
+PANEL_FONT = ui_i18n.CHINESE_FONT
 OVERLAY_Z = 0.1
 # Smaller z draws in front. The buttons render at CONTROL_Z and the pointer at
 # z=0 did not, so the pointer keeps the same 0.01 step inside that band.
@@ -100,21 +104,32 @@ def _log(message):
 def friendly_map_name(map_name):
     """Turn a server geometry name into a readable room label."""
     if map_name == RANDOM_MAP_OPTION:
-        return 'Random'
-    parts = str(map_name or '').split('_')
+        return tr('Random')
+    if ui_i18n.language() == 'zh':
+        try:
+            import ArenaType
+            for arena in ArenaType.g_cache.values():
+                if (getattr(arena, 'geometryName', None) == map_name and
+                        getattr(arena, 'gameplayName', None) == 'ctf'):
+                    name = getattr(arena, 'name', None)
+                    if name:
+                        return as_text(name)
+        except (ImportError, AttributeError):
+            pass
+    parts = as_text(map_name or '').split('_')
     prefix = ''
     if parts and parts[0].isdigit():
         prefix = parts[0] + ' - '
         parts = parts[1:]
     return prefix + (' '.join([part.capitalize() for part in parts]) or
-                     'Unknown')
+                     tr('Unknown'))
 
 
 def friendly_bot_tier_mode(mode):
     for value, label in BOT_TIER_OPTIONS:
         if value == mode:
-            return label
-    return 'Random'
+            return tr(label)
+    return tr('Random')
 
 
 def panel_geometry(screen_size):
@@ -395,7 +410,7 @@ class WaitingRoomUI(object):
         make_control('team_random', (0.52, -0.38, CONTROL_Z), 0.42, 0.14)
         make_control('start', (0.0, -0.58, CONTROL_Z), 1.20, 0.20)
         make_control('close', (0.0, -0.90, CONTROL_Z), 0.50, 0.16)
-        make_label('title', 'LAN WAITING ROOM', (-0.86, 0.82, 0.0), 1.72,
+        make_label('title', tr('LAN WAITING ROOM'), (-0.86, 0.82, 0.0), 1.72,
                    0.12, colour=(232, 244, 255, 255))
         make_label('room', '', (-0.86, 0.62, 0.0), 1.72, 0.11)
         make_label('players', '', (-0.86, 0.44, 0.0), 1.72, 0.11)
@@ -425,15 +440,15 @@ class WaitingRoomUI(object):
                    anchor='CENTER', colour=(232, 244, 255, 255))
         make_label('team2_up', '+', (0.82, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team1', 'TEAM 1', (-0.52, -0.38, 0.0), 0.40, 0.09,
+        make_label('team1', tr('TEAM 1'), (-0.52, -0.38, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team2', 'TEAM 2', (0.0, -0.38, 0.0), 0.40, 0.09,
+        make_label('team2', tr('TEAM 2'), (0.0, -0.38, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('team_random', 'RANDOM', (0.52, -0.38, 0.0), 0.40, 0.09,
+        make_label('team_random', tr('RANDOM'), (0.52, -0.38, 0.0), 0.40, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('start', 'START BATTLE', (0.0, -0.58, 0.0), 1.16, 0.11,
+        make_label('start', tr('START BATTLE'), (0.0, -0.58, 0.0), 1.16, 0.11,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('close', 'LEAVE', (0.0, -0.90, 0.0), 0.46, 0.10,
+        make_label('close', tr('LEAVE'), (0.0, -0.90, 0.0), 0.46, 0.10,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('message', '', (-0.86, -0.75, 0.0), 1.72, 0.10,
                    colour=(184, 205, 222, 255))
@@ -501,14 +516,17 @@ class WaitingRoomUI(object):
         labels = self._labels if labels is None else labels
         surface = self._surface if surface is None else surface
         component = surface.text()
+        # A missing font must reach the session's stock-window fallback,
+        # not silently leave translated text in an unreviewed default font.
+        component.font = PANEL_FONT
         for name, value in (
-                ('text', text),
+                ('text', as_text(text)),
                 ('horizontalPositionMode', 'CLIP'),
                 ('verticalPositionMode', 'CLIP'),
                 ('widthMode', 'CLIP'), ('heightMode', 'CLIP'),
                 ('horizontalAnchor', anchor), ('verticalAnchor', 'CENTER'),
                 ('position', position), ('width', width), ('height', height),
-                ('font', PANEL_FONT), ('colour', colour), ('multiline', False),
+                ('colour', colour), ('multiline', False),
                 ('focus', False), ('mouseButtonFocus', False),
                 ('crossFocus', False), ('moveFocus', False),
                 ('visible', False)):
@@ -906,12 +924,12 @@ class WaitingRoomUI(object):
         if self._pending_bot_tier_mode == tier_mode:
             self._pending_bot_tier_mode = None
         shown_tier_mode = self._pending_bot_tier_mode or tier_mode
-        self._set_text('tier', 'BOT TIER: %s%s' % (
+        self._set_text('tier', tr('BOT TIER: %s%s') % (
             friendly_bot_tier_mode(shown_tier_mode),
             '...' if self._pending_bot_tier_mode is not None else ''))
         preferred_team = team_status.get('preferred', 0)
-        self._set_text('team_random', 'RANDOM%s' % (
-            ' (ON)' if preferred_team == 0 else ''))
+        self._set_text('team_random', tr('RANDOM%s') % (
+            tr(' (ON)') if preferred_team == 0 else ''))
         sizes = team_status.get('sizes') or {}
         for team in (1, 2):
             size = int(sizes.get(team, sizes.get(str(team), 15)))
@@ -921,21 +939,21 @@ class WaitingRoomUI(object):
                 pending = None
             shown_size = pending if pending is not None else size
             self._set_text('team%d_capacity' % team,
-                           'TEAM %d SIZE: %d%s' % (
+                           tr('TEAM %d SIZE: %d%s') % (
                                team, shown_size,
                                '...' if pending is not None else ''))
-            self._set_text('team%d' % team, 'TEAM %d%s' % (
-                team, '  (YOU)' if preferred_team == team else ''))
-        lines = str(self._status() or '').splitlines()
+            self._set_text('team%d' % team, tr('TEAM %d%s') % (
+                team, tr('  (YOU)') if preferred_team == team else ''))
+        lines = as_text(self._status() or '').splitlines()
         self._set_text('room', lines[0] if lines else '')
         self._set_text('players', lines[1] if len(lines) > 1 else '')
         if is_host:
-            self._set_text('map', 'MAP: %s' % (
+            self._set_text('map', tr('MAP: %s') % (
                 friendly_map_name(self._selected_map) if options else
-                'waiting for the server map list'))
+                tr('waiting for the server map list')))
         else:
             self._set_text('map', lines[2] if len(lines) > 2 else
-                           'The room host starts the battle.')
+                           tr('The room host starts the battle.'))
         self._set_text('message', self._message)
         for role, component in self._controls.items():
             visible = (team_supported if role in _TEAM_SELECT_CONTROLS else
@@ -957,7 +975,7 @@ class WaitingRoomUI(object):
     def _set_text(self, role, value):
         label = self._labels.get(role)
         if label is not None:
-            self._set(label, 'text', value)
+            self._set(label, 'text', as_text(value))
 
     def _paint(self):
         """Show hover through the label, the only colour this client applies."""
@@ -1007,19 +1025,19 @@ class WaitingRoomUI(object):
             return False
         current_choice = status.get('preferred', status.get('team'))
         if current_choice == team:
-            self._message = ('Random team selection is already on.'
+            self._message = (tr('Random team selection is already on.')
                              if team == 0 else
-                             'Already on Team %d.' % team)
+                             tr('Already on Team %d.') % team)
             self.refresh()
             return True
-        self._message = ('Requesting a random team...'
+        self._message = (tr('Requesting a random team...')
                          if team == 0 else
-                         'Requesting Team %d...' % team)
+                         tr('Requesting Team %d...') % team)
         self.refresh()
         if self._request_team(team) is False:
-            self._message = ('The server did not accept random selection.'
+            self._message = (tr('The server did not accept random selection.')
                              if team == 0 else
-                             'The server did not accept Team %d.' % team)
+                             tr('The server did not accept Team %d.') % team)
             self.refresh()
             return False
         self.refresh()
@@ -1036,20 +1054,20 @@ class WaitingRoomUI(object):
             team, int(sizes.get(team, sizes.get(str(team), 15))))
         target = max(1, min(15, int(current) + int(step)))
         if target < int(counts.get(team, 0)):
-            self._message = 'Team %d already has %d player(s).' % (
+            self._message = tr('Team %d already has %d player(s).') % (
                 team, int(counts.get(team, 0)))
             self.refresh()
             return False
         if target == current:
-            self._message = 'Team %d size is already %d.' % (team, target)
+            self._message = tr('Team %d size is already %d.') % (team, target)
             self.refresh()
             return True
         self._pending_team_sizes[team] = target
-        self._message = 'Setting Team %d size to %d...' % (team, target)
+        self._message = tr('Setting Team %d size to %d...') % (team, target)
         self.refresh()
         if self._request_team_size(team, target) is False:
             self._pending_team_sizes.pop(team, None)
-            self._message = 'The server did not accept that team size.'
+            self._message = tr('The server did not accept that team size.')
             self.refresh()
             return False
         return True
@@ -1061,7 +1079,7 @@ class WaitingRoomUI(object):
         except (TypeError, ValueError):
             return False
         self._pending_team_sizes.pop(team, None)
-        self._message = message or 'The server did not accept that team size.'
+        self._message = message or tr('The server did not accept that team size.')
         self.refresh()
         return True
 
@@ -1078,11 +1096,11 @@ class WaitingRoomUI(object):
             index = 0
         target = modes[(index + int(step)) % len(modes)]
         self._pending_bot_tier_mode = target
-        self._message = 'Setting Bot tier preset...'
+        self._message = tr('Setting Bot tier preset...')
         self.refresh()
         if self._request_bot_tier_mode(target) is False:
             self._pending_bot_tier_mode = None
-            self._message = 'The server did not accept that Bot tier preset.'
+            self._message = tr('The server did not accept that Bot tier preset.')
             self.refresh()
             return False
         return True
@@ -1090,14 +1108,14 @@ class WaitingRoomUI(object):
     def reject_bot_tier_mode(self, unused_mode=None, message=None):
         self._pending_bot_tier_mode = None
         self._message = (message or
-                         'The server did not accept that Bot tier preset.')
+                         tr('The server did not accept that Bot tier preset.'))
         self.refresh()
         return True
 
     def _cycle(self, step):
         options = self._options()
         if not options:
-            self._message = 'The server has not published its map list yet.'
+            self._message = tr('The server has not published its map list yet.')
             self.refresh()
             return False
         try:
@@ -1111,15 +1129,15 @@ class WaitingRoomUI(object):
 
     def _start(self):
         if not self._selected_map:
-            self._message = 'Choose a map first.'
+            self._message = tr('Choose a map first.')
             self.refresh()
             return False
-        self._message = 'Starting %s...' % friendly_map_name(
+        self._message = tr('Starting %s...') % friendly_map_name(
             self._selected_map)
         self.refresh()
         accepted = self._request_start(self._selected_map)
         if accepted is False:
-            self._message = 'The server did not accept that map.'
+            self._message = tr('The server did not accept that map.')
             self.refresh()
             return False
         return True

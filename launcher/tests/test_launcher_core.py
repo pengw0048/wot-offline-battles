@@ -683,6 +683,15 @@ class ServerPayloadTest(unittest.TestCase):
                      core.WORKER_READY_MARKER_ENV_0922):
             self.assertNotIn(name, environment)
 
+    def test_visible_client_language_overrides_inherited_selection(self):
+        for language, expected in (("zh", "zh"), ("en", "en"),
+                                   ("invalid", "en")):
+            inherited = {"WOT_OFFLINE_UI_LANGUAGE": "zh"}
+            environment = core.visible_client_environment(
+                core.PORT_0_9_22, environment=inherited, language=language)
+            self.assertEqual(expected, environment["WOT_OFFLINE_UI_LANGUAGE"])
+            self.assertEqual({"WOT_OFFLINE_UI_LANGUAGE": "zh"}, inherited)
+
     def test_visible_client_carries_the_preferred_team(self):
         environment = core.visible_client_environment(
             core.PORT_0_9_22, environment={}, preferred_team=2)
