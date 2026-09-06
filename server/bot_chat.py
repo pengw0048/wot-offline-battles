@@ -49,10 +49,12 @@ MAX_CONVERSATION_HOPS = 2
 HOP_PROBABILITY = (0.55, 0.3)
 
 # A generating backend is asked when the line is scheduled and states how
-# long it wants.  Ordinary reply pacing already covers a small local model,
-# so this only matters for a slow one, and the cap bounds how long a hung
-# generator can hold a scheduled line before it is abandoned.
-MAX_PREFETCH_WAIT_SECONDS = 15.0
+# long it wants.  Ordinary reply pacing already covers a fast machine, so
+# this only matters for a slow one, and the cap bounds how long a hung
+# generator can hold a scheduled line before it is abandoned.  A late answer
+# still reads as a teammate who took their time; an abandoned one reads as a
+# feature that does not work.
+MAX_PREFETCH_WAIT_SECONDS = 30.0
 
 # Peng's product choice: most lines get an answer, and an interesting line may
 # get more than one.  Silence stays legal, it is simply not the default.

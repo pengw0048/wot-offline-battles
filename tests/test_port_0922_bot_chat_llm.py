@@ -257,6 +257,28 @@ class PromptTest(unittest.TestCase):
         self.assertIn('120/400', user)
         self.assertIn(bot_chat_llm.TRIGGER_TASK[bot_chat.TRIGGER_REPLY], user)
 
+    def test_every_bot_shares_the_same_prompt_prefix(self):
+        # Prompt processing dominates on a slow machine, and llama.cpp can
+        # only reuse a cached prefix that actually matches.
+        first = build_messages(_request())
+        other = dict(_request())
+        other['persona'] = bot_chat.PERSONA_TACTICAL
+        other['bot'] = {'id': 2, 'name': '北方孤狼',
+                        'vehicle': 'germany:G54_E-50', 'hp': 300,
+                        'max_hp': 300}
+        second = build_messages(other)
+        shared = "\n".join(bot_chat_llm.SHARED_RULES)
+        self.assertTrue(first[0]['content'].startswith(shared))
+        self.assertTrue(second[0]['content'].startswith(shared))
+        self.assertNotEqual(first[0]['content'], second[0]['content'])
+
+    def test_the_transcript_is_bounded(self):
+        recent = tuple({'name': 'Peng', 'text': '第%d句' % index}
+                       for index in range(12))
+        user = build_messages(_request(recent=recent))[1]['content']
+        included = [line for line in recent if line['text'] in user]
+        self.assertEqual(bot_chat_llm.TRANSCRIPT_LINES, len(included))
+
     def test_a_hop_is_told_not_to_repeat_its_teammate(self):
         messages = build_messages(_request(trigger=bot_chat.TRIGGER_HOP))
         self.assertIn('不要重复', messages[1]['content'])
@@ -389,6 +411,42 @@ class _InstantBackend(object):
 
     def compose(self, request):
         return '好'
+
+
+class LatencyTest(unittest.TestCase):
+    """One constant cannot serve both a desktop and an emulated VM."""
+
+    def _backend(self):
+        return LlamaChatBackend('http://127.0.0.1:1',
+                                opener=lambda url, payload: {
+                                    'choices': [{'message': {
+                                        'content': '好'}}]})
+
+    def test_an_untried_machine_uses_the_initial_guess(self):
+        self.assertEqual(bot_chat_llm.INITIAL_LATENCY_SECONDS,
+                         self._backend().latency_hint_seconds)
+
+    def test_a_slow_machine_asks_for_longer(self):
+        backend = self._backend()
+        backend._record_latency(20.0)
+        self.assertGreater(backend.latency_hint_seconds, 20.0)
+
+    def test_a_fast_machine_never_asks_for_less_than_the_guess(self):
+        backend = self._backend()
+        backend._record_latency(0.2)
+        self.assertEqual(bot_chat_llm.INITIAL_LATENCY_SECONDS,
+                         backend.latency_hint_seconds)
+
+    def test_the_estimate_follows_repeated_observations(self):
+        backend = self._backend()
+        for unused in range(20):
+            backend._record_latency(30.0)
+        self.assertAlmostEqual(30.0, backend._observed_latency, places=1)
+
+    def test_the_request_timeout_outlasts_a_slow_machine(self):
+        # A twelve second cap turned a working slow generator into silence.
+        self.assertGreaterEqual(bot_chat_llm.REQUEST_TIMEOUT_SECONDS, 60.0)
+        self.assertGreaterEqual(bot_chat.MAX_PREFETCH_WAIT_SECONDS, 30.0)
 
 
 class DirectorIntegrationTest(unittest.TestCase):
