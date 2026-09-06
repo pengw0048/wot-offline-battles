@@ -15714,6 +15714,44 @@ class BotRuntimeTests(unittest.TestCase):
                 offset_goals += int(offset_distance > 1.0e-6)
         self.assertGreater(offset_goals, 0)
 
+    def test_prohorovka_bot_hull_cannot_settle_past_the_stock_red_border(self):
+        # scripts/arena_defs/05_prohorovka.xml boundingBox. The shipped graph
+        # samples out to x=512 because the baker padded its grid around the
+        # authored east-lane waypoint at x=496, so the map-edge guard used to
+        # accept a Bot whose whole hull sat outside the red border.
+        arena = (-500.0, -500.0, 500.0, 500.0)
+        graph = json.loads(
+            (PORT_ROOT / 'navgraphs' / '05_prohorovka.json').read_text())
+        state = {'id': 11, 'half_length': 3.5, 'half_width': 1.7}
+        outside = (506.0, 0.0, -316.0)
+        inside = (494.0, 0.0, -316.0)
+        unguarded = self.module.BotRuntime(1)
+        unguarded.baked_graph = graph
+
+        self.assertFalse(any(value > 1.0e-6 for value in
+                             unguarded._baked_boundary_overflow(
+                                 state, outside, 0.0)))
+
+        runtime = self.module.BotRuntime(
+            1, ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            baked_graph=graph, arena_bounds=arena)
+        runtime._ensure_navigation_graph('05_prohorovka')
+
+        self.assertEqual(list(arena), runtime.baked_graph['bounds'])
+        self.assertEqual(list(arena), list(runtime.navigator.grid.bounds))
+        self.assertTrue(any(value > 1.0e-6 for value in
+                            runtime._baked_boundary_overflow(
+                                state, outside, 0.0)))
+        self.assertFalse(any(value > 1.0e-6 for value in
+                             runtime._baked_boundary_overflow(
+                                 state, inside, 0.0)))
+        # A stale outside pose must still be allowed to drive back in.
+        self.assertFalse(runtime._baked_pose_progress_clear(
+            state, inside, 0.0, outside, 0.0))
+        self.assertTrue(runtime._baked_pose_progress_clear(
+            state, outside, 0.0, inside, 0.0))
+
     def test_route_lane_collision_and_hull_bounds_narrow_without_oscillation(self):
         class Grid(object):
             cell_size = 4.0

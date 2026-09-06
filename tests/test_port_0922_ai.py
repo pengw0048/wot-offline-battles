@@ -141,6 +141,38 @@ class BotAiPortTests(unittest.TestCase):
                 with self.subTest(registry=registry_name, map=map_name):
                     self.assertNotIn('bases', tactical)
 
+    def test_tactical_rectangle_matches_the_baked_gameplay_rectangle(self):
+        # The LAN server resolves a minimap attention-cell order through this
+        # rectangle, so it must be the stock arena rectangle: never wider than
+        # the baked world, and never so narrow that a baked objective, spawn
+        # anchor or route waypoint falls outside the cell grid.
+        graphs = PORT_ROOT / 'navgraphs'
+        checked = 0
+        for map_name in sorted(MAP_POOL):
+            path = graphs / (map_name + '.json')
+            if not path.is_file():
+                continue
+            graph = json.loads(path.read_text())
+            bounds = maps.TACTICAL_MAPS[map_name]['bounds']
+            points = [tuple(point) for point in graph['objective_bases']]
+            points.extend(tuple(point) for point in graph['spawn_anchors'])
+            for routes in graph['routes'].values():
+                for route in routes:
+                    points.extend((point[0], point[1])
+                                  for point in route['waypoints'])
+            with self.subTest(map=map_name):
+                self.assertGreaterEqual(bounds[0], graph['bounds'][0])
+                self.assertGreaterEqual(bounds[1], graph['bounds'][1])
+                self.assertLessEqual(bounds[2], graph['bounds'][2])
+                self.assertLessEqual(bounds[3], graph['bounds'][3])
+                for x, z in points:
+                    self.assertTrue(
+                        bounds[0] <= x <= bounds[2] and
+                        bounds[1] <= z <= bounds[3],
+                        '%s: %r is outside %r' % (map_name, (x, z), bounds))
+            checked += 1
+        self.assertGreaterEqual(checked, 40)
+
     def test_review_overlay_rejects_an_unknown_removed_route(self):
         tactical = copy.deepcopy(
             maps._TACTICAL_MAPS_AUTHORING['06_ensk'])

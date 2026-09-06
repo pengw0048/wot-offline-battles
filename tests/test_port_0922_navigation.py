@@ -9,6 +9,7 @@ PORT_ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SCRIPTS = PORT_ROOT / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
+from gui.mods.offline_lan_0922 import prebaked_navigation
 from gui.mods.offline_lan_0922.ai.navigation import TerrainGrid, TerrainNavigator
 from gui.mods.offline_lan_0922.ai.driver import LocalDriver
 
@@ -344,6 +345,112 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
         self.assertFalse(TerrainNavigator.navigation_paused(
             current, goal, (0.0, 0.0, 1.6)))
+
+
+class ArenaRectangleClipTests(unittest.TestCase):
+    """A baked rectangle is a sampling artifact; the red border is not."""
+
+    # scripts/arena_defs/05_prohorovka.xml boundingBox in the pinned #1513
+    # client. The shipped graph samples 12 m further east because the baker
+    # padded its grid around the authored east-lane waypoint at x=496.
+    PROKHOROVKA_ARENA = (-500.0, -500.0, 500.0, 500.0)
+
+    _DIRECTIONS = [[-1, -1], [0, -1], [1, -1], [-1, 0],
+                   [1, 0], [-1, 1], [0, 1], [1, 1]]
+
+    def _row_graph(self):
+        """Return five 4 m cells centred from x=-8 to x=8 on one row."""
+        west = 1 << self._DIRECTIONS.index([-1, 0])
+        east = 1 << self._DIRECTIONS.index([1, 0])
+        return {
+            'cell_size': 4.0,
+            'origin': [-8.0, 0.0],
+            'bounds': [-10.0, -2.0, 10.0, 2.0],
+            'width': 5,
+            'height': 1,
+            'heights_mm': [0, 0, 0, 0, 0],
+            'links': [east, west | east, west | east, west | east, west],
+            'hazards': [0, 0, 0, 0, 0],
+            'directions': list(self._DIRECTIONS),
+        }
+
+    def test_clip_retires_cells_and_links_outside_the_arena_rectangle(self):
+        graph = self._row_graph()
+        west = 1 << self._DIRECTIONS.index([-1, 0])
+
+        retired = prebaked_navigation.clip_graph_to_arena(
+            graph, (-10.0, -2.0, 2.0, 2.0))
+
+        self.assertEqual(2, retired)
+        self.assertEqual([-10.0, -2.0, 2.0, 2.0], graph['bounds'])
+        self.assertEqual([0, 0, 0, None, None], graph['heights_mm'])
+        self.assertEqual([0, 0], list(graph['links'])[3:])
+        # The last surviving cell keeps its inward link and loses the one that
+        # pointed at a retired cell.
+        self.assertEqual(west, graph['links'][2])
+        self.assertEqual(0, prebaked_navigation.clip_graph_to_arena(
+            graph, (-10.0, -2.0, 2.0, 2.0)))
+
+    def test_clip_never_widens_and_keeps_a_graph_without_an_arena(self):
+        graph = self._row_graph()
+
+        self.assertEqual(0, prebaked_navigation.clip_graph_to_arena(
+            graph, None))
+        self.assertEqual([-10.0, -2.0, 10.0, 2.0], graph['bounds'])
+        self.assertEqual(0, prebaked_navigation.clip_graph_to_arena(
+            graph, (-40.0, -40.0, 40.0, 40.0)))
+        self.assertEqual([-10.0, -2.0, 10.0, 2.0], graph['bounds'])
+        self.assertEqual([0, 0, 0, 0, 0], graph['heights_mm'])
+
+    def _prohorovka(self):
+        return json.loads(
+            (PORT_ROOT / 'navgraphs' / '05_prohorovka.json').read_text())
+
+    def test_shipped_prohorovka_cells_reach_past_the_stock_red_border(self):
+        graph = self._prohorovka()
+        grid = TerrainNavigator(lambda *unused: None, baked_graph=graph).grid
+        outside = [(column, row)
+                   for row in range(graph['height'])
+                   for column in range(graph['width'])
+                   if (graph['heights_mm'][row * graph['width'] + column]
+                       is not None and
+                       graph['origin'][0] + column * graph['cell_size'] >
+                       self.PROKHOROVKA_ARENA[2])]
+
+        self.assertTrue(outside)
+        self.assertTrue(any(grid._baked_edge_height(
+            (column - 1, row), (column, row)) is not None
+            for column, row in outside))
+
+    def test_clipped_prohorovka_stops_planning_past_the_red_border(self):
+        graph = self._prohorovka()
+        cell_size = graph['cell_size']
+        origin_x = graph['origin'][0]
+        entries = [(row, column)
+                   for row in range(graph['height'])
+                   for column in range(graph['width'])
+                   if (graph['heights_mm'][row * graph['width'] + column]
+                       is not None and
+                       origin_x + column * cell_size >
+                       self.PROKHOROVKA_ARENA[2])]
+        row, column = entries[0]
+
+        retired = prebaked_navigation.clip_graph_to_arena(
+            graph, self.PROKHOROVKA_ARENA)
+
+        self.assertEqual(len(entries), retired)
+        self.assertEqual(list(self.PROKHOROVKA_ARENA), graph['bounds'])
+        grid = TerrainNavigator(lambda *unused: None, baked_graph=graph).grid
+        self.assertEqual(list(self.PROKHOROVKA_ARENA), list(grid.bounds))
+        self.assertIsNone(grid._baked_cell_height((column, row)))
+        self.assertIsNone(
+            grid._baked_edge_height((column - 1, row), (column, row)))
+        for index, value in enumerate(graph['heights_mm']):
+            if value is None:
+                continue
+            self.assertLessEqual(
+                origin_x + (index % graph['width']) * cell_size,
+                self.PROKHOROVKA_ARENA[2])
 
 
 if __name__ == '__main__':

@@ -5,6 +5,11 @@ Routes are intentionally sparse macro waypoints.  Exact #1513 objectives and
 team starts come from the validated navigation artifact, never this authoring
 registry.  The existing multi-ray driver remains responsible for local
 obstacle avoidance between route waypoints.
+
+Each map's ``bounds`` is the exact stock ``scripts/arena_defs/<map>.xml``
+boundingBox rather than an authoring estimate: the LAN server resolves a
+minimap attention-cell order through this rectangle, so a wider one would
+order Bots at, or past, the red border.
 """
 
 
