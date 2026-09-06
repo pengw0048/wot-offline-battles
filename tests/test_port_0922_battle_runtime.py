@@ -2025,6 +2025,7 @@ def _runtime():
             VEHICLE_KILLED=6, AVATAR_READY=7, TEAM_KILLER=10),
         ARENA_PERIOD=types.SimpleNamespace(PREBATTLE=2, BATTLE=3),
         VEHICLE_PHYSICS_MODE=types.SimpleNamespace(STANDARD=0),
+        SERVER_TICK_LENGTH=0.1,
         VEHICLE_SIEGE_STATE=types.SimpleNamespace(
             DISABLED=0, SWITCHING_ON=1, ENABLED=2, SWITCHING_OFF=3),
         VEHICLE_SETTING=types.SimpleNamespace(
@@ -15702,7 +15703,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(attach_reads, entity.model.reads)
         self.assertIs(battle._local_matrix, entity.model._matrix)
 
-    def test_local_camera_motion_is_derived_from_copied_pose_each_frame(self):
+    def _camera_motion_battle(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -15714,30 +15715,118 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._local_position = (2.0, 3.0, 4.0)
         battle._local_descriptor = entity.typeDescriptor
         battle._attach_local_presentation()
+        return runtime, battle, entity
+
+    @staticmethod
+    def _camera_motion_overlay(runtime, entity):
+        overlay = runtime.compatibility.pose_overlays[id(entity)]
+        return (tuple(overlay['velocity']), tuple(overlay['acceleration']))
+
+    def test_local_camera_motion_uses_the_exact_client_sample_interval(self):
+        # Retail fills WGVehicleFilter.velocity/acceleration from the native
+        # filter on the constants.SERVER_TICK_LENGTH grid.  Differencing the
+        # copied pose once per rendered frame instead measures the ground
+        # snap and scales with the frame rate, and SniperCamera turns that
+        # straight into camera rotation.
+        runtime, battle, entity = self._camera_motion_battle()
 
         battle._local_position = (2.0, 3.0, 4.5)
         battle._update_local_presentation(entity, 0.1)
-        overlay = runtime.compatibility.pose_overlays[id(entity)]
-        self.assertEqual((0.0, 0.0, 5.0), tuple(overlay['velocity']))
-        self.assertEqual((0.0, 0.0, 50.0),
-                         tuple(overlay['acceleration']))
+        velocity, acceleration = self._camera_motion_overlay(runtime, entity)
+        self.assertEqual((0.0, 0.0, 5.0), velocity)
+        # One completed interval carries a velocity but no second difference.
+        self.assertEqual((0.0, 0.0, 0.0), acceleration)
 
         battle._local_position = (2.0, 3.0, 5.0)
         battle._update_local_presentation(entity, 0.1)
-        overlay = runtime.compatibility.pose_overlays[id(entity)]
-        self.assertEqual((0.0, 0.0, 5.0), tuple(overlay['velocity']))
-        self.assertEqual((0.0, 0.0, 0.0),
-                         tuple(overlay['acceleration']))
+        velocity, acceleration = self._camera_motion_overlay(runtime, entity)
+        self.assertEqual((0.0, 0.0, 5.0), velocity)
+        self.assertEqual((0.0, 0.0, 0.0), acceleration)
 
         battle._sender = types.SimpleNamespace(
             forward=1.0, turn=0.0, handbrake=False,
             send_current=mock.Mock(return_value=True))
         battle._battle_result = {'winner': 1}
         battle._drive_local(0.1)
-        overlay = runtime.compatibility.pose_overlays[id(entity)]
-        self.assertEqual((0.0, 0.0, 0.0), tuple(overlay['velocity']))
-        self.assertEqual((0.0, 0.0, -50.0),
-                         tuple(overlay['acceleration']))
+        velocity, acceleration = self._camera_motion_overlay(runtime, entity)
+        self.assertEqual((0.0, 0.0, 0.0), velocity)
+        for expected, actual in zip((0.0, 0.0, -50.0), acceleration):
+            self.assertAlmostEqual(expected, actual, places=6)
+
+    def test_camera_motion_estimate_does_not_scale_with_the_frame_rate(self):
+        # One slope discontinuity, exactly what a terrain triangle edge
+        # produces under the copied ground follow.  Its true second
+        # difference over the exact client interval is
+        # 6 m/s * 0.06 / 0.1 s = 3.6 m/s^2.  A per-frame second difference
+        # reports 0.36 / dt instead: 8.6 at 24 FPS and 43.2 at 120 FPS.
+        def peak(frame_rate):
+            runtime, battle, entity = self._camera_motion_battle()
+            dt = 1.0 / frame_rate
+            highest = 0.0
+            for frame in range(1, 2 * frame_rate + 1):
+                moment = frame * dt
+                z = 4.0 + 6.0 * moment
+                y = 3.0 if z < 10.0 else 3.0 + 0.06 * (z - 10.0)
+                battle._local_position = (2.0, y, z)
+                battle._update_local_presentation(entity, dt)
+                unused, acceleration = self._camera_motion_overlay(
+                    runtime, entity)
+                highest = max(highest, max(abs(v) for v in acceleration))
+            return highest
+
+        peaks = [peak(rate) for rate in (24, 30, 45, 60, 90, 120)]
+        for value in peaks:
+            self.assertLessEqual(value, 3.6 * 1.01)
+        self.assertGreater(min(peaks), 0.0)
+        self.assertLess(max(peaks) / min(peaks), 1.25)
+
+    def test_a_one_frame_ground_snap_is_not_a_camera_impulse(self):
+        # A five centimetre vertical step inside one rendered frame is a
+        # discretisation of the copied ground follow, not vehicle dynamics.
+        runtime, battle, entity = self._camera_motion_battle()
+        dt = 1.0 / 60.0
+        highest = 0.0
+        for frame in range(1, 61):
+            y = 3.0 if frame < 30 else 3.05
+            battle._local_position = (2.0, y, 4.0)
+            battle._update_local_presentation(entity, dt)
+            unused, acceleration = self._camera_motion_overlay(
+                runtime, entity)
+            highest = max(highest, abs(acceleration[1]))
+        # The rejected per-frame estimate reports 0.05 / dt ** 2 = 180 m/s^2.
+        self.assertLess(highest, 10.0)
+
+    def test_a_parked_player_publishes_no_camera_motion(self):
+        runtime, battle, entity = self._camera_motion_battle()
+        for unused_frame in range(60):
+            battle._update_local_presentation(entity, 1.0 / 60.0)
+        velocity, acceleration = self._camera_motion_overlay(runtime, entity)
+        self.assertEqual((0.0, 0.0, 0.0), velocity)
+        self.assertEqual((0.0, 0.0, 0.0), acceleration)
+
+    def test_camera_motion_history_is_dropped_with_the_presentation(self):
+        # A retained history would report hundreds of metres per second on
+        # the first frame after the next spawn.
+        runtime, battle, entity = self._camera_motion_battle()
+        battle._local_position = (2.0, 3.0, 4.5)
+        battle._update_local_presentation(entity, 0.1)
+        self.assertTrue(battle._local_motion_history)
+
+        battle._detach_local_presentation()
+
+        self.assertEqual([], battle._local_motion_history)
+        self.assertEqual(0.0, battle._local_motion_clock)
+
+    def test_camera_motion_history_stays_bounded_at_a_high_frame_rate(self):
+        runtime, battle, entity = self._camera_motion_battle()
+        for frame in range(1, 601):
+            battle._local_position = (2.0, 3.0, 4.0 + frame * 0.01)
+            battle._update_local_presentation(entity, 1.0 / 300.0)
+        window = runtime.constants.SERVER_TICK_LENGTH
+        self.assertLessEqual(len(battle._local_motion_history), 64)
+        oldest = battle._local_motion_history[0][0]
+        self.assertLessEqual(
+            battle._local_motion_clock - oldest, 2.0 * window + window)
 
     def test_visible_local_motion_never_commits_destructibles(self):
         runtime = _runtime()
