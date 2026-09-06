@@ -1257,6 +1257,12 @@ def _movement_throttle(flags):
     return direction
 
 
+def _compute_backend_status():
+    """Report which sweep preparation this process actually selected."""
+    from gui.mods.offline_lan_0922 import native_compute
+    return native_compute.status()
+
+
 def _load_runtime():
     import AccountCommands
     import AreaDestructibles
@@ -1874,7 +1880,8 @@ class BattleRuntime(object):
         self._config = dict(config or {})
         self._worker_mode = bool(self._config.get('worker_mode', False))
         self._combat_diagnostics = (
-            WorkerCombatDiagnostics(_PROFILE_CLOCK)
+            WorkerCombatDiagnostics(
+                _PROFILE_CLOCK, backend_status=_compute_backend_status)
             if self._worker_mode and PERFORMANCE_DIAGNOSTICS else None)
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False

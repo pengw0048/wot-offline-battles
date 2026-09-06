@@ -713,8 +713,24 @@ class WorkerSession(object):
     def start(self):
         if self._stopped or self.client is not None:
             return False
+        self._select_compute_backend()
         self._ensure_runtime_boundaries()
         return self._connect()
+
+    def _select_compute_backend(self):
+        """Choose and record the sweep preparation before any battle starts.
+
+        The selection is process-wide and never changes mid-battle, so a
+        capture cannot be attributed to an implementation that did not run.
+        A selection failure leaves the unchanged inline path in place.
+        """
+        from gui.mods.offline_lan_0922 import native_compute
+        try:
+            native_compute.select_backend()
+            message = native_compute.describe()
+        except Exception as error:
+            message = 'compute backend selection failed: %s' % (error,)
+        sys.stdout.write('[Offline LAN 0.9.22] %s\n' % message)
 
     def _connect(self):
         if self._stopped:

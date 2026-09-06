@@ -114,8 +114,11 @@ class WorkerCombatDiagnostics(object):
     def __init__(self, clock, capture_seconds=CAPTURE_SECONDS,
                  cooldown_seconds=CAPTURE_COOLDOWN_SECONDS,
                  maximum_captures=MAX_CAPTURES,
-                 sampled_stages=SAMPLED_STAGES):
+                 sampled_stages=SAMPLED_STAGES, backend_status=None):
         self.clock = clock
+        # An injected reader, so a capture can prove which implementation ran
+        # without this module depending on the experiment.
+        self.backend_status = backend_status
         self.capture_seconds = float(capture_seconds)
         self.cooldown_seconds = float(cooldown_seconds)
         self.maximum_captures = int(maximum_captures)
@@ -442,8 +445,17 @@ class WorkerCombatDiagnostics(object):
             self._fail()
             return None
 
+    def _backend_record(self):
+        if self.backend_status is None:
+            return None
+        try:
+            return self.backend_status()
+        except Exception:
+            return {'error': 'backend status unavailable'}
+
     def _complete_capture(self, reason):
         self._completed.append({
+            'backend': self._backend_record(),
             'capture': self.capture, 'trigger': self._reason,
             'end_reason': reason,
             'authority_start': self._capture_started,
