@@ -101,13 +101,20 @@ whose profile changed after it started must be restarted first.
 - Automatically generated Bot lineups contain no self-propelled artillery.
   Player vehicles and manually assigned Bot lineups remain unrestricted;
   tank destroyers are not artillery and remain in the automatic pool.
-- Bot gunnery skill: every Bot is a rookie, regular, veteran or elite gunner.
-  The tier picks the crew level its vehicle is trained to, and how long that
-  gunner takes to react, how patiently it waits for the aiming circle, how
-  far off centre it lays the gun and how badly it leads a moving target. The
-  waiting room chooses the whole roster's mix - easy, relaxed, pub mix, hard
-  or brutal - and the launcher's exact Bot lineup can pin one slot's tier,
-  with or without also pinning its vehicle.
+- Bot competence is a spectrum, not a tier. Each Bot gets one rating that
+  sets the crew level its vehicle is trained to, how long that gunner takes
+  to react, how patiently it waits for the aiming circle, how far off centre
+  it lays the gun and how badly it leads a moving target. The same rating is
+  the chance it does the tactically right thing each time the situation
+  comes up: reaching for cover, peeking out of it, angling its hull, picking
+  the round that beats the armour in front of it, aiming at the part it can
+  actually hurt, turning on whoever just hit it, breaking off when it should,
+  avoiding a crossfire and going around a flank. A weak Bot is not a Bot that
+  does everything slightly worse; it is one that does not think of some of
+  it. The waiting room chooses how competence is spread over the whole roster
+  - easy, relaxed, pub mix, hard or brutal - and the launcher's exact Bot
+  lineup can still pin one slot to a named tier, with or without also pinning
+  its vehicle.
 - Live combat statistics, a damage log with assists, hit and critical-damage
   messages, target outlines, vehicle fires, wrecks, and a consumables panel
   that counts down each cooldown.

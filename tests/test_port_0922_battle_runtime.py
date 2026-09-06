@@ -10881,6 +10881,71 @@ class BattleRuntimeContractTests(unittest.TestCase):
                   gravity * time_at_wall ** 2 * 0.5)
         self.assertGreater(height, 1.8)
 
+    def test_a_weak_gunner_keeps_the_part_the_cursor_offered(self):
+        """Not knowing where to aim is an unranked choice, not a bad one."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        scored = []
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda unused_descriptor, unused_entry, unused_source,
+            unused_target, unused_origin, point: scored.append(point) or
+            (900.0 if point[1] > 2.0 else 100.0))
+
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            False)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        weak = battle._bot_aim_point(source, target)
+        # One tested part, taken as offered: no second ray, no comparison.
+        self.assertEqual(1, len(scored))
+
+        scored[:] = []
+        battle._records['bot:11'].pop('bot_aim_targets', None)
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            True)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        strong = battle._bot_aim_point(source, target)
+
+        self.assertEqual(2, len(scored))
+        self.assertGreater(strong['aim_position'][1], 2.0)
+        self.assertLess(weak['aim_position'][1], strong['aim_position'][1])
+
+    def test_no_gunner_deliberately_aims_at_a_part_it_cannot_hurt(self):
+        """Not knowing which plate is thinnest is ordinary; this is not."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        tested = []
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda unused_descriptor, unused_entry, unused_source,
+            unused_target, unused_origin, point: tested.append(point) or
+            (0.0 if point[1] < 2.0 else 250.0))
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            False)
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        selected = battle._bot_aim_point(source, target)
+
+        self.assertEqual(2, len(tested))
+        self.assertGreater(selected['aim_position'][1], 2.0)
+
+    def test_a_useless_part_is_still_fired_at_when_it_is_all_there_is(self):
+        """Holding fire would read as a broken Bot, not a weak one."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        battle._bot_aim_damage_score = (
+            lambda *unused_args: 0.0)
+        battle._bots = types.SimpleNamespace(
+            bot_aim_selection_allowed=lambda unused_source, unused_target:
+            True)
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+        self.assertIsNotNone(battle._bot_aim_point(source, target))
+
     def test_bot_firing_lane_rotates_real_samples_with_two_ray_budget(self):
         runtime, battle, source, target, unused = self._bot_lane_scene()
         rays = []

@@ -164,13 +164,15 @@ class _CountingPlanner(object):
         self.state = state
         self.build_ticks = []
         self.reset_count = 0
+        self.reset_round_id = None
 
     def build_orders(self, *unused_args, **unused_kwargs):
         self.build_ticks.append(self.state.tick)
         return {"revision": len(self.build_ticks), "orders": []}
 
-    def reset(self):
+    def reset(self, round_id=None):
         self.reset_count += 1
+        self.reset_round_id = round_id
 
 
 class ServerBotTacticsTests(unittest.TestCase):
@@ -1872,6 +1874,271 @@ class ServerBotTacticsTests(unittest.TestCase):
             order for order in state.bot_orders['orders']
             if order['id'] == 11)
         self.assertEqual(2, order['target_id'])
+
+
+class ServerBotCompetenceTests(unittest.TestCase):
+    """The rating gates which tactics a Bot actually reaches for."""
+
+    def setUp(self):
+        self.route = _route('lane', [
+            (0, -100, False), (0, 100, False), (0, 500, False),
+        ])
+        self.manifest = [_bot(
+            11, 1, 0, self.route, 'mediumTank', {'support': 1.0})]
+        self.manifest[0]['profile'].update({
+            'armor': 120.0,
+            'dominant_role': 'support',
+            'desired_range': 180.0,
+            'fire_range': 520.0,
+        })
+        self.states = [_state(11, 1, 0, 0)]
+
+    def _rate(self, rating):
+        self.manifest[0]['skill_rating'] = rating
+
+    def _report(self, planner, contacts):
+        players = [
+            {'id': raw['target_id'], 'team': 2, 'alive': True}
+            for raw in contacts
+        ]
+        self.assertEqual(len(contacts), planner.report_contacts(
+            contacts, planner.known_targets(self.states, players), 1.0))
+        return players
+
+    def _cover_ladder(self, planner, players):
+        modes = []
+        for index, now in enumerate((1.1, 1.2, 5.0, 7.2)):
+            if index == 1:
+                self.states[0]['x'] = 12.0
+            modes.append(planner.build_orders(
+                self.manifest, self.states, players, now)['orders'][0][
+                    'combat_mode'])
+        return modes
+
+    def _armed_cover(self, planner, players):
+        known_bots = planner.known_bots(self.manifest, self.states)
+        known_targets = planner.known_targets(self.states, players)
+        self.assertEqual(1, planner.report_affordances(
+            [_cover_report(11, 2)], known_bots, known_targets, 1.0))
+        planner.report_damage(11, 'player', 2, 200, 1.1)
+
+    def test_an_unrated_manifest_entry_keeps_full_competence(self):
+        """A missing rating is a plumbing failure, not a weak Bot."""
+        planner = BotPlanner()
+        self.assertEqual(
+            1.0, planner._alive_bots(self.manifest, self.states)[0]['rating'])
+
+    def test_a_published_rating_reaches_the_live_bot_row(self):
+        planner = BotPlanner()
+        self._rate(0.25)
+        self.assertEqual(
+            0.25, planner._alive_bots(self.manifest, self.states)[0]['rating'])
+
+    def test_a_tier_name_alone_is_read_at_its_own_anchor(self):
+        planner = BotPlanner()
+        self.manifest[0]['skill'] = 'rookie'
+        self.assertEqual(
+            0.0, planner._alive_bots(self.manifest, self.states)[0]['rating'])
+
+    def test_a_complete_bot_still_works_its_way_through_cover(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [_contact(2, 0, 260, [11])]
+        players = self._report(planner, contacts)
+        self._armed_cover(planner, players)
+
+        self.assertEqual(
+            ['take_cover', 'cover_hold', 'cover_hold', 'cover_peek'],
+            self._cover_ladder(planner, players))
+
+    def test_a_hopeless_bot_never_reaches_for_cover(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        contacts = [_contact(2, 0, 260, [11])]
+        players = self._report(planner, contacts)
+        self._armed_cover(planner, players)
+
+        for mode in self._cover_ladder(planner, players):
+            self.assertNotIn(mode, ('take_cover', 'cover_hold', 'cover_peek',
+                                    'cover_return'))
+
+    def test_a_hopeless_bot_keeps_fighting_where_it_stands_after_a_hit(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        contacts = [_contact(2, 0, 150, [11])]
+        players = self._report(planner, contacts)
+        self.assertTrue(planner.report_damage(11, 'player', 2, 100, 1.1))
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.1)['orders'][0]
+
+        self.assertEqual('engage', order['combat_mode'])
+
+    def test_a_hopeless_bot_does_not_turn_on_whoever_shot_it(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        contacts = [
+            _contact(2, 0, 260, [11]),
+            _contact(3, 0, 35, [11]),
+        ]
+        players = self._report(planner, contacts)
+        first = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+        self.assertEqual(3, first['target_id'])
+        self.assertTrue(planner.report_damage(11, 'player', 2, 240, 1.1))
+
+        reaction = planner.build_orders(
+            self.manifest, self.states, players, 1.1)['orders'][0]
+
+        self.assertEqual(3, reaction['target_id'])
+
+    def test_a_point_blank_enemy_is_answered_at_every_competence(self):
+        """Self-defence is not a tactic a Bot has to have learned."""
+        for rating in (0.0, 1.0):
+            planner = BotPlanner()
+            self._rate(rating)
+            contacts = [
+                _contact(2, 0, 300, [11]),
+                _contact(3, 0, 30, [11]),
+            ]
+            players = self._report(planner, contacts)
+            order = planner.build_orders(
+                self.manifest, self.states, players, 1.0)['orders'][0]
+            self.assertEqual(3, order['target_id'], rating)
+
+    def test_a_hopeless_bot_fires_the_round_the_racks_offer_first(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        self.manifest[0]['profile']['shells'] = [
+            {'index': 0, 'kind': 'armor_piercing', 'penetration': 100.0,
+             'damage': 250.0},
+            {'index': 1, 'kind': 'armor_piercing_cr', 'penetration': 250.0,
+             'damage': 250.0},
+        ]
+        self.states[0]['ammo_remaining'] = [20, 10]
+        contacts = [_contact(2, 0, 150, [11])]
+        contacts[0]['armor'] = 200.0
+        players = self._report(planner, contacts)
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+
+        self.assertEqual(0, order['shell_index'])
+
+    def test_a_complete_bot_answers_armour_with_the_round_that_beats_it(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        self.manifest[0]['profile']['shells'] = [
+            {'index': 0, 'kind': 'armor_piercing', 'penetration': 100.0,
+             'damage': 250.0},
+            {'index': 1, 'kind': 'armor_piercing_cr', 'penetration': 250.0,
+             'damage': 250.0},
+        ]
+        self.states[0]['ammo_remaining'] = [20, 10]
+        contacts = [_contact(2, 0, 150, [11])]
+        contacts[0]['armor'] = 200.0
+        players = self._report(planner, contacts)
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+
+        self.assertEqual(1, order['shell_index'])
+
+    def test_a_hopeless_bot_presents_its_flat_front(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        contacts = [_contact(2, 0, 150, [11])]
+        players = self._report(planner, contacts)
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+
+        self.assertEqual('engage', order['combat_mode'])
+        self.assertNotIn('hull_angle_degrees', order)
+
+    def test_a_complete_bot_still_angles(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [_contact(2, 0, 150, [11])]
+        players = self._report(planner, contacts)
+
+        order = planner.build_orders(
+            self.manifest, self.states, players, 1.0)['orders'][0]
+
+        self.assertGreaterEqual(abs(order['hull_angle_degrees']), 12.0)
+
+    def test_target_priority_holds_for_one_lease_not_one_clock_tick(self):
+        """A Bot may not change its mind because a timer rolled over."""
+        planner = BotPlanner()
+        self._rate(0.5)
+        contacts = [
+            _contact(2, 0, 260, [11]),
+            _contact(3, 0, 200, [11]),
+        ]
+        players = self._report(planner, contacts)
+        chosen = []
+        for step in range(24):
+            now = 1.0 + step * 0.25
+            planner.report_contacts(
+                contacts, planner.known_targets(self.states, players), now)
+            chosen.append(planner.build_orders(
+                self.manifest, self.states, players, now)[
+                    'orders'][0]['target_id'])
+
+        # The lease may hand the Bot a new target when it expires; it may not
+        # hand it a new one because a wall-clock bucket rolled over.
+        self.assertLessEqual(len(set(chosen)), 2)
+        lease = planner._target_assignments[11]
+        first = planner._capable(
+            planner._alive_bots(self.manifest, self.states)[0],
+            'target_priority', round(lease['until'], 3))
+        self.assertEqual(first, planner._capable(
+            planner._alive_bots(self.manifest, self.states)[0],
+            'target_priority', round(lease['until'], 3)))
+
+    def test_a_latched_capability_ignores_the_occasion(self):
+        """A habit may not flip between two ticks of one battle."""
+        planner = BotPlanner()
+        planner.reset(4)
+        bot = {'id': 11, 'team': 1, 'slot': 0, 'rating': 0.5}
+        answers = set(
+            planner._capable(bot, 'hull_angling', occasion)
+            for occasion in range(50))
+        self.assertEqual(1, len(answers))
+
+    def test_an_unlatched_capability_is_decided_per_occasion(self):
+        planner = BotPlanner()
+        planner.reset(4)
+        bot = {'id': 11, 'team': 1, 'slot': 0, 'rating': 0.5}
+        answers = set(
+            planner._capable(bot, 'tactical_cover', occasion)
+            for occasion in range(50))
+        self.assertEqual(set((True, False)), answers)
+
+    def test_a_new_round_re_rolls_a_latched_habit(self):
+        """A slot must not be condemned to one habit for the whole server."""
+        answers = set()
+        for round_id in range(30):
+            planner = BotPlanner()
+            planner.reset(round_id)
+            answers.add(planner._capable(
+                {'id': 11, 'team': 1, 'slot': 0, 'rating': 0.5},
+                'hull_angling'))
+        self.assertEqual(set((True, False)), answers)
+
+    def test_a_failover_cannot_make_a_bot_change_its_mind(self):
+        """Capability is derived, never stored, so a fresh planner agrees."""
+        first = BotPlanner()
+        first.reset(9)
+        second = BotPlanner()
+        second.reset(9)
+        second.clear_observations()
+        bot = {'id': 11, 'team': 1, 'slot': 0, 'rating': 0.5}
+        for capability in ('hull_angling', 'tactical_cover', 'flank',
+                           'withdraw', 'shell_choice'):
+            self.assertEqual(
+                first._capable(bot, capability, 'x'),
+                second._capable(bot, capability, 'x'), capability)
 
 
 class ServerBotArtilleryTests(unittest.TestCase):

@@ -20023,8 +20023,22 @@ class BattleRuntime(object):
                 if samples[index] not in attempts:
                     attempts.append(samples[index])
             entry['selected'] = None
+            # A gunner who has not worked out where this tank is soft still
+            # aims at something exposed. It ranks the tested parts only when
+            # its own competence roll succeeds for the current aiming epoch,
+            # so the same Bot finds the weak spot in one engagement and not
+            # in the next. A failed roll keeps whichever exposed part the
+            # rotating cursor offered, which is uncorrelated with armour -
+            # not knowing where to aim is that, and not the inverted armour
+            # solve it would take to deliberately pick the worst plate.
+            # No reachable Bot runtime means no rating to read, so the part
+            # ranking stays on. A Bot must never lose a competence because
+            # the plumbing that scores it went missing.
+            ranks = (self._bots is None or
+                     self._bots.bot_aim_selection_allowed(source, target))
             best = None
             best_score = None
+            exposed = None
             for sample in attempts:
                 point = shot_geometry.vehicle_aim_point(sample, target)
                 hit = self._runtime.bigworld.wg_collideSegment(
@@ -20034,15 +20048,22 @@ class BattleRuntime(object):
                     continue
                 score = self._bot_aim_damage_score(
                     descriptor, entry, source, target, origin, point)
-                if best is None or (score is not None and
+                if exposed is None:
+                    exposed = sample
+                # A part the armour resolver proved cannot be hurt is never a
+                # deliberate choice at any competence, only a last resort
+                # when nothing else in this job was clear.
+                if score == 0.0:
+                    continue
+                if best is None or (ranks and score is not None and
                         best_score is not None and score > best_score):
                     best, best_score = sample, score
                 # Missing material evidence cannot authorize a weak-spot
                 # claim. Preserve the exposed-part behaviour in that case.
-                if score is None:
+                if score is None or not ranks:
                     break
-            entry['selected'] = best
-            return best is not None
+            entry['selected'] = best if best is not None else exposed
+            return entry['selected'] is not None
         except Exception:
             if entry is not None:
                 entry['selected'] = None

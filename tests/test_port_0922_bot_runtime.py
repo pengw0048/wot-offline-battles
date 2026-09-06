@@ -8313,6 +8313,77 @@ class BotRuntimeTests(unittest.TestCase):
 
         self.assertEqual('elite', successor.bot_skill(11))
 
+    def test_the_manifest_publishes_each_bot_rating_beside_its_label(self):
+        messages = self.runtime.battle_start(
+            dict(self.start, bot_skill_mode='brutal'))
+
+        published = [state for message in messages
+                     for state in message.get('bots') or ()]
+        self.assertEqual([1.0], [row['skill_rating'] for row in published])
+        self.assertEqual(['elite'], [row['skill'] for row in published])
+
+    def test_a_room_preset_draws_a_rating_inside_its_own_envelope(self):
+        self.runtime.battle_start(dict(self.start, bot_skill_mode='easy'))
+
+        ceiling = self.module.bot_gunnery._MODE_RATING_POINTS['easy'][-1]
+        self.assertLessEqual(self.runtime.bot_rating(11), ceiling)
+
+    def test_a_takeover_reinstalls_the_exact_rating_not_its_label(self):
+        """Snapping a rating to its nearest tier would move the gunner.
+
+        The crew level a rating trains is baked into the published reload
+        duration, so a successor that re-labelled a Bot would also fail the
+        installed-gun guard. Reinstalling the exact number is what keeps a
+        mid-spectrum gunner identical across a failover.
+        """
+        manifest = self.runtime.battle_start(
+            dict(self.start, bot_skill_mode='mixed'))[0]
+        expected = self.runtime.bot_rating(11)
+        self.assertNotIn(expected, self.module.bot_gunnery.RATING_ANCHORS)
+        entry = manifest['bots'][0]
+
+        successor = self.module.BotRuntime(
+            2, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *args: _Adapter(*args),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        successor.battle_start(dict(
+            self.start, bot_authority_id=2, bot_skill_mode='easy',
+            bot_manifest=[entry]))
+
+        self.assertEqual(expected, successor.bot_rating(11))
+
+    def test_the_aim_selection_gate_holds_for_one_aiming_epoch(self):
+        """A per-frame flip would re-solve the ballistics every tick."""
+        self.runtime.battle_start(dict(self.start, bot_skill_mode='mixed'))
+        state = {'id': 11}
+        target = {'kind': 'human', 'network_id': 2, 'id': 2}
+
+        first = self.runtime.bot_aim_selection_allowed(state, target)
+        for unused_repeat in range(5):
+            self.assertEqual(
+                first,
+                self.runtime.bot_aim_selection_allowed(state, target))
+        # The accessor may not create or advance the hold that owns the epoch.
+        self.assertEqual({}, self.runtime._gunnery_holds)
+
+    def test_the_top_of_the_spectrum_always_looks_for_the_weak_spot(self):
+        self.runtime.battle_start(dict(self.start, bot_skill_mode='brutal'))
+
+        self.assertTrue(self.runtime.bot_aim_selection_allowed(
+            {'id': 11}, {'kind': 'human', 'network_id': 2, 'id': 2}))
+
+    def test_a_bot_with_no_competence_never_looks_for_the_weak_spot(self):
+        self.runtime.battle_start(dict(
+            self.start, bot_skill_mode='brutal',
+            bot_lineup=[{'team': 2, 'slot': 0, 'skill': 'rookie'}]))
+
+        self.assertEqual(0.0, self.runtime.bot_rating(11))
+        self.assertFalse(self.runtime.bot_aim_selection_allowed(
+            {'id': 11}, {'kind': 'human', 'network_id': 2, 'id': 2}))
+
     def test_a_weak_gunner_lays_the_gun_off_the_target_centre(self):
         command = self._gunnery_command()
         player = _admit_player(
