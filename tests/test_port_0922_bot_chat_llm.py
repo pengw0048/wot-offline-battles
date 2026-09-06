@@ -130,8 +130,20 @@ class CatalogTest(unittest.TestCase):
         self.assertIsNone(catalog.model_url('gigantic', catalog.MODELSCOPE))
         self.assertIsNone(catalog.model_url('small', 'some-other-mirror'))
 
-    def test_the_default_tier_is_the_small_one(self):
-        self.assertEqual('small', catalog.default_tier()['key'])
+    def test_the_default_tier_is_one_of_the_smallest(self):
+        default = catalog.default_tier()
+        self.assertEqual(catalog.DEFAULT_TIER_KEY, default['key'])
+        smallest = min(entry['size'] for entry in catalog.MODEL_TIERS)
+        # The default must stay a tier every machine can reasonably try, not
+        # simply the best one available.
+        self.assertLess(default['size'], smallest * 2)
+
+    def test_every_tier_key_is_unique_and_names_its_model(self):
+        keys = [entry['key'] for entry in catalog.MODEL_TIERS]
+        self.assertEqual(len(keys), len(set(keys)))
+        for entry in catalog.MODEL_TIERS:
+            self.assertIn(entry['key'].split('-')[0].replace('.', ''),
+                          entry['repo'].lower().replace('.', ''))
 
     def test_runtime_architecture_is_named_honestly(self):
         self.assertEqual('x64', catalog.runtime_arch('AMD64'))
@@ -328,6 +340,9 @@ class BackendTest(unittest.TestCase):
         self.assertFalse(payload['stream'])
         self.assertIn('<|im_end|>', payload['stop'])
         self.assertIn('\n', payload['stop'])
+        # A reasoning model must not spend the reply budget thinking.
+        self.assertEqual({'enable_thinking': False},
+                         payload['chat_template_kwargs'])
 
 
 class _StubBackend(object):
@@ -492,6 +507,28 @@ class SupervisorTest(unittest.TestCase):
 
     def test_a_reserved_port_is_usable(self):
         self.assertTrue(1 <= free_loopback_port() <= 65535)
+
+    def test_thinking_is_switched_off_on_the_command_line(self):
+        supervisor = LlamaServerSupervisor('/bin/true', '/bin/true', port=1)
+        started = []
+        supervisor._log = started.append
+        import subprocess as _subprocess
+        recorded = {}
+
+        def fake_popen(command, **unused):
+            recorded['command'] = command
+            raise OSError('not launched')
+
+        original, _subprocess.Popen = _subprocess.Popen, fake_popen
+        try:
+            supervisor.start()
+        finally:
+            _subprocess.Popen = original
+        command = recorded['command']
+        self.assertIn('--reasoning-budget', command)
+        self.assertEqual(
+            bot_chat_llm.REASONING_BUDGET,
+            command[command.index('--reasoning-budget') + 1])
 
     def test_a_missing_download_reports_rather_than_launching(self):
         messages = []

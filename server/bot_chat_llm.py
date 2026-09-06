@@ -48,6 +48,11 @@ TOP_P = 0.9
 # Qwen closes a turn with ``<|im_end|>``.  A newline ends the line whatever
 # the model intended: this channel carries exactly one sentence.
 STOP_SEQUENCES = ("<|im_end|>", "<|endoftext|>", "\n")
+# A reasoning model would spend the whole reply budget inside a ``<think>``
+# block nobody sees, so thinking is switched off at both levels the pinned
+# runtime offers.  Each is a no-op for a template that has no thinking mode.
+REASONING_BUDGET = "0"
+CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 PENDING_LIMIT = 24
 RESULT_LIMIT = 48
 
@@ -138,6 +143,7 @@ class LlamaServerSupervisor(object):
             "--port", str(self.port),
             "-c", str(self.context_tokens),
             "-t", str(self.threads),
+            "--reasoning-budget", REASONING_BUDGET,
         ]
         try:
             self._process = subprocess.Popen(
@@ -372,6 +378,7 @@ class LlamaChatBackend(object):
             "top_p": TOP_P,
             "stop": list(STOP_SEQUENCES),
             "stream": False,
+            "chat_template_kwargs": dict(CHAT_TEMPLATE_KWARGS),
         }
         body = self._opener(self.endpoint + "/v1/chat/completions", payload)
         return sanitize_line(extract_content(body))
@@ -409,7 +416,8 @@ def sanitize_line(text):
     if not isinstance(text, str):
         return None
     cleaned = text
-    # Qwen2.5 has no thinking mode, but a mis-picked model would leak one.
+    # Thinking is switched off at the runtime and in the template, so this
+    # only fires when one of those switches did not take.
     while "<think>" in cleaned and "</think>" in cleaned:
         head, rest = cleaned.split("<think>", 1)
         cleaned = head + rest.split("</think>", 1)[1]

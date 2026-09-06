@@ -25,13 +25,41 @@ _MODELSCOPE_URL = (
     "?Revision=master&FilePath=%s")
 _HUGGINGFACE_URL = "https://huggingface.co/%s/resolve/main/%s"
 
-# Qwen2.5-Instruct rather than Qwen3: Qwen3 emits ``<think>`` reasoning
-# blocks, which would both blow a 140 unit chat line and spend the whole
-# reply budget on text nobody sees.  Do not "upgrade" this without solving
-# that first.
+# Qwen3 thinking is switched off explicitly rather than avoided: the pinned
+# runtime accepts ``--reasoning-budget 0`` and the request carries
+# ``chat_template_kwargs {"enable_thinking": false}``.  Both are no-ops for a
+# model whose template has no thinking mode, so the same call serves either
+# generation.  Without them a reasoning model would spend the whole reply
+# budget on a ``<think>`` block nobody sees.
+#
+# The Qwen organisation publishes only Q8_0 for the Qwen3 GGUF repositories,
+# so those entries are larger than the Q4_K_M Qwen2.5 ones at similar
+# parameter counts.  Third-party requantisations are deliberately not listed.
 MODEL_TIERS = (
     {
-        "key": "small",
+        "key": "qwen3-0.6b",
+        "parameters": "0.6B",
+        "quantization": "Q8_0",
+        "repo": "Qwen/Qwen3-0.6B-GGUF",
+        "file": "Qwen3-0.6B-Q8_0.gguf",
+        "size": 639446688,
+        "sha256":
+            "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "license": "Apache-2.0",
+    },
+    {
+        "key": "qwen3-1.7b",
+        "parameters": "1.7B",
+        "quantization": "Q8_0",
+        "repo": "Qwen/Qwen3-1.7B-GGUF",
+        "file": "Qwen3-1.7B-Q8_0.gguf",
+        "size": 1834426016,
+        "sha256":
+            "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+        "license": "Apache-2.0",
+    },
+    {
+        "key": "qwen2.5-0.5b",
         "parameters": "0.5B",
         "quantization": "Q4_K_M",
         "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
@@ -42,7 +70,7 @@ MODEL_TIERS = (
         "license": "Apache-2.0",
     },
     {
-        "key": "large",
+        "key": "qwen2.5-1.5b",
         "parameters": "1.5B",
         "quantization": "Q4_K_M",
         "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
@@ -53,7 +81,11 @@ MODEL_TIERS = (
         "license": "Apache-2.0",
     },
 )
-DEFAULT_TIER_KEY = "small"
+# The smallest current-generation entry: newer than the Qwen2.5 pair at a
+# comparable size, and small enough to be the one tier every machine tries
+# first.  Which of these actually writes a better Chinese one-liner in time
+# has not been measured on Windows.
+DEFAULT_TIER_KEY = "qwen3-0.6b"
 
 RUNTIME_BUILD = "b10819"
 RUNTIME_LICENSE = "MIT"

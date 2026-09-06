@@ -14461,7 +14461,7 @@ def print_bot_chat_catalogue(stream=None):
     stream = stream or sys.stdout
     arch = bot_chat_models.runtime_arch(platform.machine())
     for entry in bot_chat_models.MODEL_TIERS:
-        print("%-6s %-5s %-8s %6.0f MB  %s" % (
+        print("%-13s %-5s %-7s %6.0f MB  %s" % (
             entry["key"], entry["parameters"], entry["quantization"],
             entry["size"] / 1048576.0, entry["license"]), file=stream)
         for source in bot_chat_models.SOURCES:
