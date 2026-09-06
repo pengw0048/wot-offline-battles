@@ -18722,7 +18722,22 @@ class BotRuntimeTests(unittest.TestCase):
 
         runtime._resolve_tank_contacts = push_outside
 
-        runtime.update(.04, 1.0)
+        from contextlib import redirect_stdout
+        state['_motion_stall_log'] = ((6.5, 0.0, 0.0), -2.0)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            runtime.update(.04, 1.0)
+        rows = [json.loads(line.split('[BOT MOTION] ', 1)[1])
+                for line in output.getvalue().splitlines()
+                if '[BOT MOTION] ' in line]
+        self.assertEqual(1, len(rows))
+        self.assertTrue(rows[0]['pose_rollback'])
+        self.assertFalse(rows[0]['support_rollback'])
+        self.assertEqual([7.0, 0.0, 0.0], rows[0]['after_contacts'])
+        self.assertEqual([6.5, 0.0, 0.0], rows[0]['final'])
+        self.assertIn('drive_speed', rows[0])
+        self.assertIn('powerW', rows[0])
+        self.assertNotIn('_motion_stall_pending', state)
 
         self.assertEqual((6.5, 0.0), (state['x'], state['z']))
         self.assertEqual(0.0, state['speed'])

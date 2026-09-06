@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import copy
 import math
+import json
 import random
 import sys
 
@@ -6071,6 +6072,16 @@ class BotRuntime(object):
         planner_age = now - cached[2] if cached is not None else -1.0
         probe = motion_probe if isinstance(motion_probe, dict) else {}
         strategic = self._server_orders.get(state['id']) or {}
+        # Finish this rare diagnostic after every authority gate has run.
+        # The control verdict alone cannot explain a later pose rollback.
+        state['_motion_stall_pending'] = {
+            'id': int(state['id']), 'vehicle': state.get('vehicle'),
+            'native_motion': bool(self.native_motion),
+            'start': position, 'speed_before': state.get('speed', 0.0),
+            'requested_throttle': throttle, 'turn': turn,
+            'yaw': state.get('yaw'), 'pitch': state.get('pitch'),
+            'roll': state.get('roll'), 'shape': state.get('collision_shape'),
+        }
         print('[BOT STALL] id=%s pos=(%.1f,%.1f) mode=%s recovery=%s '
               'traffic=%s intent=%s goal=%s strategic_goal=%s '
               'yaw=%.3f target_yaw=%s speed=%.2f throttle=%.2f turn=%.2f '
@@ -6088,6 +6099,41 @@ class BotRuntime(object):
                   probe.get('water'), probe.get('deferred'),
                   pose_frozen, state.get('hull_aiming', False),
                   self._hard_contact_grinds.get(state['id'], 0), planner_age))
+
+    def _finish_motion_stall(self, state, support_rollback, pose_rollback,
+                             settled_position):
+        """Log the actual authority outcome without extra world queries."""
+        trace = state.pop('_motion_stall_pending', None)
+        if trace is None:
+            return
+        position = _position(state)
+        nearby = []
+        for other in self.states.values():
+            if int(other['id']) == int(state['id']):
+                continue
+            other_position = _position(other)
+            if ((other_position[0] - position[0]) ** 2 +
+                    (other_position[2] - position[2]) ** 2 > 144.0):
+                continue
+            nearby.append({
+                'id': int(other['id']), 'position': other_position,
+                'yaw': other.get('yaw'), 'speed': other.get('speed'),
+                'alive': other.get('alive', True),
+                'shape': other.get('collision_shape'),
+            })
+        trace.update({
+            'nearby': sorted(nearby, key=lambda item: item['id']),
+            'final': position, 'speed_final': state.get('speed', 0.0),
+            'support_rollback': bool(support_rollback),
+            'pose_rollback': bool(pose_rollback),
+            'airborne': bool(state.get('airborne', False)),
+            'post_settle_delta': tuple(position[index] - settled_position[index]
+                                   for index in (0, 2)),
+            'contact_pairs': sorted(pair for pair in self._ram_contacts
+                                    if int(state['id']) in pair),
+        })
+        print('[BOT MOTION] %s' % json.dumps(
+            trace, sort_keys=True, separators=(',', ':')))
 
     def set_camera_position(self, position):
         """Publish the viewpoint that drives the presentation detail tiers."""
@@ -6639,6 +6685,9 @@ class BotRuntime(object):
                                 suspension_motion_pose=None):
         """Run grounded/ballistic phases and reject false raised support."""
         params = self._suspension_params_for(state['id'])
+        trace = state.get('_motion_stall_pending')
+        if trace is not None:
+            trace['suspension'] = params is not None
         if params is not None:
             suspension_snapshot = self._snapshot_bot_suspension_state(state)
             try:
@@ -6671,6 +6720,9 @@ class BotRuntime(object):
         # their real CoM distance below so a remote valley floor cannot pull
         # the bot down in one tick.
         ground = centre if centre is not None else highest
+        if trace is not None:
+            trace.update({'support_centre': centre, 'support_highest': highest,
+                          'grounded_before': state.get('grounded_once', False)})
         if ground is not None:
             speed = abs(state['speed'])
             snap_gap = vehicle_physics.ground_follow_gap(
@@ -6697,6 +6749,10 @@ class BotRuntime(object):
                         0.0, float(centre) - _number(tick_pose[1]))
                     max_climb = max(
                         max_climb, proved_support_rise)
+            if trace is not None:
+                trace.update({'support_limit': max_climb,
+                              'support_rise_obstacle': support_rise_obstacle,
+                              'support_rise_continuous': support_rise_continuous})
             com_gap = state['y'] - ground
             land_y = ground if centre is None else centre
             if not state.get('grounded_once', False):
@@ -11374,6 +11430,19 @@ class BotRuntime(object):
                         steer_dir != 0, slope_pitch, step,
                         bool(state.get('airborne', False)), 0, False))
                 state['last_drive_pitch'] = slope_pitch
+                trace = state.get('_motion_stall_pending')
+                if trace is not None:
+                    trace.update({
+                        'dt': step, 'drive_speed': speed,
+                        'drive_pitch': slope_pitch, 'throttle': throttle,
+                        'baked_veto': committed_corridor is False,
+                        'path_clear': bool(path_clear),
+                        'frozen': bool(pose_frozen),
+                        'mass': params['mass'], 'powerW': params['powerW'],
+                        'nativePowerRatio': params.get('nativePowerRatio', 1.0),
+                        'terrainResist': params['terrainResist'],
+                        'specificFriction': params['specificFriction'],
+                    })
                 hard_contact = False
                 contact_position = position
                 contact_deflected = False
@@ -11479,6 +11548,13 @@ class BotRuntime(object):
                         bot_id = int(state['id'])
                         self._hard_contact_grinds[bot_id] = max(
                             0, self._hard_contact_grinds.get(bot_id, 0) - 1)
+                if trace is not None:
+                    trace.update({
+                        'world_status': motion_status,
+                        'hard_contact': bool(hard_contact),
+                        'integrated': _position(state),
+                        'world_speed': state['speed'],
+                    })
             ammo_state.publish(state)
             ballistic_solution, local_action_fresh = \
                 self._cadenced_ballistic_solution(
@@ -11776,15 +11852,22 @@ class BotRuntime(object):
                     self._update_vertical_motion(
                         state, 0.0, rollback_pose, attempted_yaw,
                         suspension_motion_pose=settled))
+            trace = state.get('_motion_stall_pending')
+            if trace is not None:
+                trace['after_contacts'] = current
+            pose_rollback = False
             if (not support_blocked_by_id.get(bot_id, False) and
                     not ballistic_ticks.get(bot_id, False) and
                     not state.get('airborne', False)):
-                self._guard_realised_pose(
+                pose_rollback = self._guard_realised_pose(
                     state, tick_poses[bot_id], tick_safe[bot_id],
                     attempted_yaw,
                     (tick_suspension_states.get(bot_id)
                      if self._suspension_params.get(bot_id) is not None
                      else None))
+            self._finish_motion_stall(
+                state, support_blocked_by_id.get(bot_id, False),
+                pose_rollback, settled)
         self._alive_bot_ticks += len(slope_candidates)
         if refresh_control and slope_candidates:
             start = self._slope_pose_cursor % len(slope_candidates)
