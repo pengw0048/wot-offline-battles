@@ -4,10 +4,20 @@ This file owns ``postbattle_state.json``.  The launcher may preserve this file
 when repairing startup, but a full offline-data reset must remove it.  Raw LAN
 receipts stay JSON-only; native compact result lists are created on demand by
 the exact client ``battle_results_shared`` packers and are never persisted.
+
+Only an unacknowledged receipt is persisted in full.  Once #1513 has cached a
+result and confirmed it with 1501, the archived row keeps its identity so a
+retried delivery is still applied exactly once, but its body lives only in
+this process, and only for the most recent MAX_HISTORY results.  Re-opening a
+result from the notification list therefore works for those, within one
+session, and not across a restart; that is the explicit product choice.
+Account and per-vehicle progress, including medal counts, is carried by
+``progress`` and does survive both.
 """
 
 from __future__ import print_function
 
+import copy
 import json
 import os
 import time
@@ -35,7 +45,12 @@ STATE_PATH = os.path.join(
     port_config.USER_DATA_DIR, 'postbattle_state.json')
 LEGACY_STATE_PATH = os.path.join(
     port_config.LEGACY_USER_DATA_DIR, 'postbattle_state.json')
-MAX_HISTORY = 256
+# Bounds only this process's archived receipt bodies, which serve a repeated
+# 1500 for a result #1513 has already cached and confirmed.  Nothing durable
+# depends on it: an unacknowledged receipt is persisted in full, and an
+# archived row is persisted as its identity alone.  Explicit product choice --
+# ten results stay re-openable from the notification list within one session.
+MAX_HISTORY = 10
 INTERACTION_FIELDS = (
     ('spotted', 'spotted', 0, 1),
     ('death_reason', 'deathReason', -1, 10),
@@ -788,10 +803,22 @@ class PostBattleStore(object):
         row['changeTime'] = progress['battles']
 
     def _snapshot(self):
-        return json.loads(json.dumps({
-            'pending': self._pending, 'history': self._history,
-            'progress': self._progress,
-        }))
+        """Capture enough state to undo one failed durable transaction.
+
+        The server ships settlement inside the terminal round barrier, so
+        ``accept`` runs in a BigWorld callback at the instant the victory
+        condition is met.  A JSON round-trip of the whole store cost time
+        proportional to the archived history there -- hundreds of
+        milliseconds of visible freeze on a saturated profile -- while
+        neither ``accept`` nor ``acknowledge`` mutates an archived or pending
+        receipt in place.  Copy the two containers, not their rows, and deep
+        copy only the counters ``_apply_progress`` edits in place.
+        """
+        return {
+            'pending': dict(self._pending),
+            'history': list(self._history),
+            'progress': copy.deepcopy(self._progress),
+        }
 
     def _restore(self, value):
         self._pending = value['pending']
@@ -817,9 +844,11 @@ class PostBattleStore(object):
                 pending[str(receipt['arena_unique_id'])] = receipt
             history = []
             for raw in value.get('history', ()):
-                # Schema-1 files written before the native cache restart fix
-                # contain identity-only rows.  They remain valid dedupe marks
-                # but cannot reconstruct a result compact descriptor.
+                # An archived row is persisted as its identity alone.  That
+                # is a complete dedupe mark for a retried delivery, and it
+                # deliberately cannot reconstruct a result compact
+                # descriptor.  Files written by an older build carry the
+                # whole receipt here; keep honouring those bodies.
                 if isinstance(raw, dict) and all(
                         name in raw for name in ('receipt_id',
                                                 'arena_unique_id')):
@@ -857,12 +886,28 @@ class PostBattleStore(object):
             self._history = []
             self._progress = self._empty_progress()
 
+    def _archived_identities(self):
+        """Project the archive down to what a restart actually needs.
+
+        An acknowledged receipt is only consulted again to reject a retried
+        delivery, and its identity carries that on its own.  Writing the
+        whole body instead made the terminal round barrier rewrite every
+        archived 30-vehicle roster at the instant the round ended.
+        """
+        return [{'receipt_id': row['receipt_id'],
+                 'arena_unique_id': row['arena_unique_id']}
+                for row in self._history]
+
     def _save(self):
         if self._path is None:
             return
         value = {
             'schema': SCHEMA, 'accountKey': self._account_key,
             'pending': list(self._pending.values()),
-            'history': self._history, 'progress': self._progress,
+            'history': self._archived_identities(),
+            'progress': self._progress,
         }
-        port_config.write_json(self._path, value)
+        # This file is a machine-owned cache rewritten on the terminal round
+        # barrier.  Only ``_load`` reads it, so sorted and indented output
+        # buys nothing and costs the embedded 2.7 runtime its C JSON encoder.
+        port_config.write_json(self._path, value, compact=True)

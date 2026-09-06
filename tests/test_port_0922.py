@@ -679,6 +679,34 @@ class PortConfigTests(unittest.TestCase):
                          'offline_lan_0922'), path)
         self.assertNotIn(os.path.join('mods', 'configs'), path)
 
+    def test_a_machine_owned_state_file_can_skip_the_readable_form(self):
+        """The embedded 2.7 runtime loses its C JSON encoder to either flag.
+
+        ``json.dumps`` in CPython 2.7 uses ``c_make_encoder`` only when
+        ``indent`` is None and ``sort_keys`` is false.  A large cache the port
+        writes on a gameplay barrier must not pay the pure-Python encoder, so
+        ``write_json`` offers a compact form while the small files a player
+        or a support request reads stay indented and sorted.
+        """
+        config_module = _load_port_source('config')
+        value = {'b': 2, 'a': [1, {'d': 4, 'c': 3}]}
+        with tempfile.TemporaryDirectory() as directory:
+            readable = str(Path(directory) / 'readable.json')
+            compact = str(Path(directory) / 'compact.json')
+
+            config_module.write_json(readable, value)
+            config_module.write_json(compact, value, compact=True)
+
+            readable_text = Path(readable).read_text(encoding='utf-8')
+            compact_text = Path(compact).read_text(encoding='utf-8')
+            self.assertIn('\n  ', readable_text)
+            self.assertEqual(1, compact_text.count('\n'))
+            self.assertNotIn(', ', compact_text)
+            self.assertNotIn(': ', compact_text)
+            self.assertLess(len(compact_text), len(readable_text))
+            self.assertEqual(value, json.loads(compact_text))
+            self.assertEqual(value, json.loads(readable_text))
+
     def test_waiting_room_choices_round_trip_in_player_owned_state(self):
         config_module = _load_port_source('config')
         with tempfile.TemporaryDirectory() as directory:
