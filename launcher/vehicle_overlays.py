@@ -887,7 +887,10 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
             }
             # ``secret`` hides vehicles from the retail tech tree, but it is
             # not a data-safety boundary for this local editor. Keep only
-            # native construction hazards out of the player catalogue.
+            # native construction hazards out of the player catalogue, so the
+            # editor still reaches the Bootcamp and Fallout copies of a real
+            # tank; bot_lineup_profiles applies the stricter roster rule on
+            # top of this list before offering a vehicle as a Bot.
             type_name = "%s:%s" % (roster_nation, vehicle)
             record["selectable"] = bool(
                 not _NON_EDITABLE_VEHICLE_TAGS.intersection(record["tags"]) and

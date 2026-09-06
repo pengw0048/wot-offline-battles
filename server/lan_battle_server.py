@@ -881,15 +881,21 @@ def _projectile_bounded_vector(value, lows, highs):
 
 
 def _bot_lineup_allowed_names(catalog):
-    """Return selectable catalog identities without hidden test vehicles."""
+    """Return catalog identities accepted by every Bot roster owner."""
     excluded_tags = {
-        "event_battles", "premiumIGR", "observer", "secret",
+        "event_battles", "premiumIGR", "observer", "unrecoverable",
+        "fallout",
+    }
+    excluded_names = {
+        "usa:T23", "germany:G138_VK168_02_Mauerbrecher",
     }
     return set(
         row.get("name") for row in (catalog or ())
         if isinstance(row, dict) and row.get("name") and
         not excluded_tags.intersection(row.get("tags") or ()) and
-        row.get("name") != "usa:T23")
+        row.get("name") not in excluded_names and
+        not ("secret" in (row.get("tags") or ()) and
+             row.get("name").endswith("_bootcamp")))
 
 
 def _bounded_vector(value, lows, highs):

@@ -1,9 +1,31 @@
 """Shared #1513 vehicle-module fitting and battle-eligibility rules."""
 
 
+# ``fallout`` is the stock #1513 tag name; gui/shared/gui_items/Vehicle.py
+# declares it in VEHICLE_TAGS next to the other exclusions listed here.
 NON_STANDARD_BATTLE_TAGS = frozenset((
-    'event_battles', 'premiumIGR', 'observer', 'unrecoverable'))
+    'event_battles', 'premiumIGR', 'observer', 'unrecoverable', 'fallout'))
 NON_STANDARD_BATTLE_NAMES = frozenset(('usa:T23',))
+# The Bootcamp tutorial copies are the one clone family stock gives no tag of
+# its own: it hides them with ``secret`` plus this item_defs name suffix.
+CLONE_NAME_SUFFIXES = ('_bootcamp',)
+CATALOGUE_VISIBILITY_TAG = 'secret'
+
+
+def is_clone_of_a_standard_vehicle(name, tags):
+    """Return whether this entry republishes a real tank at a fake level.
+
+    #1513 ``list.xml`` carries 22 ``_bootcamp`` copies, every one of them
+    published at ``level`` 2 while keeping the original hull: for example
+    ``ussr:R07_T-34-85_bootcamp`` is the 536 HP tier 6 T-34-85 under the same
+    ``#ussr_vehicles:T-34-85`` name.  A tier-matched Bot lineup drawn from the
+    catalogue therefore fields tier 6 hulls as tier 2 opponents, and the
+    garage shows two tanks with one name and two tiers.  Requiring the stock
+    ``secret`` tag as well keeps this from ever hiding a shipped vehicle.
+    """
+    return bool(
+        CATALOGUE_VISIBILITY_TAG in tags and
+        str(name or '').endswith(CLONE_NAME_SUFFIXES))
 
 
 def is_standard_battle_vehicle(vehicle_type):
@@ -13,13 +35,16 @@ def is_standard_battle_vehicle(vehicle_type):
     environment helper entities.  Some of them can be constructed in the
     garage but omit resources required by ``Vehicle.prerequisites``;
     ``Env_Artillery`` is one example whose shell has no renderable projectile.
-    ``secret`` alone is only a catalogue-visibility tag and remains playable.
+    ``secret`` alone is only a catalogue-visibility tag: a hidden entry whose
+    own level and name are honest stays playable, and only the clones above
+    and the ``fallout`` event copies are withheld.
     """
     name = str(getattr(vehicle_type, 'name', '') or '')
     tags = set(getattr(vehicle_type, 'tags', ()) or ())
     return bool(
         name and name not in NON_STANDARD_BATTLE_NAMES and
-        not NON_STANDARD_BATTLE_TAGS.intersection(tags))
+        not NON_STANDARD_BATTLE_TAGS.intersection(tags) and
+        not is_clone_of_a_standard_vehicle(name, tags))
 
 
 def _sort_text(value):

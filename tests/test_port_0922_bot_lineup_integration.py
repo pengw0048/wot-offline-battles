@@ -15,7 +15,9 @@ for path in (LAUNCHER_ROOT, SERVER_ROOT, CLIENT_ROOT):
 
 import bot_lineup_profiles  # noqa: E402
 import bot_lineup_ui  # noqa: E402
+import vehicle_overlays  # noqa: E402
 import core as launcher_core  # noqa: E402
+import lan_battle_server as server_runtime  # noqa: E402
 import windows_server  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_blacklist  # noqa: E402
 from gui.mods.offline_lan_0922 import descriptor_donation  # noqa: E402
@@ -257,6 +259,12 @@ class BotLineupIntegrationTests(unittest.TestCase):
             6: types.SimpleNamespace(
                 name='ussr:R99_SecretTank', level=8,
                 tags=('mediumTank', 'secret')),
+            7: types.SimpleNamespace(
+                name='ussr:R07_T-34-85_bootcamp', level=2,
+                tags=('mediumTank', 'secret')),
+            8: types.SimpleNamespace(
+                name='ussr:R45_IS-7_fallout', level=10,
+                tags=('heavyTank', 'fallout', 'secret')),
         }
         runtime = types.SimpleNamespace(
             nations=types.SimpleNamespace(
@@ -264,6 +272,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
             vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
                 getList=lambda unused_nation_id: entries)))
 
+        # A hidden entry keeps its own honest level and name, so it stays in
+        # every catalogue.  The Bootcamp copy publishes the tier 6 T-34-85 at
+        # level 2 and the Fallout copy is event content; neither may reach the
+        # garage, the waiting-room roster, or a tier-matched Bot lineup.
         self.assertEqual(
             ['ussr:R11_MS-1', 'ussr:R99_SecretTank'],
             [row['name'] for row in
@@ -273,6 +285,82 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 vehicle_configuration.is_standard_battle_vehicle(entry))
         self.assertTrue(vehicle_configuration.is_standard_battle_vehicle(
             entries[6]))
+        for key in (7, 8):
+            self.assertFalse(
+                vehicle_configuration.is_standard_battle_vehicle(
+                    entries[key]))
+            self.assertFalse(bot_lineup_profiles.vehicle_choice_is_eligible({
+                'nation': entries[key].name.split(':')[0],
+                'vehicle': entries[key].name.split(':')[1],
+                'tags': entries[key].tags,
+            }))
+
+    # The launcher reaches its Bot roster through two filters: the editor's
+    # own ``selectable`` pass in vehicle_overlays.list_vehicle_choices, then
+    # bot_lineup_profiles.eligible_vehicle_choices.  The mod applies one and
+    # the server validates explicit choices against the donated catalogue.
+    # Comparing constants alone would not prove the composition matches, so
+    # this reproduces all three effective predicates over the exact families.
+    _EXCLUSION_CASES = (
+        ('ussr:R11_MS-1', ('lightTank',), True),
+        ('ussr:R99_SecretTank', ('mediumTank', 'secret'), True),
+        ('ussr:R07_T-34-85_bootcamp', ('mediumTank', 'secret'), False),
+        ('ussr:R45_IS-7_fallout', ('heavyTank', 'fallout', 'secret'), False),
+        ('ussr:R07_T-34-85_training',
+         ('mediumTank', 'secret', 'unrecoverable'), False),
+        ('germany:Env_Artillery', ('SPG', 'secret', 'unrecoverable'), False),
+        ('germany:G01_Maus_IGR', ('heavyTank', 'premiumIGR', 'secret'), False),
+        ('ussr:EventTank', ('mediumTank', 'event_battles'), False),
+        ('ussr:Observer', ('lightTank', 'observer'), False),
+        ('usa:T23', ('mediumTank',), False),
+        ('germany:G138_VK168_02_Mauerbrecher', ('heavyTank',), False),
+    )
+
+    @staticmethod
+    def _launcher_admits(name, tags):
+        """Reproduce the composed launcher decision for one vehicle."""
+        if (vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS.intersection(tags) or
+                name in vehicle_overlays._NON_EDITABLE_VEHICLES):
+            return False
+        nation, vehicle = name.split(':', 1)
+        return bool(bot_lineup_profiles.eligible_vehicle_choices([{
+            'nation': nation, 'vehicle': vehicle, 'tags': list(tags),
+        }]))
+
+    def test_launcher_and_server_share_the_mod_exclusion_rule(self):
+        self.assertEqual(
+            frozenset(vehicle_configuration.NON_STANDARD_BATTLE_TAGS),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
+        self.assertEqual(
+            frozenset(vehicle_configuration.NON_STANDARD_BATTLE_NAMES),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
+        self.assertEqual(
+            tuple(vehicle_configuration.CLONE_NAME_SUFFIXES),
+            tuple(bot_lineup_profiles.CLONE_BOT_VEHICLE_SUFFIXES_0922))
+        self.assertEqual(
+            vehicle_configuration.CATALOGUE_VISIBILITY_TAG,
+            bot_lineup_profiles.CATALOGUE_VISIBILITY_TAG_0922)
+        # The editor pass may never be the stricter of the two, or the
+        # launcher would silently withhold a Bot the worker accepts.
+        self.assertLessEqual(
+            frozenset(vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
+        self.assertLessEqual(
+            frozenset(vehicle_overlays._NON_EDITABLE_VEHICLES),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
+
+        for name, tags, expected in self._EXCLUSION_CASES:
+            entry = types.SimpleNamespace(name=name, level=5, tags=tags)
+            admitted = bool(
+                vehicle_configuration.is_standard_battle_vehicle(entry) and
+                not vehicle_blacklist.is_unusable(name))
+            self.assertEqual(expected, admitted, name)
+            self.assertEqual(
+                admitted, self._launcher_admits(name, tags), name)
+            server_names = server_runtime._bot_lineup_allowed_names([{
+                'name': name, 'level': 5, 'tags': list(tags),
+            }])
+            self.assertEqual(admitted, name in server_names, name)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{
