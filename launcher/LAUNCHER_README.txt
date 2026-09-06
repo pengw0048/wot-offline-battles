@@ -157,6 +157,56 @@ https://learn.microsoft.com/en-us/sysinternals/downloads/procdump
 https://learn.microsoft.com/en-us/sysinternals/license-faq
 https://learn.microsoft.com/en-us/sysinternals/license-terms
 
+Neither the AI teammate chat model nor its inference program is included in
+this launcher, and the feature stays off until you install them from the AI
+chat tab. Both go to %LOCALAPPDATA%\WoTOfflineBattles\bot-chat, and Remove on
+that tab deletes them again.
+
+The models are Qwen2.5-Instruct and Qwen3 in GGUF form, published by Alibaba
+Cloud's Qwen team under the Apache License 2.0. Each is offered from ModelScope
+and from Hugging Face; ModelScope is tried first because it is reachable from
+mainland China, and both were verified to serve the identical file. The
+smallest is about 610 MB and the largest about 1.7 GB.
+
+Inference runs in a separate llama-server process from ggml-org/llama.cpp,
+distributed under the MIT License, whose text is reproduced below. The launcher
+downloads one pinned CPU-only Windows release archive, unmodified, and unpacks
+only that program and the libraries it loads. For the x64 build it tries a
+ModelScope repository that republishes the identical archive before falling
+back to GitHub. Every download is checked against the SHA-256 of the official
+release asset, so a mirror that is stale, wrong or hostile fails verification
+and installs nothing.
+
+If you already have llama-server.exe, the AI chat tab accepts its path instead
+and downloads only the model.
+
+https://www.modelscope.cn/models/Qwen/Qwen3-0.6B-GGUF
+https://huggingface.co/Qwen/Qwen3-0.6B-GGUF
+https://github.com/ggml-org/llama.cpp
+
+MIT LICENSE FOR LLAMA.CPP
+----------------------------------------------------------------------
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 World of Tanks and its assets are not included with this server. This project
 is unofficial and is not endorsed by Wargaming.
 

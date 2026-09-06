@@ -12,6 +12,8 @@ import time
 import unittest
 from unittest import mock
 
+import bot_chat_ui
+import i18n
 import core
 import wot_launcher
 
@@ -141,6 +143,7 @@ class _FakeTk(object):
 class _FakeTtk(object):
     Combobox = _Widget
     Notebook = _Notebook
+    Progressbar = _Widget
 
 
 class _FakeFileDialog(object):
@@ -2433,6 +2436,49 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(stopped, ["terminate"])
         self.assertIsNone(self.window._room_vehicle_overlay_root)
         self.assertTrue(self.window.root.destroyed)
+
+
+class BotChatTabTests(unittest.TestCase):
+    """The optional chat panel is really built, not silently unavailable."""
+
+    # Reuse the window fixture without re-running every window test.
+    setUp = WindowTest.setUp
+
+    def test_the_panel_is_constructed(self):
+        self.assertIsNotNone(self.window._bot_chat)
+
+    def test_a_disabled_panel_names_no_model_to_the_server(self):
+        self.assertIsNone(self.window._bot_chat_paths())
+
+    def test_enabling_without_an_install_still_names_nothing(self):
+        self.window._bot_chat.enabled.set(True)
+        self.assertIsNone(self.window._bot_chat_paths())
+
+    def test_the_panel_choices_are_saved(self):
+        panel = self.window._bot_chat
+        panel.enabled.set(True)
+        self.window._save_settings()
+        saved = core.load_settings(core.settings_path())
+        self.assertTrue(saved[bot_chat_ui.ENABLED_SETTING])
+        self.assertEqual(panel.tier_key(), saved[bot_chat_ui.TIER_SETTING])
+
+    def test_the_status_line_survives_every_state(self):
+        panel = self.window._bot_chat
+        for state in (bot_chat_ui.STATE_ABSENT, bot_chat_ui.STATE_READY,
+                      bot_chat_ui.STATE_WORKING,
+                      bot_chat_ui.STATE_UNSUPPORTED):
+            panel._state = state
+            self.assertTrue(self.window._bot_chat_status(panel), state)
+
+    def test_the_tab_is_titled_in_both_languages(self):
+        for language in (i18n.LANGUAGE_ENGLISH, i18n.LANGUAGE_CHINESE):
+            self.window.language = language
+            self.window._apply_language()
+            title = self.window.tools_tabs.tab_options[
+                self.window.bot_chat_panel]["text"]
+            self.assertTrue(title, language)
+            self.assertTrue(self.window._bot_chat.install_button.options[
+                "text"], language)
 
 
 if __name__ == "__main__":

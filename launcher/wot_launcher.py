@@ -15,6 +15,7 @@ import time
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import bot_chat_ui
     import bot_lineup_profiles
     import bot_lineup_ui
     import core
@@ -24,8 +25,8 @@ if __package__ in (None, ""):
     import vehicle_overlays
 else:
     from . import (
-        bot_lineup_profiles, bot_lineup_ui, core, error_reports, i18n,
-        vehicle_editor_ui, vehicle_overlays)
+        bot_chat_ui, bot_lineup_profiles, bot_lineup_ui, core, error_reports,
+        i18n, vehicle_editor_ui, vehicle_overlays)
 
 
 LAUNCHER_VERSION = "0.6.9"
@@ -167,6 +168,22 @@ _CHINESE = {
     "ProcDump was downloaded and crash dumps are enabled.":
         "ProcDump 下载完成，闪退转储已启用。",
     "ProcDump could not be enabled: %s": "无法启用 ProcDump：%s",
+    "AI chat": "AI 队友",
+    "Let Bots talk in team chat (downloads a local model)":
+        "让 Bot 在队伍频道说话（需要下载本地模型）",
+    "Model": "模型",
+    "llama-server": "推理程序",
+    "Not installed. %s to download.": "尚未安装，需要下载 %s。",
+    "Ready.": "已就绪。",
+    "This machine has no published inference runtime.":
+        "本机没有可用的推理程序版本。",
+    "Downloading... %s": "正在下载… %s",
+    "Stopped. Progress was kept; install again to resume.":
+        "已停止。进度已保留，再次安装可继续。",
+    "Install failed: %s": "安装失败：%s",
+    "Install": "安装",
+    "Stop": "停止",
+    "Remove": "删除",
     "Report game crash?": "是否汇报游戏闪退？",
     "The game closed unexpectedly and an error report is ready. Choose Yes "
     "to select the ZIP in Windows Explorer; choosing No deletes it.":
@@ -538,8 +555,10 @@ class LauncherWindow(object):
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.bot_chat_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
+        self.tools_tabs.add(self.bot_chat_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
@@ -631,6 +650,9 @@ class LauncherWindow(object):
             self.log_panel, height=10, width=72, state="disabled",
                                 wrap="none")
         self.log_view.pack(fill="both", expand=True)
+        # The panel reports its own failures through the log, so it is the
+        # first thing built once the log exists.
+        self._bot_chat = self._build_bot_chat(settings)
         self.author_text = tk.StringVar(value=(
             "作者：伪红学家  Bilibili：@tiancaihb  GitHub: "
             "https://github.com/pengw0048/wot-offline-battles"))
@@ -675,6 +697,67 @@ class LauncherWindow(object):
         self._log("Launcher session: %s role=launcher." %
                   core.payload_identity_text(identity))
 
+    def _build_bot_chat(self, settings):
+        """Build the optional chat panel, or leave the tab empty on failure.
+
+        The catalogue lives with the server payload. A launcher that cannot
+        read it must still start: the tab reports that the feature is
+        unavailable rather than taking the window down with it.
+        """
+        try:
+            catalogue = core.bot_chat_catalogue()
+        except Exception as error:
+            self._log("BOT CHAT is unavailable: %s" % error)
+            return None
+        try:
+            return bot_chat_ui.BotChatPanel(
+                self.bot_chat_panel, catalogue, self._tk, self._ttk,
+                settings, on_change=self._bot_chat_changed, log=self._log)
+        except Exception as error:
+            self._log("BOT CHAT panel could not be built: %s" % error)
+            return None
+
+    def _bot_chat_changed(self):
+        self._save_settings()
+        self._apply_bot_chat_language()
+
+    def _apply_bot_chat_language(self):
+        """Retitle the chat panel and restate what it is currently doing."""
+        panel = getattr(self, "_bot_chat", None)
+        if panel is None:
+            return
+        panel.enable_check.config(text=self._t(
+            "Let Bots talk in team chat (downloads a local model)"))
+        panel.model_label.config(text=self._t("Model"))
+        panel.runtime_label.config(text=self._t("llama-server"))
+        panel.install_button.config(text=self._t("Install"))
+        panel.stop_button.config(text=self._t("Stop"))
+        panel.remove_button.config(text=self._t("Remove"))
+        panel.status.set(self._bot_chat_status(panel))
+
+    def _bot_chat_status(self, panel):
+        state = panel.state()
+        if state == bot_chat_ui.STATE_UNSUPPORTED:
+            return self._t(
+                "This machine has no published inference runtime.")
+        if state == bot_chat_ui.STATE_WORKING:
+            return self._t("Downloading... %s") % panel.progress_text()
+        if state == bot_chat_ui.STATE_READY:
+            return self._t("Ready.")
+        error = panel.last_error()
+        if error:
+            return self._t("Install failed: %s") % error
+        if panel.was_cancelled():
+            return self._t(
+                "Stopped. Progress was kept; install again to resume.")
+        pending = panel.plan()["pending_bytes"]
+        return self._t("Not installed. %s to download.") % (
+            bot_chat_ui.bot_chat_install.format_bytes(pending))
+
+    def _bot_chat_paths(self):
+        panel = getattr(self, "_bot_chat", None)
+        return panel.paths() if panel is not None else None
+
     def _t(self, text):
         if self.language == i18n.LANGUAGE_CHINESE:
             return _CHINESE.get(text, text)
@@ -706,7 +789,10 @@ class LauncherWindow(object):
             self.vehicle_panel, text=self._t("Vehicle modifier"))
         self.tools_tabs.tab(
             self.bot_lineup_panel, text=self._t("Exact lineup"))
+        self.tools_tabs.tab(
+            self.bot_chat_panel, text=self._t("AI chat"))
         self.tools_tabs.tab(self.repair_panel, text=self._t("Repair"))
+        self._apply_bot_chat_language()
         self.vehicle_profile_label.config(text=self._t("Vehicle data profile"))
         self.new_profile_button.config(text=self._t("New profile..."))
         self.vehicle_editor_button.config(
@@ -1364,7 +1450,20 @@ class LauncherWindow(object):
                 bool(self.full_crash_dumps.get()),
             PROCDUMP_CONSENT_SETTING:
                 bool(self._procdump_download_consent),
+            **self._bot_chat_settings(),
         })
+
+    def _bot_chat_settings(self):
+        """Return the chat panel's remembered choices, or nothing."""
+        panel = getattr(self, "_bot_chat", None)
+        if panel is None:
+            return {}
+        return {
+            bot_chat_ui.ENABLED_SETTING: bool(panel.enabled.get()),
+            bot_chat_ui.TIER_SETTING: panel.tier_key(),
+            bot_chat_ui.RUNTIME_OVERRIDE_SETTING:
+                panel.runtime_override.get().strip(),
+        }
 
     def _start_maintenance(self, action):
         if self._busy or self._maintenance_busy:
@@ -2118,7 +2217,7 @@ class LauncherWindow(object):
         command = core.server_child_command(port_version)
         environment = core.server_environment(
             port_version, game_root, loopback_only=loopback_only,
-            bot_lineup=bot_lineup)
+            bot_lineup=bot_lineup, bot_chat=self._bot_chat_paths())
         server_log_path = core.server_log_path()
         report_session = self._active_report_session
         if report_session is not None:

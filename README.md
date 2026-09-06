@@ -53,6 +53,15 @@ The 0.9.22 client gets a working offline garage:
   range, concealment, reload, aim time, dispersion, traverse, engine power,
   terrain resistance and repair speed.
 
+The Tools tab also has an **AI chat** panel, off by default. Turning it on
+installs a small local language model and llama.cpp's inference program, and
+Bots then hold conversations in team chat: they answer when you address one by
+its tank ("那个 T-34"), by class, by grid square or by callsign, they answer
+each other, and each keeps a voice of its own for the round. Nothing is
+downloaded until you ask, downloads resume where they stopped, everything is
+checked against its published checksum, and Remove deletes it all again. With
+no model installed the feature is simply off and every Bot is quiet.
+
 The launcher's Tools tab can also edit vehicle data directly. A vehicle data
 profile is a named set of Packed XML field changes (health, damage,
 penetration, armour, speeds, reload and more) made in the launcher's editor;

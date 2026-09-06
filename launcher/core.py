@@ -74,6 +74,9 @@ WORKER_READY_MARKER_ENV_0922 = "OFFLINE_LAN_0922_WORKER_READY_MARKER"
 WORKER_STARTER_FILENAME_0922 = "offline_worker_starter.exe"
 WORKER_READY_MARKER_FILENAME_0922 = "offline-worker.ready"
 WORKER_FAILURE_LOG_FILENAME_0922 = "offline-worker-starter.log"
+SERVER_BOT_CHAT_RUNTIME_ENV_0922 = "WOT_BOT_CHAT_RUNTIME"
+SERVER_BOT_CHAT_MODEL_ENV_0922 = "WOT_BOT_CHAT_MODEL"
+
 SERVER_LOG_FILENAME = "server.log"
 LAUNCHER_LOG_FILENAME = "launcher.log"
 BUILD_IDENTITY_FILENAME_0922 = "build_identity.json"
@@ -1531,7 +1534,8 @@ def server_argv(port_version, base_dir=None):
 
 def server_environment(port_version, game_root, environment=None,
                        team_size=DEFAULT_TEAM_SIZE, loopback_only=False,
-                       team1_size=None, team2_size=None, bot_lineup=None):
+                       team1_size=None, team2_size=None, bot_lineup=None,
+                       bot_chat=None):
     """Build the endpoint and roster environment for one LAN server."""
     environment = dict(os.environ if environment is None else environment)
     if port_version == PORT_0_9_22:
@@ -1553,7 +1557,44 @@ def server_environment(port_version, game_root, environment=None,
             environment[SERVER_LOOPBACK_ONLY_ENV_0922] = "1"
         else:
             environment.pop(SERVER_LOOPBACK_ONLY_ENV_0922, None)
+        _apply_bot_chat_environment(environment, bot_chat)
     return environment
+
+
+def _apply_bot_chat_environment(environment, bot_chat):
+    """Name the optional chat model, or make sure no stale one is named.
+
+    Both halves must be present. Naming one alone would start a room that
+    reports a disabled feature every time it looks for the other.
+    """
+    runtime = str((bot_chat or {}).get("runtime") or "")
+    model = str((bot_chat or {}).get("model") or "")
+    if (runtime and model and os.path.isfile(runtime) and
+            os.path.isfile(model)):
+        environment[SERVER_BOT_CHAT_RUNTIME_ENV_0922] = runtime
+        environment[SERVER_BOT_CHAT_MODEL_ENV_0922] = model
+        return
+    environment.pop(SERVER_BOT_CHAT_RUNTIME_ENV_0922, None)
+    environment.pop(SERVER_BOT_CHAT_MODEL_ENV_0922, None)
+
+
+def bot_chat_catalogue(port_version=PORT_0_9_22, base_dir=None):
+    """Import the pinned model catalogue the bundled server carries.
+
+    The launcher downloads what the server will load, so both must read one
+    catalogue. The server payload already reaches this process through
+    ``sys.path`` when a room runs in it; this makes the same directory
+    importable before any room exists.
+    """
+    script = server_script(port_version, base_dir)
+    if script is None:
+        raise LauncherError("Unknown client port: %s" % port_version)
+    directory = os.path.dirname(script)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import bot_chat_models
+
+    return bot_chat_models
 
 
 def server_child_command(port_version, launcher_script=None, executable=None,
