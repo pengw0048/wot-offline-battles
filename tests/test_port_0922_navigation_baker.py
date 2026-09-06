@@ -863,16 +863,16 @@ class CompiledSpace0922Test(unittest.TestCase):
     def test_great_wall_4m_grid_phase_changes_only_x_and_is_recorded(self):
         original = (-500.0, -500.0, 500.0, 500.0)
         self.assertEqual(
-            original,
-            baker._target_expanded_bounds(
-                '59_asia_great_wall', original, 3.0, original))
+            (-501.0, -501.0, 501.0, 501.0),
+            baker._target_sampling_bounds(
+                '59_asia_great_wall', {'bounds': original}, 3.0))
         self.assertEqual(
             original,
-            baker._target_expanded_bounds(
-                '07_lakeville', original, 4.0, original))
+            baker._target_sampling_bounds(
+                '07_lakeville', {'bounds': original}, 4.0))
 
-        phased = baker._target_expanded_bounds(
-            '59_asia_great_wall', original, 4.0, original)
+        phased = baker._target_sampling_bounds(
+            '59_asia_great_wall', {'bounds': original}, 4.0)
 
         self.assertEqual((-502.0, -500.0, 502.0, 500.0), phased)
         self.assertEqual(original[1::2], phased[1::2])
@@ -927,16 +927,67 @@ class CompiledSpace0922Test(unittest.TestCase):
             'reason': '#1513 gatehouse passage requires an x=404m graph centre',
         }, graph['bake']['grid_phase_override'])
 
+    def test_sampling_grid_stays_inside_the_stock_arena_rectangle(self):
+        arena = (-500.0, -500.0, 500.0, 500.0)
+        config = {
+            'bounds': arena,
+            # Prokhorovka's east lane waypoint. The baseline baker's 16 m
+            # anchor margin used to push the sampled rectangle out to x=512,
+            # and Bot A* reached every cell baked out there.
+            'anchors': ((496.0, -316.0),),
+            'bases': ((-126.0, 446.0), (54.0, -446.0)),
+        }
+
+        self.assertEqual(
+            arena, baker._target_sampling_bounds('05_prohorovka', config, 4.0))
+
+    def test_sampling_grid_rounds_outward_without_moving_the_grid_phase(self):
+        # Stalingrad's stock rectangle is not a multiple of the 4 m cell.
+        arena = (-500.0, -500.0, 450.0, 450.0)
+
+        sampled = baker._target_sampling_bounds(
+            '92_stalingrad', {'bounds': arena}, 4.0)
+
+        self.assertEqual(arena[:2], sampled[:2])
+        self.assertGreaterEqual(sampled[2], arena[2])
+        self.assertLess(sampled[2] - arena[2], 4.0)
+        self.assertLess(sampled[3] - arena[3], 4.0)
+
+    def test_sampling_grid_refuses_an_anchor_outside_the_play_area(self):
+        config = {'bounds': (-500.0, -500.0, 500.0, 500.0),
+                  'anchors': ((504.0, 0.0),)}
+
+        with self.assertRaises(space.UnsafeBakeInputError):
+            baker._target_sampling_bounds('05_prohorovka', config, 4.0)
+
+    def test_published_bounds_are_the_stock_rectangle_not_the_sampled_grid(self):
+        arena = (-8.0, -4.0, 4.0, 4.0)
+        graph = {
+            'cell_size': 4.0,
+            'bounds': [-8.0, -4.0, 8.0, 4.0],
+            'origin': [-6.0, -2.0],
+            'width': 4,
+            'height': 2,
+            'heights_mm': [0, 0, 0, None, 0, 0, 0, None],
+        }
+
+        baker._publish_gameplay_bounds(graph, {'bounds': arena})
+
+        self.assertEqual(list(arena), graph['bounds'])
+        graph['heights_mm'][3] = 0
+        with self.assertRaises(space.UnsafeBakeInputError):
+            baker._publish_gameplay_bounds(graph, {'bounds': arena})
+
     def test_great_wall_4m_grid_phase_rejects_any_contract_drift(self):
         original = (-500.0, -500.0, 500.0, 500.0)
         with self.assertRaises(space.UnsafeBakeInputError):
-            baker._target_expanded_bounds(
-                '59_asia_great_wall', (-499.0,) + original[1:],
-                4.0, original)
+            baker._target_sampling_bounds(
+                '59_asia_great_wall',
+                {'bounds': (-499.0,) + original[1:]}, 4.0)
         with self.assertRaises(space.UnsafeBakeInputError):
-            baker._target_expanded_bounds(
-                '59_asia_great_wall', original, 4.0,
-                (-504.0,) + original[1:])
+            baker._target_sampling_bounds(
+                '59_asia_great_wall',
+                {'bounds': (-500.0, -500.0, 502.0, 500.0)}, 4.0)
 
         valid = {
             'cell_size': 4.0,

@@ -1920,7 +1920,8 @@ class BotRuntime(object):
                  spawn_resolver=None, ground_probe=None,
                  physics_ground_probe=None,
                  suspension_ground_probe=None,
-                 obstacle_probe=None, bounds=None, cover_probe=None,
+                 obstacle_probe=None, bounds=None, arena_bounds=None,
+                 cover_probe=None,
                  native_motion=False, baked_graph=None, probe_clock=None,
                  motion_resolver=None, motion_report=None,
                  world_receipt_probe=None, probe_timing_seconds=0.0,
@@ -1997,6 +1998,10 @@ class BotRuntime(object):
             if callable(suspension_ground_probe) else None)
         self._obstacle_probe = obstacle_probe
         self._navigation_bounds = bounds
+        # The exact #1513 arena rectangle. It is the same red border the local
+        # player's own chassis contact uses, and it overrides the wider baked
+        # sampling rectangle for planning and for the map-edge authority guard.
+        self._arena_bounds = arena_bounds
         self.navigator = (TerrainNavigator(
             ground_probe, obstacle_probe, bounds, 18.0)
             if callable(ground_probe) else None)
@@ -2285,6 +2290,10 @@ class BotRuntime(object):
             raise ValueError(
                 'required navigation graph is missing for %s' % map_name)
         prebaked_navigation._validate(graph, map_name)
+        # Idempotent: BattleRuntime already narrowed the graph it injects. This
+        # keeps the authority's own rectangle correct for any graph reaching
+        # the Bot runtime by another path.
+        prebaked_navigation.clip_graph_to_arena(graph, self._arena_bounds)
         self._validated_baked_routes(graph)
         if not callable(self._ground_probe):
             raise ValueError(

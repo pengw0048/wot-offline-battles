@@ -439,29 +439,79 @@ def _legacy_baker():
     return module
 
 
-def _target_expanded_bounds(map_name, arena_bounds, cell_size,
-                            expanded_bounds):
-    """Apply the pinned Great Wall X phase without changing graph safety."""
-    expanded = tuple(float(value) for value in expanded_bounds)
+def _target_sampling_bounds(map_name, map_config, cell_size):
+    """Sample the stock arena rectangle, then apply the Great Wall X phase.
+
+    The baseline baker widens its sampling rectangle by a 16 metre margin
+    around every authored anchor.  That margin exists for authoring bounds that
+    predate exact client data; here ``bounds`` is the stock ``boundingBox``
+    itself, so the margin only pushed sampled cells -- and the gameplay
+    rectangle published beside them -- past the official red border.  Sample the
+    stock rectangle aligned outward to the cell grid instead, and refuse an
+    anchor that genuinely sits outside the play area rather than widening it.
+    """
+    arena = tuple(float(value) for value in map_config.get('bounds', ()))
+    if len(arena) != 4 or arena[0] >= arena[2] or arena[1] >= arena[3]:
+        raise UnsafeBakeInputError(
+            'stock arena rectangle is unavailable: %r' % (arena,))
+    anchors = (tuple(map_config.get('anchors', ())) +
+               tuple(map_config.get('bases', ())))
+    for point in anchors:
+        x, z = float(point[0]), float(point[1])
+        if not (arena[0] <= x <= arena[2] and arena[1] <= z <= arena[3]):
+            raise UnsafeBakeInputError(
+                'tactical anchor %r is outside the stock arena rectangle %r' %
+                ((x, z), arena))
+    size = float(cell_size)
+    sampled = (
+        math.floor(arena[0] / size) * size,
+        math.floor(arena[1] / size) * size,
+        math.ceil(arena[2] / size) * size,
+        math.ceil(arena[3] / size) * size,
+    )
     if (map_name != _GREAT_WALL_MAP or
             float(cell_size) != _GREAT_WALL_GRID_CELL_SIZE):
-        return expanded
-    arena = tuple(float(value) for value in arena_bounds)
+        return sampled
     if arena != _GREAT_WALL_ARENA_BOUNDS:
         raise UnsafeBakeInputError(
             'Great Wall 4m grid phase arena bounds drifted: %r' %
             (arena,))
-    if expanded != _GREAT_WALL_ARENA_BOUNDS:
-        raise UnsafeBakeInputError(
-            'Great Wall 4m expanded bounds drifted: %r' %
-            (expanded,))
     phased = (
-        expanded[0] - 2.0, expanded[1],
-        expanded[2] + 2.0, expanded[3],
+        sampled[0] - 2.0, sampled[1],
+        sampled[2] + 2.0, sampled[3],
     )
     if phased != _GREAT_WALL_PHASED_BOUNDS:
         raise UnsafeBakeInputError('Great Wall 4m X phase is invalid')
     return phased
+
+
+def _publish_gameplay_bounds(graph, map_config):
+    """Publish the stock arena rectangle as the runtime gameplay boundary.
+
+    The sampling rectangle may still round outward by up to one cell, and the
+    Great Wall phase deliberately widens it.  Runtime reads ``bounds`` as the
+    map edge the Bot authority enforces, so it must be the exact rectangle the
+    local player's own border contact uses.  No navigable cell centre may fall
+    outside it: prebaked A* walks the cell arrays, not this rectangle.
+    """
+    arena = tuple(float(value) for value in map_config.get('bounds', ()))
+    if len(arena) != 4:
+        raise UnsafeBakeInputError(
+            'stock arena rectangle is unavailable: %r' % (arena,))
+    width = int(graph['width'])
+    cell_size = float(graph['cell_size'])
+    origin = tuple(float(value) for value in graph['origin'])
+    heights = graph['heights_mm']
+    for index, value in enumerate(heights):
+        if value is None:
+            continue
+        x = origin[0] + (index % width) * cell_size
+        z = origin[1] + (index // width) * cell_size
+        if not (arena[0] <= x <= arena[2] and arena[1] <= z <= arena[3]):
+            raise UnsafeBakeInputError(
+                'navigable cell %r is outside the stock arena rectangle %r' %
+                ((x, z), arena))
+    graph['bounds'] = list(arena)
 
 
 def _record_target_grid_phase(graph, map_name, cell_size):
@@ -2309,11 +2359,8 @@ def bake_map_graph(client_root, map_name, output=None, cell_size=4.0):
         original_format_name, original_format_version = legacy.FORMAT_NAME, legacy.FORMAT_VERSION
         original_expanded_bounds = legacy._expanded_bounds
         def target_expanded_bounds(map_config, requested_cell_size):
-            expanded = original_expanded_bounds(
-                map_config, requested_cell_size)
-            return _target_expanded_bounds(
-                map_name, map_config.get('bounds', ()), requested_cell_size,
-                expanded)
+            return _target_sampling_bounds(
+                map_name, map_config, requested_cell_size)
         try:
             legacy.MAPS = {map_name: config}
             legacy.GAME_VERSION = GAME_VERSION
@@ -2436,6 +2483,7 @@ def bake_map_graph(client_root, map_name, output=None, cell_size=4.0):
                 'ctf objective geometry plus validated 15-slot layout')
             graph['validation'].update(formation_validation)
             _record_target_grid_phase(graph, map_name, cell_size)
+            _publish_gameplay_bounds(graph, config)
         finally:
             legacy.MAPS, legacy.GAME_VERSION = original_maps, original_game_version
             legacy.FORMAT_NAME, legacy.FORMAT_VERSION = original_format_name, original_format_version

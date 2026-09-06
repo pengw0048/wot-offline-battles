@@ -2092,6 +2092,15 @@ class BattleRuntime(object):
                 raise RuntimeError(
                     'validated navigation graph is unavailable for %s' %
                     map_name)
+            # The baked rectangle is a sampling artifact and is wider than the
+            # stock red border on several maps. Bots plan and are guarded from
+            # this graph, so narrow it here, once, before any consumer sees it.
+            retired = (0 if self._navigation_graph is None else
+                       prebaked_navigation.clip_graph_to_arena(
+                           self._navigation_graph, self._arena_bounds))
+            if retired:
+                print('[Offline LAN 0.9.22] retired %d baked navigation cell(s)'
+                      ' outside the %s arena rectangle' % (retired, map_name))
             foliage_loader = getattr(
                 self._runtime, 'foliage_loader',
                 prebaked_foliage.load_foliage)
@@ -3198,6 +3207,7 @@ class BattleRuntime(object):
                 physics_ground_probe=self._ground_y,
                 obstacle_probe=self._navigation_obstacle,
                 bounds=getattr(self._spawn_planner, 'bounds', None),
+                arena_bounds=self._arena_bounds,
                 cover_probe=self._sample_bot_cover,
                 motion_resolver=self._resolve_bot_motion,
                 motion_report=self._report_bot_destructible_contact,
