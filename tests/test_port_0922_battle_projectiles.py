@@ -299,6 +299,94 @@ def _event():
 
 
 class BattleProjectileTests(unittest.TestCase):
+    def test_combat_capture_preserves_eight_shots_and_local_query_failure(self):
+        from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
+
+        def exercise(shooter_kind, mode):
+            battle, bigworld = _battle()
+            battle._worker_mode = True
+            if shooter_kind == 'bot':
+                record = battle._records.pop('player:7')
+                record['kind'] = 'bot'
+                battle._records['bot:7'] = record
+            reads = [0]
+            def clock():
+                reads[0] += 1
+                if mode == 'broken':
+                    raise RuntimeError('diagnostic clock failed')
+                return reads[0] * 0.000001
+            diagnostic = WorkerCombatDiagnostics(clock) if mode else None
+            battle._combat_diagnostics = diagnostic
+            bigworld.wall_x = 4.0
+            native = bigworld.wg_collideSegment
+            queries = []
+            def world(space, start, end, mask):
+                queries.append((space, tuple(start), tuple(end), mask))
+                if len(queries) == 5:
+                    raise RuntimeError('one native query failed')
+                return native(space, start, end, mask)
+            bigworld.wg_collideSegment = world
+            events = {}
+            for sequence in range(1, 9):
+                event = _event()
+                event.update(projectile_id='%s:7:%d' % (shooter_kind, sequence),
+                             shooter_kind=shooter_kind, shot_seq=sequence,
+                             burst_group_seq=sequence)
+                if shooter_kind == 'bot':
+                    event.pop('attacker')
+                    event.pop('fire_intent_seq')
+                    event.pop('fire_input_seq')
+                    event['attacker_bot'] = 7
+                self.assertTrue(battle._accept_projectile_event(event))
+                events[event['projectile_id']] = event
+            self.assertEqual(8, len(battle._projectiles))
+            frames, traces = [], []
+            with mock.patch('sys.stdout', io.StringIO()):
+                for frame, now in enumerate((0.733, 1.317, 1.5)):
+                    bigworld.now = now
+                    if diagnostic is not None:
+                        diagnostic.begin_frame(frame, now, 'projectiles')
+                    self.assertTrue(battle._advance_projectiles(now))
+                    frames.append((battle._projectiles.snapshot(),
+                                   dict((key, value) for key, value in
+                                        battle._projectile_perf.items()
+                                        if key != 'advance')))
+                    # Terminals wait for the server's progress CAS receipt.
+                    # Reproduce that acknowledgement instead of bypassing it.
+                    if battle.client.progress:
+                        for cursor in battle.client.progress[-1][1]:
+                            acknowledged = dict(events[cursor['projectile_id']])
+                            acknowledged['max_distance'] = acknowledged.pop('maxDistance')
+                            acknowledged.update(cursor)
+                            battle._install_projectile_meta(
+                                battle._projectile_wire_meta(acknowledged))
+                    if diagnostic is not None:
+                        row = diagnostic.finish_frame()
+                        if row:
+                            traces.append(row)
+            self.assertEqual(0, len(battle._projectiles))
+            outcomes = dict((args[1], args[3])
+                            for args, unused in battle.client.resolutions)
+            self.assertEqual(8, len(outcomes), battle.client.resolutions)
+            self.assertEqual(1, list(outcomes.values()).count('expired'))
+            self.assertEqual(7, list(outcomes.values()).count('impact'))
+            return (frames, queries, battle.client.resolutions,
+                    battle.client.progress, battle.client.ricochets), traces
+
+        for shooter_kind in ('player', 'bot'):
+            with self.subTest(shooter=shooter_kind):
+                baseline, unused = exercise(shooter_kind, None)
+                measured, traces = exercise(shooter_kind, 'active')
+                failed, unused = exercise(shooter_kind, 'broken')
+                self.assertEqual(baseline, measured)
+                self.assertEqual(baseline, failed)
+                self.assertEqual(len(measured[1]), sum(row['stages'].get(
+                    'native.projectile.world', {}).get('calls', 0)
+                    for row in traces))
+                self.assertEqual(8, sum(row['stages'].get(
+                    'projectile.terminal', {}).get('calls', 0)
+                    for row in traces))
+
     def _preinstalled_high_precision_player_projectile(self):
         battle, unused_bigworld = _battle(now=10.0)
         battle._worker_mode = True
@@ -1056,7 +1144,7 @@ class BattleProjectileTests(unittest.TestCase):
                     reached = []
 
                     def scene(unused_world, unused_space, start, end,
-                              unused_direction, unused_shot):
+                              unused_direction, unused_shot, diagnostic=None):
                         for prop_distance in (4.0, 11.0):
                             if (end - start).length >= prop_distance:
                                 reached.append(prop_distance)
@@ -4292,7 +4380,7 @@ class BattleProjectileTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def shot_world_distance(self, *unused_args):
+            def shot_world_distance(self, *unused_args, diagnostic=None):
                 self.calls += 1
                 if self.calls == 1:
                     return {
@@ -4326,7 +4414,7 @@ class BattleProjectileTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def shot_world_distance(self, *unused_args):
+            def shot_world_distance(self, *unused_args, diagnostic=None):
                 self.calls += 1
                 if self.calls == 1:
                     return {

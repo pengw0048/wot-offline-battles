@@ -3791,6 +3791,93 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(3, dict(zip(
             self.module.PROBE_KINDS, runtime.probe_totals()))['ground'])
 
+    def test_combat_timing_preserves_worker_outputs_queries_and_queue_order(self):
+        from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
+        command = self._stationary_command()
+        roster = [
+            {'id': 11 + index, 'team': 1 if index < 14 else 2,
+             'slot': index if index < 14 else index - 14,
+             'name': 'Diagnostic-%d' % index}
+            for index in range(29)]
+
+        class HoldAdapter(_FixedAdapter):
+            def decide_with_order(self, state, order, unused_clear):
+                result = dict(self.command)
+                result['target_id'] = order.get('target_id')
+                result['fire_allowed'] = False
+                return result
+
+        def exercise(mode):
+            reads = [0]
+            def clock():
+                reads[0] += 1
+                if mode == 'broken':
+                    raise RuntimeError('diagnostic clock failed')
+                return reads[0] * 0.000001
+            diagnostic = WorkerCombatDiagnostics(clock) if mode else None
+            queries = []
+            def lane(source, target):
+                queries.append(('lane', source['id'], target['network_id']))
+                return True
+            def visible(source, target, fired_recently=False):
+                queries.append(('visible', source['id'], target['network_id']))
+                return True
+            def ground(x, z, y):
+                queries.append(('ground', x, z, y))
+                return 0.0
+            runtime = self.module.BotRuntime(
+                1, descriptor_resolver=lambda unused: _combat_descriptor(),
+                adapter_factory=lambda *unused, **unused_kwargs: HoldAdapter(command),
+                direction_probe=lambda *unused: {
+                    'clear': True, 'collision': False, 'slope': 0.0},
+                visibility_probe=visible, firing_lane_probe=lane,
+                ground_probe=ground, physics_ground_probe=ground,
+                cover_probe=lambda *unused: (),
+                spawn_resolver=_spawn_resolver, native_motion=True,
+                baked_graph=_graph(), control_seconds=self.module.WORKER_CONTROL_SECONDS,
+                combat_diagnostics=diagnostic)
+            wire = list(runtime.battle_start(dict(self.start, bots=roster)))
+            runtime.debug_logging = False
+            runtime._server_orders[11] = {
+                'target_kind': 'bot', 'target_id': 25,
+                'fire_allowed': False, 'shell_index': 0,
+                'fire_range': 500.0, 'combat_mode': 'engage'}
+            runtime._server_order_tokens[11] = 1
+            traces = []
+            now = 1.0
+            for frame in range(55):
+                dt = (0.1, 0.1, 0.45, 0.035, 0.08)[frame % 5]
+                now += dt
+                if frame == 10:
+                    source = copy.deepcopy(runtime.states[11])
+                    target = runtime._bot_observation_target(25, runtime.states[25])
+                    for offset in (0.0, 0.2, 0.4):
+                        runtime._cover_queue.append((
+                            now + offset, 11, source, target, (0, 0, 0), ()))
+                if diagnostic is not None:
+                    diagnostic.begin_frame(frame, now, 'queue')
+                wire.extend(runtime.update(dt, now))
+                if diagnostic is not None:
+                    row = diagnostic.finish_frame()
+                    if row:
+                        traces.append(row)
+            return (wire, runtime.presentation_states(), queries,
+                    runtime.probe_totals(), runtime._shot_lane_work,
+                    runtime._shot_los_cache), traces
+
+        baseline, unused = exercise(None)
+        measured, traces = exercise('active')
+        failed, unused = exercise('broken')
+        self.assertEqual(baseline, measured)
+        self.assertEqual(baseline, failed)
+        stages = set(name for row in traces for name in row['stages'])
+        self.assertTrue({'bot.slice', 'bot.targets', 'bot.lane_service',
+                         'bot.probe.lane'}.issubset(stages))
+        self.assertGreater(sum(row['counts'].get(
+            'lane_service_cover_blocked', 0) for row in traces), 0)
+        self.assertGreater(max(row['completed_wait']['max_kept_ms']
+                               for row in traces), 1000.0)
+
     def _suspension_case(self, terrain):
         descriptor = _suspension_descriptor()
         calls = []
@@ -17388,7 +17475,7 @@ class BotRuntimeTests(unittest.TestCase):
         key = (11, 'bot', 25)
         team_visibility = {(1, 'bot', 25): True}
         runtime._shot_lane_work_cycle = 0.0
-        runtime._queue_shot_lane_identity(key, 0.0)
+        runtime._queue_shot_lane_identity(key, 0.0, 0.0)
         runtime.states[25]['team'] = 1
         runtime._service_shot_lane_work(
             1.0, 0.0, team_visibility, [], {}, set((11, 25)), {}, [16])
@@ -17396,7 +17483,7 @@ class BotRuntimeTests(unittest.TestCase):
 
         runtime.states[25]['team'] = 2
         runtime.states[25]['alive'] = True
-        runtime._queue_shot_lane_identity(key, 0.0)
+        runtime._queue_shot_lane_identity(key, 0.0, 0.0)
         runtime.states[25]['alive'] = False
         runtime._service_shot_lane_work(
             1.1, 0.0, team_visibility, [], {}, set((11, 25)), {}, [16])

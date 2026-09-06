@@ -1603,7 +1603,7 @@ def encode_damage_sticker(vehicle, vehicle_matrix, start_point, end_point,
 
 def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
                                end_point, math_module, include_world_normal,
-                               chassis_matrix=None):
+                               chassis_matrix=None, diagnostic=None):
     """Run precise descriptor collision at supplied body/chassis matrices.
 
     #1513's native ``Vehicle.collideSegmentExt`` first rejects rays through
@@ -1647,7 +1647,12 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
         # contact below is a pure function of this ray and that distance.
         component_start = component_matrix.applyPoint(start)
         component_end = component_matrix.applyPoint(end)
-        collisions = local_hit_test(component_start, component_end)
+        if diagnostic is None:
+            collisions = local_hit_test(component_start, component_end)
+        else:
+            collisions = diagnostic.call(
+                'native.projectile.armour', local_hit_test,
+                component_start, component_end)
         component_to_vehicle = None
         if include_world_normal:
             component_to_vehicle = math_module.Matrix(component_matrix)
@@ -1694,11 +1699,11 @@ def _collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,
 
 def _collide_vehicle_evidence_at_matrix(vehicle, vehicle_matrix, start_point,
                                         end_point, math_module,
-                                        chassis_matrix=None):
+                                        chassis_matrix=None, diagnostic=None):
     """Return world-normal evidence for the authoritative shot resolver."""
     return _collide_vehicle_at_matrix(
         vehicle, vehicle_matrix, start_point, end_point, math_module, True,
-        chassis_matrix=chassis_matrix)
+        chassis_matrix=chassis_matrix, diagnostic=diagnostic)
 
 
 def collide_vehicle_at_matrix(vehicle, vehicle_matrix, start_point,

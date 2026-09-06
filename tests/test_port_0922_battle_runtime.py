@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import json
 import io
 import math
 from pathlib import Path
@@ -3651,6 +3652,40 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         # Equal-distance duplicates on one component share one contact.
         self.assertEqual(evidence[0].localPoint, evidence[1].localPoint)
 
+    def test_combat_timing_counts_only_callable_native_component_testers(self):
+        from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
+        descriptor = _Descriptor()
+        calls = []
+        def hit(start, end):
+            calls.append((tuple(start), tuple(end)))
+            return [(1.0, None, 1.0, 21)]
+        descriptor.chassis.hitTester = types.SimpleNamespace(localHitTest=hit)
+        descriptor.chassis.materials = {21: types.SimpleNamespace(armor=20.0)}
+        descriptor.hull.hitTester = None
+        descriptor.turret.hitTester = None
+        descriptor.gun.hitTester = None
+        vehicle = _Vehicle(
+            11, descriptor, _Vector(), (0.0, 0.0, 0.0), {'health': 500})
+        args = (vehicle, _Matrix(), _Vector(), _Vector(0.0, 0.0, 10.0),
+                types.SimpleNamespace(Vector3=_Vector, Matrix=_Matrix))
+        baseline = remote_vehicle_module._collide_vehicle_evidence_at_matrix(*args)
+        diagnostic = WorkerCombatDiagnostics(lambda: 1.0)
+        diagnostic.begin_frame(1, 1.0, 'projectiles')
+        measured = remote_vehicle_module._collide_vehicle_evidence_at_matrix(
+            *args, diagnostic=diagnostic)
+        trace = diagnostic.finish_frame()
+        self.assertEqual(baseline, measured)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(1, trace['stages']['native.projectile.armour']['calls'])
+        descriptor.chassis.hitTester.localHitTest = mock.Mock(
+            side_effect=RuntimeError('native tester failed'))
+        diagnostic.begin_frame(2, 1.1)
+        with self.assertRaisesRegex(RuntimeError, 'native tester failed'):
+            remote_vehicle_module._collide_vehicle_evidence_at_matrix(
+                *args, diagnostic=diagnostic)
+        trace = diagnostic.finish_frame()
+        self.assertEqual(1, trace['stages']['native.projectile.armour']['calls'])
+
     def test_public_collision_path_stays_the_four_field_retail_value(self):
         descriptor = _Descriptor()
         material = types.SimpleNamespace(armor=20.0)
@@ -6010,6 +6045,34 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1.0, diagnostics._window_seconds)
         diagnostics.reset()
         self.assertEqual(0.25, diagnostics._window_seconds)
+
+    def test_worker_trace_keeps_the_slow_frames_neighbours_without_recursion(self):
+        wall = [0.0]
+        payloads = []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append, window_seconds=30.0)
+        for frame, gap in enumerate((0.02, 0.02, 0.02, 0.4, 0.08, 0.03, 0.02, 0.02), 1):
+            entry = wall[0]
+            frame_id = diagnostics.begin(entry, gap)
+            wall[0] = entry + 0.005
+            diagnostics.finish(
+                frame_id, entry, gap, gap, {'bots_update': 0.003}, {},
+                {'role': 'worker', 'round': 7, 'authority_time': entry},
+                combat={'frame': frame, 'stages': {}})
+            wall[0] = entry + gap
+        diagnostics.begin(wall[0], 0.02)
+        diagnostics.flush()
+        rows = [json.loads(line.split('combat_trace ', 1)[1])
+                for line in ''.join(payloads).splitlines()
+                if 'combat_trace ' in line]
+        slow = rows[0]
+        self.assertEqual(4, slow['focus']['cause'])
+        self.assertEqual(400.0, slow['focus']['gap_ms'])
+        self.assertEqual([1, 2, 3], [row['cause'] for row in slow['previous']])
+        self.assertEqual([5, 6, 7], [row['cause'] for row in slow['following']])
+        self.assertEqual(4, slow['focus']['detail']['frame'])
+        self.assertNotIn('previous', slow['previous'][0])
+        self.assertLessEqual(len(diagnostics._recent_frames), 3)
 
     def test_frame_diagnostic_percentile_storage_is_bounded(self):
         diagnostics = _FrameDiagnostics(
@@ -25804,7 +25867,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         calls = []
 
         def sensor(unused_bigworld, unused_space, start, end,
-                   unused_direction, unused_shot):
+                   unused_direction, unused_shot, diagnostic=None):
             calls.append((start, end))
             if (end - start).length > 5.0:
                 self.fail('vehicle cap exposed the prop behind it')

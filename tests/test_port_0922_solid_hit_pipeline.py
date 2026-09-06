@@ -21,6 +21,7 @@ sys.path.insert(0, str(TESTS))
 
 from gui.mods.offline_lan_0922 import combat_rules, critical_damage, lan_client
 from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime
+from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
 import test_port_0922_solid_collision_oracle as row_oracle
 
 
@@ -171,6 +172,7 @@ class SolidHitPipelineTests(unittest.TestCase):
             bigworld=_BigWorld(), math=types.SimpleNamespace(
                 Vector3=_PipelineVector, Matrix=Matrix))
         battle = object.__new__(BattleRuntime)
+        battle._combat_diagnostics = None
         battle._runtime = runtime
         battle._avatar = types.SimpleNamespace(spaceID=1)
         battle._records = {}
@@ -188,7 +190,8 @@ class SolidHitPipelineTests(unittest.TestCase):
         battle._equipment_state = None
         return battle
 
-    def _run_first_hit(self, shooter_kind, shell_kind, target_delta):
+    def _run_first_hit(self, shooter_kind, shell_kind, target_delta,
+                       diagnostic=None):
         expected_fraction, expected_impact, expected_cosine = \
             _moving_plane_solution(TARGET_START, target_delta, YAW)
         self.assertGreater(expected_fraction, 0.1)
@@ -207,6 +210,9 @@ class SolidHitPipelineTests(unittest.TestCase):
             isAlive=lambda: True)
         source = types.SimpleNamespace(id=41, typeDescriptor=None)
         battle = self._battle()
+        battle._combat_diagnostics = diagnostic
+        if diagnostic is not None:
+            diagnostic.begin_frame(1, 1.0, 'projectiles')
         source_key = '%s:7' % shooter_kind
         target_key = 'bot:8'
         projectile_id = '%s:7:1' % shooter_kind
@@ -291,6 +297,12 @@ class SolidHitPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(expected_cosine, contact['angle_cos'], places=7)
         self.assertAlmostEqual(expected_piercing, contact['piercing'], places=7)
         self.assertEqual(2, contact['result'])
+        if diagnostic is not None:
+            trace = diagnostic.finish_frame()
+            self.assertEqual(len(tester.calls),
+                             trace['stages']['native.projectile.armour']['calls'])
+            self.assertEqual(1, trace['stages']['projectile.direct']['calls'])
+        return terminal_data['impact'], effect, tester.calls
 
     def test_ap_and_apcr_first_hit_pipeline_for_player_and_bot(self):
         for shooter_kind in ('player', 'bot'):
@@ -300,8 +312,12 @@ class SolidHitPipelineTests(unittest.TestCase):
                         ('constant_velocity', (0.0, 0.0, 4.0))):
                     with self.subTest(shooter=shooter_kind, shell=shell_kind,
                                       target_motion=label):
-                        self._run_first_hit(
+                        baseline = self._run_first_hit(
                             shooter_kind, shell_kind, target_delta)
+                        measured = self._run_first_hit(
+                            shooter_kind, shell_kind, target_delta,
+                            WorkerCombatDiagnostics(lambda: 1.0))
+                        self.assertEqual(baseline, measured)
 
 
 # The root position is selected from the independent analytic equation so
