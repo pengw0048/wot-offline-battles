@@ -73,6 +73,13 @@ _NON_EDITABLE_VEHICLE_TAGS = frozenset((
 _NON_EDITABLE_VEHICLE_SUFFIXES = ("_bot", "_training")
 _NON_EDITABLE_VEHICLES = frozenset(("germany:Env_Artillery",))
 
+# Every one of the 680 stock 0.9.22.0.1 #1513 roster entries carries exactly
+# one of these class tags and an integer ``level`` between 1 and 10.  Both
+# only narrow the editor's vehicle list, so an entry that states neither is
+# still offered; it simply cannot be placed by the matching list filter.
+VEHICLE_CLASSES = ("lightTank", "mediumTank", "heavyTank", "AT-SPG", "SPG")
+_VEHICLE_CLASS_TAGS = frozenset(VEHICLE_CLASSES)
+
 _TYPE_NAMES = {
     packed_xml.TYPE_STRING: "string",
     packed_xml.TYPE_INTEGER: "integer",
@@ -765,7 +772,7 @@ def list_vehicle_choices(game_root):
                 status["path"], nation)
         label = _vehicle_label(record, translators[nation])
         choice = dict((key, record[key]) for key in (
-            "nation", "vehicle", "member", "tags"))
+            "nation", "vehicle", "member", "tags", "vehicleClass", "level"))
         choice["label"] = label
         choices.append(choice)
     return choices
@@ -835,6 +842,25 @@ def _vehicle_is_selectable(type_name, tags):
             type_name.endswith(_NON_EDITABLE_VEHICLE_SUFFIXES))))
 
 
+def _roster_vehicle_class(tags):
+    """Return the single stock class tag, or None when it is not unique."""
+    classes = _VEHICLE_CLASS_TAGS.intersection(tags)
+    if len(classes) != 1:
+        return None
+    return next(iter(classes))
+
+
+def _roster_level(element):
+    """Return the stock tier as an integer, or None when it is not stated."""
+    values = [child for name, child in element.children if name == b"level"]
+    if len(values) != 1 or values[0].value_type != packed_xml.TYPE_INTEGER:
+        return None
+    try:
+        return int(values[0].value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _vehicle_roster_from_archive(archive, counts, nation=None):
     """Resolve vehicle definitions from each nation's stock list.xml."""
     list_members = []
@@ -902,7 +928,9 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
                 "tags": tuple(tags.split()),
                 "userString": user_strings.get("userString", ""),
                 "shortUserString": user_strings.get("shortUserString", ""),
+                "level": _roster_level(value.value),
             }
+            record["vehicleClass"] = _roster_vehicle_class(record["tags"])
             record["selectable"] = _vehicle_is_selectable(
                 "%s:%s" % (roster_nation, vehicle), record["tags"])
             records.append(record)
