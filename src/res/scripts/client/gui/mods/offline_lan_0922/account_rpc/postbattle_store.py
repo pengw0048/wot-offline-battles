@@ -31,10 +31,7 @@ except NameError:
 
 
 SCHEMA = 1
-STATE_PATH = os.path.join(
-    port_config.USER_DATA_DIR, 'postbattle_state.json')
-LEGACY_STATE_PATH = os.path.join(
-    port_config.LEGACY_USER_DATA_DIR, 'postbattle_state.json')
+STATE_FILE_NAME = 'postbattle_state.json'
 MAX_HISTORY = 256
 INTERACTION_FIELDS = (
     ('spotted', 'spotted', 0, 1),
@@ -578,9 +575,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
 class PostBattleStore(object):
     """Apply each LAN receipt once and retain it until the native 1501 ack."""
 
-    def __init__(self, path=STATE_PATH):
-        self._path = (port_config.migrate_legacy_user_file(
-            path, LEGACY_STATE_PATH) if path == STATE_PATH else path)
+    def __init__(self, path=port_config.ACTIVE_SAVE_SLOT):
+        if path is port_config.ACTIVE_SAVE_SLOT:
+            path = port_config.save_slot_state_path(STATE_FILE_NAME)
+        self._path = path
         self._account_key = uuid.uuid4().hex
         self._pending = {}
         self._history = []

@@ -46,12 +46,22 @@ The 0.9.22 client gets a working offline garage:
   kit and a large repair kit.
 - You can change modules, optional devices, consumables, shells, camouflage
   and crew skills. Every item costs nothing.
-- The garage is written to `mods/configs/offline_lan_0922/garage_state.json`
-  after each change, so it survives a restart.
+- The garage is written to the selected save after each change, so it survives
+  a restart.
 - The battle runs the vehicle the garage fitted. Crew skills, optional devices
   and consumables move the same values the garage parameters panel shows: view
   range, concealment, reload, aim time, dispersion, traverse, engine power,
   terrain resistance and repair speed.
+
+## Saves
+
+The launcher's Saves tab keeps any number of independent saves. Each one owns
+its own garage, crew, account settings and battle results under
+`%APPDATA%/Wargaming.net/WorldOfTanks/offline_lan_0922/saves/<save>/`, and the
+selected save is written into the client configuration when the game starts.
+State written by a build without saves moves into the default save on the next
+start. Vehicle data profiles are deliberately not part of a save: they change
+the client catalogue for a whole room, so they belong to the installation.
 
 The launcher's Tools tab can also edit vehicle data directly. A vehicle data
 profile is a named set of Packed XML field changes (health, damage,

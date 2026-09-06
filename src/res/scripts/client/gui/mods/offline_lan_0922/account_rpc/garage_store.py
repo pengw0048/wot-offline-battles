@@ -40,10 +40,7 @@ except NameError:
 # crew XP idempotent.  Schema 3 remains readable and upgrades on the next save.
 SCHEMA = 4
 READABLE_SCHEMAS = (3, SCHEMA)
-STATE_PATH = os.path.join(
-    port_config.USER_DATA_DIR, 'garage_state.json')
-LEGACY_STATE_PATH = os.path.join(
-    port_config.LEGACY_USER_DATA_DIR, 'garage_state.json')
+STATE_FILE_NAME = 'garage_state.json'
 
 _VEHICLE_INT_KEYS = ('eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx')
 _ARTEFACT_ITEM_TYPES = (9, 10, 11)
@@ -98,9 +95,10 @@ def _int_map(value):
 class GarageStore(object):
     """Load and save the mutable parts of one garage snapshot."""
 
-    def __init__(self, path=STATE_PATH):
-        self._path = (port_config.migrate_legacy_user_file(
-            path, LEGACY_STATE_PATH) if path == STATE_PATH else path)
+    def __init__(self, path=port_config.ACTIVE_SAVE_SLOT):
+        if path is port_config.ACTIVE_SAVE_SLOT:
+            path = port_config.save_slot_state_path(STATE_FILE_NAME)
+        self._path = path
         self._dirty = False
         self._battle_receipts = []
         self._receipts_loaded = False

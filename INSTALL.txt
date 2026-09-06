@@ -67,10 +67,22 @@ and fuel tank, plus an automatic fire extinguisher, a large first aid kit and a
 large repair kit. Every item costs nothing.
 
 Change modules, optional devices, consumables, shells, camouflage and crew
-skills as you like. Each change is written to
-mods\configs\offline_lan_0922\garage_state.json, so the garage survives a
-restart. Crew skills, optional devices and consumables move the same values the
-garage parameters panel shows, and the battle uses those values.
+skills as you like. Each change is written to the selected save, so the garage
+survives a restart. Crew skills, optional devices and consumables move the same
+values the garage parameters panel shows, and the battle uses those values.
+
+Saves
+-----
+
+The Launcher's Saves tab keeps as many independent saves as you want. Each one
+has its own garage, crew, account settings and battle results, and the selected
+save is the one the game starts with. Saves live in
+%APPDATA%\Wargaming.net\WorldOfTanks\offline_lan_0922\saves\<save>\. A save you
+made in an older build keeps working: its files move into the default save the
+first time this build starts.
+
+Vehicle data profiles are not part of a save. They change the client's shared
+vehicle catalogue for a whole room, so they stay with the installation.
 
 The Launcher's Tools tab can also edit vehicle data directly. A vehicle data
 profile is a named set of Packed XML field changes (health, damage,
@@ -113,9 +125,11 @@ Troubleshooting
   mods\configs\offline_lan_0922\config.json as a backup, and extract this ZIP
   again. This restores the default configuration without deleting the garage,
   account progress, vehicle-data overrides or battle results. To reset every
-  ordinary offline save manually, delete config.json, server_endpoint.json,
-  account_state.json, garage_state.json and postbattle_state.json while the
-  game is closed, then extract this ZIP again. Vehicle-data overlays are
+  ordinary offline save manually, delete config.json and server_endpoint.json
+  in mods\configs\offline_lan_0922, then delete account_state.json,
+  garage_state.json, postbattle_state.json and the saves folder under
+  %APPDATA%\Wargaming.net\WorldOfTanks\offline_lan_0922 while the game is
+  closed. Extract this ZIP again afterwards. Vehicle-data overlays are
   separate and are not removed by that reset.
 - Bot tracks and road wheels do not turn. A broken enemy track therefore has no
   visual cue; read the damage panel instead.
