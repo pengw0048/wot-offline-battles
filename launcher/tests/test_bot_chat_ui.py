@@ -408,6 +408,125 @@ class ProgressReportingTest(_Temp):
         self.assertIsNone(panel.stage())
 
 
+class _FakeSupervisor(object):
+    def __init__(self, started=True, ready=True):
+        self.started = started
+        self.ready = ready
+        self.stopped = False
+        self.endpoint = "http://127.0.0.1:1"
+
+    def start(self):
+        return self.started
+
+    def wait_ready(self, timeout=None):
+        return self.ready
+
+    def stop(self):
+        self.stopped = True
+
+
+class _FakeBackend(object):
+    def __init__(self, line="收到"):
+        self.line = line
+        self.stopped = False
+
+    def start(self):
+        pass
+
+    def prefetch(self, request):
+        pass
+
+    def compose(self, request):
+        return self.line
+
+    def stop(self):
+        self.stopped = True
+
+
+class _FakeRuntime(object):
+    def __init__(self, supervisor=None, backend=None):
+        self.supervisor = supervisor or _FakeSupervisor()
+        self.backend = backend if backend is not None else _FakeBackend()
+
+    def LlamaServerSupervisor(self, executable, model, log=None):
+        return self.supervisor
+
+    def LlamaChatBackend(self, endpoint, log=None):
+        return self.backend
+
+
+class SelfTestTest(_Temp):
+    """Installed files are not proof; a machine has to produce a line."""
+
+    def _installed(self):
+        panel = _panel(self.base)
+        panel.start_install(opener=_opener())
+        self.assertTrue(_await(lambda: not panel.busy()))
+        panel.enabled.set(True)
+        return panel
+
+    def test_nothing_installed_cannot_be_tested(self):
+        panel = _panel(self.base)
+        self.assertFalse(panel.start_check(runtime=_FakeRuntime()))
+        self.assertEqual(ui.CHECK_UNKNOWN, panel.check_state())
+
+    def test_a_working_machine_reports_the_line_it_produced(self):
+        panel = self._installed()
+        runtime = _FakeRuntime()
+        self.assertTrue(panel.start_check(runtime=runtime))
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertEqual(ui.CHECK_PASSED, panel.check_state())
+        self.assertEqual("收到", panel.check_line())
+        self.assertTrue(runtime.supervisor.stopped)
+        self.assertTrue(runtime.backend.stopped)
+
+    def test_a_runtime_that_will_not_start_is_reported(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(supervisor=_FakeSupervisor(started=False))
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertEqual(ui.CHECK_FAILED, panel.check_state())
+        self.assertIn("did not start", panel.check_error())
+
+    def test_a_model_that_never_loads_is_reported(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(supervisor=_FakeSupervisor(ready=False))
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertEqual(ui.CHECK_FAILED, panel.check_state())
+        self.assertIn("finish loading", panel.check_error())
+
+    def test_a_model_that_writes_nothing_is_reported(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(backend=_FakeBackend(line=None))
+        panel.check_timeout = 0.5
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy(), timeout=30.0))
+        self.assertEqual(ui.CHECK_FAILED, panel.check_state())
+
+    def test_the_generator_is_always_stopped_afterwards(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(supervisor=_FakeSupervisor(started=False))
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertTrue(runtime.supervisor.stopped)
+
+    def test_removing_clears_a_test_result(self):
+        panel = self._installed()
+        panel.start_check(runtime=_FakeRuntime())
+        self.assertTrue(_await(lambda: not panel.busy()))
+        panel.remove()
+        self.assertEqual(ui.CHECK_UNKNOWN, panel.check_state())
+        self.assertIsNone(panel.check_line())
+
+    def test_a_switched_off_install_is_not_a_working_feature(self):
+        panel = self._installed()
+        panel.enabled.set(False)
+        self.assertFalse(panel.enabled_and_ready())
+        panel.enabled.set(True)
+        self.assertTrue(panel.enabled_and_ready())
+
+
 class ResolvedPathTest(_Temp):
     def test_the_catalogue_model_is_named_for_the_selected_tier(self):
         catalogue = _Catalogue()

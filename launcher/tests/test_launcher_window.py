@@ -2493,10 +2493,54 @@ class BotChatTabTests(unittest.TestCase):
         self.assertNotEqual(runtime_status, model_status)
         self.assertTrue(runtime_status and model_status)
 
-    def test_a_ready_panel_says_bots_will_talk(self):
+    def test_downloaded_but_switched_off_does_not_claim_to_be_ready(self):
+        # Installed files are not a working feature. Claiming otherwise is
+        # what makes a silent battle baffling.
         panel = self.window._bot_chat
         panel._state = bot_chat_ui.STATE_READY
-        self.assertIn('Bots', self.window._bot_chat_status(panel))
+        panel.enabled.set(False)
+        status = self.window._bot_chat_status(panel)
+        self.assertIn('switch', status)
+        self.assertFalse(panel.enabled_and_ready())
+
+    def test_downloaded_and_on_asks_to_be_tested(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_READY
+        panel.enabled.set(True)
+        self.assertIn('Test', self.window._bot_chat_status(panel))
+        self.assertTrue(panel.enabled_and_ready())
+
+    def test_a_passed_test_quotes_the_line_and_names_the_lan_owner(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_READY
+        panel.enabled.set(True)
+        panel._check_state = bot_chat_ui.CHECK_PASSED
+        panel._check_line = '收到'
+        status = self.window._bot_chat_status(panel)
+        self.assertIn('收到', status)
+        self.assertIn('host', status)
+
+    def test_a_failed_test_says_why(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_READY
+        panel.enabled.set(True)
+        panel._check_state = bot_chat_ui.CHECK_FAILED
+        panel._check_error = 'the model did not finish loading'
+        self.assertIn('did not finish loading',
+                      self.window._bot_chat_status(panel))
+
+    def test_a_running_test_says_it_may_take_a_minute(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_WORKING
+        panel._check_state = bot_chat_ui.CHECK_RUNNING
+        self.assertIn('minute', self.window._bot_chat_status(panel))
+
+    def test_the_test_button_needs_an_install(self):
+        panel = self.window._bot_chat
+        panel._set_status(bot_chat_ui.STATE_ABSENT)
+        self.assertEqual('disabled', panel.check_button.options['state'])
+        panel._set_status(bot_chat_ui.STATE_READY)
+        self.assertEqual('normal', panel.check_button.options['state'])
 
     def test_the_panel_shows_where_the_download_goes(self):
         self.assertIn('bot-chat', self.window._bot_chat.location.get())

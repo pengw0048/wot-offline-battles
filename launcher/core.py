@@ -1597,6 +1597,19 @@ def bot_chat_catalogue(port_version=PORT_0_9_22, base_dir=None):
     return bot_chat_models
 
 
+def bot_chat_runtime(port_version=PORT_0_9_22, base_dir=None):
+    """Import the server's generator module so the launcher can test it.
+
+    Proving that a machine can actually produce a line is the only honest
+    way to call an install ready. Reusing the server's own supervisor and
+    backend means the launcher tests the thing a room will really run.
+    """
+    bot_chat_catalogue(port_version, base_dir)
+    import bot_chat_llm
+
+    return bot_chat_llm
+
+
 def server_child_command(port_version, launcher_script=None, executable=None,
                          frozen=None):
     """Build the command that runs one server in a child of this launcher."""

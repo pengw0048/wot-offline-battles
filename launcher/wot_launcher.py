@@ -175,8 +175,17 @@ _CHINESE = {
     "llama-server (optional, if you already have one)":
         "推理程序（可选，已经有就填路径）",
     "Not installed. %s to download.": "尚未安装，需要下载 %s。",
-    "Ready. Bots will talk in your next battle.":
-        "已就绪，下一局 Bot 就会说话了。",
+    "Downloaded, but the switch above is off.":
+        "已下载，但上面的开关没有打开。",
+    "Downloaded and on. Test it to prove this PC can run it.":
+        "已下载并启用。点下面的自检，确认这台机器跑得动。",
+    "Working. A Bot said: %s": "可以用。Bot 说：%s",
+    "The test failed: %s": "自检失败：%s",
+    "Testing... loading the model can take a minute.":
+        "正在自检…加载模型可能要一分钟。",
+    "Test": "自检",
+    "In a LAN room the host's PC provides this, not yours.":
+        "局域网房间里，这个由房主那台机器提供，不是你这台。",
     "Downloading the inference program... %s": "正在下载推理程序… %s",
     "Downloading the model... %s": "正在下载模型… %s",
     "This machine has no published inference runtime.":
@@ -741,6 +750,7 @@ class LauncherWindow(object):
         panel.install_button.config(text=self._t("Install"))
         panel.stop_button.config(text=self._t("Stop"))
         panel.remove_button.config(text=self._t("Remove"))
+        panel.check_button.config(text=self._t("Test"))
         panel.status.set(self._bot_chat_status(panel))
 
     def _bot_chat_status(self, panel):
@@ -749,12 +759,29 @@ class LauncherWindow(object):
             return self._t(
                 "This machine has no published inference runtime.")
         if state == bot_chat_ui.STATE_WORKING:
+            if panel.check_state() == bot_chat_ui.CHECK_RUNNING:
+                return self._t(
+                    "Testing... loading the model can take a minute.")
             key = ("Downloading the model... %s"
                    if panel.stage() == "model" else
                    "Downloading the inference program... %s")
             return self._t(key) % (panel.progress_text() or "...")
         if state == bot_chat_ui.STATE_READY:
-            return self._t("Ready. Bots will talk in your next battle.")
+            # Files on disk are not a working feature. Say which of the
+            # remaining conditions is not met, rather than "ready".
+            if not panel.enabled.get():
+                return self._t("Downloaded, but the switch above is off.")
+            check = panel.check_state()
+            if check == bot_chat_ui.CHECK_PASSED:
+                return "%s  %s" % (
+                    self._t("Working. A Bot said: %s") % panel.check_line(),
+                    self._t(
+                        "In a LAN room the host's PC provides this, not "
+                        "yours."))
+            if check == bot_chat_ui.CHECK_FAILED:
+                return self._t("The test failed: %s") % panel.check_error()
+            return self._t(
+                "Downloaded and on. Test it to prove this PC can run it.")
         error = panel.last_error()
         if error:
             return self._t("Install failed: %s") % error
