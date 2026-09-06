@@ -204,7 +204,7 @@ def visible_client_command(game_root, port_version, paired_worker=False):
 def visible_client_environment(port_version, host=LOCAL_HOST,
                                port=DEFAULT_SERVER_PORT,
                                paired_worker=False, environment=None,
-                               preferred_team=DEFAULT_PREFERRED_TEAM):
+                               preferred_team=DEFAULT_PREFERRED_TEAM, language="en"):
     """Keep worker-only state out of the visible game process."""
     environment = dict(os.environ if environment is None else environment)
     if port_version != PORT_0_9_22:
@@ -213,6 +213,7 @@ def visible_client_environment(port_version, host=LOCAL_HOST,
         environment, bundled_payload_identity(port_version))
     for name in (HIDDEN_DESKTOP_ENV_0922, WORKER_READY_MARKER_ENV_0922):
         environment.pop(name, None)
+    environment["WOT_OFFLINE_UI_LANGUAGE"] = ("zh" if language == "zh" else "en")
     environment[CLIENT_MODE_ENV_0922] = PLAYER_MODE_0922
     environment[CLIENT_SERVER_HOST_ENV_0922] = str(host)
     environment[CLIENT_SERVER_PORT_ENV_0922] = str(int(port))

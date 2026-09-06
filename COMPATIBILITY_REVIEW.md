@@ -1960,3 +1960,32 @@ lobby features outside that matrix and all BigWorld-side behavior still remain
 empirical. If a real-client check fails, preserve `python.log`; the package
 intentionally avoids noisy per-frame tracing so the first actionable traceback
 remains visible.
+
+## Mod display language
+
+The launcher passes its resolved `en`/`zh` selection as
+`WOT_OFFLINE_UI_LANGUAGE` to the visible game starter, whose child inherits the
+process environment. It is presentation state only: map geometry keys, team
+requests, endpoint syntax, persisted choices and LAN messages do not change.
+Mod-owned waiting-room labels and lobby notifications use a Python 2 Unicode
+catalog; UTF-8 client map names and player names are decoded before formatting.
+In particular, the waiting-room refresh no longer calls Python 2 `str()` on
+Unicode roster text. Stock Scaleform UI retains the client's language.
+
+The waiting room uses the packaged `system/fonts/offline_lan_cjk.font` in both
+languages so Chinese player names also work with English labels. It requests
+Windows Microsoft YaHei at size 16 without a pre-generated Latin-only atlas.
+The [BigWorld Client Programming Guide, Fonts](https://howarduong.github.io/github.io/doc/html/client_programming_guide/ch18.html)
+documents dynamic glyph caching, installed TrueType fonts and CJK font support.
+This is engine documentation, not proof of #1513 native rendering. No font
+binary is redistributed. The font is assigned before text; load errors reach
+the existing session fallback to the stock training window.
+
+Local regression coverage checks launcher environment propagation, translated
+host/guest labels, Unicode names, map wire identity, denial notifications and
+catalog formatting. The available loose client files did not pass
+`tools/inspect_client.py` (missing version.xml, paths.xml and the client package
+layout); they are not a newly verified complete #1513 resource set. Exact
+Windows #1513 acceptance must still check font availability, Chinese glyphs,
+notification rendering and panel clipping at supported resolutions, in both
+launcher languages. A Chinese stock garage alone does not validate GUI.Text.

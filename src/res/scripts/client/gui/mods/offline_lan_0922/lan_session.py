@@ -7,6 +7,8 @@ import math
 import sys
 import time
 
+from gui.mods.offline_lan_0922.ui_i18n import as_text, tr
+
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922 import queue_screen
 from gui.mods.offline_lan_0922 import queue_ui
@@ -832,7 +834,7 @@ class LANSession(object):
         self._connection_error_notified = False
         if self._picker_open:
             self._close_picker_after_event()
-        self._status_notifier(VEHICLE_SELECTION_WARNING)
+        self._status_notifier(tr(VEHICLE_SELECTION_WARNING))
         return False
 
     def start(self):
@@ -967,11 +969,11 @@ class LANSession(object):
             (self._endpoint_value(), bool(user_requested)))
         if not self.start():
             if self.state not in ('ready_to_join', 'retrying'):
-                self._status_notifier('The LAN room could not be rejoined.')
+                self._status_notifier(tr('The LAN room could not be rejoined.'))
             return False
         if user_requested:
             self._status_notifier(
-                'Joining LAN room at %s...' % self._endpoint_value())
+                tr('Joining LAN room at %s...') % self._endpoint_value())
         return True
 
     def join(self, unused_map_id=None, unused_action_name=None):
@@ -989,7 +991,7 @@ class LANSession(object):
             return bool(self._rejoin_room())
         if self.state == 'awaiting_battle_start':
             self._status_notifier(
-                'The LAN round is starting. Wait for the battle to load.')
+                tr('The LAN round is starting. Wait for the battle to load.'))
             return True
         if self.client is None:
             self._picker_dismissed = False
@@ -1000,15 +1002,15 @@ class LANSession(object):
             if not self.start():
                 if self.state not in ('ready_to_join', 'retrying'):
                     self._status_notifier(
-                        'The LAN room could not be joined.')
+                        tr('The LAN room could not be joined.'))
             else:
                 self._status_notifier(
-                    'Joining LAN room at %s...' % self._endpoint_value())
+                    tr('Joining LAN room at %s...') % self._endpoint_value())
             return True
         if self.state in ('connecting', 'retrying'):
             self._status_notifier(
-                'Still connecting to LAN room at %s. '
-                'Opening server settings.' %
+                tr('Still connecting to LAN room at %s. '
+                'Opening server settings.') %
                 self._endpoint_value())
             self._open_connection_picker()
         elif self.state == 'waiting':
@@ -1045,7 +1047,7 @@ class LANSession(object):
         self._start_requested = False
         self._connection_error_notified = False
         self._status_notifier(
-            'You left the LAN room. Click Battle! to join again.')
+            tr('You left the LAN room. Click Battle! to join again.'))
         return True
 
     def _endpoint_value(self):
@@ -1063,7 +1065,7 @@ class LANSession(object):
         if value is None:
             return None
         try:
-            label = text_type(value)
+            label = as_text(value)
         except Exception:
             return None
         label = u' '.join(label.split())
@@ -1079,30 +1081,30 @@ class LANSession(object):
                 labels.append(label)
         shown = labels[:3]
         if len(labels) > len(shown):
-            shown.append(u'+%d more' % (len(labels) - len(shown)))
+            shown.append(tr(u'+%d more') % (len(labels) - len(shown)))
         if shown:
             roster = u', '.join(shown)
         else:
-            roster = u'waiting for roster'
+            roster = tr(u'waiting for roster')
         lines = [
             text_type(self._endpoint_value()),
-            u'PLAYERS (%d): %s' % (len(players), roster),
+            tr(u'PLAYERS (%d): %s') % (len(players), roster),
         ]
         if self._is_local_host():
             lines.extend((
-                u'SELECT A MAP, THEN CLICK CREATE TO START',
-                u'OTHER PLAYERS JOIN WITH THE BATTLE BUTTON',
+                tr(u'SELECT A MAP, THEN CLICK CREATE TO START'),
+                tr(u'OTHER PLAYERS JOIN WITH THE BATTLE BUTTON'),
             ))
         elif self.state == 'waiting':
             lines.extend((
-                u'WAITING FOR %s TO START THE BATTLE' %
+                tr(u'WAITING FOR %s TO START THE BATTLE') %
                 text_type(self._host_name()),
-                u'NO ACTION NEEDED; THE BATTLE OPENS AUTOMATICALLY',
+                tr(u'NO ACTION NEEDED; THE BATTLE OPENS AUTOMATICALLY'),
             ))
         else:
             lines.extend((
-                u'EDIT THE FIRST LINE TO CHANGE THE SERVER',
-                u'THEN CLICK CREATE TO CONNECT',
+                tr(u'EDIT THE FIRST LINE TO CHANGE THE SERVER'),
+                tr(u'THEN CLICK CREATE TO CONNECT'),
             ))
         return u'\n'.join(lines)
 
@@ -1157,8 +1159,8 @@ class LANSession(object):
             host = self._config.get('host', '127.0.0.1')
             port = self._config.get('port', 28782)
             self._status_notifier(
-                'LAN server %s:%s is unavailable (%s). Retrying and opening '
-                'server settings.' %
+                tr('LAN server %s:%s is unavailable (%s). Retrying and opening '
+                'server settings.') %
                 (host, port, error))
             sys.stdout.write(
                 '[Offline LAN 0.9.22] LAN connection failed: %s:%s (%s)\n' %
@@ -1233,12 +1235,12 @@ class LANSession(object):
         selector = getattr(self.client, 'select_team', None)
         if not callable(selector) or not selector(team):
             self._status_notifier(
-                'The LAN server did not accept that team selection.')
+                tr('The LAN server did not accept that team selection.'))
             return False
         self._remember_team(team)
         self._status_notifier(
-            'Requesting a random team...'
-            if team == 0 else 'Requesting Team %d...' % team)
+            tr('Requesting a random team...')
+            if team == 0 else tr('Requesting Team %d...') % team)
         return True
 
     def set_team_size(self, team, size):
@@ -1249,11 +1251,11 @@ class LANSession(object):
         setter = getattr(self.client, 'set_team_size', None)
         if not callable(setter) or not setter(team, size):
             self._status_notifier(
-                'The LAN server did not accept that team size.')
+                tr('The LAN server did not accept that team size.'))
             return False
         self._remember_team_size(team, size)
         self._status_notifier(
-            'Requesting Team %d size %d...' % (int(team), int(size)))
+            tr('Requesting Team %d size %d...') % (int(team), int(size)))
         return True
 
     def set_bot_tier_mode(self, mode):
@@ -1264,17 +1266,17 @@ class LANSession(object):
         setter = getattr(self.client, 'set_bot_tier_mode', None)
         if not callable(setter) or not setter(mode):
             self._status_notifier(
-                'The LAN server did not accept that Bot tier preset.')
+                tr('The LAN server did not accept that Bot tier preset.'))
             return False
-        self._status_notifier('Requesting Bot tier preset...')
+        self._status_notifier(tr('Requesting Bot tier preset...'))
         return True
 
     def _save_room_preferences(self):
         if port_config.save_waiting_room_state(self._room_preferences):
             return True
         self._status_notifier(
-            'Could not save the LAN waiting room choices. Check that the '
-            'user data directory is writable.')
+            tr('Could not save the LAN waiting room choices. Check that the '
+            'user data directory is writable.'))
         return False
 
     def _remember_map(self, map_name):
@@ -1422,14 +1424,14 @@ class LANSession(object):
                 labels.append(label)
         shown = labels[:6]
         if len(labels) > len(shown):
-            shown.append(u'+%d more' % (len(labels) - len(shown)))
+            shown.append(tr(u'+%d more') % (len(labels) - len(shown)))
         lines = [
             text_type(self._endpoint_value()),
-            u'PLAYERS (%d): %s' % (len(players),
-                                   u', '.join(shown) or u'waiting for roster'),
+            tr(u'PLAYERS (%d): %s') % (len(players),
+                                   u', '.join(shown) or tr(u'waiting for roster')),
         ]
         if not self._is_local_host():
-            lines.append(u'WAITING FOR %s TO START THE BATTLE' %
+            lines.append(tr(u'WAITING FOR %s TO START THE BATTLE') %
                          text_type(self._host_name()))
         return u'\n'.join(lines)
 
@@ -1610,7 +1612,7 @@ class LANSession(object):
             return
         self._waiting_notice_host_id = self._host_player_id
         self._status_notifier(
-            'Joined LAN room. Waiting for host %s to choose the map.' %
+            tr('Joined LAN room. Waiting for host %s to choose the map.') %
             self._host_name())
 
     def _sync_waiting_surface(self, previous_host_player_id=None):
@@ -1619,7 +1621,7 @@ class LANSession(object):
             if (previous_host_player_id is not None and
                     previous_host_player_id != self._host_player_id):
                 self._status_notifier(
-                    'You are now the LAN room host. Choose a map to start.')
+                    tr('You are now the LAN room host. Choose a map to start.'))
             self._open_waiting_picker('host election')
             return
         self._show_waiting_notice(
@@ -1684,8 +1686,8 @@ class LANSession(object):
             return True
         if not port_config.save_endpoint(host, port):
             self._status_notifier(
-                'Could not save the LAN server address. Check that the user '
-                'data directory is writable.')
+                tr('Could not save the LAN server address. Check that the user '
+                'data directory is writable.'))
             return False
         self._config['host'] = host
         self._config['port'] = port
@@ -1727,7 +1729,7 @@ class LANSession(object):
         if not bool(getattr(self.client, 'ready', False)):
             self._pending_map = map_name
             self._status_notifier(
-                'Connecting to %s. The selected map will start automatically.' %
+                tr('Connecting to %s. The selected map will start automatically.') %
                 self._endpoint_value())
             self._close_picker_after_event()
             return True
@@ -1763,7 +1765,7 @@ class LANSession(object):
             getattr(self.client, 'host_player_id', None))
         self._connection_error_notified = False
         if recovered_connection:
-            self._status_notifier('LAN server connected.')
+            self._status_notifier(tr('LAN server connected.'))
         self._map_pool = list(_message_value(
             message, 'map_pool', getattr(self.client, 'map_pool', [])) or [])
         phase = _message_value(message, 'phase', getattr(self.client, 'phase', None))
@@ -1826,7 +1828,7 @@ class LANSession(object):
                         pending_map == waiting_room_ui.RANDOM_MAP_OPTION and
                         self._server_supports_random_map())):
                     self._status_notifier(
-                        'The LAN server does not offer the selected map.')
+                        tr('The LAN server does not offer the selected map.'))
                     self._sync_waiting_surface(previous_host_player_id)
                     return
                 if self.client.request_start(pending_map):
@@ -1835,7 +1837,7 @@ class LANSession(object):
                     self._close_picker()
                     return
                 self._status_notifier(
-                    'The LAN server did not accept the start request.')
+                    tr('The LAN server did not accept the start request.'))
             self._sync_waiting_surface(previous_host_player_id)
         elif phase == 'battle':
             # Disconnect/failover roster updates are broadcast during a live
@@ -2018,7 +2020,7 @@ class LANSession(object):
             except Exception:
                 self.state = 'error'
                 self._status_notifier(
-                    'Battle could not start (%s). LAN session stopped.' %
+                    tr('Battle could not start (%s). LAN session stopped.') %
                     reason)
                 try:
                     # BattleRuntime already owns cleanup and Account restore.
@@ -2030,13 +2032,13 @@ class LANSession(object):
                 return False
             self._enter_awaiting_round_end()
             self._status_notifier(
-                'Battle could not start (%s). Returning to the map picker.' %
+                tr('Battle could not start (%s). Returning to the map picker.') %
                 reason)
             return True
 
         self.state = 'error'
         self._status_notifier(
-            'Battle could not start and the lobby was not restored (%s).' %
+            tr('Battle could not start and the lobby was not restored (%s).') %
             reason)
         try:
             # Runtime recovery already failed.  Do not recurse through its
@@ -2102,7 +2104,7 @@ class LANSession(object):
                 pass
 
         self._status_notifier(
-            'LAN room connection lost (%s). Click Battle! to rejoin.' %
+            tr('LAN room connection lost (%s). Click Battle! to rejoin.') %
             reason)
         return True
 
@@ -2163,10 +2165,10 @@ class LANSession(object):
                         self._host_player_id))
             if _message_value(message, 'code') == 'host_only':
                 self._status_notifier(
-                    'Only the LAN room host can choose the map and start.')
+                    tr('Only the LAN room host can choose the map and start.'))
             else:
                 self._status_notifier(
-                    'The LAN server refused the battle start (%s).' %
+                    tr('The LAN server refused the battle start (%s).') %
                     (_message_value(message, 'code') or 'unknown'))
             self._sync_waiting_surface()
         elif kind == 'team_denied':
@@ -2180,10 +2182,10 @@ class LANSession(object):
                 self._remember_team(0)
             if code == 'team_full':
                 self._status_notifier(
-                    'Team %s is full. Choose the other team or Random.' % team)
+                    tr('Team %s is full. Choose the other team or Random.') % team)
             else:
                 self._status_notifier(
-                    'The LAN server refused the team selection (%s).' %
+                    tr('The LAN server refused the team selection (%s).') %
                     (code or 'unknown'))
             self._refresh_surface()
         elif kind == 'team_size_denied':
@@ -2199,12 +2201,12 @@ class LANSession(object):
             if actual_size is not None:
                 self._remember_team_size(team, actual_size)
             if code == 'host_only':
-                notice = 'Only the LAN room host can change team sizes.'
+                notice = tr('Only the LAN room host can change team sizes.')
             elif code == 'team_occupied':
-                notice = ('Team %s already has too many players for that '
-                          'size.' % team)
+                notice = (tr('Team %s already has too many players for that '
+                          'size.') % team)
             else:
-                notice = ('The LAN server refused the team size (%s).' %
+                notice = (tr('The LAN server refused the team size (%s).') %
                           (code or 'unknown'))
             self._status_notifier(notice)
             reject = getattr(self._queue, 'reject_team_size', None)
@@ -2215,10 +2217,10 @@ class LANSession(object):
         elif kind == 'bot_tier_mode_denied':
             code = _message_value(message, 'code')
             if code == 'host_only':
-                notice = ('Only the LAN room host can change the Bot tier '
-                          'preset.')
+                notice = (tr('Only the LAN room host can change the Bot tier '
+                          'preset.'))
             else:
-                notice = ('The LAN server refused the Bot tier preset (%s).' %
+                notice = (tr('The LAN server refused the Bot tier preset (%s).') %
                           (code or 'unknown'))
             self._status_notifier(notice)
             reject = getattr(self._queue, 'reject_bot_tier_mode', None)
@@ -2340,11 +2342,11 @@ class LANSession(object):
                 code = _message_value(message, 'code')
                 if code == 'team_full':
                     self._status_notifier(
-                        'The selected LAN team is full. Choose the other '
-                        'team or Random in the waiting room.')
+                        tr('The selected LAN team is full. Choose the other '
+                        'team or Random in the waiting room.'))
                 else:
                     self._status_notifier(
-                        'The launcher team selection is invalid.')
+                        tr('The launcher team selection is invalid.'))
                 self.stop(show_login=True)
             elif (kind == 'error' and not self._battle_started and
                     not bool(getattr(self.client, 'ready', False)) and
@@ -2366,8 +2368,8 @@ class LANSession(object):
                         'kind=%s round=%r: %s\n' %
                         (kind, self._active_round_id, reason))
                     self._status_notifier(
-                        'LAN battle connection lost (%s). Returning to the '
-                        'garage.' % reason)
+                        tr('LAN battle connection lost (%s). Returning to the '
+                        'garage.') % reason)
                 self.stop(show_login=True)
         if self._on_event_callback is not None:
             self._on_event_callback(kind, message)

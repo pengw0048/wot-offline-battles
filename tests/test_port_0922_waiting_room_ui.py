@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import types
@@ -185,6 +186,44 @@ class WaitingRoomTests(unittest.TestCase):
     def _root_count(self, room=None):
         """The room panel plus one root per arrow row."""
         return 1 + len((room or self.room)._pointer_parts)
+
+    def test_chinese_room_preserves_names_and_wire_map_id(self):
+        self.status = 'LAN SERVER: 10.0.0.5:28782\n玩家（2）：房主, 小鹏'
+        with mock.patch.dict(os.environ, {'WOT_OFFLINE_UI_LANGUAGE': 'zh'}):
+            self.assertTrue(self.room.open())
+            self.assertEqual('局域网等待房间', self._label('title'))
+            self.assertEqual('开始战斗', self._label('start'))
+            self.assertEqual('地图：随机', self._label('map'))
+            self.assertEqual('玩家（2）：房主, 小鹏', self._label('players'))
+            self.assertEqual('电脑等级：随机', self._label('tier'))
+            self.assertTrue(self.room.activate('start'))
+            self.assertEqual(['server_random'], self.started)
+            self.assertEqual('正在开始 随机...', self._label('message'))
+        self.assertTrue(self.room.close())
+
+    def test_chinese_map_label_uses_client_name_without_changing_geometry(self):
+        arena = types.SimpleNamespace(
+            geometryName='01_karelia', gameplayName='ctf',
+            name='卡累利阿'.encode('utf-8'))
+        with mock.patch.dict(os.environ, {'WOT_OFFLINE_UI_LANGUAGE': 'zh'}), \
+                mock.patch.dict(sys.modules, {
+                    'ArenaType': types.SimpleNamespace(g_cache={1: arena})}):
+            self.assertEqual('卡累利阿',
+                             self.module.friendly_map_name('01_karelia'))
+            self.assertEqual('99 - Missing',
+                             self.module.friendly_map_name('99_missing'))
+
+    def test_missing_mod_font_reaches_stock_window_fallback_boundary(self):
+        class MissingFont(_Component):
+            def __setattr__(self, name, value):
+                if name == 'font':
+                    raise ValueError('font unavailable')
+                super().__setattr__(name, value)
+
+        self.surface.text = lambda: MissingFont('text')
+        with self.assertRaisesRegex(ValueError, 'font unavailable'):
+            self.room.install()
+        self.assertEqual([], self.surface.roots)
 
     def test_the_room_only_uses_properties_this_client_has(self):
         self.room.install()
