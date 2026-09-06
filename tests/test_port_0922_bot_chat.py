@@ -8,6 +8,8 @@ TEST_ROOT = Path(__file__).resolve().parent
 SERVER_ROOT = TEST_ROOT.parent / 'server'
 sys.path.insert(0, str(TEST_ROOT))
 sys.path.insert(0, str(SERVER_ROOT))
+CLIENT_ROOT = TEST_ROOT.parent / 'src' / 'res' / 'scripts' / 'client'
+sys.path.insert(0, str(CLIENT_ROOT))
 
 import bot_chat  # noqa: E402
 from bot_chat import (  # noqa: E402
@@ -398,6 +400,95 @@ class PublicationTest(unittest.TestCase):
         director.reset_round(8)
         self.assertEqual(_drain(director, self.snapshot), [])
         self.assertEqual(director.recent_lines(1), [])
+
+
+class ArmingReportTest(unittest.TestCase):
+    """Every way chat can fail to arm is silent inside a battle."""
+
+    class _Runtime(object):
+        _worker_mode = False
+        _team_chat_initialized = False
+        state = 'running'
+
+        def __init__(self, provider=None):
+            self._avatar = type('Avatar', (), {
+                'guiSessionProvider': provider})()
+            self.written = []
+
+        def _run_optional_feature(self, unused_name, callback):
+            return callback()
+
+    def _runtime(self, allies=None, provider_missing=False,
+                 reader_missing=False, start=True):
+        import io
+        import sys as system
+
+        from gui.mods.offline_lan_0922 import battle_runtime as module
+
+        provider = None
+        if not provider_missing:
+            arena_dp = type('ArenaDP', (), {})()
+            if not reader_missing:
+                arena_dp.getAlliesVehiclesNumber = lambda: allies
+            provider = type('Provider', (), {
+                'getArenaDP': staticmethod(lambda: arena_dp)})()
+        runtime = self._Runtime(provider)
+        runtime._server = type('Server', (), {
+            'start_team_chat': staticmethod(lambda: start)})()
+        runtime._team_chat_waiting = (
+            module.BattleRuntime._team_chat_waiting.__get__(runtime))
+        stream = io.StringIO()
+        original, system.stdout = system.stdout, stream
+        try:
+            armed = module.BattleRuntime._start_team_chat_when_roster_ready(
+                runtime)
+        finally:
+            system.stdout = original
+        return armed, stream.getvalue()
+
+    def test_a_missing_session_provider_is_reported(self):
+        armed, said = self._runtime(provider_missing=True)
+        self.assertFalse(armed)
+        self.assertIn('no session provider', said)
+
+    def test_a_missing_roster_reader_is_reported(self):
+        armed, said = self._runtime(reader_missing=True)
+        self.assertFalse(armed)
+        self.assertIn('no arena roster reader', said)
+
+    def test_a_roster_with_nobody_in_it_is_reported(self):
+        armed, said = self._runtime(allies=1)
+        self.assertFalse(armed)
+        self.assertIn('only 1 ally', said)
+
+    def test_stock_channels_refusing_is_reported(self):
+        armed, said = self._runtime(allies=15, start=False)
+        self.assertFalse(armed)
+        self.assertIn('refused to start', said)
+
+    def test_arming_says_so_with_the_roster_it_saw(self):
+        armed, said = self._runtime(allies=15)
+        self.assertTrue(armed)
+        self.assertIn('armed with 15 allies', said)
+
+    def test_one_reason_is_not_repeated_every_frame(self):
+        import io
+        import sys as system
+
+        from gui.mods.offline_lan_0922 import battle_runtime as module
+
+        runtime = self._Runtime(None)
+        runtime._team_chat_waiting = (
+            module.BattleRuntime._team_chat_waiting.__get__(runtime))
+        stream = io.StringIO()
+        original, system.stdout = system.stdout, stream
+        try:
+            for unused in range(5):
+                module.BattleRuntime._start_team_chat_when_roster_ready(
+                    runtime)
+        finally:
+            system.stdout = original
+        self.assertEqual(1, stream.getvalue().count('no session provider'))
 
 
 class AdmissionReportTest(unittest.TestCase):
