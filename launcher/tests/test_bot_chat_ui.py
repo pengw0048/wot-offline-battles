@@ -345,6 +345,69 @@ def threading_gate(cancel_panel=None):
     return _Gate(cancel_panel)
 
 
+class ProgressReportingTest(_Temp):
+    """The bar and the stage exist so a long download does not look hung."""
+
+    def test_the_bar_starts_empty(self):
+        panel = _panel(self.base)
+        panel.apply_progress()
+        self.assertEqual(0, panel.progress.options["value"])
+
+    def test_the_bar_follows_the_byte_count(self):
+        panel = _panel(self.base)
+        panel._progress(50, 200)
+        panel.apply_progress()
+        self.assertEqual(ui.PROGRESS_STEPS // 4,
+                         panel.progress.options["value"])
+
+    def test_the_bar_fills_completely(self):
+        panel = _panel(self.base)
+        panel._progress(200, 200)
+        panel.apply_progress()
+        self.assertEqual(ui.PROGRESS_STEPS, panel.progress.options["value"])
+
+    def test_each_stage_reports_its_own_progress(self):
+        panel = _panel(self.base)
+        panel._progress(10, 200)
+        panel._stage("model")
+        # A new stage restarts the count rather than inheriting the last.
+        self.assertEqual("model", panel.stage())
+        self.assertEqual(0.0, panel.progress_fraction())
+
+    def test_the_window_is_told_when_a_download_starts(self):
+        started = []
+        panel = ui.BotChatPanel(
+            _Parent(), _Catalogue(), _Tk, _Ttk, {}, base_dir=self.base,
+            machine="AMD64", on_start=lambda: started.append(1))
+        self.assertTrue(panel.start_install(opener=_opener()))
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertEqual(1, len(started))
+
+    def test_a_refused_start_tells_the_window_nothing(self):
+        started = []
+        panel = ui.BotChatPanel(
+            _Parent(), _Catalogue(arch_supported=False), _Tk, _Ttk, {},
+            base_dir=self.base, machine="x86",
+            on_start=lambda: started.append(1))
+        self.assertFalse(panel.start_install(opener=_opener()))
+        self.assertEqual([], started)
+
+    def test_the_install_location_is_shown(self):
+        panel = _panel(self.base)
+        self.assertEqual(ui.bot_chat_install.install_root(self.base),
+                         panel.location.get())
+
+    def test_removing_clears_the_last_failure(self):
+        panel = _panel(self.base)
+        panel.start_install(opener=_opener(fail_urls=("modelscope", "github",
+                                                      "huggingface")))
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertIsNotNone(panel.last_error())
+        panel.remove()
+        self.assertIsNone(panel.last_error())
+        self.assertIsNone(panel.stage())
+
+
 class ResolvedPathTest(_Temp):
     def test_the_catalogue_model_is_named_for_the_selected_tier(self):
         catalogue = _Catalogue()

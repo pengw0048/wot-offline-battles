@@ -172,12 +172,16 @@ _CHINESE = {
     "Let Bots talk in team chat (downloads a local model)":
         "让 Bot 在队伍频道说话（需要下载本地模型）",
     "Model": "模型",
-    "llama-server": "推理程序",
+    "llama-server (optional, if you already have one)":
+        "推理程序（可选，已经有就填路径）",
     "Not installed. %s to download.": "尚未安装，需要下载 %s。",
-    "Ready.": "已就绪。",
+    "Ready. Bots will talk in your next battle.":
+        "已就绪，下一局 Bot 就会说话了。",
+    "Downloading the inference program... %s": "正在下载推理程序… %s",
+    "Downloading the model... %s": "正在下载模型… %s",
     "This machine has no published inference runtime.":
         "本机没有可用的推理程序版本。",
-    "Downloading... %s": "正在下载… %s",
+
     "Stopped. Progress was kept; install again to resume.":
         "已停止。进度已保留，再次安装可继续。",
     "Install failed: %s": "安装失败：%s",
@@ -194,6 +198,8 @@ _CHINESE = {
 
 COLLECT_CRASH_REPORTS_SETTING = "collect_crash_reports"
 FULL_CRASH_DUMPS_SETTING = "full_crash_dumps"
+# How often the window reads the install thread's byte counts.
+BOT_CHAT_POLL_MILLISECONDS = 250
 PROCDUMP_CONSENT_SETTING = "procdump_download_consent"
 PROCDUMP_PATH_ENV = "WOT_OFFLINE_PROCDUMP_PATH"
 CRASH_DUMP_PATH_ENV = "WOT_OFFLINE_CRASH_DUMP_PATH"
@@ -712,7 +718,8 @@ class LauncherWindow(object):
         try:
             return bot_chat_ui.BotChatPanel(
                 self.bot_chat_panel, catalogue, self._tk, self._ttk,
-                settings, on_change=self._bot_chat_changed, log=self._log)
+                settings, on_change=self._bot_chat_changed, log=self._log,
+                on_start=self._start_bot_chat_poll)
         except Exception as error:
             self._log("BOT CHAT panel could not be built: %s" % error)
             return None
@@ -729,7 +736,8 @@ class LauncherWindow(object):
         panel.enable_check.config(text=self._t(
             "Let Bots talk in team chat (downloads a local model)"))
         panel.model_label.config(text=self._t("Model"))
-        panel.runtime_label.config(text=self._t("llama-server"))
+        panel.runtime_label.config(text=self._t(
+            "llama-server (optional, if you already have one)"))
         panel.install_button.config(text=self._t("Install"))
         panel.stop_button.config(text=self._t("Stop"))
         panel.remove_button.config(text=self._t("Remove"))
@@ -741,9 +749,12 @@ class LauncherWindow(object):
             return self._t(
                 "This machine has no published inference runtime.")
         if state == bot_chat_ui.STATE_WORKING:
-            return self._t("Downloading... %s") % panel.progress_text()
+            key = ("Downloading the model... %s"
+                   if panel.stage() == "model" else
+                   "Downloading the inference program... %s")
+            return self._t(key) % (panel.progress_text() or "...")
         if state == bot_chat_ui.STATE_READY:
-            return self._t("Ready.")
+            return self._t("Ready. Bots will talk in your next battle.")
         error = panel.last_error()
         if error:
             return self._t("Install failed: %s") % error
@@ -753,6 +764,27 @@ class LauncherWindow(object):
         pending = panel.plan()["pending_bytes"]
         return self._t("Not installed. %s to download.") % (
             bot_chat_ui.bot_chat_install.format_bytes(pending))
+
+    def _poll_bot_chat(self):
+        """Move the download's progress onto the panel while it runs.
+
+        The install thread must not touch Tk, so the window reads its counts
+        here instead. Without this the bar never moved and a six hundred
+        megabyte download looked like the launcher had hung.
+        """
+        panel = getattr(self, "_bot_chat", None)
+        if panel is None:
+            return
+        try:
+            panel.apply_progress()
+            panel.status.set(self._bot_chat_status(panel))
+        except Exception:
+            return
+        if panel.busy():
+            self.root.after(BOT_CHAT_POLL_MILLISECONDS, self._poll_bot_chat)
+
+    def _start_bot_chat_poll(self):
+        self.root.after(BOT_CHAT_POLL_MILLISECONDS, self._poll_bot_chat)
 
     def _bot_chat_paths(self):
         panel = getattr(self, "_bot_chat", None)
