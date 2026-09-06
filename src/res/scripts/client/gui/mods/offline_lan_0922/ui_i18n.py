@@ -32,7 +32,6 @@ def tr(source):
 
 _ZH = {
     'RANDOM MAP': u'随机地图',
-    'CHOOSE MAP': u'选择地图',
     '  -  %d MIN': u'  -  %d 分钟',
     'The stock map window is unavailable.': u'原版地图窗口不可用。',
     'The stock map window could not open.': u'无法打开原版地图窗口。',

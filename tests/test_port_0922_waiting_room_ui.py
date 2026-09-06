@@ -205,6 +205,19 @@ class WaitingRoomTests(unittest.TestCase):
             self.assertEqual('正在开始 随机...', self._label('message'))
         self.assertTrue(self.room.close())
 
+    def test_chinese_graphical_picker_controls_keep_language_after_selection(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface, round_seconds=lambda: 1200)
+        with mock.patch.dict(os.environ, {'WOT_OFFLINE_UI_LANGUAGE': 'zh'}):
+            self.assertTrue(room.open())
+            self.assertEqual('随机地图', self._label_of(room, 'random'))
+            self.assertEqual('开始战斗  -  20 分钟', self._label_of(room, 'start'))
+            self.assertFalse(room.activate('map'))
+            self.assertEqual('原版地图窗口不可用。', self._label_of(room, 'message'))
+        self.assertTrue(room.close())
+
     def test_chinese_map_label_uses_client_name_without_changing_geometry(self):
         arena = types.SimpleNamespace(
             geometryName='01_karelia', gameplayName='ctf',
