@@ -12039,11 +12039,18 @@ class BattleRuntime(object):
         self._report_effect(
             'wreck_hit', 'armorHit', effects_index, impact, direction)
         try:
+            # Same #1513 impact trio as a hit on a live vehicle: without the
+            # shooter and target identities the group can only play its
+            # other-tanks mix.
             add_effect(
                 hit_position, effects, stages, None, dir=direction,
                 start=hit_position - direction.scale(0.4),
                 end=hit_position + direction.scale(0.4),
-                showShockWave=False, showFlashBang=False)
+                showShockWave=False, showFlashBang=False,
+                isPlayerVehicle=bool(target_record.get('local')),
+                entity_id=int(target_record.get('engine_id') or 0),
+                attackerID=self._projectile_attacker_engine_id(meta),
+                damageFactor=0.0, hitdir=direction)
         except Exception as error:
             self._warn_optional_failure(
                 'projectile impact presentation', error)
@@ -13509,6 +13516,17 @@ class BattleRuntime(object):
             return None
         meta['source_descriptor'] = descriptor
         return descriptor
+
+    def _projectile_attacker_engine_id(self, meta):
+        """Return the engine id #1513 hit sounds compare against the player."""
+        record = self._records.get(
+            '%s:%s' % (meta.get('shooter_kind'), meta.get('shooter_id')))
+        if record is None:
+            return 0
+        try:
+            return int(record.get('engine_id') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     def _projectile_source_entity(self, meta):
         key = '%s:%s' % (meta.get('shooter_kind'), meta.get('shooter_id'))
