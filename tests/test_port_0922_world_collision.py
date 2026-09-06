@@ -44,6 +44,11 @@ class _Vector(object):
             self.z /= length
 
 
+def _vertical_ray(start, end):
+    return (abs(start.x - end.x) < 1.0e-9 and
+            abs(start.z - end.z) < 1.0e-9)
+
+
 class _Strict1513Component(object):
     """Attribute-only stand-in for #1513's ``NoLegacyStuff`` mixin."""
 
@@ -573,7 +578,7 @@ class WorldCollisionTests(unittest.TestCase):
         horizontal_calls = []
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             horizontal_calls.append((start, end))
             return None
@@ -803,7 +808,8 @@ class WorldCollisionTests(unittest.TestCase):
 
         def ground_profile(unused_space, unused_math, unused_pos,
                            unused_x, unused_z, unused_sin, unused_cos,
-                           unused_direction, look, segment_count=6):
+                           unused_direction, look, segment_count=6,
+                           ground_plane=None):
             segment = float(look) / float(segment_count)
             return ([index * segment * 0.5
                      for index in range(segment_count + 1)], segment)
@@ -880,7 +886,7 @@ class WorldCollisionTests(unittest.TestCase):
         horizontal_ends = []
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             horizontal_ends.append(end.z)
             low = min(start.z, end.z)
@@ -917,7 +923,7 @@ class WorldCollisionTests(unittest.TestCase):
 
         def collide(unused_space, start, end, unused_mask):
             calls.append((start, end))
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             return (_Vector(start.x, start.y,
                             start.z + (end.z - start.z) * 0.5),
@@ -940,7 +946,7 @@ class WorldCollisionTests(unittest.TestCase):
         horizontal_calls = []
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, start.z * 0.10, start.z),)
             horizontal_calls.append((start, end))
             return (_Vector(start.x, start.y,
@@ -959,12 +965,122 @@ class WorldCollisionTests(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertTrue(horizontal_calls)
 
+    def _passage_scene(self, gradient, direction, roof=True, wall=False,
+                       roof_levels=(8.0, 11.0)):
+        """Intersect the road, an overhead deck and an optional solid wall.
+
+        Great Wall's east gate at x=404, z=-150 has a roughly 0.08 downhill
+        road and a top about 11 m above it. Its north roof edge lies between
+        the lane origin and the front of the hull. Returning the first top
+        from a sky ray must not manufacture an eleven-metre road drop.
+        """
+        def collide(unused_space, start, end, unused_mask, *unused_filter):
+            sy, sz = start.y, start.z * direction
+            dy, dz = end.y - sy, (end.z - start.z) * direction
+            candidates = []
+
+            def hit(progress, normal):
+                if 0.0 <= progress <= 1.0:
+                    candidates.append((progress, (
+                        _Vector(start.x + (end.x - start.x) * progress,
+                                sy + dy * progress,
+                                start.z + (end.z - start.z) * progress),
+                        normal, 0)))
+
+            denominator = dy - gradient * dz
+            if abs(denominator) > 1.0e-9:
+                hit((gradient * sz - sy) / denominator,
+                    _Vector(0.0, 1.0, -gradient * direction))
+            if roof:
+                roof_bottom, roof_top = roof_levels
+                if abs(dy) > 1.0e-9:
+                    for height, normal in ((roof_top, 1.0),
+                                           (roof_bottom, -1.0)):
+                        progress = (height - sy) / dy
+                        if -5.0 <= sz + dz * progress <= 3.0:
+                            hit(progress, _Vector(0.0, normal, 0.0))
+                if abs(dz) > 1.0e-9:
+                    for edge in (-5.0, 3.0):
+                        progress = (edge - sz) / dz
+                        if roof_bottom <= sy + dy * progress <= roof_top:
+                            hit(progress, _Vector(0.0, 0.0, -direction))
+            if wall and abs(dz) > 1.0e-9:
+                progress = (3.0 - sz) / dz
+                if gradient * 3.0 <= sy + dy * progress <= 3.0:
+                    hit(progress, _Vector(0.0, 0.0, -direction))
+            return min(candidates, key=lambda row: row[0])[1] if candidates else None
+
+        return types.SimpleNamespace(
+            wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+
+    def test_overhead_gate_exit_does_not_turn_road_into_cliff(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        for direction in (-1.0, 1.0):
+            for roof in (False, True):
+                with self.subTest(direction=direction, roof=roof):
+                    self.assertEqual('clear',
+                        world_collision.check_horizontal_collision(
+                            self._passage_scene(-0.08, direction, roof),
+                            math_module, 1, _Vector(), 0.0,
+                            direction * 5.0, None, False, 0.04, True,
+                            pitch=-math.atan(-0.08 * direction)))
+
+    def test_road_contact_below_deck_uses_the_lower_surface_profile(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        for gradient in (0.2, 1.0):
+            for direction in (-1.0, 1.0):
+                with self.subTest(gradient=gradient, direction=direction):
+                    self.assertEqual('clear',
+                        world_collision.check_horizontal_collision(
+                            self._passage_scene(gradient, direction),
+                            math_module, 1, _Vector(), 0.0,
+                            direction * 5.0, None, False, 0.04, True))
+
+    def test_actual_wall_inside_underpass_still_blocks(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        for direction in (-1.0, 1.0):
+            self.assertEqual('hard',
+                world_collision.check_horizontal_collision(
+                    self._passage_scene(-0.08, direction, wall=True),
+                    math_module, 1, _Vector(), 0.0,
+                    direction * 5.0, None, False, 0.04, True,
+                    pitch=-math.atan(-0.08 * direction)))
+
+    def test_low_beam_inside_occupied_upper_lane_still_blocks(self):
+        math_module = types.SimpleNamespace(Vector3=_Vector)
+        self.assertEqual('hard',
+            world_collision.check_horizontal_collision(
+                self._passage_scene(0.0, 1.0, roof_levels=(1.05, 1.25)),
+                math_module, 1, _Vector(), 0.0, 5.0,
+                None, False, 0.04, True))
+
+    def test_driving_on_bridge_selects_deck_above_lower_road(self):
+        scene = self._passage_scene(0.0, 1.0)
+        native = scene.wg_collideSegment
+        support_heights = []
+
+        def collide(space, start, end, mask, *filters):
+            hit = native(space, start, end, mask, *filters)
+            if _vertical_ray(start, end) and hit is not None:
+                support_heights.append(hit[0].y)
+            return hit
+
+        scene.wg_collideSegment = collide
+        self.assertEqual('clear',
+            world_collision.check_horizontal_collision(
+                scene, types.SimpleNamespace(Vector3=_Vector),
+                1, _Vector(0.0, 11.0, -1.0), 0.0, 5.0,
+                None, False, 0.04, True, pitch=0.03))
+        self.assertTrue(support_heights)
+        self.assertEqual({11.0}, set(support_heights))
+
     def test_hull_pitch_keeps_lower_rays_above_rising_terrain_seam(self):
         gradient = 0.20
         seam_normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, gradient * start.z, start.z),)
             delta_y = end.y - start.y
             delta_z = end.z - start.z
@@ -999,7 +1115,7 @@ class WorldCollisionTests(unittest.TestCase):
             counts = {'ground': 0, 'horizontal': 0}
 
             def collide(unused_space, start, end, unused_mask):
-                if abs(start.y - end.y) > 10.0:
+                if _vertical_ray(start, end):
                     counts['ground'] += 1
                     ground_y = world_gradient * start.z
                     if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
@@ -1039,7 +1155,7 @@ class WorldCollisionTests(unittest.TestCase):
         wall_hits = []
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 at_wall = abs(start.z - wall_z) <= 1.0e-6
                 if at_wall:
                     exact_wall_queries[0] += 1
@@ -1092,7 +1208,7 @@ class WorldCollisionTests(unittest.TestCase):
         ground_queries = [0]
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 ground_queries[0] += 1
                 return (_Vector(start.x, 0.0, start.z),)
             delta_z = end.z - start.z
@@ -1154,7 +1270,7 @@ class WorldCollisionTests(unittest.TestCase):
             return tuple(hit[2:4]) != (37, 22)
 
         def collide(unused_space, start, end, unused_mask, *callbacks):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 terrain_y = gradient * start.z
                 is_profile_sample = any(
                     abs(start.z - sample) <= 1.0e-6
@@ -1209,7 +1325,7 @@ class WorldCollisionTests(unittest.TestCase):
             return tuple(hit[2:4]) != (37, 22)
 
         def collide(unused_space, start, end, unused_mask, *callbacks):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 terrain_y = gradient * start.z
                 if abs(start.z - broken_z) <= 1.0e-6:
                     if callbacks:
@@ -1257,7 +1373,7 @@ class WorldCollisionTests(unittest.TestCase):
             counts = {'ground': 0, 'horizontal': 0, 'seams': 0}
 
             def collide(unused_space, start, end, unused_mask):
-                if abs(start.y - end.y) > 10.0:
+                if _vertical_ray(start, end):
                     counts['ground'] += 1
                     ground_y = world_gradient * start.z
                     if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
@@ -1299,7 +1415,7 @@ class WorldCollisionTests(unittest.TestCase):
             ground_calls = [0]
 
             def collide(unused_space, start, end, unused_mask):
-                if abs(start.y - end.y) > 10.0:
+                if _vertical_ray(start, end):
                     ground_calls[0] += 1
                     ground_y = world_gradient * start.z
                     if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
@@ -1339,7 +1455,7 @@ class WorldCollisionTests(unittest.TestCase):
             return ground_gradient * z
 
         def collide(unused_space, start, end, unused_mask, *unused):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 tops = []
                 if ground_end is None or start.z <= ground_end:
                     tops.append(ground_at(start.z))
@@ -1503,7 +1619,7 @@ class WorldCollisionTests(unittest.TestCase):
 
                 def collide(unused_space, start, end, unused_mask):
                     calls.append((start, end))
-                    if abs(start.y - end.y) > 10.0:
+                    if _vertical_ray(start, end):
                         ground_y = (0.40 * min(start.z, 3.5)
                                     if velocity > 0.0 else
                                     -0.40 * max(start.z, -3.5))
@@ -1534,7 +1650,7 @@ class WorldCollisionTests(unittest.TestCase):
                 self.assertTrue(calls)
                 ground_calls = [
                     call for call in calls
-                    if abs(call[0].y - call[1].y) > 10.0]
+                    if _vertical_ray(call[0], call[1])]
                 # A pitched lane always buys its in-footprint ground trend and
                 # the look-ahead top, airborne included: an airborne hull is
                 # exactly the pose that used to lift its lowest witness over a
@@ -1542,7 +1658,7 @@ class WorldCollisionTests(unittest.TestCase):
                 self.assertTrue(ground_calls)
                 lane_calls = [
                     call for call in calls
-                    if abs(call[0].y - call[1].y) <= 10.0]
+                    if not _vertical_ray(call[0], call[1])]
                 unused_start, end = lane_calls[0]
                 footprint_end = 3.5 if velocity > 0.0 else -3.5
                 pose_y = world_collision._hull_pose_y(hull_pitch, 0.0)
@@ -1748,7 +1864,7 @@ class WorldCollisionTests(unittest.TestCase):
         horizontal_calls = []
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, -start.z * 0.20, start.z),)
             horizontal_calls.append((start, end))
             return (_Vector(start.x, start.y,
@@ -1789,7 +1905,7 @@ class WorldCollisionTests(unittest.TestCase):
         gradient = [-1.6]
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 ground_y = gradient[0] * start.z
                 if min(start.y, end.y) <= ground_y <= max(start.y, end.y):
                     return (_Vector(start.x, ground_y, start.z),)
@@ -1817,7 +1933,7 @@ class WorldCollisionTests(unittest.TestCase):
 
     def test_descending_ground_does_not_hide_an_independent_wall(self):
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, -start.z * 0.20, start.z),)
             return (_Vector(start.x, start.y,
                             start.z + (end.z - start.z) * 0.5),
@@ -1836,7 +1952,7 @@ class WorldCollisionTests(unittest.TestCase):
 
     def test_drivable_lower_slope_does_not_hide_a_wall_above_it(self):
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, -start.z * 0.20, start.z),)
             if abs(start.y - 0.6) < 0.01:
                 return (_Vector(start.x, start.y,
@@ -1869,7 +1985,7 @@ class WorldCollisionTests(unittest.TestCase):
             return tuple(hit[2:4]) != (37, 22)
 
         def collide(unused_space, start, end, unused_mask, *callbacks):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 terrain_y = gradient * start.z
                 if abs(start.z - broken_z) <= 1.0e-6:
                     if callbacks:
@@ -1916,7 +2032,7 @@ class WorldCollisionTests(unittest.TestCase):
 
     def test_abrupt_rising_step_stays_blocked(self):
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 height = 2.0 if start.z >= 2.0 else 0.0
                 return (_Vector(start.x, height, start.z),)
             return (_Vector(start.x, start.y,
@@ -1936,7 +2052,7 @@ class WorldCollisionTests(unittest.TestCase):
 
     def test_native_destructible_failure_is_not_silently_passable(self):
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             return (_Vector(start.x, start.y,
                             start.z + (end.z - start.z) * 0.5),
@@ -1959,7 +2075,7 @@ class WorldCollisionTests(unittest.TestCase):
         surface_normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if abs(start.y - 0.6) < 0.01:
                 return (_Vector(start.x, start.y,
@@ -1990,7 +2106,7 @@ class WorldCollisionTests(unittest.TestCase):
         normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if abs(start.y - 0.6) < 0.01:
                 return (_Vector(start.x, start.y, 2.0), normal, 0)
@@ -2024,7 +2140,7 @@ class WorldCollisionTests(unittest.TestCase):
         normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if abs(start.y - 0.6) < 0.01:
                 return (_Vector(start.x, start.y, 3.0), normal, 0)
@@ -2052,7 +2168,7 @@ class WorldCollisionTests(unittest.TestCase):
         normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if abs(start.y - 1.6) < 0.01:
                 return (_Vector(start.x, start.y, 2.0), normal, 0)
@@ -2078,7 +2194,7 @@ class WorldCollisionTests(unittest.TestCase):
         normal = _Vector(0.0, 0.0, -1.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if abs(start.y - 0.6) < 0.01:
                 return (_Vector(end.x, start.y, end.z), normal, 0)
@@ -2106,7 +2222,7 @@ class WorldCollisionTests(unittest.TestCase):
         surface_normal = _Vector(1.0, 0.0, 0.0)
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             return (_Vector(start.x, start.y,
                             start.z + (end.z - start.z) * 0.5),
@@ -2142,7 +2258,7 @@ class WorldCollisionTests(unittest.TestCase):
         horizontal_calls = [0]
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             horizontal_calls[0] += 1
             if horizontal_calls[0] == 1:
@@ -2179,7 +2295,7 @@ class WorldCollisionTests(unittest.TestCase):
         solid_present = [True]
 
         def collide(unused_space, start, end, unused_mask):
-            if abs(start.y - end.y) > 10.0:
+            if _vertical_ray(start, end):
                 return (_Vector(start.x, 0.0, start.z),)
             if solid_present[0]:
                 return (_Vector(start.x, start.y,
