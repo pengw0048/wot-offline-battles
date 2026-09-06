@@ -9,6 +9,7 @@ simulation work. Stage totals include children; self time excludes them.
 import collections
 import functools
 import math
+import threading
 
 
 CAPTURE_SECONDS = 30.0
@@ -16,17 +17,78 @@ CAPTURE_COOLDOWN_SECONDS = 30.0
 MAX_CAPTURES = 3
 MAX_QUEUE_IDENTITIES = 1024
 MAX_WAIT_SAMPLES = 512
+MAX_ACTOR_SLICES = 128
+MAX_CAPTURE_ACTORS = 64
+MAX_FRAME_ACTORS_REPORTED = 6
+MAX_GEOMETRY_KEYS = 2048
+
+# Only synchronous, instrumented Python calls bind this observer. No native
+# hook, entity, scheduled callback or process-global simulation state is owned.
+_observer = threading.local()
+
+
+def current():
+    diagnostic = getattr(_observer, 'current', None)
+    return (diagnostic if diagnostic is not None and diagnostic.active and
+            diagnostic.detail_active else None)
+
+
+def count(name, value=1):
+    diagnostic = current()
+    if diagnostic is not None:
+        diagnostic.count(name, value)
+
+
+def observed_call(stage, function, *args, **kwargs):
+    diagnostic = current()
+    if diagnostic is None:
+        return function(*args, **kwargs)
+    return _invoke(diagnostic, stage, function, args, kwargs)
+
+
+def observed_ray(stage, function, space, start, end, *args):
+    diagnostic = current()
+    if diagnostic is None:
+        return function(space, start, end, *args)
+    try:
+        diagnostic.geometry(stage, (
+            space, (start.x, start.y, start.z), (end.x, end.y, end.z)))
+    except Exception:
+        diagnostic.count('ray_geometry_unavailable')
+    return _invoke(diagnostic, stage, function, (space, start, end) + args, {})
+
+
+def observed(stage):
+    """Observe a pure helper only inside its synchronous worker owner."""
+    def decorate(function):
+        @functools.wraps(function)
+        def measured(*args, **kwargs):
+            diagnostic = current()
+            if diagnostic is None:
+                return function(*args, **kwargs)
+            return _invoke(diagnostic, stage, function, args, kwargs)
+        return measured
+    return decorate
+
+
+def _invoke(diagnostic, stage, function, args, kwargs):
+    previous = getattr(_observer, 'current', None)
+    _observer.current = diagnostic
+    token = diagnostic.start()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        try:
+            diagnostic.stop(stage, token)
+        finally:
+            _observer.current = previous
 
 
 def call(diagnostic, stage, function, *args, **kwargs):
     """Measure an injected adapter without changing its callable identity."""
     if diagnostic is None or not diagnostic.active:
         return function(*args, **kwargs)
-    token = diagnostic.start()
-    try:
-        return function(*args, **kwargs)
-    finally:
-        diagnostic.stop(stage, token)
+    return _invoke(diagnostic, stage, function, args, kwargs)
 
 
 def timed(stage):
@@ -37,30 +99,29 @@ def timed(stage):
             diagnostic = getattr(self, '_combat_diagnostics', None)
             if diagnostic is None or not diagnostic.active:
                 return method(self, *args, **kwargs)
-            token = diagnostic.start()
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                diagnostic.stop(stage, token)
+            return _invoke(diagnostic, stage, method, (self,) + args, kwargs)
         return measured
     return decorate
 
 
 class WorkerCombatDiagnostics(object):
-    """Capture three combat windows without retaining entities or poses."""
+    """Capture three combat windows without retaining native objects."""
 
     def __init__(self, clock, capture_seconds=CAPTURE_SECONDS,
                  cooldown_seconds=CAPTURE_COOLDOWN_SECONDS,
-                 maximum_captures=MAX_CAPTURES):
+                 maximum_captures=MAX_CAPTURES, detail_stride=1):
         self.clock = clock
         self.capture_seconds = float(capture_seconds)
         self.cooldown_seconds = float(cooldown_seconds)
         self.maximum_captures = int(maximum_captures)
+        self.detail_stride = max(1, int(detail_stride))
         self.reset()
 
     def reset(self):
         self.enabled = True
         self.active = False
+        self.detail_active = False
+        self._detail_ticks = 0
         self.capture = 0
         self._deadline = None
         self._next_capture = 0.0
@@ -87,6 +148,22 @@ class WorkerCombatDiagnostics(object):
         self._capture_wait_count = 0
         self._capture_selected_wait_count = 0
         self._completed = []
+        self._capture_actors = {}
+        self._capture_detail_stages = {}
+        self._capture_detail_counts = {}
+        self._capture_detail_frames = 0
+        self._reset_actor_frame()
+
+    def _reset_actor_frame(self):
+        self._actor_key = None
+        self._actor_token = None
+        self._phase_token = None
+        self._phase_name = None
+        self._actors = {}
+        self._slices = []
+        self._slice = 0
+        self._control_selected = False
+        self._geometry = set()
 
     def _fail(self):
         self.enabled = False
@@ -94,6 +171,89 @@ class WorkerCombatDiagnostics(object):
         self._stack = []
         self._queue.clear()
         self._receipts.clear()
+        self._reset_actor_frame()
+
+    def begin_control(self):
+        if not self.active or self._control_selected:
+            return
+        # Sample complete control callbacks, never every N render frames:
+        # render/modulo sampling can alias the 10 Hz control cadence and miss
+        # every Bot update. Rotate the selected slot within each group so
+        # slower decision cadences do not always select the same Bot cohort.
+        # All catch-up slices keep this decision.
+        self._control_selected = True
+        self._detail_ticks += 1
+        tick = self._detail_ticks - 1
+        self.detail_active = (tick % self.detail_stride ==
+                              (tick // self.detail_stride) % self.detail_stride)
+
+    def begin_slice(self, elapsed, refresh_control, publish):
+        if not self.active:
+            return
+        self.actor(None)
+        self.begin_control()
+        self._slice += 1
+        if len(self._slices) < MAX_ACTOR_SLICES:
+            self._slices.append({
+                'slice': self._slice, 'elapsed_ms': round(elapsed * 1000.0, 3),
+                'control': bool(refresh_control),
+                'publish_requested': bool(publish),
+                'detail': self.detail_active,
+            })
+
+    def actor(self, bot_id):
+        """Attribute a synchronous Bot work block, including its residual time.
+
+        Explicitly close between roster loops. The enclosing timed scope also
+        closes its unfinished actor on exception, before unwinding itself.
+        """
+        if not self.active or not self.detail_active:
+            return
+        self.phase(None)
+        token = self._actor_token
+        self._actor_token = None
+        if token is not None:
+            self.stop('bot.actor', token)
+        self._actor_key = None
+        if bot_id is None or not self.active:
+            return
+        key = (self._slice, int(bot_id))
+        if key not in self._actors:
+            if len(self._actors) >= MAX_ACTOR_SLICES:
+                self.count('actor_tracking_overflow')
+                return
+            self._actors[key] = {'stages': {}, 'counts': {}}
+        self._actor_key = key
+        self._actor_token = self.start()
+
+    def phase(self, name):
+        """Partition inline Bot work without moving simulation statements."""
+        if not self.active or not self.detail_active:
+            return
+        token, previous_name = self._phase_token, self._phase_name
+        self._phase_token = None
+        self._phase_name = None
+        if token is not None:
+            self.stop(previous_name, token)
+        if name is not None and self._actor_key is not None and self.active:
+            self._phase_name = name
+            self._phase_token = self.start()
+
+    def geometry(self, name, key):
+        """Count repeated geometry, without asserting unchanged world state."""
+        if not self.active:
+            return
+        self.count(name + '_queries')
+        try:
+            signature = (self._slice, self._actor_key, name, key)
+            if signature in self._geometry:
+                self.count(name + '_same_geometry_in_slice')
+            elif len(self._geometry) < MAX_GEOMETRY_KEYS:
+                self._geometry.add(signature)
+            else:
+                self.count('geometry_tracking_overflow')
+        except Exception:
+            self.count('geometry_tracking_unavailable')
 
     @staticmethod
     def _finite(value):
@@ -129,15 +289,21 @@ class WorkerCombatDiagnostics(object):
                 self._capture_wait_count = 0
                 self._capture_selected_wait_count = 0
                 self._receipts.clear()
+                self._capture_actors = {}
+                self._capture_detail_stages = {}
+                self._capture_detail_counts = {}
+                self._capture_detail_frames = 0
             self._frame = int(frame)
             self._now = now
             self.active = self._deadline is not None
+            self.detail_active = self.active and self.detail_stride == 1
             self._stack = []
             self._stages = {}
             self._counts = {}
             self._waits = []
             self._selected_waits = []
             self._queue_snapshot = {}
+            self._reset_actor_frame()
             return self.active
         except Exception:
             self._fail()
@@ -147,7 +313,7 @@ class WorkerCombatDiagnostics(object):
         if not self.active:
             return None
         try:
-            token = [self._finite(self.clock()), 0.0]
+            token = [self._finite(self.clock()), 0.0, self._actor_key]
             self._stack.append(token)
             return token
         except Exception:
@@ -161,23 +327,47 @@ class WorkerCombatDiagnostics(object):
         if token is None or not self.active:
             return
         try:
+            if (self._phase_token is not None and len(self._stack) >= 3 and
+                    self._stack[-1] is self._phase_token and
+                    self._stack[-2] is self._actor_token and
+                    self._stack[-3] is token):
+                self.actor(None)
+                if not self.active:
+                    return
+            if (self._actor_token is not None and len(self._stack) >= 2 and
+                    self._stack[-1] is self._actor_token and
+                    self._stack[-2] is token):
+                self.actor(None)
+                if not self.active:
+                    return
             elapsed = max(0.0, self._finite(self.clock()) - token[0])
             if not self._stack or self._stack[-1] is not token:
                 raise ValueError('diagnostic scope ownership changed')
             self._stack.pop()
             if self._stack:
                 self._stack[-1][1] += elapsed
-            row = self._stages.setdefault(stage, [0, 0.0, 0.0, 0.0])
-            row[0] += 1
-            row[1] += elapsed
-            row[2] += max(0.0, elapsed - token[1])
-            row[3] = max(row[3], elapsed)
+            own = max(0.0, elapsed - token[1])
+            self._add_stage(self._stages, stage, elapsed, own)
+            if token[2] in self._actors:
+                self._add_stage(
+                    self._actors[token[2]]['stages'], stage, elapsed, own)
         except Exception:
             self._fail()
 
     def count(self, name, value=1):
         if self.active:
             self._counts[name] = self._counts.get(name, 0) + int(value)
+            if self._actor_key in self._actors:
+                counts = self._actors[self._actor_key]['counts']
+                counts[name] = counts.get(name, 0) + int(value)
+
+    @staticmethod
+    def _add_stage(stages, name, elapsed, own):
+        row = stages.setdefault(name, [0, 0.0, 0.0, 0.0])
+        row[0] += 1
+        row[1] += elapsed
+        row[2] += own
+        row[3] = max(row[3], elapsed)
 
     def queue_added(self, key, now, ready_at):
         """Keep enqueue times outside captures so waits are not truncated."""
@@ -321,6 +511,11 @@ class WorkerCombatDiagnostics(object):
                 'frame': self._frame, 'authority_time': self._now,
                 'stages': self._stage_rows(self._stages),
                 'counts': dict(self._counts),
+                'slices': list(self._slices),
+                'actors_tracked': len(self._actors),
+                'detail_sampled': self.detail_active,
+                'actors': self._actor_rows(
+                    self._actors, MAX_FRAME_ACTORS_REPORTED),
                 'queue': dict(self._queue_snapshot),
                 'completed_wait': self._wait_summary(self._waits),
                 'selected_completed_wait': self._wait_summary(
@@ -335,6 +530,32 @@ class WorkerCombatDiagnostics(object):
             for name, count in self._counts.items():
                 self._capture_counts[name] = (
                     self._capture_counts.get(name, 0) + count)
+            if self.detail_active:
+                self._capture_detail_frames += 1
+                for name, row in self._stages.items():
+                    total = self._capture_detail_stages.setdefault(
+                        name, [0, 0.0, 0.0, 0.0])
+                    for index in (0, 1, 2):
+                        total[index] += row[index]
+                    total[3] = max(total[3], row[3])
+                for name, count in self._counts.items():
+                    self._capture_detail_counts[name] = (
+                        self._capture_detail_counts.get(name, 0) + count)
+            for (unused_slice, bot_id), actor in self._actors.items():
+                key = (0, bot_id)
+                if key not in self._capture_actors:
+                    if len(self._capture_actors) >= MAX_CAPTURE_ACTORS:
+                        continue
+                    self._capture_actors[key] = {'stages': {}, 'counts': {}}
+                total = self._capture_actors[key]
+                for name, row in actor['stages'].items():
+                    summed = total['stages'].setdefault(
+                        name, [0, 0.0, 0.0, 0.0])
+                    for index in (0, 1, 2):
+                        summed[index] += row[index]
+                    summed[3] = max(summed[3], row[3])
+                for name, count in actor['counts'].items():
+                    total['counts'][name] = total['counts'].get(name, 0) + count
             for name, value in self._queue_snapshot.items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     self._capture_queue_maxima[name] = max(
@@ -351,6 +572,16 @@ class WorkerCombatDiagnostics(object):
             self._fail()
             return None
 
+    def _actor_rows(self, actors, limit=None):
+        ordered = sorted(actors.items(), key=lambda item: (
+            -item[1]['stages'].get('bot.actor', (0, 0.0))[1], item[0]))
+        if limit is not None:
+            ordered = ordered[:limit]
+        return [{'slice': key[0], 'bot': key[1],
+                 'stages': self._stage_rows(row['stages']),
+                 'counts': dict(row['counts'])}
+                for key, row in ordered]
+
     def _complete_capture(self, reason):
         self._completed.append({
             'capture': self.capture, 'trigger': self._reason,
@@ -360,6 +591,14 @@ class WorkerCombatDiagnostics(object):
             'frames': self._capture_frames,
             'stages': self._stage_rows(self._capture_totals),
             'counts': dict(self._capture_counts),
+            'actors': self._actor_rows(self._capture_actors),
+            'detail': {
+                'stride': self.detail_stride,
+                'selection': 'rotating_control_slot',
+                'frames': self._capture_detail_frames,
+                'stages': self._stage_rows(self._capture_detail_stages),
+                'counts': dict(self._capture_detail_counts),
+            },
             'queue_maxima': dict(self._capture_queue_maxima),
             'completed_wait': self._wait_summary(
                 self._capture_waits, self._capture_wait_count),
@@ -381,3 +620,4 @@ class WorkerCombatDiagnostics(object):
         self._stack = []
         self._queue.clear()
         self._receipts.clear()
+        self._reset_actor_frame()

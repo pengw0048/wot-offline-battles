@@ -3853,7 +3853,9 @@ class BotRuntimeTests(unittest.TestCase):
                 if mode == 'broken':
                     raise RuntimeError('diagnostic clock failed')
                 return reads[0] * 0.000001
-            diagnostic = WorkerCombatDiagnostics(clock) if mode else None
+            diagnostic = (WorkerCombatDiagnostics(
+                clock, detail_stride=4 if mode == 'sampled' else 1)
+                          if mode else None)
             queries = []
             def lane(source, target):
                 queries.append(('lane', source['id'], target['network_id']))
@@ -3906,9 +3908,14 @@ class BotRuntimeTests(unittest.TestCase):
 
         baseline, unused = exercise(None)
         measured, traces = exercise('active')
+        sampled, sampled_traces = exercise('sampled')
         failed, unused = exercise('broken')
         self.assertEqual(baseline, measured)
+        self.assertEqual(baseline, sampled)
         self.assertEqual(baseline, failed)
+        detailed_frames = sum(row['detail_sampled'] for row in sampled_traces)
+        self.assertGreater(detailed_frames, 0)
+        self.assertLess(detailed_frames, len(sampled_traces))
         stages = set(name for row in traces for name in row['stages'])
         self.assertTrue({'bot.slice', 'bot.targets', 'bot.lane_service',
                          'bot.probe.lane'}.issubset(stages))

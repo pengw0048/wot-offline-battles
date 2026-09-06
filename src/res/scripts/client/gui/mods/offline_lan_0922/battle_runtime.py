@@ -1874,7 +1874,7 @@ class BattleRuntime(object):
         self._config = dict(config or {})
         self._worker_mode = bool(self._config.get('worker_mode', False))
         self._combat_diagnostics = (
-            WorkerCombatDiagnostics(_PROFILE_CLOCK)
+            WorkerCombatDiagnostics(_PROFILE_CLOCK, detail_stride=4)
             if self._worker_mode and PERFORMANCE_DIAGNOSTICS else None)
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False
@@ -17203,6 +17203,7 @@ class BattleRuntime(object):
                             descriptor, dt, now, commit_enabled=True,
                             motion_yaw=None):
         """Resolve Bot contact: static world first, then exact catalog."""
+        diagnostic = getattr(self, '_combat_diagnostics', None)
         pos = self._vector(position)
         bot_state = getattr(self._bots, 'states', {}).get(int(bot_id), {})
         airborne = bool(bot_state.get('airborne', False))
@@ -17233,7 +17234,17 @@ class BattleRuntime(object):
                 not self._destructibles._catalog_hull_contact(
                     pos, yaw, speed, descriptor, dt,
                     **destructible_motion)):
+            if diagnostic is not None:
+                diagnostic.count('motion_world_reused')
             return 'clear'
+        if diagnostic is not None:
+            diagnostic.count('motion_world_fallback')
+            if airborne:
+                diagnostic.count('motion_world_airborne')
+            elif movement_dir * float(speed) <= 0.0:
+                diagnostic.count('motion_world_coast_or_reverse')
+            elif rotation_dir != 0 or abs(turn_speed) > 0.01:
+                diagnostic.count('motion_world_turning')
         allow_crush_drive = (
             not airborne and
             movement_dir * float(speed) > 0.0)
