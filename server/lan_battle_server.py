@@ -83,6 +83,11 @@ BOT_PLANNER_INTERVAL_TICKS = max(1, int(round(TICK_HZ)))
 BOT_CHAT_INTERVAL_TICKS = max(1, int(round(TICK_HZ / 2.0)))
 # A Bot reports its own damage once per round, below this fraction.
 BOT_CHAT_LOW_HEALTH_FRACTION = 0.3
+# The commands a Bot may agree to in chat. Each is a stock order the server
+# already admits from a player, so agreeing creates no new authority: it
+# creates the order the player could have sent with the command wheel.
+BOT_CHAT_ORDER_COMMANDS = frozenset((
+    "ATTENTIONTOCELL", "BACKTOBASE", "FOLLOWME", "STOP"))
 # The optional local chat model.  The launcher installs both halves and names
 # them here; with either missing the feature is simply off and Bots are quiet.
 BOT_CHAT_RUNTIME_ENV = "WOT_BOT_CHAT_RUNTIME"
@@ -4856,6 +4861,10 @@ class BattleState:
         return message
 
     def _publish_team_command_terminal(self, issuer, command, code):
+        if command.get("from_chat"):
+            # Nobody sent a request for this order, so there is nothing to
+            # close and no sequence the client would accept.
+            return
         if issuer is not None and issuer.connected:
             issuer.offer_reliable(self._team_command_terminal(command, code))
 
@@ -5449,6 +5458,7 @@ class BattleState:
         """Describe the human who just spoke, including what they can see."""
         spotted = self.player_spotted.get(int(player.player_id), frozenset())
         return {
+            "player_id": int(player.player_id),
             "name": str(player.name),
             "x": float(player.x),
             "z": float(player.z),
@@ -5562,6 +5572,95 @@ class BattleState:
             "text": text,
         }
 
+    def _admit_bot_chat_order_locked(self, line):
+        """Admit one Bot's agreement as an ordinary team order.
+
+        The Bot is agreeing to something a player asked, so the player is the
+        issuer and the Bot is the only recipient. That keeps the existing
+        order lifecycle: the order expires with its TTL, and lapses if the
+        player who asked leaves, dies, or changes team, exactly as a command
+        from the wheel does.
+        """
+        order = line.get("order")
+        if (not isinstance(order, dict) or self.battle_result is not None or
+                not self._combat_accepting()):
+            return None
+        command = str(order.get("command") or "")
+        if command not in BOT_CHAT_ORDER_COMMANDS:
+            return None
+        team = int(line["team"])
+        bot_id = int(line["bot_id"])
+        try:
+            issuer_id = _exact_int(order.get("asked_by"), 1,
+                                   PROJECTILE_MAX_ID)
+        except ValueError:
+            return None
+        player = self.players.get(issuer_id)
+        if (player is None or not player.connected or
+                not player.participating or not player.alive or
+                int(player.team) != team):
+            return None
+        bot = next((row for row in self._team_command_bots_locked(team)
+                    if row["id"] == bot_id), None)
+        if bot is None:
+            return None
+        current_orders = dict(
+            (int(row.get("id")), row)
+            for row in self.bot_orders.get("orders", ())
+            if isinstance(row, dict) and isinstance(row.get("id"), int))
+        if not self._team_command_bot_can_respond(
+                bot, current_orders.get(bot_id), command):
+            return None
+        cell_index = None
+        # The same gates a player's command passes. A Bot cannot agree its
+        # way past a missing base, an unknown arena, or a dead issuer.
+        if command == "BACKTOBASE":
+            if not self._sanitize_capture_bases(self.capture_bases).get(team):
+                return None
+        elif command == "FOLLOWME":
+            if not self._team_command_player_has_world_pose(player):
+                return None
+        elif command == "ATTENTIONTOCELL":
+            if self._bot_defense_context()["arena_bounds"] is None:
+                return None
+            try:
+                cell_index = _exact_int(order.get("cell_index"), 0, 99)
+            except ValueError:
+                return None
+            if cell_index is None:
+                return None
+        ttl = (TEAM_COMMAND_MOVEMENT_TTL_TICKS
+               if command in TEAM_COMMAND_MOVEMENT else TEAM_COMMAND_TTL_TICKS)
+        command_id = "chat:%d:%d:%d" % (self.round_id, bot_id, self.tick)
+        admitted = {
+            "command_id": command_id,
+            "command_seq": 0,
+            "round_id": int(self.round_id),
+            "command": command,
+            "team": team,
+            "issuer_id": int(issuer_id),
+            "issued_tick": int(self.tick),
+            "expires_tick": int(self.tick + ttl),
+            "recipient_bot_ids": [bot_id],
+            # The chat line is the acknowledgement, so this order has no
+            # request to close and publishes no stock terminal. Its
+            # ``command_seq`` is not a player sequence and the client would
+            # rightly refuse it.
+            "from_chat": True,
+        }
+        if cell_index is not None:
+            admitted["cell_index"] = int(cell_index)
+        self.team_commands[command_id] = admitted
+        while len(self.team_commands) > TEAM_COMMAND_HISTORY:
+            unused_id, retired = self.team_commands.popitem(last=False)
+            self._publish_team_command_terminal(
+                self.players.get(retired["issuer_id"]), retired, "superseded")
+        self._next_bot_planner_tick = min(
+            self._next_bot_planner_tick, self.tick)
+        _server_log("BOT CHAT order bot=%d command=%s issuer=%d" % (
+            bot_id, command, issuer_id))
+        return command_id
+
     def publish_bot_team_chat(self):
         """Publish the Bot lines this tick has due, at a bounded cadence."""
         with self.lock:
@@ -5581,6 +5680,9 @@ class BattleState:
                 message = self._bot_team_chat_message_locked(line)
                 if message is None:
                     continue
+                # The line is the acknowledgement, so the order is admitted
+                # only once the line itself is publishable.
+                self._admit_bot_chat_order_locked(line)
                 deliveries.append((message, tuple(
                     player for player in self.players.values()
                     if player.connected and player.participating and

@@ -20,6 +20,7 @@ healthy.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -29,10 +30,11 @@ import urllib.error
 import urllib.request
 
 from bot_chat import (
-    PERSONA_MECHANIC, PERSONA_PLAIN, PERSONA_POETIC, PERSONA_SCOUT,
-    PERSONA_SLACKER, PERSONA_TACTICAL, TRIGGER_ALLY_DOWN, TRIGGER_DOWN,
-    TRIGGER_HOP, TRIGGER_KILL, TRIGGER_LOW_HEALTH, TRIGGER_REPLY,
-    clamp_chat_text,
+    MARKER_FOR_REQUEST, PERSONA_MECHANIC, PERSONA_PLAIN, PERSONA_POETIC,
+    PERSONA_SCOUT, PERSONA_SLACKER, PERSONA_TACTICAL, REQUEST_BASE,
+    REQUEST_CELL, REQUEST_FOLLOW, REQUEST_HOLD, TRIGGER_ALLY_DOWN,
+    TRIGGER_DOWN, TRIGGER_HOP, TRIGGER_KILL, TRIGGER_LOW_HEALTH,
+    TRIGGER_REPLY, clamp_chat_text,
 )
 
 
@@ -53,6 +55,9 @@ STOP_SEQUENCES = ("<|im_end|>", "<|endoftext|>", "\n")
 # runtime offers.  Each is a no-op for a template that has no thinking mode.
 REASONING_BUDGET = "0"
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
+# A bracketed run of Latin characters, which is what a mistyped marker
+# leaves behind. Chinese chat does not use ASCII brackets.
+_LEFTOVER_MARKER = re.compile(r"\[[\x20-\x7e]{0,16}\]")
 PENDING_LIMIT = 24
 RESULT_LIMIT = 48
 
@@ -63,6 +68,14 @@ PERSONA_STYLE = {
     PERSONA_SCOUT: "谨慎、爱报点、先看再动",
     PERSONA_POETIC: "话少，偶尔带一点文气，但不掉书袋",
     PERSONA_PLAIN: "普通队友，平实直接",
+}
+
+# What a Bot is being asked to do, in the words the prompt uses.
+ASK_TEXT = {
+    REQUEST_CELL: "去 %s 这个格子",
+    REQUEST_BASE: "回自己家防守",
+    REQUEST_FOLLOW: "跟着他走",
+    REQUEST_HOLD: "停在原地别动",
 }
 
 TRIGGER_TASK = {
@@ -256,10 +269,39 @@ def build_messages(request):
     prefix = request.get("address_prefix")
     if prefix:
         lines.append("刚才是 %s 在叫你。" % prefix)
+    lines.extend(_agreement_lines(request))
     lines.append("只回一句话：")
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(lines)},
+    ]
+
+
+def _agreement_lines(request):
+    """Offer the marker, only when something was actually asked.
+
+    The marker is how a Bot agrees, and it is deliberately not JSON: a small
+    model copies a fixed token far more reliably than it produces a valid
+    object, and because the line and the marker come from one generation,
+    what a Bot says and what it does cannot disagree.
+    """
+    ask = request.get("ask")
+    if not ask:
+        return []
+    kind = ask.get("request")
+    described = ASK_TEXT.get(kind)
+    if described is None:
+        return []
+    if kind == REQUEST_CELL:
+        described = described % ask.get("cell", "")
+        marker = MARKER_FOR_REQUEST[kind] % ask.get("cell", "")
+    else:
+        marker = MARKER_FOR_REQUEST[kind]
+    return [
+        "队友在请你%s。" % described,
+        "如果你答应，就在这句话的最末尾原样加上 %s，一个字都不要改。"
+        % marker,
+        "如果你不想去，就正常说一句话，不要加这个标记。",
     ]
 
 
@@ -429,6 +471,10 @@ def sanitize_line(text):
     for quote in ('"', "'", "“", "”", "「", "」", "『", "』"):
         cleaned = cleaned.strip(quote)
     cleaned = cleaned.strip()
+    # The agreement marker has already been taken out by this point. A
+    # bracketed run of Latin text left here is a marker the model got wrong,
+    # and it is punctuation to a reader rather than speech.
+    cleaned = _LEFTOVER_MARKER.sub(" ", cleaned).strip()
     # ``名字：内容`` is the single most common instruct-model slip here.
     for separator in ("：", ":"):
         head, sep, tail = cleaned.partition(separator)

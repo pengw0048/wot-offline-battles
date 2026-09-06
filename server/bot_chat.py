@@ -124,12 +124,106 @@ ADDRESS_VEHICLE = "vehicle"
 ADDRESS_CLASS = "class"
 ADDRESS_CELL = "cell"
 
+# What a human line is asking a teammate to do, when it asks anything.
+# Each maps onto a stock command the server already admits and validates, so
+# an agreeing Bot produces an ordinary order rather than a new authority.
+REQUEST_CELL = "cell"
+REQUEST_BASE = "base"
+REQUEST_FOLLOW = "follow"
+REQUEST_HOLD = "hold"
+
+REQUEST_COMMANDS = {
+    REQUEST_CELL: "ATTENTIONTOCELL",
+    REQUEST_BASE: "BACKTOBASE",
+    REQUEST_FOLLOW: "FOLLOWME",
+    REQUEST_HOLD: "STOP",
+}
+
+# A Bot agrees by ending its line with one of these.  A marker is cheaper and
+# far more reliable from a small model than a JSON object, and because the
+# line and the marker come from one generation, what a Bot says and what it
+# does cannot disagree.
+MARKER_PATTERN = re.compile(r"\[(GO:([A-Ja-j])(10|[1-9])|BASE|FOLLOW|HOLD)\]")
+MARKER_FOR_REQUEST = {
+    REQUEST_CELL: "[GO:%s]",
+    REQUEST_BASE: "[BASE]",
+    REQUEST_FOLLOW: "[FOLLOW]",
+    REQUEST_HOLD: "[HOLD]",
+}
+
+REQUEST_KEYWORDS = (
+    (REQUEST_BASE, ("回家", "回防", "守家", "救家", "防守", "回来守",
+                    "拦一下", "back to base", "defend")),
+    (REQUEST_FOLLOW, ("跟着我", "跟我", "跟上", "掩护我", "follow me")),
+    (REQUEST_HOLD, ("别动", "原地", "停一下", "别走", "hold", "stop")),
+)
+
 TRIGGER_REPLY = "reply"
 TRIGGER_HOP = "hop"
 TRIGGER_KILL = "kill"
 TRIGGER_DOWN = "down"
 TRIGGER_ALLY_DOWN = "ally_down"
 TRIGGER_LOW_HEALTH = "low_health"
+
+
+def parse_marker(text):
+    """Split one generated line into its publishable text and its marker.
+
+    The marker is an agreement, not speech, so it never reaches the chat
+    window. Anything the model wrote that is not a marker is left alone.
+    """
+    if not isinstance(text, str):
+        return text, None
+    match = MARKER_PATTERN.search(text)
+    if match is None:
+        return text, None
+    body = match.group(1)
+    if body.upper().startswith("GO:"):
+        marker = {"request": REQUEST_CELL,
+                  "cell_index": _cell_index_from(match.group(2),
+                                                 match.group(3))}
+    elif body.upper() == "BASE":
+        marker = {"request": REQUEST_BASE}
+    elif body.upper() == "FOLLOW":
+        marker = {"request": REQUEST_FOLLOW}
+    else:
+        marker = {"request": REQUEST_HOLD}
+    marker["command"] = REQUEST_COMMANDS[marker["request"]]
+    cleaned = (text[:match.start()] + " " + text[match.end():]).strip()
+    return cleaned, marker
+
+
+def _cell_index_from(letter, number):
+    """Return the stock 10x10 minimap index for one grid reference."""
+    column = ord(letter.lower()) - ord("a")
+    row = int(number) - 1
+    if not 0 <= column <= 9 or not 0 <= row <= 9:
+        return None
+    return row * 10 + column
+
+
+def read_request(text):
+    """Return what one human line asks a teammate to do, or None.
+
+    This is deliberately deterministic and narrow. It decides only whether a
+    Bot is even offered the chance to agree; the model still decides whether
+    it does.
+    """
+    folded = fold_text(text)
+    for request, keywords in REQUEST_KEYWORDS:
+        if any(keyword in folded for keyword in keywords):
+            return {"request": request,
+                    "command": REQUEST_COMMANDS[request]}
+    match = _CELL_PATTERN.search(folded)
+    if match is not None:
+        index = _cell_index_from(match.group(1), match.group(2))
+        if index is not None:
+            return {"request": REQUEST_CELL,
+                    "command": REQUEST_COMMANDS[REQUEST_CELL],
+                    "cell_index": index,
+                    "cell": "%s%s" % (match.group(1).upper(),
+                                      match.group(2))}
+    return None
 
 
 def fold_text(value):
@@ -410,6 +504,8 @@ class BotChatDirector(object):
         team = int(team)
         if self._backend is None:
             return {"kind": ADDRESS_NONE, "bot_ids": []}
+        ask = read_request(text)
+        asked_by = (snapshot.get("speaker") or {}).get("player_id")
         address = self.resolve_address(text, team, snapshot)
         self._remember(team, snapshot.get("speaker", {}).get("name"), text)
         if address["kind"] in (ADDRESS_CALLSIGN, ADDRESS_VEHICLE,
@@ -428,7 +524,8 @@ class BotChatDirector(object):
                                else SECOND_SPEAKER_PROBABILITY)
                 if self._rng.random() <= probability:
                     self._schedule(tick, bot_id, team, TRIGGER_REPLY,
-                                   address["kind"], snapshot)
+                                   address["kind"], snapshot, ask=ask,
+                                   asked_by=asked_by)
             return address
         # Nobody was named.  Peng's choice is that an open remark usually
         # still gets an answer, and an interesting one may get two.
@@ -439,10 +536,11 @@ class BotChatDirector(object):
         if not pool:
             return address
         self._schedule(tick, pool[0]["id"], team, TRIGGER_REPLY,
-                       ADDRESS_NONE, snapshot)
+                       ADDRESS_NONE, snapshot, ask=ask, asked_by=asked_by)
         if len(pool) > 1 and self._rng.random() < SECOND_SPEAKER_PROBABILITY:
             self._schedule(tick, pool[1]["id"], team, TRIGGER_REPLY,
-                           ADDRESS_NONE, snapshot)
+                           ADDRESS_NONE, snapshot, ask=ask,
+                           asked_by=asked_by)
         return address
 
     @staticmethod
@@ -477,11 +575,17 @@ class BotChatDirector(object):
         self._schedule(tick, bot_id, team, trigger, ADDRESS_NONE, snapshot)
         return True
 
-    def _build_request(self, bot, team, trigger, address_kind, snapshot):
+    def _build_request(self, bot, team, trigger, address_kind, snapshot,
+                       ask=None, asked_by=None):
         """Describe one line completely enough for any backend to write it."""
         self._request_seq += 1
         return {
             "request_id": self._request_seq,
+            # Only a direct answer to a request may agree to it. A Bot
+            # answering another Bot, or reacting to a kill, has nothing to
+            # agree to and is never offered the marker.
+            "ask": dict(ask) if (ask and trigger == TRIGGER_REPLY) else None,
+            "asked_by": asked_by if trigger == TRIGGER_REPLY else None,
             "trigger": trigger,
             "persona": self.persona(bot["id"], bot.get("name")),
             "address_kind": address_kind,
@@ -495,7 +599,7 @@ class BotChatDirector(object):
         }
 
     def _schedule(self, tick, bot_id, team, trigger, address_kind, snapshot,
-                  hop=0):
+                  hop=0, ask=None, asked_by=None):
         bot = self._find_bot(bot_id, snapshot)
         if bot is None:
             return
@@ -505,7 +609,7 @@ class BotChatDirector(object):
                                  REPLY_DELAY_MAX_SECONDS))
         delay = self._rng.uniform(delay_min, delay_max)
         request = self._build_request(bot, team, trigger, address_kind,
-                                      snapshot)
+                                      snapshot, ask, asked_by)
         # Hand a generating backend the work now, and hold the line back long
         # enough for it to finish.  ``rng`` is deliberately not shared across
         # a thread boundary: a backend copies what it needs.
@@ -575,9 +679,13 @@ class BotChatDirector(object):
             # A backend failure is contained to this one line.  It must never
             # silence the team for the rest of the round or fault the tick.
             return None
+        text, marker = parse_marker(text)
         text = clamp_chat_text(text)
         if text is None:
             return None
+        if marker is not None and not request.get("ask"):
+            # Nothing was asked, so there is nothing to agree to.
+            marker = None
         if any(text == record["text"]
                for record in list(self._recent.get(team, ()))[-3:]):
             return None
@@ -587,7 +695,30 @@ class BotChatDirector(object):
         self._team_last_line[team] = tick
         self._advance_thread(team, bot["id"], tick)
         self._maybe_hop(tick, entry, snapshot)
-        return {"bot_id": bot["id"], "team": team, "text": text}
+        line = {"bot_id": bot["id"], "team": team, "text": text}
+        if marker is not None:
+            line["order"] = self._order_from(marker, request)
+        return line
+
+    @staticmethod
+    def _order_from(marker, request):
+        """Turn one agreement into the order fields the server admits.
+
+        A Bot may only agree to what was actually asked. It cannot invent a
+        different destination, and a cell it names must be the cell in the
+        request, so a misread marker becomes no order rather than a wrong one.
+        """
+        ask = request.get("ask") or {}
+        if marker["request"] != ask.get("request"):
+            return None
+        order = {"command": marker["command"],
+                 "asked_by": request.get("asked_by")}
+        if marker["request"] == REQUEST_CELL:
+            index = marker.get("cell_index")
+            if index is None or index != ask.get("cell_index"):
+                return None
+            order["cell_index"] = int(index)
+        return order
 
     def _address_prefix(self, address_kind, snapshot):
         """Name the human back only when they named a Bot first."""
