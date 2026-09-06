@@ -4626,10 +4626,12 @@ class BotRuntime(object):
         targets = []
         for state in live_bots:
             targets.append(('bot', int(state['id']),
-                            int(state.get('team', 0)), state))
+                            int(state.get('team', 0)),
+                            self._visibility_fire_sequence(state)))
         for raw in live_humans:
             targets.append(('human', int(raw['id']),
-                            int(raw.get('team', 0)), raw))
+                            int(raw.get('team', 0)),
+                            self._visibility_fire_sequence(raw)))
         sources = []
         for state in live_bots:
             sources.append((
@@ -4647,12 +4649,11 @@ class BotRuntime(object):
              source_eligible) in sources:
             if source_team not in (1, 2):
                 continue
-            for target_kind, target_id, target_team, target in targets:
+            for target_kind, target_id, target_team, fire_seq in targets:
                 if target_team == source_team or target_team not in (1, 2):
                     continue
                 key = (source_kind, source_id, target_kind, target_id)
                 cached = self._visibility_cache.get(key)
-                fire_seq = self._visibility_fire_sequence(target)
                 new_pair = cached is None
                 fire_edge = bool(
                     cached is not None and cached[2] != fire_seq)
@@ -4992,14 +4993,24 @@ class BotRuntime(object):
 
     @staticmethod
     def _copy_target_fields(raw, names):
-        return dict((name, raw[name]) for name in names if name in raw)
+        return {name: raw[name] for name in names if name in raw}
 
     @staticmethod
-    def _target_pose_snapshot(target):
+    def _target_pose_snapshot(target, cache=None):
+        # Only slice-scoped observation templates and refreshed probe targets
+        # may share this cache. Their pose is stable until the target's next
+        # motion phase, which owns a different record. Keep the record alive
+        # alongside its projection so identity cannot be recycled in a slice.
+        if cache is not None:
+            cached = cache.get(id(target))
+            if cached is not None:
+                return cached[1]
         remembered = BotRuntime._copy_target_fields(target, _TARGET_POSE_FIELDS)
         remembered['position'] = _position(target)
         for name in ('x', 'y', 'z', 'yaw', 'speed'):
             remembered.setdefault(name, 0.0)
+        if cache is not None:
+            cache[id(target)] = (target, remembered)
         return remembered
 
     def _human_observation_target(
@@ -5050,6 +5061,9 @@ class BotRuntime(object):
             self, players, now, aggregate, team_visibility,
             visibility_tick=None):
         """Merge trusted human direct observers into the contact batch."""
+        pose_cache = (
+            visibility_tick.setdefault('target_pose_snapshots', {})
+            if isinstance(visibility_tick, dict) else None)
         human_targets = [
             self._human_observation_target(raw, visibility_tick)
             for raw in players or ()
@@ -5118,7 +5132,7 @@ class BotRuntime(object):
                     continue
                 entry[3].add(source['id'])
                 team_visibility[key] = True
-                remembered = self._target_pose_snapshot(target)
+                remembered = self._target_pose_snapshot(target, pose_cache)
                 self._visible_target_poses[key] = remembered
                 entry[2].update(remembered)
                 duration = spotting.SPOT_MEMORY_SECONDS
@@ -5140,6 +5154,9 @@ class BotRuntime(object):
         remembered_team = (
             visibility_tick.setdefault('remembered_team', {})
             if isinstance(visibility_tick, dict) else {})
+        pose_cache = (
+            visibility_tick.setdefault('target_pose_snapshots', {})
+            if isinstance(visibility_tick, dict) else None)
 
         def resolve_source_view_range():
             if source_view_range[0] is None:
@@ -5147,11 +5164,11 @@ class BotRuntime(object):
                     source, now, visibility_tick)
             return source_view_range[0]
 
-        def retain_team_known_pose(target):
+        def retain_team_known_pose(target, template):
             key = (source_team, target.get('kind'),
                    int(target.get('network_id', 0)))
             if target['fresh_visible']:
-                remembered = self._target_pose_snapshot(target)
+                remembered = self._target_pose_snapshot(template, pose_cache)
                 self._visible_target_poses[key] = remembered
                 target.update(remembered)
                 return True
@@ -5200,23 +5217,25 @@ class BotRuntime(object):
                     not raw.get('alive', True) or
                     int(raw.get('team', 0)) == source_team):
                 continue
-            target = dict(self._human_observation_target(
-                raw, visibility_tick, raw['id']))
+            template = self._human_observation_target(
+                raw, visibility_tick, raw['id'])
+            target = dict(template)
             planner_id = target['id']
             (target['visible'], target['direct_visible'],
              target['fresh_visible']) = visible_to_team(target)
-            if retain_team_known_pose(target):
+            if retain_team_known_pose(target, template):
                 lookup[planner_id] = target
             contacts.append(target)
         for bot_id, raw in self.states.items():
             if (bot_id == source.get('id') or not raw.get('alive', True) or
                     int(raw.get('team', 0)) == source_team):
                 continue
-            target = dict(self._bot_observation_target(
-                bot_id, raw, visibility_tick, processed_bot_ids))
+            template = self._bot_observation_target(
+                bot_id, raw, visibility_tick, processed_bot_ids)
+            target = dict(template)
             (target['visible'], target['direct_visible'],
              target['fresh_visible']) = visible_to_team(target)
-            if retain_team_known_pose(target):
+            if retain_team_known_pose(target, template):
                 lookup[int(bot_id)] = target
             contacts.append(target)
         return contacts, lookup
@@ -10093,7 +10112,8 @@ class BotRuntime(object):
         players = list(players or [])
         # Canonical player mechanics are immutable within this bounded slice.
         # Keep their source objects alive so every observer shares one result.
-        visibility_tick = {}
+        pose_cache = {}
+        visibility_tick = {'target_pose_snapshots': pose_cache}
         self._track_human_observer_lifecycle(
             players, now, visibility_tick)
         live_players = None
@@ -10410,7 +10430,8 @@ class BotRuntime(object):
                 team_visibility[key] = bool(
                     fresh_visible or team_visibility.get(key, False))
                 if fresh_visible:
-                    remembered = self._target_pose_snapshot(observed_target)
+                    remembered = self._target_pose_snapshot(
+                        observed_target, pose_cache)
                     self._visible_target_poses[key] = remembered
                     observed_target.update(remembered)
                 if collect_observation:

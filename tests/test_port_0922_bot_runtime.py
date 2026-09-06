@@ -17119,6 +17119,62 @@ class BotRuntimeTests(unittest.TestCase):
             set((('bot', 25, False), ('bot', 25, True))),
             set(tick['target_templates']))
 
+    def test_contact_pose_reuse_preserves_observer_and_motion_boundaries(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        bot = {'id': 25, 'team': 2, 'alive': True,
+               'x': 10.0, 'y': 1.0, 'z': 20.0, 'yaw': 0.2,
+               'velocity': (1.0, 0.0, 2.0), 'gun_pitch': 0.3}
+        player = _admit_player(dict(bot, id=2))
+        runtime.states = {25: bot}
+        sight_calls = []
+
+        def visible(source, target, *unused):
+            sight_calls.append((source['id'], target['kind']))
+            return source['id'] != 13
+
+        runtime._visible = visible
+        tick = {}
+        first, unused = runtime._contacts_for(
+            {'id': 11, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+        remembered = dict(runtime._visible_target_poses)
+        # Observer-local edits must never contaminate the shared projection.
+        first[0].update(x=999.0, gun_pitch=2.0)
+        second, unused = runtime._contacts_for(
+            {'id': 12, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set())
+        for target in second:
+            key = (1, target['kind'], target['network_id'])
+            self.assertIs(remembered[key], runtime._visible_target_poses[key])
+            self.assertEqual((10.0, 1.0, 20.0), target['position'])
+            self.assertEqual(0.3, target['gun_pitch'])
+
+        bot.update(x=40.0, gun_pitch=0.6)
+        player.update(x=70.0, gun_pitch=0.9)
+        hidden, unused = runtime._contacts_for(
+            {'id': 13, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        for target in hidden:
+            self.assertFalse(target['direct_visible'])
+            self.assertFalse(target['fresh_visible'])
+            self.assertEqual((10.0, 1.0, 20.0), target['position'])
+            self.assertEqual(0.3, target['gun_pitch'])
+        post_motion, unused = runtime._contacts_for(
+            {'id': 14, 'team': 1}, [player], 1.0,
+            visibility_tick=tick, processed_bot_ids=set((25,)))
+        self.assertEqual([10.0, 40.0], [target['x'] for target in post_motion])
+        self.assertEqual([0.3, 0.6],
+                         [target['gun_pitch'] for target in post_motion])
+        next_tick, unused = runtime._contacts_for(
+            {'id': 15, 'team': 1}, [player], 1.1,
+            visibility_tick={}, processed_bot_ids=set())
+        self.assertEqual([70.0, 40.0], [target['x'] for target in next_tick])
+        self.assertEqual(10, len(sight_calls))
+        for pose in remembered.values():
+            self.assertEqual(10.0, pose['x'])
+            self.assertEqual(0.3, pose['gun_pitch'])
+
     def test_compact_human_target_keeps_dynamic_spotting_contract(self):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor())

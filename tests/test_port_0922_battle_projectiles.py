@@ -2507,6 +2507,63 @@ class BattleProjectileTests(unittest.TestCase):
             ({'cursor_time': 0.0},), 1.0, maximum_chords=1))
         self.assertIsNone(battle._projectile_spatial_bins)
 
+    def test_spatial_index_cost_ignores_history_before_active_cursors(self):
+        for target_kind in ('bot', 'player'):
+            with self.subTest(target_kind=target_kind):
+                battle, unused_bigworld = _battle()
+                target_key = '%s:8' % target_kind
+                battle._records[target_key] = {
+                    'engine_id': 42, 'network_id': 8, 'kind': target_kind,
+                    'local': False, 'ready': True,
+                    'state': {'health': 100, 'alive': True}}
+                source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+                for index in range(211):
+                    sample_time = (index - 200) / 10.0
+                    # Old retained poses must neither disable the index nor
+                    # expand this cursor's envelope to an obsolete position.
+                    target_x = 5.0 if sample_time < 0.0 else 1000.0
+                    battle._sample_projectile_positions(sample_time, {
+                        'player:7': source,
+                        target_key: battle._projectile_plain_pose(
+                            (target_x, 0.0, 0.0)),
+                    })
+                history = list(battle._projectile_position_history)
+
+                self.assertTrue(battle._build_projectile_spatial_bins(
+                    ({'cursor_time': 0.8},), 1.0, maximum_chords=32))
+                candidates = dict(battle._projectile_chord_records(
+                    (0.0, 0.0, 0.0), (10.0, 0.0, 0.0), 0.8, 0.85))
+
+                self.assertNotIn(target_key, candidates)
+                self.assertEqual(history, battle._projectile_position_history)
+
+    def test_warm_spatial_index_keeps_presented_target_history(self):
+        battle, unused_bigworld = _battle()
+        battle._records['bot:8'] = {
+            'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
+        for index in range(211):
+            sample_time = (index - 200) / 10.0
+            target_x = 5.0 if sample_time == 0.5 else 1000.0
+            battle._sample_projectile_positions(sample_time, {
+                'player:7': source,
+                'bot:8': battle._projectile_plain_pose((target_x, 0.0, 0.0)),
+            })
+        battle._projectile_meta['player:7:1'] = {
+            'presentation_offsets': {'bot:8': 0.4}}
+        states = tuple({'key': 'player:7:1', 'cursor_time': 0.8}
+                       for unused in range(4))
+
+        self.assertTrue(battle._build_projectile_spatial_bins(
+            states, 1.0, maximum_chords=32))
+        candidates = dict(battle._projectile_chord_records(
+            (0.0, 0.0, 0.0), (10.0, 0.0, 0.0), 0.8, 0.85))
+
+        self.assertIn('bot:8', candidates)
+        self.assertAlmostEqual(0.4, battle._projectile_spatial_floor)
+
     def test_spatial_index_cell_budgets_fall_back_to_all_records(self):
         battle, unused_bigworld = _battle()
         source = battle._projectile_plain_pose((0.0, 0.0, 0.0))
@@ -3001,6 +3058,11 @@ class BattleProjectileTests(unittest.TestCase):
             'stage=effects reason=missing_live_direct', output.getvalue())
 
     def test_stock_max_29_projectile_debt_bounds_frame_and_reduces_scans(self):
+        for warm_history in (False, True):
+            with self.subTest(warm_history=warm_history):
+                self._check_stock_max_29_projectile_debt(warm_history)
+
+    def _check_stock_max_29_projectile_debt(self, warm_history):
         battle, bigworld = _battle()
         source = battle._server_entity(41)
         entities = {41: source}
@@ -3016,6 +3078,11 @@ class BattleProjectileTests(unittest.TestCase):
                 'local': False, 'ready': True,
                 'state': {'health': 100, 'alive': True}}
         battle._server_entity = lambda entity_id: entities.get(entity_id)
+        if warm_history:
+            poses = battle._projectile_record_poses()
+            for index in range(201):
+                battle._sample_projectile_positions(
+                    (index - 200) / 10.0, poses)
         for shot_seq in range(1, 30):
             event = dict(_event())
             event.update({

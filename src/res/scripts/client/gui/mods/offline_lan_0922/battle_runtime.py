@@ -12405,10 +12405,7 @@ class BattleRuntime(object):
                     max(0, int(maximum_chords)), estimated_chords)
             except (KeyError, TypeError, ValueError, OverflowError):
                 return False
-            upper_build_pose_reads = len(keys) * (len(history) + 2)
-            full_record_scans = estimated_chords * len(items)
-            if (estimated_chords <= 0 or
-                    upper_build_pose_reads >= full_record_scans):
+            if estimated_chords <= 0:
                 return False
         previous_time = None
         middle_samples = []
@@ -12434,6 +12431,10 @@ class BattleRuntime(object):
                 ceiling > float(history[-1][0]) + 1.0e-9):
             return False
         if maximum_chords is not None:
+            # Retaining 21 seconds for delayed launches does not make this
+            # advance's index read every old pose. Charge only the cursor
+            # interval (including presentation lag) and its two endpoints;
+            # using len(history) here disabled the index as battles warmed up.
             build_pose_reads = len(keys) * (len(middle_samples) + 2)
             full_record_scans = estimated_chords * len(items)
             if (estimated_chords <= 0 or
