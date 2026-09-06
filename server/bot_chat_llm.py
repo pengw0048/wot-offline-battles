@@ -39,7 +39,17 @@ from bot_chat import (
 
 
 READY_TIMEOUT_SECONDS = 90.0
-REQUEST_TIMEOUT_SECONDS = 12.0
+# Generous rather than tuned. A slow machine -- an emulated CPU, two threads,
+# a cold prompt -- takes far longer for one short line than a desktop does,
+# and cutting it off produces silence rather than a fast answer. Nothing
+# waits on this: a stuck request costs unsaid lines on one worker thread and
+# never a frame of the battle.
+REQUEST_TIMEOUT_SECONDS = 90.0
+# What one line is assumed to cost before this machine has shown otherwise.
+INITIAL_LATENCY_SECONDS = 4.0
+# How much longer than the average observed line to hold a scheduled one.
+LATENCY_MARGIN = 1.4
+LATENCY_SMOOTHING = 0.4
 HEALTH_INTERVAL_SECONDS = 0.5
 # One line is at most 140 UTF-16 units and the prompt asks for far less, so a
 # short cap is a latency control rather than a quality limit.
@@ -63,6 +73,20 @@ RUNTIME_LOG_NAME = "llama-server.log"
 OUTPUT_TAIL_BYTES = 8192
 PENDING_LIMIT = 24
 RESULT_LIMIT = 48
+
+# Identical for every Bot in every round, and therefore the part worth
+# putting in front of the cache.
+SHARED_RULES = (
+    "你在玩《坦克世界》，是玩家的AI队友，正在队伍聊天频道里说话。",
+    "规则：",
+    "1. 只输出一句话，不超过25个字。",
+    "2. 不要加引号，不要写自己的ID，不要解释，不要换行。",
+    "3. 玩家说中文你就说中文，玩家说英文你就说英文。",
+    "4. 像队友在打字，可以口语、可以不完整。",
+)
+# How much of the channel one line is given as context. Every extra line is
+# prompt this machine has to process again before it can answer.
+TRANSCRIPT_LINES = 4
 
 PERSONA_STYLE = {
     PERSONA_TACTICAL: "干脆、果断，像个老车长，说话短促",
@@ -285,16 +309,13 @@ def build_messages(request):
     vehicle = str(bot.get("vehicle") or "")
     if ":" in vehicle:
         vehicle = vehicle.split(":", 1)[1]
-    system = "\n".join((
-        "你在玩《坦克世界》，是玩家的AI队友，正在队伍聊天频道里说话。",
+    # The shared rules come first and the per-Bot identity last, so every
+    # Bot's prompt starts with the same tokens. llama.cpp reuses the cached
+    # prefix, and on a slow machine prompt processing is most of the wait.
+    system = "\n".join(SHARED_RULES + (
         "你的ID是“%s”，开的车是 %s。" % (name, vehicle),
         "你的说话风格：%s。" % PERSONA_STYLE.get(persona, PERSONA_STYLE[
             PERSONA_PLAIN]),
-        "规则：",
-        "1. 只输出一句话，不超过25个字。",
-        "2. 不要加引号，不要写自己的ID，不要解释，不要换行。",
-        "3. 玩家说中文你就说中文，玩家说英文你就说英文。",
-        "4. 像队友在打字，可以口语、可以不完整。",
     ))
 
     lines = []
@@ -306,7 +327,7 @@ def build_messages(request):
                   if record.get("text")]
     if transcript:
         lines.append("队伍频道最近的话：")
-        for record in transcript[-6:]:
+        for record in transcript[-TRANSCRIPT_LINES:]:
             speaker = record.get("name") or "队友"
             lines.append("%s：%s" % (speaker, record["text"]))
     task = TRIGGER_TASK.get(request.get("trigger"))
@@ -360,10 +381,11 @@ class LlamaChatBackend(object):
     back to the shipped templates.
     """
 
-    def __init__(self, endpoint, latency_hint_seconds=3.0,
+    def __init__(self, endpoint, latency_hint_seconds=INITIAL_LATENCY_SECONDS,
                  timeout=REQUEST_TIMEOUT_SECONDS, opener=None, log=None):
         self.endpoint = str(endpoint).rstrip("/")
-        self.latency_hint_seconds = float(latency_hint_seconds)
+        self._initial_latency = float(latency_hint_seconds)
+        self._observed_latency = None
         self._timeout = float(timeout)
         self._opener = opener or self._post
         self._log = log or (lambda message: None)
@@ -375,6 +397,25 @@ class LlamaChatBackend(object):
         self._queue = []
         self._wake = threading.Condition(self._lock)
         self._stopped = False
+
+    @property
+    def latency_hint_seconds(self):
+        """Return how long this machine actually needs for one line.
+
+        A constant cannot serve both a desktop and an emulated VM, so the
+        estimate follows what this machine has really done. Until it has done
+        anything, the initial guess stands.
+        """
+        if self._observed_latency is None:
+            return self._initial_latency
+        return max(self._initial_latency,
+                   self._observed_latency * LATENCY_MARGIN)
+
+    def _record_latency(self, seconds):
+        previous = self._observed_latency
+        self._observed_latency = (
+            seconds if previous is None else
+            previous + (seconds - previous) * LATENCY_SMOOTHING)
 
     # -- lifecycle ------------------------------------------------------
 
@@ -444,10 +485,18 @@ class LlamaChatBackend(object):
                     return
                 request_id, messages = self._queue.pop(0)
             text = None
+            started = time.monotonic()
             try:
                 text = self._generate(messages)
+                elapsed = time.monotonic() - started
+                self._record_latency(elapsed)
+                self._log("BOT CHAT generated one line in %.1fs" % elapsed)
             except Exception as error:
-                self._log("BOT CHAT generation failed: %s" % (error,))
+                elapsed = time.monotonic() - started
+                # Naming the wait is what separates "the model is slow" from
+                # "the model is broken".
+                self._log("BOT CHAT generation failed after %.1fs: %s"
+                          % (elapsed, error))
             with self._lock:
                 self._pending.discard(request_id)
                 if self._stopped:
