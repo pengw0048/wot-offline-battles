@@ -6,6 +6,9 @@ import threading
 import time
 import unittest
 
+import bot_state_rows
+from gui.mods.offline_lan_0922 import bot_state_codec
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(
@@ -386,7 +389,7 @@ class LanClientQueueTests(unittest.TestCase):
             full_message, [0])
 
         self.assertTrue(client.send_bot_state(
-            states, sample_time_us=40000,
+            bot_state_rows.rows(states), sample_time_us=40000,
             source_batch_horizon_us=40000))
 
         queued = client._outbound_queue[0]
@@ -394,20 +397,27 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual(40000, queued_wire['sample_time_us'])
         self.assertEqual(
             40000, queued_wire['source_batch_horizon_us'])
-        queued_bots = queued_wire['bots']
+        queued_bots = bot_state_rows.bots(queued_wire)
+        # These Bots publish no burst clock and no Siege state, so the row's
+        # presence bits keep those groups off the wire entirely and the server
+        # keeps the state it already admitted for them.
         expected = {
             'id', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
             'aim_yaw', 'gun_pitch', 'speed',
             'movement_dir', 'rotation_dir', 'fire_seq', 'shell_index',
             'next_shell_index', 'ammo_remaining', 'ammo_reload_pending',
             'reload_time', 'reload_duration', 'clip', 'clip_size',
+            'world_pose', 'stun_end_server_time_ms',
             'health', 'alive', 'critical', 'combat_base_revision',
             'combat_seq', 'combat_fire_elapsed', 'combat_fire_timer',
             'death_reason', 'display_health', 'shot_yaw', 'shot_pitch',
         }
         self.assertEqual(29, len(queued_bots))
-        self.assertTrue(all(set(state) == expected for state in queued_bots))
-        self.assertLess(queued[2], full_size)
+        for state in queued_bots:
+            self.assertEqual(expected, set(state))
+        # The positional row carries the same contract in a fraction of the
+        # bytes the mapping form needed.
+        self.assertLess(queued[2], full_size // 8)
         self.assertIn('profile', states[0])
         self.assertIn('shot_origin', states[0])
         self.assertIn('shot_proof_key', states[0])
@@ -415,39 +425,36 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertNotIn('shot_origin', queued_bots[0])
         self.assertNotIn('shot_proof_key', queued_bots[0])
 
-    def test_bot_state_projection_rejects_half_shot_pair(self):
-        client = self.activate(worker=True)
-        client.ready = True
-        client.phase = 'battle'
-        client.round_id = 7
-        client.bot_authority_id = lan_client_module.WORKER_AUTHORITY_ID
+    def test_bot_state_encoder_rejects_a_half_shot_pair(self):
+        """A shot angle pair is atomic; a row cannot carry half of it."""
+        with self.assertRaises(bot_state_codec.BotStateCodecError):
+            bot_state_rows.rows([{
+                'id': 1, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                'health': 100, 'alive': True, 'fire_seq': 1,
+                'shot_yaw': 0.2,
+            }])
 
-        self.assertFalse(client.send_bot_state([{
-            'id': 1, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
-            'health': 100, 'alive': True, 'fire_seq': 1,
-            'shot_yaw': 0.2,
-        }]))
-        self.assertEqual([], client._outbound_queue)
+    def test_bot_state_row_carries_a_bare_reload_state_as_flag_and_clock(self):
+        """Reload state is a flag bit and two fixed-point clocks on the wire.
 
-    def test_bot_state_projection_requires_boolean_atomic_reload_state(self):
-        client = self.activate(worker=True)
-        client.ready = True
-        client.phase = 'battle'
-        client.round_id = 7
-        client.bot_authority_id = lan_client_module.WORKER_AUTHORITY_ID
+        The mapping form needed an atomic-boolean check because a caller could
+        publish any type or omit the field; a positional row can express only
+        the contract, so the previous rejection has nothing left to reject.
+        """
         state = {
             'id': 1, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
             'health': 100, 'alive': True, 'fire_seq': 1,
             'shell_index': 0, 'next_shell_index': 1,
-            'ammo_remaining': [2, 1],
+            'ammo_remaining': [2, 1], 'ammo_reload_pending': 1,
+            'reload_time': 1.5, 'reload_duration': 4.0,
         }
+        decoded = bot_state_rows.decoded(bot_state_rows.rows([state]), 0)
+        self.assertIs(True, decoded['ammo_reload_pending'])
+        self.assertAlmostEqual(1.5, decoded['reload_time'], places=6)
+        self.assertAlmostEqual(4.0, decoded['reload_duration'], places=6)
+        self.assertEqual([2, 1], decoded['ammo_remaining'])
 
-        self.assertFalse(client.send_bot_state([state]))
-        state['ammo_reload_pending'] = 1
-        self.assertFalse(client.send_bot_state([state]))
-        self.assertEqual([], client._outbound_queue)
-
-    def test_bot_state_projection_rejects_partial_clip_checkpoint(self):
+    def test_bot_state_encoder_rejects_a_partial_clip_checkpoint(self):
         state = {
             'id': 1, 'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
             'health': 100, 'alive': True, 'fire_seq': 1,
@@ -455,7 +462,8 @@ class LanClientQueueTests(unittest.TestCase):
             'clip': 1,
         }
 
-        self.assertIsNone(lan_client_module.project_bot_state(state))
+        with self.assertRaises(bot_state_codec.BotStateCodecError):
+            bot_state_rows.rows([state])
 
     def test_sender_owns_json_encoding_and_socket_write(self):
         client = self.activate()

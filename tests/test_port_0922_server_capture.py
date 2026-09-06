@@ -3,6 +3,8 @@ import json
 import sys
 import unittest
 
+import bot_state_rows
+
 
 PORT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PORT_ROOT / 'server'))
@@ -184,9 +186,9 @@ class ServerCaptureTests(unittest.TestCase):
             'combat_fire_elapsed': 0.0, 'combat_fire_timer': 0.0,
             'stun_end_server_time_ms': 0,
         }
-        self.assertTrue(state.update_bot_states(1, {
+        self.assertTrue(state.update_bot_states(1, bot_state_rows.publication({
             'round_id': state.round_id, 'bots': [publication],
-        }))
+        })))
         self.assertTrue(state.bot_states[16]['world_pose'])
         self.assertTrue(self._capture_tick(state))
         self.assertEqual(1, state.rules_state['bases']['1']['points'])

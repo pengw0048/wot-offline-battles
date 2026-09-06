@@ -20691,9 +20691,9 @@ class BattleRuntime(object):
                     'edge_sample_time_us')
                 state_kwargs['edge_revision'] = message.get(
                     'edge_revision')
-                return projected_sender(message.get('bots'), **state_kwargs)
+                return projected_sender(message.get('rows'), **state_kwargs)
             return self.client.send_bot_state(
-                message.get('bots'), **state_kwargs)
+                message.get('rows'), **state_kwargs)
         if kind == 'bot_observation':
             return self.client.send_bot_observation(
                 message.get('contacts'), message.get('affordances'))

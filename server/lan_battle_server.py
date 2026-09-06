@@ -51,6 +51,7 @@ from gui.mods.offline_lan_0922.battle_achievements import (
     ACHIEVEMENT_CONDITIONS, AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES,
     award_battle_achievements)
 from gui.mods.offline_lan_0922 import bot_gunnery
+from gui.mods.offline_lan_0922 import bot_state_codec
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922 import equipment_mechanics
@@ -674,6 +675,18 @@ def _has_finite_fields(value, names):
         except (TypeError, ValueError):
             return False
     return True
+
+
+def _validated_bot_round_constants(raw):
+    """Validate the immutable consumable contracts one Bot mounts.
+
+    These cannot change while a round runs and were the largest part of the
+    old per-publication encoding, so they ride ``bot_manifest`` and are proved
+    here exactly once instead of on every row of every publication.
+    """
+    contracts = equipment_mechanics.bot_consumable_contracts(
+        None, snapshot=raw.get("equipment_states"))
+    return {"equipment_contracts": list(contracts)}
 
 
 def _validated_bot_reload_progress(raw, required=False):
@@ -4382,6 +4395,10 @@ class BattleState:
                                 raw.get("terminal_critical")))
                 except (TypeError, ValueError):
                     return False
+                try:
+                    round_constants = _validated_bot_round_constants(raw)
+                except ValueError:
+                    return False
                 entry = {
                     "id": bot_id,
                     "team": identity["team"],
@@ -4393,6 +4410,10 @@ class BattleState:
                     "profile": self._sanitize_bot_profile(raw.get("profile")),
                     "route": route,
                 }
+                # Per-vehicle constants are validated once here. Every later
+                # publication carries only the values that change, and
+                # ``_decode_bot_row`` rejoins these.
+                entry.update(round_constants)
                 if 'skill' in raw:
                     if raw['skill'] not in bot_gunnery.SKILL_TIERS:
                         return False
@@ -5622,7 +5643,15 @@ class BattleState:
         return False
 
     @staticmethod
-    def _sanitize_bot_state(raw, identity, previous):
+    def _sanitize_bot_state(raw, identity, previous, trusted=False):
+        """Build one canonical Bot state from a manifest or publication row.
+
+        ``trusted`` marks input that came from ``bot_state_codec.decode_row``.
+        Such a mapping is complete, finite, in contract range and already
+        canonical for the critical and consumable ledgers, because the wire
+        row cannot represent anything else. Re-deriving those two ledgers is
+        the most expensive part of this function and is skipped for it.
+        """
         max_health = int(identity.get("max_health", 1000))
         reported_health = max(0, min(int(_finite_float(raw.get("health"), max_health)), max_health))
         if previous is not None:
@@ -5721,7 +5750,8 @@ class BattleState:
                 reload_progress
         critical = (previous or {}).get("critical")
         if "critical" in raw:
-            critical = _critical_state(_critical_payload(raw.get("critical")))
+            critical = (_critical_state(raw["critical"]) if trusted else
+                        _critical_state(_critical_payload(raw.get("critical"))))
         # Canonical snapshots always carry the complete combat baseline. An
         # empty state must not disappear before the #1513 loading snapshot.
         result["critical"] = critical or {}
@@ -5754,26 +5784,31 @@ class BattleState:
                 else []
         if not isinstance(snapshots, (list, tuple)):
             raise ValueError("bot equipment snapshot is invalid")
-        contracts = None
-        if previous_snapshots is not None:
-            contracts = equipment_mechanics.bot_consumable_contracts(
-                None, snapshot=previous_snapshots)
+        if trusted:
+            # The row carried only the mutable triple; the immutable contract
+            # was rejoined from the round manifest. Nothing needs restoring or
+            # re-projecting, so only the one invariant the wire cannot express
+            # is still checked: a Bot never gains a consumable use.
+            if previous_snapshots is not None:
+                for old_snapshot, new_snapshot in zip(
+                        previous_snapshots, snapshots):
+                    old_uses = int(old_snapshot.get("usesLeft", -1))
+                    if (old_uses >= 0 and
+                            int(new_snapshot.get("usesLeft", 0)) > old_uses):
+                        raise ValueError("bot equipment inventory increased")
+            result["equipment_states"] = snapshots
         else:
-            contracts = equipment_mechanics.bot_consumable_contracts(
-                None, snapshot=snapshots)
-        equipments = equipment_mechanics.restore_equipment_states(
-            snapshots, contracts=contracts, now=0.0)
-        canonical_snapshots = [equipment.snapshot(0.0)
-                               for equipment in equipments]
-        if previous_snapshots is not None:
-            previous_equipments = \
-                equipment_mechanics.restore_equipment_states(
-                    previous_snapshots, contracts=contracts, now=0.0)
-            for old, new in zip(previous_equipments, equipments):
-                if (old.uses_left >= 0 and
-                        new.uses_left > old.uses_left):
-                    raise ValueError("bot equipment inventory increased")
-        result["equipment_states"] = canonical_snapshots
+            contracts = None
+            if previous_snapshots is not None:
+                contracts = equipment_mechanics.bot_consumable_contracts(
+                    None, snapshot=previous_snapshots)
+            else:
+                contracts = equipment_mechanics.bot_consumable_contracts(
+                    None, snapshot=snapshots)
+            equipments = equipment_mechanics.restore_equipment_states(
+                snapshots, contracts=contracts, now=0.0)
+            result["equipment_states"] = [equipment.snapshot(0.0)
+                                          for equipment in equipments]
         raw_stun_end = raw.get(
             "stun_end_server_time_ms",
             (previous or {}).get("stun_end_server_time_ms", 0))
@@ -6013,6 +6048,53 @@ class BattleState:
         bot["combat_fire_timer"] = 0.0
         return durable
 
+    @staticmethod
+    def _contained_bot_state(raw, identity, previous):
+        """Keep one Bot moving when its own combat contract did not hold.
+
+        Rejecting the publication would also leave this Bot's stored state
+        behind its next publication, which then fails the same way, so the Bot
+        would stay frozen for the rest of the round while every other Bot lost
+        that tick as well. Pose, health and the presented hull are merges, not
+        proposals, so they advance here. The shot counter, magazine, burst,
+        consumable and critical ledgers stay on the last state the server
+        admitted, and no projectile edge is derived from a state it refused.
+        """
+        result = dict(previous) if previous else {}
+        # The ledgers this holds must not alias the retired state; every other
+        # path here produces fresh containers.
+        for name in ("critical", "equipment_states", "ammo_remaining"):
+            if name in result:
+                result[name] = copy.deepcopy(result[name])
+        max_health = int(identity.get("max_health", 1000))
+        health = max(0, min(int(raw["health"]), max_health))
+        if previous is not None:
+            health = min(health, int(previous.get("health", max_health)))
+        for name in ("x", "y", "z", "yaw", "pitch", "roll", "aim_yaw",
+                     "gun_pitch", "speed", "movement_dir", "rotation_dir",
+                     "world_pose"):
+            result[name] = raw[name]
+        for name in ("shot_yaw", "shot_pitch"):
+            if name in raw:
+                result[name] = raw[name]
+        result.update({
+            "id": int(identity["id"]),
+            "team": int(identity["team"]),
+            "slot": int(identity["slot"]),
+            "name": identity["name"],
+            "vehicle": identity.get("vehicle", "ussr:R11_MS-1"),
+            "max_health": max_health,
+            "health": health,
+            "alive": bool(raw["alive"]) and health > 0,
+            "display_health": max(
+                0, min(int(raw["display_health"]), max_health)),
+            "fire_seq": int((previous or {}).get("fire_seq", 0)),
+        })
+        result.setdefault("critical", {})
+        result.setdefault("equipment_states", [])
+        result.setdefault("ammo_remaining", [])
+        return result
+
     def _reconcile_modern_bot_combat(self, raw, previous, current):
         """Apply the strict #1513 bot publication/base/ack contract."""
         required = ("critical", "combat_base_revision", "combat_seq",
@@ -6216,8 +6298,12 @@ class BattleState:
                 next_launch_clock_offset_us = (
                     self._server_time_ms() * 1000 -
                     source_batch_horizon_us)
+            # One row per Bot, dead Bots included, so membership is a length
+            # check plus one identity lookup. The worker publishes in its own
+            # slot order, which is not the manifest's id order, so a row names
+            # the Bot it belongs to rather than relying on position.
             identities = {entry["id"]: entry for entry in self.bot_manifest}
-            incoming = message.get("bots") or []
+            incoming = message.get("rows") or []
             if (not isinstance(incoming, (list, tuple)) or
                     len(incoming) != len(identities)):
                 return self._set_protocol_reject(
@@ -6239,78 +6325,84 @@ class BattleState:
             fire_lineage_clears = set()
             capture_resets = set()
             stun_clears = []
-            seen = set()
-            required = ("id", "x", "y", "z", "yaw", "health",
-                        "alive", "fire_seq", "reload_time",
-                        "reload_duration")
-            for raw in incoming:
-                if (not isinstance(raw, dict) or
-                        not all(key in raw for key in required) or
-                        not _has_finite_fields(
-                            raw, ("id", "x", "y", "z", "yaw",
-                                  "health", "fire_seq")) or
-                        not isinstance(raw.get("alive"), bool)):
+            for row in incoming:
+                if (not isinstance(row, (list, tuple)) or not row or
+                        not isinstance(row[0], int) or
+                        isinstance(row[0], bool)):
                     return self._set_protocol_reject(
-                        "bot_state", "bot_shape",
-                        "bot=%s required_or_finite_fields_invalid" % (
-                            raw.get("id") if isinstance(raw, dict)
-                            else None))
-                try:
-                    bot_id = int(raw.get("id"))
-                except (TypeError, ValueError):
-                    return self._set_protocol_reject(
-                        "bot_state", "bot_id", "bot=%s" % raw.get("id"))
+                        "bot_state", "row_shape", "row is not a Bot row")
+                bot_id = row[0]
                 identity = identities.get(bot_id)
-                if identity is None or bot_id in seen:
+                if identity is None:
                     return self._set_protocol_reject(
-                        "bot_state", "bot_identity",
-                        "bot=%s known=%s duplicate=%s" % (
-                            bot_id, identity is not None, bot_id in seen))
-                seen.add(bot_id)
-                try:
-                    fire_seq = int(raw.get("fire_seq"))
-                except (TypeError, ValueError):
-                    return self._set_protocol_reject(
-                        "bot_state", "fire_seq",
-                        "bot=%s client_fire=%s" % (
-                            bot_id, raw.get("fire_seq")))
-                if (fire_seq < 0 or float(raw.get("fire_seq")) != fire_seq or
-                        bool(raw.get("alive")) !=
-                        (int(float(raw.get("health"))) > 0)):
-                    return self._set_protocol_reject(
-                        "bot_state", "fire_or_alive",
-                        "bot=%s client_fire=%s health=%s alive=%s" % (
-                            bot_id, raw.get("fire_seq"), raw.get("health"),
-                            raw.get("alive")))
+                        "bot_state", "bot_identity", "bot=%s" % bot_id)
                 previous = self.bot_states.get(bot_id)
                 try:
-                    current = self._sanitize_bot_state(
-                        raw, identity, previous)
-                    _validated_bot_reload_progress(raw, required=True)
-                    if (previous is not None and
-                            int(current.get("fire_seq", 0)) >
-                            int(previous.get("fire_seq", 0)) and
-                            current.get("siege_state") in (
-                                SIEGE_SWITCHING_ON,
-                                SIEGE_SWITCHING_OFF)):
-                        raise ValueError(
-                            "bot fired during a Siege transition")
-                    self._reconcile_modern_bot_combat(
-                        raw, previous, current)
-                except ValueError as error:
+                    raw = bot_state_codec.decode_row(row, identity)
+                except (bot_state_codec.BotStateCodecError, TypeError,
+                        ValueError) as error:
                     return self._set_protocol_reject(
-                        "bot_state", "combat_contract",
-                        ("bot=%s client_fire=%s server_fire=%s "
-                         "client_base=%s server_base=%s client_seq=%s "
-                         "server_ack=%s reason=%s") % (
+                        "bot_state", "row_shape",
+                        "bot=%s reason=%s" % (bot_id, error))
+                try:
+                    current = self._sanitize_bot_state(
+                        raw, identity, previous, trusted=True)
+                except ValueError as error:
+                    # One Bot's own state contract cannot hold the whole
+                    # publication. Rejecting the batch would also leave this
+                    # Bot's stored state behind its own next publication,
+                    # which repeats the same failure and freezes it for the
+                    # rest of the round while every other Bot loses the tick
+                    # too. Keep the Bot moving on its published pose and carry
+                    # its previous ledgers forward.
+                    _server_log_limited(
+                        "bot-state-contract:%d" % bot_id,
+                        "BOT STATE contained bot=%s client_fire=%s "
+                        "server_fire=%s reason=%s" % (
                             bot_id, raw.get("fire_seq"),
-                            (previous or {}).get("fire_seq", 0),
-                            raw.get("combat_base_revision"),
-                            (previous or {}).get(
-                                "combat_base_revision", 0),
-                            raw.get("combat_seq"),
-                            (previous or {}).get("combat_ack_seq", 0),
-                            error))
+                            (previous or {}).get("fire_seq", 0), error))
+                    current = self._contained_bot_state(
+                        raw, identity, previous)
+                else:
+                    try:
+                        self._reconcile_modern_bot_combat(
+                            raw, previous, current)
+                    except ValueError as error:
+                        # The state itself is well formed; only its combat
+                        # lineage is not the one the server holds. Fence the
+                        # combat ledger exactly like a lost ordering race, and
+                        # open a new canonical revision so the authority
+                        # rebases onto it. Without that new base the authority
+                        # keeps proposing past a sequence the server will
+                        # never acknowledge and this Bot's combat state stays
+                        # frozen for the rest of the round.
+                        _server_log_limited(
+                            "bot-combat-contract:%d" % bot_id,
+                            "BOT STATE combat rebased bot=%s client_base=%s "
+                            "server_base=%s client_seq=%s server_ack=%s "
+                            "reason=%s" % (
+                                bot_id, raw.get("combat_base_revision"),
+                                (previous or {}).get(
+                                    "combat_base_revision", 0),
+                                raw.get("combat_seq"),
+                                (previous or {}).get("combat_ack_seq", 0),
+                                error))
+                        if previous is None:
+                            current = self._contained_bot_state(
+                                raw, identity, previous)
+                        else:
+                            self._copy_bot_combat(current, previous)
+                            proposed_base = raw.get(
+                                "combat_base_revision", 0)
+                            if not isinstance(proposed_base, int) or \
+                                    isinstance(proposed_base, bool):
+                                proposed_base = 0
+                            revision = max(
+                                int(current.get("combat_revision", 0)),
+                                int(current.get("combat_base_revision", 0)),
+                                proposed_base) + 1
+                            current["combat_revision"] = revision
+                            current["combat_base_revision"] = revision
                 rebase_fire_gap = bool(
                     source_clock_rebase and previous is not None and
                     int(current.get("fire_seq", 0)) >
@@ -6327,9 +6419,20 @@ class BattleState:
                             previous, current)
                         self._validate_bot_ammo_transition(previous, current)
                     except ValueError as error:
-                        return self._set_protocol_reject(
-                            "bot_state", "ammo_contract",
-                            "bot=%s reason=%s" % (bot_id, error))
+                        # The published magazine and burst clock do not follow
+                        # from the last ones the server admitted, which a
+                        # coalesced publication spanning an unobserved shot
+                        # already produces legally.  Holding the old magazine
+                        # would make every later publication disagree with it
+                        # the same way, so this Bot would never fire again.
+                        # Take the complete published inventory as the new
+                        # trusted baseline exactly like the rebase above, and
+                        # never invent projectile edges for the gap.
+                        _server_log_limited(
+                            "bot-ammo-contract:%d" % bot_id,
+                            "BOT STATE rebased bot=%s reason=%s" % (
+                                bot_id, error))
+                        burst_edges = ()
                 previous_fire = int((previous or {}).get("fire_seq", 0))
                 if (previous is not None and
                         int(previous.get("stun_end_server_time_ms", 0)) > 0 and
@@ -6400,10 +6503,10 @@ class BattleState:
                         })
                         pending_projectile_launches[(
                             bot_id, shot_seq)] = edge
-            if seen != set(identities):
+            if len(next_states) != len(identities):
                 return self._set_protocol_reject(
                     "bot_state", "batch_members",
-                    "missing=%s" % sorted(set(identities) - seen))
+                    "missing=%s" % sorted(set(identities) - set(next_states)))
             self._commit_human_ram_armors(human_ram_armors)
             self.bot_states = next_states
             for bot_id in stun_clears:

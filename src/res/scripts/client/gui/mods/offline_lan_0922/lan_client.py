@@ -155,19 +155,6 @@ RUNTIME_DROP_LOG_INTERVAL = 5.0
 # stands still and nothing the player shoots reports back.
 SNAPSHOT_STALL_SECONDS = 2.0
 LEAVE_PAYLOAD = b'{"type":"leave"}\n'
-_BOT_STATE_WIRE_FIELDS = (
-    'id', 'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw', 'gun_pitch',
-    'speed', 'movement_dir', 'rotation_dir', 'fire_seq', 'shell_index',
-    'next_shell_index', 'ammo_remaining', 'ammo_reload_pending',
-    'reload_time', 'reload_duration', 'clip', 'clip_size',
-    'burst_active', 'burst_group_seq', 'burst_count',
-    'burst_next_index', 'burst_interval', 'burst_time_left',
-    'burst_shell_index',
-    'siege_state', 'siege_time_left_ms', 'siege_transition_total_ms',
-    'health', 'alive', 'critical', 'combat_base_revision', 'combat_seq',
-    'combat_fire_elapsed', 'combat_fire_timer',
-    'death_reason', 'display_health', 'world_pose', 'equipment_states',
-    'stun_end_server_time_ms')
 STATE_BARRIER_TYPES = frozenset((
     'welcome', 'roster', 'battle_start', 'battle_live',
     'start_denied', 'team_denied', 'team_size_denied',
@@ -508,17 +495,6 @@ def _valid_player_equipment_contract(state, required=False):
     return True
 
 
-def _valid_bot_equipment_contract(state, required=False):
-    snapshots = state.get('equipment_states')
-    if snapshots is None:
-        return not required and 'equipment_states' not in state
-    if not isinstance(snapshots, list):
-        return False
-    try:
-        equipment_mechanics.validate_bot_equipment_states(snapshots)
-    except (TypeError, ValueError):
-        return False
-    return True
 
 
 def _mapping_list(value, limit=30):
@@ -592,85 +568,6 @@ def _canonical_runtime_vehicle_row(value):
     return result
 
 
-def _project_bot_state_impl(state, validate_equipment):
-    """Project one internal state, optionally proving its equipment ledger."""
-    if not isinstance(state, dict):
-        return None
-    projected = dict((name, state[name]) for name in _BOT_STATE_WIRE_FIELDS
-                     if name in state)
-    has_shot_yaw = 'shot_yaw' in state
-    has_shot_pitch = 'shot_pitch' in state
-    if has_shot_yaw != has_shot_pitch:
-        return None
-    if has_shot_yaw:
-        projected['shot_yaw'] = state['shot_yaw']
-        projected['shot_pitch'] = state['shot_pitch']
-    ammo_fields = ('shell_index', 'next_shell_index', 'ammo_remaining',
-                   'ammo_reload_pending')
-    present = tuple(name in state for name in ammo_fields)
-    if any(present) and not all(present):
-        return None
-    if (all(present) and
-            not isinstance(state.get('ammo_reload_pending'), bool)):
-        return None
-    clip_fields = ('clip', 'clip_size')
-    clip_present = tuple(name in state for name in clip_fields)
-    if any(clip_present) and not all(clip_present):
-        return None
-    reload_fields = ('reload_time', 'reload_duration')
-    if not all(name in state for name in reload_fields):
-        return None
-    reload_time = _exact_finite_float(state.get('reload_time'))
-    reload_duration = _exact_finite_float(state.get('reload_duration'))
-    if (reload_time is None or reload_duration is None or
-            reload_duration <= 0.0 or reload_time < 0.0 or
-            reload_time > reload_duration):
-        return None
-    siege_fields = (
-        'siege_state', 'siege_time_left_ms',
-        'siege_transition_total_ms')
-    siege_present = tuple(name in state for name in siege_fields)
-    if any(siege_present) and not all(siege_present):
-        return None
-    if (all(siege_present) and
-            not siege_mechanics.valid_wire_state(
-                state.get('siege_state'),
-                state.get('siege_time_left_ms'),
-                transition_total_ms=state.get(
-                    'siege_transition_total_ms'))):
-        return None
-    try:
-        burst_mechanics.BurstClock().restore(
-            projected, projected.get('fire_seq', 0))
-    except ValueError:
-        return None
-    if (validate_equipment and 'equipment_states' in state and
-            not _valid_bot_equipment_contract(state)):
-        return None
-    if 'stun_end_server_time_ms' in state:
-        stun_end = _projectile_int_range(
-            state.get('stun_end_server_time_ms'), 0, MAX_PROJECTILE_ID)
-        if stun_end is None:
-            return None
-        projected['stun_end_server_time_ms'] = stun_end
-    return projected
-
-
-def project_bot_state(state):
-    """Return only fields consumed by the v5 server bot-state sanitizer."""
-    return _project_bot_state_impl(state, True)
-
-
-def project_owned_bot_state(state):
-    """Select wire fields from one trusted BotRuntime-owned state."""
-    projected = dict((name, state[name]) for name in _BOT_STATE_WIRE_FIELDS
-                     if name in state)
-    if 'shot_yaw' in state:
-        projected['shot_yaw'] = state['shot_yaw']
-        projected['shot_pitch'] = state['shot_pitch']
-    return projected
-
-
 def _project_human_ram_armors(raw_results):
     """Return the exact worker-only native contact-armour response batch."""
     if (not isinstance(raw_results, (list, tuple)) or
@@ -713,7 +610,6 @@ def _project_human_ram_armors(raw_results):
 
 
 # Compatibility for engine-free callers which imported the old private name.
-_project_bot_state = project_bot_state
 
 
 def _projectile_int_range(value, minimum, maximum):
@@ -3186,19 +3082,16 @@ class LANClient(object):
                 player_collision_profiles or ())[:64]
         return self._send(message)
 
-    def send_bot_state(self, bots, sample_time_us=None,
+    def send_bot_state(self, rows, sample_time_us=None,
                        source_batch_horizon_us=None,
                        human_ram_armors=None):
         if not self.is_bot_authority():
             return False
-        projected = []
-        for state in list(bots or ())[:30]:
-            state = project_bot_state(state)
-            if state is None:
-                return False
-            projected.append(state)
+        rows = list(rows or ())[:30]
+        if any(not isinstance(row, list) for row in rows):
+            return False
         message = {'type': 'bot_state', 'round_id': self.round_id,
-                   'bots': projected}
+                   'rows': rows}
         if sample_time_us is not None:
             sample_time_us = _exact_int(sample_time_us)
             if (sample_time_us is None or
@@ -3221,7 +3114,7 @@ class LANClient(object):
             message['human_ram_armors'] = human_ram_armors
         return self._send(message)
 
-    def send_projected_bot_state(self, bots, sample_time_us=None,
+    def send_projected_bot_state(self, rows, sample_time_us=None,
                                  source_batch_horizon_us=None,
                                  human_ram_armors=None,
                                  edge_sample_time_us=None,
@@ -3230,11 +3123,11 @@ class LANClient(object):
         del edge_sample_time_us, edge_revision
         if not self.is_bot_authority():
             return False
-        if (not isinstance(bots, (list, tuple)) or len(bots) > 30 or
-                any(not isinstance(state, dict) for state in bots)):
+        if (not isinstance(rows, (list, tuple)) or len(rows) > 30 or
+                any(not isinstance(row, list) for row in rows)):
             return False
         message = {'type': 'bot_state', 'round_id': self.round_id,
-                   'bots': bots}
+                   'rows': rows}
         if sample_time_us is not None:
             sample_time_us = _exact_int(sample_time_us)
             if (sample_time_us is None or

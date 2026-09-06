@@ -12,6 +12,8 @@ import sys
 import tempfile
 import types
 import unittest
+
+import bot_state_rows
 from unittest import mock
 import weakref
 import xml.etree.ElementTree as ET
@@ -5660,13 +5662,10 @@ class LANClientTests(unittest.TestCase):
         bots = [{'id': 11, 'x': 0.0, 'y': 0.0, 'z': 0.0,
                  'yaw': 0.0, 'health': 1000, 'alive': True,
                  'fire_seq': 0}]
-        original = module.project_bot_state
-        module.project_bot_state = mock.Mock(
-            side_effect=AssertionError('second projection'))
-        try:
-            self.assertFalse(client.send_projected_bot_state(bots))
-        finally:
-            module.project_bot_state = original
+        # A visible client is never Bot authority, so the sender must refuse
+        # before it touches the rows at all.
+        rows = bot_state_rows.rows(bots)
+        self.assertFalse(client.send_projected_bot_state(rows))
 
         client._send.assert_not_called()
 

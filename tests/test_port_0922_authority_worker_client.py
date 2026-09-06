@@ -6,6 +6,9 @@ import tempfile
 import threading
 import types
 import unittest
+
+import bot_state_rows
+from gui.mods.offline_lan_0922 import bot_state_codec
 from unittest import mock
 
 
@@ -214,7 +217,7 @@ def _projected_bot_state(bot_id=11):
         'health': 700, 'alive': True,
         'critical': {
             'devices': [{
-                'name': 'engine', 'hp': 100.0, 'max_hp': 100.0,
+                'name': 'engineHealth', 'hp': 100.0, 'max_hp': 100.0,
                 'state': 'normal'}],
             'destroyed': [], 'crew_ko': [], 'fire': False,
             'ammo_rack_death': False, 'events': []},
@@ -419,7 +422,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                     lan_client_module.json, 'dumps',
                     side_effect=recording_dumps):
                 self.assertTrue(client.send_projected_bot_state(
-                    [state], sample_time_us=40000,
+                    bot_state_rows.rows([state]), sample_time_us=40000,
                     source_batch_horizon_us=40000))
                 state['x'] = 99.0
                 state['critical']['devices'][0]['hp'] = 1.0
@@ -438,9 +441,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(40000, wire['source_batch_horizon_us'])
         self.assertNotIn('edge_sample_time_us', wire)
         self.assertNotIn('edge_revision', wire)
-        self.assertEqual(1.0, wire['bots'][0]['x'])
+        self.assertEqual(1.0, bot_state_rows.decoded(wire, 0)['x'])
         self.assertEqual(100.0,
-                         wire['bots'][0]['critical']['devices'][0]['hp'])
+                         bot_state_rows.decoded(wire, 0)['critical']['devices'][0]['hp'])
 
     def test_worker_owned_message_is_encoded_without_recursive_walks(self):
         client = self._active_client()
@@ -499,27 +502,39 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertEqual(1, len(client._outbound_queue))
         self.assertEqual(len(payload), client._outbound_queue[0][2])
 
-    def test_worker_bot_state_trusted_path_relies_on_projection_and_encoder(self):
+    def test_worker_bot_state_trusted_path_relies_on_the_encoder(self):
         client = self._active_client()
+        # The row has fixed columns, so worker-local bookkeeping the wire has
+        # no column for simply never reaches it.
         extra = _projected_bot_state()
         extra['profile'] = {'class_tag': 'mediumTank'}
-        projected = lan_client_module.project_owned_bot_state(extra)
-        self.assertNotIn('profile', projected)
-        self.assertTrue(client.send_projected_bot_state([projected]))
+        row = bot_state_rows.rows([extra])
+        self.assertTrue(client.send_projected_bot_state(row))
+        self.assertNotIn('profile', bot_state_rows.decoded(row, 0))
 
         half_shot = _projected_bot_state()
         half_shot['shot_yaw'] = 0.2
-        with self.assertRaises(KeyError):
-            lan_client_module.project_owned_bot_state(half_shot)
+        with self.assertRaises(bot_state_codec.BotStateCodecError):
+            bot_state_rows.rows([half_shot])
 
+        # A row is fixed-point integers, so a non-finite pose cannot reach the
+        # wire at all: the encoder refuses to produce the row.
         nonfinite = _projected_bot_state()
         nonfinite['x'] = float('nan')
-        self.assertFalse(client.send_projected_bot_state([nonfinite]))
+        with self.assertRaises(bot_state_codec.BotStateCodecError):
+            bot_state_rows.rows([nonfinite])
 
-        oversized = _projected_bot_state()
-        oversized['critical']['events'] = [
-            'x' * lan_client_module.MAX_MESSAGE_BYTES]
-        self.assertFalse(client.send_projected_bot_state([oversized]))
+        # Critical transition events were validated and then discarded by the
+        # server, so they are no longer published at all.
+        eventful = _projected_bot_state()
+        eventful['critical']['events'] = [
+            {'kind': 'fire', 'state': True, 'cause': 'shot'}]
+        self.assertTrue(client.send_projected_bot_state(
+            bot_state_rows.rows([eventful])))
+        wire = json.loads(
+            client._outbound_queue[-1][1].payload.decode('utf-8'))
+        self.assertEqual([], bot_state_rows.decoded(wire, 0)['critical'][
+            'events'])
 
         self.assertEqual(1, len(client._outbound_queue))
         self.assertTrue(client.running)
@@ -531,7 +546,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         with mock.patch.object(
                 equipment_mechanics, 'canonical_bot_equipment_states',
                 side_effect=AssertionError('owned ledger was revalidated')):
-            self.assertTrue(client.send_projected_bot_state([state]))
+            self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([state])))
         self.assertEqual(1, len(client._outbound_queue))
         self.assertTrue(client.running)
 
@@ -546,11 +561,11 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         second['combat_fire_timer'] = 0.07
 
         self.assertTrue(client.send_projected_bot_state(
-            [first], sample_time_us=40000,
+            bot_state_rows.rows([first]), sample_time_us=40000,
             source_batch_horizon_us=40000))
         first_size = client._outbound_bytes
         self.assertTrue(client.send_projected_bot_state(
-            [second], sample_time_us=80000,
+            bot_state_rows.rows([second]), sample_time_us=80000,
             source_batch_horizon_us=80000))
 
         self.assertTrue(client.running)
@@ -561,19 +576,19 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wire = json.loads(
             client._outbound_queue[0][1].payload.decode('utf-8'))
         self.assertEqual(80000, wire['sample_time_us'])
-        self.assertEqual(8.0, wire['bots'][0]['x'])
-        self.assertEqual(0.05, wire['bots'][0]['reload_time'])
+        self.assertEqual(8.0, bot_state_rows.decoded(wire, 0)['x'])
+        self.assertEqual(0.05, bot_state_rows.decoded(wire, 0)['reload_time'])
 
     def test_worker_coalesce_key_uses_owner_revision_not_current_sample(self):
         client = self._active_client()
         state = _projected_bot_state()
         self.assertTrue(client.send_projected_bot_state(
-            [state], sample_time_us=40000,
+            bot_state_rows.rows([state]), sample_time_us=40000,
             source_batch_horizon_us=40000,
             edge_sample_time_us=40000, edge_revision=7))
         state['x'] = 9.0
         self.assertTrue(client.send_projected_bot_state(
-            [state], sample_time_us=80000,
+            bot_state_rows.rows([state]), sample_time_us=80000,
             source_batch_horizon_us=80000,
             edge_sample_time_us=40000, edge_revision=7))
 
@@ -581,7 +596,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wire = json.loads(
             client._outbound_queue[0][1].payload.decode('utf-8'))
         self.assertEqual(80000, wire['sample_time_us'])
-        self.assertEqual(9.0, wire['bots'][0]['x'])
+        self.assertEqual(9.0, bot_state_rows.decoded(wire, 0)['x'])
 
     def test_worker_human_ram_results_and_authority_epoch_are_edges(self):
         client = self._active_client()
@@ -591,12 +606,12 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'available': False,
         }]
         self.assertTrue(client.send_projected_bot_state(
-            [state], human_ram_armors=result))
+            bot_state_rows.rows([state]), human_ram_armors=result))
         self.assertTrue(client.send_projected_bot_state(
-            [state], human_ram_armors=[]))
+            bot_state_rows.rows([state]), human_ram_armors=[]))
         client.authority_epoch += 1
         self.assertTrue(client.send_projected_bot_state(
-            [state], human_ram_armors=[]))
+            bot_state_rows.rows([state]), human_ram_armors=[]))
 
         self.assertEqual(3, len(client._outbound_queue))
 
@@ -610,11 +625,11 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         consumed = json.loads(json.dumps(cooldown))
         consumed['equipment_states'][0]['usesLeft'] -= 1
 
-        self.assertTrue(client.send_projected_bot_state([first]))
-        self.assertTrue(client.send_projected_bot_state([cooldown]))
+        self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([first])))
+        self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([cooldown])))
         self.assertEqual(1, len(client._outbound_queue))
         self.assertTrue(client.send_projected_bot_state(
-            [consumed], edge_sample_time_us=2, edge_revision=2))
+            bot_state_rows.rows([consumed]), edge_sample_time_us=2, edge_revision=2))
         self.assertEqual(2, len(client._outbound_queue))
 
     def test_worker_coalesces_across_queue_without_dropping_discrete_message(self):
@@ -626,10 +641,10 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         fired['ammo_reload_pending'] = True
 
         self.assertTrue(client.send_projected_bot_state(
-            [first], sample_time_us=40000,
+            bot_state_rows.rows([first]), sample_time_us=40000,
             source_batch_horizon_us=40000))
         self.assertTrue(client.send_projected_bot_state(
-            [fired], sample_time_us=80000,
+            bot_state_rows.rows([fired]), sample_time_us=80000,
             source_batch_horizon_us=80000,
             edge_sample_time_us=80000, edge_revision=2))
         self.assertTrue(client._send({
@@ -638,7 +653,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         later['x'] = 9.0
         later['reload_time'] = 0.04
         self.assertTrue(client.send_projected_bot_state(
-            [later], sample_time_us=120000,
+            bot_state_rows.rows([later]), sample_time_us=120000,
             source_batch_horizon_us=120000,
             edge_sample_time_us=80000, edge_revision=2))
 
@@ -653,7 +668,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wires = [_queued_wire(item[1])
                  for item in client._outbound_queue]
         wires = [wire for wire in wires if wire['type'] == 'bot_state']
-        self.assertEqual(9.0, wires[-1]['bots'][0]['x'])
+        self.assertEqual(9.0, bot_state_rows.decoded(wires[-1], 0)['x'])
 
     def test_worker_ram_event_preserves_its_preceding_pose_barrier(self):
         client = self._active_client()
@@ -663,12 +678,12 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         later['x'] = 20.0
 
         self.assertTrue(client.send_projected_bot_state(
-            [contact], sample_time_us=400000,
+            bot_state_rows.rows([contact]), sample_time_us=400000,
             source_batch_horizon_us=1000000))
         self.assertTrue(client.send_bot_ram(
             11, 'bot', 12, 1, 1, 1))
         self.assertTrue(client.send_projected_bot_state(
-            [later], sample_time_us=1000000,
+            bot_state_rows.rows([later]), sample_time_us=1000000,
             source_batch_horizon_us=1000000))
 
         self.assertEqual([
@@ -682,7 +697,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                   for item in client._outbound_queue]
         states = [state for state in states if state['type'] == 'bot_state']
         self.assertEqual([5.0, 20.0], [
-            state['bots'][0]['x'] for state in states])
+            bot_state_rows.decoded(state, 0)['x'] for state in states])
 
     def test_worker_never_coalesces_damage_or_combat_sequence_edges(self):
         client = self._active_client()
@@ -694,10 +709,10 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         damaged['combat_seq'] += 1
 
         self.assertTrue(client.send_projected_bot_state(
-            [first], sample_time_us=40000,
+            bot_state_rows.rows([first]), sample_time_us=40000,
             source_batch_horizon_us=40000))
         self.assertTrue(client.send_projected_bot_state(
-            [damaged], sample_time_us=80000,
+            bot_state_rows.rows([damaged]), sample_time_us=80000,
             source_batch_horizon_us=80000,
             edge_sample_time_us=80000, edge_revision=2))
 
@@ -705,9 +720,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wires = [json.loads(item[1].payload.decode('utf-8'))
                  for item in client._outbound_queue]
         self.assertEqual([700, 640], [
-            wire['bots'][0]['health'] for wire in wires])
+            bot_state_rows.decoded(wire, 0)['health'] for wire in wires])
         self.assertEqual([2, 3], [
-            wire['bots'][0]['combat_seq'] for wire in wires])
+            bot_state_rows.decoded(wire, 0)['combat_seq'] for wire in wires])
 
     def test_worker_never_coalesces_back_across_a_state_edge(self):
         client = self._active_client()
@@ -718,12 +733,12 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         reverted_key = json.loads(json.dumps(first))
         reverted_key['x'] = 12.0
 
-        self.assertTrue(client.send_projected_bot_state([first]))
+        self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([first])))
         self.assertTrue(client.send_projected_bot_state(
-            [edge], edge_sample_time_us=2, edge_revision=2))
+            bot_state_rows.rows([edge]), edge_sample_time_us=2, edge_revision=2))
         self.assertTrue(client._send({'type': 'projectile_launch'}))
         self.assertTrue(client.send_projected_bot_state(
-            [reverted_key], edge_sample_time_us=3, edge_revision=3))
+            bot_state_rows.rows([reverted_key]), edge_sample_time_us=3, edge_revision=3))
 
         self.assertEqual(4, len(client._outbound_queue))
         self.assertEqual('projectile_launch',
@@ -744,7 +759,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                     state['reload_time'] = max(
                         0.0, 0.1 - (frame % 3) * 0.01)
                 self.assertTrue(client.send_projected_bot_state(
-                    states, sample_time_us=sample,
+                    bot_state_rows.rows(states), sample_time_us=sample,
                     source_batch_horizon_us=sample))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
@@ -755,7 +770,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         wire = json.loads(
             client._outbound_queue[0][1].payload.decode('utf-8'))
         self.assertEqual(600 * 33333, wire['sample_time_us'])
-        self.assertEqual(0.599, wire['bots'][0]['x'])
+        self.assertEqual(0.599, bot_state_rows.decoded(wire, 0)['x'])
 
     def test_worker_bot_state_queue_pressure_keeps_transport_and_fifo(self):
         client = self._active_client()
@@ -763,10 +778,10 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
         lan_client_module.MAX_OUTBOUND_MESSAGES = 1
         try:
-            self.assertTrue(client.send_projected_bot_state([
-                _projected_bot_state(11)]))
-            self.assertFalse(client.send_projected_bot_state([
-                _projected_bot_state(12)],
+            self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([
+                _projected_bot_state(11)])))
+            self.assertFalse(client.send_projected_bot_state(bot_state_rows.rows([
+                _projected_bot_state(12)]),
                 edge_sample_time_us=2, edge_revision=2))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
@@ -782,8 +797,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
         lan_client_module.MAX_OUTBOUND_MESSAGES = 1
         try:
-            self.assertTrue(client.send_projected_bot_state([
-                _projected_bot_state(11)]))
+            self.assertTrue(client.send_projected_bot_state(bot_state_rows.rows([
+                _projected_bot_state(11)])))
             self.assertFalse(client._send({'type': 'projectile_progress'}))
             self.assertTrue(client._send({'type': 'projectile_launch'}))
             self.assertFalse(client._send({'type': 'battle_result'}))
@@ -818,8 +833,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         with mock.patch.object(
                 lan_client_module.json, 'dumps',
                 side_effect=reconnect_during_encoding):
-            self.assertFalse(client.send_projected_bot_state([
-                _projected_bot_state()]))
+            self.assertFalse(client.send_projected_bot_state(bot_state_rows.rows([
+                _projected_bot_state()])))
 
         self.assertIsNot(old_sock, client.sock)
         self.assertEqual([], client._outbound_queue)

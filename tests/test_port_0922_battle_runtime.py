@@ -9,6 +9,8 @@ import struct
 import sys
 import types
 import unittest
+
+import bot_state_rows
 from unittest import mock
 import zlib
 
@@ -6909,7 +6911,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             send_projected_bot_state=mock.Mock(return_value=True))
 
         self.assertTrue(battle._send_bot_message({
-            'type': 'bot_state', 'bots': [], 'sample_time_us': 40000,
+            'type': 'bot_state', 'rows': [], 'sample_time_us': 40000,
             'source_batch_horizon_us': 40000,
             'edge_sample_time_us': 40000, 'edge_revision': 7}))
 
@@ -7263,7 +7265,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1.0, battle._ram_bot_state_at(*key)['z'])
 
         replacement = dict(message)
-        replacement['bots'] = [dict(message['bots'][0], z=2.0)]
+        replacement['bots'] = [dict(bot_state_rows.bots(message)[0], z=2.0)]
         self.assertTrue(battle._remember_ram_bot_snapshot(replacement))
 
         self.assertEqual([37], battle._ram_bot_history_order)
@@ -15439,7 +15441,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             player_id=-1, team=1, bot_authority_id=-1,
             phase='battle', is_bot_authority=lambda: True)
         battle._last_snapshot = {'players': []}
-        publication = {'type': 'bot_state', 'bots': []}
+        publication = {'type': 'bot_state', 'rows': []}
         battle._bots = types.SimpleNamespace(
             update=mock.Mock(return_value=[publication]),
             presentation_states=mock.Mock(return_value=()),
@@ -27356,22 +27358,23 @@ class BattleRuntimeContractTests(unittest.TestCase):
                  'yaw': 0.0, 'health': 1000, 'alive': True,
                  'fire_seq': 0}]
 
+        rows = bot_state_rows.rows(bots)
         self.assertTrue(battle._send_bot_message({
-            'type': 'bot_state', 'bots': bots,
+            'type': 'bot_state', 'rows': rows,
             'edge_sample_time_us': 1, 'edge_revision': 2}))
 
         battle.client.send_projected_bot_state.assert_called_once_with(
-            bots, edge_sample_time_us=1, edge_revision=2)
+            rows, edge_sample_time_us=1, edge_revision=2)
         battle.client.send_bot_state.assert_not_called()
 
         battle.client.send_projected_bot_state.reset_mock()
         self.assertTrue(battle._send_bot_message({
-            'type': 'bot_state', 'bots': bots,
+            'type': 'bot_state', 'rows': rows,
             'sample_time_us': 40000,
             'source_batch_horizon_us': 40000,
             'edge_sample_time_us': 30000, 'edge_revision': 3}))
         battle.client.send_projected_bot_state.assert_called_once_with(
-            bots, sample_time_us=40000,
+            rows, sample_time_us=40000,
             source_batch_horizon_us=40000,
             edge_sample_time_us=30000, edge_revision=3)
 
@@ -27419,7 +27422,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(3, battle.client.send_bot_manifest.call_count)
         expected = (
-            payload['bots'], payload['player_collision_profiles'])
+            bot_state_rows.bots(payload), payload['player_collision_profiles'])
         self.assertTrue(all(
             call.args == expected
             for call in battle.client.send_bot_manifest.call_args_list))
@@ -27617,7 +27620,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._send_bot_message = mock.Mock(side_effect=[False, True])
         battle._launch_bot_projectile = mock.Mock(return_value=True)
         publication = {
-            'type': 'bot_state', 'bots': [],
+            'type': 'bot_state', 'rows': [],
             'launches': [dict(outbox._pending_launches[0])],
         }
 
@@ -27657,7 +27660,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._launch_bot_projectile = mock.Mock(
             side_effect=enqueue_launch)
         first = {
-            'type': 'bot_state', 'bots': [],
+            'type': 'bot_state', 'rows': [],
             'launches': [dict(value)
                          for value in outbox._pending_launches],
         }
@@ -27669,7 +27672,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual({}, battle._bot_fire_seen)
 
         retry = {
-            'type': 'bot_state', 'bots': [],
+            'type': 'bot_state', 'rows': [],
             'launches': [dict(value)
                          for value in outbox._pending_launches],
         }
@@ -27714,7 +27717,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._launch_bot_projectile = mock.Mock(
             side_effect=enqueue_launch)
         first = {
-            'type': 'bot_state', 'bots': [],
+            'type': 'bot_state', 'rows': [],
             'launches': [dict(value)
                          for value in outbox._pending_launches],
         }
@@ -27727,7 +27730,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual({}, battle._bot_fire_seen)
 
         retry = {
-            'type': 'bot_state', 'bots': [],
+            'type': 'bot_state', 'rows': [],
             'launches': [dict(value)
                          for value in outbox._pending_launches],
         }
@@ -27759,7 +27762,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, 'outbox identity is invalid'):
             battle._enqueue_bot_message({
-                'type': 'bot_state', 'bots': [],
+                'type': 'bot_state', 'rows': [],
                 'launches': [{'id': 11}],
             })
 
