@@ -185,6 +185,17 @@ class WorkerCombatDiagnosticsTests(unittest.TestCase):
         self.assertEqual(1, trace.finish_frame()['counts'][
             'geometry_tracking_unavailable'])
 
+    def test_shared_geometry_repetition_stays_inside_its_authority_slice(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        trace.begin_frame(1, 20.0, 'collision')
+        for unused in range(2):
+            trace.begin_slice(0.05, True, True)
+            trace.geometry('shared_ray', (1, 2, 3))
+            trace.geometry('shared_ray', (1, 2, 3))
+        counts = trace.finish_frame()['counts']
+        self.assertEqual(4, counts['shared_ray_queries'])
+        self.assertEqual(2, counts['shared_ray_same_geometry_in_slice'])
+
     def test_nested_stages_separate_total_and_self_time(self):
         clock = iter((1.0, 1.010, 1.030, 1.050))
         trace = diagnostics.WorkerCombatDiagnostics(lambda: next(clock))

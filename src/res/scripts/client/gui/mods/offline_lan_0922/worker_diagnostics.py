@@ -245,7 +245,7 @@ class WorkerCombatDiagnostics(object):
             return
         self.count(name + '_queries')
         try:
-            signature = (self._actor_key, name, key)
+            signature = (self._slice, self._actor_key, name, key)
             if signature in self._geometry:
                 self.count(name + '_same_geometry_in_slice')
             elif len(self._geometry) < MAX_GEOMETRY_KEYS:
