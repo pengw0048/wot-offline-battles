@@ -12584,6 +12584,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(0, target.health)
         self.assertEqual(0, target_record['state']['health'])
+        self.assertFalse(target_record['dead_marker_known'])
         self.assertNotIn('wreck_known', target_record)
         self.assertNotIn('deferred_health_presentation', target_record)
         self.assertEqual((0, 10, 0), target.health_change)
@@ -13322,6 +13323,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         feedback.setVehicleState.assert_called_once_with(
             11, runtime.feedback_event_id.VEHICLE_DEAD, False)
+        self.assertTrue(record['dead_marker_known'])
         # Retail presents the health first and the dead state second.
         self.assertLess(
             present_health.call_args_list.index(present_health.call_args),
@@ -21687,9 +21689,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         feedback.setVehicleState.assert_called_once_with(
             1000, runtime.feedback_event_id.VEHICLE_DEAD, True)
 
-    def test_a_dead_enemy_keeps_its_remaining_spot_memory(self):
-        """Retail never hides a marker because the vehicle died; hiding is
-        visibility-driven, so the destroyed plate has time to show."""
+    def test_a_known_dead_enemy_keeps_its_marker_after_spot_memory_expires(self):
+        """Retail keeps the dead marker after the live spotting clock ends."""
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -21706,6 +21707,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'engine_id': 12, 'network_id': 17, 'kind': 'bot',
             'ready': True, 'local': False, 'presentation': True,
             'tombstone': False, 'spot_visible': True,
+            'dead_marker_known': True,
             'spot_until': 14.0, 'spot_next': 100.0,
             'state': {'team': 2, 'health': 0, 'alive': False}}
         battle._records = {'bot:17': record}
@@ -21716,9 +21718,61 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._update_spotting(10.4))
         self.assertTrue(record['spot_visible'])
 
-        # The memory decays on its own clock instead of being cut at death.
-        battle._update_spotting(14.4)
-        self.assertFalse(record['spot_visible'])
+        # The live memory decays on its own clock.  Knowledge of the dead
+        # marker is a separate terminal state, so the nearby marker remains.
+        self.assertFalse(battle._update_spotting(14.4))
+        self.assertEqual(14.0, record['spot_until'])
+        self.assertTrue(record['spot_visible'])
+
+    def test_known_dead_marker_stays_aoi_bounded_and_restarts_dead(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        battle._local_position = (0.0, 0.0, 0.0)
+        enemy = _Vehicle(
+            1000, _Descriptor(), _Vector(100.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), {'health': 0})
+        runtime.bigworld.entities[1000] = enemy
+        battle._remote_factory = types.SimpleNamespace(
+            get=lambda entity_id: enemy if entity_id == 1000 else None)
+        record = {
+            'engine_id': 1000, 'kind': 'bot', 'network_id': 17,
+            'ready': True, 'local': False, 'presentation': True,
+            'native_remote': True,
+            'world_marker_started': True, 'minimap_started': True,
+            'spot_visible': True, 'spot_marker_visible': True,
+            'dead_marker_known': True,
+            'state': {'team': 2, 'health': 0, 'alive': False}}
+
+        # Expired spotting does not remove a nearby known wreck marker.
+        self.assertEqual(
+            (True, True),
+            battle._apply_spot_presentation(record, enemy, False))
+        battle._binding.stop_vehicle_marker.assert_not_called()
+
+        # The 3D marker still leaves the exact #1513 vehicle AOI, while the
+        # team-known minimap entry remains.
+        enemy.position = _Vector(600.0, 0.0, 0.0)
+        self.assertEqual(
+            (False, True),
+            battle._apply_spot_presentation(record, enemy, False))
+        battle._binding.stop_vehicle_marker.assert_called_once_with(1000)
+        self.assertFalse(record['world_marker_started'])
+        self.assertTrue(record['minimap_started'])
+
+        # Re-entry reuses the existing marker owner and immediately restores
+        # the dead style, matching Vehicle.startVisual's stock tail.
+        enemy.position = _Vector(100.0, 0.0, 0.0)
+        self.assertEqual(
+            (True, True),
+            battle._apply_spot_presentation(record, enemy, False))
+        battle._binding.start_vehicle_marker.assert_called_once_with(1000)
+        feedback = battle._avatar.guiSessionProvider.shared.feedback
+        feedback.setVehicleState.assert_called_once_with(
+            1000, runtime.feedback_event_id.VEHICLE_DEAD, True)
+        battle._binding.start_vehicle_visual.assert_not_called()
+        battle._binding.start_vehicle_minimap.assert_not_called()
 
     def test_team_relay_visibility_does_not_claim_a_direct_spot(self):
         runtime = _runtime()

@@ -31,6 +31,7 @@ def tr(source):
 
 
 _ZH = {
+    'Select a map and battle duration here, then confirm to return to the waiting room.': u'这里只选择地图和战斗时长，确认后返回等待房间。',
     'RANDOM MAP': u'随机地图',
     '  -  %d MIN': u'  -  %d 分钟',
     'The stock map window is unavailable.': u'原版地图窗口不可用。',
