@@ -10255,17 +10255,20 @@ class BotRuntime(object):
             raw_command = None
             planner_probe_samples = {}
 
-            def planner_sample_direction(sample_yaw):
+            def planner_sample_direction(sample_yaw, maximum_distance=None):
                 # Invalid or unavailable baked data retains the mature native
                 # planner path.  These advisory samples never enter the motion
                 # cache and never authorize the finally selected direction.
                 normalised = ((float(sample_yaw) + math.pi) %
                               (2.0 * math.pi) - math.pi)
-                key = round(normalised, 4)
+                key = (round(normalised, 4),
+                       None if maximum_distance is None
+                       else round(float(maximum_distance), 2))
                 if key not in planner_probe_samples:
                     planner_probe_samples[key] = self._probe_direction(
                         position, sample_yaw, state.get('speed', 0.0),
-                        self._descriptors.get(state['id']))
+                        self._descriptors.get(state['id']),
+                        maximum_distance)
                 return planner_probe_samples[key]
 
             grid = getattr(self.navigator, 'grid', None)
@@ -10278,7 +10281,28 @@ class BotRuntime(object):
             controlled_shallow_commit = getattr(
                 self.navigator, 'controlled_shallow_committed', None)
 
-            def sample_clear(sample_yaw):
+            def sample_pose_clear(sample_yaw):
+                # Whether this hull may rotate where it stands is a question
+                # about a rectangle, not about a heading. Answer it from the
+                # shipped graph the navigator already owns.
+                pose_grid = getattr(self.navigator, 'grid', None)
+                pose_probe = getattr(pose_grid, 'hull_pose_clear', None)
+                if not callable(pose_probe):
+                    return True
+                try:
+                    return bool(pose_probe(
+                        position, sample_yaw,
+                        state.get('half_length', 3.5),
+                        state.get('half_width', 1.7)))
+                except Exception:
+                    return True
+
+            def sample_clear(sample_yaw, maximum_distance=None):
+                # A short manoeuvre asks about the space it actually enters.
+                # Ranking a five-metre backing escape against the fifteen to
+                # twenty metre travel horizon rejects every gateway, alley and
+                # bridge underpass on the map, which leaves an in-place turn
+                # as the only recovery in exactly the places no hull can turn.
                 advisory = self._planner_corridor_clear(
                     position, sample_yaw, state.get('speed', 0.0),
                     wet_escape=(baked_shallow_escape or
@@ -10289,7 +10313,8 @@ class BotRuntime(object):
                                        state['id'], position, sample_yaw)))
                 if advisory is not None:
                     return bool(advisory)
-                sample = planner_sample_direction(sample_yaw)
+                sample = planner_sample_direction(
+                    sample_yaw, maximum_distance)
                 # Exhausting the soft-static recast budget is not a wall. Keep
                 # the previous drive intent; commit-side world collision still
                 # stops the hull if this corridor reaches real hard geometry.
@@ -10360,6 +10385,7 @@ class BotRuntime(object):
                     # is the physical quantity being consumed.
                     'speed': state['speed'],
                     'dt': decision_step, 'now': now,
+                    'pose_clear': sample_pose_clear,
                     'health': state['health'],
                     'max_health': state['max_health'],
                     'contacts': contacts,
