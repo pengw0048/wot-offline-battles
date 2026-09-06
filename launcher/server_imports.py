@@ -30,6 +30,7 @@ import time
 import traceback
 import types
 import typing
+import unicodedata
 import uuid
 import weakref
 import zlib
@@ -59,6 +60,7 @@ SERVER_STDLIB_MODULES = (
     traceback.__name__,
     types.__name__,
     typing.__name__,
+    unicodedata.__name__,
     uuid.__name__,
     weakref.__name__,
     zlib.__name__,

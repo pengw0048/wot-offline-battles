@@ -1606,6 +1606,21 @@ class ServerImportTest(unittest.TestCase):
                         name != '__future__'}
             self.assertLessEqual(required, declared, port_version)
 
+    def test_no_server_import_resolves_to_nothing(self):
+        """A payload import that resolves nowhere is an unstaged file.
+
+        The bundled servers import only the standard library and their own
+        modules.  Without this, a server module left out of ``PAYLOAD_FILES``
+        looks exactly like a third-party package, is filtered out as
+        non-standard, and only fails when the packaged server exits on
+        startup with no log.
+        """
+        for port_version in core.SUPPORTED_PORTS:
+            unresolved = {name for name in self._closure(port_version)
+                          if name not in sys.stdlib_module_names and
+                          name != '__future__'}
+            self.assertEqual(set(), unresolved, port_version)
+
     def test_the_declared_modules_all_import(self):
         for name in server_imports.SERVER_STDLIB_MODULES:
             self.assertIn(name, sys.modules, name)
