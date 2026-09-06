@@ -546,6 +546,69 @@ class WaitingRoomTests(unittest.TestCase):
         self.assertEqual(['same'], requested)
         self.assertIn('Same tier', room._labels['tier'].properties['text'])
 
+    def test_host_can_cycle_the_bot_skill_preset(self):
+        requested = []
+        skill_state = {'mode': 'mixed', 'supported': True}
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface,
+            bot_skill_status=lambda: dict(skill_state),
+            request_bot_skill_mode=lambda mode: requested.append(mode) or True)
+
+        self.assertTrue(room.open())
+        for role in self.module._BOT_SKILL_CONTROLS:
+            self.assertTrue(room._controls[role].properties['visible'])
+        self.assertIn('Pub mix', room._labels['skill'].properties['text'])
+        self.assertTrue(room.activate('skill_next'))
+        self.assertEqual(['hard'], requested)
+        self.assertIn('Hard', room._labels['skill'].properties['text'])
+        self.assertTrue(room.activate('skill_previous'))
+        self.assertEqual(['hard', 'mixed'], requested)
+
+    def test_a_guest_never_sees_the_bot_skill_controls(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: False,
+            surface=self.surface,
+            bot_skill_status=lambda: {'mode': 'mixed', 'supported': True},
+            request_bot_skill_mode=lambda mode: True)
+
+        self.assertTrue(room.open())
+        for role in self.module._BOT_SKILL_CONTROLS:
+            self.assertFalse(room._controls[role].properties['visible'])
+
+    def test_a_denied_bot_skill_preset_retires_the_optimistic_label(self):
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface,
+            bot_skill_status=lambda: {'mode': 'mixed', 'supported': True},
+            request_bot_skill_mode=lambda mode: True)
+
+        self.assertTrue(room.open())
+        self.assertTrue(room.activate('skill_next'))
+        self.assertIn('Hard', room._labels['skill'].properties['text'])
+        self.assertTrue(room.reject_bot_skill_mode('hard'))
+        self.assertIn('Pub mix', room._labels['skill'].properties['text'])
+
+    def test_the_bot_skill_row_never_overlaps_its_neighbours(self):
+        """Both preset rows and the map row share one narrow native panel."""
+        room = self.module.WaitingRoomUI(
+            self._request_start, lambda: list(self.pool),
+            status=lambda: self.status, host=lambda: True,
+            surface=self.surface)
+
+        self.assertTrue(room.open())
+        spans = []
+        for role in ('tier', 'skill', 'map'):
+            component = room._controls[role]
+            centre = component.properties['position'][1]
+            half = component.properties['height'] / 2.0
+            spans.append((centre - half, centre + half))
+        for lower, upper in zip(spans, spans[1:]):
+            self.assertGreater(lower[0], upper[1])
+
     def test_non_host_sees_capacities_but_not_size_controls(self):
         team_state = {
             'team': 2, 'sizes': {1: 4, 2: 6},

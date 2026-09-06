@@ -4629,8 +4629,14 @@ class BattleRuntime(object):
                     self._bot_vehicle_assignments = {}
                     return False
                 vehicle = raw.get('vehicle')
-                if (team not in (1, 2) or not 0 <= slot < 15 or
-                        vehicle not in allowed_names):
+                if team not in (1, 2) or not 0 <= slot < 15:
+                    self._bot_vehicle_assignments = {}
+                    return False
+                if vehicle is None:
+                    # A slot that pins only its Bot skill tier keeps the
+                    # generated vehicle; the worker reads that tier directly.
+                    continue
+                if vehicle not in allowed_names:
                     self._bot_vehicle_assignments = {}
                     return False
                 if (team, slot) in assignments:

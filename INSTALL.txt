@@ -43,7 +43,9 @@ Play
    MAP opens the client's own map window, where the host picks a standard map
    and a battle time and confirms. The room comes back with that choice, and
    START BATTLE starts it. LEAVE closes the room and returns you to the
-   garage.
+   garage. BOT TIER picks which vehicle tiers the Bots bring, and BOT SKILL
+   picks how good their gunners are: Easy, Relaxed, Pub mix, Hard or Brutal.
+   Only the host sees those two rows.
 4. The server fills each team to WOT_0922_TEAM_SIZE total tanks, including
    human players (1 through 15, default 15). Set that environment variable in
    the batch file that starts the server. Movement and firing unlock when the

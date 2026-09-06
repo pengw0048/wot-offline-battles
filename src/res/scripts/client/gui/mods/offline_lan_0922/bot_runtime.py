@@ -16,6 +16,7 @@ from gui.mods.offline_lan_0922.ai.navigation import (
     BAKED_FATAL_HAZARDS, BAKED_SHALLOW_WATER, TerrainNavigator)
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import ballistics
+from gui.mods.offline_lan_0922 import bot_gunnery
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import effective_params
@@ -499,32 +500,57 @@ def _forward_speed(descriptor):
     return max(4.0, min(value, 35.0))
 
 
-def _bot_default_crew_factors(descriptor):
-    """Return #1513's native factors for the target's plain 100% crew."""
-    factors = loadout.attribute_factors(descriptor, crew=None)
+# Crew levels this client refused, so the fallback below is reported once
+# per level per process rather than once per Bot per round.
+_LOGGED_CREW_LEVEL_REJECTIONS = set()
+
+
+def _bot_default_crew_factors(descriptor, crew_level=None):
+    """Return #1513's native factors for the target's generated default crew.
+
+    ``crew_level`` is the Bot skill tier's trained level.  ``None`` keeps the
+    pinned maximum, which is what every Bot used before skill tiers existed.
+
+    A sub-maximum level has not been accepted on the exact Windows client
+    yet.  If that client's ``generateDefaultCrew`` rejects one, fall back to
+    the maximum-level crew every Bot already used and say so once: a Bot
+    whose gunner tier is a little stronger than intended is recoverable, and
+    a round that refuses to start is not.
+    """
+    factors = loadout.attribute_factors(
+        descriptor, crew=None, crew_level=crew_level)
+    if factors is None and crew_level is not None:
+        if crew_level not in _LOGGED_CREW_LEVEL_REJECTIONS:
+            _LOGGED_CREW_LEVEL_REJECTIONS.add(crew_level)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] bot crew level %s was rejected by this '
+                'client; using the default crew\n' % (crew_level,))
+        factors = loadout.attribute_factors(descriptor, crew=None)
     if factors is None:
         raise RuntimeError(
             'bot default crew attribute factors are unavailable')
     return factors
 
 
-def _bot_profile(descriptor):
+def _bot_profile(descriptor, crew_level=None):
     """Spotting inputs for a vehicle whose crew is the #1513 default crew."""
     return loadout.spotting_profile(
-        descriptor, None, factors=_bot_default_crew_factors(descriptor))
+        descriptor, None,
+        factors=_bot_default_crew_factors(descriptor, crew_level))
 
 
-def _bot_physics_params(descriptor):
-    """Physics for the target vehicle with its plain 100% default crew."""
+def _bot_physics_params(descriptor, crew_level=None):
+    """Physics for the target vehicle with its generated default crew."""
     return vehicle_physics.derive_params(
-        descriptor, factors=_bot_default_crew_factors(descriptor))
+        descriptor,
+        factors=_bot_default_crew_factors(descriptor, crew_level))
 
 
-def _view_range(descriptor, still_seconds=0.0):
+def _view_range(descriptor, still_seconds=0.0, crew_level=None):
     """Bot view range, using the same device and crew law as the player."""
     turret = _value(descriptor, 'turret', {}) or {}
     misc = _value(descriptor, 'miscAttrs', {}) or {}
-    profile = _bot_profile(descriptor)
+    profile = _bot_profile(descriptor, crew_level)
     return spotting.effective_view_range(
         _value(turret, 'circularVisionRadius', 330.0),
         misc_factor=_value(misc, 'circularVisionRadiusFactor', 1.0),
@@ -536,14 +562,14 @@ def _view_range(descriptor, still_seconds=0.0):
                 still_seconds, profile['binocular_delay'])))
 
 
-def _vision_range_pair(descriptor):
+def _vision_range_pair(descriptor, crew_level=None):
     """Bot view range while moving, once its stereoscope arms, and the delay.
 
     The delay is ``None`` when the bot carries no stationary vision device, so
     the caller never pays for a stillness lookup it cannot use.
     """
-    profile = _bot_profile(descriptor)
-    moving = _view_range(descriptor)
+    profile = _bot_profile(descriptor, crew_level)
+    moving = _view_range(descriptor, crew_level=crew_level)
     if not profile['has_binoculars']:
         return moving, moving, None
     turret = _value(descriptor, 'turret', {}) or {}
@@ -1035,10 +1061,13 @@ class _BotGunState(object):
     empty until the full reload boundary completes.
     """
 
-    def __init__(self, descriptor, fire_seq=0, dispersion_factor=1.0):
+    def __init__(self, descriptor, fire_seq=0, dispersion_factor=1.0,
+                 crew_level=None):
         gun = _value(descriptor, 'gun', {}) or {}
+        self.crew_level = crew_level
         gun_modifiers = loadout.modifiers(
-            descriptor, factors=_bot_default_crew_factors(descriptor))
+            descriptor,
+            factors=_bot_default_crew_factors(descriptor, crew_level))
         self.loadout = dict(gun_modifiers)
         raw_dispersion = _value(gun, 'shotDispersionAngle')
         try:
@@ -1112,7 +1141,7 @@ class _BotGunState(object):
         old_dispersion = self.dispersion
         active_reload_duration = self.reload_duration
         aiming_elapsed = self.aiming_elapsed
-        candidate = _BotGunState(descriptor)
+        candidate = _BotGunState(descriptor, crew_level=self.crew_level)
         if (candidate.shell_count != self.shell_count or
                 candidate.clip_size != self.clip_size):
             raise RuntimeError(
@@ -2090,6 +2119,10 @@ class BotRuntime(object):
         self._reset_shot_lane_work()
         self._reset_shot_lane_diagnostics()
         self._physics_params = {}
+        self._bot_skills = {}
+        self._bot_skill_mode = bot_gunnery.DEFAULT_SKILL_MODE
+        self._bot_skill_pins = {}
+        self._gunnery_holds = {}
         self._suspension_params = {}
         self._suspension_param_failures = 0
         self._suspension_trial_reports = set()
@@ -2594,7 +2627,8 @@ class BotRuntime(object):
                                   not descriptor):
             params = vehicle_physics.derive_params({})
         else:
-            params = _bot_physics_params(descriptor)
+            params = _bot_physics_params(
+                descriptor, self.bot_crew_level(bot_id))
         self._physics_params[bot_id] = params
         return params
 
@@ -2706,7 +2740,8 @@ class BotRuntime(object):
             return False
         if state is not None:
             state.pop(_GUN_PITCH_LIMIT_CACHE, None)
-        self._physics_params[bot_id] = _bot_physics_params(descriptor)
+        self._physics_params[bot_id] = _bot_physics_params(
+            descriptor, self.bot_crew_level(bot_id))
         self._suspension_params.pop(bot_id, None)
         self._gun_yaw_limits[bot_id] = ai_driver.gun_yaw_limits(descriptor)
         gun_state = self._gun_states.get(bot_id)
@@ -3010,9 +3045,58 @@ class BotRuntime(object):
         state['_siege_intent_elapsed'] = 0.0
         return changed or switching
 
+    @staticmethod
+    def _lineup_skill_pins(message):
+        """Return the host's exact per-slot Bot gunnery tiers, if any."""
+        pins = {}
+        for raw in message.get('bot_lineup') or ():
+            if not isinstance(raw, dict):
+                continue
+            skill = raw.get('skill')
+            if skill not in bot_gunnery.SKILL_TIERS:
+                continue
+            try:
+                pins[(int(raw['team']), int(raw['slot']))] = skill
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+        return pins
+
+    def _resolve_bot_skill(self, raw):
+        """Return one Bot's gunnery tier for this round.
+
+        A takeover manifest already carries the tier the previous authority
+        installed, so it wins.  Then the host's explicit lineup pin.  Then the
+        room preset, which resolves from round and slot identity alone, so
+        every process reaches the same tier without it travelling first.
+        """
+        published = raw.get('skill')
+        if published in bot_gunnery.SKILL_TIERS:
+            return published
+        try:
+            team = int(raw.get('team', 1))
+            slot = int(raw.get('slot', 0))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('authority manifest Bot slot identity is invalid')
+        pinned = self._bot_skill_pins.get((team, slot))
+        if pinned in bot_gunnery.SKILL_TIERS:
+            return pinned
+        return bot_gunnery.resolve_skill(
+            self._bot_skill_mode, self.round_id, team, slot)
+
+    def bot_skill(self, bot_id):
+        """Return the gunnery tier installed for one Bot this round."""
+        return self._bot_skills.get(int(bot_id), bot_gunnery.DEFAULT_SKILL)
+
+    def bot_crew_level(self, bot_id):
+        """Return the #1513 crew level this Bot's tier trains it to."""
+        return bot_gunnery.crew_level(self.bot_skill(bot_id))
+
     def battle_start(self, message):
         """Build a local authority manifest from the server roster once per round."""
         message = message if isinstance(message, dict) else {}
+        self._bot_skill_mode = bot_gunnery.normalize_skill_mode(
+            message.get('bot_skill_mode'))
+        self._bot_skill_pins = self._lineup_skill_pins(message)
         round_id = message.get('round_id')
         if round_id != self.round_id:
             self.round_id = round_id
@@ -3048,6 +3132,8 @@ class BotRuntime(object):
             self._reset_shot_lane_work()
             self._reset_shot_lane_diagnostics()
             self._physics_params = {}
+            self._bot_skills = {}
+            self._gunnery_holds = {}
             self._suspension_params = {}
             self._suspension_param_failures = 0
             self._suspension_trial_reports = set()
@@ -3161,6 +3247,7 @@ class BotRuntime(object):
             self._ram_cooldowns = {}
             self._human_ram_cooldowns = {}
             self._ram_contacts = frozenset()
+            self._gunnery_holds = {}
             self._cover_queue = []
             self._cover_results = []
             self._next_observation = 0.0
@@ -3226,6 +3313,8 @@ class BotRuntime(object):
             wire_total = int(raw_wire_total)
             siege_time_left = wire_time / 1000.0
             siege_transition_total = wire_total / 1000.0
+            self._bot_skills[bot_id] = self._resolve_bot_skill(raw)
+            crew_level = bot_gunnery.crew_level(self._bot_skills[bot_id])
             self._descriptor_pairs[bot_id] = descriptor_pair
             descriptor = siege_mechanics.active_descriptor(
                 descriptor_pair, siege_state)
@@ -3237,7 +3326,8 @@ class BotRuntime(object):
             if bot_id not in self._gun_states:
                 self._gun_states[bot_id] = _BotGunState(
                     descriptor, raw.get('fire_seq', 0),
-                    _critical_factor(raw, descriptor, 'dispersion'))
+                    _critical_factor(raw, descriptor, 'dispersion'),
+                    crew_level)
                 if restoring_authority:
                     if ('reload_time' not in raw or
                             'reload_duration' not in raw):
@@ -3254,7 +3344,8 @@ class BotRuntime(object):
                         raw.get('clip'), raw.get('clip_size'))
             else:
                 self._gun_states[bot_id].adopt_descriptor(descriptor)
-            self._physics_params[bot_id] = _bot_physics_params(descriptor)
+            self._physics_params[bot_id] = _bot_physics_params(
+                descriptor, crew_level)
             self._turn_speeds[bot_id] = 0.0
             if isinstance(raw.get('profile'), dict):
                 self.adapter.director.register_profile(bot_id, raw.get('team', 1),
@@ -4192,6 +4283,9 @@ class BotRuntime(object):
                 'siege_time_left_ms', 'siege_transition_total_ms',
                 'equipment_states', 'stun_end_server_time_ms')
         result = dict((key, state[key]) for key in keys)
+        # The tier rides the manifest so a takeover installs the same gunner
+        # rather than re-rolling one from a preset mid-round.
+        result['skill'] = self.bot_skill(state['id'])
         descriptor = self._descriptors.get(state['id'], {})
         terminal = _terminal_critical(state, descriptor, 'shot')
         # Retail descriptors always expose the physical crew. Keep synthetic
@@ -4301,7 +4395,8 @@ class BotRuntime(object):
             return cached
         if kind == 'bot':
             descriptor = self._descriptors.get(int(target_id), {})
-            profile = _bot_profile(descriptor)
+            profile = _bot_profile(
+                descriptor, self.bot_crew_level(target_id))
             cached = (_base_invisibility(descriptor, profile),
                       _shot_invisibility_factor(descriptor), profile)
         else:
@@ -4328,8 +4423,9 @@ class BotRuntime(object):
         if cached is None:
             cached = loadout.modifiers(
                 descriptor,
-                factors=_bot_default_crew_factors(descriptor))[
-                    'repair_factor']
+                factors=_bot_default_crew_factors(
+                    descriptor, self.bot_crew_level(bot_id)))[
+                        'repair_factor']
             passive = self._equipment_passives.get(int(bot_id), {})
             cached *= 1.0 + max(
                 0.0, passive.get('repairkitBonusValue', 0.0))
@@ -4338,7 +4434,8 @@ class BotRuntime(object):
 
     def _cache_vision_range(self, bot_id, descriptor):
         """Record this bot's moving and armed view ranges, return the moving one."""
-        moving, still, delay = _vision_range_pair(descriptor)
+        moving, still, delay = _vision_range_pair(
+            descriptor, self.bot_crew_level(bot_id))
         self._vision_ranges[int(bot_id)] = (moving, still, delay)
         return moving
 
@@ -8664,8 +8761,102 @@ class BotRuntime(object):
             'pitch': pitch, 'flight_time': flight_time, 'arc': arc,
         }
 
+    def _track_gunnery_hold(self, state, target, now):
+        """Advance one Bot's continuous hold on its current target.
+
+        Returns ``(hold_seconds, laying_seconds, opening_shot)``, or ``None``
+        when the Bot holds no target.  ``laying_seconds`` restarts at the
+        Bot's own shot and ``opening_shot`` says whether this engagement has
+        produced one yet.  A momentary gap keeps the record: a gunner does
+        not react to the same tank twice.
+        """
+        bot_id = int(state['id'])
+        record = self._gunnery_holds.get(bot_id)
+        if not isinstance(target, dict):
+            return None
+        key = self._observer_target_key(target)
+        now = float(now)
+        if record is None or record['key'] != key:
+            record = {'key': key, 'since': now, 'laid_since': now,
+                      'fire_seq': int(_number(state.get('fire_seq'), 0)),
+                      'fired': False, 'epoch': None, 'error': None}
+            self._gunnery_holds[bot_id] = record
+        fire_seq = int(_number(state.get('fire_seq'), 0))
+        if record['fire_seq'] != fire_seq:
+            record['fire_seq'] = fire_seq
+            record['laid_since'] = now
+            record['fired'] = True
+        return (max(0.0, now - record['since']),
+                max(0.0, now - record['laid_since']),
+                not record['fired'])
+
+    def _gunnery_error(self, state, target, now):
+        """Return this Bot's frozen gunner error for the current aim epoch."""
+        held = self._track_gunnery_hold(state, target, now)
+        if held is None:
+            return None
+        bot_id = int(state['id'])
+        record = self._gunnery_holds[bot_id]
+        epoch = bot_gunnery.bias_epoch(held[0])
+        if record['epoch'] != epoch or record['error'] is None:
+            record['epoch'] = epoch
+            record['error'] = bot_gunnery.engagement_error(
+                self.bot_skill(bot_id), self.round_id, bot_id,
+                record['key'], epoch)
+        return record['error']
+
+    def _aimed_target(self, state, target, now):
+        """Return the point this Bot's gunner actually lays the gun on.
+
+        Retail #1513 has no Bot gunner, so an unmodified Bot solved an exact
+        intercept on the target centre and only ever paid the shot dispersion
+        every gun pays.  The tier's persistent bias moves that aim point and
+        its lead error scales the velocity fed to the solve, so a weak gunner
+        misses the way a human does.  The original target row is never
+        mutated: identity, visibility and lease state stay canonical.
+        """
+        if not isinstance(target, dict):
+            return target
+        error = self._gunnery_error(state, target, now)
+        if error is None:
+            return target
+        bot_id = int(state['id'])
+        gun_state = self._gun_states.get(bot_id)
+        if gun_state is None:
+            return target
+        position = _point(target.get('position'), _position(target))
+        origin = _position(state)
+        dx = position[0] - origin[0]
+        dz = position[2] - origin[2]
+        horizontal = math.sqrt(dx * dx + dz * dz)
+        if horizontal <= 1.0:
+            return target
+        lateral, vertical = bot_gunnery.aim_offset_metres(
+            self.bot_skill(bot_id), error,
+            gun_state.fully_aimed_dispersion, _distance(origin, position))
+        velocity = self._target_velocity(target)
+        scale = float(error['lead_scale'])
+        aimed = dict(target)
+        aimed['position'] = (
+            position[0] + (dz / horizontal) * lateral,
+            position[1] + vertical,
+            position[2] - (dx / horizontal) * lateral)
+        aimed['velocity'] = (velocity[0] * scale, velocity[1] * scale,
+                             velocity[2] * scale)
+        return aimed
+
+    def _gunner_ready(self, state, gun_state, target, now):
+        """Return whether this Bot's gunner has reacted and finished laying."""
+        held = self._track_gunnery_hold(state, target, now)
+        if held is None:
+            return False
+        return bot_gunnery.may_fire(
+            self.bot_skill(int(state['id'])), held[0], held[1],
+            gun_state.current_dispersion_factor, held[2])
+
     def _ballistic_solution(self, state, target, descriptor, shell_index,
                             now):
+        target = self._aimed_target(state, target, now)
         profile = state.get('profile')
         profile = profile if isinstance(profile, dict) else {}
         if str(profile.get('class_tag') or '') == 'SPG':
@@ -11115,11 +11306,17 @@ class BotRuntime(object):
                     not burst_state.active and
                     gun_state.ready(reload_factor) and
                     ammo_state.can_fire() and
+                    # The gunner tier is the last term on purpose.  It only
+                    # decides whether an already admitted shot leaves, so the
+                    # lane probe above keeps refreshing its receipt while the
+                    # gunner reacts and lays, exactly as it did before Bots
+                    # had tiers.
                     (pending_intent is not None or
                      pending_reproof is not None or
                      self._shot_clear(
                         state, target, now,
-                        probe_budget=final_shot_lane_budget))):
+                        probe_budget=final_shot_lane_budget)) and
+                    self._gunner_ready(state, gun_state, target, now)):
                 launch_receipt = None
                 launch_preview = None
                 lane_clear = False

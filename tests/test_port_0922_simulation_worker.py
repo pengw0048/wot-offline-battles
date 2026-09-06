@@ -1626,6 +1626,7 @@ class SimulationWorkerSocketTests(unittest.TestCase):
                 'state_revision', 'spawn', 'bot_authority_id', 'team_size',
                 'authority_epoch', 'capabilities', 'server_capabilities',
                 'team_sizes', 'requested_team', 'bot_tier_mode',
+                'bot_skill_mode',
                 'worker_status', 'vehicle_compact_descr',
                 'effective_params',
             }, set(welcome))

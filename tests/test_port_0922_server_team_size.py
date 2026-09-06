@@ -121,6 +121,69 @@ class ServerTeamSizeTests(unittest.TestCase):
             guest.player_id, 'same'))
         self.assertEqual('random', state.bot_tier_mode)
 
+    def test_host_can_select_a_bot_skill_preset(self):
+        self.assertIn('set_bot_skill_mode', MODERN_VISIBLE_MESSAGE_TYPES)
+        state = BattleState()
+        host, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1000), _hello(1))
+        self.assertIsNone(error)
+
+        self.assertEqual('mixed', state.bot_skill_mode)
+        self.assertEqual((True, None), state.set_bot_skill_mode(
+            host.player_id, 'brutal'))
+        self.assertEqual('brutal', state.bot_skill_mode)
+        self.assertEqual(
+            'brutal', state.lobby_message()['bot_skill_mode'])
+
+    def test_guest_cannot_select_a_bot_skill_preset(self):
+        state = BattleState()
+        unused_host, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1000), _hello(1))
+        self.assertIsNone(error)
+        guest, error = state.add_player(
+            _Connection(), ('10.0.0.2', 1001), _hello(2))
+        self.assertIsNone(error)
+
+        self.assertEqual((False, 'host_only'), state.set_bot_skill_mode(
+            guest.player_id, 'easy'))
+        self.assertEqual('mixed', state.bot_skill_mode)
+
+    def test_an_unsupported_bot_skill_preset_is_refused(self):
+        state = BattleState()
+        host, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1000), _hello(1))
+        self.assertIsNone(error)
+
+        self.assertEqual((False, 'invalid_mode'), state.set_bot_skill_mode(
+            host.player_id, 'perfect'))
+        self.assertEqual('mixed', state.bot_skill_mode)
+
+    def test_exact_lineup_may_pin_a_slot_skill_with_or_without_a_vehicle(self):
+        state = BattleState(bot_lineup=[
+            {'team': 1, 'slot': 0, 'skill': 'elite'},
+            {'team': 2, 'slot': 3, 'vehicle': 'germany:G12_Ltraktor',
+             'skill': 'rookie'},
+            {'team': 2, 'slot': 4, 'vehicle': 'germany:G12_Ltraktor'},
+        ])
+
+        self.assertEqual([
+            {'team': 1, 'slot': 0, 'skill': 'elite'},
+            {'team': 2, 'slot': 3, 'vehicle': 'germany:G12_Ltraktor',
+             'skill': 'rookie'},
+            {'team': 2, 'slot': 4, 'vehicle': 'germany:G12_Ltraktor'},
+        ], state.bot_lineup)
+
+    def test_exact_lineup_rejects_an_unsupported_slot_skill(self):
+        with self.assertRaises(ValueError):
+            BattleState(bot_lineup=[{
+                'team': 2, 'slot': 3,
+                'vehicle': 'germany:G12_Ltraktor', 'skill': 'perfect',
+            }])
+
+    def test_exact_lineup_rejects_a_slot_that_pins_nothing(self):
+        with self.assertRaises(ValueError):
+            BattleState(bot_lineup=[{'team': 2, 'slot': 3}])
+
     def test_exact_lineup_requires_unique_fully_qualified_slots(self):
         state = BattleState(bot_lineup=[{
             'team': 2, 'slot': 3,

@@ -35,6 +35,10 @@ CLONE_BOT_VEHICLE_SUFFIXES_0922 = ("_bootcamp",)
 NON_BATTLE_ENTITY_BOT_SUFFIXES_0922 = ("_bot", "_training")
 NON_BATTLE_ENTITY_BOT_VEHICLES_0922 = frozenset(("germany:Env_Artillery",))
 CATALOGUE_VISIBILITY_TAG_0922 = "secret"
+# The Bot gunnery tiers bot_gunnery.SKILL_TIERS defines, weakest first, bound
+# by a parity test so a new tier cannot appear on only one side.  ``None``
+# leaves a pinned slot on the room's own skill preset.
+BOT_SKILL_TIERS_0922 = ("rookie", "regular", "veteran", "elite")
 
 _NATION = re.compile(r"^[a-z][a-z0-9_]*$")
 _VEHICLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -74,6 +78,15 @@ def vehicle_type_name(choice):
             _VEHICLE.fullmatch(vehicle) is None):
         raise BotLineupProfileError("The vehicle choice is invalid.")
     return "%s:%s" % (nation, vehicle)
+
+
+def _skill(value):
+    """Return one supported gunnery tier, or None to follow the room preset."""
+    if value is None:
+        return None
+    if value not in BOT_SKILL_TIERS_0922:
+        raise BotLineupProfileError("The Bot skill level is invalid.")
+    return value
 
 
 def _vehicle_type_name(value):
@@ -127,12 +140,23 @@ def _assignments(value):
             team, slot = int(raw.get("team")), int(raw.get("slot"))
         except (TypeError, ValueError, OverflowError):
             raise BotLineupProfileError("The Bot slot is invalid.")
-        vehicle = _vehicle_type_name(raw.get("vehicle"))
+        raw_vehicle = raw.get("vehicle")
+        vehicle = (None if raw_vehicle is None else
+                   _vehicle_type_name(raw_vehicle))
+        skill = _skill(raw.get("skill"))
         if (team not in (1, 2) or not 0 <= slot < 15 or
                 (team, slot) in seen):
             raise BotLineupProfileError("The Bot lineup is invalid.")
+        if vehicle is None and skill is None:
+            # An entry that pins nothing is not a saved slot at all.
+            continue
         seen.add((team, slot))
-        result.append({"team": team, "slot": slot, "vehicle": vehicle})
+        entry = {"team": team, "slot": slot}
+        if vehicle is not None:
+            entry["vehicle"] = vehicle
+        if skill is not None:
+            entry["skill"] = skill
+        result.append(entry)
     return sorted(result, key=lambda item: (item["team"], item["slot"]))
 
 
@@ -205,12 +229,15 @@ def assignments_for(store, raw_name):
         "That Bot lineup profile does not exist.")
 
 
-def set_assignment(store, raw_name, team, slot, vehicle):
+def set_assignment(store, raw_name, team, slot, vehicle=None, skill=None):
     store = normalize_store(store)
     name = _name(raw_name)
-    assignment = _assignments([{
-        "team": team, "slot": slot, "vehicle": vehicle,
-    }])[0]
+    pinned = _assignments([{
+        "team": team, "slot": slot, "vehicle": vehicle, "skill": skill,
+    }])
+    if not pinned:
+        return clear_assignment(store, raw_name, team, slot)
+    assignment = pinned[0]
     for profile in store["profiles"]:
         if profile["name"].casefold() != name.casefold():
             continue

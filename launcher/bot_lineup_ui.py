@@ -9,6 +9,24 @@ except ImportError:
     import vehicle_overlays
 
 
+# The editor labels every gunnery tier plus the "leave it to the room"
+# choice.  ``None`` keeps the waiting-room skill preset for that slot.
+SKILL_CHOICES = (
+    (None, "Room preset"),
+    ("rookie", "Rookie"),
+    ("regular", "Regular"),
+    ("veteran", "Veteran"),
+    ("elite", "Elite"),
+)
+
+
+def _skill_label(skill):
+    for value, label in SKILL_CHOICES:
+        if value == skill:
+            return label
+    return SKILL_CHOICES[0][1]
+
+
 class BotLineupEditorWindow(object):
     def __init__(self, parent, game_root, profile_name, store, on_save,
                  tk_module, ttk_module, messagebox_module, log=None):
@@ -34,29 +52,31 @@ class BotLineupEditorWindow(object):
         frame.pack(fill="both", expand=True)
         tk.Label(
             frame,
-            text=("Choose a nation and vehicle for any Bot slot. Empty slots "
-                  "continue to use the waiting-room tier preset. A human in a "
-                  "slot simply leaves that saved Bot choice unused."),
-            justify="left", anchor="w", wraplength=820).grid(
-                row=0, column=0, columnspan=6, sticky="we", pady=(0, 8))
+            text=("Choose a nation, vehicle and skill level for any Bot "
+                  "slot. Anything left empty continues to use the "
+                  "waiting-room presets, and a human in a slot simply leaves "
+                  "that saved Bot choice unused."),
+            justify="left", anchor="w", wraplength=1040).grid(
+                row=0, column=0, columnspan=8, sticky="we", pady=(0, 8))
         for column, title in ((0, "Team 1 Bot"), (1, "Nation"),
-                              (2, "Vehicle"), (3, "Team 2 Bot"),
-                              (4, "Nation"), (5, "Vehicle")):
+                              (2, "Vehicle"), (3, "Skill"),
+                              (4, "Team 2 Bot"), (5, "Nation"),
+                              (6, "Vehicle"), (7, "Skill")):
             tk.Label(frame, text=title, anchor="w").grid(
                 row=1, column=column, sticky="we", padx=(0, 5))
         for slot in range(15):
             self._make_slot(frame, 2 + slot, 1, slot, 0)
-            self._make_slot(frame, 2 + slot, 2, slot, 3)
+            self._make_slot(frame, 2 + slot, 2, slot, 4)
         self.status = tk.StringVar(value="Loading original vehicle list…")
         tk.Label(frame, textvariable=self.status, anchor="w").grid(
-            row=17, column=0, columnspan=6, sticky="we", pady=(8, 0))
+            row=17, column=0, columnspan=8, sticky="we", pady=(8, 0))
         tk.Button(
             frame, text="Clear all saved slots", command=self._clear_all).grid(
-                row=18, column=0, columnspan=3, sticky="we", pady=(8, 0))
+                row=18, column=0, columnspan=4, sticky="we", pady=(8, 0))
         tk.Button(frame, text="Close", command=self.root.destroy).grid(
-            row=18, column=3, columnspan=3, sticky="we", padx=(6, 0),
+            row=18, column=4, columnspan=4, sticky="we", padx=(6, 0),
             pady=(8, 0))
-        for column in (2, 5):
+        for column in (2, 6):
             frame.grid_columnconfigure(column, weight=1)
 
     def _make_slot(self, frame, row, team, slot, column):
@@ -77,11 +97,21 @@ class BotLineupEditorWindow(object):
         vehicle_box.bind(
             "<<ComboboxSelected>>",
             lambda unused, key=(team, slot): self._vehicle_changed(key))
+        skill = tk.StringVar(value=SKILL_CHOICES[0][1])
+        skill_box = self._ttk.Combobox(
+            frame, textvariable=skill, state="readonly", width=12,
+            values=tuple(label for unused_value, label in SKILL_CHOICES))
+        skill_box.grid(row=row, column=column + 3, sticky="we", padx=(0, 5))
+        skill_box.bind(
+            "<<ComboboxSelected>>",
+            lambda unused, key=(team, slot): self._skill_changed(key))
         self._rows[(team, slot)] = {
             "nation": nation,
             "vehicle": vehicle,
+            "skill": skill,
             "nation_box": nation_box,
             "vehicle_box": vehicle_box,
+            "skill_box": skill_box,
         }
 
     def _load_choices(self):
@@ -103,7 +133,7 @@ class BotLineupEditorWindow(object):
                 value["label"].casefold(), value["type_name"])))
             for nation, values in by_nation.items())
         assignments = dict(
-            ((value["team"], value["slot"]), value["vehicle"])
+            ((value["team"], value["slot"]), value)
             for value in bot_lineup_profiles.assignments_for(
                 self._store, self._profile_name))
         nations = tuple(sorted(self._choices_by_nation))
@@ -111,7 +141,9 @@ class BotLineupEditorWindow(object):
             (choice["type_name"], choice) for choice in self._choices)
         for key, row in self._rows.items():
             row["nation_box"].config(values=nations)
-            choice = choice_by_vehicle.get(assignments.get(key))
+            saved = assignments.get(key) or {}
+            row["skill"].set(_skill_label(saved.get("skill")))
+            choice = choice_by_vehicle.get(saved.get("vehicle"))
             if choice is not None:
                 row["nation"].set(choice["nation"])
                 self._set_vehicle_values(key, choice["nation"])
@@ -133,7 +165,34 @@ class BotLineupEditorWindow(object):
         row = self._rows[key]
         self._set_vehicle_values(key, row["nation"].get())
         row["vehicle"].set("")
-        self._clear_slot(key)
+        self._save_slot(key, None)
+
+    def _selected_skill(self, key):
+        label = self._rows[key]["skill"].get()
+        for value, choice_label in SKILL_CHOICES:
+            if choice_label == label:
+                return value
+        return None
+
+    def _skill_changed(self, key):
+        self._save_slot(key, self._selected_choice(key))
+
+    def _save_slot(self, key, choice):
+        """Persist whatever this slot still pins, or clear it when nothing."""
+        skill = self._selected_skill(key)
+        if choice is None and skill is None:
+            return self._clear_slot(key)
+        try:
+            self._store = bot_lineup_profiles.set_assignment(
+                self._store, self._profile_name, key[0], key[1],
+                None if choice is None else choice["type_name"], skill)
+            self._on_save(self._store)
+            self.status.set("Saved Team %d Bot %d: %s, %s" % (
+                key[0], key[1] + 1,
+                "generated vehicle" if choice is None else choice["label"],
+                _skill_label(skill)))
+        except bot_lineup_profiles.BotLineupProfileError as error:
+            self.status.set(str(error))
 
     def _selected_choice(self, key):
         row = self._rows[key]
@@ -151,18 +210,7 @@ class BotLineupEditorWindow(object):
         return matches[0] if len(matches) == 1 else None
 
     def _vehicle_changed(self, key):
-        selected = self._selected_choice(key)
-        if selected is None:
-            return self._clear_slot(key)
-        try:
-            self._store = bot_lineup_profiles.set_assignment(
-                self._store, self._profile_name, key[0], key[1],
-                selected["type_name"])
-            self._on_save(self._store)
-            self.status.set("Saved Team %d Bot %d: %s" % (
-                key[0], key[1] + 1, selected["label"]))
-        except bot_lineup_profiles.BotLineupProfileError as error:
-            self.status.set(str(error))
+        self._save_slot(key, self._selected_choice(key))
 
     def _clear_slot(self, key):
         try:
@@ -180,6 +228,7 @@ class BotLineupEditorWindow(object):
             self._on_save(self._store)
             for row in self._rows.values():
                 row["vehicle"].set("")
+                row["skill"].set(SKILL_CHOICES[0][1])
             self.status.set("All saved Bot slots were cleared.")
         except bot_lineup_profiles.BotLineupProfileError as error:
             self.status.set(str(error))
