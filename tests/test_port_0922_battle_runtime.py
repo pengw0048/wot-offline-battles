@@ -12652,6 +12652,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'kind': 'hit', 'world_pose': True,
             'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
             'shot_result': 2, 'damage': 250, 'source': 'shot'}
+        battle._avatar.playerVehicleID = 11
 
         self.assertTrue(battle._present_combat_hit(
             event, target_record, attacker_record, 11))
@@ -12688,6 +12689,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'kind': 'bot_human_hit', 'world_pose': True,
             'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
             'shot_result': 1, 'damage': 0, 'source': 'shot'}
+        battle._avatar.playerVehicleID = 10
 
         self.assertTrue(battle._present_combat_hit(
             event, target_record, attacker_record, 11))
@@ -12697,6 +12699,18 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(10, effect.kwargs['entity_id'])
         self.assertTrue(effect.kwargs['isPlayerVehicle'])
         self.assertEqual(0.0, effect.kwargs['damageFactor'])
+
+        # _SoundEffectDesc dereferences BigWorld.entity(playerVehicleID)
+        # as soon as either identity is present, so a player who has left
+        # the world keeps the old event instead of disabling the effect.
+        del runtime.bigworld.entities[10]
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+        effect = battle._avatar.terrainEffects.addNew.call_args
+        self.assertNotIn('attackerID', effect.kwargs)
+        self.assertNotIn(
+            'projectile impact presentation',
+            battle._disabled_optional_features)
 
     def test_self_splash_with_degenerate_direction_is_presentation_safe(self):
         runtime = _runtime()

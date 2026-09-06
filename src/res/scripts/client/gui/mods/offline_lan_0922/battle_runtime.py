@@ -9547,6 +9547,32 @@ class BattleRuntime(object):
                 impulse, bool(presented)))
         return True
 
+    def _impact_sound_identity(self, target_record, attacker_id, direction,
+                               damage_factor):
+        """Return the arguments a #1513 hit sound resolves its event from.
+
+        ``_SoundEffectDesc.create`` dereferences
+        ``BigWorld.entity(playerVehicleID).isAlive()`` as soon as either
+        identity is present, so only publish them while that stock lookup
+        resolves.  Without them the descriptor can only play its
+        two-other-tanks impact event.
+        """
+        player_id = int(getattr(self._avatar, 'playerVehicleID', 0) or 0)
+        lookup = getattr(self._runtime.bigworld, 'entity', None)
+        if player_id <= 0 or not callable(lookup) or lookup(player_id) is None:
+            return {}
+        try:
+            attacker_id = int(attacker_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            attacker_id = 0
+        return {
+            'isPlayerVehicle': bool(target_record.get('local')),
+            'entity_id': int(target_record.get('engine_id') or 0),
+            'attackerID': attacker_id,
+            'damageFactor': damage_factor,
+            'hitdir': direction,
+        }
+
     def _hit_damage_factor(self, event, target_record):
         """Return retail's ``damageFactor``: hull damage as a health percent.
 
@@ -9728,11 +9754,8 @@ class BattleRuntime(object):
                 end=hit_position + direction.scale(0.4),
                 showShockWave=bool(target_record.get('local')),
                 showFlashBang=bool(target_record.get('local')),
-                isPlayerVehicle=bool(target_record.get('local')),
-                entity_id=int(target_record['engine_id']),
-                attackerID=int(attacker_id or 0),
-                damageFactor=damage_factor,
-                hitdir=direction)
+                **self._impact_sound_identity(
+                    target_record, attacker_id, direction, damage_factor))
         except Exception as error:
             self._warn_optional_failure(
                 'projectile impact presentation', error)
@@ -12054,10 +12077,10 @@ class BattleRuntime(object):
                 start=hit_position - direction.scale(0.4),
                 end=hit_position + direction.scale(0.4),
                 showShockWave=False, showFlashBang=False,
-                isPlayerVehicle=bool(target_record.get('local')),
-                entity_id=int(target_record.get('engine_id') or 0),
-                attackerID=self._projectile_attacker_engine_id(meta),
-                damageFactor=0.0, hitdir=direction)
+                **self._impact_sound_identity(
+                    target_record,
+                    self._projectile_attacker_engine_id(meta), direction,
+                    0.0))
         except Exception as error:
             self._warn_optional_failure(
                 'projectile impact presentation', error)
