@@ -174,6 +174,18 @@ class _Process(object):
         return self.exit_code
 
 
+class _StoppableProcess(_Process):
+    """A child that stays live until the launcher requests its stop."""
+
+    def __init__(self, exit_code=0, pid=1234):
+        _Process.__init__(self, exit_code=None, pid=pid)
+        self._stop_exit_code = exit_code
+
+    def request_stop(self, unused_process, unused_root):
+        self.exit_code = self._stop_exit_code
+        return True
+
+
 class WindowTest(unittest.TestCase):
     def setUp(self):
         self.settings_dir = tempfile.mkdtemp()
@@ -1963,7 +1975,40 @@ class WindowTest(unittest.TestCase):
             wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
             self.window._observed_crash_roles)
 
-    def test_clean_worker_termination_is_not_a_crash(self):
+    def test_requested_worker_stop_with_nonzero_exit_is_not_a_crash(self):
+        worker = _StoppableProcess(exit_code=3, pid=42)
+        self.window._worker = worker
+        self.window._worker_starter_root = self.settings_dir
+
+        with mock.patch.object(
+                self.window, "_request_starter_stop",
+                side_effect=worker.request_stop), \
+                mock.patch.object(
+                    wot_launcher.error_reports, "minidump_evidence",
+                    return_value=(wot_launcher.error_reports.
+                                  MINIDUMP_EVIDENCE_TERMINATION)), \
+                mock.patch.object(
+                    wot_launcher.error_reports, "client_exited_cleanly",
+                    return_value=True) as clean_exit:
+            self.assertEqual(3, self.window._stop_worker())
+
+        self.assertIn("Stopping the hidden simulation worker", self._log_text())
+        clean_exit.assert_called_once_with(
+            self.window._active_report_session,
+            wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
+            stop_requested=True)
+        self.assertNotIn(
+            wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
+            self.window._observed_crash_roles)
+
+    def test_worker_already_gone_with_nonzero_exit_is_a_crash(self):
+        """The reported #1513 case: the worker aborts on its own.
+
+        Its last line is the restored lobby, ProcDump's ``-t`` dump carries no
+        exception stream, and nobody asked it to stop. Only the missing stop
+        request separates this from an orderly shutdown, so the launcher must
+        keep the dump and report the crash.
+        """
         worker = _Process(exit_code=3, pid=42)
         self.window._worker = worker
         self.window._worker_starter_root = self.settings_dir
@@ -1974,13 +2019,16 @@ class WindowTest(unittest.TestCase):
                     wot_launcher.error_reports.MINIDUMP_EVIDENCE_TERMINATION)), \
                 mock.patch.object(
                     wot_launcher.error_reports, "client_exited_cleanly",
-                    return_value=True) as clean_exit:
+                    return_value=False) as clean_exit:
             self.assertEqual(3, self.window._stop_worker())
 
+        self.assertNotIn(
+            "Stopping the hidden simulation worker", self._log_text())
         clean_exit.assert_called_once_with(
             self.window._active_report_session,
-            wot_launcher.error_reports.ROLE_HIDDEN_WORKER)
-        self.assertNotIn(
+            wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
+            stop_requested=False)
+        self.assertIn(
             wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
             self.window._observed_crash_roles)
 
@@ -2286,11 +2334,47 @@ class WindowTest(unittest.TestCase):
                 self.settings_dir, core.PORT_0_9_22, core.LOCAL_HOST,
                 core.DEFAULT_SERVER_PORT, paired_worker=True))
 
-        clean_exit.assert_called_once_with(boundary)
+        clean_exit.assert_called_once_with(boundary, stop_requested=False)
         self.assertNotIn(
             wot_launcher.error_reports.ROLE_VISIBLE_CLIENT,
             self.window._observed_crash_roles)
         self.assertNotIn("exit code 1", self._log_text())
+
+    def test_worker_authority_exit_is_judged_without_a_stop_request(self):
+        """The launcher never asked, so the tail cannot excuse the exit."""
+        boundary = wot_launcher.error_reports.begin_session(
+            self.settings_dir, needs_worker=True,
+            session_id="20260823T120000Z-555555555555")
+        self.window._active_report_session = boundary
+        game = _Process(exit_code=None)
+        worker = _Process(exit_code=3)
+        self.window._worker = worker
+        with mock.patch(
+                "wot_launcher.subprocess.Popen", return_value=game), \
+                mock.patch(
+                    "core.wait_for_paired_player_exit",
+                    return_value=(1, True)), \
+                mock.patch.object(
+                    wot_launcher.error_reports, "minidump_evidence",
+                    return_value=(wot_launcher.error_reports.
+                                  MINIDUMP_EVIDENCE_TERMINATION)), \
+                mock.patch.object(
+                    wot_launcher.error_reports, "client_exited_cleanly",
+                    return_value=False) as clean_exit, \
+                mock.patch.object(self.window, "_log_worker_failure"):
+            self.window._run_game(
+                self.settings_dir, core.PORT_0_9_22, core.LOCAL_HOST,
+                core.DEFAULT_SERVER_PORT, paired_worker=True)
+
+        clean_exit.assert_called_once_with(
+            boundary, wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
+            stop_requested=False)
+        self.assertTrue(self.window._worker_exited_unexpectedly)
+        self.assertIn(
+            wot_launcher.error_reports.ROLE_HIDDEN_WORKER,
+            self.window._observed_crash_roles)
+        self.assertIn("worker stopped with exit code 3", self._log_text())
+        self.assertNotIn("exited normally with code 3", self._log_text())
 
     def test_paired_player_logs_worker_failure(self):
         game = _Process(exit_code=None)
