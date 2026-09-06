@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Dedented 0.8.2 horizontal world-collision law."""
 
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    observed, observed_ray)
+
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
 	_try_destroy_solid_hit, _vehicle_hull_bbox,
@@ -24,8 +27,11 @@ def _collide_horizontal(spaceID, start, end,
 	if broken_filter is _UNPREPARED_COLLISION_FILTER:
 		broken_filter = horizontal_collision_filter(start, end)
 	if broken_filter is None:
-		return BigWorld.wg_collideSegment(spaceID, start, end, 128)
-	return BigWorld.wg_collideSegment(
+		return observed_ray(
+			'native.motion.ray', BigWorld.wg_collideSegment,
+			spaceID, start, end, 128)
+	return observed_ray(
+		'native.motion.ray', BigWorld.wg_collideSegment,
 		spaceID, start, end, 128, broken_filter)
 
 
@@ -78,6 +84,7 @@ def _drivable_surface(collision, maximum_gradient=_MAX_DRIVABLE_GRADIENT):
 		return False
 
 
+@observed('motion.ground_profile')
 def _ground_profile(spaceID, Math, pos, sx, sz, sin_y, cos_y, direction,
 		look, segment_count=6, ground_plane=None):
 	"""Sample the lane that produced a lower-hull hit."""
@@ -170,6 +177,7 @@ def _hull_pose_endpoint(local_start, local_end, half_width,
 		start_forward + delta_forward * fraction)
 
 
+@observed('motion.ground_top')
 def _ground_top(spaceID, Math, pos, x, z, look, ground_plane=None):
 	"""Return support below the occupied lane, not an overhead deck.
 
@@ -193,15 +201,19 @@ def _ground_top(spaceID, Math, pos, x, z, look, ground_plane=None):
 		start = Math.Vector3(x, start_y, z)
 		end = Math.Vector3(x, pos.y - probe_down, z)
 		broken_filter = ground_collision_filter(x, z)
-		ground = (BigWorld.wg_collideSegment(spaceID, start, end, 128)
+		ground = (observed_ray(
+			'native.motion.ground', BigWorld.wg_collideSegment,
+			spaceID, start, end, 128)
 			if broken_filter is None else
-			BigWorld.wg_collideSegment(
+			observed_ray(
+				'native.motion.ground', BigWorld.wg_collideSegment,
 				spaceID, start, end, 128, broken_filter))
 		return None if ground is None else float(ground[0].y)
 	except (AttributeError, IndexError, TypeError, ValueError):
 		return None
 
 
+@observed('motion.ground_ahead')
 def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		footprint_x, footprint_z, end_x, end_z, look, ground_plane=None):
 	"""Conservatively extend the ground observed inside the hull footprint.
@@ -306,6 +318,7 @@ def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
 	return False
 
 
+@observed('motion.solid_recast')
 def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td,
 		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""Admit only a clear ray or a bounded chain of proved light props.
@@ -327,6 +340,7 @@ def _solid_contact_cleared(spaceID, segment_start, segment_end, vel, td,
 		[_WORLD_SOFT_RECAST_BUDGET])
 
 
+@observed('motion.destroy_recast')
 def _destroy_and_recast(spaceID, segment_start, segment_end, collision,
 		yaw, vel, td, crush_state=None, allow_kinetic=False,
 		kinetic_speed=None, commit_enabled=True,
@@ -411,6 +425,7 @@ def check_horizontal_collision(bigworld, math_module, *args, **kwargs):
 			sys.modules['Math'] = old_math
 
 
+@observed('motion.world')
 def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		airborne=False, dt=0.04, return_status=False,
 		allow_kinetic=False, kinetic_speed=None, commit_enabled=True,
