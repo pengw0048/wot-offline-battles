@@ -732,7 +732,8 @@ and logical id before transmission, then performs the reverse mapping for
 display; account DBIDs are resolved independently and are never assumed to
 equal entity ids. A same-team server broadcast owns the original stock command
 display, marker, and sound. Its acknowledgement closes the stock request and
-may display one assigned Bot's stock `POSITIVE` reply. Expiry, issuer death or
+displays each assigned Bot's stock `POSITIVE` reply, up to three distinct
+responders; an empty assignment produces no Bot reply. Expiry, issuer death or
 departure, round completion, and replacement at the bounded command-history
 limit are cancellation terminals, not claims that a Bot completed the order.
 

@@ -172,6 +172,21 @@ class BattleRadioAdapterTests(unittest.TestCase):
         self.assertEqual((27, 0), reply[:2])
         self.assertEqual(99002, reply[2]['int64Arg1'])
 
+    def test_ack_identifies_all_assigned_bots_once_and_allows_no_responder(self):
+        for recipients, expected in (([], []),
+                                     ([99002, 99003, 9002], [99002, 99003, 9002]),
+                                     ([99002, 99002, 9003], [99002])):
+            with self.subTest(recipients=recipients):
+                self.assertTrue(self.adapter.handle_client_action(25, 8, _args()))
+                sequence = self.sender.next_sequence
+                self.avatar.chat2 = []
+                self.assertTrue(self.adapter.receive_ack(sequence, True, recipients))
+                self.assertEqual(expected, [reply[2]['int64Arg1']
+                                           for reply in self.avatar.chat2[1:]])
+                before = list(self.avatar.chat2)
+                self.assertFalse(self.adapter.receive_ack(sequence, True, recipients))
+                self.assertEqual(before, self.avatar.chat2)
+
     def test_same_team_broadcast_owns_the_original_stock_echo(self):
         self.assertTrue(self.adapter.receive_command(
             'FOLLOWME', 9001, target_id=102))

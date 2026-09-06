@@ -115,7 +115,7 @@ class TeamCommandTests(unittest.TestCase):
                  'critical': {'destroyed': ['engineHealth']}},
             15: {'id': 15, 'team': 1, 'alive': True, 'x': 6.0, 'z': 0.0,
                  'critical': {'destroyed': ['leftTrackHealth']}},
-            16: {'id': 16, 'team': 1, 'alive': True, 'x': 7.0, 'z': 0.0,
+            16: {'id': 16, 'team': 1, 'alive': True, 'x': 310.0, 'z': 0.0,
                  'critical': {'crew_ko': ['driver']}},
             17: {'id': 17, 'team': 1, 'alive': True, 'x': 300.0, 'z': 0.0},
             18: {'id': 18, 'team': 1, 'alive': True, 'x': 301.0, 'z': 0.0},
@@ -131,6 +131,28 @@ class TeamCommandTests(unittest.TestCase):
 
         self.assertTrue(ack['accepted'])
         self.assertEqual([12, 13, 17], ack['recipient_bot_ids'])
+
+    def test_driver_loss_and_routine_withdraw_do_not_make_a_mobile_bot_ineligible(self):
+        self.state.bot_states[11]['critical'] = {'crew_ko': ['driver']}
+        self.state.bot_orders = {'revision': 1, 'orders': [
+            {'id': 11, 'combat_mode': 'withdraw'},
+        ]}
+        ack = self.state.submit_team_command(1, self._message('HELPME'))
+        self.assertEqual([11, 12], ack['recipient_bot_ids'])
+
+    def test_travel_order_survives_the_old_fifteen_second_deadline(self):
+        ack = self.state.submit_team_command(1, self._message('BACKTOBASE'))
+        issued = self.state.tick
+        self.state.tick += 16 * TICK_HZ
+        self.assertEqual([ack['command_seq']], [order['command_seq']
+                         for order in self.state._active_team_commands_locked()])
+        self.assertEqual(120 * TICK_HZ, ack['expires_tick'] - issued)
+        self.state.tick = ack['expires_tick']
+        self.assertEqual([], self.state._active_team_commands_locked())
+
+        stop = self.state.submit_team_command(1, self._message(
+            'STOP', sequence=2, target_kind='bot', target_id=11))
+        self.assertEqual(15 * TICK_HZ, stop['expires_tick'] - self.state.tick)
 
     def test_broadcast_limits_the_nearest_eligible_recipients_to_three(self):
         self.state.bot_manifest.extend([

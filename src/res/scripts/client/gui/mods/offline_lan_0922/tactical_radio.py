@@ -513,7 +513,7 @@ class BattleRadioAdapter(object):
 
     def receive_ack(self, command_seq, accepted,
                     responder_account_dbids=None):
-        """Complete a sent request and render one deterministic Bot reply."""
+        """Complete a sent request and identify each assigned Bot."""
         if not self._is_current_avatar() or not isinstance(accepted, bool):
             return False
         command_seq = _exact_int(command_seq, 1)
@@ -525,15 +525,18 @@ class BattleRadioAdapter(object):
             return True
 
         # The reliable same-team broadcast owns the stock command echo.  The
-        # acknowledgement only closes the request and presents one assigned
+        # acknowledgement closes the request and presents each assigned
         # Bot's positive response, so delivery order cannot duplicate the
         # issuer's command in chat or on the minimap.
+        replied = set()
         for account_dbid in responder_account_dbids or ():
             account_dbid = _exact_int(account_dbid, 1)
-            if (account_dbid is not None and
+            if (account_dbid is not None and account_dbid not in replied and
                     self._valid_sender(account_dbid)):
                 self.receive_command('POSITIVE', account_dbid)
-                break
+                replied.add(account_dbid)
+                if len(replied) == 3:
+                    break
         return True
 
     def receive_chat_ack(self, chat_seq, accepted):

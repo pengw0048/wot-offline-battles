@@ -225,6 +225,12 @@ TEAM_CHAT_HISTORY = 64
 # LAN admission finite while preserving every accepted Unicode string unchanged.
 TEAM_CHAT_MAX_CHARACTERS = 140
 TEAM_COMMAND_TTL_TICKS = int(15 * TICK_HZ)
+# Travel orders need time to cross the map; short tactical focus stays brief.
+TEAM_COMMAND_MOVEMENT_TTL_TICKS = int(120 * TICK_HZ)
+TEAM_COMMAND_MOVEMENT = frozenset((
+    "BACKTOBASE", "HELPME", "HELPMEEX", "FOLLOWME", "TURNBACK",
+    "ATTENTIONTOCELL",
+))
 # A radio call asks nearby teammates to respond.  This is a product response
 # radius, not a reconstruction of the client's spotting or radio mechanics.
 TEAM_COMMAND_RESPONSE_RANGE = 300.0
@@ -4895,7 +4901,7 @@ class BattleState:
         if (combat_mode in (
                 "low_health_retreat", "low_health_defend",
                 "under_fire_withdraw", "under_fire_hold",
-                "crossfire_withdraw", "crossfire_hold", "withdraw") or
+                "crossfire_withdraw", "crossfire_hold") or
                 (combat_mode == "base_defense" and
                  command != "BACKTOBASE")):
             return False
@@ -4908,10 +4914,7 @@ class BattleState:
             record.get("name") == "engineHealth" and
             record.get("state") == "destroyed"
             for record in critical.get("devices") or ())
-        driver_knocked_out = "driver" in set(
-            str(name) for name in critical.get("crew_ko") or ())
-        return (not engine_destroyed and not _destroyed_tracks(critical) and
-                not driver_knocked_out)
+        return not engine_destroyed and not _destroyed_tracks(critical)
 
     def _team_command_bot_identity_locked(self, bot_id):
         """Return the roster identity for a message target without requiring life."""
@@ -5170,7 +5173,10 @@ class BattleState:
                 recipients = [bot["id"]
                               for bot in bots[:TEAM_COMMAND_MAX_RECIPIENTS]]
                 if recipients:
-                    expires_tick = self.tick + TEAM_COMMAND_TTL_TICKS
+                    ttl = (TEAM_COMMAND_MOVEMENT_TTL_TICKS
+                           if command in TEAM_COMMAND_MOVEMENT else
+                           TEAM_COMMAND_TTL_TICKS)
+                    expires_tick = self.tick + ttl
                     command_id = "%d:%d:%d" % (
                         self.round_id, player.player_id, sequence)
                     order = {
