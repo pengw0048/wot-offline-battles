@@ -326,12 +326,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
     @staticmethod
     def _launcher_admits(name, tags):
         """Reproduce the composed launcher decision for one vehicle."""
-        if vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS.intersection(tags):
-            return False
-        if 'secret' in tags and (
-                name in vehicle_overlays._NON_EDITABLE_VEHICLES or
-                name.endswith(
-                    vehicle_overlays._NON_EDITABLE_VEHICLE_SUFFIXES)):
+        if not vehicle_overlays._vehicle_is_selectable(name, tags):
             return False
         nation, vehicle = name.split(':', 1)
         return bool(bot_lineup_profiles.eligible_vehicle_choices([{
@@ -378,6 +373,38 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 'name': name, 'level': 5, 'tags': list(tags),
             }])
             self.assertEqual(admitted, name in server_names, name)
+
+    def test_the_helper_rule_withholds_nothing_without_the_secret_tag(self):
+        # ``secret`` is what separates a stock placeholder from a shipped
+        # tank whose item_defs name happens to end the same way, so every
+        # authority must require the tag before it withholds an entry.
+        for name in ('ussr:R09_T-26_bot', 'ussr:R07_T-34-85_training',
+                     'germany:Env_Artillery'):
+            self.assertTrue(vehicle_configuration.is_non_battle_entity(
+                name, ('lightTank', 'secret')), name)
+            self.assertFalse(vehicle_configuration.is_non_battle_entity(
+                name, ('lightTank',)), name)
+            nation, vehicle = name.split(':', 1)
+            for tags, expected in ((('lightTank', 'secret'), False),
+                                   (('lightTank',), True)):
+                entry = types.SimpleNamespace(name=name, level=2, tags=tags)
+                self.assertEqual(
+                    expected,
+                    vehicle_configuration.is_standard_battle_vehicle(entry),
+                    name)
+                self.assertEqual(
+                    expected,
+                    bot_lineup_profiles.vehicle_choice_is_eligible({
+                        'nation': nation, 'vehicle': vehicle,
+                        'tags': list(tags)}),
+                    name)
+                self.assertEqual(
+                    expected,
+                    name in server_runtime._bot_lineup_allowed_names([{
+                        'name': name, 'level': 2, 'tags': list(tags)}]),
+                    name)
+                self.assertEqual(
+                    expected, self._launcher_admits(name, tags), name)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{

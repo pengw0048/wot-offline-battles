@@ -818,6 +818,23 @@ def _vehicle_display_id(vehicle):
     return display or value
 
 
+def _vehicle_is_selectable(type_name, tags):
+    """Return whether the editor offers this catalogue entry for editing.
+
+    ``secret`` hides vehicles from the retail tech tree, but it is not a
+    data-safety boundary for this local editor. Keep only the entries no
+    battle can field out of the player catalogue, so the editor still
+    reaches the Bootcamp and Fallout copies of a real tank;
+    bot_lineup_profiles applies the stricter roster rule on top of this list
+    before offering a vehicle as a Bot.
+    """
+    return bool(
+        not _NON_EDITABLE_VEHICLE_TAGS.intersection(tags) and
+        not ("secret" in tags and (
+            type_name in _NON_EDITABLE_VEHICLES or
+            type_name.endswith(_NON_EDITABLE_VEHICLE_SUFFIXES))))
+
+
 def _vehicle_roster_from_archive(archive, counts, nation=None):
     """Resolve vehicle definitions from each nation's stock list.xml."""
     list_members = []
@@ -886,18 +903,8 @@ def _vehicle_roster_from_archive(archive, counts, nation=None):
                 "userString": user_strings.get("userString", ""),
                 "shortUserString": user_strings.get("shortUserString", ""),
             }
-            # ``secret`` hides vehicles from the retail tech tree, but it is
-            # not a data-safety boundary for this local editor. Keep only
-            # native construction hazards out of the player catalogue, so the
-            # editor still reaches the Bootcamp and Fallout copies of a real
-            # tank; bot_lineup_profiles applies the stricter roster rule on
-            # top of this list before offering a vehicle as a Bot.
-            type_name = "%s:%s" % (roster_nation, vehicle)
-            record["selectable"] = bool(
-                not _NON_EDITABLE_VEHICLE_TAGS.intersection(record["tags"]) and
-                not ("secret" in record["tags"] and (
-                    type_name in _NON_EDITABLE_VEHICLES or
-                    type_name.endswith(_NON_EDITABLE_VEHICLE_SUFFIXES))))
+            record["selectable"] = _vehicle_is_selectable(
+                "%s:%s" % (roster_nation, vehicle), record["tags"])
             records.append(record)
     return sorted(records, key=lambda record: (
         record["nation"], record["vehicle"], record["member"]))
