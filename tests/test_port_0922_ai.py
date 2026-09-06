@@ -1822,6 +1822,48 @@ class BotAiPortTests(unittest.TestCase):
         self.assertEqual(1.0, order['throttle'])
         self.assertAlmostEqual(0.0, order['target_yaw'])
 
+    def test_a_wreck_ahead_withdraws_that_heading_but_a_live_hull_does_not(
+            self):
+        wreck = {
+            'position': (0.0, 0.0, 8.0), 'yaw': 0.0,
+            'alive': False, 'half_length': 3.5, 'half_width': 1.7,
+        }
+        live = dict(wreck, alive=True)
+
+        against_live = LocalDriver().drive(
+            141, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1, (0.0, 0.0, 50.0),
+            (live,), lambda unused_yaw: True)
+        against_wreck = LocalDriver().drive(
+            142, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1, (0.0, 0.0, 50.0),
+            (wreck,), lambda unused_yaw: True)
+
+        # Living traffic clears by itself and the contact solver owns it.
+        self.assertAlmostEqual(0.0, against_live['target_yaw'])
+        self.assertEqual(1.0, against_live['throttle'])
+        # A corpse never clears, so the straight heading is not a direction the
+        # hull can drive and the fan must pick a real way around it.
+        self.assertGreater(abs(against_wreck['target_yaw']), 0.4)
+
+    def test_a_wreck_the_hull_is_wedged_against_stops_the_drive(self):
+        wreck = {
+            'position': (0.0, 0.0, 6.6), 'yaw': 0.0,
+            'alive': False, 'half_length': 3.5, 'half_width': 1.7,
+        }
+        # A lane too narrow to steer out of: every terrain-clear heading ends
+        # inside the wreck, so the only honest answer is to stop driving.
+        narrow_lane = lambda yaw: math.cos(yaw) > 0.88
+
+        order = LocalDriver().drive(
+            143, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1, (0.0, 0.0, 50.0),
+            (wreck,), narrow_lane)
+
+        self.assertEqual('blocked', order['recovery_mode'])
+        self.assertEqual(0.0, order['throttle'])
+        # The same lane without the corpse is still driven.
+        self.assertEqual('drive', LocalDriver().drive(
+            144, 0, (0.0, 0.0, 0.0), 0.0, 0.0, 0.1, (0.0, 0.0, 50.0),
+            (dict(wreck, alive=True),), narrow_lane)['recovery_mode'])
+
     def test_front_contact_does_not_divert_a_route_turn(self):
         driver = LocalDriver()
         position = (0.0, 0.0, 0.0)

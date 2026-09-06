@@ -37,6 +37,11 @@ BLOCKED_STEP_REPLAN_SECONDS = 1.0
 BLOCKED_STEP_REPLAN_VERDICTS = 4
 BLOCKED_STEP_EDGE_TTL = 12.0
 BLOCKED_STEP_EDGE_PENALTY = 240.0
+# A destroyed vehicle is permanent static geometry, so a search must prefer a
+# real detour over the lane it occupies. The penalty stays soft, in the same
+# class as the other edge penalties, so a single-lane choke keeps a connected
+# graph and ends in an honest hold instead of an unplannable map.
+STATIC_HULL_EDGE_PENALTY = 240.0
 # LocalDriver deliberately owns short-lived contact recovery, but displacement
 # alone cannot detect a tank that rocks or circles without advancing its route.
 # Track progress towards the navigator's stable local target and, after a long
@@ -70,6 +75,32 @@ def _distance_2d(first, second):
 	dx = float(first[0]) - float(second[0])
 	dz = float(first[2]) - float(second[2])
 	return math.sqrt(dx * dx + dz * dz)
+
+
+def _hull_covers_cell(centre_x, centre_z, half_extent,
+		hull_x, hull_z, sine, cosine, half_length, half_width):
+	"""Return whether a hull box overlaps one axis-aligned graph cell square.
+
+	Testing the cell square rather than its centre matters: a 3.4 metre wide
+	hull can sit entirely between the centres of a four-metre bake and cover
+	neither of them while still blocking both.
+	"""
+	dx = float(hull_x) - float(centre_x)
+	dz = float(hull_z) - float(centre_z)
+	# The two cell axes, then the two hull axes: forward is (sin, cos) and the
+	# side is (cos, -sin), matching this module's atan2(x, z) yaw convention.
+	if abs(dx) > (half_extent + abs(sine) * half_length +
+			abs(cosine) * half_width):
+		return False
+	if abs(dz) > (half_extent + abs(cosine) * half_length +
+			abs(sine) * half_width):
+		return False
+	cell_radius = half_extent * (abs(sine) + abs(cosine))
+	if abs(dx * sine + dz * cosine) > half_length + cell_radius:
+		return False
+	if abs(dx * cosine - dz * sine) > half_width + cell_radius:
+		return False
+	return True
 
 
 class TerrainGrid(object):
@@ -112,6 +143,8 @@ class TerrainGrid(object):
 		self._edge_cache = {}
 		self._segment_cache = {}
 		self._failed_edges = {}
+		self._static_hull_edges = {}
+		self._static_hull_key = None
 
 	def _install_baked_graph(self, graph):
 		if (graph.get('format') != BAKED_FORMAT_NAME or
@@ -364,16 +397,68 @@ class TerrainGrid(object):
 
 	def _failed_edge_penalty(self, first_cell, second_cell, now):
 		key = tuple(sorted((first_cell, second_cell)))
+		# A published wreck never expires on a timer: it stays until the hull
+		# is retired from the roster.
+		penalty = self._static_hull_edges.get(key, 0.0)
 		value = self._failed_edges.get(key)
 		if value is None:
-			return 0.0
+			return penalty
 		if float(now) >= value[0]:
 			self._failed_edges.pop(key, None)
-			return 0.0
-		return value[1]
+			return penalty
+		return max(penalty, value[1])
+
+	def set_static_hulls(self, hulls):
+		"""Publish the destroyed hulls that now occupy baked navigation cells.
+
+		A wreck is exact new static geometry, not traffic: it never moves
+		again, so no plan through it can succeed and no amount of waiting
+		clears it. Marking the graph edges it occupies routes later searches
+		around it, refuses the direct shortcut, and drops the cached paths that
+		used to run through it. Only the cells the hull box really overlaps are
+		marked, so a wide road keeps every column the wreck does not occupy.
+
+		Returns whether the published set changed.
+		"""
+		key = tuple(sorted(
+			(int(hull[0]), round(float(hull[1]), 2), round(float(hull[2]), 2),
+			 round(float(hull[3]), 3), round(float(hull[4]), 2),
+			 round(float(hull[5]), 2))
+			for hull in hulls or ()))
+		if key == self._static_hull_key:
+			return False
+		self._static_hull_key = key
+		edges = {}
+		half_extent = self.cell_size * 0.5
+		for unused_id, x, z, yaw, half_length, half_width in key:
+			half_length = max(0.5, half_length)
+			half_width = max(0.3, half_width)
+			sine = math.sin(yaw)
+			cosine = math.cos(yaw)
+			radius = math.sqrt(half_length * half_length +
+			                   half_width * half_width)
+			first = self.cell_for((x - radius, 0.0, z - radius))
+			last = self.cell_for((x + radius, 0.0, z + radius))
+			for cell_z in range(first[1], last[1] + 1):
+				for cell_x in range(first[0], last[0] + 1):
+					centre = self.point_for((cell_x, cell_z), 0.0)
+					if not _hull_covers_cell(
+							centre[0], centre[2], half_extent,
+							x, z, sine, cosine, half_length, half_width):
+						continue
+					for step_z in (-1, 0, 1):
+						for step_x in (-1, 0, 1):
+							if step_x == 0 and step_z == 0:
+								continue
+							edges[tuple(sorted((
+								(cell_x, cell_z),
+								(cell_x + step_x, cell_z + step_z))))] = (
+									STATIC_HULL_EDGE_PENALTY)
+		self._static_hull_edges = edges
+		return True
 
 	def segment_penalty(self, start, end, now):
-		if not self._failed_edges:
+		if not self._failed_edges and not self._static_hull_edges:
 			return 0.0
 		penalty = 0.0
 		for key in self._edge_keys_for_segment(start, end):
@@ -486,7 +571,7 @@ class TerrainGrid(object):
 		        self.segment_clear(start, end))
 
 	def path_has_penalty(self, path, now):
-		if not self._failed_edges:
+		if not self._failed_edges and not self._static_hull_edges:
 			return False
 		for index in range(len(path) - 1):
 			if self.segment_penalty(path[index], path[index + 1], now) > 0.0:
@@ -913,7 +998,8 @@ class TerrainGrid(object):
 				            self._penalty(
 				                next_cell, avoid_points, prefer_clearance) +
 				            (self._failed_edge_penalty(current, next_cell, now)
-				             if self._failed_edges else 0.0) +
+				             if (self._failed_edges or
+				                 self._static_hull_edges) else 0.0) +
 				            local_penalty)
 				if next_cell not in cost_so_far or new_cost < cost_so_far[next_cell]:
 					cost_so_far[next_cell] = new_cost

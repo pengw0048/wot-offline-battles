@@ -8302,6 +8302,44 @@ class BotRuntime(object):
         self._ram_contacts = frozenset(current_ram_contacts)
         return reports
 
+    def _publish_static_hulls(self, players):
+        """Give the navigator this tick's wrecks as static graph geometry.
+
+        A destroyed vehicle is exact new world geometry that appears mid-round.
+        Without it the terrain graph keeps returning the lane the wreck now
+        occupies, so every following search, direct shortcut and cached path
+        still drives into it. The navigator recomputes only when this set
+        actually changes, which is once per death.
+        """
+        grid = getattr(self.navigator, 'grid', None)
+        publish = getattr(grid, 'set_static_hulls', None)
+        if not callable(publish):
+            return
+        hulls = []
+        for bot_id, state in self.states.items():
+            if state.get('alive', True):
+                continue
+            hulls.append((
+                int(bot_id), _number(state.get('x')), _number(state.get('z')),
+                _number(state.get('yaw')),
+                _number(state.get('half_length'), 3.5),
+                _number(state.get('half_width'), 1.7)))
+        for raw in players or ():
+            if (not isinstance(raw, dict) or raw.get('id') is None or
+                    raw.get('alive', True)):
+                continue
+            try:
+                shape = self._player_collision_profile(raw)['shape']
+                player_id = HUMAN_TARGET_ID_BASE + int(raw['id'])
+            except (TypeError, ValueError, KeyError, OverflowError):
+                # A human wreck without a resolved descriptor is still solid to
+                # the contact solver; it simply cannot be published this tick.
+                continue
+            hulls.append((
+                player_id, _number(raw.get('x')), _number(raw.get('z')),
+                _number(raw.get('yaw')), shape[1], shape[0]))
+        publish(hulls)
+
     @staticmethod
     def _target_velocity(target):
         if target is None:
@@ -10543,6 +10581,8 @@ class BotRuntime(object):
         shot_lanes_ready = True
         shot_lane_pending_pairs = 0
         neighbours = list(neighbours or []) + self._player_neighbours(players)
+        if refresh_control:
+            self._publish_static_hulls(players)
         # Native terrain and visibility probes run on BigWorld's render thread.
         # Build the local-overlap view lazily, only when a staggered decision is
         # due. It steers apart hulls which already touch; it never predicts

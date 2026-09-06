@@ -453,5 +453,99 @@ class ArenaRectangleClipTests(unittest.TestCase):
                 self.PROKHOROVKA_ARENA[2])
 
 
+class StaticHullNavigationTests(unittest.TestCase):
+    """A destroyed hull is exact static geometry the graph has to carry."""
+
+    @staticmethod
+    def _flat_graph(cell_size=4.0, cells=21):
+        directions = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                      (1, 0), (-1, 1), (0, 1), (1, 1))
+        links = []
+        for z in range(cells):
+            for x in range(cells):
+                links.append(sum(
+                    1 << index for index, (dx, dz) in enumerate(directions)
+                    if 0 <= x + dx < cells and 0 <= z + dz < cells))
+        return {
+            'format': 'offline-lan-0922-navgraph', 'version': 2,
+            'game_version': '0.9.22.0.1-cn-1513', 'map': '01_karelia',
+            'cell_size': cell_size, 'origin': (0.0, 0.0),
+            'bounds': (-1.0, -1.0, cells * cell_size, cells * cell_size),
+            'width': cells, 'height': cells,
+            'heights_mm': [0] * (cells * cells),
+            'links': links, 'hazards': [0] * (cells * cells),
+            'spawn_anchors': ((0.0, 0.0), (0.0, 0.0)),
+            'objective_bases': ((0.0, 0.0), (0.0, 0.0)),
+            'spawn_formations': {'1': (), '2': ()},
+            'routes': {'1': (), '2': ()},
+            'bake': {'max_grade': 0.30},
+        }
+
+    def _grid(self, cell_size=4.0):
+        return TerrainNavigator(
+            lambda *unused: None,
+            baked_graph=self._flat_graph(cell_size)).grid
+
+    def test_a_hull_between_cell_centres_still_marks_both_cells(self):
+        grid = self._grid()
+        # A 3.4 metre wide hull straddling the x=18 boundary of a four-metre
+        # bake covers neither the x=16 nor the x=20 cell centre. Ranking the
+        # cell square instead of its centre keeps both columns blocking.
+        self.assertTrue(grid.set_static_hulls(
+            ((7, 18.0, 40.0, 0.0, 3.5, 1.7),)))
+        edges = grid._static_hull_edges
+
+        self.assertEqual((16.0, 0.0, 40.0), grid.point_for((4, 10), 0.0))
+        self.assertEqual((20.0, 0.0, 40.0), grid.point_for((5, 10), 0.0))
+        # Both columns the hull straddles are entered through a marked edge.
+        self.assertIn(((4, 10), (5, 10)), edges)
+        self.assertIn(((3, 10), (4, 10)), edges)
+        self.assertIn(((5, 10), (6, 10)), edges)
+        # Only edges that touch the hull are marked; the next lane is free.
+        self.assertNotIn(((2, 10), (3, 10)), edges)
+        self.assertNotIn(((6, 10), (7, 10)), edges)
+        self.assertGreater(
+            grid.segment_penalty((18.0, 0.0, 32.0), (18.0, 0.0, 48.0), 0.0),
+            0.0)
+        self.assertFalse(
+            grid.dry_segment_clear((18.0, 0.0, 32.0), (18.0, 0.0, 48.0), 0.0))
+        # A lane the wreck does not reach stays free for everyone else.
+        self.assertEqual(
+            0.0,
+            grid.segment_penalty((8.0, 0.0, 32.0), (8.0, 0.0, 48.0), 0.0))
+
+    def test_an_unchanged_hull_set_is_not_recomputed(self):
+        grid = self._grid()
+        hulls = ((7, 20.0, 40.0, 0.0, 3.5, 1.7),)
+
+        self.assertTrue(grid.set_static_hulls(hulls))
+        edges = grid._static_hull_edges
+        self.assertFalse(grid.set_static_hulls(hulls))
+        self.assertIs(edges, grid._static_hull_edges)
+        self.assertTrue(grid.set_static_hulls(()))
+        self.assertEqual({}, grid._static_hull_edges)
+
+    def test_a_published_hull_retires_the_cached_path_through_it(self):
+        grid = self._grid()
+        path = ((20.0, 0.0, 32.0), (20.0, 0.0, 40.0), (20.0, 0.0, 48.0))
+
+        self.assertFalse(grid.path_has_penalty(path, 0.0))
+        grid.set_static_hulls(((7, 20.0, 40.0, 0.0, 3.5, 1.7),))
+        self.assertTrue(grid.path_has_penalty(path, 0.0))
+
+    def test_a_search_prefers_the_free_lane_beside_a_wreck(self):
+        grid = self._grid()
+        start = (20.0, 0.0, 20.0)
+        goal = (20.0, 0.0, 60.0)
+        grid.set_static_hulls(((7, 20.0, 40.0, 0.0, 3.5, 1.7),))
+
+        path = grid.plan(start, goal, prefer_clearance=False)
+
+        self.assertTrue(path)
+        self.assertFalse(grid.path_has_penalty(path, 0.0))
+        self.assertGreater(
+            max(abs(point[0] - 20.0) for point in path), 0.0)
+
+
 if __name__ == '__main__':
     unittest.main()
