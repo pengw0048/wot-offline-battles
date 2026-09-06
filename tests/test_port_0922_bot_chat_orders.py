@@ -13,7 +13,8 @@ import bot_chat_llm  # noqa: E402
 import lan_battle_server as server_module  # noqa: E402
 from bot_chat import (  # noqa: E402
     ADDRESS_NONE, BotChatDirector, REQUEST_BASE, REQUEST_CELL, REQUEST_FOLLOW,
-    REQUEST_HOLD, TRIGGER_KILL, parse_marker, read_request,
+    REQUEST_ATTACK, REQUEST_HOLD, TRIGGER_KILL, parse_marker,
+    read_request,
 )
 from lan_battle_server import BattleState  # noqa: E402
 
@@ -87,6 +88,21 @@ class ReadRequestTest(unittest.TestCase):
     def test_following_and_holding_are_recognised(self):
         self.assertEqual(REQUEST_FOLLOW, read_request('跟着我')['request'])
         self.assertEqual(REQUEST_HOLD, read_request('孤狼别动')['request'])
+
+    def test_the_short_words_players_actually_type_are_requests(self):
+        # "冲啊" and "跟我来" went unanswered: one was not a request at all
+        # and the other lost a coin toss meant for idle remarks.
+        for text in ('冲啊', '冲', '压上去', '推一波', '进攻'):
+            self.assertEqual(REQUEST_ATTACK,
+                             read_request(text)['request'], text)
+
+    def test_holding_wins_over_attacking_when_both_words_appear(self):
+        self.assertEqual(REQUEST_HOLD, read_request('别冲')['request'])
+
+    def test_an_attack_marker_maps_to_the_stock_command(self):
+        text, marker = parse_marker('好 [ATTACK]')
+        self.assertEqual('好', text)
+        self.assertEqual('ATTACK', marker['command'])
 
     def test_ordinary_talk_asks_for_nothing(self):
         for text in ('这局有点难打', '哈哈', '打得不错'):
@@ -229,6 +245,31 @@ class DirectorOrderTest(unittest.TestCase):
         ordered = [line for line in published if line.get('order')]
         self.assertEqual(2, len(ordered))
         self.assertEqual({1, 2}, {line['bot_id'] for line in ordered})
+
+
+class AlwaysAnsweredTest(unittest.TestCase):
+    """A line that asked the team for something is not an idle remark."""
+
+    def setUp(self):
+        self.snapshot = _snapshot()
+
+    def test_a_request_is_answered_even_on_an_unlucky_roll(self):
+        # value=1.0 fails every probability gate an open remark faces.
+        director = BotChatDirector(_ScriptedRandom(1.0), tick_hz=30.0,
+                                   backend=_Backend('收到'))
+        director.reset_round(1)
+        outcome = director.observe_player_line(0, 1, '跟我来', self.snapshot)
+        self.assertEqual('follow', outcome['ask'])
+        self.assertEqual(1, outcome['scheduled'])
+
+    def test_an_idle_remark_still_may_go_unanswered(self):
+        director = BotChatDirector(_ScriptedRandom(1.0), tick_hz=30.0,
+                                   backend=_Backend('收到'))
+        director.reset_round(1)
+        outcome = director.observe_player_line(
+            0, 1, '这局有点难打', self.snapshot)
+        self.assertIsNone(outcome['ask'])
+        self.assertEqual(0, outcome['scheduled'])
 
 
 class ServerAdmissionTest(unittest.TestCase):

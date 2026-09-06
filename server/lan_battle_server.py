@@ -87,7 +87,7 @@ BOT_CHAT_LOW_HEALTH_FRACTION = 0.3
 # already admits from a player, so agreeing creates no new authority: it
 # creates the order the player could have sent with the command wheel.
 BOT_CHAT_ORDER_COMMANDS = frozenset((
-    "ATTENTIONTOCELL", "BACKTOBASE", "FOLLOWME", "STOP"))
+    "ATTENTIONTOCELL", "BACKTOBASE", "FOLLOWME", "STOP", "ATTACK"))
 # The optional local chat model.  The launcher installs both halves and names
 # them here; with either missing the feature is simply off and Bots are quiet.
 BOT_CHAT_RUNTIME_ENV = "WOT_BOT_CHAT_RUNTIME"

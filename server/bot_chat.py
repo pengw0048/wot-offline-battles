@@ -140,31 +140,41 @@ REQUEST_CELL = "cell"
 REQUEST_BASE = "base"
 REQUEST_FOLLOW = "follow"
 REQUEST_HOLD = "hold"
+REQUEST_ATTACK = "attack"
 
 REQUEST_COMMANDS = {
     REQUEST_CELL: "ATTENTIONTOCELL",
     REQUEST_BASE: "BACKTOBASE",
     REQUEST_FOLLOW: "FOLLOWME",
     REQUEST_HOLD: "STOP",
+    REQUEST_ATTACK: "ATTACK",
 }
 
 # A Bot agrees by ending its line with one of these.  A marker is cheaper and
 # far more reliable from a small model than a JSON object, and because the
 # line and the marker come from one generation, what a Bot says and what it
 # does cannot disagree.
-MARKER_PATTERN = re.compile(r"\[(GO:([A-Ja-j])(10|[1-9])|BASE|FOLLOW|HOLD)\]")
+MARKER_PATTERN = re.compile(
+    r"\[(GO:([A-Ja-j])(10|[1-9])|BASE|FOLLOW|HOLD|ATTACK)\]")
 MARKER_FOR_REQUEST = {
     REQUEST_CELL: "[GO:%s]",
     REQUEST_BASE: "[BASE]",
     REQUEST_FOLLOW: "[FOLLOW]",
     REQUEST_HOLD: "[HOLD]",
+    REQUEST_ATTACK: "[ATTACK]",
 }
 
+# The words players actually type, which are mostly two characters and an
+# exclamation rather than anything resembling a command.
 REQUEST_KEYWORDS = (
     (REQUEST_BASE, ("回家", "回防", "守家", "救家", "防守", "回来守",
                     "拦一下", "back to base", "defend")),
-    (REQUEST_FOLLOW, ("跟着我", "跟我", "跟上", "掩护我", "follow me")),
-    (REQUEST_HOLD, ("别动", "原地", "停一下", "别走", "hold", "stop")),
+    (REQUEST_FOLLOW, ("跟着我", "跟我", "跟上", "掩护我", "跟紧",
+                      "follow me", "followme")),
+    (REQUEST_HOLD, ("别动", "原地", "停一下", "别走", "别冲", "稳住",
+                    "hold", "stop")),
+    (REQUEST_ATTACK, ("冲啊", "冲鸭", "冲", "上啊", "压上", "推", "进攻",
+                      "打上去", "干他", "go go", "push", "attack")),
 )
 
 TRIGGER_REPLY = "reply"
@@ -195,6 +205,8 @@ def parse_marker(text):
         marker = {"request": REQUEST_BASE}
     elif body.upper() == "FOLLOW":
         marker = {"request": REQUEST_FOLLOW}
+    elif body.upper() == "ATTACK":
+        marker = {"request": REQUEST_ATTACK}
     else:
         marker = {"request": REQUEST_HOLD}
     marker["command"] = REQUEST_COMMANDS[marker["request"]]
@@ -551,8 +563,11 @@ class BotChatDirector(object):
                                    asked_by=asked_by)
             return self._admitted(address, scheduled_before, ask)
         # Nobody was named.  Peng's choice is that an open remark usually
-        # still gets an answer, and an interesting one may get two.
-        if self._rng.random() > self._open_probability(text):
+        # still gets an answer, and an interesting one may get two.  A line
+        # that asked the team for something is not an open remark at all:
+        # leaving "跟我来" unanswered reads as Bots that cannot hear.
+        if (ask is None and
+                self._rng.random() > self._open_probability(text)):
             return self._admitted(address, scheduled_before, ask)
         pool = [bot for bot in self._by_turn(bots, snapshot)
                 if self._can_speak(tick, bot["id"])]
