@@ -9474,17 +9474,20 @@ class BattleRuntime(object):
                 'vehicle hit impulse', error, disable=False)
             return None
 
-    def _present_hit_impulse(self, event, target_record, effects_descr):
+    def _present_hit_impulse(self, event, target_record, effects_descr,
+                             splash_direction=None):
         """Present retail's hull shot impulse on one vehicle this shot hit.
 
-        Retail reaches ``CompoundAppearance.receiveShotImpulse`` only inside
-        ``Vehicle.showDamageFromShot``'s decoded direct-hit branch, so an HE
-        near miss presents ``armorSplashHit`` with no hull reaction at all.
-        The impulse is the shot effect group's own ``targetImpulse``: retail
-        scales it by neither damage nor calibre.
+        Retail reaches ``CompoundAppearance.receiveShotImpulse`` from two
+        places.  ``Vehicle.showDamageFromShot`` passes the decoded direct-hit
+        axis and the shot effect group's own ``targetImpulse``, scaled by
+        neither damage nor calibre.  ``Vehicle.showDamageFromExplosion``
+        rocks the hull away from the blast centre at a quarter of the same
+        impulse, so an HE near miss is not motionless.
         """
         state = target_record.get('state') or {}
-        if event.get('splash', False) or event.get('dead', False):
+        splash = bool(event.get('splash', False))
+        if event.get('dead', False):
             return False
         if not bool(state.get('alive', True)) or int(
                 state.get('health', 1) or 0) <= 0:
@@ -9492,8 +9495,12 @@ class BattleRuntime(object):
         impulse = _number(_field(effects_descr, 'targetImpulse', 0.0))
         if impulse <= 0.0:
             return False
-        direction = self._decoded_hit_impulse_direction(
-            event, target_record)
+        if splash:
+            impulse = impulse / 4.0
+            direction = splash_direction
+        else:
+            direction = self._decoded_hit_impulse_direction(
+                event, target_record)
         if direction is None:
             return False
         if target_record.get('local'):
@@ -9684,7 +9691,7 @@ class BattleRuntime(object):
         # failed terrain effect must not swallow the hull reaction.
         self._run_optional_feature(
             'vehicle hit impulse', self._present_hit_impulse,
-            (event, target_record, effects_descr))
+            (event, target_record, effects_descr, direction))
         # Retail presents an HE near-miss through
         # Vehicle.showDamageFromExplosion/armorSplashHit.  Direct hits keep
         # the three protocol outcomes: ricochet, resisted and pierced.

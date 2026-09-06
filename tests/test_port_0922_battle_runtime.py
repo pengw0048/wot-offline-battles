@@ -3300,7 +3300,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertNotIn(
             'vehicle hit impulse', battle._disabled_optional_features)
 
-    def test_splash_and_killing_hits_present_no_retail_hull_impulse(self):
+    def test_splash_rocks_the_hull_at_a_quarter_of_the_impulse(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
             self._swinging_native_factory()
         battle = BattleRuntime(runtime)
@@ -3312,8 +3312,32 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             'spot_visible': True, 'state': {'health': 500, 'alive': True}}
         effects_descr = runtime.vehicles.g_cache.shotEffects[3]
 
+        # Exact #1513 Vehicle.showDamageFromExplosion pushes the hull away
+        # from the blast centre with targetImpulse / 4.
+        self.assertTrue(battle._present_hit_impulse(
+            {'splash': True}, target_record, effects_descr,
+            runtime.math.Vector3(0.0, 0.0, 1.0)))
+        impulse_call = vehicle.appearance.receiveShotImpulse.call_args
+        self.assertAlmostEqual(87.5, impulse_call.args[1])
+        vehicle.appearance.receiveShotImpulse.reset_mock()
+
+        # A splash without a blast direction stays a no-op rather than
+        # inventing one.
         self.assertFalse(battle._present_hit_impulse(
             {'splash': True}, target_record, effects_descr))
+
+    def test_killing_hits_present_no_retail_hull_impulse(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._swinging_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        target_record = {
+            'engine_id': vehicle_id, 'local': False, 'native_remote': True,
+            'spot_visible': True, 'state': {'health': 500, 'alive': True}}
+        effects_descr = runtime.vehicles.g_cache.shotEffects[3]
+
         self.assertFalse(battle._present_hit_impulse(
             {'dead': True}, target_record, effects_descr))
         self.assertFalse(battle._present_hit_impulse(
