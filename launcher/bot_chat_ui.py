@@ -29,6 +29,17 @@ STATE_READY = "ready"
 STATE_WORKING = "working"
 STATE_UNSUPPORTED = "unsupported"
 
+# What a self test found, if one has run. Installed files only prove that
+# bytes are on disk; a machine still has to be able to load the model and
+# produce a line.
+CHECK_UNKNOWN = "unknown"
+CHECK_RUNNING = "running"
+CHECK_PASSED = "passed"
+CHECK_FAILED = "failed"
+
+CHECK_PROMPT = "\u8bf4\u4e00\u53e5\u8bdd"
+CHECK_TIMEOUT_SECONDS = 180.0
+
 # The progress bar's own scale. A byte count would overflow a Tk integer on
 # a large model, and a fraction of a thousand is finer than the eye.
 PROGRESS_STEPS = 1000
@@ -114,6 +125,7 @@ class BotChatPanel(object):
         self._thread = None
         self._working = False
         self._cancel = threading.Event()
+        self.check_timeout = CHECK_TIMEOUT_SECONDS
         self._build(parent)
         self.refresh()
 
@@ -184,6 +196,10 @@ class BotChatPanel(object):
         self.remove_button = tk.Button(parent, text="", command=self.remove)
         self.remove_button.grid(row=6, column=2, sticky="we", pady=(6, 0),
                                 padx=(6, 0))
+        self.check_button = tk.Button(parent, text="",
+                                      command=self.start_check)
+        self.check_button.grid(row=7, column=0, columnspan=3, sticky="we",
+                               pady=(6, 0))
         parent.grid_columnconfigure(1, weight=1)
 
     # -- settings -------------------------------------------------------
@@ -229,6 +245,122 @@ class BotChatPanel(object):
                             self._base_dir, self.runtime_override.get())
 
     # -- install --------------------------------------------------------
+
+    def enabled_and_ready(self):
+        """Return whether a room started now would really have chat.
+
+        Installed files are not the same thing as a switched-on feature, and
+        saying otherwise is what makes a silent battle baffling.
+        """
+        return bool(self.enabled.get()) and self.state() == STATE_READY
+
+    def check_state(self):
+        return getattr(self, "_check_state", CHECK_UNKNOWN)
+
+    def check_line(self):
+        """Return the line the self test produced, if it produced one."""
+        return getattr(self, "_check_line", None)
+
+    def check_error(self):
+        return getattr(self, "_check_error", None)
+
+    def start_check(self, runtime=None):
+        """Prove this machine can load the model and write one line."""
+        if self.busy() or self.state() != STATE_READY:
+            return False
+        runtime = runtime or self._runtime_module()
+        if runtime is None:
+            return False
+        self._working = True
+        self._check_state = CHECK_RUNNING
+        self._check_error = None
+        self._check_line = None
+        self._set_working()
+        self._thread = threading.Thread(
+            target=self._check, args=(runtime,), name="bot-chat-check",
+            daemon=True)
+        self._thread.start()
+        self._on_start()
+        return True
+
+    def _runtime_module(self):
+        try:
+            from . import core
+        except ImportError:
+            try:
+                import core
+            except ImportError:
+                return None
+        try:
+            return core.bot_chat_runtime()
+        except Exception as error:
+            self._log("BOT CHAT self test is unavailable: %s" % error)
+            return None
+
+    def _check(self, runtime):
+        paths = resolved_paths(self._catalogue, self.tier_key(),
+                               self._base_dir, self.runtime_override.get())
+        supervisor = runtime.LlamaServerSupervisor(
+            paths["runtime"], paths["model"], log=self._log)
+        backend = None
+        try:
+            if not supervisor.start():
+                raise RuntimeError("the inference program did not start")
+            if not supervisor.wait_ready(timeout=CHECK_TIMEOUT_SECONDS):
+                raise RuntimeError("the model did not finish loading")
+            backend = runtime.LlamaChatBackend(supervisor.endpoint,
+                                               log=self._log)
+            backend.start()
+            request = self._check_request()
+            backend.prefetch(request)
+            line = self._await_line(backend, request,
+                                    timeout=self.check_timeout)
+            if not line:
+                raise RuntimeError("the model produced no usable line")
+            self._check_line = line
+            self._check_state = CHECK_PASSED
+            self._check_error = None
+        except Exception as error:
+            self._check_state = CHECK_FAILED
+            self._check_error = str(error)
+        finally:
+            if backend is not None:
+                backend.stop()
+            supervisor.stop()
+            self._working = False
+            self.refresh()
+            self._on_change()
+
+    def _check_request(self):
+        import random
+
+        return {
+            "request_id": 1,
+            "trigger": "reply",
+            "persona": "plain",
+            "address_kind": "none",
+            "address_prefix": None,
+            "ask": None,
+            "asked_by": None,
+            "speaker": {"name": "Peng"},
+            "bot": {"id": 1, "name": "\u4eca\u5929\u4e0d\u52a0\u73ed",
+                    "vehicle": "ussr:R04_T-34", "hp": 400, "max_hp": 400},
+            "recent": [{"name": "Peng", "text": CHECK_PROMPT}],
+            "recent_texts": [],
+            "rng": random.Random(1),
+        }
+
+    @staticmethod
+    def _await_line(backend, request, timeout=CHECK_TIMEOUT_SECONDS):
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = backend.compose(request)
+            if line:
+                return line
+            time.sleep(0.1)
+        return None
 
     def busy(self):
         """Return whether an install is in flight.
@@ -337,6 +469,10 @@ class BotChatPanel(object):
         self.install_button.config(state="disabled" if working else "normal")
         self.stop_button.config(state="normal" if working else "disabled")
         self.remove_button.config(state="disabled" if working else "normal")
+        # Nothing to test until both halves are actually installed.
+        self.check_button.config(
+            state="normal" if (not working and self._state == STATE_READY)
+            else "disabled")
 
     def _finish(self, error, cancelled=False):
         self._working = False
@@ -377,6 +513,9 @@ class BotChatPanel(object):
         self._stage_name = None
         self._error = None
         self._cancelled = False
+        self._check_state = CHECK_UNKNOWN
+        self._check_line = None
+        self._check_error = None
         self.refresh()
         self._on_change()
         return removed

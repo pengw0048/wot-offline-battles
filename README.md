@@ -62,6 +62,12 @@ downloaded until you ask, downloads resume where they stopped, everything is
 checked against its published checksum, and Remove deletes it all again. With
 no model installed the feature is simply off and every Bot is quiet.
 
+Installed files are not the same thing as a working feature, so the panel does
+not claim to be ready on their account: it says whether the switch is on, and
+**Test** proves this PC can actually load the model and write a line before you
+find out in a battle. In a LAN room the chat comes from the **host's** PC, so a
+joiner's own model does nothing.
+
 The launcher's Tools tab can also edit vehicle data directly. A vehicle data
 profile is a named set of Packed XML field changes (health, damage,
 penetration, armour, speeds, reload and more) made in the launcher's editor;
