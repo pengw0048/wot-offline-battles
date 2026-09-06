@@ -381,13 +381,15 @@ class TerrainGrid(object):
 			              self._failed_edge_penalty(key[0], key[1], now))
 		return penalty
 
-	def _baked_segment_cells(self, start, end):
+	def _baked_segment_cells(self, start, end, require_height=True):
 		"""Return graph cells crossed by a straight segment, start included."""
 		if not self.prebaked:
 			return ()
-		start_cell = self._nearest_baked_cell(self.cell_for(start), 2)
+		start_cell = (self._nearest_baked_cell(self.cell_for(start), 2)
+					  if require_height else self.cell_for(start))
 		end_cell = self.cell_for(end)
-		if start_cell is None or self._baked_index(end_cell) is None:
+		lookup = self._baked_index if require_height else self._baked_flat_index
+		if start_cell is None or lookup(start_cell) is None or lookup(end_cell) is None:
 			return ()
 		x, z = start_cell
 		target_x, target_z = end_cell
@@ -445,6 +447,21 @@ class TerrainGrid(object):
 		unused_clear, hazards = self._baked_corridor(start, end)
 		# The summary excludes the occupied start cell so a tank can leave a ford.
 		return hazards is None or bool(hazards & int(hazard_mask))
+
+	def segment_has_motion_hazard(self, start, end, hazard_mask):
+		"""Read motion hazards even where erosion removed the routing height.
+
+		Use the occupied start cell, without snapping it to a nearby route.
+		Skipping that first cell still permits escape from an existing hazard.
+		"""
+		cells = self._baked_segment_cells(start, end, require_height=False)
+		if not cells:
+			return True
+		for cell in cells[1:]:
+			index = self._baked_flat_index(cell)
+			if index is None or int(self._baked_hazards[index]) & hazard_mask:
+				return True
+		return False
 
 	def baked_hazard_cells(self, start, end, hazard_mask):
 		"""Return entered hazard cells, or ``None`` for an invalid corridor."""

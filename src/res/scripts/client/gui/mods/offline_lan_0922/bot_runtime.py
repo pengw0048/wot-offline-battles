@@ -2343,6 +2343,7 @@ class BotRuntime(object):
         # the Bot runtime by another path.
         prebaked_navigation.clip_graph_to_arena(graph, self._arena_bounds)
         self._validated_baked_routes(graph)
+        graph = prebaked_navigation.with_shore_hazards(graph)
         if not callable(self._ground_probe):
             raise ValueError(
                 'navigation ground probe is unavailable for %s' % map_name)
@@ -6202,10 +6203,11 @@ class BotRuntime(object):
                 position[1],
                 position[2] + cosine * distance,
             )
-            hazard_mask = BAKED_FATAL_HAZARDS
+            # Dry edge erosion is advisory; water and wet banks still veto.
+            hazard_mask = prebaked_navigation.MOTION_FATAL_HAZARDS
             if not allow_shallow:
                 hazard_mask |= BAKED_SHALLOW_WATER
-            if grid.segment_has_baked_hazard(position, end, hazard_mask):
+            if grid.segment_has_motion_hazard(position, end, hazard_mask):
                 return False
             if hazard_only:
                 return True
@@ -6846,7 +6848,8 @@ class BotRuntime(object):
         if (not moved_farther_outside and
                 (not tick_was_safe or
                  prebaked_navigation.pose_is_safe(
-                     self.baked_graph, realised_pose, shoulder_cells=0))):
+                     self.baked_graph, realised_pose, shoulder_cells=0,
+                     hazard_mask=prebaked_navigation.MOTION_FATAL_HAZARDS))):
             return False
         state['x'], state['y'], state['z'] = tick_pose
         state['speed'] = 0.0
@@ -10662,7 +10665,8 @@ class BotRuntime(object):
             tick_suspension_states[state['id']] = \
                 self._snapshot_bot_suspension_state(state)
             tick_safe[state['id']] = prebaked_navigation.pose_is_safe(
-                self.baked_graph, position, shoulder_cells=0)
+                self.baked_graph, position, shoulder_cells=0,
+                hazard_mask=prebaked_navigation.MOTION_FATAL_HAZARDS)
             server_order = self._server_orders.get(state['id'])
             decide_with_order = getattr(self.adapter, 'decide_with_order', None)
             cache_key = (('server', self._server_order_tokens.get(

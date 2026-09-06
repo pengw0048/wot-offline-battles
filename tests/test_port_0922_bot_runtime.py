@@ -1681,6 +1681,8 @@ class BotRuntimeTests(unittest.TestCase):
                     self, unused_start, unused_end, unused_hazards):
                 return True
 
+            segment_has_motion_hazard = segment_has_baked_hazard
+
             def segment_clear(self, unused_start, unused_end):
                 raise AssertionError('fatal hazard should decide first')
 
@@ -1707,6 +1709,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, hazard_mask):
                 return bool(hazard_mask & self_module.BAKED_SHALLOW_WATER)
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 return True
@@ -1735,6 +1739,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, hazard_mask):
                 return bool(hazard_mask & self_module.BAKED_FATAL_HAZARDS)
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 raise AssertionError('fatal hazard should decide first')
@@ -1948,6 +1954,8 @@ class BotRuntimeTests(unittest.TestCase):
                     self, unused_start, unused_end, unused_hazards):
                 return False
 
+            segment_has_motion_hazard = segment_has_baked_hazard
+
             def segment_clear(self, unused_start, end):
                 ends.append(end)
                 return True
@@ -1976,6 +1984,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, unused_hazards):
                 return False
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 return False
@@ -2191,6 +2201,8 @@ class BotRuntimeTests(unittest.TestCase):
                     self, unused_start, unused_end, unused_mask):
                 return False
 
+            segment_has_motion_hazard = segment_has_baked_hazard
+
             def segment_clear(self, unused_start, unused_end):
                 return True
 
@@ -2299,6 +2311,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, unused_mask):
                 return False
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 return True
@@ -2564,6 +2578,8 @@ class BotRuntimeTests(unittest.TestCase):
                     self, unused_start, unused_end, unused_mask):
                 return False
 
+            segment_has_motion_hazard = segment_has_baked_hazard
+
             def segment_clear(self, start, end):
                 graph_calls.append((start, end))
                 return True
@@ -2642,6 +2658,8 @@ class BotRuntimeTests(unittest.TestCase):
                     self, unused_start, unused_end, unused_mask):
                 return False
 
+            segment_has_motion_hazard = segment_has_baked_hazard
+
             def segment_clear(self, unused_start, unused_end):
                 return True
 
@@ -2689,6 +2707,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, unused_mask):
                 return False
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 return False
@@ -5630,7 +5650,7 @@ class BotRuntimeTests(unittest.TestCase):
             self.module.prebaked_navigation.load_graph = original
 
         self.assertEqual(['02_malinovka'], loaded)
-        self.assertIs(second_graph, runtime.baked_graph)
+        self.assertEqual(second_graph, runtime.baked_graph)
         self.assertEqual('02_malinovka', runtime._navigation_map_name)
 
     def test_render_frames_bank_pose_until_the_30hz_authority_tick(self):
@@ -7758,6 +7778,8 @@ class BotRuntimeTests(unittest.TestCase):
             def segment_has_baked_hazard(
                     self, unused_start, unused_end, unused_mask):
                 return False
+
+            segment_has_motion_hazard = segment_has_baked_hazard
 
             def segment_clear(self, unused_start, unused_end):
                 return True
@@ -12632,7 +12654,7 @@ class BotRuntimeTests(unittest.TestCase):
         })
         return graph
 
-    def _ford_runtime(self):
+    def _ford_runtime(self, graph=None):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
             adapter_factory=lambda *unused, **kwargs: _FixedAdapter(
@@ -12642,9 +12664,59 @@ class BotRuntimeTests(unittest.TestCase):
                 'water': False, 'slope': 0.0},
             ground_probe=lambda *unused: 0.0,
             physics_ground_probe=lambda *unused: 0.0,
-            spawn_resolver=_spawn_resolver, baked_graph=self._ford_graph())
+            spawn_resolver=_spawn_resolver, baked_graph=(
+                self._ford_graph() if graph is None else graph))
         runtime.battle_start(self.start)
         return runtime
+
+    def test_motion_admits_dry_edges_but_keeps_water_and_shore_veto(self):
+        for hazard, nearby_water, blocked in (
+                (2, 0, False), (1, 0, True), (3, 0, True),
+                (2, 1, True), (2, 4, True)):
+            with self.subTest(hazard=hazard, nearby_water=nearby_water):
+                graph = self._ford_graph(size=9)
+                hazards = [0] * 81
+                hazards[4 * 9 + 2] = hazard
+                hazards[4 * 9 + 4] = nearby_water
+                graph['hazards'] = tuple(hazards)
+                heights = list(graph['heights_mm'])
+                heights[4 * 9 + 2] = None
+                graph['heights_mm'] = tuple(heights)
+                runtime = self._ford_runtime(graph)
+                approach, entered = (4.0, 0.0, 16.0), (8.0, 0.0, 16.0)
+                # Navigation still rejects the eroded cell; motion may ask
+                # the existing native probe instead of treating it as a wall.
+                self.assertFalse(runtime.navigator.grid.segment_clear(
+                    approach, entered))
+                self.assertEqual(False if blocked else None,
+                                 runtime._planner_corridor_clear(
+                                     approach, math.pi * 0.5, 1.0))
+                self.assertEqual(not blocked, runtime._planner_corridor_clear(
+                    approach, math.pi * 0.5, 1.0, hazard_only=True))
+                state = runtime.states[11]
+                state.update(x=8.0, y=0.0, z=16.0, yaw=0.0, speed=1.6)
+                self.assertEqual(blocked, runtime._guard_realised_pose(
+                    state, approach, True, 0.0))
+                self.assertEqual(approach if blocked else entered,
+                                 (state['x'], state['y'], state['z']))
+                self.assertEqual(tuple(hazards), graph['hazards'])
+
+    def test_dry_edge_tick_still_guards_subsequent_water_entry(self):
+        graph = self._ford_graph(size=9)
+        hazards = [0] * 81
+        hazards[4 * 9 + 2] = 2
+        hazards[4 * 9 + 6] = 1
+        graph['hazards'] = tuple(hazards)
+        runtime = self._ford_runtime(graph)
+        start = (8.0, 0.0, 16.0)
+        safe = self.module.prebaked_navigation.pose_is_safe(
+            runtime.baked_graph, start,
+            hazard_mask=self.module.prebaked_navigation.MOTION_FATAL_HAZARDS)
+        self.assertTrue(safe)
+        state = runtime.states[11]
+        state.update(x=24.0, y=0.0, z=16.0, yaw=0.0, speed=1.6)
+        self.assertTrue(runtime._guard_realised_pose(state, start, safe, 0.0))
+        self.assertEqual(start, (state['x'], state['y'], state['z']))
 
     def test_bounded_recovery_ignores_hazards_beyond_its_travel(self):
         runtime = self._ford_runtime()
@@ -12691,6 +12763,12 @@ class BotRuntimeTests(unittest.TestCase):
         graph = self._ford_graph(size=9, shallow_column=5)
         graph['hazards'] = tuple(
             hazard if value else 0 for value in graph['hazards'])
+        if hazard == 2:
+            # A wet bank remains fatal; dry edge erosion is only advisory.
+            hazards = list(graph['hazards'])
+            for row in range(9):
+                hazards[row * 9 + 7] = 1
+            graph['hazards'] = tuple(hazards)
         command = self._stationary_command()
         command.update({
             'target_yaw': 0.0 if turning else math.pi * 0.5,

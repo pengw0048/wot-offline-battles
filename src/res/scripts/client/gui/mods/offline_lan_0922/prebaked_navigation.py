@@ -234,8 +234,47 @@ def nearest_ground_point(graph, x, z, max_radius=3):
 	return None
 
 
-def pose_is_safe(graph, position, shoulder_cells=0):
-	"""Return whether a pose stays outside baked water/cliff cells.
+# Runtime-only bit: routing continues to use the original edge bit (2).
+SHORE_EDGE = 8
+MOTION_FATAL_HAZARDS = 1 | SHORE_EDGE
+
+
+def with_shore_hazards(graph):
+	"""Classify wet edges once, without changing the baked routing graph.
+
+	Edge erosion also marks continuous dry slopes. Only edges within the bake's
+	clearance radius of water remain a hard motion veto. Rounding outward to
+	whole cells conservatively includes the shoreline's coarse-grid apron.
+	This is local shoreline protection, not a complete fall-trajectory test.
+	"""
+	result = dict(graph)
+	hazards = graph['hazards']
+	width, height = int(graph['width']), int(graph['height'])
+	radii = (graph.get('bake') or {}).get('edge_clearance_radii') or ()
+	radius = (int(math.ceil(max(radii) / float(graph['cell_size'])))
+			  if radii else None)
+	classified = [int(value) & ~SHORE_EDGE for value in hazards]
+	for index, value in enumerate(hazards):
+		if not int(value) & 2:
+			continue
+		# Without the bake's reviewed clearance extent, retain its edge veto.
+		near_water = radius is None
+		if radius is not None:
+			row, column = divmod(index, width)
+			for z in range(max(0, row - radius), min(height, row + radius + 1)):
+				if any(int(hazards[z * width + x]) & (1 | 4)
+					   for x in range(max(0, column - radius),
+									  min(width, column + radius + 1))):
+					near_water = True
+					break
+		if near_water:
+			classified[index] |= SHORE_EDGE
+	result['hazards'] = tuple(classified)
+	return result
+
+
+def pose_is_safe(graph, position, shoulder_cells=0, hazard_mask=3):
+	"""Return whether a pose stays outside the selected baked hazards.
 
 	Missing height cells may be ordinary building footprints and are therefore
 	not classified as cliffs. A coordinate outside the baked grid is invalid.
@@ -260,6 +299,6 @@ def pose_is_safe(graph, position, shoulder_cells=0):
 	for check_row in range(row - radius, row + radius + 1):
 		for check_column in range(column - radius, column + radius + 1):
 			index = check_row * width + check_column
-			if int(hazards[index]) & 3:
+			if int(hazards[index]) & hazard_mask:
 				return False
 	return True
