@@ -14476,7 +14476,7 @@ def print_bot_chat_catalogue(stream=None):
     print("runtime       %-5s %-7s %6.0f MB  %s" % (
         arch, bot_chat_models.RUNTIME_BUILD, asset["size"] / 1048576.0,
         bot_chat_models.RUNTIME_LICENSE), file=stream)
-    for source in bot_chat_models.RUNTIME_SOURCES:
+    for source in bot_chat_models.runtime_sources(arch):
         print("       %-12s %s" % (
             source, bot_chat_models.runtime_url(arch, source)), file=stream)
 

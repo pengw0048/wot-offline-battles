@@ -83,10 +83,14 @@ repositories, file names, sizes and SHA-256 digests are pinned in
 Inference runs in a separate `llama-server` process from
 [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp), distributed
 under the MIT License. The launcher downloads one pinned CPU-only Windows
-release archive, unmodified, either from that project's own release assets or
-from a ModelScope repository that mirrors the identical archives together
-with llama.cpp's license text. The pinned SHA-256 validates the download from
-either host.
+release archive, unmodified, from that project's own GitHub release assets or,
+for the x64 build, from a third-party ModelScope repository that republishes
+the identical archive together with llama.cpp's license text. The archive from
+that mirror was verified to have the same SHA-256 as the official asset, and
+the digest pinned in
+[`server/bot_chat_models.py`](server/bot_chat_models.py) is the official one,
+so a mirror that is stale, wrong or hostile fails verification rather than
+installing anything.
 
 ## Wargaming intellectual property
 

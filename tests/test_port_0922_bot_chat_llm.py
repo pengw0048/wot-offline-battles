@@ -152,28 +152,33 @@ class CatalogTest(unittest.TestCase):
         # A 32-bit host has no published CPU build, and saying so beats
         # downloading an executable that cannot run.
         self.assertIsNone(catalog.runtime_arch('x86'))
-        for source in catalog.RUNTIME_SOURCES:
-            self.assertIsNone(catalog.runtime_url(None, source))
+        self.assertEqual((), catalog.runtime_sources(None))
+        self.assertIsNone(catalog.runtime_url(None))
 
     def test_the_runtime_build_is_pinned(self):
-        for source in catalog.RUNTIME_SOURCES:
-            url = catalog.runtime_url('x64', source)
-            self.assertIn(catalog.RUNTIME_BUILD, url, source)
-            self.assertNotIn('latest', url, source)
-
-    def test_the_runtime_has_a_mirror_that_is_not_github(self):
-        # GitHub is the least reliable host in this catalogue from mainland
-        # China, and it is the only home the runtime has upstream.
-        mirrored = catalog.runtime_url('x64', catalog.MODELSCOPE)
-        self.assertTrue(mirrored.startswith('https://www.modelscope.cn/'))
-        self.assertIn(catalog.runtime_asset('x64')['file'], mirrored)
-        self.assertEqual(catalog.MODELSCOPE, catalog.RUNTIME_SOURCES[0])
-
-    def test_both_runtime_mirrors_name_the_same_archive(self):
         for arch in ('x64', 'arm64'):
-            name = catalog.runtime_asset(arch)['file']
-            for source in catalog.RUNTIME_SOURCES:
-                self.assertIn(name, catalog.runtime_url(arch, source))
+            for source in catalog.runtime_sources(arch):
+                url = catalog.runtime_url(arch, source)
+                self.assertIn(catalog.RUNTIME_BUILD, url, (arch, source))
+                self.assertNotIn('latest', url, (arch, source))
+                self.assertIn(catalog.runtime_asset(arch)['file'], url)
+
+    def test_the_x64_runtime_is_reachable_without_github(self):
+        # GitHub is the least reliable host in this catalogue from mainland
+        # China, and it is the runtime's only upstream home.  The pin is
+        # chosen to be a build a mirror already carries.
+        self.assertEqual(catalog.MODELSCOPE,
+                         catalog.runtime_sources('x64')[0])
+        mirrored = catalog.runtime_url('x64')
+        self.assertTrue(mirrored.startswith('https://www.modelscope.cn/'))
+        self.assertIn(catalog.RUNTIME_BUILD, catalog.RUNTIME_MODELSCOPE_REPO)
+
+    def test_an_architecture_with_no_mirror_says_so(self):
+        # Nothing mirrors the ARM64 build; claiming otherwise would send the
+        # launcher to a URL that cannot exist.
+        self.assertEqual((catalog.GITHUB,), catalog.runtime_sources('arm64'))
+        self.assertIsNone(
+            catalog.runtime_url('arm64', catalog.MODELSCOPE))
 
     def test_an_unknown_runtime_source_has_no_url(self):
         self.assertIsNone(catalog.runtime_url('x64', 'some-other-mirror'))
@@ -496,7 +501,7 @@ class ServerWiringTest(unittest.TestCase):
         self.assertIn('runtime', printed)
         arch = catalog.runtime_arch(__import__('platform').machine())
         if arch is not None:
-            for source in catalog.RUNTIME_SOURCES:
+            for source in catalog.runtime_sources(arch):
                 self.assertIn(catalog.runtime_url(arch, source), printed)
 
     def test_an_uninstalled_generator_refuses_to_start(self):

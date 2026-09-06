@@ -18,12 +18,6 @@ MODELSCOPE = "modelscope"
 HUGGINGFACE = "huggingface"
 GITHUB = "github"
 SOURCES = (MODELSCOPE, HUGGINGFACE)
-# The runtime's upstream home is GitHub, which is the least reliable host in
-# this catalogue from mainland China.  A ModelScope repository mirrors the
-# pinned release assets byte for byte, so the same digest validates either
-# and a stale or wrong mirror fails integrity rather than installing
-# something else.
-RUNTIME_SOURCES = (MODELSCOPE, GITHUB)
 
 # ``FilePath`` serves the LFS object directly, which is what makes ModelScope
 # usable without its SDK.
@@ -94,25 +88,39 @@ MODEL_TIERS = (
 # has not been measured on Windows.
 DEFAULT_TIER_KEY = "qwen3-0.6b"
 
-RUNTIME_BUILD = "b10819"
+# llama.cpp publishes Windows builds only as GitHub release assets, which is
+# the least reliable host in this catalogue from mainland China.  The pin is
+# therefore chosen to be a build that a third-party ModelScope repository
+# already mirrors, rather than the newest one.  b9637 documents every switch
+# this code uses, including ``--reasoning-budget`` and ``chat_template_kwargs``.
+#
+# Trusting that mirror costs nothing: the digest below is the official GitHub
+# artifact's, verified byte-identical to what the mirror serves, so a mirror
+# that is stale, wrong or hostile fails integrity instead of installing
+# something else.  Its repository name embeds the build, so moving the pin
+# retires the mirror cleanly into a 404 and GitHub takes over.
+RUNTIME_BUILD = "b9637"
 RUNTIME_LICENSE = "MIT"
-# Redistributing the MIT-licensed binaries only requires the licence to
-# travel with them, so the mirror carries llama.cpp's LICENSE file too.
-RUNTIME_MODELSCOPE_REPO = "pengw0048/wot-offline-battles-llama-runtime"
+RUNTIME_MODELSCOPE_REPO = "ytr56269/llama.cpp-b9637-Windows-Runtime"
 _RUNTIME_GITHUB_URL = (
     "https://github.com/ggml-org/llama.cpp/releases/download/%s/%s")
 RUNTIME_ASSETS = {
     "x64": {
-        "file": "llama-b10819-bin-win-cpu-x64.zip",
-        "size": 18413010,
+        "file": "llama-b9637-bin-win-cpu-x64.zip",
+        "size": 16906751,
         "sha256":
-            "4599e502b374196d24600ea9b03c842a448c853116a15b55e8ba502bdc727b3f",
+            "f7783c2b8c007f95e710ac40f26a24861a80b603b0b739fc54d7c926a4716c1e",
+        # Ordered by reachability from mainland China, not by authority.
+        "sources": (MODELSCOPE, GITHUB),
     },
     "arm64": {
-        "file": "llama-b10819-bin-win-cpu-arm64.zip",
-        "size": 11980559,
+        "file": "llama-b9637-bin-win-cpu-arm64.zip",
+        "size": 10846442,
         "sha256":
-            "5802d55f633b68bf6dbe574d75f9f47387761fe3b6ddef4193ea9ea423642afb",
+            "db1d3f4c13c08b693f539e100bf6d3a435148b0ffc186b044fdd65d490cc6df7",
+        # No mirror publishes the ARM64 build.  A Windows-on-ARM host can
+        # still run the x64 archive under emulation if GitHub is unreachable.
+        "sources": (GITHUB,),
     },
 }
 RUNTIME_EXECUTABLE = "llama-server.exe"
@@ -164,15 +172,25 @@ def runtime_asset(arch):
     return dict(entry) if entry else None
 
 
-def runtime_url(arch, source=MODELSCOPE):
+def runtime_sources(arch):
+    """Return the hosts that serve one architecture, best route first."""
+    entry = RUNTIME_ASSETS.get(str(arch))
+    return tuple(entry["sources"]) if entry else ()
+
+
+def runtime_url(arch, source=None):
     """Return one pinned runtime download URL, or None.
 
-    ModelScope is the default for the same reason it leads the model list.
-    Both mirrors serve the identical archive, so a caller may try either and
-    validate the result against one ``sha256``.
+    With no source named, the best route for that architecture is used.
+    Every host serves the identical archive, so a caller may try them in
+    order and validate whichever answers against one ``sha256``.
     """
     entry = runtime_asset(arch)
-    if entry is None or source not in RUNTIME_SOURCES:
+    if entry is None:
+        return None
+    if source is None:
+        source = entry["sources"][0]
+    if source not in entry["sources"]:
         return None
     if source == MODELSCOPE:
         return _MODELSCOPE_URL % (RUNTIME_MODELSCOPE_REPO, entry["file"])
