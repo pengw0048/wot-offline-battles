@@ -28584,3 +28584,153 @@ class LocalBodySwingingTests(unittest.TestCase):
         self.assertEqual([], writes)
         self.assertIsNone(battle._local_swinging_animator)
         self.assertIsNone(battle._local_swinging_restore)
+
+
+class LocalEngineAudioMotionTests(unittest.TestCase):
+    """The player's stock engine audition follows the copied LAN motion.
+
+    Exact #1513 ``model_assembler.assembleDetailedEngineState`` links
+    ``vehicleSpeedLink`` and ``rotationSpeedLink`` to the native vehicle
+    filter for every vehicle, the player's own included, and the native
+    refresh publishes the speed, rotation-speed and engine-load RTPCs from
+    them.  This port never drives that filter for the player, so a
+    stationary A/D pivot - whose only non-zero motion is rotation - reached
+    the engine sound as a parked tank.
+    """
+
+    def _battle(self, engine_state=True):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        entity = _Vehicle(10, _Descriptor(), _Vector(2, 3, 4), (0, 0, 0),
+                          {'health': 500})
+        if engine_state:
+            entity.appearance.detailedEngineState = types.SimpleNamespace(
+                vehicleSpeedLink=None, rotationSpeedLink=None)
+        runtime.bigworld.entities[10] = entity
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = types.SimpleNamespace(
+            forward=0.0, turn=0.0, handbrake=False,
+            send_current=lambda: True)
+        battle._local_position = (2.0, 3.0, 4.0)
+        battle._local_descriptor = entity.typeDescriptor
+        return battle, entity
+
+    def test_a_stationary_pivot_publishes_the_copied_rotation_speed(self):
+        battle, entity = self._battle()
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._attach_local_presentation()
+
+        detailed = entity.appearance.detailedEngineState
+        battle._local_speed = 0.0
+        battle._local_turn_speed = 0.45
+
+        # Exact #1513 normalises this by physics['rotationSpeedLimit'], which
+        # items.vehicles stores in radians per second, and feeds
+        # RTPC_ext_rot_speed_abs/_rel plus the engine load.
+        self.assertEqual(0.0, detailed.vehicleSpeedLink())
+        self.assertEqual(0.45, detailed.rotationSpeedLink())
+
+    def test_the_links_track_signed_forward_and_reverse_speed(self):
+        battle, entity = self._battle()
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._attach_local_presentation()
+
+        detailed = entity.appearance.detailedEngineState
+        battle._local_speed = -3.25
+        battle._local_turn_speed = -0.1
+
+        # The native refresh divides a negative speed by speedLimits[1], so
+        # the sign must survive the copied motion.
+        self.assertEqual(-3.25, detailed.vehicleSpeedLink())
+        self.assertEqual(-0.1, detailed.rotationSpeedLink())
+
+    def test_a_stock_appearance_refresh_does_not_drop_the_rebind(self):
+        battle, entity = self._battle()
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._attach_local_presentation()
+
+        rebuilt = types.SimpleNamespace(
+            vehicleSpeedLink=None, rotationSpeedLink=None)
+        entity.appearance.detailedEngineState = rebuilt
+        battle._local_turn_speed = 0.3
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._update_local_presentation(entity, 0.1)
+
+        self.assertIs(rebuilt, battle._local_engine_state)
+        self.assertEqual(0.3, rebuilt.rotationSpeedLink())
+
+    def test_an_unchanged_engine_state_is_not_rewritten_every_frame(self):
+        battle, entity = self._battle()
+        writes = []
+
+        class _CountingEngineState(object):
+            def __setattr__(self, name, value):
+                writes.append(name)
+                object.__setattr__(self, name, value)
+
+        counting = _CountingEngineState()
+        entity.appearance.detailedEngineState = counting
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._attach_local_presentation()
+        self.assertEqual(
+            ['vehicleSpeedLink', 'rotationSpeedLink'], writes)
+        del writes[:]
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._update_local_presentation(entity, 0.1)
+
+        self.assertEqual([], writes)
+
+    def test_a_missing_engine_state_reports_once_without_failing_startup(self):
+        battle, entity = self._battle(engine_state=False)
+        stream = io.StringIO()
+
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._attach_local_presentation())
+            battle._update_local_presentation(entity, 0.1)
+
+        self.assertIsNone(battle._local_engine_state)
+        self.assertEqual(
+            1, stream.getvalue().count('local_engine_audio_motion=False'))
+        self.assertNotIn(
+            'local engine audio motion',
+            battle._disabled_optional_features)
+
+    def test_a_native_setter_failure_retires_only_this_feature(self):
+        battle, entity = self._battle()
+
+        class _RejectingEngineState(object):
+            def __setattr__(self, name, value):
+                raise RuntimeError('native link rejected: %s' % name)
+
+        entity.appearance.detailedEngineState = _RejectingEngineState()
+        stream = io.StringIO()
+
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._attach_local_presentation())
+
+        self.assertIsNone(battle._local_engine_state)
+        self.assertIn('local_engine_audio_motion=False', stream.getvalue())
+        self.assertIn(
+            'local engine audio motion',
+            battle._disabled_optional_features)
+
+    def test_teardown_clears_the_bound_engine_state(self):
+        battle, entity = self._battle()
+        with mock.patch('sys.stdout', io.StringIO()):
+            battle._attach_local_presentation()
+        self.assertIsNotNone(battle._local_engine_state)
+
+        with mock.patch('sys.stdout', io.StringIO()):
+            self.assertTrue(battle._detach_local_presentation())
+
+        self.assertIsNone(battle._local_engine_state)
+        self.assertIsNone(battle._local_engine_audio_report)
+        # A native link that outlives teardown must still be answerable.
+        self.assertEqual(0.0, battle._read_local_vehicle_speed())
+        self.assertEqual(0.0, battle._read_local_vehicle_rotation_speed())

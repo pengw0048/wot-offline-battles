@@ -1548,6 +1548,11 @@ class BattleRuntime(object):
 
     def __init__(self, runtime=None):
         self._runtime = runtime
+        # Keep stable callable objects alive for the native #1513 data-link
+        # setters.  Re-reading a bound method would create a temporary object.
+        self._local_vehicle_speed_link = self._read_local_vehicle_speed
+        self._local_vehicle_rotation_speed_link = \
+            self._read_local_vehicle_rotation_speed
         self._config = None
         self._worker_mode = False
         self._start_message = None
@@ -1708,6 +1713,8 @@ class BattleRuntime(object):
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
         self._local_engine_mode = None
+        self._local_engine_state = None
+        self._local_engine_audio_report = None
         self._spectated_engine_id = None
         self._local_grind = 0
         self._local_motion_soft_block = False
@@ -2018,6 +2025,8 @@ class BattleRuntime(object):
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
         self._local_engine_mode = None
+        self._local_engine_state = None
+        self._local_engine_audio_report = None
         self._spectated_engine_id = None
         self._local_grind = 0
         self._local_motion_soft_block = False
@@ -6142,9 +6151,82 @@ class BattleRuntime(object):
         self._run_optional_feature(
             'local body swinging', self._bind_local_body_swinging,
             (entity, model))
+        self._run_optional_feature(
+            'local engine audio motion',
+            self._bind_local_engine_audio_motion, (entity,))
         self._runtime.compatibility.bind_vehicle_pose_sources(
             self._avatar, entity)
         self._local_model = model
+        return True
+
+    def _read_local_vehicle_speed(self):
+        return float(self._local_speed)
+
+    def _read_local_vehicle_rotation_speed(self):
+        return float(self._local_turn_speed)
+
+    def _report_local_engine_audio(self, available, error=None):
+        """Publish one line per distinct player engine-audio motion outcome."""
+        record = (bool(available), None if error is None else str(error))
+        if record == self._local_engine_audio_report:
+            return False
+        self._local_engine_audio_report = record
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] PRESENTATION '
+            'local_engine_audio_motion=%s%s\n' % (
+                record[0],
+                '' if record[1] is None else ' error=%r' % (record[1],)))
+        return True
+
+    def _bind_local_engine_audio_motion(self, entity):
+        """Feed the player's stock engine audition from the copied motion.
+
+        Exact #1513 ``model_assembler.assembleDetailedEngineState`` links
+        ``vehicleSpeedLink`` and ``rotationSpeedLink`` to the native vehicle
+        filter's ``averageSpeed`` and ``averageRotationSpeed`` for every
+        vehicle, the player's own included.  The native
+        ``DetailedEngineState`` refresh reads both every tick.  The speed
+        link feeds ``RTPC_ext_speed_abs``/``_rel``, ``RTPC_ext_move`` and
+        the engine load; the rotation link feeds
+        ``RTPC_ext_rot_speed_abs``/``_rel``, and also raises the engine load
+        once the vehicle is actually translating.  This port drives the
+        player from a copied pose overlay and never feeds that filter, so
+        all of those inputs stayed at zero for the whole battle: a
+        stationary A/D pivot, whose only non-zero motion is rotation,
+        reached the engine sound as a parked tank.  Forward and reverse
+        motion still made noise only because the published
+        ``ownVehicleAuxPhysicsData`` RPM covers them, and #1513's simulated
+        engine law is speed-only.
+
+        Bot vehicles already publish these two links from copied motion, so
+        the player's own vehicle was the last one left on the dead native
+        filter.  A plain Python callable is the exact boundary #1513 accepts
+        here; ``DataLinks.createFloatLink`` only supports native data-link
+        owners.  This is presentation only: it never feeds authoritative
+        motion, and the copied speed and yaw rate carry the signs and units
+        (m/s, rad/s) the native normalisation expects.
+        """
+        appearance = getattr(entity, 'appearance', None)
+        detailed = getattr(appearance, 'detailedEngineState', None)
+        if detailed is None:
+            self._local_engine_state = None
+            self._report_local_engine_audio(
+                False, 'stock DetailedEngineState is unavailable')
+            return False
+        if detailed is self._local_engine_state:
+            return True
+        try:
+            detailed.vehicleSpeedLink = self._local_vehicle_speed_link
+            detailed.rotationSpeedLink = \
+                self._local_vehicle_rotation_speed_link
+        except Exception as error:
+            # A half-applied pair still reads the copied speed, so keep no
+            # ownership claim and let the next frame retry the whole rebind.
+            self._local_engine_state = None
+            self._report_local_engine_audio(False, error)
+            raise
+        self._local_engine_state = detailed
+        self._report_local_engine_audio(True)
         return True
 
     def _report_local_body_swinging(self, available, error=None):
@@ -6484,6 +6566,9 @@ class BattleRuntime(object):
         self._run_optional_feature(
             'local body swinging', self._bind_local_body_swinging,
             (entity, self._local_model))
+        self._run_optional_feature(
+            'local engine audio motion',
+            self._bind_local_engine_audio_motion, (entity,))
         self._sample_local_acceleration_swinging(entity, dt)
         self._run_optional_feature(
             'local track animation', self._update_local_tracks, (entity,))
@@ -6627,6 +6712,8 @@ class BattleRuntime(object):
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
         self._local_engine_mode = None
+        self._local_engine_state = None
+        self._local_engine_audio_report = None
         return True
 
     def _on_client_ready(self):
@@ -23832,6 +23919,8 @@ class BattleRuntime(object):
         self._local_native_stabilised_matrix = None
         self._local_camera_velocity = None
         self._local_engine_mode = None
+        self._local_engine_state = None
+        self._local_engine_audio_report = None
         self._spectated_engine_id = None
         self._local_grind = 0
         self._local_vertical_speed = 0.0
