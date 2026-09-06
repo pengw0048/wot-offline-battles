@@ -149,6 +149,11 @@ SENDER_JOIN_TIMEOUT = 0.1
 SEND_STALL_TIMEOUT = 5.0
 LEAVE_SEND_TIMEOUT = 0.05
 RUNTIME_DROP_LOG_INTERVAL = 5.0
+# A live round publishes snapshots at 30 Hz. Two seconds without one accepted
+# is far outside ordinary jitter, and it is the exact condition that used to
+# be invisible: the replica keeps drawing its last accepted frame, so every Bot
+# stands still and nothing the player shoots reports back.
+SNAPSHOT_STALL_SECONDS = 2.0
 LEAVE_PAYLOAD = b'{"type":"leave"}\n'
 _BOT_STATE_WIRE_FIELDS = (
     'id', 'x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw', 'gun_pitch',
@@ -392,46 +397,6 @@ def _valid_player_siege_contract(player):
             (state in (0, 2) and time_left == 0))
 
 
-def _valid_bot_siege_contract(bot):
-    if not isinstance(bot, dict):
-        return False
-    fields = (
-        'siege_state', 'siege_time_left_ms',
-        'siege_transition_total_ms')
-    present = tuple(name in bot for name in fields)
-    if not any(present):
-        return True
-    if not all(present):
-        return False
-    return siege_mechanics.valid_wire_state(
-        bot.get('siege_state'), bot.get('siege_time_left_ms'),
-        transition_total_ms=bot.get('siege_transition_total_ms'))
-
-
-def _valid_stun_contract(vehicle):
-    if not isinstance(vehicle, dict):
-        return False
-    names = (
-        'stun_end_server_time_ms', 'stun_attacker_kind',
-        'stun_attacker_id')
-    present = tuple(name in vehicle for name in names)
-    if not any(present):
-        return True
-    if not all(present):
-        return False
-    end = _projectile_int_range(
-        vehicle.get('stun_end_server_time_ms'), 0, MAX_PROJECTILE_ID)
-    attacker_id = _projectile_int_range(
-        vehicle.get('stun_attacker_id'), 0, MAX_PROJECTILE_ID)
-    attacker_kind = vehicle.get('stun_attacker_kind')
-    if end is None or attacker_id is None:
-        return False
-    return bool(
-        (end == 0 and attacker_kind == '' and attacker_id == 0) or
-        (end > 0 and attacker_kind in ('player', 'bot') and
-         attacker_id > 0))
-
-
 def _canonical_angle(value, default=0.0):
     """Return one mathematically equivalent angle inside [-pi, pi].
 
@@ -511,27 +476,6 @@ def _valid_player_gun_checkpoint_contract(player):
             player.get('gun_checkpoint')) is not None)
 
 
-def _valid_bot_combat_contract(bot):
-    if not isinstance(bot, dict) or not isinstance(bot.get('critical'), dict):
-        return False
-    revision = _exact_int(bot.get('combat_revision'))
-    base_revision = _exact_int(bot.get('combat_base_revision'))
-    ack_seq = _exact_int(bot.get('combat_ack_seq'))
-    fire_elapsed = _exact_finite_float(bot.get('combat_fire_elapsed'))
-    fire_timer = _exact_finite_float(bot.get('combat_fire_timer'))
-    if (revision is None or revision < 0 or
-            base_revision is None or base_revision < 0 or
-            base_revision > revision or ack_seq is None or ack_seq < 0 or
-            fire_elapsed is None or fire_elapsed < 0.0 or
-            fire_elapsed > 10.0 or fire_timer is None or
-            fire_timer < 0.0 or fire_timer >= 1.0):
-        return False
-    if (not bool(bot['critical'].get('fire', False)) and
-            (fire_elapsed != 0.0 or fire_timer != 0.0)):
-        return False
-    return True
-
-
 def _valid_player_equipment_contract(state, required=False):
     """Validate the complete canonical player equipment ledger."""
     fields = {
@@ -577,47 +521,6 @@ def _valid_bot_equipment_contract(state, required=False):
     return True
 
 
-def _valid_player_environment_contract(state, required=False):
-    """Validate canonical pose, input and landing frontiers in a player row."""
-    required_fields = {
-        'input_seq', 'up_cosine', 'landing_observation_seq'}
-    if not required_fields.issubset(state):
-        return not required and not (set(state) & required_fields)
-    input_sequence = _projectile_int_range(
-        state.get('input_seq'), 0, MAX_PROJECTILE_ID)
-    landing_sequence = _projectile_int_range(
-        state.get('landing_observation_seq'), 0, MAX_PROJECTILE_ID)
-    up_cosine = _exact_finite_float(state.get('up_cosine'))
-    processed_sequence = input_sequence
-    if 'input_processed_seq' in state:
-        processed_sequence = _projectile_int_range(
-            state.get('input_processed_seq'), 0, MAX_PROJECTILE_ID)
-    pose_bounds = (
-        ('x', PLAYER_INPUT_WORLD_BOUNDS[0]),
-        ('y', PLAYER_INPUT_WORLD_BOUNDS[1]),
-        ('z', PLAYER_INPUT_WORLD_BOUNDS[2]),
-        ('pitch', MAX_PLAYER_INPUT_ATTITUDE),
-        ('roll', MAX_PLAYER_INPUT_ATTITUDE),
-        ('gun_pitch', MAX_PLAYER_GUN_PITCH),
-        ('speed', MAX_PLAYER_INPUT_SPEED),
-        ('forward', 1.0), ('turn', 1.0),
-    )
-    for name, bound in pose_bounds:
-        if name not in state:
-            continue
-        value = _exact_finite_float(state.get(name))
-        if value is None or abs(value) > bound:
-            return False
-    for name in ('yaw', 'aim_yaw'):
-        if name in state and _exact_finite_float(state.get(name)) is None:
-            return False
-    return bool(
-        input_sequence is not None and landing_sequence is not None and
-        processed_sequence is not None and
-        processed_sequence >= input_sequence and
-        up_cosine is not None and -1.0 <= up_cosine <= 1.0)
-
-
 def _mapping_list(value, limit=30):
     if not isinstance(value, (list, tuple)):
         return []
@@ -641,6 +544,20 @@ _RUNTIME_VEHICLE_INT_FIELDS = (
     'stun_end_server_time_ms')
 
 
+# Pose scalars reach native matrices and animation keyframes. Finiteness is
+# not enough there: a finite but absurd coordinate is still a bad native write,
+# and the client already clamps its own outbound input to exactly these bounds.
+_RUNTIME_VEHICLE_POSE_BOUNDS = {
+    'x': PLAYER_INPUT_WORLD_BOUNDS[0],
+    'y': PLAYER_INPUT_WORLD_BOUNDS[1],
+    'z': PLAYER_INPUT_WORLD_BOUNDS[2],
+    'pitch': MAX_PLAYER_INPUT_ATTITUDE,
+    'roll': MAX_PLAYER_INPUT_ATTITUDE,
+    'gun_pitch': MAX_PLAYER_GUN_PITCH,
+    'speed': MAX_PLAYER_INPUT_SPEED,
+}
+
+
 def _canonical_runtime_vehicle_row(value):
     """Canonicalize shared pose scalars once at the snapshot boundary."""
     if not isinstance(value, dict):
@@ -651,6 +568,9 @@ def _canonical_runtime_vehicle_row(value):
             continue
         parsed = _exact_finite_float(result.get(name))
         if parsed is None:
+            return None
+        bound = _RUNTIME_VEHICLE_POSE_BOUNDS.get(name)
+        if bound is not None and abs(parsed) > bound:
             return None
         result[name] = parsed
     for name in _RUNTIME_VEHICLE_INT_FIELDS:
@@ -1753,6 +1673,11 @@ class LANClient(object):
         self._landing_observation_queue = []
         self._projectile_lock = threading.Lock()
         self._runtime_drop_diagnostics = {}
+        self._degraded_snapshot_log = None
+        self._snapshot_accepted_time = None
+        self._snapshot_stall_log = None
+        self._snapshot_drop_streak = 0
+        self._snapshot_drop_reason = ''
 
     def start(self):
         with self._outbound_lock:
@@ -1783,6 +1708,11 @@ class LANClient(object):
             self._landing_observation_pending = None
             self._landing_observation_queue = []
             self._runtime_drop_diagnostics = {}
+            self._degraded_snapshot_log = None
+            self._snapshot_accepted_time = None
+            self._snapshot_stall_log = None
+            self._snapshot_drop_streak = 0
+            self._snapshot_drop_reason = ''
         with self._pending_lock:
             self._pending = []
             self._recv_buffer = u''
@@ -3970,6 +3900,7 @@ class LANClient(object):
         if latest_snapshot is not None:
             self._handle_message(latest_snapshot)
         now = _monotonic_time()
+        self._report_snapshot_stall(now)
         if self.connected and now - self._last_ping >= PING_INTERVAL:
             self._last_ping = now
             self._ping_seq += 1
@@ -4042,6 +3973,81 @@ class LANClient(object):
         self._combat_timing_round_id = round_id
         self._combat_timing_tick = server_tick
         return True
+
+    def _report_snapshot_stall(self, now):
+        """Say out loud that the replica is drawing a frozen world.
+
+        Discarding one live payload is recoverable and stays quiet. A replica
+        that has accepted nothing for seconds is not recovering: every Bot and
+        every remote hull is held at its last accepted pose while the round
+        keeps running, so the log has to carry the reason that produced it.
+        """
+        if self.phase != 'battle':
+            return False
+        accepted = self._snapshot_accepted_time
+        if accepted is None:
+            return False
+        age = now - accepted
+        if age < SNAPSHOT_STALL_SECONDS:
+            return False
+        last_time = self._snapshot_stall_log
+        if last_time is not None and now - last_time < RUNTIME_DROP_LOG_INTERVAL:
+            return False
+        self._snapshot_stall_log = now
+        print(
+            '[Offline LAN 0.9.22] snapshot stream stalled age=%.1fs '
+            'round=%s dropped=%d last_reason=%s' % (
+                age, self.round_id, int(self._snapshot_drop_streak),
+                self._snapshot_drop_reason or 'none'))
+        return True
+
+    def _log_degraded_snapshot(self, round_id, server_tick, manifest_stale,
+                               uncanonical_rows):
+        """Report an applied but degraded snapshot at the drop log cadence."""
+        now = _monotonic_time()
+        last_time = self._degraded_snapshot_log
+        if last_time is not None and now - last_time < RUNTIME_DROP_LOG_INTERVAL:
+            return False
+        self._degraded_snapshot_log = now
+        print(
+            '[Offline LAN 0.9.22] applied degraded snapshot round=%s tick=%s '
+            'manifest_lineage_stale=%s retained_rows=%d' % (
+                round_id, server_tick, bool(manifest_stale),
+                int(uncanonical_rows)))
+        return True
+
+    def _canonical_runtime_rows(self, rows, field):
+        """Canonicalize one runtime row list, retaining unusable rows.
+
+        ``SnapshotSync`` destroys any entity a snapshot omits, so dropping an
+        unusable row would delete that vehicle from the world - a worse
+        outcome than the stale pose it was meant to avoid. Substitute the last
+        accepted row for that id instead, and only omit a row that this replica
+        has never seen, which can create nothing and so destroys nothing.
+        """
+        previous_rows = {}
+        previous = self.last_snapshot
+        if isinstance(previous, dict):
+            for value in previous.get(field) or ():
+                if not isinstance(value, dict):
+                    continue
+                identity = _exact_int(value.get('id'))
+                if identity is not None:
+                    previous_rows[identity] = value
+        canonical = []
+        retained = 0
+        for value in rows:
+            row = _canonical_runtime_vehicle_row(value)
+            if row is not None:
+                canonical.append(row)
+                continue
+            identity = (_exact_int(value.get('id'))
+                        if isinstance(value, dict) else None)
+            substitute = previous_rows.get(identity)
+            if substitute is not None:
+                canonical.append(dict(substitute))
+            retained += 1
+        return canonical, retained
 
     def _runtime_recovery_enabled(self):
         """Return whether one bad live-state payload may be ignored.
@@ -4682,15 +4688,11 @@ class LANClient(object):
                 if has_bot_state_time else None)
             projectiles = message.get('projectiles')
             players = _strict_mapping_list(message.get('players'), 64)
-            player_runtime_rows_valid = players is not None
-            if player_runtime_rows_valid:
-                canonical_players = [
-                    _canonical_runtime_vehicle_row(value)
-                    for value in players]
-                player_runtime_rows_valid = all(
-                    value is not None for value in canonical_players)
-                if player_runtime_rows_valid:
-                    players = canonical_players
+            uncanonical_rows = 0
+            if players is not None:
+                players, retained = self._canonical_runtime_rows(
+                    players, 'players')
+                uncanonical_rows += retained
             prepared_players = (
                 self._prepare_player_static_inputs(
                     players, allow_lean=True,
@@ -4703,14 +4705,9 @@ class LANClient(object):
             player_effective_params_valid = bool(
                 prepared_players is not None and prepared_players[2])
             bots = _strict_mapping_list(message.get('bots'), 30)
-            bot_runtime_rows_valid = bots is not None
-            if bot_runtime_rows_valid:
-                canonical_bots = [
-                    _canonical_runtime_vehicle_row(value) for value in bots]
-                bot_runtime_rows_valid = all(
-                    value is not None for value in canonical_bots)
-                if bot_runtime_rows_valid:
-                    bots = canonical_bots
+            if bots is not None:
+                bots, retained = self._canonical_runtime_rows(bots, 'bots')
+                uncanonical_rows += retained
             manifest = None
             if 'bot_manifest' in message:
                 manifest = _strict_mapping_list(
@@ -4728,34 +4725,13 @@ class LANClient(object):
                     message.get('destructibles'), 4096)
                 destructible_revision = _exact_int(
                     message.get('destructible_revision'))
-            player_critical_contract = all(
-                _exact_int(player.get('critical_revision')) is not None and
-                _exact_int(player.get('critical_revision')) >= 0 and
-                _exact_int(player.get('critical_base_revision')) is not None and
-                _exact_int(player.get('critical_base_revision')) >= 0 and
-                _exact_int(player.get('critical_ack_seq')) is not None and
-                _exact_int(player.get('critical_ack_seq')) >= 0
-                for player in players or ())
-            player_equipment_contract = all(
-                _valid_player_equipment_contract(player, required=True)
-                for player in players or ())
-            player_environment_contract = all(
-                _valid_player_environment_contract(player, required=True)
-                for player in players or ())
-            player_siege_contract = all(
-                _valid_player_siege_contract(player)
-                for player in players or ())
-            player_gun_checkpoint_contract = all(
-                _valid_player_gun_checkpoint_contract(player)
-                for player in players or ())
-            player_stun_contract = all(
-                _valid_stun_contract(player) for player in players or ())
-            bot_combat_contract = all(
-                _valid_bot_combat_contract(bot) for bot in bots or ())
-            bot_siege_contract = all(
-                _valid_bot_siege_contract(bot) for bot in bots or ())
-            bot_stun_contract = all(
-                _valid_stun_contract(bot) for bot in bots or ())
+            # A live snapshot is produced by the trusted LAN server from the
+            # trusted worker's own publication, and both already enforce these
+            # ledgers before they ship. Re-deriving them here bought no
+            # recovery: the replica has no second source and no repair, so the
+            # only outcome of a failed re-derivation was discarding a frame it
+            # could have drawn. Round identity, ordering and the canonical
+            # numbers below remain enforced; handshake barriers stay strict.
             ledger_required = self.has_projectile_ledger()
             previous_bot_state_revision = None
             previous_snapshot = None
@@ -4788,17 +4764,17 @@ class LANClient(object):
                     previous_bot_state_time = _projectile_int_range(
                         previous_snapshot.get('bot_state_time_us'), 0,
                         MAX_MOTION_TIME_US)
+                    # Only the monotonic frontier decides whether this frame
+                    # is newer than the one already drawn. How the producer
+                    # paired its revision with its sample clock is its own
+                    # bookkeeping; asserting that pairing here discarded live
+                    # motion the replica had no other way to obtain.
                     motion_timing_valid = bool(
                         has_motion_time and
                         previous_motion_time is not None and
                         previous_bot_state_time is not None and
                         motion_time_us >= previous_motion_time and
-                        ((bot_state_revision ==
-                          previous_bot_state_revision and
-                          bot_state_time_us == previous_bot_state_time) or
-                         (bot_state_revision >
-                          previous_bot_state_revision and
-                          bot_state_time_us > previous_bot_state_time)))
+                        bot_state_time_us >= previous_bot_state_time)
             valid_projectiles = (not ledger_required or (
                 server_time_ms is not None and authority_epoch is not None and
                 projectile_revision is not None and
@@ -4806,16 +4782,26 @@ class LANClient(object):
                  authority_epoch >= self.authority_epoch) and
                 _valid_active_projectiles(
                     projectiles, authority_epoch, server_time_ms)))
+            retained_manifest = (
+                previous_snapshot.get('bot_manifest')
+                if previous_snapshot is not None else None)
             lean_manifest_valid = bool(
                 'bot_manifest' not in message and
                 LEAN_SNAPSHOT_MANIFEST_CAPABILITY in
                 self.server_capabilities and
-                previous_snapshot is not None and
-                isinstance(previous_snapshot.get('bot_manifest'), list) and
-                message.get('bot_authority_id') ==
-                previous_snapshot.get('bot_authority_id') and
-                message.get('authority_epoch') ==
-                previous_snapshot.get('authority_epoch'))
+                isinstance(retained_manifest, list))
+            # The server records a manifest as delivered when it writes it to
+            # the socket, so a replica that could not consume that one frame is
+            # never offered the lineage barrier again. Refusing every later
+            # lean snapshot then froze the whole roster for the rest of the
+            # round. Static identity one lineage behind is strictly better, so
+            # inherit the retained roster and say so.
+            lean_manifest_stale = bool(
+                lean_manifest_valid and
+                (message.get('bot_authority_id') !=
+                 previous_snapshot.get('bot_authority_id') or
+                 message.get('authority_epoch') !=
+                 previous_snapshot.get('authority_epoch')))
             invalid_reasons = []
             if server_tick is None or server_tick < 0:
                 invalid_reasons.append('server_tick')
@@ -4832,34 +4818,12 @@ class LANClient(object):
                 invalid_reasons.append('bot_authority')
             if players is None:
                 invalid_reasons.append('players')
-            elif not player_runtime_rows_valid:
-                invalid_reasons.append('player_runtime_numbers')
             if not player_outfits_valid:
                 invalid_reasons.append('player_outfits')
             if not player_effective_params_valid:
                 invalid_reasons.append('player_effective_params')
             if bots is None:
                 invalid_reasons.append('bots')
-            elif not bot_runtime_rows_valid:
-                invalid_reasons.append('bot_runtime_numbers')
-            if not player_critical_contract:
-                invalid_reasons.append('player_critical')
-            if not player_equipment_contract:
-                invalid_reasons.append('player_equipment')
-            if not player_environment_contract:
-                invalid_reasons.append('player_environment')
-            if not player_siege_contract:
-                invalid_reasons.append('player_siege')
-            if not player_gun_checkpoint_contract:
-                invalid_reasons.append('player_gun_checkpoint')
-            if not player_stun_contract:
-                invalid_reasons.append('player_stun')
-            if not bot_combat_contract:
-                invalid_reasons.append('bot_combat')
-            if not bot_siege_contract:
-                invalid_reasons.append('bot_siege')
-            if not bot_stun_contract:
-                invalid_reasons.append('bot_stun')
             if 'bot_manifest' in message and manifest is None:
                 invalid_reasons.append('bot_manifest')
             if ('bot_manifest' not in message and
@@ -4875,33 +4839,18 @@ class LANClient(object):
                      destructible_revision < 0)):
                 invalid_reasons.append('destructibles')
             if invalid_reasons:
+                self._snapshot_drop_streak += 1
+                self._snapshot_drop_reason = ','.join(invalid_reasons)
                 if self._ignore_runtime_payload(
                         kind, 'invalid_snapshot:' +
-                        ','.join(invalid_reasons), message):
+                        self._snapshot_drop_reason, message):
                     return
-                bad_bot = next((
-                    value for value in bots or ()
-                    if not _valid_bot_combat_contract(value)), None)
-                bad_bot_detail = None
-                if isinstance(bad_bot, dict):
-                    bad_bot_critical = bad_bot.get('critical')
-                    bad_bot_detail = {
-                        'id': bad_bot.get('id'),
-                        'revision': bad_bot.get('combat_revision'),
-                        'base': bad_bot.get('combat_base_revision'),
-                        'ack': bad_bot.get('combat_ack_seq'),
-                        'fire': (bad_bot_critical.get('fire')
-                                 if isinstance(bad_bot_critical, dict)
-                                 else None),
-                        'elapsed': bad_bot.get('combat_fire_elapsed'),
-                        'timer': bad_bot.get('combat_fire_timer'),
-                    }
                 print(
                     '[Offline LAN 0.9.22] snapshot rejected reasons=%s '
                     'round=%s tick=%s bot_revision=%s previous_revision=%s '
                     'motion_us=%s previous_motion_us=%s bot_state_us=%s '
                     'previous_bot_state_us=%s projectiles=%s bots=%s '
-                    'players=%s bad_bot=%s' % (
+                    'players=%s' % (
                         ','.join(invalid_reasons), round_id, server_tick,
                         bot_state_revision, previous_bot_state_revision,
                         motion_time_us, previous_motion_time,
@@ -4909,8 +4858,7 @@ class LANClient(object):
                         (len(projectiles)
                          if isinstance(projectiles, list) else None),
                         (len(bots) if bots is not None else None),
-                        (len(players) if players is not None else None),
-                        bad_bot_detail))
+                        (len(players) if players is not None else None)))
                 self.last_error = 'invalid snapshot message'
                 self.stop()
                 return
@@ -4937,9 +4885,15 @@ class LANClient(object):
                     lean_manifest_valid):
                 message = dict(message)
                 message['bot_manifest'] = [
-                    dict(value)
-                    for value in previous_snapshot.get('bot_manifest') or ()]
+                    dict(value) for value in retained_manifest or ()]
+            if lean_manifest_stale or uncanonical_rows:
+                self._log_degraded_snapshot(
+                    round_id, server_tick, lean_manifest_stale,
+                    uncanonical_rows)
             self.last_snapshot = message
+            self._snapshot_accepted_time = _monotonic_time()
+            self._snapshot_drop_streak = 0
+            self._snapshot_drop_reason = ''
             local_player = next((
                 player for player in players
                 if _exact_int(player.get('id')) == self.player_id), None)

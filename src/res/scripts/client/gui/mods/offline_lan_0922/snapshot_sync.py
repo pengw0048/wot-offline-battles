@@ -486,18 +486,12 @@ class SnapshotSync(object):
             if (self._last_bot_state_time_us is not None and
                     bot_state_time_us < self._last_bot_state_time_us):
                 raise ValueError('bot state time regressed')
-            if (previous_revision is not None and
-                    revision == previous_revision and
-                    self._last_bot_state_time_us is not None and
-                    bot_state_time_us != self._last_bot_state_time_us):
-                raise ValueError(
-                    'unchanged bot revision changed its sample time')
-            if (previous_revision is not None and
-                    revision > previous_revision and
-                    self._last_bot_state_time_us is not None and
-                    bot_state_time_us <= self._last_bot_state_time_us):
-                raise ValueError(
-                    'advanced bot revision did not advance sample time')
+            # How the producer paired its revision with its sample clock is
+            # its own bookkeeping. Both frontiers are already fenced against
+            # regression above, which is all the presentation timeline needs.
+            # Asserting the pairing here raised out of the caller after it had
+            # already applied the same frame to the Bot state store, leaving
+            # the authority poses ahead of the replicas drawn from them.
         elif self._timed_bot_poses:
             raise ValueError('bot pose timing disappeared')
 

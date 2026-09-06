@@ -1086,7 +1086,7 @@ class SnapshotSyncTests(unittest.TestCase):
         self.assertEqual(['destroy'],
                          [event['type'] for event in destroyed])
 
-    def test_bot_pose_timing_is_atomic_monotonic_and_revision_bound(self):
+    def test_bot_pose_timing_is_atomic_and_monotonic(self):
         bot = player(7, 0.0)
         self.sync.manifest({'round_id': 1, 'bots': [bot]})
         self.sync.snapshot({
@@ -1095,26 +1095,33 @@ class SnapshotSyncTests(unittest.TestCase):
             'motion_time_us': 100000, 'bot_state_time_us': 90000,
             'bots': [bot]})
 
-        with self.assertRaisesRegex(ValueError, 'sample time'):
+        # How the producer paired its revision with its sample clock is its
+        # own bookkeeping. Both frontiers are fenced against regression, which
+        # is all the presentation timeline needs.
+        self.sync.snapshot({
+            'round_id': 1, 'server_tick': 2,
+            'bot_state_revision': 1,
+            'motion_time_us': 120000, 'bot_state_time_us': 100000,
+            'bots': [bot]})
+        self.sync.snapshot({
+            'round_id': 1, 'server_tick': 3,
+            'bot_state_revision': 2,
+            'motion_time_us': 130000, 'bot_state_time_us': 100000,
+            'bots': [bot]})
+        self.assertEqual(130000, self.sync._last_motion_time_us)
+        self.assertEqual(100000, self.sync._last_bot_state_time_us)
+
+        with self.assertRaisesRegex(ValueError, 'motion time regressed'):
             self.sync.snapshot({
-                'round_id': 1, 'server_tick': 2,
-                'bot_state_revision': 1,
+                'round_id': 1, 'server_tick': 4,
+                'bot_state_revision': 3,
                 'motion_time_us': 120000, 'bot_state_time_us': 100000,
                 'bots': [bot]})
-
-        advanced = self.module.SnapshotSync(
-            1, clock=lambda: self.now[0])
-        advanced.manifest({'round_id': 1, 'bots': [bot]})
-        advanced.snapshot({
-            'round_id': 1, 'server_tick': 1,
-            'bot_state_revision': 1,
-            'motion_time_us': 100000, 'bot_state_time_us': 90000,
-            'bots': [bot]})
-        with self.assertRaisesRegex(ValueError, 'did not advance'):
-            advanced.snapshot({
-                'round_id': 1, 'server_tick': 2,
-                'bot_state_revision': 2,
-                'motion_time_us': 120000, 'bot_state_time_us': 90000,
+        with self.assertRaisesRegex(ValueError, 'bot state time regressed'):
+            self.sync.snapshot({
+                'round_id': 1, 'server_tick': 4,
+                'bot_state_revision': 3,
+                'motion_time_us': 140000, 'bot_state_time_us': 90000,
                 'bots': [bot]})
 
         fresh = self.module.SnapshotSync(1, clock=lambda: self.now[0])

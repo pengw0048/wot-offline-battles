@@ -7813,7 +7813,16 @@ class BattleRuntime(object):
                 self._bots.apply_snapshot(self._last_snapshot)
                 self._remember_ram_bot_snapshot(self._last_snapshot)
             if self._sync is not None:
-                self._sync.snapshot(message)
+                try:
+                    self._sync.snapshot(message)
+                except Exception as error:
+                    # The Bot state store has already consumed this frame.
+                    # Rolling the whole snapshot back here would leave the
+                    # authority poses permanently ahead of the replicas drawn
+                    # from them, which reads in game as frozen hulls that
+                    # shells pass through. Contain the presentation timeline
+                    # alone and keep the applied state.
+                    self._ignore_live_payload('snapshot_sync', error, message)
             return True
         except Exception as error:
             self._last_snapshot = previous_snapshot

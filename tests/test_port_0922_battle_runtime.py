@@ -11970,7 +11970,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([], battle._event_journal)
         battle._fail.assert_not_called()
 
-    def test_snapshot_exception_keeps_last_good_state_and_round_running(self):
+    def test_presentation_timeline_failure_keeps_the_applied_frame(self):
+        # The Bot state store consumes the frame before the presentation
+        # timeline does. Rolling the whole snapshot back on a timeline failure
+        # left authority permanently ahead of the replicas drawn from it,
+        # which reads in game as frozen hulls that shells pass through.
         battle = BattleRuntime(_runtime())
         battle.state = 'running'
         battle._last_snapshot = {'server_tick': 7}
@@ -11978,7 +11982,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
             snapshot=mock.Mock(side_effect=ValueError('stale snapshot')))
         battle._fail = mock.Mock()
 
-        self.assertFalse(battle.on_snapshot({'server_tick': 8}))
+        self.assertTrue(battle.on_snapshot({'server_tick': 8}))
+
+        self.assertEqual({'server_tick': 8}, battle._last_snapshot)
+        battle._fail.assert_not_called()
+
+    def test_snapshot_exception_keeps_last_good_state_and_round_running(self):
+        battle = BattleRuntime(_runtime())
+        battle.state = 'running'
+        battle._last_snapshot = {'server_tick': 7}
+        battle._apply_rules = mock.Mock(
+            side_effect=ValueError('broken rules'))
+        battle._fail = mock.Mock()
+
+        self.assertFalse(battle.on_snapshot({'server_tick': 8, 'rules': {}}))
 
         self.assertEqual({'server_tick': 7}, battle._last_snapshot)
         battle._fail.assert_not_called()
