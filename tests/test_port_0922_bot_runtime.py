@@ -14779,58 +14779,77 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual('human', self.runtime.states[11]['target_kind'])
         self.assertEqual(2, self.runtime.states[11]['target_id'])
 
-    def test_radio_follow_order_drives_planner_navigator_and_vehicle_motion(self):
-        runtime = self.module.BotRuntime(
-            1, descriptor_resolver=lambda unused: _combat_descriptor(),
-            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
-            visibility_probe=lambda *unused: True,
-            firing_lane_probe=lambda *unused: True,
-            ground_probe=lambda *unused: 0.0,
-            physics_ground_probe=lambda *unused: 0.0,
-            spawn_resolver=_spawn_resolver, baked_graph=_graph())
-        manifest = runtime.battle_start(dict(self.start, bots=[{
-            'id': 11, 'team': 1, 'slot': 0, 'name': 'Follower',
-        }]))[0]['bots']
-        state = runtime.states[11]
-        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0)
+    def test_radio_movement_orders_drive_toward_the_commanded_goal(self):
         issuer = _admit_player({
             'id': 1, 'team': 1, 'alive': True, 'world_pose': True,
             'x': 8.0, 'y': 0.0, 'z': 18.0, 'yaw': 0.0,
         })
-        team_order = {
-            'command_id': '5:1:1',
-            'command': 'FOLLOWME',
-            'team': 1,
-            'issuer_id': 1,
-            'issued_tick': 100,
-            'expires_tick': 200,
-            'recipient_bot_ids': [11],
-        }
-        payload = BotPlanner().build_orders(
-            manifest, [dict(state)], [issuer], 1.0,
-            team_orders=[team_order])
-        self.assertEqual('team_follow', payload['orders'][0]['combat_mode'])
-        self.assertEqual(
-            {'x': 8.0, 'y': 0.0, 'z': 0.0},
-            payload['orders'][0]['move_position'])
-        runtime.apply_snapshot({
-            'bot_order_revision': payload['revision'],
-            'bot_orders': payload['orders'], 'bots': [],
-        })
+        follow_goal = {'x': 8.0, 'y': 0.0, 'z': 0.0}
+        base_goal = {'x': 0.0, 'y': 0.0, 'z': 20.0}
+        cases = (
+            ('FOLLOWME', 'team_follow', follow_goal, None),
+            ('HELPME', 'team_follow', follow_goal, None),
+            ('BACKTOBASE', 'team_back_to_base', base_goal, {
+                'capture_bases': {'1': [dict(base_goal, id='1:0')]},
+            }),
+        )
 
-        start = (state['x'], state['z'])
-        commanded_throttles = []
-        for frame in range(100):
-            runtime.update(.04, 1.0 + frame * .04, players=[issuer])
-            cached = runtime._decision_cache.get(11)
-            if cached is not None:
-                commanded_throttles.append(cached[3].get('throttle', 0.0))
+        for sequence, (command, mode, goal, defense) in enumerate(cases, 1):
+            with self.subTest(command=command):
+                runtime = self.module.BotRuntime(
+                    1, descriptor_resolver=lambda unused: _combat_descriptor(),
+                    direction_probe=lambda *unused: {
+                        'clear': True, 'slope': 0.0},
+                    visibility_probe=lambda *unused: True,
+                    firing_lane_probe=lambda *unused: True,
+                    ground_probe=lambda *unused: 0.0,
+                    physics_ground_probe=lambda *unused: 0.0,
+                    spawn_resolver=_spawn_resolver, baked_graph=_graph())
+                manifest = runtime.battle_start(dict(self.start, bots=[{
+                    'id': 11, 'team': 1, 'slot': 0, 'name': 'Recipient',
+                }]))[0]['bots']
+                state = runtime.states[11]
+                state.update(
+                    x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0)
+                team_order = {
+                    'command_id': '5:1:%d' % sequence,
+                    'command': command,
+                    'team': 1,
+                    'issuer_id': 1,
+                    'issued_tick': 100,
+                    'expires_tick': 200,
+                    'recipient_bot_ids': [11],
+                }
+                payload = BotPlanner().build_orders(
+                    manifest, [dict(state)], [issuer], 1.0, defense,
+                    team_orders=[team_order])
+                order = payload['orders'][0]
+                self.assertEqual(mode, order['combat_mode'])
+                self.assertEqual(goal, order['move_position'])
+                runtime.apply_snapshot({
+                    'bot_order_revision': payload['revision'],
+                    'bot_orders': payload['orders'], 'bots': [],
+                })
 
-        self.assertTrue(any(value > 0.0 for value in commanded_throttles))
-        self.assertEqual('team_follow',
-                         runtime._decision_cache[11][3]['combat_mode'])
-        self.assertGreater(math.hypot(
-            state['x'] - start[0], state['z'] - start[1]), 0.5)
+                initial_distance = math.hypot(
+                    goal['x'] - state['x'], goal['z'] - state['z'])
+                distances = []
+                commanded_throttles = []
+                for frame in range(100):
+                    runtime.update(
+                        .04, 1.0 + frame * .04, players=[issuer])
+                    distances.append(math.hypot(
+                        goal['x'] - state['x'], goal['z'] - state['z']))
+                    cached = runtime._decision_cache.get(11)
+                    if cached is not None:
+                        commanded_throttles.append(
+                            cached[3].get('throttle', 0.0))
+
+                self.assertTrue(
+                    any(value > 0.0 for value in commanded_throttles))
+                self.assertEqual(
+                    mode, runtime._decision_cache[11][3]['combat_mode'])
+                self.assertLess(min(distances), initial_distance - 0.5)
 
     def test_driver_decision_receives_slot_and_signed_reverse_speed(self):
         self.runtime.battle_start(self.start)
