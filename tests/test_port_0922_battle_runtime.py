@@ -2023,7 +2023,8 @@ def _runtime():
         ARENA_UPDATE=types.SimpleNamespace(
             VEHICLE_ADDED=2, PERIOD=3, VEHICLE_STATISTICS=5,
             VEHICLE_KILLED=6, AVATAR_READY=7, TEAM_KILLER=10),
-        ARENA_PERIOD=types.SimpleNamespace(PREBATTLE=2, BATTLE=3),
+        ARENA_PERIOD=types.SimpleNamespace(
+            PREBATTLE=2, BATTLE=3, AFTERBATTLE=4),
         VEHICLE_PHYSICS_MODE=types.SimpleNamespace(STANDARD=0),
         VEHICLE_SIEGE_STATE=types.SimpleNamespace(
             DISABLED=0, SWITCHING_ON=1, ENABLED=2, SWITCHING_OFF=3),
@@ -25417,6 +25418,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
         battle.state = 'running'
 
         battle.on_events({'events': [{
@@ -25430,6 +25432,59 @@ class BattleRuntimeContractTests(unittest.TestCase):
             [(2, runtime.constants.FINISH_REASON.EXTERMINATION)],
             runtime.bigworld.avatar.round_finished)
         self.assertTrue(battle._round_finished_notified)
+        # The stock end-of-battle music owners read the arena period, not
+        # ``Avatar.onRoundFinished``, and a replayed result must not move the
+        # arena twice.
+        battle._binding.arena_period.assert_called_once_with(
+            'afterbattle', winner_team=2,
+            finish_reason=runtime.constants.FINISH_REASON.EXTERMINATION)
+
+    def test_terminal_result_moves_the_arena_before_notifying(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle.state = 'running'
+        order = []
+        battle._binding = mock.Mock()
+        battle._binding.arena_period.side_effect = (
+            lambda *args, **kwargs: order.append(('period',) + args))
+        battle._avatar.onRoundFinished = mock.Mock(
+            side_effect=lambda winner, reason: order.append(
+                ('finished', winner, reason)))
+
+        self.assertTrue(battle._apply_battle_result({
+            'winner': 0, 'reason': 'battle_timeout'}))
+
+        # ``BattleContext.lastArenaWinStatus`` and
+        # ``MusicController.__lastBattleResultEventName`` must both hold this
+        # round's outcome before any onRoundFinished consumer runs.
+        self.assertEqual(
+            [('period', 'afterbattle'),
+             ('finished', 0, runtime.constants.FINISH_REASON.TIMEOUT)],
+            order)
+        self.assertEqual(
+            {'winner_team': 0,
+             'finish_reason': runtime.constants.FINISH_REASON.TIMEOUT},
+            battle._binding.arena_period.call_args[1])
+
+    def test_afterbattle_period_failure_still_notifies_the_native_hud(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle.state = 'running'
+        battle._binding = mock.Mock()
+        battle._binding.arena_period.side_effect = RuntimeError(
+            'arena period rejected')
+
+        self.assertTrue(battle._apply_battle_result({
+            'winner': 1, 'reason': 'team_eliminated'}))
+
+        self.assertEqual(
+            [(1, runtime.constants.FINISH_REASON.EXTERMINATION)],
+            runtime.bigworld.avatar.round_finished)
+        self.assertTrue(battle._round_finished_notified)
+        self.assertEqual({'winner': 1, 'reason': 'team_eliminated'},
+                         battle._battle_result)
 
     def test_worker_terminal_result_stops_simulation_without_hud(self):
         runtime = _runtime()
@@ -25439,12 +25494,16 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._battle_live = True
         battle.state = 'running'
 
+        battle._binding = mock.Mock()
+
         self.assertTrue(battle._apply_battle_result({
             'winner': 2, 'reason': 'battle_timeout'}))
 
         self.assertFalse(battle._battle_live)
         self.assertTrue(battle._round_finished_notified)
         self.assertEqual([], runtime.bigworld.avatar.round_finished)
+        # A hidden worker owns no stock GUI, arena period or music.
+        battle._binding.arena_period.assert_not_called()
 
     def test_base_capture_uses_exact_1513_event_shapes(self):
         runtime = _runtime()
@@ -25479,12 +25538,16 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(update_count,
                          len(runtime.bigworld.avatar.base_points))
 
+        battle._binding = mock.Mock()
         self.assertTrue(battle._apply_battle_result({
             'winner': 2, 'reason': 'base captured', 'base_team': 1}))
         self.assertEqual([(1, 0)], runtime.bigworld.avatar.base_captured)
         self.assertEqual([
             (2, runtime.constants.FINISH_REASON.BASE),
         ], runtime.bigworld.avatar.round_finished)
+        battle._binding.arena_period.assert_called_once_with(
+            'afterbattle', winner_team=2,
+            finish_reason=runtime.constants.FINISH_REASON.BASE)
 
     def test_ammo_hud_producer_obeys_exact_integer_wire_ranges(self):
         runtime = _runtime()

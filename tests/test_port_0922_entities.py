@@ -66,6 +66,7 @@ class _ArenaUpdate(object):
 class _ArenaPeriod(object):
     PREBATTLE = 2
     BATTLE = 5
+    AFTERBATTLE = 7
 
 
 class _SiegeState(object):
@@ -491,6 +492,55 @@ class BigWorldBindingTests(unittest.TestCase):
             (2, 115.0, 15.0, []),
             pickle.loads(zlib.decompress(avatar.updates[0][1])))
 
+    def test_afterbattle_period_carries_the_native_round_outcome(self):
+        # ``arena_info.listeners._getPeriodAdditionalInfo`` unpacks exactly
+        # two members, and ``MusicController.__onArenaStateChanged`` indexes
+        # ``periodAdditionalInfo[0]`` for the winning team.
+        module = _binding_module()
+        bigworld = _BigWorld()
+        avatar = _Avatar()
+        binding = module.BigWorldVehicleBinding(
+            bigworld, avatar, _Constants, _VehicleDescr,
+            lambda yaw, pitch, limits: 321,
+            outfit_provider=lambda descriptor: '')
+
+        binding.arena_period('afterbattle', winner_team=2, finish_reason=1)
+
+        self.assertEqual(
+            (7, 0.0, 0.0, (2, 1)),
+            pickle.loads(zlib.decompress(avatar.updates[0][1])))
+
+    def test_afterbattle_period_keeps_a_draw_winner_team(self):
+        module = _binding_module()
+        avatar = _Avatar()
+        binding = module.BigWorldVehicleBinding(
+            _BigWorld(), avatar, _Constants, _VehicleDescr,
+            lambda yaw, pitch, limits: 321,
+            outfit_provider=lambda descriptor: '')
+
+        binding.arena_period('afterbattle', winner_team=0, finish_reason=3)
+
+        self.assertEqual(
+            (7, 0.0, 0.0, (0, 3)),
+            pickle.loads(zlib.decompress(avatar.updates[0][1])))
+
+    def test_arena_period_rejects_a_mismatched_round_outcome(self):
+        module = _binding_module()
+        avatar = _Avatar()
+        binding = module.BigWorldVehicleBinding(
+            _BigWorld(), avatar, _Constants, _VehicleDescr,
+            lambda yaw, pitch, limits: 321,
+            outfit_provider=lambda descriptor: '')
+
+        self.assertRaises(
+            module.CapabilityError, binding.arena_period, 'afterbattle')
+        self.assertRaises(
+            module.CapabilityError, binding.arena_period, 'afterbattle',
+            0.0, 3, 1)
+        self.assertRaises(
+            module.CapabilityError, binding.arena_period, 'battle', 5.0, 1, 1)
+        self.assertEqual([], avatar.updates)
+
     def test_exact_property_schema_rejects_jointly_wrong_producer_values(self):
         module = _binding_module()
         binding = module.BigWorldVehicleBinding(
@@ -591,8 +641,10 @@ class _BridgeBinding(object):
     def avatar_ready(self):
         self.events.append(('avatar_ready',))
 
-    def arena_period(self, period, duration=0.0):
-        self.events.append(('period', period, duration))
+    def arena_period(self, period, duration=0.0, winner_team=None,
+                     finish_reason=None):
+        self.events.append(
+            ('period', period, duration, winner_team, finish_reason))
 
     def arena_vehicle_removed(self, vehicle_id):
         self.events.append(('removed', vehicle_id))
@@ -887,8 +939,9 @@ class AvatarServerBridgeTests(unittest.TestCase):
             sender)
         original_arena_period = binding.arena_period
 
-        def arena_period(period, duration=0.0):
-            original_arena_period(period, duration)
+        def arena_period(period, duration=0.0, winner_team=None,
+                         finish_reason=None):
+            original_arena_period(period, duration, winner_team, finish_reason)
             bridge.vehicle_moveWith(0)
 
         binding.arena_period = arena_period
