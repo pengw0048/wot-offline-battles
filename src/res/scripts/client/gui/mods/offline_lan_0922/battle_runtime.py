@@ -4792,18 +4792,33 @@ class BattleRuntime(object):
             self._avatar.spaceID, start, end, 128, ground_filter)
 
     def _ground_y(self, x, z, hint=0.0, allow_wide=False):
-        """Use the 0.8.2 near-hull probe so roofs do not become terrain."""
+        """Find upward-facing support below rejected overhead surfaces.
+
+        A gate underside can be inside the height band, or conceal a valid
+        road while falling just outside it. Neither case is missing ground.
+        Keep the existing near-hull range and a bounded layered query, so
+        real bridge decks and slopes retain their previous placement.
+        """
         ground_filter = self._ground_filter(x, z)
-        try:
-            hit = self._collide_down(
-                self._vector((x, hint + 8.0, z)),
-                self._vector((x, hint - 30.0, z)), ground_filter)
-            if hit is not None:
+        start_y = float(hint) + 8.0
+        end_y = float(hint) - 30.0
+        for unused_layer in range(4):
+            try:
+                hit = self._collide_down(
+                    self._vector((x, start_y, z)),
+                    self._vector((x, end_y, z)), ground_filter)
+                if hit is None:
+                    break
                 value = float(hit[0].y)
-                if -14.0 < value - float(hint) < 6.0:
+                if (-14.0 < value - float(hint) < 6.0 and
+                        float(hit[1].y) > 0.0):
                     return value
-        except Exception:
-            pass
+                next_y = value - 0.05
+                if not end_y < next_y < start_y:
+                    break
+                start_y = next_y
+            except Exception:
+                break
         if not allow_wide:
             return None
         from_y = max(1000.0, hint + 50.0)
@@ -4887,17 +4902,22 @@ class BattleRuntime(object):
                 hit = self._collide_down(
                     self._vector((x, probe_top, z)),
                     self._vector((x, probe_bottom, z)), ground_filter)
+                if hit is None:
+                    return None
+                height = float(hit[0].y)
+                normal_y = float(hit[1].y)
             except Exception:
                 return None
-            if hit is None:
-                return None
-            height = float(hit[0].y)
-            if height <= float(hint_y) + 4.5:
+            if (height <= float(hint_y) + 4.5 and
+                    normal_y > 0.0):
                 if self._water_depth((x, height, z)) > \
                         BOT_WATER_AVOID_DEPTH:
                     return None
                 return height
-            probe_top = height - 0.35
+            next_top = height - 0.05
+            if not probe_bottom < next_top < probe_top:
+                return None
+            probe_top = next_top
         return None
 
     def _baked_pose_safe(self, position):
