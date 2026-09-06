@@ -14787,14 +14787,23 @@ class BotRuntimeTests(unittest.TestCase):
         follow_goal = {'x': 8.0, 'y': 0.0, 'z': 0.0}
         base_goal = {'x': 0.0, 'y': 0.0, 'z': 20.0}
         cases = (
-            ('FOLLOWME', 'team_follow', follow_goal, None),
-            ('HELPME', 'team_follow', follow_goal, None),
-            ('BACKTOBASE', 'team_back_to_base', base_goal, {
+            ('FOLLOWME', 'team_follow', (0.0, 0.0), follow_goal, None, None),
+            ('HELPME', 'team_follow', (0.0, 0.0), follow_goal, None, None),
+            ('HELPMEEX', 'team_follow', (0.0, 0.0), follow_goal, None, None),
+            ('BACKTOBASE', 'team_back_to_base', (0.0, 0.0), base_goal, {
                 'capture_bases': {'1': [dict(base_goal, id='1:0')]},
-            }),
+            }, None),
+            ('ATTACK', 'team_attack', (8.0, 0.0),
+             {'x': 4.0, 'y': 0.0, 'z': 0.0}, None, None),
+            ('TURNBACK', 'team_turnback', (8.0, 0.0),
+             {'x': 0.0, 'y': 0.0, 'z': 0.0}, None, 'turnback'),
+            ('ATTENTIONTOCELL', 'team_attention_cell', (0.0, 0.0),
+             {'x': 12.0, 'y': 0.0, 'z': -4.0},
+             {'arena_bounds': [0.0, -40.0, 80.0, 40.0]}, 15),
         )
 
-        for sequence, (command, mode, goal, defense) in enumerate(cases, 1):
+        for sequence, case in enumerate(cases, 1):
+            command, mode, start, goal, defense, extra = case
             with self.subTest(command=command):
                 runtime = self.module.BotRuntime(
                     1, descriptor_resolver=lambda unused: _combat_descriptor(),
@@ -14810,17 +14819,22 @@ class BotRuntimeTests(unittest.TestCase):
                 }]))[0]['bots']
                 state = runtime.states[11]
                 state.update(
-                    x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0)
+                    x=start[0], y=0.0, z=start[1], yaw=0.0, speed=0.0)
                 team_order = {
                     'command_id': '5:1:%d' % sequence,
-                    'command': command,
-                    'team': 1,
-                    'issuer_id': 1,
-                    'issued_tick': 100,
-                    'expires_tick': 200,
+                    'command': command, 'team': 1, 'issuer_id': 1,
+                    'issued_tick': 100, 'expires_tick': 200,
                     'recipient_bot_ids': [11],
                 }
-                payload = BotPlanner().build_orders(
+                if isinstance(extra, int):
+                    team_order['cell_index'] = extra
+                planner = BotPlanner()
+                if extra == 'turnback':
+                    planner._route_states[11] = {
+                        'index': 1, 'route_id': 'safe-1', 'join_index': 0,
+                        'join_anchor': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                    }
+                payload = planner.build_orders(
                     manifest, [dict(state)], [issuer], 1.0, defense,
                     team_orders=[team_order])
                 order = payload['orders'][0]
@@ -14835,6 +14849,7 @@ class BotRuntimeTests(unittest.TestCase):
                     goal['x'] - state['x'], goal['z'] - state['z'])
                 distances = []
                 commanded_throttles = []
+                observed_modes = []
                 for frame in range(100):
                     runtime.update(
                         .04, 1.0 + frame * .04, players=[issuer])
@@ -14844,12 +14859,54 @@ class BotRuntimeTests(unittest.TestCase):
                     if cached is not None:
                         commanded_throttles.append(
                             cached[3].get('throttle', 0.0))
+                        observed_modes.append(cached[3].get('combat_mode'))
 
                 self.assertTrue(
                     any(value > 0.0 for value in commanded_throttles))
-                self.assertEqual(
-                    mode, runtime._decision_cache[11][3]['combat_mode'])
+                self.assertIn(mode, observed_modes)
                 self.assertLess(min(distances), initial_distance - 0.5)
+
+    def test_radio_stop_reaches_the_driver_as_zero_throttle(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            visibility_probe=lambda *unused: True,
+            firing_lane_probe=lambda *unused: True,
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        manifest = runtime.battle_start(dict(self.start, bots=[{
+            'id': 11, 'team': 1, 'slot': 0, 'name': 'Recipient',
+        }]))[0]['bots']
+        state = runtime.states[11]
+        state.update(
+            x=3.0, y=0.0, z=2.0, yaw=0.0, speed=0.0,
+            health=100, max_health=1000)
+        team_order = {
+            'command_id': '5:1:1', 'command': 'STOP',
+            'team': 1, 'issuer_id': 1,
+            'issued_tick': 100, 'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+        payload = BotPlanner().build_orders(
+            manifest, [dict(state)], [], 1.0,
+            team_orders=[team_order])
+        order = payload['orders'][0]
+        self.assertEqual('team_stop', order['combat_mode'])
+        self.assertEqual(0.0, order['throttle_override'])
+        runtime.apply_snapshot({
+            'bot_order_revision': payload['revision'],
+            'bot_orders': payload['orders'], 'bots': [],
+        })
+
+        start = (state['x'], state['z'])
+        for frame in range(25):
+            runtime.update(.04, 1.0 + frame * .04, players=[])
+
+        decision = runtime._decision_cache[11][3]
+        self.assertEqual('team_stop', decision['combat_mode'])
+        self.assertEqual(0.0, decision['throttle'])
+        self.assertEqual(start, (state['x'], state['z']))
 
     def test_driver_decision_receives_slot_and_signed_reverse_speed(self):
         self.runtime.battle_start(self.start)

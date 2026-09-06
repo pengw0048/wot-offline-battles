@@ -1318,7 +1318,7 @@ class ServerBotTacticsTests(unittest.TestCase):
             ('STOP', 'team_stop',
              {'x': 0.0, 'y': 0.0, 'z': 0.0}),
             ('TURNBACK', 'team_turnback',
-             {'x': 0.0, 'y': 0.0, 'z': 0.0}),
+             {'x': 0.0, 'y': 0.0, 'z': -100.0}),
         )
 
         for command, mode, point in cases:
@@ -1420,51 +1420,147 @@ class ServerBotTacticsTests(unittest.TestCase):
             [-200.0, -400.0, -100.0, -300.0],
             order['move_area_bounds'])
 
-    def test_radio_movement_order_replaces_nonurgent_combat_movement(self):
-        team_order = {
-            'command_id': '1:1:1',
-            'command': 'BACKTOBASE',
-            'team': 1,
-            'issuer_id': 1,
-            'issued_tick': 100,
-            'expires_tick': 200,
+    def test_radio_navigation_orders_replace_every_autonomous_mode(self):
+        base_team_order = {
+            'command_id': '1:1:1', 'team': 1, 'issuer_id': 1,
+            'issued_tick': 100, 'expires_tick': 200,
             'recipient_bot_ids': [11],
         }
+        issuer = {
+            'id': 1, 'team': 1, 'alive': True, 'world_pose': True,
+            'x': 45.0, 'y': 2.0, 'z': 60.0, 'yaw': 0.0,
+        }
         defense = {
-            'capture_bases': {
-                '1': [{'id': '1:0', 'x': -25.0, 'y': 0.0, 'z': -450.0}],
-            },
+            'capture_bases': {'1': [
+                {'id': '1:0', 'x': -25.0, 'y': 0.0, 'z': -450.0},
+            ]},
+            'arena_bounds': [-500.0, -500.0, 500.0, 500.0],
         }
         bot = {
             'id': 11, 'team': 1,
-            'state': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+            'state': {'x': 4.0, 'y': 0.0, 'z': 6.0},
         }
-        nonurgent_modes = (
+        modes = (
             'engage', 'advance_contact', 'support_hold', 'flank',
             'take_cover', 'cover_hold', 'cover_peek', 'cover_return',
-            'withdraw',
+            'withdraw', 'base_defense', 'low_health_retreat',
+            'low_health_defend', 'under_fire_withdraw', 'under_fire_hold',
+            'crossfire_withdraw', 'crossfire_hold',
+        )
+        route_point = {'x': 0.0, 'y': 0.0, 'z': 100.0}
+        turnback_point = {'x': 0.0, 'y': 0.0, 'z': -100.0}
+        cases = (
+            ('ATTACK', 'team_attack', route_point, None),
+            ('FOLLOWME', 'team_follow',
+             {'x': 45.0, 'y': 2.0, 'z': 42.0}, None),
+            ('HELPME', 'team_follow',
+             {'x': 45.0, 'y': 2.0, 'z': 42.0}, None),
+            ('HELPMEEX', 'team_follow',
+             {'x': 45.0, 'y': 2.0, 'z': 42.0}, None),
+            ('STOP', 'team_stop',
+             {'x': 4.0, 'y': 0.0, 'z': 6.0}, 0.0),
+            ('TURNBACK', 'team_turnback', turnback_point, None),
+            ('BACKTOBASE', 'team_back_to_base',
+             {'x': -25.0, 'y': 0.0, 'z': -450.0}, None),
+            ('ATTENTIONTOCELL', 'team_attention_cell',
+             {'x': -150.0, 'y': 0.0, 'z': -350.0}, None),
         )
 
-        for mode in nonurgent_modes:
-            with self.subTest(mode=mode):
-                order = {
-                    'combat_mode': mode,
-                    'route_anchor': {'x': 0.0, 'y': 0.0, 'z': -100.0},
-                    'move_position': {'x': 12.0, 'y': 0.0, 'z': 0.0},
-                    'face_position': {'x': 18.0, 'y': 0.0, 'z': 4.0},
-                    'throttle_override': 0.0,
+        for mode in modes:
+            for command, expected_mode, point, throttle in cases:
+                with self.subTest(mode=mode, command=command):
+                    team_order = dict(
+                        base_team_order, command=command, cell_index=38)
+                    order = {
+                        'combat_mode': mode, 'target_id': 2,
+                        'aim_position': {'x': 18.0, 'y': 0.0, 'z': 4.0},
+                        'route_anchor': dict(turnback_point),
+                        'move_position': {'x': 12.0, 'y': 0.0, 'z': 0.0},
+                        'face_position': {'x': 18.0, 'y': 0.0, 'z': 4.0},
+                        'throttle_override': 0.0, 'fire_allowed': True,
+                    }
+
+                    BotPlanner._apply_team_order(
+                        order, bot, team_order, [issuer], defense,
+                        route_point, turnback_point)
+
+                    self.assertEqual(expected_mode, order['combat_mode'])
+                    self.assertEqual(point, order['move_position'])
+                    self.assertEqual(throttle, order['throttle_override'])
+                    self.assertEqual(2, order['target_id'])
+                    self.assertTrue(order['fire_allowed'])
+                    if command == 'ATTACK':
+                        self.assertEqual(
+                            {'x': 18.0, 'y': 0.0, 'z': 4.0},
+                            order['face_position'])
+
+    def test_radio_enemy_commands_keep_local_survival_priority(self):
+        protected_modes = (
+            'base_defense', 'low_health_retreat', 'low_health_defend',
+            'under_fire_withdraw', 'under_fire_hold',
+            'crossfire_withdraw', 'crossfire_hold',
+        )
+        bot = {
+            'id': 11, 'team': 1,
+            'state': {'x': 4.0, 'y': 0.0, 'z': 6.0},
+        }
+        for mode in protected_modes:
+            for command in ('ATTACKENEMY', 'SUPPORTMEWITHFIRE'):
+                with self.subTest(mode=mode, command=command):
+                    team_order = {
+                        'command_id': '1:1:1', 'command': command,
+                        'team': 1, 'issuer_id': 1,
+                        'issued_tick': 100, 'expires_tick': 200,
+                        'recipient_bot_ids': [11],
+                    }
+                    original = {'x': 12.0, 'y': 0.0, 'z': 0.0}
+                    order = {
+                        'combat_mode': mode,
+                        'route_anchor': {'x': 0.0, 'y': 0.0, 'z': -100.0},
+                        'move_position': dict(original),
+                        'throttle_override': 0.0,
+                    }
+                    BotPlanner._apply_team_order(
+                        order, bot, team_order, [], None)
+                    self.assertEqual(mode, order['combat_mode'])
+                    self.assertEqual(original, order['move_position'])
+                    self.assertEqual(0.0, order['throttle_override'])
+                    self.assertEqual(command, order['team_command'])
+
+    def test_turnback_uses_route_retreat_point_for_every_vehicle_role(self):
+        route = _route('turnback-lane', [
+            (0, -100, False), (0, 100, False),
+            (0, 300, False), (0, 500, False),
+        ])
+        team_order = {
+            'command_id': '1:1:1', 'command': 'TURNBACK',
+            'team': 1, 'issuer_id': 1,
+            'issued_tick': 100, 'expires_tick': 200,
+            'recipient_bot_ids': [11],
+        }
+        for class_tag in (
+                'lightTank', 'mediumTank', 'heavyTank', 'AT-SPG', 'SPG'):
+            with self.subTest(class_tag=class_tag):
+                planner = BotPlanner()
+                manifest = [_bot(11, 1, 0, route, class_tag)]
+                states = [_state(11, 1, 0, 400)]
+                planner._route_states[11] = {
+                    'index': 3, 'route_id': route['id'],
+                    'join_index': 1,
+                    'join_anchor': {'x': 0.0, 'y': 0.0, 'z': 100.0},
                 }
-
-                BotPlanner._apply_team_order(
-                    order, bot, team_order, [], defense)
-
-                self.assertEqual('team_back_to_base', order['combat_mode'])
+                order = planner.build_orders(
+                    manifest, states, [], 1.0,
+                    team_orders=[team_order])['orders'][0]
+                self.assertEqual('team_turnback', order['combat_mode'])
                 self.assertEqual(
-                    {'x': -25.0, 'y': 0.0, 'z': -450.0},
+                    {'x': 0.0, 'y': 0.0, 'z': 300.0},
                     order['move_position'])
                 self.assertIsNone(order['throttle_override'])
+                self.assertNotIn('_route_position', order)
+                self.assertNotIn('_turnback_position', order)
 
-    def test_radio_does_not_override_local_survival(self):
+    def test_radio_stop_overrides_local_survival(self):
         planner = BotPlanner()
         contact = _contact(2, 0, 150, [11])
         players = self._report(planner, [contact])
@@ -1483,10 +1579,11 @@ class ServerBotTacticsTests(unittest.TestCase):
             self.manifest, self.states, players, 1.0,
             team_orders=[team_order])['orders'][0]
 
-        self.assertEqual('low_health_retreat', order['combat_mode'])
+        self.assertEqual('team_stop', order['combat_mode'])
+        self.assertEqual(0.0, order['throttle_override'])
         self.assertEqual('STOP', order['team_command'])
 
-    def test_radio_does_not_override_an_urgent_base_responder(self):
+    def test_radio_stop_overrides_an_urgent_base_responder(self):
         defense = {
             'bases': {'1': [
                 {'id': '1:0', 'x': 0.0, 'y': 0.0, 'z': -100.0},
@@ -1514,7 +1611,8 @@ class ServerBotTacticsTests(unittest.TestCase):
             self.manifest, self.states, [], 1.0, defense,
             team_orders=[team_order])['orders'][0]
 
-        self.assertEqual('base_defense', order['combat_mode'])
+        self.assertEqual('team_stop', order['combat_mode'])
+        self.assertEqual(0.0, order['throttle_override'])
         self.assertEqual('STOP', order['team_command'])
 
     def test_nearby_ally_changes_cautious_support_advance_score(self):

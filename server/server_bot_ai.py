@@ -68,6 +68,10 @@ TEAM_ORDER_COMMANDS = frozenset((
 TEAM_ORDER_ENEMY_COMMANDS = frozenset((
     "ATTACKENEMY", "SUPPORTMEWITHFIRE",
 ))
+TEAM_ORDER_NAVIGATION_COMMANDS = frozenset((
+    "ATTACK", "FOLLOWME", "HELPME", "HELPMEEX", "STOP", "TURNBACK",
+    "BACKTOBASE", "ATTENTIONTOCELL",
+))
 
 
 def _number(value, default=0.0):
@@ -490,7 +494,8 @@ class BotPlanner(object):
         return result
 
     @staticmethod
-    def _apply_team_order(order, bot, team_order, players, defense):
+    def _apply_team_order(order, bot, team_order, players, defense,
+                          route_point=None, turnback_point=None):
         """Overlay one admitted radio intent without inventing target data."""
         if not isinstance(team_order, dict):
             return order
@@ -503,27 +508,39 @@ class BotPlanner(object):
             order["team_command_cell_index"] = _integer(
                 team_order.get("cell_index"))
 
-        # Radio intent cannot cancel an already selected local survival action
-        # or an urgent base response. The command remains visible in the order
-        # so its bounded admission is observable without claiming execution.
+        # An admitted navigation command is a direct player control and must
+        # replace autonomous tactics. Combat radio still cannot cancel a local
+        # survival action or an urgent base response.
         protected_modes = (
             "base_defense", "low_health_retreat", "low_health_defend",
             "under_fire_withdraw", "under_fire_hold",
             "crossfire_withdraw", "crossfire_hold",
         )
-        if order.get("combat_mode") in protected_modes:
+        if (order.get("combat_mode") in protected_modes and
+                command not in TEAM_ORDER_NAVIGATION_COMMANDS):
             return order
 
         state = bot.get("state") if isinstance(bot.get("state"), dict) else {}
+        if command == "ATTACK":
+            target = (route_point if isinstance(route_point, dict)
+                      else order["move_position"])
+            order["combat_mode"] = "team_attack"
+            order["move_position"] = dict(target)
+            if order.get("target_id") is None:
+                order["face_position"] = dict(target)
+            order["throttle_override"] = None
+            return order
         if command == "STOP":
             order["combat_mode"] = "team_stop"
             order["move_position"] = _point(state)
             order["throttle_override"] = 0.0
             return order
         if command == "TURNBACK":
+            target = (turnback_point if isinstance(turnback_point, dict)
+                      else order["route_anchor"])
             order["combat_mode"] = "team_turnback"
-            order["move_position"] = dict(order["route_anchor"])
-            order["face_position"] = dict(order["route_anchor"])
+            order["move_position"] = dict(target)
+            order["face_position"] = dict(target)
             order["throttle_override"] = None
             return order
         if command == "BACKTOBASE":
@@ -598,8 +615,6 @@ class BotPlanner(object):
                 order["face_position"] = dict(point)
                 order["throttle_override"] = None
             return order
-        if command == "ATTACK" and order.get("target_id") is None:
-            order["combat_mode"] = "team_attack"
         # Enemy-target commands retain the ordinary locally proved target and
         # firing checks. Cell and social commands remain explicit markers for
         # the worker/UI until a validated world point or response exists.
@@ -648,9 +663,11 @@ class BotPlanner(object):
                     defenders.get(team, {}).get(bot["id"]), team_axis,
                     team_bots, capture_targets[team],
                     not bool(contacts[team]) and bot["id"] in capture_ids)
+                route_point = order.pop("_route_position")
+                turnback_point = order.pop("_turnback_position")
                 self._apply_team_order(
                     order, bot, team_order_by_bot.get(bot["id"]),
-                    players, defense)
+                    players, defense, route_point, turnback_point)
                 orders.append(order)
         orders.sort(key=lambda value: value["id"])
         payload = {"orders": orders}
@@ -2766,6 +2783,10 @@ class BotPlanner(object):
             "route_index": route_index,
             "route_anchor": dict(route_anchor),
             "route_join": bool(route_join),
+            # Internal inputs for direct radio movement overlays. Tactical
+            # roles may replace the public movement fields before that overlay.
+            "_route_position": dict(move),
+            "_turnback_position": dict(retreat_point),
             "personality": personality,
             "profile": profile,
             "shell_index": 0,
