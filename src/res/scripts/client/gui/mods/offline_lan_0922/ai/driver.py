@@ -147,6 +147,7 @@ class LocalDriver(object):
 
 	def __init__(self, stuck_seconds=1.8, recovery_seconds=0.85,
 			failure_ttl=2.0):
+		self._probe_takes_distance = True
 		self.stuck_seconds = max(0.4, float(stuck_seconds))
 		self.recovery_seconds = max(0.25, float(recovery_seconds))
 		self.failure_ttl = max(0.25, float(failure_ttl))
@@ -288,9 +289,31 @@ class LocalDriver(object):
 			return neighbour.get('position') or neighbour.get('pos')
 		return neighbour
 
-	def _clear(self, direction_clear, yaw):
+	def _clear(self, direction_clear, yaw, maximum_distance=None):
+		"""Ask one probe about a heading, optionally over a bounded distance.
+
+		A recovery manoeuvre travels a hull length, not the fifteen to twenty
+		metre travel horizon the ordinary drive candidates are ranked over.
+		Probes that predate the bounded form keep the unbounded answer.
+		"""
+		if maximum_distance is not None and self._probe_takes_distance:
+			try:
+				return bool(direction_clear(yaw, maximum_distance))
+			except TypeError:
+				self._probe_takes_distance = False
+			except Exception:
+				return False
 		try:
 			return bool(direction_clear(yaw))
+		except Exception:
+			return False
+
+	@staticmethod
+	def _pose_fits(pose_clear, yaw):
+		if pose_clear is None:
+			return True
+		try:
+			return bool(pose_clear(yaw))
 		except Exception:
 			return False
 
@@ -357,10 +380,15 @@ class LocalDriver(object):
 				if self._obb_overlap(
 						sweep, float(yaw), sweep_length, half_width,
 						other, other_yaw, other_length, other_width):
+					# Name the hull that owns the blockage. A wedged tank whose
+					# only escape is occupied by a team mate is a queue the
+					# caller can resolve; an anonymous veto is not.
+					if isinstance(neighbour, dict) and neighbour.get('id') is not None:
+						return neighbour['id']
 					return True
 			except Exception:
 				continue
-		return False
+		return None
 
 	def _recovery_occupancy(self, position, yaw, direction, neighbours,
 			half_length, half_width):
@@ -414,6 +442,25 @@ class LocalDriver(object):
 			return 1.0
 		return self._fallback_recovery_side(state)
 
+	def _pivot_side_fits(self, pose_clear, yaw, direction):
+		"""Report whether the hull can sweep one in-place turn.
+
+		``direction_clear`` answers about a heading; it cannot answer about a
+		rotation, because the corners a turn sweeps are metres away from every
+		ray it casts. Inside a gateway, an alley or a bridge underpass those
+		corners are already at the walls, so an unchecked turn only grinds
+		them and the column behind never moves.
+		"""
+		if pose_clear is None:
+			return True
+		for fraction in RECOVERY_SWEEP_FRACTIONS:
+			if not self._pose_fits(
+					pose_clear,
+					float(yaw) + float(direction) *
+					RECOVERY_YAW_OFFSET * float(fraction)):
+				return False
+		return True
+
 	def _choose_yaw(self, state, desired_yaw, direction_clear):
 		# Teammate proximity never replaces the route with a repulsion heading.
 		# Crossing priority is coordinated separately; real contact owns overlap.
@@ -443,7 +490,7 @@ class LocalDriver(object):
 			neighbours, direction_clear, velocity=None,
 			half_length=3.5, half_width=1.7,
 			movement_intent=True, stopping_distance=None,
-			stop_at_target=True, decision_horizon=0.0):
+			stop_at_target=True, decision_horizon=0.0, pose_clear=None):
 		"""Return ``throttle``, ``turn``, ``target_yaw`` and ``recovery_mode``.
 
 		``team_slot`` is the explicit stable 0..14 formation slot. It must not be
@@ -564,10 +611,38 @@ class LocalDriver(object):
 					own_half_length, own_half_width)
 				state['recovery_side'] = direction
 			recovery_yaw = float(yaw) + direction * RECOVERY_YAW_OFFSET
-			if (not self._clear(direction_clear, float(yaw) + math.pi) or
-					self._reverse_blocked_by_vehicle(
-						position, yaw, neighbours,
-						own_half_length, own_half_width)):
+			# The escape is one bounded backing manoeuvre, so rank it over the
+			# distance it travels. Ranking it over the fifteen to twenty metre
+			# travel horizon rejects the rear of every gateway and alley on the
+			# map and leaves an in-place turn as the only recovery in exactly
+			# the places where a hull cannot turn.
+			escape_distance = own_half_length * 1.6
+			reverse_clear = self._clear(
+				direction_clear, float(yaw) + math.pi, escape_distance)
+			reverse_blocker = None
+			if reverse_clear:
+				reverse_blocker = self._reverse_blocked_by_vehicle(
+					position, yaw, neighbours,
+					own_half_length, own_half_width)
+			if not reverse_clear or reverse_blocker is not None:
+				if not self._pivot_side_fits(pose_clear, yaw, direction):
+					mirrored = -direction
+					if self._pivot_side_fits(pose_clear, yaw, mirrored):
+						state['recovery_side'] = direction = mirrored
+						recovery_yaw = float(yaw) + direction * RECOVERY_YAW_OFFSET
+					else:
+						# Neither rotation fits and the rear is denied. Hold the
+						# pose instead of grinding the corners, and publish the
+						# hull that owns the escape so the queue can clear it.
+						blocked = {
+							'throttle': 0.0,
+							'turn': 0.0,
+							'target_yaw': float(yaw),
+							'recovery_mode': 'blocked',
+						}
+						if reverse_blocker is not None:
+							blocked['reverse_blocked_by'] = reverse_blocker
+						return blocked
 				return {
 					'throttle': 0.0,
 					'turn': direction,
@@ -587,7 +662,8 @@ class LocalDriver(object):
 				if not self._clear(
 						direction_clear,
 						float(yaw) + math.pi +
-						direction * RECOVERY_YAW_OFFSET * fraction):
+						direction * RECOVERY_YAW_OFFSET * fraction,
+						escape_distance):
 					recovery_turn = 0.0
 					recovery_target = float(yaw)
 					break
