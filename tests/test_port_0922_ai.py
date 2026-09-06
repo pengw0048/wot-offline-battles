@@ -18,7 +18,7 @@ from gui.mods.offline_lan_0922.ai import (
 )
 from gui.mods.offline_lan_0922.ai.adapter import BotAdapter
 from gui.mods.offline_lan_0922.ai.driver import (
-    LocalDriver, TRAFFIC_WAIT_LEASE_SECONDS,
+    LocalDriver, RECOVERY_YAW_OFFSET, TRAFFIC_WAIT_LEASE_SECONDS,
 )
 from gui.mods.offline_lan_0922.ai.planner import (
     BattleDirector, build_vehicle_profile,
@@ -2181,6 +2181,45 @@ class BotAiPortTests(unittest.TestCase):
         # when slot zero's parity fallback points the other way.
         unused_driver, mirrored = force(202, 0, left_front)
         self.assertGreater(mirrored['target_yaw'], 0.0)
+
+    def test_reverse_recovery_keeps_a_narrow_passage_hull_straight(self):
+        """A gateway narrower than the recovery arc must not be crossed.
+
+        Steering while reversing rotates the hull through the recovery offset,
+        so its rear sweeps every heading between the straight reverse and the
+        mirrored offset. Inside a gatehouse or alley that arc ends with the
+        hull parked across the passage and the whole column behind it stopped.
+        """
+        def passage(yaw):
+            delta = (float(yaw) + math.pi) % (2.0 * math.pi) - math.pi
+            return abs(delta) < 0.15 or abs(abs(delta) - math.pi) < 0.15
+
+        def held(direction_clear):
+            driver = LocalDriver()
+            order = None
+            for unused_step in range(40):
+                order = driver.drive(
+                    311, 3, (404.0, 0.0, -150.0), 0.0, 0.0, 0.1,
+                    (404.0, 0.0, -120.0), (), direction_clear,
+                    half_length=5.46, half_width=2.24)
+                if order['recovery_mode'] != 'drive':
+                    break
+            return order
+
+        passage_order = held(passage)
+        self.assertEqual('reverse_turn', passage_order['recovery_mode'])
+        self.assertLess(passage_order['throttle'], 0.0)
+        self.assertEqual(0.0, passage_order['turn'])
+        self.assertEqual(0.0, passage_order['target_yaw'])
+
+        # Open ground still earns the steered escape; only the swept arc
+        # decides, so this is a probe result and not a new global rule.
+        open_order = held(lambda unused_yaw: True)
+        self.assertEqual('reverse_turn', open_order['recovery_mode'])
+        self.assertLess(open_order['throttle'], 0.0)
+        self.assertEqual(1.0, abs(open_order['turn']))
+        self.assertAlmostEqual(
+            RECOVERY_YAW_OFFSET, abs(open_order['target_yaw']))
 
     def test_recovery_geometry_is_independent_of_neighbour_order(self):
         driver = LocalDriver()
