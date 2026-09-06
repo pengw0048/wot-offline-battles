@@ -15750,6 +15750,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._drive_local(0.1)
         velocity, acceleration = self._camera_motion_overlay(runtime, entity)
         self.assertEqual((0.0, 0.0, 0.0), velocity)
+        # These steps are one interval long, so the estimate reduces to the
+        # cell-tick second difference and reports the whole stop.
         for expected, actual in zip((0.0, 0.0, -50.0), acceleration):
             self.assertAlmostEqual(expected, actual, places=6)
 
