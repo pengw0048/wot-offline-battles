@@ -85,6 +85,13 @@ BOT_TIER_OPTIONS = (
     ('minus1_0', 'Tier -1 / 0'), ('0_plus1', 'Tier 0 / +1'),
     ('minus1_plus2', 'Tier -1 / +2'),
 )
+_BOT_SKILL_CONTROLS = ('skill_previous', 'skill', 'skill_next')
+# The values and their order are bot_gunnery.SKILL_MODES, easiest first, bound
+# by a parity test.  The labels name the enemy a preset produces.
+BOT_SKILL_OPTIONS = (
+    ('easy', 'Easy'), ('relaxed', 'Relaxed'), ('mixed', 'Pub mix'),
+    ('hard', 'Hard'), ('brutal', 'Brutal'),
+)
 
 
 def _LEFT_MOUSE_KEY():
@@ -146,6 +153,13 @@ def friendly_bot_tier_mode(mode):
         if value == mode:
             return tr(label)
     return tr('Random')
+
+
+def friendly_bot_skill_mode(mode):
+    for value, label in BOT_SKILL_OPTIONS:
+        if value == mode:
+            return tr(label)
+    return tr('Pub mix')
 
 
 def panel_geometry(screen_size):
@@ -340,7 +354,8 @@ class WaitingRoomUI(object):
                  request_team_size=None, initial_map=None,
                  on_map_selected=None, bot_tier_status=None,
                  request_bot_tier_mode=None, open_map_picker=None,
-                 round_seconds=None):
+                 round_seconds=None, bot_skill_status=None,
+                 request_bot_skill_mode=None):
         self._request_start = request_start
         self._map_pool = map_pool
         self._status = status or (lambda: '')
@@ -352,6 +367,8 @@ class WaitingRoomUI(object):
         self._team_status = team_status or (lambda: {})
         self._bot_tier_status = bot_tier_status or (lambda: {})
         self._request_bot_tier_mode = request_bot_tier_mode
+        self._bot_skill_status = bot_skill_status or (lambda: {})
+        self._request_bot_skill_mode = request_bot_skill_mode
         self._on_map_selected = on_map_selected
         # The stock map window is the room's map browser: it presents the
         # #1513 map images this native surface cannot draw.  Its owner opens
@@ -377,6 +394,7 @@ class WaitingRoomUI(object):
         self._message = ''
         self._pending_team_sizes = {}
         self._pending_bot_tier_mode = None
+        self._pending_bot_skill_mode = None
 
     def install(self):
         """Build the native components without showing them."""
@@ -419,11 +437,14 @@ class WaitingRoomUI(object):
             self._make_label(
                 role, text, position, width, height, panel=panel, labels=labels,
                 surface=surface, **kwargs)
-        make_control('tier_previous', (-0.72, 0.28, CONTROL_Z), 0.20, 0.16)
-        make_control('tier', (0.0, 0.28, CONTROL_Z), 1.15, 0.16)
-        make_control('tier_next', (0.72, 0.28, CONTROL_Z), 0.20, 0.16)
-        make_control('map', (-0.30, 0.04, CONTROL_Z), 1.00, 0.16)
-        make_control('random', (0.62, 0.04, CONTROL_Z), 0.56, 0.16)
+        make_control('tier_previous', (-0.72, 0.30, CONTROL_Z), 0.20, 0.13)
+        make_control('tier', (0.0, 0.30, CONTROL_Z), 1.15, 0.13)
+        make_control('tier_next', (0.72, 0.30, CONTROL_Z), 0.20, 0.13)
+        make_control('skill_previous', (-0.72, 0.15, CONTROL_Z), 0.20, 0.13)
+        make_control('skill', (0.0, 0.15, CONTROL_Z), 1.15, 0.13)
+        make_control('skill_next', (0.72, 0.15, CONTROL_Z), 0.20, 0.13)
+        make_control('map', (-0.30, 0.0, CONTROL_Z), 1.00, 0.14)
+        make_control('random', (0.62, 0.0, CONTROL_Z), 0.56, 0.14)
         make_control('team1_down', (-0.82, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team1_up', (-0.22, -0.18, CONTROL_Z), 0.12, 0.14)
         make_control('team2_down', (0.22, -0.18, CONTROL_Z), 0.12, 0.14)
@@ -439,15 +460,21 @@ class WaitingRoomUI(object):
         make_label('players', '', (-0.86, 0.44, 0.0), 1.72, 0.11)
         # These labels sit on textured buttons, which render white until a
         # tint is proved, so their text has to be dark to stay readable.
-        make_label('tier_previous', '<', (-0.72, 0.28, 0.0), 0.18, 0.10,
+        make_label('tier_previous', '<', (-0.72, 0.30, 0.0), 0.18, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('tier', '', (0.0, 0.28, 0.0), 1.10, 0.10,
+        make_label('tier', '', (0.0, 0.30, 0.0), 1.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('tier_next', '>', (0.72, 0.28, 0.0), 0.18, 0.10,
+        make_label('tier_next', '>', (0.72, 0.30, 0.0), 0.18, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('map', '', (-0.30, 0.04, 0.0), 0.96, 0.10,
+        make_label('skill_previous', '<', (-0.72, 0.15, 0.0), 0.18, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
-        make_label('random', tr('RANDOM MAP'), (0.62, 0.04, 0.0), 0.52, 0.10,
+        make_label('skill', '', (0.0, 0.15, 0.0), 1.10, 0.09,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('skill_next', '>', (0.72, 0.15, 0.0), 0.18, 0.09,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('map', '', (-0.30, 0.0, 0.0), 0.96, 0.10,
+                   anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
+        make_label('random', tr('RANDOM MAP'), (0.62, 0.0, 0.0), 0.52, 0.10,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
         make_label('team1_down', '-', (-0.82, -0.18, 0.0), 0.10, 0.09,
                    anchor='CENTER', colour=CONTROL_TEXT_COLOUR)
@@ -957,6 +984,17 @@ class WaitingRoomUI(object):
         self._set_text('tier', tr('BOT TIER: %s%s') % (
             friendly_bot_tier_mode(shown_tier_mode),
             '...' if self._pending_bot_tier_mode is not None else ''))
+        skill_status = self._bot_skill_status() or {}
+        skill_supported = bool(
+            is_host and callable(self._request_bot_skill_mode) and
+            skill_status.get('supported'))
+        skill_mode = skill_status.get('mode', 'mixed')
+        if self._pending_bot_skill_mode == skill_mode:
+            self._pending_bot_skill_mode = None
+        shown_skill_mode = self._pending_bot_skill_mode or skill_mode
+        self._set_text('skill', tr('BOT SKILL: %s%s') % (
+            friendly_bot_skill_mode(shown_skill_mode),
+            '...' if self._pending_bot_skill_mode is not None else ''))
         preferred_team = team_status.get('preferred', 0)
         self._set_text('team_random', tr('RANDOM%s') % (
             tr(' (ON)') if preferred_team == 0 else ''))
@@ -992,6 +1030,7 @@ class WaitingRoomUI(object):
             visible = (team_supported if role in _TEAM_SELECT_CONTROLS else
                        team_size_supported if role in _TEAM_SIZE_CONTROLS else
                        tier_supported if role in _BOT_TIER_CONTROLS else
+                       skill_supported if role in _BOT_SKILL_CONTROLS else
                        random_supported if role == 'random' else
                        role == 'close' or is_host)
             self._set(component, 'visible', visible)
@@ -1000,7 +1039,8 @@ class WaitingRoomUI(object):
                 self._set(label, 'visible', visible)
         for role in _TEAM_CAPACITY_LABELS:
             self._set(self._labels[role], 'visible', team_supported)
-        for role in ('title', 'room', 'players', 'tier', 'map', 'message'):
+        for role in ('title', 'room', 'players', 'tier', 'skill', 'map',
+                     'message'):
             self._set(self._labels[role], 'visible', True)
         self._paint()
         self._set(self._panel, 'visible', True)
@@ -1043,6 +1083,9 @@ class WaitingRoomUI(object):
         if role in _BOT_TIER_CONTROLS:
             return self._cycle_bot_tier_mode(
                 -1 if role == 'tier_previous' else 1)
+        if role in _BOT_SKILL_CONTROLS:
+            return self._cycle_bot_skill_mode(
+                -1 if role == 'skill_previous' else 1)
         if not self._host():
             return False
         if role == 'map':
@@ -1137,6 +1180,37 @@ class WaitingRoomUI(object):
             self._message = tr('The server did not accept that Bot tier preset.')
             self.refresh()
             return False
+        return True
+
+    def _cycle_bot_skill_mode(self, step):
+        status = self._bot_skill_status() or {}
+        if (not self._host() or not callable(self._request_bot_skill_mode) or
+                not status.get('supported')):
+            return False
+        current = self._pending_bot_skill_mode or status.get('mode', 'mixed')
+        modes = [value for value, unused_label in BOT_SKILL_OPTIONS]
+        try:
+            index = modes.index(current)
+        except ValueError:
+            index = 0
+        target = modes[(index + int(step)) % len(modes)]
+        self._pending_bot_skill_mode = target
+        self._message = tr('Setting Bot skill preset...')
+        self.refresh()
+        if self._request_bot_skill_mode(target) is False:
+            self._pending_bot_skill_mode = None
+            self._message = tr(
+                'The server did not accept that Bot skill preset.')
+            self.refresh()
+            return False
+        return True
+
+    def reject_bot_skill_mode(self, unused_mode=None, message=None):
+        self._pending_bot_skill_mode = None
+        self._message = (message or
+                         tr('The server did not accept that Bot skill '
+                            'preset.'))
+        self.refresh()
         return True
 
     def reject_bot_tier_mode(self, unused_mode=None, message=None):

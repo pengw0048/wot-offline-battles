@@ -173,6 +173,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
         editor._rows = {(2, 0): {
             "nation": _Variable("germany"),
             "vehicle": _Variable("Leichttraktor"),
+            "skill": _Variable("Veteran"),
             "vehicle_box": _Combo(0),
         }}
         editor._on_save = saved.append
@@ -187,6 +188,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
         assignments = self._ui_saved_assignment()
         expected_name = "germany:G12_Ltraktor"
         self.assertEqual(expected_name, assignments[0]["vehicle"])
+        self.assertEqual("veteran", assignments[0]["skill"])
 
         environment = launcher_core.server_environment(
             launcher_core.PORT_0_9_22, "/game", {},

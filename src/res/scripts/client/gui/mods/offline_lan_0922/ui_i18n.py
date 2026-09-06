@@ -50,6 +50,12 @@ _ZH = {
     'Tier -1 / +2': u'低一级 / 高两级',
     'Unknown': u'未知',
     'BOT TIER: %s%s': u'电脑等级：%s%s',
+    'BOT SKILL: %s%s': u'电脑水平：%s%s',
+    'Easy': u'简单',
+    'Relaxed': u'轻松',
+    'Pub mix': u'野队水平',
+    'Hard': u'困难',
+    'Brutal': u'变态',
     'RANDOM%s': u'随机%s',
     ' (ON)': u'（已选）',
     '  (YOU)': u'（已选）',
@@ -70,6 +76,15 @@ _ZH = {
     'The server did not accept that team size.': u'服务器未接受该队伍人数。',
     'Setting Bot tier preset...': u'正在设置电脑等级...',
     'The server did not accept that Bot tier preset.': u'服务器未接受该电脑等级设置。',
+    'Setting Bot skill preset...': u'正在设置电脑水平...',
+    'The server did not accept that Bot skill preset.': u'服务器未接受该电脑水平设置。',
+    'Only the LAN room host can change the Bot skill preset.':
+        u'只有房主可以更改电脑水平。',
+    'The LAN server refused the Bot skill preset (%s).':
+        u'服务器拒绝了电脑水平设置（%s）。',
+    'Requesting Bot skill preset...': u'正在申请电脑水平设置...',
+    'The LAN server did not accept that Bot skill preset.':
+        u'服务器未接受该电脑水平设置。',
     'The server has not published its map list yet.': u'服务器尚未发送地图列表。',
     'Choose a map first.': u'请先选择地图。',
     'Starting %s...': u'正在开始 %s...',

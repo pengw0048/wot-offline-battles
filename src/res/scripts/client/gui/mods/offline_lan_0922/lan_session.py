@@ -1236,6 +1236,13 @@ class LANSession(object):
                 self.client, 'set_bot_tier_mode', None)),
         }
 
+    def _bot_skill_status(self):
+        return {
+            'mode': getattr(self.client, 'bot_skill_mode', 'mixed'),
+            'supported': callable(getattr(
+                self.client, 'set_bot_skill_mode', None)),
+        }
+
     def select_team(self, team):
         """Ask the server to move this waiting-room player."""
         if self._stopped or self.client is None or self.state != 'waiting':
@@ -1283,6 +1290,19 @@ class LANSession(object):
                 tr('The LAN server did not accept that Bot tier preset.'))
             return False
         self._status_notifier(tr('Requesting Bot tier preset...'))
+        return True
+
+    def set_bot_skill_mode(self, mode):
+        """Ask the elected host server to use one Bot-skill preset."""
+        if (self._stopped or self.client is None or self.state != 'waiting' or
+                not self._is_local_host()):
+            return False
+        setter = getattr(self.client, 'set_bot_skill_mode', None)
+        if not callable(setter) or not setter(mode):
+            self._status_notifier(
+                tr('The LAN server did not accept that Bot skill preset.'))
+            return False
+        self._status_notifier(tr('Requesting Bot skill preset...'))
         return True
 
     def _save_room_preferences(self):
@@ -1598,6 +1618,8 @@ class LANSession(object):
                     'request_team_size': self.set_team_size,
                     'bot_tier_status': self._bot_tier_status,
                     'request_bot_tier_mode': self.set_bot_tier_mode,
+                    'bot_skill_status': self._bot_skill_status,
+                    'request_bot_skill_mode': self.set_bot_skill_mode,
                     'initial_map': self._room_preferences.get('map'),
                     'on_map_selected': self._remember_map,
                     'open_map_picker': self._open_map_window,
@@ -2440,6 +2462,20 @@ class LANSession(object):
             reject = getattr(self._queue, 'reject_bot_tier_mode', None)
             if callable(reject):
                 reject(_message_value(message, 'bot_tier_mode'), notice)
+            else:
+                self._refresh_surface()
+        elif kind == 'bot_skill_mode_denied':
+            code = _message_value(message, 'code')
+            if code == 'host_only':
+                notice = tr('Only the LAN room host can change the Bot skill '
+                            'preset.')
+            else:
+                notice = (tr('The LAN server refused the Bot skill preset '
+                             '(%s).') % (code or 'unknown'))
+            self._status_notifier(notice)
+            reject = getattr(self._queue, 'reject_bot_skill_mode', None)
+            if callable(reject):
+                reject(_message_value(message, 'bot_skill_mode'), notice)
             else:
                 self._refresh_surface()
         elif kind == 'battle_start':

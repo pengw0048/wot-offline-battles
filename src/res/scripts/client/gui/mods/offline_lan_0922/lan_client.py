@@ -11,6 +11,7 @@ import uuid
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922.battle_achievements import (
     AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
+from gui.mods.offline_lan_0922 import bot_gunnery
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
@@ -143,6 +144,7 @@ RESULT_INTERACTION_LIMITS = {
 }
 BOT_TIER_MODES = frozenset((
     'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus2'))
+BOT_SKILL_MODES = frozenset(bot_gunnery.SKILL_MODES)
 SENDER_JOIN_TIMEOUT = 0.1
 SEND_STALL_TIMEOUT = 5.0
 LEAVE_SEND_TIMEOUT = 0.05
@@ -164,7 +166,7 @@ _BOT_STATE_WIRE_FIELDS = (
 STATE_BARRIER_TYPES = frozenset((
     'welcome', 'roster', 'battle_start', 'battle_live',
     'start_denied', 'team_denied', 'team_size_denied',
-    'bot_tier_mode_denied', 'events', 'error'))
+    'bot_tier_mode_denied', 'bot_skill_mode_denied', 'events', 'error'))
 ORDERED_RECEIVE_TYPES = STATE_BARRIER_TYPES | frozenset((
     'battle_receipt', 'fire_intent', 'fire_intent_result',
     'landing_observation_result',
@@ -173,7 +175,8 @@ ORDERED_RECEIVE_TYPES = STATE_BARRIER_TYPES | frozenset((
     'team_command_ack', 'team_command_terminal', 'team_chat', 'team_chat_ack'))
 SERVER_STATE_TYPES = frozenset((
     'welcome', 'roster', 'battle_start', 'battle_live', 'start_denied',
-    'team_denied', 'team_size_denied', 'bot_tier_mode_denied', 'snapshot',
+    'team_denied', 'team_size_denied', 'bot_tier_mode_denied',
+    'bot_skill_mode_denied', 'snapshot',
     'events', 'bot_observation',
     'battle_receipt', 'player_destructible_contact'))
 RECOVERABLE_RUNTIME_TYPES = frozenset((
@@ -1692,6 +1695,7 @@ class LANClient(object):
         self.team = None
         self.team_sizes = {1: 15, 2: 15}
         self.bot_tier_mode = 'random'
+        self.bot_skill_mode = bot_gunnery.DEFAULT_SKILL_MODE
         self.slot = 0
         self.map_name = None
         self.map_pool = []
@@ -1987,6 +1991,14 @@ class LANClient(object):
                 mode not in BOT_TIER_MODES):
             return False
         return self._send({'type': 'set_bot_tier_mode', 'mode': mode})
+
+    def set_bot_skill_mode(self, mode):
+        """Ask the waiting-room server to change the next Bot skill mix."""
+        if (not self.ready or self.phase != 'waiting' or
+                self.player_id != self.host_player_id or
+                mode not in BOT_SKILL_MODES):
+            return False
+        return self._send({'type': 'set_bot_skill_mode', 'mode': mode})
 
     def _adopt_published_vehicle(self, players):
         """Track the vehicle and HP the server holds for this client."""
@@ -4227,6 +4239,8 @@ class LANClient(object):
                 self.team_sizes)
             bot_tier_mode = _safe_text(
                 message.get('bot_tier_mode'), self.bot_tier_mode, 32)
+            bot_skill_mode = _safe_text(
+                message.get('bot_skill_mode'), self.bot_skill_mode, 32)
             if (player_id is None or state_revision is None or
                     state_revision < 0 or host_player_id is None or
                     host_player_id <= 0 or
@@ -4242,6 +4256,7 @@ class LANClient(object):
                     effective_params is None or
                     team_sizes is None or
                     bot_tier_mode not in BOT_TIER_MODES or
+                    bot_skill_mode not in BOT_SKILL_MODES or
                     not isinstance(spawn, dict) or
                     not all(axis in spawn for axis in ('x', 'y', 'z'))):
                 self.last_error = 'invalid welcome message'
@@ -4259,6 +4274,7 @@ class LANClient(object):
             self.team = team
             self.team_sizes = team_sizes
             self.bot_tier_mode = bot_tier_mode
+            self.bot_skill_mode = bot_skill_mode
             self.slot = slot
             self.max_health = max_health
             self.outfits = outfits
@@ -4320,6 +4336,8 @@ class LANClient(object):
                 self.team_sizes)
             bot_tier_mode = _safe_text(
                 message.get('bot_tier_mode'), self.bot_tier_mode, 32)
+            bot_skill_mode = _safe_text(
+                message.get('bot_skill_mode'), self.bot_skill_mode, 32)
             roster_server_time = None
             if 'server_time_ms' in message:
                 roster_server_time = _projectile_int_range(
@@ -4354,6 +4372,7 @@ class LANClient(object):
                     not player_assignments_valid or
                     team_sizes is None or
                     bot_tier_mode not in BOT_TIER_MODES or
+                    bot_skill_mode not in BOT_SKILL_MODES or
                     host_player_id not in player_ids or
                     not _valid_visible_authority_message(message) or
                     (ledger_required and authority_epoch is None) or
@@ -4397,6 +4416,7 @@ class LANClient(object):
             self.roster = players
             self.team_sizes = team_sizes
             self.bot_tier_mode = bot_tier_mode
+            self.bot_skill_mode = bot_skill_mode
             self._adopt_published_vehicle(players)
             self.host_player_id = host_player_id
             self.bot_authority_id = message.get(
@@ -4618,6 +4638,18 @@ class LANClient(object):
                 self.stop()
                 return
             self.bot_tier_mode = mode
+        elif kind == 'bot_skill_mode_denied':
+            round_id = _exact_int(message.get('round_id'))
+            mode = _safe_text(message.get('bot_skill_mode'), '', 32)
+            code = _safe_text(message.get('code'), '', 32)
+            if (round_id is None or round_id != self.round_id or
+                    mode not in BOT_SKILL_MODES or
+                    code not in ('host_only', 'invalid_mode',
+                                 'not_waiting')):
+                self.last_error = 'invalid bot_skill_mode_denied message'
+                self.stop()
+                return
+            self.bot_skill_mode = mode
         elif kind == 'snapshot':
             round_id = self._runtime_round_disposition(
                 kind, message, 'invalid snapshot message')

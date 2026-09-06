@@ -192,7 +192,7 @@ class ErrorReportTest(unittest.TestCase):
         self.assertTrue(
             error_reports.visible_client_exited_cleanly(session))
 
-    def test_termination_dump_after_lobby_restore_is_normal(self):
+    def test_termination_dump_after_lobby_restore_needs_a_requested_stop(self):
         session = error_reports.begin_session(
             self.game, session_id=self.SESSION_1, started_at="start")
         visible = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
@@ -203,23 +203,36 @@ class ErrorReportTest(unittest.TestCase):
 
         self.assertEqual(
             error_reports.VISIBLE_CLIENT_EXIT_UNKNOWN,
-            error_reports.visible_client_exit_evidence(session))
+            error_reports.visible_client_exit_evidence(
+                session, stop_requested=True))
 
         self._write(error_reports.session_dump_path(
             session, error_reports.ROLE_VISIBLE_CLIENT), self._minidump(7))
 
         self.assertEqual(
             error_reports.VISIBLE_CLIENT_EXIT_CLEAN,
-            error_reports.visible_client_exit_evidence(session))
+            error_reports.visible_client_exit_evidence(
+                session, stop_requested=True))
         self.assertTrue(
-            error_reports.visible_client_exited_cleanly(session))
+            error_reports.visible_client_exited_cleanly(
+                session, stop_requested=True))
 
-        self._write(visible, b"late failure after lobby restore\r\n", "ab")
+        # The same tail and the same exception-free dump describe a client
+        # that died on its own inside the post-battle lobby window.
         self.assertEqual(
             error_reports.VISIBLE_CLIENT_EXIT_TERMINATED,
             error_reports.visible_client_exit_evidence(session))
         self.assertFalse(
             error_reports.visible_client_exited_cleanly(session))
+
+        self._write(visible, b"late failure after lobby restore\r\n", "ab")
+        self.assertEqual(
+            error_reports.VISIBLE_CLIENT_EXIT_TERMINATED,
+            error_reports.visible_client_exit_evidence(
+                session, stop_requested=True))
+        self.assertFalse(
+            error_reports.visible_client_exited_cleanly(
+                session, stop_requested=True))
 
     def test_worker_termination_dump_after_lobby_restore_is_normal(self):
         session = error_reports.begin_session(
@@ -236,9 +249,51 @@ class ErrorReportTest(unittest.TestCase):
         self.assertEqual(
             error_reports.VISIBLE_CLIENT_EXIT_CLEAN,
             error_reports.client_exit_evidence(
-                session, error_reports.ROLE_HIDDEN_WORKER))
+                session, error_reports.ROLE_HIDDEN_WORKER,
+                stop_requested=True))
         self.assertTrue(error_reports.client_exited_cleanly(
+            session, error_reports.ROLE_HIDDEN_WORKER,
+            stop_requested=True))
+
+    def test_worker_abort_after_lobby_restore_is_not_normal(self):
+        """A worker nobody asked to stop keeps no excuse from its log tail.
+
+        #1513 prints nothing between the restored lobby and the hangar space
+        load, and ProcDump ``-t`` writes an exception-free dump for an
+        ``abort()`` exactly as it does for an orderly stop.
+        """
+        session = error_reports.begin_session(
+            self.game, needs_worker=True,
+            session_id=self.SESSION_1, started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_HIDDEN_WORKER),
+            b"2026-09-06 13:16:37.949: INFO: [Offline LAN 0.9.22] "
+            b"deferred lobby Account restored\r\n")
+        self._write(error_reports.session_dump_path(
+            session, error_reports.ROLE_HIDDEN_WORKER), self._minidump(7))
+
+        self.assertEqual(
+            error_reports.VISIBLE_CLIENT_EXIT_TERMINATED,
+            error_reports.client_exit_evidence(
+                session, error_reports.ROLE_HIDDEN_WORKER))
+        self.assertFalse(error_reports.client_exited_cleanly(
             session, error_reports.ROLE_HIDDEN_WORKER))
+
+    def test_full_shutdown_tail_stays_clean_without_a_requested_stop(self):
+        session = error_reports.begin_session(
+            self.game, session_id=self.SESSION_1, started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT),
+            b"2026-09-06 13:16:40.048: INFO: "
+            b"PostProcessing.Phases.fini()\r\n")
+        self._write(error_reports.session_dump_path(
+            session, error_reports.ROLE_VISIBLE_CLIENT), self._minidump(7))
+
+        self.assertEqual(
+            error_reports.VISIBLE_CLIENT_EXIT_CLEAN,
+            error_reports.visible_client_exit_evidence(session))
+        self.assertTrue(
+            error_reports.visible_client_exited_cleanly(session))
 
     def test_worker_termination_without_teardown_is_unexpected(self):
         session = error_reports.begin_session(

@@ -367,6 +367,7 @@ class LauncherWindow(object):
         self._worker_exited_unexpectedly = False
         self._observed_crash_roles = set()
         self._forced_stop_roles = set()
+        self._stop_requested_roles = set()
         self._stop_requested = False
         self._close_pending = False
         self._selected_client = None
@@ -1266,13 +1267,20 @@ class LauncherWindow(object):
             return exit_code
         if role in self._forced_stop_roles or exit_code == 0:
             return exit_code
+        # A role the launcher never asked to stop cannot be excused by the
+        # post-battle log tail: an aborting worker and a politely stopped one
+        # leave the same last line and the same exception-free dump.
+        stop_requested = (self._stop_requested or
+                          role in self._stop_requested_roles)
         try:
             if role == error_reports.ROLE_VISIBLE_CLIENT:
                 clean_exit = error_reports.visible_client_exited_cleanly(
-                    self._active_report_session)
+                    self._active_report_session,
+                    stop_requested=stop_requested)
             else:
                 clean_exit = error_reports.client_exited_cleanly(
-                    self._active_report_session, role)
+                    self._active_report_session, role,
+                    stop_requested=stop_requested)
         except Exception:
             clean_exit = False
         if not clean_exit:
@@ -1750,6 +1758,7 @@ class LauncherWindow(object):
         self._save_settings()
         self._observed_crash_roles = set()
         self._forced_stop_roles = set()
+        self._stop_requested_roles = set()
         self._stop_requested = False
         self._set_busy(True)
         thread = threading.Thread(
@@ -1962,6 +1971,7 @@ class LauncherWindow(object):
             self._worker_exited_unexpectedly = False
             self._observed_crash_roles = set()
             self._forced_stop_roles = set()
+            self._stop_requested_roles = set()
             self._set_busy(False)
             if automatic_report_path is not None:
                 self.root.after(
@@ -2200,6 +2210,8 @@ class LauncherWindow(object):
         environment = core.worker_environment(game_root, host, port)
         environment = self._crash_capture_environment(
             environment, error_reports.ROLE_HIDDEN_WORKER)
+        # Stop intent belongs to the previous worker, not its replacement.
+        self._stop_requested_roles.discard(error_reports.ROLE_HIDDEN_WORKER)
         worker = subprocess.Popen(
             core.worker_child_command(game_root), cwd=game_root,
             env=environment,
@@ -2286,6 +2298,7 @@ class LauncherWindow(object):
         if exit_code is not None:
             return exit_code
         self._log("Stopping the hidden simulation worker...")
+        self._stop_requested_roles.add(error_reports.ROLE_HIDDEN_WORKER)
         stopped = (starter_root is not None and
                    self._request_starter_stop(worker, starter_root))
         if not stopped:
@@ -2385,7 +2398,8 @@ class LauncherWindow(object):
             try:
                 visible_exit_evidence = (
                     error_reports.visible_client_exit_evidence(
-                        self._active_report_session))
+                        self._active_report_session,
+                        stop_requested=closed_for_required_process))
             except Exception:
                 visible_exit_evidence = (
                     error_reports.VISIBLE_CLIENT_EXIT_UNKNOWN)

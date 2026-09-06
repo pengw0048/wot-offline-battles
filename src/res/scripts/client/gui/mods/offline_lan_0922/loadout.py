@@ -39,6 +39,9 @@ _MISSING = object()
 CREW_FACTOR_BASE = 0.57
 CREW_FACTOR_SLOPE = 0.0043
 BASE_CREW_LEVEL = 100.0
+# #1513 trains a tankman between 50 and MAX_SKILL_LEVEL; a generated default
+# crew below that range is not a level the client can express.
+MIN_DEFAULT_CREW_LEVEL = 50
 COMMANDER_SHARE = 0.1
 VENTILATION_CREW_BONUS = 5.0
 BROTHERHOOD_CREW_BONUS = 5.0
@@ -205,9 +208,25 @@ def _native_attribute_factors(
     return factors
 
 
+def default_crew_level(tankmen_module, crew_level=None):
+    """Clamp a requested default-crew level into the #1513 trained range.
+
+    ``None`` keeps the pinned maximum, which is the level every consumer used
+    before Bot skill tiers existed.
+    """
+    maximum = int(tankmen_module.MAX_SKILL_LEVEL)
+    if crew_level is None:
+        return maximum
+    try:
+        requested = int(crew_level)
+    except (TypeError, ValueError, OverflowError):
+        return maximum
+    return max(MIN_DEFAULT_CREW_LEVEL, min(maximum, requested))
+
+
 def attribute_factors(
         descriptor, crew=None, equipments=(), activity_flags=None,
-        is_fire=False):
+        is_fire=False, crew_level=None):
     """Return the exact #1513 ``factors`` dictionary for one loadout.
 
     This is the same chain ``VehicleParameters`` runs for the garage panel:
@@ -216,6 +235,10 @@ def attribute_factors(
     factors and crew-level increase. ``activity_flags`` and ``is_fire`` are
     passed to the pinned native ``VehicleDescrCrew`` implementation. ``None``
     means the client machinery is unavailable or rejected the supplied state.
+
+    ``crew_level`` trains the generated default crew to something other than
+    the pinned maximum.  It is ignored when ``crew`` is a complete real crew,
+    which owns its own trained levels.
     """
     modules = _client_modules()
     if modules is None or descriptor is None:
@@ -223,13 +246,14 @@ def attribute_factors(
     (utils, tankmen, vehicles_module, aspects, qualifier_type, crew_class,
      qualifiers_class) = modules
     compact_descrs = crew_compact_descrs(crew)
+    level = default_crew_level(tankmen, crew_level)
     try:
         roles = descriptor.type.crewRoles
         has_complete_crew = len(compact_descrs) == len(roles)
         uses_existing_crew = bool(compact_descrs) and has_complete_crew
         if not has_complete_crew:
             compact_descrs = utils.generateDefaultCrew(
-                descriptor.type, tankmen.MAX_SKILL_LEVEL)
+                descriptor.type, level)
         flags = ([True] * len(compact_descrs) if activity_flags is None else
                  list(activity_flags))
         if (len(flags) != len(compact_descrs) or
@@ -250,7 +274,7 @@ def attribute_factors(
                     not _is_wrong_tankman_nation(error)):
                 raise
             default_crew = utils.generateDefaultCrew(
-                descriptor.type, tankmen.MAX_SKILL_LEVEL)
+                descriptor.type, level)
             factors = _native_attribute_factors(
                 utils, descriptor, default_crew, mounted, flags, is_fire,
                 aspects, qualifier_type, crew_class, qualifiers_class)
@@ -399,7 +423,8 @@ def modifiers(descriptor=None, equipments=(), crew_skills=None, factors=None):
     ``crew_skill_names``; ``None`` means the crew is unknown, which keeps the
     bare-crew baseline instead of claiming Brothers in Arms.  ``factors`` is
     the dictionary ``attribute_factors`` built; when it is present every crew
-    and artefact contribution below comes from it.
+    and artefact contribution below comes from it, including the level a Bot
+    skill tier trained the generated default crew to.
     """
     devices = device_names(descriptor) if descriptor is not None else ()
     consumables = equipment_names(equipments)
