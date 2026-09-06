@@ -2470,6 +2470,42 @@ class BotChatTabTests(unittest.TestCase):
             panel._state = state
             self.assertTrue(self.window._bot_chat_status(panel), state)
 
+    def test_polling_puts_the_byte_count_on_the_panel(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_WORKING
+        panel._stage('model')
+        panel._progress(50, 200)
+        # The fake root runs an after() callback immediately, so this also
+        # proves the poll stops re-arming once the download is not running.
+        self.window._poll_bot_chat()
+        self.assertEqual(bot_chat_ui.PROGRESS_STEPS // 4,
+                         panel.progress.options['value'])
+        self.assertIn('/', panel.status.get())
+
+    def test_the_status_names_which_half_is_downloading(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_WORKING
+        panel._progress(1, 2)
+        panel._stage('runtime')
+        runtime_status = self.window._bot_chat_status(panel)
+        panel._stage('model')
+        model_status = self.window._bot_chat_status(panel)
+        self.assertNotEqual(runtime_status, model_status)
+        self.assertTrue(runtime_status and model_status)
+
+    def test_a_ready_panel_says_bots_will_talk(self):
+        panel = self.window._bot_chat
+        panel._state = bot_chat_ui.STATE_READY
+        self.assertIn('Bots', self.window._bot_chat_status(panel))
+
+    def test_the_panel_shows_where_the_download_goes(self):
+        self.assertIn('bot-chat', self.window._bot_chat.location.get())
+
+    def test_the_runtime_field_is_labelled_optional(self):
+        self.window._apply_language()
+        self.assertIn('optional',
+                      self.window._bot_chat.runtime_label.options['text'])
+
     def test_the_tab_is_titled_in_both_languages(self):
         for language in (i18n.LANGUAGE_ENGLISH, i18n.LANGUAGE_CHINESE):
             self.window.language = language

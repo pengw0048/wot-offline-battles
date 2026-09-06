@@ -29,6 +29,10 @@ STATE_READY = "ready"
 STATE_WORKING = "working"
 STATE_UNSUPPORTED = "unsupported"
 
+# The progress bar's own scale. A byte count would overflow a Tk integer on
+# a large model, and a fraction of a thousand is finer than the eye.
+PROGRESS_STEPS = 1000
+
 
 def tier_labels(catalogue):
     """Return one selectable label per catalogued model, and its key."""
@@ -94,12 +98,16 @@ class BotChatPanel(object):
     """Drive one install from the launcher window without blocking it."""
 
     def __init__(self, parent, catalogue, tk_module, ttk_module, settings,
-                 on_change=None, log=None, base_dir=None, machine=None):
+                 on_change=None, log=None, base_dir=None, machine=None,
+                 on_start=None):
         self._tk = tk_module
         self._ttk = ttk_module
         self._catalogue = catalogue
         self._settings = settings
         self._on_change = on_change or (lambda: None)
+        # The window starts reading progress when a download starts, and
+        # stops when it ends, rather than polling an idle panel forever.
+        self._on_start = on_start or (lambda: None)
         self._log = log or (lambda unused: None)
         self._base_dir = base_dir
         self._arch = bot_chat_install.machine_architecture(catalogue, machine)
@@ -149,23 +157,32 @@ class BotChatPanel(object):
         self.runtime_browse.grid(row=2, column=2, sticky="w", padx=(6, 0))
 
         self.progress = self._ttk.Progressbar(
-            parent, orient="horizontal", mode="determinate", maximum=1000)
+            parent, orient="horizontal", mode="determinate",
+            maximum=PROGRESS_STEPS)
         self.progress.grid(row=3, column=0, columnspan=3, sticky="we",
                            pady=(8, 0))
         self.status = tk.StringVar(value="")
         self.status_label = tk.Label(parent, textvariable=self.status,
                                      anchor="w", justify="left")
         self.status_label.grid(row=4, column=0, columnspan=3, sticky="we")
+        # A player about to spend hundreds of megabytes should be able to see
+        # where they are going before deciding, and what Remove will delete.
+        self.location = tk.StringVar(value=bot_chat_install.install_root(
+            self._base_dir))
+        self.location_entry = tk.Entry(
+            parent, textvariable=self.location, state="readonly",
+            relief="flat", borderwidth=0, highlightthickness=0)
+        self.location_entry.grid(row=5, column=0, columnspan=3, sticky="we")
 
         self.install_button = tk.Button(parent, text="",
                                         command=self.start_install)
-        self.install_button.grid(row=5, column=0, sticky="we", pady=(6, 0))
+        self.install_button.grid(row=6, column=0, sticky="we", pady=(6, 0))
         self.stop_button = tk.Button(parent, text="", command=self.stop,
                                      state="disabled")
-        self.stop_button.grid(row=5, column=1, sticky="we", pady=(6, 0),
+        self.stop_button.grid(row=6, column=1, sticky="we", pady=(6, 0),
                               padx=(6, 0))
         self.remove_button = tk.Button(parent, text="", command=self.remove)
-        self.remove_button.grid(row=5, column=2, sticky="we", pady=(6, 0),
+        self.remove_button.grid(row=6, column=2, sticky="we", pady=(6, 0),
                                 padx=(6, 0))
         parent.grid_columnconfigure(1, weight=1)
 
@@ -241,6 +258,7 @@ class BotChatPanel(object):
             target=self._install, args=(self.tier_key(), opener),
             name="bot-chat-install", daemon=True)
         self._thread.start()
+        self._on_start()
         return True
 
     def stop(self):
@@ -274,10 +292,26 @@ class BotChatPanel(object):
 
     def _stage(self, name):
         self._stage_name = name
+        self._last_progress = (0, 0)
         self._log("BOT CHAT downloading %s" % name)
+
+    def stage(self):
+        """Return which half is downloading, for the status line."""
+        return getattr(self, "_stage_name", None)
 
     def _progress(self, done, total):
         self._last_progress = (done, total)
+
+    def apply_progress(self):
+        """Push the worker's latest count onto the bar.
+
+        The download runs on a worker thread, which must not touch Tk. The
+        window polls this instead, which is also why the bar exists at all:
+        without it a six hundred megabyte download looked like a frozen
+        panel.
+        """
+        self.progress.config(
+            value=int(round(self.progress_fraction() * PROGRESS_STEPS)))
 
     def progress_text(self):
         done, total = getattr(self, "_last_progress", (0, 0))
@@ -340,6 +374,9 @@ class BotChatPanel(object):
             return False
         removed = bot_chat_install.remove_installation(self._base_dir)
         self._last_progress = (0, 0)
+        self._stage_name = None
+        self._error = None
+        self._cancelled = False
         self.refresh()
         self._on_change()
         return removed
