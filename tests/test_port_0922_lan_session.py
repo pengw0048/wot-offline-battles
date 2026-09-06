@@ -2936,6 +2936,21 @@ class LANSessionMapWindowTests(unittest.TestCase):
         self.assertTrue(self.session._picker_open)
         self.assertFalse(self.session._map_window_open)
 
+    def test_a_failed_stock_window_open_returns_to_the_room_at_once(self):
+        def fail_open():
+            self.opens.append(True)
+            raise RuntimeError('view load failed')
+
+        self.session._picker_opener = fail_open
+
+        self.assertFalse(self.session._open_map_window())
+
+        self.assertEqual([True], self.opens)
+        self.assertEqual(2, self.room.open_calls)
+        self.assertTrue(self.session._picker_open)
+        self.assertFalse(self.session._map_window_open)
+        self.assertFalse(self.session._room_hidden_for_map_window)
+
     def test_battle_start_retires_the_window_and_never_reopens_the_room(self):
         window = self._open_window()
 

@@ -1436,7 +1436,14 @@ class LANSession(object):
             self._picker_cleanup_pending = True
             return False
         self._room_hidden_for_map_window = True
-        if not self._picker_opener():
+        try:
+            opened = self._picker_opener()
+        except Exception as error:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the stock map window could not open, '
+                'restoring the room: %s\n' % error)
+            opened = False
+        if not opened:
             self._reopen_room_after_map_window(immediate=True)
             return False
         self._map_window_open = True
