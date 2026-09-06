@@ -399,6 +399,23 @@ def _offh_internal_layout(td):
 		return None
 
 
+def prewarm_layout(td):
+	"""Prepare the hit layout only after all native component bounds exist.
+
+	An incomplete descriptor must never seed build_layout's configuration
+	cache with a failed layout before the real first shot can use it.
+	"""
+	if td is None:
+		return False
+	from gui.mods.offline_lan_0922 import internal_hit_layouts
+	for parent in internal_hit_layouts.SUPPORTED_PARENTS:
+		bounds, unused_source = internal_hit_layouts._bbox_for_component(td, parent)
+		if bounds is None:
+			return False
+	_offh_internal_layout(td)
+	return True
+
+
 def _offh_internal_ray_hits(target_mock, td, start_pos, end_pos, covered=()):
 	'''Interior modules and crew the shell REALLY passed through.
 

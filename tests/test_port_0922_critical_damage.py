@@ -391,6 +391,27 @@ class CriticalDamageTests(unittest.TestCase):
                     if target['kind'] == 'crew')
                 self.assertEqual(expected, actual)
 
+    def test_layout_prewarm_waits_for_complete_native_bounds(self):
+        descriptor = _layout_descriptor(
+            'ussr:R78_SU_85I',
+            (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')))
+        internal_hit_layouts.clear_cache()
+        self.addCleanup(internal_hit_layouts.clear_cache)
+        bounds = descriptor.gun.hitTester.bbox
+        descriptor.gun.hitTester.bbox = None
+        self.assertFalse(critical_damage.prewarm_layout(descriptor))
+        self.assertEqual({}, internal_hit_layouts._LAYOUT_CACHE)
+        descriptor.gun.hitTester.bbox = bounds
+        self.assertTrue(critical_damage.prewarm_layout(descriptor))
+        warmed = critical_damage._offh_internal_layout(descriptor)
+        self.assertIsNotNone(warmed)
+        self.assertTrue(warmed['valid'])
+        self.assertEqual(1, len(internal_hit_layouts._LAYOUT_CACHE))
+        self.assertTrue(critical_damage.prewarm_layout(descriptor))
+        self.assertIs(warmed, critical_damage._offh_internal_layout(descriptor))
+        for parent in internal_hit_layouts.SUPPORTED_PARENTS:
+            self.assertEqual(0, getattr(descriptor, parent).mapping_calls)
+
     def test_internal_layout_crew_profile_mismatch_remains_fail_closed(self):
         vehicle_name = 'china:Ch02_Type62'
         stale_roles = (

@@ -6,6 +6,7 @@ import base64
 import bisect
 import collections
 import copy
+import json
 import math
 import os
 import random
@@ -46,6 +47,8 @@ from gui.mods.offline_lan_0922.projectile_runtime import (
     projectile_range_distance, trajectory_position)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    WorkerCombatDiagnostics, timed, call as timed_call)
 from gui.mods.offline_lan_0922 import (
     ballistics, combat_rules, critical_damage, descriptor_donation,
     destructibles_compat, device_damage, effective_params,
@@ -422,6 +425,23 @@ _PROJECTILE_METRIC_NAMES = (
     'candidates')
 
 
+def _combat_log_lines(prefix, kind, record):
+    """Keep each native log line below #1513's observed 8 KiB limit."""
+    payload = json.dumps(record, sort_keys=True, separators=(',', ':'))
+    line = prefix + kind + ' ' + payload + '\n'
+    if len(line) <= 7168:
+        return line
+    # JSON is ASCII here. Even escaping every byte of one chunk again stays
+    # below the native limit, with room for the engine's own log prefix.
+    chunks = [payload[index:index + 2500]
+              for index in range(0, len(payload), 2500)]
+    return ''.join(prefix + kind + '_part ' + json.dumps({
+        'schema': 2, 'part': index + 1, 'parts': len(chunks),
+        'data': chunk,
+    }, sort_keys=True, separators=(',', ':')) + '\n'
+        for index, chunk in enumerate(chunks))
+
+
 class _FrameDiagnostics(object):
     """Correlate one callback's work with the following render interval."""
 
@@ -439,6 +459,7 @@ class _FrameDiagnostics(object):
 
     def reset(self):
         self._pending = None
+        self._recent_frames = collections.deque(maxlen=3)
         self._frame_id = 0
         self._window_id = 0
         self._window_seconds = self._initial_window_seconds
@@ -483,6 +504,7 @@ class _FrameDiagnostics(object):
         self._projectile_maxima = dict(
             (name, 0.0) for name in _PROJECTILE_METRIC_NAMES)
         self._slow = []
+        self._combat_completed = []
         self._over_50 = 0
         self._over_67 = 0
         self._over_100 = 0
@@ -534,6 +556,15 @@ class _FrameDiagnostics(object):
             return frame_id
 
     def _add(self, row):
+        if row.get('context', {}).get('role') == 'worker':
+            compact = self._compact_frame(row)
+            for previous in self._slow:
+                following = previous.get('following')
+                if following is not None and len(following) < 3:
+                    following.append(compact)
+            row['previous'] = tuple(self._recent_frames)
+            row['following'] = []
+            self._recent_frames.append(compact)
         self._samples += 1
         gap = row['wall_gap']
         raw_dt = row['raw_dt']
@@ -626,6 +657,26 @@ class _FrameDiagnostics(object):
             return False
         self._worker_runtime = dict(report)
         return True
+
+    def note_combat_captures(self, captures):
+        if self.enabled:
+            self._combat_completed.extend(captures)
+
+    @staticmethod
+    def _compact_frame(row):
+        """Retain only plain bounded data, without recursive neighbour rows."""
+        return {
+            'cause': row['cause'], 'next': row['next'],
+            'authority_time': row.get('context', {}).get('authority_time'),
+            'gap_ms': round(row['wall_gap'] * 1000.0, 3),
+            'exec_ms': round(row['exec'] * 1000.0, 3),
+            'outside_ms': round(row['outside'] * 1000.0, 3),
+            'offframe_ms': round(row.get('offframe', 0.0) * 1000.0, 3),
+            'stages_ms': dict((name, round(value * 1000.0, 3))
+                              for name, value in row['stages'].items()),
+            'projectile': dict(row.get('projectile') or {}),
+            'detail': row.get('combat'),
+        }
 
     @staticmethod
     def _milliseconds(value):
@@ -934,10 +985,30 @@ class _FrameDiagnostics(object):
                          name, self._milliseconds(
                              probe_durations.get(name, 0.0)))
                               for name in PROBE_KINDS)))
+            if context.get('role') == 'worker':
+                frames = [('focus', 0, self._compact_frame(row))]
+                if rank == 1:
+                    for relation in ('previous', 'following'):
+                        frames.extend((relation, index, frame)
+                                      for index, frame in enumerate(
+                                          row.get(relation, ())))
+                for relation, index, frame in frames:
+                    lines.append(_combat_log_lines(prefix, 'combat_trace', {
+                        'schema': 2, 'window': self._window_id, 'rank': rank,
+                        'round': context.get('round'),
+                        'map': context.get('map'), 'relation': relation,
+                        'index': index, 'frame': frame,
+                    }))
+        for capture in self._combat_completed:
+            lines.append(_combat_log_lines(prefix, 'combat_summary', {
+                'schema': 2, 'round': self._last_context.get('round'),
+                'map': self._last_context.get('map'), 'capture': capture,
+            }))
         return ''.join(lines)
 
     def finish(self, frame_id, entry_wall, tick_dt, motion_dt, stages,
-               probes, context, probe_durations=None, projectile=None):
+               probes, context, probe_durations=None, projectile=None,
+               combat=None):
         if not self.enabled:
             return
         try:
@@ -963,8 +1034,19 @@ class _FrameDiagnostics(object):
                 'stages': stages, 'probes': probes,
                 'probe_durations': dict(probe_durations or {}),
                 'projectile': dict(projectile or {}),
+                'combat': combat,
                 'context': dict(context or {}), 'emitted': emitted,
             }
+        except Exception:
+            self._disable()
+
+    def flush(self):
+        """Publish the last sealed intervals when a round ends early."""
+        if not self.enabled or not self._samples:
+            return
+        try:
+            self._writer(self._format())
+            self._reset_window()
         except Exception:
             self._disable()
 
@@ -1527,6 +1609,7 @@ class BattleRuntime(object):
             _FrameDiagnostics(
                 initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS)
             if PERFORMANCE_DIAGNOSTICS else None)
+        self._combat_diagnostics = None
         self._sixth_sense = None
         self._has_sixth_sense = False
         self._has_expert = False
@@ -1790,6 +1873,9 @@ class BattleRuntime(object):
         self._runtime = self._runtime or _load_runtime()
         self._config = dict(config or {})
         self._worker_mode = bool(self._config.get('worker_mode', False))
+        self._combat_diagnostics = (
+            WorkerCombatDiagnostics(_PROFILE_CLOCK)
+            if self._worker_mode and PERFORMANCE_DIAGNOSTICS else None)
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False
             self._config['bot_track_animation'] = False
@@ -3237,7 +3323,8 @@ class BattleRuntime(object):
                 probe_timing_seconds=(
                     WORKER_NATIVE_PROBE_SECONDS if self._worker_mode else 0.0),
                 control_seconds=(
-                    WORKER_CONTROL_SECONDS if self._worker_mode else None))
+                    WORKER_CONTROL_SECONDS if self._worker_mode else None),
+                combat_diagnostics=self._combat_diagnostics)
             self._bots.debug_logging = bool(
                 self._config.get('debug_logging', False))
             # Sampled here, not before BotRuntime exists: the bot, navigator
@@ -12274,6 +12361,7 @@ class BattleRuntime(object):
             cache[cache_key] = dict(result) if result is not None else None
         return result
 
+    @timed('projectile.pose')
     def _projectile_historic_pose_uncached(self, key, wanted):
         """Compute one detached historic pose from the current history."""
         history = self._projectile_position_history
@@ -12379,6 +12467,7 @@ class BattleRuntime(object):
                 maximum = max(maximum, max(offsets.values()))
         return maximum
 
+    @timed('projectile.index')
     def _build_projectile_spatial_bins(self, states, now,
                                        maximum_chords=None):
         """Index a conservative target envelope for one synchronous advance.
@@ -12582,6 +12671,7 @@ class BattleRuntime(object):
             key=lambda key: order[key])
         return tuple((key, records[key]) for key in ordered)
 
+    @timed('projectile.update')
     def _advance_projectiles(self, now, force_progress=False):
         """Advance collision cursors and optionally publish an extra barrier."""
         self._projectile_perf = {}
@@ -12690,6 +12780,7 @@ class BattleRuntime(object):
             second.get('gun_pitch', 0.0)))
         return max(hull, turret, gun)
 
+    @timed('projectile.sweep')
     def _projectile_pose_sweep_fractions(self, key, absolute_start,
                                          absolute_end):
         """Split at recorded samples, then enforce the component angle cap."""
@@ -12775,6 +12866,7 @@ class BattleRuntime(object):
                          [1.0])
         return tuple(fractions)
 
+    @timed('projectile.components')
     def _projectile_frozen_target(self, target, pose):
         """Build one target view whose outer and inner geometry agree."""
         descriptor = self._projectile_descriptor_at_pose(target, pose)
@@ -12795,6 +12887,7 @@ class BattleRuntime(object):
             target, descriptor, matrix, position, appearance,
             self._runtime.math)
 
+    @timed('projectile.vehicle')
     def _projectile_vehicle_collisions(self, record, target, start, end,
                                        pose=None):
         """Return retail ABI collisions plus private world-normal evidence."""
@@ -12821,7 +12914,8 @@ class BattleRuntime(object):
                 if frozen_target is not None:
                     evidence = tuple(_collide_vehicle_evidence_at_matrix(
                         frozen_target, frozen_target.matrix, start, end,
-                        self._runtime.math) or ())
+                        self._runtime.math,
+                        diagnostic=self._combat_diagnostics) or ())
                     return (tuple(item.collision for item in evidence), evidence)
             # A historical query may never borrow a live render matrix or live
             # aim as a fallback: that would combine two different instants in
@@ -12842,10 +12936,12 @@ class BattleRuntime(object):
         if body_matrix is not None:
             evidence = tuple(_collide_vehicle_evidence_at_matrix(
                 target, body_matrix, start, end, self._runtime.math,
-                chassis_matrix=chassis_matrix) or ())
+                chassis_matrix=chassis_matrix,
+                diagnostic=self._combat_diagnostics) or ())
             return (tuple(item.collision for item in evidence), evidence)
         return (tuple(target.collideSegmentExt(start, end) or ()), ())
 
+    @timed('projectile.chord')
     def _projectile_chord(self, state, start, end,
                           absolute_start, absolute_end):
         try:
@@ -13311,6 +13407,7 @@ class BattleRuntime(object):
             return None
         return self._server_entity(record.get('engine_id'))
 
+    @timed('projectile.sticker')
     def _projectile_damage_sticker(self, record, target, shot, start, end,
                                    collisions, result, historic=False):
         """Encode one direct hit against the exact sampled component pose."""
@@ -13359,7 +13456,10 @@ class BattleRuntime(object):
                     decoded_start is None or decoded_end is None or
                     decoded_start == decoded_end or
                     not callable(local_hit_test) or
-                    not local_hit_test(decoded_start, decoded_end)):
+                    not timed_call(
+                        getattr(self, '_combat_diagnostics', None),
+                        'native.projectile.sticker', local_hit_test,
+                        decoded_start, decoded_end)):
                 return None
             return encoded
         except Exception:
@@ -13543,7 +13643,9 @@ class BattleRuntime(object):
                     str(record.get('network_id')), error)
         return None
 
+    @timed('projectile.direct')
     def _projectile_direct_effect(self, meta, state, terminal_data):
+        diagnostic = getattr(self, '_combat_diagnostics', None)
         target_key = terminal_data.get('target_key')
         record = self._records.get(target_key)
         source = self._projectile_source_entity(meta)
@@ -13582,7 +13684,9 @@ class BattleRuntime(object):
         factor = terminal_data.get('penetration_factor')
         range_distance = projectile_range_distance(
             state, terminal_data['impact'])
-        contact = combat_rules.resolve_armor_contact(
+        contact = timed_call(
+            diagnostic, 'projectile.armour_resolve',
+            combat_rules.resolve_armor_contact,
             shot, range_distance, collisions,
             pierce_loss=terminal_data.get('piercing_loss', 0.0),
             penetration_factor=factor,
@@ -13662,17 +13766,22 @@ class BattleRuntime(object):
         if int(result) == 0:
             damage = 0
             hull_damage = 0
-        self._install_critical_equipment_effects(record, critical_target)
+        timed_call(diagnostic, 'projectile.critical_equipment',
+                   self._install_critical_equipment_effects,
+                   record, critical_target)
         if int(result) != 0 and is_he:
             damage, critical, critical_delta = (
-                critical_damage.propose_explosion(
+                timed_call(diagnostic, 'projectile.critical_explosion',
+                    critical_damage.propose_explosion,
                     critical_target, layers, critical_impact,
                     explosion_direction, damage, legacy_shell,
                     attacker_id, deadeye=deadeye, with_delta=True,
                     allow_interior=(int(result) == 2 or
                                     blast_contact is not None)))
         elif int(result) != 0:
-            damage, critical, critical_delta = critical_damage.propose_direct(
+            damage, critical, critical_delta = timed_call(
+                diagnostic, 'projectile.critical_direct',
+                critical_damage.propose_direct,
                 critical_target, layers, trace_start, trace_end, damage,
                 legacy_shell, attacker_id, penetrated=int(result) == 2,
                 deadeye=deadeye, with_delta=True,
@@ -13756,6 +13865,7 @@ class BattleRuntime(object):
         })
         return result
 
+    @timed('projectile.splash')
     def _projectile_splash_effects(self, meta, impact, direct_key, state=None,
                                    visual_impact=None):
 
@@ -13954,6 +14064,7 @@ class BattleRuntime(object):
                 meta, state, 'resolution_build', reason, submit_error)
             return False
 
+    @timed('projectile.terminal')
     def _projectile_terminal(self, state, terminal):
         try:
             return self._projectile_terminal_impl(state, terminal)
@@ -14996,6 +15107,36 @@ class BattleRuntime(object):
             return False
         return probe.stop(reason)
 
+    def _prewarm_critical_layout(self):
+        """Build at most one ready vehicle's hit layout per countdown frame."""
+        if (not self._worker_mode or self._battle_live or
+                self._prebattle_deadline is None):
+            return False
+        for key in sorted(self._records):
+            record = self._records[key]
+            if (not record.get('ready') or record.get('tombstone') or
+                    record.get('local')):
+                continue
+            entity = self._server_entity(record.get('engine_id'))
+            if entity is None or not getattr(entity, 'isStarted', False):
+                continue
+            descriptor = getattr(entity, 'typeDescriptor', None)
+            if (descriptor is None or
+                    record.get('critical_layout_prewarmed') is descriptor):
+                continue
+            try:
+                completed = critical_damage.prewarm_layout(descriptor)
+            except Exception as error:
+                # Prewarming must not block the match or repeatedly retry a
+                # broken layout. The shot path retains its own normal guards.
+                completed = True
+                self._warn_optional_failure(
+                    'critical layout prewarm for %s' % key, error)
+            if completed:
+                record['critical_layout_prewarmed'] = descriptor
+                return True
+        return False
+
     def _frame(self):
         if self.state != 'running':
             return
@@ -15029,6 +15170,17 @@ class BattleRuntime(object):
         self._spotted_signature = None
         frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe)
                     if profiling else 0)
+        combat_diagnostic = self._combat_diagnostics
+        if combat_diagnostic is not None and self._battle_live and profiling:
+            trigger = None
+            if self._projectiles is not None and len(self._projectiles):
+                trigger = 'projectiles'
+            elif self._bots is not None and getattr(
+                    self._bots, '_shot_lane_pending_pairs', 0):
+                trigger = 'lane_queue'
+            combat_diagnostic.begin_frame(frame_id, now, trigger)
+            diagnostics.note_combat_captures(
+                combat_diagnostic.drain_completed())
         stages = {}
         probes = dict((name, 0) for name in PROBE_KINDS)
         probe_durations = dict((name, 0.0) for name in PROBE_KINDS)
@@ -15136,6 +15288,10 @@ class BattleRuntime(object):
                     # Tree registration is likewise a countdown optimisation.
                     # A broken native registry must not prevent battle start.
                     pass
+            try:
+                self._prewarm_critical_layout()
+            except Exception as error:
+                self._warn_optional_failure('critical layout prewarm', error)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['prewarm'] = max(0.0, next_boundary - boundary)
@@ -15419,6 +15575,7 @@ class BattleRuntime(object):
             diagnostics.finish(
                 frame_id, entry_wall, tick_dt, dt, stages, probes, {
                     'round': (self._start_message or {}).get('round_id', '-'),
+                    'authority_time': now,
                     'map': (self._config or {}).get('map', '-'),
                     'phase': 'live' if self._battle_live else 'prebattle',
                     'role': ('worker' if self._worker_mode else
@@ -15433,7 +15590,9 @@ class BattleRuntime(object):
                     'grind': int(self._local_grind),
                     'transitioned': transitioned,
                 }, probe_durations=probe_durations,
-                projectile=projectile_perf)
+                projectile=projectile_perf,
+                combat=(combat_diagnostic.finish_frame()
+                        if combat_diagnostic is not None else None))
 
     def _mutable_shot_ray(self):
         """Copy #1513's native gun ray before normalising or scattering it."""
@@ -22985,6 +23144,7 @@ class BattleRuntime(object):
         index = max(0, min(int(shell_index), max(0, len(shots) - 1)))
         return shots[index] if shots else {}
 
+    @timed('projectile.scene')
     def _resolve_shot_scene(self, start, end, direction, shot,
                             penetration_factor=None,
                             initial_piercing_loss=0.0,
@@ -23001,7 +23161,9 @@ class BattleRuntime(object):
                 (projectile_state.get('payload') or {}).get(
                     'base_penetration_multiplier'), 1.0)
         if self._destructibles is None:
-            hit = self._runtime.bigworld.wg_collideSegment(
+            hit = timed_call(
+                self._combat_diagnostics, 'native.projectile.world',
+                self._runtime.bigworld.wg_collideSegment,
                 self._avatar.spaceID, start, end, 128)
             return {
                 'world_distance': ((hit[0] - start).length
@@ -23016,7 +23178,8 @@ class BattleRuntime(object):
             cursor = start + direction.scale(travelled)
             result = self._destructibles.shot_world_distance(
                 self._runtime.bigworld, self._avatar.spaceID,
-                cursor, end, direction, shot)
+                cursor, end, direction, shot,
+                diagnostic=self._combat_diagnostics)
             if not isinstance(result, dict):
                 raise RuntimeError(
                     '#1513 destructible shot result must be a dictionary')
@@ -23386,6 +23549,14 @@ class BattleRuntime(object):
             raise cleanup_error
 
     def _cleanup(self):
+        combat_diagnostic = self._combat_diagnostics
+        if combat_diagnostic is not None:
+            combat_diagnostic.close()
+            if self._frame_diagnostics is not None:
+                self._frame_diagnostics.note_combat_captures(
+                    combat_diagnostic.drain_completed())
+                self._frame_diagnostics.flush()
+        self._combat_diagnostics = None
         cleanup_error = None
         try:
             self._restore_native_ram_contact_hook()

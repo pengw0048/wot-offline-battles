@@ -577,6 +577,82 @@ return values, freshness windows, deadlines and 110-pair safety budget are
 unchanged. Straight-line Windows driving remains the frame-pacing acceptance
 test; this source review cannot claim that the visible hitch is eliminated.
 
+The current hidden worker also supports bounded combat timing beyond its
+five-second startup probe sample. `worker_diagnostics.py` captures up to three
+30-second windows per round, with a 30-second cooldown. A live battle frame
+with active projectiles or pending supplemental shot lanes can arm a window;
+slow loading or travel alone cannot exhaust the captures before combat.
+Owned Python stages report call
+count, inclusive total, self time excluding measured children, and maximum
+single-call duration. `bot.probe.*` measures logical probe boundaries;
+`native.projectile.armour/world/material/sticker` counts the actual calls at the
+instrumented `localHitTest`, `wg_collideSegment`, and material-query seams,
+including calls that raise. These are not a census of all BigWorld calls.
+The existing `PERF` records remain; `PERF combat_trace` adds JSON detail for
+the three slowest intervals and up to three neighbouring frames on either
+side of the worst interval. Schema 2 emits each frame separately, identifying
+its `relation` (focus/previous/following) and `index` within that relation.
+Each line stays below 7168 ASCII bytes: an oversized trace or summary becomes
+ordered `combat_trace_part` or `combat_summary_part` records. Concatenate their
+`data` strings in `part` order (checking `parts`) before parsing the complete
+JSON record. This preserves evidence across the observed #1513 8 KiB native
+log-line limit. Neighbours at a reporting or round boundary may
+be incomplete. `PERF combat_summary` reports each closed capture's stage
+totals, frame/time span, queue maxima, and counters. Detailed clocks are
+inactive between captures; the small frame ring remains available.
+
+The supplemental-lane shadow ledger retains at most 1024 identities and
+records actual enqueue-to-completion wait separately from phase-deadline
+overdue time and the existing whole-refresh-cycle overdue metric. It counts
+admission, deduplication, cache/probe/distance completion, invalid retirement,
+materialization, budget deferral, and cover-work pauses. Selected-target waits
+and oldest pending identities are separate. With cover work blocking service,
+`eligibility_checked=false` means the pending gauge includes identities whose
+current eligibility was not checked. Capture wait percentiles cover the last
+512 completions; `count` and `kept` expose that sampling boundary. Positive
+receipt publications distinguish repeated exports, distinct captured results,
+selected targets, replacement, and expiry before export. Publication means
+inclusion in worker observations, not acknowledgement or proof of a server
+planner decision; `shootable_by_bot_ids` feeds server target/position choices.
+The diagnostic cannot label every unselected result wasted, since alternative
+lanes also inform movement. Identical-input tests cover queue order, Bot
+outputs, player/Bot volleys, progress acknowledgements, and local query or
+clock failure without changing simulation outcomes. Timings include diagnostic
+overhead; exact #1513 Windows logs are still required to attribute a real
+combat stall or measure that overhead in the embedded runtime.
+
+Supplemental lane service rejects due, currently out-of-range pairs before
+copying full source/target jobs or spending the bounded service cohort. It
+uses the same ordinary/SPG distance rule as the final shot gate and records
+the negative receipt at service time. The independent incoming enemy-to-own
+probe retains its one-job budget even when the outgoing source cannot reach
+the enemy. Selected-first service and round-robin completion remain bounded
+by the existing native query budget. A pending cover job reserves a lane
+window only when its phase is due and its source/remembered target are still
+current; a future or stale cover job no longer pauses the entire queue.
+
+Countdown frames may prepare one ready, non-local worker vehicle's internal
+hit layout. All component hit-tester bounds must exist before the ordinary
+layout builder may populate its configuration cache; incomplete descriptors
+stay eligible and do not poison that cache. The normal hit path retains the
+same builder, configuration key, damage rules, and failure handling. Combat
+timings separately report armour resolution, sticker validation, equipment
+projection, and direct/explosion critical proposals. Cold preparation can be
+moved out of a first hit, but this does not establish the cause of a captured
+Windows terminal spike.
+
+`tools/benchmark_bot_workload.py` exercises the copied 29-Bot control loop
+with real local drivers and a selected shipped navgraph. It can record complete
+outputs for cross-checkout parity and optional cProfile data. Native queries
+use deterministic test seams, so its CPU results do not measure Windows FPS
+or native collision cost. Baked A* reads each expanded cell's link mask once,
+preserving neighbour order, costs, hazards and expansion budgets; empty
+failed-edge tables no longer require per-edge key construction.
+Hidden contact projections reuse the removal of live pose fields only within
+one authority slice and template/remembered-pose identity. Each observer keeps
+its own contact object and visibility flags; new poses and slices invalidate
+that reuse.
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
