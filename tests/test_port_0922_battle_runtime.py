@@ -724,8 +724,10 @@ class _VehicleBoundEffects(object):
                      waitForKeyOff=False, **args):
         self.calls.append((node, matProv, effectsList, keyPoints, args))
         entity = args.get('entity')
-        if (entity is not None and entity.isStarted and
-                entity.isAlive()):
+        # ``_NodeSoundEffectDesc.create`` also dereferences the local matrix
+        # this owner passes as ``position``; a static-scene call has none.
+        if (entity is not None and matProv is not None and
+                entity.isStarted and entity.isAlive()):
             self.played.append((node, effectsList, args.get('damageFactor')))
         return types.SimpleNamespace(
             stop=lambda **unused: None, keyOff=lambda: None)
@@ -12561,7 +12563,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIs(
             shooting_extra, descriptor.extrasDict['shoot'])
 
-    def test_he_splash_uses_the_stock_vehicle_explosion_effect(self):
+    def test_he_splash_binds_to_the_target_hull_node_with_its_entity(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
