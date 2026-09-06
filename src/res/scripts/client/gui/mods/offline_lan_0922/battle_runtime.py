@@ -9570,17 +9570,20 @@ class BattleRuntime(object):
                 'vehicle hit impulse', error, disable=False)
             return None
 
-    def _present_hit_impulse(self, event, target_record, effects_descr):
+    def _present_hit_impulse(self, event, target_record, effects_descr,
+                             splash_direction=None):
         """Present retail's hull shot impulse on one vehicle this shot hit.
 
-        Retail reaches ``CompoundAppearance.receiveShotImpulse`` only inside
-        ``Vehicle.showDamageFromShot``'s decoded direct-hit branch, so an HE
-        near miss presents ``armorSplashHit`` with no hull reaction at all.
-        The impulse is the shot effect group's own ``targetImpulse``: retail
-        scales it by neither damage nor calibre.
+        Retail reaches ``CompoundAppearance.receiveShotImpulse`` from two
+        places.  ``Vehicle.showDamageFromShot`` passes the decoded direct-hit
+        axis and the shot effect group's own ``targetImpulse``, scaled by
+        neither damage nor calibre.  ``Vehicle.showDamageFromExplosion``
+        rocks the hull away from the blast centre at a quarter of the same
+        impulse, so an HE near miss is not motionless.
         """
         state = target_record.get('state') or {}
-        if event.get('splash', False) or event.get('dead', False):
+        splash = bool(event.get('splash', False))
+        if event.get('dead', False):
             return False
         if not bool(state.get('alive', True)) or int(
                 state.get('health', 1) or 0) <= 0:
@@ -9588,8 +9591,12 @@ class BattleRuntime(object):
         impulse = _number(_field(effects_descr, 'targetImpulse', 0.0))
         if impulse <= 0.0:
             return False
-        direction = self._decoded_hit_impulse_direction(
-            event, target_record)
+        if splash:
+            impulse = impulse / 4.0
+            direction = splash_direction
+        else:
+            direction = self._decoded_hit_impulse_direction(
+                event, target_record)
         if direction is None:
             return False
         if target_record.get('local'):
@@ -9634,6 +9641,107 @@ class BattleRuntime(object):
                 _number(getattr(direction, 'y', 0.0)),
                 _number(getattr(direction, 'z', 0.0)),
                 impulse, bool(presented)))
+        return True
+
+    def _impact_sound_identity(self, target_record, attacker_id, direction,
+                               damage_factor):
+        """Return the arguments a #1513 hit sound resolves its event from.
+
+        ``_SoundEffectDesc.create`` dereferences
+        ``BigWorld.entity(playerVehicleID).isAlive()`` as soon as either
+        identity is present, so only publish them while that stock lookup
+        resolves.  Without them the descriptor can only play its
+        two-other-tanks impact event.
+        """
+        player_id = int(getattr(self._avatar, 'playerVehicleID', 0) or 0)
+        lookup = getattr(self._runtime.bigworld, 'entity', None)
+        if player_id <= 0 or not callable(lookup) or lookup(player_id) is None:
+            return {}
+        try:
+            attacker_id = int(attacker_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            attacker_id = 0
+        return {
+            'isPlayerVehicle': bool(target_record.get('local')),
+            'entity_id': int(target_record.get('engine_id') or 0),
+            'attackerID': attacker_id,
+            'damageFactor': damage_factor,
+            'hitdir': direction,
+        }
+
+    def _hit_damage_factor(self, event, target_record):
+        """Return retail's ``damageFactor``: hull damage as a health percent.
+
+        Exact #1513 hands this straight to ``SWITCH_ext_damage_size``:
+        ``_SoundEffectDesc.create`` compares it against 43.35 and 89.25, and
+        ``Vehicle.onStaticCollision`` scales its own 0..1 hull damage by 100
+        before passing it to the same descriptor, so the unit is a percentage
+        of the target's maximum health.
+        """
+        damage = max(0, int(event.get('damage', 0) or 0))
+        if damage <= 0:
+            return 0.0
+        state = target_record.get('state') or {}
+        maximum = _number(state.get('max_health'), 0.0)
+        if maximum <= 0.0:
+            target = self._server_entity(target_record.get('engine_id'))
+            maximum = _number(_field(
+                getattr(target, 'typeDescriptor', None), 'maxHealth', 0.0))
+        if maximum <= 0.0:
+            return 0.0
+        return max(0.0, min(100.0, 100.0 * damage / maximum))
+
+    def _present_splash_hit(self, target_record, effects_descr, effects_index,
+                            impact_position, direction, damage_factor):
+        """Present one HE near miss the way ``showSplashHitEffect`` does.
+
+        ``Vehicle.showDamageFromExplosion`` binds ``armorSplashHit`` to the
+        target's own hull node through ``ModelBoundEffects.addNewToNode`` and
+        passes the entity itself.  The only #1513 effect in that group is a
+        ``splashSound``, and ``_NodeSoundEffectDesc.create`` returns without
+        playing anything unless ``entity`` is a live, started vehicle, so the
+        static-scene owner used for direct hits presents nothing at all here.
+        """
+        try:
+            effects_list = effects_descr['armorSplashHit']
+        except (KeyError, TypeError):
+            return False
+        if not effects_list:
+            return False
+        try:
+            stages, effects, unused = effects_list
+        except (TypeError, ValueError):
+            return False
+        target = self._server_entity(target_record.get('engine_id'))
+        if (target is None or not getattr(target, 'isStarted', False) or
+                not self._record_alive(target_record, target)):
+            return False
+        if not self._optional_feature_enabled(
+                'projectile impact presentation'):
+            return False
+        hull_name = getattr(
+            getattr(self._runtime, 'tank_part_names', None), 'HULL', None)
+        if hull_name is None:
+            raise RuntimeError('#1513 HULL part name is unavailable')
+        try:
+            # The compound-only fallback builds its bound-effect owner
+            # lazily and raises while its compound is absent.
+            add_effect = getattr(
+                target.appearance.boundEffects, 'addNewToNode', None)
+            if not callable(add_effect):
+                return False
+            matrix = self._runtime.math.Matrix()
+            matrix.setTranslate((0.0, 0.0, 0.0))
+            self._report_effect(
+                'armour_splash', 'armorSplashHit', effects_index,
+                impact_position, direction)
+            add_effect(
+                hull_name, matrix, effects, stages, entity=target,
+                damageFactor=damage_factor)
+        except Exception as error:
+            self._warn_optional_failure(
+                'projectile impact presentation', error)
+            return False
         return True
 
     def _present_combat_hit(self, event, target_record, attacker_record,
@@ -9705,13 +9813,17 @@ class BattleRuntime(object):
         # failed terrain effect must not swallow the hull reaction.
         self._run_optional_feature(
             'vehicle hit impulse', self._present_hit_impulse,
-            (event, target_record, effects_descr))
+            (event, target_record, effects_descr, direction))
         # Retail presents an HE near-miss through
         # Vehicle.showDamageFromExplosion/armorSplashHit.  Direct hits keep
         # the three protocol outcomes: ricochet, resisted and pierced.
-        effect_group = ('armorSplashHit' if event.get('splash', False) else
-                        ('armorRicochet', 'armorResisted', 'armorHit')[
-                            shot_result])
+        damage_factor = self._hit_damage_factor(event, target_record)
+        if event.get('splash', False):
+            return self._present_splash_hit(
+                target_record, effects_descr, effects_index, impact_position,
+                direction, damage_factor)
+        effect_group = ('armorRicochet', 'armorResisted', 'armorHit')[
+            shot_result]
         stages, effects, unused = effects_descr[effect_group]
         hit_position = self._vector(impact_position)
         terrain_effects = getattr(self._avatar, 'terrainEffects', None)
@@ -9726,12 +9838,20 @@ class BattleRuntime(object):
             (_number(event.get('x')), _number(event.get('y')),
              _number(event.get('z'))), direction)
         try:
+            # #1513's armour-hit sound is a `_SoundEffectDesc` whose only
+            # events are the impact trio.  Without the shooter and target
+            # identities it always resolves to impactNPC_NPC, the mix meant
+            # for two other tanks, instead of impactPC_NPC for the player's
+            # own hit or impactNPC_PC for a hit on the player.  Retail's
+            # Vehicle.showDamageFromShot passes all four of these.
             add_effect(
                 hit_position, effects, stages, None, dir=direction,
                 start=hit_position - direction.scale(0.4),
                 end=hit_position + direction.scale(0.4),
                 showShockWave=bool(target_record.get('local')),
-                showFlashBang=bool(target_record.get('local')))
+                showFlashBang=bool(target_record.get('local')),
+                **self._impact_sound_identity(
+                    target_record, attacker_id, direction, damage_factor))
         except Exception as error:
             self._warn_optional_failure(
                 'projectile impact presentation', error)
@@ -12070,11 +12190,18 @@ class BattleRuntime(object):
         self._report_effect(
             'wreck_hit', 'armorHit', effects_index, impact, direction)
         try:
+            # Same #1513 impact trio as a hit on a live vehicle: without the
+            # shooter and target identities the group can only play its
+            # other-tanks mix.
             add_effect(
                 hit_position, effects, stages, None, dir=direction,
                 start=hit_position - direction.scale(0.4),
                 end=hit_position + direction.scale(0.4),
-                showShockWave=False, showFlashBang=False)
+                showShockWave=False, showFlashBang=False,
+                **self._impact_sound_identity(
+                    target_record,
+                    self._projectile_attacker_engine_id(meta), direction,
+                    0.0))
         except Exception as error:
             self._warn_optional_failure(
                 'projectile impact presentation', error)
@@ -13540,6 +13667,17 @@ class BattleRuntime(object):
             return None
         meta['source_descriptor'] = descriptor
         return descriptor
+
+    def _projectile_attacker_engine_id(self, meta):
+        """Return the engine id #1513 hit sounds compare against the player."""
+        record = self._records.get(
+            '%s:%s' % (meta.get('shooter_kind'), meta.get('shooter_id')))
+        if record is None:
+            return 0
+        try:
+            return int(record.get('engine_id') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
 
     def _projectile_source_entity(self, meta):
         key = '%s:%s' % (meta.get('shooter_kind'), meta.get('shooter_id'))

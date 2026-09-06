@@ -703,73 +703,36 @@ class _VehicleDecal(object):
         self.hull_node.detach(self.decal)
 
 
-class _VehicleTraces(object):
-    """One assembled #1513 ``Vehicular.VehicleTraces`` component."""
+class _VehicleBoundEffects(object):
+    """``helpers.bound_effects.ModelBoundEffects`` over one vehicle compound.
 
-    def __init__(self, appearance, vehicle_filter, lod_state_link):
-        self.appearance = appearance
-        self.movementInfo = getattr(vehicle_filter, 'movementInfo', None)
-        self.lodStateLink = lod_state_link
-
-
-class _TracesAssembler(object):
-    """Reproduce exact #1513 ``model_assembler.assembleVehicleTraces``.
-
-    Stock builds a fresh component, feeds it the chassis trace textures, the
-    compound, the flying links, the LOD link and the filter's movement info,
-    and publishes it through the appearance's component descriptor last.
+    #1513 fills ``armorSplashHit`` with a single ``splashSound``, and
+    ``_NodeSoundEffectDesc.create`` returns without playing anything unless
+    ``entity`` is a live, started vehicle, so reproduce that guard here: only
+    a call carrying the owning entity reaches ``played``.
     """
 
-    def __init__(self):
+    def __init__(self, owner):
+        self._owner = owner
         self.calls = []
-        self.error = None
+        self.played = []
 
-    def assembleVehicleTraces(self, appearance, vehicleFilter, lodStateLink):
-        self.calls.append((appearance, vehicleFilter, lodStateLink))
-        if self.error is not None:
-            raise self.error
-        appearance.vehicleTraces = _VehicleTraces(
-            appearance, vehicleFilter, lodStateLink)
+    def addNew(self, matProv, effectsList, keyPoints, waitForKeyOff=False,
+               **args):
+        return self.addNewToNode(
+            '', matProv, effectsList, keyPoints, waitForKeyOff, **args)
 
-
-class _Appearance(types.SimpleNamespace):
-    """A compound appearance that owns components the way #1513 does.
-
-    ``svarog_script.py_component_system.ComponentDescriptor.__set__`` removes
-    the previous component from the native component system before it stores
-    a replacement, and adds a non-None one.  A fake that only rebound an
-    attribute could not tell a retired traces component from a live one.
-    """
-
-    def __init__(self, **fields):
-        self.components = []
-        self._traces = None
-        types.SimpleNamespace.__init__(self, **fields)
-
-    def addComponent(self, component, name=''):
-        self.components.append((name, component))
-
-    def removeComponent(self, component):
-        self.components = [entry for entry in self.components
-                           if entry[1] is not component]
-
-    @property
-    def vehicleTraces(self):
-        return self._traces
-
-    @vehicleTraces.setter
-    def vehicleTraces(self, value):
-        if self._traces is not None:
-            self.removeComponent(self._traces)
-        if value is not None:
-            self.addComponent(value, 'vehicleTraces')
-        self._traces = value
-
-
-# The client resolves ``vehicle_systems.model_assembler`` lazily, so a
-# pure-data test can pin the exact stock entry point to a recording fake.
-_TRACES_ASSEMBLER = _TracesAssembler()
-remote_vehicle_module._stock_traces_assembler = _TRACES_ASSEMBLER
+    def addNewToNode(self, node, matProv, effectsList, keyPoints,
+                     waitForKeyOff=False, **args):
+        self.calls.append((node, matProv, effectsList, keyPoints, args))
+        entity = args.get('entity')
+        # ``_NodeSoundEffectDesc.create`` also dereferences the local matrix
+        # this owner passes as ``position``; a static-scene call has none.
+        if (entity is not None and matProv is not None and
+                entity.isStarted and entity.isAlive()):
+            self.played.append((node, effectsList, args.get('damageFactor')))
+        return _Appearance(
+            stop=lambda **unused: None, keyOff=lambda: None)
 
 
 class _Vehicle(object):
@@ -802,7 +765,9 @@ class _Vehicle(object):
         self.custom_effects = _CustomEffectManager()
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_DUST)
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_EXHAUST)
+        self.bound_effects = _VehicleBoundEffects(self)
         self.appearance = _Appearance(
+            boundEffects=self.bound_effects,
             compoundModel=self.model, turretMatrix=_Matrix(),
             gunMatrix=_Matrix(),
             highlighter=types.SimpleNamespace(enabled=False),
@@ -3351,7 +3316,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertNotIn(
             'vehicle hit impulse', battle._disabled_optional_features)
 
-    def test_splash_and_killing_hits_present_no_retail_hull_impulse(self):
+    def test_splash_rocks_the_hull_at_a_quarter_of_the_impulse(self):
         runtime, factory, unused_binding, vehicle_id, vehicle = \
             self._swinging_native_factory()
         battle = BattleRuntime(runtime)
@@ -3363,8 +3328,32 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             'spot_visible': True, 'state': {'health': 500, 'alive': True}}
         effects_descr = runtime.vehicles.g_cache.shotEffects[3]
 
+        # Exact #1513 Vehicle.showDamageFromExplosion pushes the hull away
+        # from the blast centre with targetImpulse / 4.
+        self.assertTrue(battle._present_hit_impulse(
+            {'splash': True}, target_record, effects_descr,
+            runtime.math.Vector3(0.0, 0.0, 1.0)))
+        impulse_call = vehicle.appearance.receiveShotImpulse.call_args
+        self.assertAlmostEqual(87.5, impulse_call.args[1])
+        vehicle.appearance.receiveShotImpulse.reset_mock()
+
+        # A splash without a blast direction stays a no-op rather than
+        # inventing one.
         self.assertFalse(battle._present_hit_impulse(
             {'splash': True}, target_record, effects_descr))
+
+    def test_killing_hits_present_no_retail_hull_impulse(self):
+        runtime, factory, unused_binding, vehicle_id, vehicle = \
+            self._swinging_native_factory()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        runtime.vehicles.g_cache.shotEffects[3]['targetImpulse'] = 350.0
+        target_record = {
+            'engine_id': vehicle_id, 'local': False, 'native_remote': True,
+            'spot_visible': True, 'state': {'health': 500, 'alive': True}}
+        effects_descr = runtime.vehicles.g_cache.shotEffects[3]
+
         self.assertFalse(battle._present_hit_impulse(
             {'dead': True}, target_record, effects_descr))
         self.assertFalse(battle._present_hit_impulse(
@@ -12605,7 +12594,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIs(
             shooting_extra, descriptor.extrasDict['shoot'])
 
-    def test_he_splash_uses_the_stock_vehicle_explosion_effect(self):
+    def test_he_splash_binds_to_the_target_hull_node_with_its_entity(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
@@ -12630,9 +12619,131 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._present_combat_hit(
             event, target_record, attacker_record, 11))
 
+        # Exact #1513 ``showSplashHitEffect`` binds armorSplashHit to the
+        # target's own hull node and hands its ``splashSound`` the entity.
+        battle._avatar.terrainEffects.addNew.assert_not_called()
+        self.assertEqual(
+            [('hull', 'splashFx', 8.0)], target.bound_effects.played)
+        node, matrix, effects, stages, args = target.bound_effects.calls[0]
+        self.assertEqual(('hull', 'splashFx', 'splashStages'),
+                         (node, effects, stages))
+        self.assertIs(target, args['entity'])
+        translation = matrix.translation
+        self.assertEqual(
+            (0.0, 0.0, 0.0),
+            (translation.x, translation.y, translation.z))
+
+    def test_he_splash_on_a_dead_target_presents_nothing(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 0})
+        target.health = 0
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'state': {'health': 0, 'alive': False},
+            'kind': 'bot', 'network_id': 1, 'local': False,
+            'spot_visible': True}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        event = {
+            'kind': 'bot_bot_hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 40, 'source': 'shot',
+            'splash': True}
+
+        # Retail reaches showSplashHitEffect only past showDamageFromExplosion's
+        # own isAlive gate.
+        self.assertFalse(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+        self.assertEqual([], target.bound_effects.calls)
+        battle._avatar.terrainEffects.addNew.assert_not_called()
+
+    def test_direct_hit_effect_carries_the_stock_sound_identity(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        target_record = {
+            'engine_id': 10, 'spot_visible': True,
+            'state': {'health': 500, 'x': 0.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 1, 'local': False}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'player', 'network_id': 2, 'local': True}
+        event = {
+            'kind': 'hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 2, 'damage': 250, 'source': 'shot'}
+        battle._avatar.playerVehicleID = 11
+
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+
+        # #1513's armour-hit sound is the impact trio.  Without these four
+        # arguments _SoundEffectDesc.create always resolves impactNPC_NPC,
+        # the mix meant for two other tanks, instead of the player's own
+        # impactPC_NPC.
         effect = battle._avatar.terrainEffects.addNew.call_args
-        self.assertEqual(('splashFx', 'splashStages'),
-                         (effect.args[1], effect.args[2]))
+        self.assertEqual(11, effect.kwargs['attackerID'])
+        self.assertEqual(10, effect.kwargs['entity_id'])
+        self.assertFalse(effect.kwargs['isPlayerVehicle'])
+        self.assertAlmostEqual(50.0, effect.kwargs['damageFactor'])
+        self.assertIs(effect.kwargs['dir'], effect.kwargs['hitdir'])
+
+    def test_hit_on_the_player_reports_the_player_as_the_effect_target(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        battle._local_position = (0.0, 0.0, 0.0)
+        target_record = {
+            'engine_id': 10, 'state': {'health': 500},
+            'kind': 'player', 'network_id': 1, 'local': True}
+        attacker_record = {
+            'engine_id': 11,
+            'state': {'health': 500, 'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        event = {
+            'kind': 'bot_human_hit', 'world_pose': True,
+            'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+            'shot_result': 1, 'damage': 0, 'source': 'shot'}
+        battle._avatar.playerVehicleID = 10
+
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+
+        effect = battle._avatar.terrainEffects.addNew.call_args
+        self.assertEqual(11, effect.kwargs['attackerID'])
+        self.assertEqual(10, effect.kwargs['entity_id'])
+        self.assertTrue(effect.kwargs['isPlayerVehicle'])
+        self.assertEqual(0.0, effect.kwargs['damageFactor'])
+
+        # _SoundEffectDesc dereferences BigWorld.entity(playerVehicleID)
+        # as soon as either identity is present, so a player who has left
+        # the world keeps the old event instead of disabling the effect.
+        del runtime.bigworld.entities[10]
+        self.assertTrue(battle._present_combat_hit(
+            event, target_record, attacker_record, 11))
+        effect = battle._avatar.terrainEffects.addNew.call_args
+        self.assertNotIn('attackerID', effect.kwargs)
+        self.assertNotIn(
+            'projectile impact presentation',
+            battle._disabled_optional_features)
 
     def test_self_splash_with_degenerate_direction_is_presentation_safe(self):
         runtime = _runtime()
@@ -12653,7 +12764,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._present_combat_hit(
             event, record, record, 10))
 
-        battle._avatar.terrainEffects.addNew.assert_called_once()
+        self.assertEqual(1, len(vehicle.bound_effects.played))
         self.assertEqual([], battle._avatar.hit_directions)
 
     def test_visible_remote_combat_keeps_the_vehicle_impact_effect(self):

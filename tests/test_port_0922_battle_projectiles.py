@@ -2116,6 +2116,12 @@ class BattleProjectileTests(unittest.TestCase):
         add_effect = mock.Mock()
         battle._avatar.terrainEffects = types.SimpleNamespace(
             addNew=add_effect)
+        # #1513 hit sounds read the player's own entity while resolving
+        # which impact event to play.
+        battle._avatar.playerVehicleID = 41
+        bigworld_entity = types.SimpleNamespace(isAlive=lambda: True)
+        battle._runtime.bigworld.entity = lambda entity_id: (
+            bigworld_entity if entity_id == 41 else None)
         battle._remote_factory = types.SimpleNamespace(
             stop_projectile_tracer=mock.Mock(return_value=True))
         target = types.SimpleNamespace(
@@ -2151,6 +2157,12 @@ class BattleProjectileTests(unittest.TestCase):
         effect = add_effect.call_args
         self.assertEqual(('wreckFx', 'wreckStages'),
                          (effect.args[1], effect.args[2]))
+        # The armour-hit group's #1513 sound needs both identities to pick
+        # the player's own impact event over the other-tanks mix.
+        self.assertEqual(41, effect.kwargs['attackerID'])
+        self.assertEqual(55, effect.kwargs['entity_id'])
+        self.assertFalse(effect.kwargs['isPlayerVehicle'])
+        self.assertIs(effect.kwargs['dir'], effect.kwargs['hitdir'])
         battle._remote_factory.stop_projectile_tracer.assert_called_once_with(
             'p1', [5.0, 1.0, 0.0], explosion=None, missed=False)
 
