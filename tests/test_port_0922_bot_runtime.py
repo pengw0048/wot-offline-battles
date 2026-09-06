@@ -14597,6 +14597,11 @@ class BotRuntimeTests(unittest.TestCase):
                 z=float(index * 100))
             self.runtime.states[state['id']] = state
 
+        pose_fields = ('x', 'y', 'z', 'yaw', 'speed', 'push_x', 'push_z')
+        poses_before = dict(
+            (bot_id, tuple(state[name] for name in pose_fields))
+            for bot_id, state in self.runtime.states.items())
+
         candidate_counts = []
         original = self.module.tank_collision.resolve_tank
 
@@ -14617,8 +14622,10 @@ class BotRuntimeTests(unittest.TestCase):
         finally:
             self.module.tank_collision.resolve_tank = original
 
-        self.assertEqual(29, len(candidate_counts))
-        self.assertEqual({0}, set(candidate_counts))
+        self.assertEqual([], candidate_counts)
+        self.assertEqual(poses_before, dict(
+            (bot_id, tuple(state[name] for name in pose_fields))
+            for bot_id, state in self.runtime.states.items()))
 
     def test_authority_failover_resumes_server_fire_sequence(self):
         waiting = dict(self.start, bot_authority_id=2)
