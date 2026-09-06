@@ -1136,6 +1136,14 @@ the room's current arena and battle time. Whether that stock view hides or only
 disables the three fixed controls is a property of `gui.pkg`, not of any client
 script, and remains unproved until it is seen on the exact Windows client.
 
+The packaged picker replaces only the exact #1513 `trainingWindow.swf` resource.
+Its `maxPlayers` value is `DefineEditText` id 10 at sprite 16 depth 12, while
+the adjacent `#menu:training/create/maxPlayers` label is the unnamed id 14 at
+depth 16. The build keeps both objects and their layout but changes their text
+color alpha from 255 to zero. Exact `lobby.swf` bytecode only assigns
+`maxPlayers.text` when the map changes; it does not replace the text format or
+alpha, so repeated map selection cannot restore either string.
+
 `updateTrainingRoom` is the single Scaleform-to-Python call of that view
 (`TrainingWindowMeta`). In this mode it records the map and the battle time and
 returns to the room instead of starting the battle. The battle time arrives in
