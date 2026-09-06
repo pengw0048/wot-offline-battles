@@ -32,7 +32,11 @@ class BotLineupProfilesTests(unittest.TestCase):
     def test_eligible_choices_match_the_authority_exclusions(self):
         choices = [
             {"nation": "ussr", "vehicle": "R11_MS-1", "tags": ()},
-            {"nation": "usa", "vehicle": "T23", "tags": ()},
+            {"nation": "ussr", "vehicle": "R09_T-26_bot",
+             "tags": ("lightTank", "secret", "unrecoverable")},
+            {"nation": "japan", "vehicle": "J30_Edelweiss",
+             "tags": ("mediumTank", "lockOutfit", "lockCrew",
+                      "unrecoverable")},
             {"nation": "germany",
              "vehicle": "G138_VK168_02_Mauerbrecher", "tags": ()},
             {"nation": "ussr", "vehicle": "R98_T44_85",
@@ -54,7 +58,7 @@ class BotLineupProfilesTests(unittest.TestCase):
         # A hidden entry with an honest level and name stays selectable; the
         # Bootcamp and Fallout copies of a real tank do not.
         self.assertEqual(
-            ["ussr:R11_MS-1", "ussr:R98_T44_85"],
+            ["ussr:R11_MS-1", "japan:J30_Edelweiss", "ussr:R98_T44_85"],
             [choice["type_name"] for choice in
              bot_lineup_profiles.eligible_vehicle_choices(choices)])
 

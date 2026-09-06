@@ -883,19 +883,23 @@ def _projectile_bounded_vector(value, lows, highs):
 def _bot_lineup_allowed_names(catalog):
     """Return catalog identities accepted by every Bot roster owner."""
     excluded_tags = {
-        "event_battles", "premiumIGR", "observer", "unrecoverable",
-        "fallout",
+        "event_battles", "premiumIGR", "observer", "fallout",
     }
     excluded_names = {
-        "usa:T23", "germany:G138_VK168_02_Mauerbrecher",
+        "germany:G138_VK168_02_Mauerbrecher",
     }
+    # ``secret`` also hides honest tanks, so it withholds an entry only when
+    # stock marks it a tutorial copy or a helper by its item_defs name.
+    hidden_names = {"germany:Env_Artillery"}
+    hidden_suffixes = ("_bootcamp", "_bot", "_training")
     return set(
         row.get("name") for row in (catalog or ())
         if isinstance(row, dict) and row.get("name") and
         not excluded_tags.intersection(row.get("tags") or ()) and
         row.get("name") not in excluded_names and
         not ("secret" in (row.get("tags") or ()) and
-             row.get("name").endswith("_bootcamp")))
+             (row.get("name") in hidden_names or
+              row.get("name").endswith(hidden_suffixes))))
 
 
 def _bounded_vector(value, lows, highs):

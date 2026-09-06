@@ -304,23 +304,29 @@ class BotLineupIntegrationTests(unittest.TestCase):
     _EXCLUSION_CASES = (
         ('ussr:R11_MS-1', ('lightTank',), True),
         ('ussr:R99_SecretTank', ('mediumTank', 'secret'), True),
+        # The two #1513 tanks stock sells but never lets a player buy back.
+        ('japan:J29_Nameless',
+         ('heavyTank', 'lockOutfit', 'lockCrew', 'unrecoverable'), True),
+        ('japan:J30_Edelweiss',
+         ('mediumTank', 'lockOutfit', 'lockCrew', 'unrecoverable'), True),
+        # A retired tank keeps an honest name and level while it is hidden.
+        ('usa:A08_T23', ('mediumTank', 'secret', 'unrecoverable'), True),
         ('ussr:R07_T-34-85_bootcamp', ('mediumTank', 'secret'), False),
         ('ussr:R45_IS-7_fallout', ('heavyTank', 'fallout', 'secret'), False),
         ('ussr:R07_T-34-85_training',
          ('mediumTank', 'secret', 'unrecoverable'), False),
+        ('ussr:R09_T-26_bot', ('lightTank', 'secret', 'unrecoverable'), False),
         ('germany:Env_Artillery', ('SPG', 'secret', 'unrecoverable'), False),
         ('germany:G01_Maus_IGR', ('heavyTank', 'premiumIGR', 'secret'), False),
         ('ussr:EventTank', ('mediumTank', 'event_battles'), False),
         ('ussr:Observer', ('lightTank', 'observer'), False),
-        ('usa:T23', ('mediumTank',), False),
         ('germany:G138_VK168_02_Mauerbrecher', ('heavyTank',), False),
     )
 
     @staticmethod
     def _launcher_admits(name, tags):
         """Reproduce the composed launcher decision for one vehicle."""
-        if (vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS.intersection(tags) or
-                name in vehicle_overlays._NON_EDITABLE_VEHICLES):
+        if not vehicle_overlays._vehicle_is_selectable(name, tags):
             return False
         nation, vehicle = name.split(':', 1)
         return bool(bot_lineup_profiles.eligible_vehicle_choices([{
@@ -332,11 +338,14 @@ class BotLineupIntegrationTests(unittest.TestCase):
             frozenset(vehicle_configuration.NON_STANDARD_BATTLE_TAGS),
             frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
         self.assertEqual(
-            frozenset(vehicle_configuration.NON_STANDARD_BATTLE_NAMES),
-            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
-        self.assertEqual(
             tuple(vehicle_configuration.CLONE_NAME_SUFFIXES),
             tuple(bot_lineup_profiles.CLONE_BOT_VEHICLE_SUFFIXES_0922))
+        self.assertEqual(
+            tuple(vehicle_configuration.NON_BATTLE_ENTITY_SUFFIXES),
+            tuple(bot_lineup_profiles.NON_BATTLE_ENTITY_BOT_SUFFIXES_0922))
+        self.assertEqual(
+            frozenset(vehicle_configuration.NON_BATTLE_ENTITY_NAMES),
+            frozenset(bot_lineup_profiles.NON_BATTLE_ENTITY_BOT_VEHICLES_0922))
         self.assertEqual(
             vehicle_configuration.CATALOGUE_VISIBILITY_TAG,
             bot_lineup_profiles.CATALOGUE_VISIBILITY_TAG_0922)
@@ -347,7 +356,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
             frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
         self.assertLessEqual(
             frozenset(vehicle_overlays._NON_EDITABLE_VEHICLES),
-            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
+            frozenset(bot_lineup_profiles.NON_BATTLE_ENTITY_BOT_VEHICLES_0922))
+        self.assertLessEqual(
+            frozenset(vehicle_overlays._NON_EDITABLE_VEHICLE_SUFFIXES),
+            frozenset(bot_lineup_profiles.NON_BATTLE_ENTITY_BOT_SUFFIXES_0922))
 
         for name, tags, expected in self._EXCLUSION_CASES:
             entry = types.SimpleNamespace(name=name, level=5, tags=tags)
@@ -361,6 +373,38 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 'name': name, 'level': 5, 'tags': list(tags),
             }])
             self.assertEqual(admitted, name in server_names, name)
+
+    def test_the_helper_rule_withholds_nothing_without_the_secret_tag(self):
+        # ``secret`` is what separates a stock placeholder from a shipped
+        # tank whose item_defs name happens to end the same way, so every
+        # authority must require the tag before it withholds an entry.
+        for name in ('ussr:R09_T-26_bot', 'ussr:R07_T-34-85_training',
+                     'germany:Env_Artillery'):
+            self.assertTrue(vehicle_configuration.is_non_battle_entity(
+                name, ('lightTank', 'secret')), name)
+            self.assertFalse(vehicle_configuration.is_non_battle_entity(
+                name, ('lightTank',)), name)
+            nation, vehicle = name.split(':', 1)
+            for tags, expected in ((('lightTank', 'secret'), False),
+                                   (('lightTank',), True)):
+                entry = types.SimpleNamespace(name=name, level=2, tags=tags)
+                self.assertEqual(
+                    expected,
+                    vehicle_configuration.is_standard_battle_vehicle(entry),
+                    name)
+                self.assertEqual(
+                    expected,
+                    bot_lineup_profiles.vehicle_choice_is_eligible({
+                        'nation': nation, 'vehicle': vehicle,
+                        'tags': list(tags)}),
+                    name)
+                self.assertEqual(
+                    expected,
+                    name in server_runtime._bot_lineup_allowed_names([{
+                        'name': name, 'level': 2, 'tags': list(tags)}]),
+                    name)
+                self.assertEqual(
+                    expected, self._launcher_admits(name, tags), name)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{

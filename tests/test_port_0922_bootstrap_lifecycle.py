@@ -250,14 +250,16 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 part.guns = guns
             return part
 
-        def make_descriptor(nation_id, vehicle_type_id, base, tags=()):
+        def make_descriptor(nation_id, vehicle_type_id, base, tags=(),
+                            name=None):
             # Two entries per slot, stock first, exactly as #1513 orders them.
             guns = [_part(base + 4, 3), _part(base + 14, 6)]
             turrets = [[_part(base + 3, 2, guns[:1]),
                         _part(base + 13, 5, guns)]]
             vehicle_type = types.SimpleNamespace(
                 id=(nation_id, vehicle_type_id),
-                name='nation-%d:vehicle-%d' % (nation_id, vehicle_type_id),
+                name=name or 'nation-%d:vehicle-%d' % (
+                    nation_id, vehicle_type_id),
                 crewRoles=(('commander',), ('driver',)),
                 tags=frozenset(tags),
                 chassis=[_part(base + 2, 2), _part(base + 12, 5)],
@@ -321,8 +323,11 @@ class BootstrapLifecycleTests(unittest.TestCase):
             (2, 1): make_descriptor(2, 1, 7000, ('event_battles',)),
             (2, 2): make_descriptor(2, 2, 8000, ('premiumIGR',)),
             (2, 3): make_descriptor(2, 3, 9000, ('observer',)),
-            (2, 4): make_descriptor(2, 4, 10000, ('SPG', 'secret',
-                                                   'unrecoverable')),
+            # #1513 hides the artillery strike emitter with ``secret`` and
+            # this item_defs name; its shell has no renderable projectile.
+            (2, 4): make_descriptor(
+                2, 4, 10000, ('SPG', 'secret', 'unrecoverable'),
+                name='germany:Env_Artillery'),
         }
         delattr(descriptors[(1, 9)], 'gun')
         descriptors[(1, 9)].type.turrets = [[]]
