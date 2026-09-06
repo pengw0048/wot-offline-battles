@@ -4748,6 +4748,10 @@ def _fell_trees_near(
 	import AreaDestructibles
 	import BigWorld
 	import Math
+	# An event whose LAN admission was refused stays frozen and pending. Drain
+	# that backlog before proving more native destruction, so a publication the
+	# transport could not take is retried instead of lost.
+	_retry_catalog_publications_1513()
 	try:
 		mgr = getattr(AreaDestructibles, 'g_destructiblesManager', None)
 		if not mgr:
@@ -5324,11 +5328,12 @@ def _fell_trees_near(
 					if (_ttyp == AreaDestructibles.DESTR_TYPE_TREE and
 							_key in _st['publish_pending']):
 						_object_pos = Math.Vector3(_tx, _ty, _tz)
-						if not _publish_tree_once_1513(
-								_st, spaceID, (cid, _ti, None), _object_pos,
-								yaw if vel >= 0 else yaw + math.pi, vel):
-							raise RuntimeError(
-								'tree proximity event was not admitted')
+						# Still refused: the frozen payload stays pending for
+						# the next scan. Transport backpressure is local to
+						# this one event and must not end the battle.
+						_publish_tree_once_1513(
+							_st, spaceID, (cid, _ti, None), _object_pos,
+							yaw if vel >= 0 else yaw + math.pi, vel)
 					continue
 				fall_yaw = yaw if vel >= 0 else (yaw + math.pi)
 				_auth = _get_destr_authority()
@@ -5362,14 +5367,16 @@ def _fell_trees_near(
 						'native proximity destroy was not accepted: '
 						'chunk=%s item=%s' % (cid, _ti))
 				_st['felled'].add(_key)
+				# The native item is already destroyed here, so its canonical
+				# event must still reach the server. A refused publication is
+				# kept frozen and retried on a later scan; raising would end
+				# the round over one unsent destructible.
 				if _ttyp == AreaDestructibles.DESTR_TYPE_TREE:
-					if not _publish_tree_once_1513(
-							_st, spaceID, (cid, _ti, None), _object_pos,
-							fall_yaw, vel):
-						raise RuntimeError(
-							'tree proximity event was not admitted')
+					_publish_tree_once_1513(
+						_st, spaceID, (cid, _ti, None), _object_pos,
+						fall_yaw, vel)
 				else:
-					_publish_destroyed(
+					_publish_catalog_once_1513(
 						('fragile'
 						 if _ttyp == AreaDestructibles.DESTR_TYPE_FRAGILE
 						 else 'module' if _ttyp == structure_type
