@@ -118,6 +118,73 @@ class TrafficTests(unittest.TestCase):
             self.assertEqual(own['yaw'], result['target_yaw'])
         self.assertEqual(before, (first, second))
 
+    def test_blocked_head_on_hold_releases_one_hull_instead_of_deadlocking(self):
+        """A passage narrower than the offset must not stop both hulls forever.
+
+        Neither footprint can separate laterally and neither centre can pass
+        the other while both are held, so the lease never clears. Exactly one
+        hull keeps waiting; the other returns to its own command and the
+        blockage is resolved by contact and ordinary recovery.
+        """
+        first, second = body(1, 0.0, 0.0, speed=0.0), body(2, 0.0, 7.5, math.pi, 0.0)
+        for own, other in ((first, second), (second, first)):
+            result = self.adjust(own, other, clear=False)
+            self.assertEqual((0.0, 0.0), (result['throttle'], result['turn']))
+        later = YIELD_SECONDS + 0.1
+        self.assertEqual(
+            command(first['yaw']),
+            self.adjust(first, second, later, clear=False))
+        held = self.adjust(second, first, later, clear=False)
+        self.assertEqual(0.0, held['throttle'])
+        self.assertEqual('head_on_blocked', held['traffic_mode'])
+
+    def test_reopened_head_on_swing_restores_the_full_hold(self):
+        """Room to swing is a new situation, not a spent hold."""
+        first, second = body(1, 0.0, 0.0, speed=0.0), body(2, 0.0, 7.5, math.pi, 0.0)
+        self.adjust(first, second, clear=False)
+        opened = self.adjust(first, second, YIELD_SECONDS + 0.1, clear=True)
+        self.assertEqual('head_on', opened['traffic_mode'])
+        blocked = self.adjust(first, second, YIELD_SECONDS + 0.2, clear=False)
+        self.assertEqual('head_on_blocked', blocked['traffic_mode'])
+
+    def _hold_then_meet(self, hold_first):
+        waiting = body(9, 0.0, -4.0)
+        if hold_first:
+            holder = body(1, -5.0, 0.0, math.pi / 2.0, speed=12.0)
+            self.assertEqual('yield',
+                             self.adjust(waiting, holder)['traffic_mode'])
+        waiting['velocity'] = (0.0, 0.0, 0.0)
+        later = body(2, -6.0, 0.0, math.pi / 2.0)
+        return (self.adjust(waiting, later, 0.2),
+                self.adjust(later, waiting, 0.2))
+
+    def test_hull_this_coordinator_holds_can_win_its_next_lease(self):
+        """The hull that already waited must not keep losing on zero speed.
+
+        Its measured speed is this coordinator's own doing, not a change of
+        route intent, so ranking it as never arriving made every following
+        lease it entered pick the other hull again.
+        """
+        waited, later = self._hold_then_meet(True)
+        self.assertEqual(command(), waited)
+        self.assertEqual(0.0, later['throttle'])
+        self.assertEqual('yield', later['traffic_mode'])
+
+    def test_a_hull_stopped_by_something_else_still_gives_way(self):
+        """Parked, in cover or deployed is not a claim on the junction."""
+        stationary, crossing = self._hold_then_meet(False)
+        self.assertEqual(0.0, stationary['throttle'])
+        self.assertEqual('yield', stationary['traffic_mode'])
+        self.assertEqual(command(math.pi / 2.0), crossing)
+
+    def test_two_moving_hulls_still_rank_on_their_own_speeds(self):
+        """The stopped-hull rule must not re-rank an ordinary crossing."""
+        near_slow = body(9, 0.0, -5.0, speed=2.0)
+        far_fast = body(1, -10.0, 0.0, math.pi / 2.0, 10.0)
+        self.assertEqual(command(far_fast['yaw']),
+                         self.adjust(far_fast, near_slow))
+        self.assertEqual(0.0, self.adjust(near_slow, far_fast)['throttle'])
+
     def test_real_shape_width_wins_over_generic_half_width(self):
         first, second = body(1, 0.0, 0.0, speed=0.0), body(2, 2.2, 7.5, math.pi, 0.0)
         first['shape'] = second['shape'] = (1.0, 3.5, -0.8, 2.0)

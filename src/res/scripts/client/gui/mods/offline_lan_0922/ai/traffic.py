@@ -91,13 +91,23 @@ def _intersection(first, second, first_axis, second_axis):
             first_pos[1] + first_axis[1] * distance)
 
 
-def _arrival(body, axis, speed, gate):
+def _arrival(body, axis, speed, gate, reference=0.0):
+    """Rank one body's arrival at the shared crossing point.
+
+    ``reference`` is the pair's pace, supplied only for a hull this coordinator
+    is itself holding. Such a hull has no measured speed while its route intent
+    is unchanged, and ranking it as never arriving made it lose every following
+    lease it entered, so the hull that already waited kept waiting. Every other
+    stationary hull - parked, in cover, or deployed - still ranks as not
+    arriving, because nothing says it intends to enter the junction.
+    """
     position = _position(body)
     distance = _dot((gate[0] - position[0], gate[1] - position[1]), axis)
     front_distance = distance - _radius(body, axis)
     if front_distance <= 0.0:
         return (0, front_distance, body['id'])
-    return (1, front_distance / speed if speed > _EPSILON else float('inf'),
+    pace = speed if speed > _EPSILON else reference
+    return (1, front_distance / pace if pace > _EPSILON else float('inf'),
             body['id'])
 
 
@@ -111,11 +121,18 @@ class TrafficCoordinator(object):
 
     def __init__(self):
         self._pairs = {}
+        self._held = {}
 
     def forget(self, bot_id):
+        self._held.pop(bot_id, None)
         for pair in list(self._pairs):
             if bot_id in pair:
                 del self._pairs[pair]
+
+    def _holding(self, body, now):
+        """Report whether this coordinator is the reason a hull is stopped."""
+        since = self._held.get(body['id'])
+        return since is not None and now - since <= YIELD_SECONDS
 
     def _begin(self, first, second, now):
         # A neighbour reversing out of a blockage is not an oncoming route
@@ -150,10 +167,14 @@ class TrafficCoordinator(object):
         gate = _intersection(first, second, first_axis, second_axis)
         if gate is None:
             return None
-        ranked = sorted(((_arrival(first, first_axis, first_speed, gate),
-                          first, first_axis, second),
-                         (_arrival(second, second_axis, second_speed, gate),
-                          second, second_axis, first)), key=lambda value: value[0])
+        pace = max(first_speed, second_speed)
+        ranked = sorted(
+            ((_arrival(first, first_axis, first_speed, gate,
+                       pace if self._holding(first, now) else 0.0),
+              first, first_axis, second),
+             (_arrival(second, second_axis, second_speed, gate,
+                       pace if self._holding(second, now) else 0.0),
+              second, second_axis, first)), key=lambda value: value[0])
         unused_rank, winner, axis, loser = ranked[0]
         return {'mode': 'yield', 'winner': winner['id'], 'axis': axis,
                 'clear_after': _dot(gate, axis) + _radius(winner, axis) +
@@ -205,6 +226,7 @@ class TrafficCoordinator(object):
             if lease['mode'] == 'yield':
                 if bot_id != lease['winner'] and now < lease['until']:
                     result.update(throttle=0.0, turn=0.0, traffic_mode='yield')
+                    self._held[bot_id] = now
                 continue
             if result.get('traffic_mode') == 'yield':
                 continue
@@ -214,9 +236,24 @@ class TrafficCoordinator(object):
             except Exception:
                 clear = False
             if not clear:
+                # A passage narrower than the offset blocks both hulls' swing.
+                # Holding both of them for as long as the lease exists is a
+                # deadlock: neither footprint can separate laterally and
+                # neither centre can pass the other, so nothing ever clears
+                # the lease. Hold the pair only long enough to keep it from
+                # steering into the wall, then keep exactly one hull waiting
+                # and return the other to its own command, so the blockage is
+                # resolved by physical contact and ordinary recovery.
+                if lease.get('blocked_until') is None:
+                    lease['blocked_until'] = now + YIELD_SECONDS
+                if (now >= lease['blocked_until'] and
+                        bot_id != max(lease['targets'])):
+                    continue
                 result.update(throttle=0.0, turn=0.0, target_yaw=body['yaw'],
                               traffic_mode='head_on_blocked')
+                self._held[bot_id] = now
                 continue
+            lease['blocked_until'] = None
             delta = (target - body['yaw'] + math.pi) % (2.0 * math.pi) - math.pi
             result.update(turn=max(-1.0, min(1.0, delta / 0.58)),
                           target_yaw=target, traffic_mode='head_on')

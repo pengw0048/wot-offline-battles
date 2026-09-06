@@ -577,10 +577,24 @@ class LocalDriver(object):
 			# Reverse recovery is an explicit reverse command. The traverse law flips
 			# steering from that command immediately, not from signed velocity.
 			recovery_turn = -direction
+			recovery_target = recovery_yaw
+			# Steering while reversing rotates the hull through the recovery offset,
+			# so the rear sweeps every heading between the straight reverse and its
+			# mirrored offset. In a gateway or alley narrower than that arc the
+			# manoeuvre parks the hull across the passage and blocks the whole
+			# column behind it. Keep the escape and drop the turn.
+			for fraction in RECOVERY_SWEEP_FRACTIONS:
+				if not self._clear(
+						direction_clear,
+						float(yaw) + math.pi +
+						direction * RECOVERY_YAW_OFFSET * fraction):
+					recovery_turn = 0.0
+					recovery_target = float(yaw)
+					break
 			return {
 				'throttle': -0.72,
 				'turn': recovery_turn,
-				'target_yaw': recovery_yaw,
+				'target_yaw': recovery_target,
 				'recovery_mode': 'reverse_turn',
 			}
 
