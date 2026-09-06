@@ -1489,6 +1489,7 @@ class BattleRuntime(object):
         self._optional_failures_reported = set()
         self._disabled_optional_features = set()
         self._team_chat_initialized = False
+        self._team_chat_waiting_reasons = set()
         self._avatar = None
         self._binding = None
         self._server = None
@@ -1842,6 +1843,7 @@ class BattleRuntime(object):
         self._optional_failures_reported = set()
         self._disabled_optional_features = set()
         self._team_chat_initialized = False
+        self._team_chat_waiting_reasons = set()
         self._sixth_sense = None
         self._has_sixth_sense = False
         self._has_expert = False
@@ -2718,29 +2720,50 @@ class BattleRuntime(object):
             return False
 
     def _start_team_chat_when_roster_ready(self):
-        """Start stock Chat2 only after its ArenaDP teammate guard passes."""
+        """Start stock Chat2 only after its ArenaDP teammate guard passes.
+
+        This runs every frame until it succeeds, and every way it can decline
+        is silent from inside a battle: the player simply types and nothing
+        happens. Each distinct reason is therefore reported once per round.
+        """
         if (self._worker_mode or self._team_chat_initialized or
                 self.state != 'running'):
             return False
         provider = getattr(self._avatar, 'guiSessionProvider', None)
         arena_getter = getattr(provider, 'getArenaDP', None)
         if not callable(arena_getter):
-            return False
+            return self._team_chat_waiting('no session provider')
         arena_dp = arena_getter()
         allies_getter = getattr(arena_dp, 'getAlliesVehiclesNumber', None)
         if not callable(allies_getter):
-            return False
+            return self._team_chat_waiting('no arena roster reader')
         try:
-            has_teammate = int(allies_getter()) > 1
-        except (TypeError, ValueError, OverflowError, ReferenceError):
-            return False
-        if not has_teammate:
-            return False
+            allies = int(allies_getter())
+        except (TypeError, ValueError, OverflowError, ReferenceError) as error:
+            return self._team_chat_waiting('roster unreadable: %s' % error)
+        if allies <= 1:
+            return self._team_chat_waiting('only %d ally in the roster'
+                                           % allies)
         started = self._run_optional_feature(
             'team chat initialization', self._server.start_team_chat)
         if started:
             self._team_chat_initialized = True
-        return bool(started)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] team chat armed with %d allies\n'
+                % allies)
+            return True
+        return self._team_chat_waiting('stock channels refused to start')
+
+    def _team_chat_waiting(self, reason):
+        """Report one distinct reason chat is not armed yet, once."""
+        seen = getattr(self, '_team_chat_waiting_reasons', None)
+        if seen is None:
+            seen = self._team_chat_waiting_reasons = set()
+        if reason not in seen:
+            seen.add(reason)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] team chat not armed yet: %s\n' % reason)
+        return False
 
     def _disable_standard_space_visibility(self):
         self._standard_space_visibility = None
