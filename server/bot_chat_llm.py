@@ -58,6 +58,9 @@ CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 # A bracketed run of Latin characters, which is what a mistyped marker
 # leaves behind. Chinese chat does not use ASCII brackets.
 _LEFTOVER_MARKER = re.compile(r"\[[\x20-\x7e]{0,16}\]")
+# Where the generator's own output is kept, beside its executable.
+RUNTIME_LOG_NAME = "llama-server.log"
+OUTPUT_TAIL_BYTES = 8192
 PENDING_LIMIT = 24
 RESULT_LIMIT = 48
 
@@ -119,14 +122,20 @@ class LlamaServerSupervisor(object):
     """Own one hidden ``llama-server`` child process."""
 
     def __init__(self, executable, model_path, port=None, threads=None,
-                 context_tokens=CONTEXT_TOKENS, log=None):
+                 context_tokens=CONTEXT_TOKENS, log=None, output_path=None):
         self.executable = str(executable)
         self.model_path = str(model_path)
         self.port = int(port) if port else None
         self.threads = (int(threads) if threads else inference_threads())
         self.context_tokens = int(context_tokens)
         self._log = log or (lambda message: None)
+        # A generator that dies during startup says why on its own output.
+        # Discarding that leaves "it exited" as the entire diagnosis, which
+        # is not a diagnosis.
+        self.output_path = output_path or os.path.join(
+            os.path.dirname(self.executable) or ".", RUNTIME_LOG_NAME)
         self._process = None
+        self._output = None
         self._ready = False
 
     @property
@@ -159,19 +168,52 @@ class LlamaServerSupervisor(object):
             "--reasoning-budget", REASONING_BUDGET,
         ]
         try:
+            self._output = open(self.output_path, "wb")
+        except OSError:
+            self._output = None
+        try:
             self._process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._output or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if self._output
+                else subprocess.DEVNULL,
                 creationflags=_no_window_flags())
         except OSError as error:
             self._log("BOT CHAT runtime failed to start: %s" % (error,))
+            self._close_output()
             self._process = None
             return False
-        self._log("BOT CHAT runtime started on port %d with %d threads"
-                  % (self.port, self.threads))
+        self._log("BOT CHAT runtime started on port %d with %d threads: %s"
+                  % (self.port, self.threads, " ".join(command)))
         return True
+
+    def _close_output(self):
+        output, self._output = self._output, None
+        if output is not None:
+            try:
+                output.close()
+            except OSError:
+                pass
+
+    def output_tail(self, lines=12):
+        """Return the generator's last words, for a failure report."""
+        try:
+            with open(self.output_path, "rb") as stream:
+                text = stream.read()[-OUTPUT_TAIL_BYTES:]
+        except OSError:
+            return ""
+        decoded = text.decode("utf-8", "replace").replace("\r", "")
+        kept = [line for line in decoded.split("\n") if line.strip()]
+        return " | ".join(kept[-lines:])
+
+    def _report_exit(self, reason):
+        """Log why the generator stopped, with whatever it said about it."""
+        code = self.poll()
+        tail = self.output_tail()
+        self._log("BOT CHAT runtime %s (exit=%s): %s" % (
+            reason, "?" if code is None else code,
+            tail or "it wrote nothing; see %s" % self.output_path))
 
     def poll(self):
         """Return the child's exit code, or None while it is running."""
@@ -189,13 +231,14 @@ class LlamaServerSupervisor(object):
         deadline = clock() + float(timeout)
         while clock() < deadline:
             if self._process is not None and self._process.poll() is not None:
-                self._log("BOT CHAT runtime exited during startup")
+                self._close_output()
+                self._report_exit("exited during startup")
                 return False
             if self._health():
                 self._ready = True
                 return True
             sleep(HEALTH_INTERVAL_SECONDS)
-        self._log("BOT CHAT runtime did not become ready")
+        self._report_exit("did not become ready")
         return False
 
     def is_ready(self):
@@ -219,6 +262,7 @@ class LlamaServerSupervisor(object):
         self._process = None
         self._ready = False
         if process is None or process.poll() is not None:
+            self._close_output()
             return
         try:
             process.terminate()
@@ -229,6 +273,8 @@ class LlamaServerSupervisor(object):
                 process.wait(timeout=5.0)
         except OSError as error:
             self._log("BOT CHAT runtime failed to stop: %s" % (error,))
+        finally:
+            self._close_output()
 
 
 def build_messages(request):

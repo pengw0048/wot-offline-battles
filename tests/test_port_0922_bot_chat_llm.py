@@ -558,6 +558,64 @@ class SupervisorTest(unittest.TestCase):
             bot_chat_llm.REASONING_BUDGET,
             command[command.index('--reasoning-budget') + 1])
 
+    def test_a_generator_that_dies_reports_its_own_last_words(self):
+        # Discarding the child's output left "it exited" as the entire
+        # diagnosis of a failed install, which is not a diagnosis.
+        directory = tempfile.mkdtemp()
+        model = os.path.join(directory, 'model.gguf')
+        launcher = os.path.join(directory, 'llama-server')
+        with open(model, 'wb') as stream:
+            stream.write(b'GGUF')
+        with open(launcher, 'w', encoding='utf-8') as stream:
+            stream.write('#!/bin/sh\n'
+                         'echo "error: invalid argument: --nonsense" >&2\n'
+                         'exit 1\n')
+        os.chmod(launcher, 0o755)
+        messages = []
+        supervisor = LlamaServerSupervisor(
+            launcher, model, port=1, threads=1, log=messages.append)
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(supervisor.start())
+        self.assertFalse(supervisor.wait_ready(timeout=10.0))
+        reported = ' '.join(messages)
+        self.assertIn('invalid argument: --nonsense', reported)
+        self.assertIn('exit=1', reported)
+
+    def test_the_command_line_is_logged_when_it_starts(self):
+        directory = tempfile.mkdtemp()
+        model = os.path.join(directory, 'model.gguf')
+        launcher = os.path.join(directory, 'llama-server')
+        for path, payload in ((model, b'GGUF'), (launcher, b'#!/bin/sh\nexit 0\n')):
+            with open(path, 'wb') as stream:
+                stream.write(payload)
+        os.chmod(launcher, 0o755)
+        messages = []
+        supervisor = LlamaServerSupervisor(
+            launcher, model, port=1, threads=3, log=messages.append)
+        self.addCleanup(supervisor.stop)
+        supervisor.start()
+        started = ' '.join(messages)
+        self.assertIn('--reasoning-budget', started)
+        self.assertIn(model, started)
+
+    def test_a_silent_death_still_names_the_log_to_read(self):
+        directory = tempfile.mkdtemp()
+        model = os.path.join(directory, 'model.gguf')
+        launcher = os.path.join(directory, 'llama-server')
+        for path, payload in ((model, b'GGUF'), (launcher, b'#!/bin/sh\nexit 3\n')):
+            with open(path, 'wb') as stream:
+                stream.write(payload)
+        os.chmod(launcher, 0o755)
+        messages = []
+        supervisor = LlamaServerSupervisor(
+            launcher, model, port=1, threads=1, log=messages.append)
+        self.addCleanup(supervisor.stop)
+        supervisor.start()
+        supervisor.wait_ready(timeout=10.0)
+        reported = ' '.join(messages)
+        self.assertIn('exit=3', reported)
+        self.assertIn(supervisor.output_path, reported)
+
     def test_a_missing_download_reports_rather_than_launching(self):
         messages = []
         supervisor = LlamaServerSupervisor(

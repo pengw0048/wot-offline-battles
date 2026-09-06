@@ -78,6 +78,18 @@ def resolved_paths(catalogue, tier_key, base_dir=None, runtime_override=""):
     return {"runtime": runtime, "model": model}
 
 
+def _with_reason(message, supervisor):
+    """Append the generator's own last words to a failure message."""
+    tail = ""
+    reader = getattr(supervisor, "output_tail", None)
+    if callable(reader):
+        try:
+            tail = reader()
+        except Exception:
+            tail = ""
+    return "%s (%s)" % (message, tail) if tail else message
+
+
 def install_plan(catalogue, tier_key, arch, base_dir=None,
                  runtime_override=""):
     """Describe what still has to be downloaded before a room can talk."""
@@ -307,7 +319,11 @@ class BotChatPanel(object):
             if not supervisor.start():
                 raise RuntimeError("the inference program did not start")
             if not supervisor.wait_ready(timeout=CHECK_TIMEOUT_SECONDS):
-                raise RuntimeError("the model did not finish loading")
+                # Whatever the generator printed before dying is the only
+                # thing that explains this, so it goes in front of the
+                # player rather than only into a log file.
+                raise RuntimeError(_with_reason(
+                    "the model did not finish loading", supervisor))
             backend = runtime.LlamaChatBackend(supervisor.endpoint,
                                                log=self._log)
             backend.start()

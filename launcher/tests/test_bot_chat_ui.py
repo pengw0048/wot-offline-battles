@@ -409,11 +409,15 @@ class ProgressReportingTest(_Temp):
 
 
 class _FakeSupervisor(object):
-    def __init__(self, started=True, ready=True):
+    def __init__(self, started=True, ready=True, tail=""):
         self.started = started
         self.ready = ready
+        self.tail = tail
         self.stopped = False
         self.endpoint = "http://127.0.0.1:1"
+
+    def output_tail(self, lines=12):
+        return self.tail
 
     def start(self):
         return self.started
@@ -510,6 +514,21 @@ class SelfTestTest(_Temp):
         panel.start_check(runtime=runtime)
         self.assertTrue(_await(lambda: not panel.busy()))
         self.assertTrue(runtime.supervisor.stopped)
+
+    def test_a_failed_load_quotes_what_the_generator_said(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(supervisor=_FakeSupervisor(
+            ready=False, tail='error: invalid argument: --reasoning-budget'))
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertIn('--reasoning-budget', panel.check_error())
+
+    def test_a_silent_generator_still_names_the_step_that_failed(self):
+        panel = self._installed()
+        runtime = _FakeRuntime(supervisor=_FakeSupervisor(ready=False))
+        panel.start_check(runtime=runtime)
+        self.assertTrue(_await(lambda: not panel.busy()))
+        self.assertIn('finish loading', panel.check_error())
 
     def test_removing_clears_a_test_result(self):
         panel = self._installed()
