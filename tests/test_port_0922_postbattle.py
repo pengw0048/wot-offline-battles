@@ -293,20 +293,21 @@ class PostBattleContractTests(unittest.TestCase):
             self.assertEqual(1, restarted.progress()['battles'])
             self.assertTrue(restarted.acknowledge(receipt['arena_unique_id']))
             self.assertEqual([], restarted.pending_arenas())
-            final = postbattle_store.PostBattleStore(path=path)
-            self.assertEqual(1, final.progress()['battles'])
+            # An acknowledged result stays re-openable for the rest of this
+            # session: #1513 confirms with 1501 as soon as it has cached the
+            # result, and the notification list can request 1500 again.
             self.assertEqual(receipt['arena_unique_id'],
-                             final.latest_archived_arena())
+                             restarted.latest_archived_arena())
             original_vehicle = postbattle_store._vehicle_type_compact_descr
             original_arena = postbattle_store._arena_type_id
             try:
                 postbattle_store._vehicle_type_compact_descr = (
                     lambda unused: 50001)
                 postbattle_store._arena_type_id = lambda unused: 70001
-                self.assertIsNotNone(final.result(
+                self.assertIsNotNone(restarted.result(
                     receipt['arena_unique_id'], packers=_Packers(),
                     replay_types=(_Replay, _ReplayConnector)))
-                service_data = final.service_message_data(
+                service_data = restarted.service_message_data(
                     receipt['arena_unique_id'])
                 self.assertEqual({
                     'arenaTypeID', 'arenaCreateTime', 'playerVehicles',
@@ -321,8 +322,89 @@ class PostBattleContractTests(unittest.TestCase):
             finally:
                 postbattle_store._vehicle_type_compact_descr = original_vehicle
                 postbattle_store._arena_type_id = original_arena
-            self.assertTrue(final.acknowledge(receipt['arena_unique_id']))
-            self.assertFalse(final.accept(receipt))
+            self.assertTrue(restarted.acknowledge(receipt['arena_unique_id']))
+            self.assertFalse(restarted.accept(receipt))
+
+    def test_an_acknowledged_result_is_not_replayed_after_a_restart(self):
+        """Only an unacknowledged receipt is persisted in full.
+
+        Re-opening an old result after a restart is deliberately not
+        supported, so an archived row keeps its identity and drops its body.
+        Applying it twice would double the credits, so the identity has to be
+        durable, and the progress it produced has to survive too.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            receipt = _receipt(store.account_key)
+            self.assertTrue(store.accept(receipt))
+            self.assertTrue(store.acknowledge(receipt['arena_unique_id']))
+            settled = store.progress()
+
+            restarted = postbattle_store.PostBattleStore(path=path)
+
+            self.assertEqual(settled, restarted.progress())
+            self.assertEqual(1, restarted.progress()['battles'])
+            self.assertEqual(4200, restarted.progress()['credits'])
+            # The retried delivery an unlucky ACK produces is still applied
+            # exactly once, and the client still acknowledges it.
+            self.assertFalse(restarted.accept(receipt))
+            self.assertEqual(settled, restarted.progress())
+            # The body is gone, so nothing claims to be replayable.
+            self.assertIsNone(restarted.latest_archived_arena())
+            self.assertIsNone(restarted.result(receipt['arena_unique_id']))
+            self.assertIsNone(restarted.service_message_data(
+                receipt['arena_unique_id']))
+            self.assertFalse(restarted.should_show_immediately(
+                receipt['arena_unique_id']))
+
+    def test_the_terminal_write_does_not_carry_the_archived_bodies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            for index in range(4):
+                row = _receipt(store.account_key)
+                row['receipt_id'] = 'server:%d:1' % (200 + index)
+                row['arena_unique_id'] = ((200 + index) << 32) | 1
+                self.assertTrue(store.accept(row))
+                self.assertTrue(store.acknowledge(row['arena_unique_id']))
+            live = _receipt(store.account_key)
+            live['receipt_id'] = 'server:300:1'
+            live['arena_unique_id'] = (300 << 32) | 1
+            self.assertTrue(store.accept(live))
+
+            saved = json.loads(Path(path).read_text(encoding='utf-8'))
+
+            self.assertEqual(
+                [{'receipt_id': 'server:%d:1' % (200 + index),
+                  'arena_unique_id': ((200 + index) << 32) | 1}
+                 for index in range(4)],
+                saved['history'])
+            # The unacknowledged receipt is the only body on disk, because
+            # losing it would lose the settlement itself.
+            self.assertEqual(1, len(saved['pending']))
+            self.assertEqual('server:300:1', saved['pending'][0]['receipt_id'])
+            self.assertIn('public_results', saved['pending'][0])
+
+    def test_an_older_full_bodied_archive_still_loads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            receipt = postbattle_store._receipt(_receipt(store.account_key))
+            legacy = {
+                'schema': postbattle_store.SCHEMA,
+                'accountKey': store.account_key,
+                'pending': [],
+                'history': [receipt],
+                'progress': postbattle_store.PostBattleStore._empty_progress(),
+            }
+            Path(path).write_text(json.dumps(legacy), encoding='utf-8')
+
+            reloaded = postbattle_store.PostBattleStore(path=path)
+
+            self.assertEqual(receipt['arena_unique_id'],
+                             reloaded.latest_archived_arena())
+            self.assertFalse(reloaded.accept(_receipt(store.account_key)))
 
     def test_terminal_receipt_does_not_re_copy_the_archived_history(self):
         """The victory instant must not cost time per archived receipt.
