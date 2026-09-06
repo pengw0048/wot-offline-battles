@@ -701,6 +701,75 @@ class _VehicleDecal(object):
         self.hull_node.detach(self.decal)
 
 
+class _VehicleTraces(object):
+    """One assembled #1513 ``Vehicular.VehicleTraces`` component."""
+
+    def __init__(self, appearance, vehicle_filter, lod_state_link):
+        self.appearance = appearance
+        self.movementInfo = getattr(vehicle_filter, 'movementInfo', None)
+        self.lodStateLink = lod_state_link
+
+
+class _TracesAssembler(object):
+    """Reproduce exact #1513 ``model_assembler.assembleVehicleTraces``.
+
+    Stock builds a fresh component, feeds it the chassis trace textures, the
+    compound, the flying links, the LOD link and the filter's movement info,
+    and publishes it through the appearance's component descriptor last.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.error = None
+
+    def assembleVehicleTraces(self, appearance, vehicleFilter, lodStateLink):
+        self.calls.append((appearance, vehicleFilter, lodStateLink))
+        if self.error is not None:
+            raise self.error
+        appearance.vehicleTraces = _VehicleTraces(
+            appearance, vehicleFilter, lodStateLink)
+
+
+class _Appearance(types.SimpleNamespace):
+    """A compound appearance that owns components the way #1513 does.
+
+    ``svarog_script.py_component_system.ComponentDescriptor.__set__`` removes
+    the previous component from the native component system before it stores
+    a replacement, and adds a non-None one.  A fake that only rebound an
+    attribute could not tell a retired traces component from a live one.
+    """
+
+    def __init__(self, **fields):
+        self.components = []
+        self._traces = None
+        types.SimpleNamespace.__init__(self, **fields)
+
+    def addComponent(self, component, name=''):
+        self.components.append((name, component))
+
+    def removeComponent(self, component):
+        self.components = [entry for entry in self.components
+                           if entry[1] is not component]
+
+    @property
+    def vehicleTraces(self):
+        return self._traces
+
+    @vehicleTraces.setter
+    def vehicleTraces(self, value):
+        if self._traces is not None:
+            self.removeComponent(self._traces)
+        if value is not None:
+            self.addComponent(value, 'vehicleTraces')
+        self._traces = value
+
+
+# The client resolves ``vehicle_systems.model_assembler`` lazily, so a
+# pure-data test can pin the exact stock entry point to a recording fake.
+_TRACES_ASSEMBLER = _TracesAssembler()
+remote_vehicle_module._stock_traces_assembler = _TRACES_ASSEMBLER
+
+
 class _Vehicle(object):
     def __init__(self, entity_id, descriptor, position, rotation, properties):
         self.id = entity_id
@@ -731,7 +800,7 @@ class _Vehicle(object):
         self.custom_effects = _CustomEffectManager()
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_DUST)
         self.custom_effects.enable(True, _CustomEffectManager.SETTING_EXHAUST)
-        self.appearance = types.SimpleNamespace(
+        self.appearance = _Appearance(
             compoundModel=self.model, turretMatrix=_Matrix(),
             gunMatrix=_Matrix(),
             highlighter=types.SimpleNamespace(enabled=False),
@@ -760,7 +829,18 @@ class _Vehicle(object):
         self.speed = 0.0
         self.filter = types.SimpleNamespace(
             longitudinalSpeed=0.0, angularSpeed=0.0,
+            movementInfo=object(),
             notifyInputKeysDown=mock.Mock())
+        # Exact #1513 assembles a traces component for every non-damaged
+        # vehicle and reads both of its rebuild inputs off the appearance.
+        self.appearance.filter = self.filter
+        self.appearance.damageState = types.SimpleNamespace(
+            isCurrentModelDamaged=False)
+        self.appearance.lodCalculator = types.SimpleNamespace(
+            lodStateLink=object())
+        self.appearance.vehicleTraces = _VehicleTraces(
+            self.appearance, self.filter,
+            self.appearance.lodCalculator.lodStateLink)
         self.ammo_bay_effects = []
         self.shows = []
         self.draw_pass_visible = True
@@ -22435,6 +22515,108 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([], vehicle.custom_effects.running())
         self.assertTrue(set_draw_visibility(vehicle, True))
         self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+
+    def test_hidden_remote_retires_its_ground_track_marks(self):
+        """An unspotted enemy must not print track marks on the terrain.
+
+        Exact #1513 assembles a ``Vehicular.VehicleTraces`` component for
+        every non-damaged vehicle and drives it from ``filter.movementInfo``.
+        It reads no compound draw flag, so ``Vehicle.show(False)`` and
+        ``changeVisibility(False)`` left a hidden tank drawing a trail of
+        track marks - the leak Peng saw from the SPG strategic camera, which
+        looks straight down at ground he is not allowed to see.
+        """
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        assembled = appearance.vehicleTraces
+        self.assertIsNotNone(assembled)
+        self.assertEqual(
+            [('vehicleTraces', assembled)], appearance.components)
+        del _TRACES_ASSEMBLER.calls[:]
+
+        self.assertTrue(set_draw_visibility(vehicle, False))
+
+        # Stock's own retire line: the descriptor removes the component from
+        # the native system, so nothing is left to print a mark.
+        self.assertIsNone(appearance.vehicleTraces)
+        self.assertEqual([], appearance.components)
+        self.assertEqual([], _TRACES_ASSEMBLER.calls)
+
+        # A repeated hide edge must not retire an already retired component.
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertIsNone(appearance.vehicleTraces)
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        restored = appearance.vehicleTraces
+        self.assertIsNotNone(restored)
+        self.assertIsNot(assembled, restored)
+        self.assertEqual(
+            [('vehicleTraces', restored)], appearance.components)
+        # Reveal runs the exact stock assembly call with the two inputs
+        # ``vehicle_assembler._assembleParts`` reads off the appearance.
+        self.assertEqual(1, len(_TRACES_ASSEMBLER.calls))
+        rebuilt_appearance, rebuilt_filter, rebuilt_lod = (
+            _TRACES_ASSEMBLER.calls[0])
+        self.assertIs(appearance, rebuilt_appearance)
+        self.assertIs(appearance.filter, rebuilt_filter)
+        self.assertIs(appearance.lodCalculator.lodStateLink, rebuilt_lod)
+
+        # A repeated reveal must not build a second component.
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertEqual(1, len(_TRACES_ASSEMBLER.calls))
+        self.assertIs(restored, appearance.vehicleTraces)
+
+    def test_revealed_wreck_keeps_the_stock_absence_of_track_marks(self):
+        """A destroyed vehicle stays drawn but owns no traces component.
+
+        ``_set_record_spot_visibility`` keeps a wreck enabled for the stock
+        renderer, so the reveal edge fires for it.  Exact #1513
+        ``CompoundAppearance.__prepareSystemsForDamagedVehicle`` retires
+        ``vehicleTraces`` when the model becomes damaged and
+        ``vehicle_assembler`` never assembles one for a damaged model, so
+        this port must not invent one either.
+        """
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        self.assertIsNone(appearance.vehicleTraces)
+        appearance.damageState.isCurrentModelDamaged = True
+        del _TRACES_ASSEMBLER.calls[:]
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+
+        self.assertTrue(vehicle.model.visible)
+        self.assertIsNone(appearance.vehicleTraces)
+        self.assertEqual([], _TRACES_ASSEMBLER.calls)
+
+    def test_failed_track_mark_rebuild_stays_local_to_that_appearance(self):
+        """A traces rebuild failure must not break the visibility edge."""
+        vehicle = _Vehicle(
+            1000, _Descriptor(), _Vector(), (0.0, 0.0, 0.0),
+            {'health': 500, 'publicInfo': {'team': 2}})
+        appearance = vehicle.appearance
+        self.assertTrue(set_draw_visibility(vehicle, False))
+        del _TRACES_ASSEMBLER.calls[:]
+        _TRACES_ASSEMBLER.error = RuntimeError('traces buffer is unavailable')
+        try:
+            self.assertTrue(set_draw_visibility(vehicle, True))
+        finally:
+            _TRACES_ASSEMBLER.error = None
+
+        # The rest of the reveal still ran, and the field stays empty so a
+        # later reveal can retry a fresh component.
+        self.assertTrue(vehicle.model.visible)
+        self.assertIn(vehicle.splodge, vehicle.hull_node.attachments)
+        self.assertIsNone(appearance.vehicleTraces)
+        self.assertEqual(1, len(_TRACES_ASSEMBLER.calls))
+
+        self.assertTrue(set_draw_visibility(vehicle, True))
+        self.assertIsNotNone(appearance.vehicleTraces)
 
     def test_ground_splodge_rebind_uses_only_the_current_model_generation(self):
         vehicle = _Vehicle(

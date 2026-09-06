@@ -44,9 +44,10 @@ def set_draw_visibility(entity, visible):
     # keeps drawing over a hidden tank.  Gate the attachments too.
     set_model_attachment_visibility(
         getattr(appearance, 'compoundModel', None), visible)
-    # That flag is one unproven native property.  Close the two stock owners
-    # it would have covered directly as well: the ground occlusion decals and
-    # the camera-distance dust/exhaust selectors.
+    # That flag is one unproven native property.  Close the stock owners it
+    # would have covered directly as well: the ground occlusion decals, the
+    # camera-distance dust/exhaust selectors and the terrain track marks,
+    # which are a separate component and no attachment at all.
     close_stock_presentation_extras(appearance, visible)
     return True
 
