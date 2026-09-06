@@ -15,6 +15,7 @@ for path in (LAUNCHER_ROOT, SERVER_ROOT, CLIENT_ROOT):
 
 import bot_lineup_profiles  # noqa: E402
 import bot_lineup_ui  # noqa: E402
+import vehicle_overlays  # noqa: E402
 import core as launcher_core  # noqa: E402
 import windows_server  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_blacklist  # noqa: E402
@@ -293,6 +294,37 @@ class BotLineupIntegrationTests(unittest.TestCase):
                 'tags': entries[key].tags,
             }))
 
+    # The launcher reaches its Bot roster through two filters: the editor's
+    # own ``selectable`` pass in vehicle_overlays.list_vehicle_choices, then
+    # bot_lineup_profiles.eligible_vehicle_choices.  The mod applies one.
+    # Comparing constants alone would not prove the composition matches, so
+    # this reproduces both effective predicates over the exact #1513 families.
+    _EXCLUSION_CASES = (
+        ('ussr:R11_MS-1', ('lightTank',), True),
+        ('ussr:R99_SecretTank', ('mediumTank', 'secret'), True),
+        ('ussr:R07_T-34-85_bootcamp', ('mediumTank', 'secret'), False),
+        ('ussr:R45_IS-7_fallout', ('heavyTank', 'fallout', 'secret'), False),
+        ('ussr:R07_T-34-85_training',
+         ('mediumTank', 'secret', 'unrecoverable'), False),
+        ('germany:Env_Artillery', ('SPG', 'secret', 'unrecoverable'), False),
+        ('germany:G01_Maus_IGR', ('heavyTank', 'premiumIGR', 'secret'), False),
+        ('ussr:EventTank', ('mediumTank', 'event_battles'), False),
+        ('ussr:Observer', ('lightTank', 'observer'), False),
+        ('usa:T23', ('mediumTank',), False),
+        ('germany:G138_VK168_02_Mauerbrecher', ('heavyTank',), False),
+    )
+
+    @staticmethod
+    def _launcher_admits(name, tags):
+        """Reproduce the composed launcher decision for one vehicle."""
+        if (vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS.intersection(tags) or
+                name in vehicle_overlays._NON_EDITABLE_VEHICLES):
+            return False
+        nation, vehicle = name.split(':', 1)
+        return bool(bot_lineup_profiles.eligible_vehicle_choices([{
+            'nation': nation, 'vehicle': vehicle, 'tags': list(tags),
+        }]))
+
     def test_launcher_bot_selector_shares_the_mod_exclusion_rule(self):
         self.assertEqual(
             frozenset(vehicle_configuration.NON_STANDARD_BATTLE_TAGS),
@@ -306,6 +338,23 @@ class BotLineupIntegrationTests(unittest.TestCase):
         self.assertEqual(
             vehicle_configuration.CATALOGUE_VISIBILITY_TAG,
             bot_lineup_profiles.CATALOGUE_VISIBILITY_TAG_0922)
+        # The editor pass may never be the stricter of the two, or the
+        # launcher would silently withhold a Bot the worker accepts.
+        self.assertLessEqual(
+            frozenset(vehicle_overlays._NON_EDITABLE_VEHICLE_TAGS),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
+        self.assertLessEqual(
+            frozenset(vehicle_overlays._NON_EDITABLE_VEHICLES),
+            frozenset(bot_lineup_profiles.NON_STANDARD_BOT_VEHICLES_0922))
+
+        for name, tags, expected in self._EXCLUSION_CASES:
+            entry = types.SimpleNamespace(name=name, level=5, tags=tags)
+            admitted = bool(
+                vehicle_configuration.is_standard_battle_vehicle(entry) and
+                not vehicle_blacklist.is_unusable(name))
+            self.assertEqual(expected, admitted, name)
+            self.assertEqual(
+                admitted, self._launcher_admits(name, tags), name)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{
