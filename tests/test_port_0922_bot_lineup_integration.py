@@ -17,6 +17,7 @@ import bot_lineup_profiles  # noqa: E402
 import bot_lineup_ui  # noqa: E402
 import vehicle_overlays  # noqa: E402
 import core as launcher_core  # noqa: E402
+import lan_battle_server as server_runtime  # noqa: E402
 import windows_server  # noqa: E402
 from gui.mods.offline_lan_0922 import vehicle_blacklist  # noqa: E402
 from gui.mods.offline_lan_0922 import descriptor_donation  # noqa: E402
@@ -296,9 +297,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
 
     # The launcher reaches its Bot roster through two filters: the editor's
     # own ``selectable`` pass in vehicle_overlays.list_vehicle_choices, then
-    # bot_lineup_profiles.eligible_vehicle_choices.  The mod applies one.
+    # bot_lineup_profiles.eligible_vehicle_choices.  The mod applies one and
+    # the server validates explicit choices against the donated catalogue.
     # Comparing constants alone would not prove the composition matches, so
-    # this reproduces both effective predicates over the exact #1513 families.
+    # this reproduces all three effective predicates over the exact families.
     _EXCLUSION_CASES = (
         ('ussr:R11_MS-1', ('lightTank',), True),
         ('ussr:R99_SecretTank', ('mediumTank', 'secret'), True),
@@ -325,7 +327,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
             'nation': nation, 'vehicle': vehicle, 'tags': list(tags),
         }]))
 
-    def test_launcher_bot_selector_shares_the_mod_exclusion_rule(self):
+    def test_launcher_and_server_share_the_mod_exclusion_rule(self):
         self.assertEqual(
             frozenset(vehicle_configuration.NON_STANDARD_BATTLE_TAGS),
             frozenset(bot_lineup_profiles.NON_STANDARD_BOT_TAGS_0922))
@@ -355,6 +357,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
             self.assertEqual(expected, admitted, name)
             self.assertEqual(
                 admitted, self._launcher_admits(name, tags), name)
+            server_names = server_runtime._bot_lineup_allowed_names([{
+                'name': name, 'level': 5, 'tags': list(tags),
+            }])
+            self.assertEqual(admitted, name in server_names, name)
 
     def test_missing_exact_vehicle_is_rejected_by_hidden_worker(self):
         lineup = [{
