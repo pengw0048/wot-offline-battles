@@ -10618,14 +10618,39 @@ class BattleRuntime(object):
         callback = getattr(self._avatar, 'onRoundFinished', None)
         if not callable(callback):
             raise RuntimeError('Avatar.onRoundFinished is unavailable')
+        winner = max(0, min(int(result.get('winner', 0)), 2))
         base_team = max(0, min(int(result.get('base_team', 0)), 2))
         if base_team in (1, 2):
             captured = getattr(self._avatar.arena, 'onTeamBaseCaptured', None)
             if callable(captured):
                 captured(base_team, 0)
-        callback(max(0, min(int(result.get('winner', 0)), 2)), reason)
+        # Retail ends the round by moving the arena to AFTERBATTLE, and every
+        # stock end-of-battle consumer reads that transition rather than
+        # ``Avatar.onRoundFinished``.  ``ArenaPeriodController`` stores the
+        # winner as ``BattleContext.lastArenaWinStatus``, which survives into
+        # the lobby and selects the battle-results music; the same publication
+        # latches ``MusicController.__lastBattleResultEventName`` from the
+        # arena's ``wwmusicSetup`` and stops the combat ambient.  Publish the
+        # period first so both owners hold the outcome before the notification
+        # runs.  The LAN round has no separate afterbattle server window, so
+        # the period carries no countdown, exactly as retail behaves once its
+        # own afterbattle window has elapsed.  A failure here is end-of-battle
+        # presentation only; it must never swallow the terminal notification
+        # or the result bookkeeping that follows it.
+        self._run_optional_feature(
+            'afterbattle arena period', self._publish_afterbattle_period,
+            (winner, reason))
+        callback(winner, reason)
         self._round_finished_notified = True
         self._report_memory('round_end')
+        return True
+
+    def _publish_afterbattle_period(self, winner, reason):
+        """Move the stock arena to AFTERBATTLE with the round's outcome."""
+        if self._binding is None:
+            raise RuntimeError('#1513 arena-period binding is unavailable')
+        self._binding.arena_period(
+            'afterbattle', winner_team=int(winner), finish_reason=int(reason))
         return True
 
     def _apply_rules(self, rules):

@@ -125,6 +125,7 @@ class BigWorldVehicleBinding(object):
             self._need(self._constants.ARENA_UPDATE, name)
         self._need(self._constants.ARENA_PERIOD, 'PREBATTLE')
         self._need(self._constants.ARENA_PERIOD, 'BATTLE')
+        self._need(self._constants.ARENA_PERIOD, 'AFTERBATTLE')
         self._need(self._constants.VEHICLE_PHYSICS_MODE, 'STANDARD')
         for name in ('DISABLED', 'SWITCHING_ON', 'ENABLED',
                      'SWITCHING_OFF'):
@@ -394,24 +395,48 @@ class BigWorldVehicleBinding(object):
         self._avatar.updateArena(self._constants.ARENA_UPDATE.AVATAR_READY,
                                  _pickle.dumps(self._avatar.playerVehicleID))
 
-    def arena_period(self, period, duration=0.0):
+    def arena_period(self, period, duration=0.0, winner_team=None,
+                     finish_reason=None):
         """Publish one native #1513 arena-period tuple.
 
         The stock HUD derives both its prebattle countdown and battle clock
         from ``periodEndTime``.  Publishing BATTLE immediately made the local
         Avatar playable as soon as it entered the world and skipped the same
         PREBATTLE barrier that the 0.8.2 runtime preserves.
+
+        ``ClientArena.__onPeriodInfoUpdate`` stores the whole tuple as
+        ``periodInfo`` and forwards it to ``onPeriodChange``, so the fourth
+        member becomes ``arena.periodAdditionalInfo``.  Exact #1513 reads it
+        only for AFTERBATTLE, where both
+        ``arena_info.listeners._getPeriodAdditionalInfo`` and
+        ``MusicControllerWWISE.MusicController.__onArenaStateChanged`` require
+        the two-member ``(winnerTeam, finishReason)`` pair.  Every other
+        period ships the empty list the retail server sends.
         """
         if period == 'prebattle':
             value = self._constants.ARENA_PERIOD.PREBATTLE
         elif period == 'battle':
             value = self._constants.ARENA_PERIOD.BATTLE
+        elif period == 'afterbattle':
+            value = self._constants.ARENA_PERIOD.AFTERBATTLE
         else:
             raise CapabilityError('unsupported arena period: %s' % period)
+        if period == 'afterbattle':
+            if winner_team is None or finish_reason is None:
+                raise CapabilityError(
+                    'afterbattle arena period has no round outcome')
+            self._require_int('arena winnerTeam', winner_team, 0, 2)
+            self._require_int('arena finishReason', finish_reason, 0, 255)
+            additional_info = (int(winner_team), int(finish_reason))
+        elif winner_team is not None or finish_reason is not None:
+            raise CapabilityError(
+                'arena period %s carries no round outcome' % period)
+        else:
+            additional_info = []
         duration = max(0.0, float(duration))
         end_time = (float(self._bigworld.serverTime()) + duration
                     if duration > 0.0 else 0.0)
-        payload = (value, end_time, duration, [])
+        payload = (value, end_time, duration, additional_info)
         self._avatar.updateArena(self._constants.ARENA_UPDATE.PERIOD,
                                  zlib.compress(_pickle.dumps(payload)))
 
