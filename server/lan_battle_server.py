@@ -225,7 +225,10 @@ TEAM_CHAT_HISTORY = 64
 # LAN admission finite while preserving every accepted Unicode string unchanged.
 TEAM_CHAT_MAX_CHARACTERS = 140
 TEAM_COMMAND_TTL_TICKS = int(15 * TICK_HZ)
-TEAM_COMMAND_MAX_RECIPIENTS = 2
+# A radio call asks nearby teammates to respond.  This is a product response
+# radius, not a reconstruction of the client's spotting or radio mechanics.
+TEAM_COMMAND_RESPONSE_RANGE = 300.0
+TEAM_COMMAND_MAX_RECIPIENTS = 3
 TEAM_COMMANDS = frozenset((
     "ATTACK", "BACKTOBASE", "HELPME", "FOLLOWME", "TURNBACK",
     "HELPMEEX", "STOP", "ATTACKENEMY", "SUPPORTMEWITHFIRE",
@@ -4868,6 +4871,48 @@ class BattleState:
             result.append(row)
         return result
 
+    @staticmethod
+    def _team_command_player_has_world_pose(player):
+        """Return whether a radio issuer has a current, finite world pose."""
+        try:
+            return bool(player.client_position) and all(
+                math.isfinite(float(value)) for value in (player.x, player.z))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _team_command_bot_can_respond(bot, current_order, command):
+        """Keep only Bots that can move to answer a broadcast radio call."""
+        try:
+            has_pose = bool(bot.get("world_pose", True))
+            finite_pose = all(math.isfinite(float(bot.get(name)))
+                              for name in ("x", "z"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not has_pose or not finite_pose:
+            return False
+        combat_mode = str((current_order or {}).get("combat_mode") or "")
+        if (combat_mode in (
+                "low_health_retreat", "low_health_defend",
+                "under_fire_withdraw", "under_fire_hold",
+                "crossfire_withdraw", "crossfire_hold", "withdraw") or
+                (combat_mode == "base_defense" and
+                 command != "BACKTOBASE")):
+            return False
+        critical = bot.get("critical")
+        if not isinstance(critical, dict):
+            return True
+        destroyed = set(str(name) for name in critical.get("destroyed") or ())
+        engine_destroyed = "engineHealth" in destroyed or any(
+            isinstance(record, dict) and
+            record.get("name") == "engineHealth" and
+            record.get("state") == "destroyed"
+            for record in critical.get("devices") or ())
+        driver_knocked_out = "driver" in set(
+            str(name) for name in critical.get("crew_ko") or ())
+        return (not engine_destroyed and not _destroyed_tracks(critical) and
+                not driver_knocked_out)
+
     def _team_command_bot_identity_locked(self, bot_id):
         """Return the roster identity for a message target without requiring life."""
         for identity in self.bot_manifest:
@@ -5096,6 +5141,21 @@ class BattleState:
                 if command in TEAM_COMMAND_ALLY_TARGETS:
                     bots = (bots if target_kind == "bot" else [])
                     bots = [bot for bot in bots if bot["id"] == target_id]
+                elif not self._team_command_player_has_world_pose(player):
+                    bots = []
+                else:
+                    current_orders = dict(
+                        (int(order.get("id")), order)
+                        for order in self.bot_orders.get("orders", ())
+                        if isinstance(order, dict) and
+                        isinstance(order.get("id"), int))
+                    bots = [bot for bot in bots
+                            if (self._team_command_bot_can_respond(
+                                    bot, current_orders.get(bot["id"]),
+                                    command) and
+                                math.hypot(float(bot["x"]) - player.x,
+                                           float(bot["z"]) - player.z) <=
+                                TEAM_COMMAND_RESPONSE_RANGE)]
 
                 def sort_key(bot):
                     bot_id = bot["id"]

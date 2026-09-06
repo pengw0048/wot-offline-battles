@@ -35,7 +35,7 @@ class TeamCommandTests(unittest.TestCase):
         self.state.phase = 'battle'
         self.state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
         self.sender = Player(1, _Socket(), ('127.0.0.1', 1), team=1,
-                             x=0.0, z=0.0)
+                             x=0.0, z=0.0, client_position=True)
         self.enemy = Player(2, _Socket(), ('127.0.0.1', 2), team=2,
                             x=200.0, z=0.0)
         self.state.players = {1: self.sender, 2: self.enemy}
@@ -97,6 +97,75 @@ class TeamCommandTests(unittest.TestCase):
         self.assertEqual('ATTENTIONTOCELL', orders[0]['command'])
         self.assertEqual(38, orders[0]['cell_index'])
         self.assertGreater(orders[0]['expires_tick'], self.state.tick)
+
+    def test_broadcast_uses_nearby_mobile_bots_and_keeps_yellow_damage(self):
+        self.state.bot_states[11]['x'] = 400.0
+        self.state.bot_manifest.extend([
+            {'id': 13, 'team': 1}, {'id': 14, 'team': 1},
+            {'id': 15, 'team': 1}, {'id': 16, 'team': 1},
+            {'id': 17, 'team': 1}, {'id': 18, 'team': 1},
+            {'id': 19, 'team': 1}, {'id': 20, 'team': 1},
+        ])
+        self.state.bot_states.update({
+            12: {'id': 12, 'team': 1, 'alive': True, 'x': 30.0, 'z': 0.0,
+                 'critical': {'devices': [
+                     {'name': 'engineHealth', 'state': 'critical'}]}},
+            13: {'id': 13, 'team': 1, 'alive': True, 'x': 40.0, 'z': 0.0},
+            14: {'id': 14, 'team': 1, 'alive': True, 'x': 5.0, 'z': 0.0,
+                 'critical': {'destroyed': ['engineHealth']}},
+            15: {'id': 15, 'team': 1, 'alive': True, 'x': 6.0, 'z': 0.0,
+                 'critical': {'destroyed': ['leftTrackHealth']}},
+            16: {'id': 16, 'team': 1, 'alive': True, 'x': 7.0, 'z': 0.0,
+                 'critical': {'crew_ko': ['driver']}},
+            17: {'id': 17, 'team': 1, 'alive': True, 'x': 300.0, 'z': 0.0},
+            18: {'id': 18, 'team': 1, 'alive': True, 'x': 301.0, 'z': 0.0},
+            19: {'id': 19, 'team': 1, 'alive': True, 'x': 4.0, 'z': 0.0,
+                 'world_pose': False},
+            20: {'id': 20, 'team': 1, 'alive': True, 'x': 8.0, 'z': 0.0},
+        })
+        self.state.bot_orders = {'revision': 1, 'orders': [
+            {'id': 20, 'combat_mode': 'under_fire_hold'},
+        ]}
+
+        ack = self.state.submit_team_command(1, self._message('BACKTOBASE'))
+
+        self.assertTrue(ack['accepted'])
+        self.assertEqual([12, 13, 17], ack['recipient_bot_ids'])
+
+    def test_broadcast_limits_the_nearest_eligible_recipients_to_three(self):
+        self.state.bot_manifest.extend([
+            {'id': 13, 'team': 1}, {'id': 14, 'team': 1},
+        ])
+        self.state.bot_states.update({
+            13: {'id': 13, 'team': 1, 'alive': True, 'x': 60.0, 'z': 0.0},
+            14: {'id': 14, 'team': 1, 'alive': True, 'x': 80.0, 'z': 0.0},
+        })
+
+        ack = self.state.submit_team_command(1, self._message('HELPME'))
+
+        self.assertEqual([11, 12, 13], ack['recipient_bot_ids'])
+
+    def test_broadcast_preserves_emergency_orders_but_back_to_base_keeps_defenders(self):
+        self.state.bot_orders = {'revision': 1, 'orders': [
+            {'id': 11, 'combat_mode': 'base_defense'},
+            {'id': 12, 'combat_mode': 'under_fire_withdraw'},
+        ]}
+
+        attack = self.state.submit_team_command(1, self._message('ATTACK'))
+        return_to_base = self.state.submit_team_command(
+            1, self._message('BACKTOBASE', sequence=2))
+
+        self.assertEqual([], attack['recipient_bot_ids'])
+        self.assertEqual([11], return_to_base['recipient_bot_ids'])
+
+    def test_broadcast_needs_the_issuer_world_pose(self):
+        self.sender.client_position = False
+
+        ack = self.state.submit_team_command(1, self._message('BACKTOBASE'))
+
+        self.assertTrue(ack['accepted'])
+        self.assertEqual([], ack['recipient_bot_ids'])
+        self.assertEqual([], self.state._active_team_commands_locked())
 
     def test_enemy_message_broadcasts_without_a_spot_but_only_spotted_order_reaches_bot(self):
         message = self._message(
