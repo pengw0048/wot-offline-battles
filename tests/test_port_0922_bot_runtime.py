@@ -483,6 +483,38 @@ class ServerBotStateRevisionTests(unittest.TestCase):
             'battle_result': copy.deepcopy(server.battle_result),
         }
 
+    def test_lost_lineage_sections_are_republished_on_a_cadence(self):
+        # Every lineage section is recorded as delivered when it is written to
+        # the socket. Without a periodic republication one frame a replica
+        # could not consume cost it that section for the whole round.
+        from lan_battle_server import (
+            BOT_MANIFEST_REFRESH_TICKS, LEAN_SNAPSHOT_MANIFEST_CAPABILITY)
+
+        server, unused_manifest_bot, unused_socket = self._server()
+        player = server.players[1]
+        player.capabilities = (LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        self.assertTrue(server.update_bot_states(
+            SIMULATION_WORKER_AUTHORITY_ID, self._publication(server, 1.0)))
+
+        def sent_snapshots():
+            return [json.loads(payload.decode('utf-8'))
+                    for payload in player.conn.payloads
+                    if json.loads(
+                        payload.decode('utf-8')).get('type') == 'snapshot']
+
+        server.tick_once(1.0 / 30.0)
+        self.assertIn('bot_manifest', sent_snapshots()[-1])
+
+        before = len(sent_snapshots())
+        for unused in range(4):
+            server.tick_once(1.0 / 30.0)
+        self.assertGreater(len(sent_snapshots()), before)
+        self.assertNotIn('bot_manifest', sent_snapshots()[-1])
+
+        server.tick += BOT_MANIFEST_REFRESH_TICKS
+        server.tick_once(1.0 / 30.0)
+        self.assertIn('bot_manifest', sent_snapshots()[-1])
+
     def test_revision_survives_player_departure_and_resets(self):
         server, manifest_bot, authority_socket = self._server()
         self.assertEqual(0, server.bot_state_revision)

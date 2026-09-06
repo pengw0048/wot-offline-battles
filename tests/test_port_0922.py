@@ -6187,9 +6187,15 @@ class LANClientTests(unittest.TestCase):
         self.assertEqual('invalid snapshot message', client.last_error)
 
     def test_snapshot_bot_pose_timing_is_atomic_and_monotonic(self):
+        # Atomic: the pair is present or absent together, and once a round
+        # publishes it, it may not disappear. Monotonic: neither frontier may
+        # rewind. How the producer paired its revision with its sample clock
+        # is its own bookkeeping and no longer costs the replica a frame.
         _, client, _, _ = self._client()
         client.running = True
         client.round_id = 3
+        # A live round contains a rejected live payload instead of ending.
+        client.phase = 'battle'
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 3, 'server_tick': 4,
@@ -6199,6 +6205,7 @@ class LANClientTests(unittest.TestCase):
             'players': [], 'bots': []})
         self.assertTrue(client.running)
 
+        # An unchanged revision whose sample clock moved is applied.
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
             'round_id': 3, 'server_tick': 5,
@@ -6206,57 +6213,51 @@ class LANClientTests(unittest.TestCase):
             'motion_time_us': 150000, 'bot_state_time_us': 100000,
             'bot_authority_id': -1, 'bot_manifest': [],
             'players': [], 'bots': []})
-        self.assertFalse(client.running)
-        self.assertEqual('invalid snapshot message', client.last_error)
+        self.assertTrue(client.running)
+        self.assertIsNone(client.last_error)
+        self.assertEqual(5, client.last_snapshot['server_tick'])
 
-        _, client, _, _ = self._client()
-        client.running = True
-        client.round_id = 3
+        # An advanced revision that repeats its sample time is applied too.
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
-            'round_id': 3, 'server_tick': 4,
-            'bot_state_revision': 5,
-            'motion_time_us': 120000, 'bot_state_time_us': 90000,
+            'round_id': 3, 'server_tick': 6,
+            'bot_state_revision': 6,
+            'motion_time_us': 160000, 'bot_state_time_us': 100000,
             'bot_authority_id': -1, 'bot_manifest': [],
             'players': [], 'bots': []})
+        self.assertTrue(client.running)
+        self.assertEqual(6, client.last_snapshot['server_tick'])
+
+        # A rewound sample clock is not newer than the frame already drawn.
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
-            'round_id': 3, 'server_tick': 5,
-            'bot_state_revision': 6,
+            'round_id': 3, 'server_tick': 7,
+            'bot_state_revision': 7,
+            'motion_time_us': 170000, 'bot_state_time_us': 90000,
             'bot_authority_id': -1, 'bot_manifest': [],
             'players': [], 'bots': []})
-        self.assertFalse(client.running)
-        self.assertEqual('invalid snapshot message', client.last_error)
+        self.assertTrue(client.running)
+        self.assertEqual(6, client.last_snapshot['server_tick'])
 
-        _, client, _, _ = self._client()
-        client.running = True
-        client.round_id = 3
+        # Timing may not disappear once the round has published it.
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
-            'round_id': 3, 'server_tick': 4,
-            'bot_state_revision': 5,
-            'motion_time_us': 120000, 'bot_state_time_us': 90000,
+            'round_id': 3, 'server_tick': 8,
+            'bot_state_revision': 8,
+            'bot_authority_id': -1, 'bot_manifest': [],
             'players': [], 'bots': []})
-        client._handle_message({
-            'type': 'snapshot', 'protocol': 5,
-            'round_id': 3, 'server_tick': 5,
-            'bot_state_revision': 6,
-            'motion_time_us': 150000, 'bot_state_time_us': 90000,
-            'players': [], 'bots': []})
-        self.assertFalse(client.running)
-        self.assertEqual('invalid snapshot message', client.last_error)
+        self.assertTrue(client.running)
+        self.assertEqual(6, client.last_snapshot['server_tick'])
 
-        _, client, _, _ = self._client()
-        client.running = True
-        client.round_id = 3
+        # Half a pair is never a valid header.
         client._handle_message({
             'type': 'snapshot', 'protocol': 5,
-            'round_id': 3, 'server_tick': 4,
-            'bot_state_revision': 5,
-            'motion_time_us': 120000,
+            'round_id': 3, 'server_tick': 9,
+            'bot_state_revision': 8, 'motion_time_us': 180000,
+            'bot_authority_id': -1, 'bot_manifest': [],
             'players': [], 'bots': []})
-        self.assertFalse(client.running)
-        self.assertEqual('invalid snapshot message', client.last_error)
+        self.assertTrue(client.running)
+        self.assertEqual(6, client.last_snapshot['server_tick'])
 
     def test_state_message_without_protocol_fails_closed(self):
         _, client, _, _ = self._client()

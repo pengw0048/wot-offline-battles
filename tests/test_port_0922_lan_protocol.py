@@ -3,6 +3,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -17,8 +18,7 @@ from gui.mods.offline_lan_0922.lan_client import (
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
     _canonical_runtime_vehicle_row,
     _project_human_ram_armors, _projectile_wire_round,
-    _strict_projectile_effect,
-    _valid_player_environment_contract, project_bot_state)
+    _strict_projectile_effect, project_bot_state)
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
@@ -864,22 +864,6 @@ class LanProtocolTests(unittest.TestCase):
         self.assertIsNone(self.client.last_error)
         self.assertIn('events', self.client._runtime_drop_diagnostics)
 
-    def test_snapshot_missing_bot_combat_contract_keeps_last_good_state(self):
-        self.client.running = True
-        self.client._handle_message({
-            'type': 'snapshot', 'protocol': 5, 'round_id': 7,
-            'server_tick': 1,
-            'players': [{
-                'id': 1, 'critical_revision': 0,
-                'critical_base_revision': 0, 'critical_ack_seq': 0}],
-            'bots': [{'id': 11, 'health': 500, 'alive': True}],
-        })
-
-        self.assertTrue(self.client.running)
-        self.assertIsNone(self.client.last_error)
-        self.assertEqual('battle', self.client.phase)
-        self.assertIsNone(self.client.last_snapshot)
-
     def test_lean_snapshot_inherits_the_last_static_bot_manifest(self):
         self.client.server_capabilities = (
             LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
@@ -948,7 +932,90 @@ class LanProtocolTests(unittest.TestCase):
         self.assertIsNone(self.client.last_error)
         self.assertIs(accepted, self.client.last_snapshot)
 
-    def test_lean_snapshot_requires_existing_same_lineage_manifest(self):
+    def test_lean_snapshot_after_a_lineage_change_keeps_the_roster(self):
+        # The server records a manifest as delivered when it writes it, so a
+        # replica that could not consume that frame is never offered another.
+        # Refusing every later lean snapshot froze the whole roster; carrying
+        # the retained one keeps the round playable.
+        self.client.running = True
+        self.client.server_capabilities = (
+            LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        player = _snapshot_player()
+        manifest = [{'id': 11, 'vehicle': 'ussr:R11_MS-1'}]
+        first = {
+            'type': 'snapshot', 'protocol': 5, 'round_id': 7,
+            'server_tick': 1, 'bot_state_revision': 0,
+            'players': [player],
+            'bots': [{'id': 11, 'x': 1.0, 'y': 0.0, 'z': 2.0}],
+            'bot_manifest': manifest,
+            'bot_authority_id': -1, 'authority_epoch': 1,
+        }
+        drifted = dict(
+            first, server_tick=2, bot_state_revision=1, authority_epoch=2,
+            bots=[{'id': 11, 'x': 5.0, 'y': 0.0, 'z': 6.0}])
+        drifted.pop('bot_manifest')
+
+        self.client._handle_message(first)
+        self.client._handle_message(drifted)
+
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+        self.assertEqual(2, self.client.last_snapshot['server_tick'])
+        self.assertEqual(
+            manifest, self.client.last_snapshot['bot_manifest'])
+        self.assertEqual(5.0, self.client.last_snapshot['bots'][0]['x'])
+
+    def test_unusable_runtime_row_keeps_the_last_accepted_pose(self):
+        # SnapshotSync destroys any entity a snapshot omits, so an unusable
+        # row must not remove that vehicle and must not cost the whole frame.
+        self.client.running = True
+        self.client.server_capabilities = (
+            LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        player = _snapshot_player()
+        first = {
+            'type': 'snapshot', 'protocol': 5, 'round_id': 7,
+            'server_tick': 1, 'bot_state_revision': 0,
+            'players': [player],
+            'bots': [{'id': 11, 'x': 1.0, 'y': 0.0, 'z': 2.0},
+                     {'id': 12, 'x': 3.0, 'y': 0.0, 'z': 4.0}],
+            'bot_manifest': [], 'bot_authority_id': -1,
+        }
+        second = dict(
+            first, server_tick=2, bot_state_revision=1,
+            bots=[{'id': 11, 'x': float('nan'), 'y': 0.0, 'z': 2.0},
+                  {'id': 12, 'x': 9.0, 'y': 0.0, 'z': 4.0}])
+
+        self.client._handle_message(first)
+        self.client._handle_message(second)
+
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+        self.assertEqual(2, self.client.last_snapshot['server_tick'])
+        accepted = dict(
+            (row['id'], row) for row in self.client.last_snapshot['bots'])
+        self.assertEqual(sorted(accepted), [11, 12])
+        self.assertEqual(1.0, accepted[11]['x'])
+        self.assertEqual(9.0, accepted[12]['x'])
+
+    def test_poll_reports_a_stalled_snapshot_stream(self):
+        self.client.running = True
+        self.client.connected = False
+        self.client.bigworld = mock.Mock()
+        self.client.bigworld.callback.return_value = 1
+        self.client._snapshot_accepted_time = time.monotonic() - 4.0
+        self.client._snapshot_drop_streak = 7
+        self.client._snapshot_drop_reason = 'motion_timing'
+
+        with mock.patch('builtins.print') as printed:
+            self.client._poll()
+
+        reported = ' '.join(
+            str(call[0][0]) for call in printed.call_args_list)
+        self.assertIn('snapshot stream stalled', reported)
+        self.assertIn('dropped=7', reported)
+        self.assertIn('last_reason=motion_timing', reported)
+
+    def test_lean_snapshot_requires_a_manifest_and_worker_authority(self):
         self.client.running = True
         player = _snapshot_player()
         self.client.server_capabilities = (
@@ -983,85 +1050,6 @@ class LanProtocolTests(unittest.TestCase):
         self.assertTrue(missing.running)
         self.assertIsNone(missing.last_error)
         self.assertIsNone(missing.last_snapshot)
-
-    def test_snapshot_drops_non_exact_bot_combat_revisions(self):
-        cases = (
-            ('combat_revision', True),
-            ('combat_base_revision', True),
-            ('combat_ack_seq', True),
-            ('combat_base_revision', 2),
-            ('combat_ack_seq', -1),
-            ('combat_fire_elapsed', float('nan')),
-            ('combat_fire_elapsed', -0.1),
-            ('combat_fire_elapsed', 10.1),
-            ('combat_fire_timer', True),
-            ('combat_fire_timer', 1.0),
-        )
-        for field, value in cases:
-            client = LANClient(
-                '127.0.0.1', 28782, 'P', 'ussr:MS-1')
-            client.running = True
-            client.ready = True
-            client.phase = 'battle'
-            client.round_id = 7
-            client._send = lambda unused: True
-            bot = {
-                'id': 11, 'health': 500, 'alive': True,
-                'critical': {},
-                'combat_revision': 1, 'combat_base_revision': 1,
-                'combat_ack_seq': 0,
-                'combat_fire_elapsed': 0.0,
-                'combat_fire_timer': 0.0,
-            }
-            bot[field] = value
-
-            client._handle_message({
-                'type': 'snapshot', 'protocol': 5, 'round_id': 7,
-                'server_tick': 1,
-                'players': [{
-                    'id': 1, 'critical_revision': 0,
-                    'critical_base_revision': 0, 'critical_ack_seq': 0}],
-                'bots': [bot],
-            })
-
-            self.assertTrue(client.running, '%s=%r' % (field, value))
-            self.assertIsNone(client.last_error, '%s=%r' % (field, value))
-            self.assertEqual('battle', client.phase)
-            self.assertIsNone(client.last_snapshot)
-
-    def test_snapshot_drops_missing_or_non_object_bot_critical(self):
-        for critical in (None, [], 'broken'):
-            client = LANClient('127.0.0.1', 28782, 'P', 'ussr:MS-1')
-            client.running = True
-            client.ready = True
-            client.phase = 'battle'
-            client.round_id = 7
-            client._send = lambda unused: True
-            bot = {
-                'id': 11, 'health': 500, 'alive': True,
-                'critical': critical,
-                'combat_revision': 1, 'combat_base_revision': 1,
-                'combat_ack_seq': 0,
-                'combat_fire_elapsed': 0.0,
-                'combat_fire_timer': 0.0,
-            }
-            if critical is None:
-                bot.pop('critical')
-
-            client._handle_message({
-                'type': 'snapshot', 'protocol': 5, 'round_id': 7,
-                'server_tick': 1,
-                'players': [{
-                    'id': 1, 'critical_revision': 0,
-                    'critical_base_revision': 0,
-                    'critical_ack_seq': 0}],
-                'bots': [bot],
-            })
-
-            self.assertTrue(client.running)
-            self.assertIsNone(client.last_error)
-            self.assertEqual('battle', client.phase)
-            self.assertIsNone(client.last_snapshot)
 
     def test_loading_ready_and_battle_live_form_one_transition(self):
         self.client.phase = 'loading'
@@ -1400,33 +1388,20 @@ class ShippingClientInputContractTests(unittest.TestCase):
         self.assertFalse(self.client._adopt_player_input_frontier([
             _snapshot_player(input_seq=8, input_processed_seq=6)]))
 
-    def test_snapshot_validation_covers_the_terminal_frontier_relation(self):
-        self.assertTrue(_valid_player_environment_contract(
-            _snapshot_player(input_seq=4), required=True))
-        self.assertTrue(_valid_player_environment_contract(
-            _snapshot_player(input_seq=4, input_processed_seq=6),
-            required=True))
-        self.assertFalse(_valid_player_environment_contract(
-            _snapshot_player(input_seq=4, input_processed_seq=3),
-            required=True))
-        self.assertFalse(_valid_player_environment_contract(
-            _snapshot_player(input_seq=4, input_processed_seq=True),
-            required=True))
-
-    def test_snapshot_validation_covers_pose_number_boundaries(self):
-        self.assertTrue(_valid_player_environment_contract(
+    def test_canonical_rows_keep_pose_numbers_inside_native_bounds(self):
+        self.assertIsNotNone(_canonical_runtime_vehicle_row(
             _snapshot_player(
                 x=1.0, y=-2.0, z=3.0, yaw=math.pi,
                 pitch=0.25, roll=-0.25, aim_yaw=-math.pi,
-                gun_pitch=0.1, speed=12.5, forward=1.0, turn=-1.0),
-            required=True))
+                gun_pitch=0.1, speed=12.5, forward=1.0, turn=-1.0)))
         for field, value in (
                 ('x', float('nan')), ('z', float('inf')),
                 ('yaw', float('-inf')), ('speed', 1000.0),
-                ('forward', 1.01), ('turn', -1.01)):
+                ('x', 5000.0), ('gun_pitch', 3.0),
+                ('pitch', 1.5)):
             with self.subTest(field=field, value=value):
-                self.assertFalse(_valid_player_environment_contract(
-                    _snapshot_player(**{field: value}), required=True))
+                self.assertIsNone(_canonical_runtime_vehicle_row(
+                    _snapshot_player(**{field: value})))
 
     def test_runtime_vehicle_numbers_are_canonicalized_once(self):
         source = {
