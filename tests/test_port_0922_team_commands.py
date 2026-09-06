@@ -158,15 +158,70 @@ class TeamCommandTests(unittest.TestCase):
     def test_broadcast_limits_the_nearest_eligible_recipients_to_three(self):
         self.state.bot_manifest.extend([
             {'id': 13, 'team': 1}, {'id': 14, 'team': 1},
+            {'id': 15, 'team': 1},
         ])
         self.state.bot_states.update({
             13: {'id': 13, 'team': 1, 'alive': True, 'x': 60.0, 'z': 0.0},
             14: {'id': 14, 'team': 1, 'alive': True, 'x': 80.0, 'z': 0.0},
+            15: {'id': 15, 'team': 1, 'alive': True, 'x': 310.0, 'z': 0.0},
         })
 
         ack = self.state.submit_team_command(1, self._message('HELPME'))
 
         self.assertEqual([11, 12, 13], ack['recipient_bot_ids'])
+
+    def test_broadcast_without_nearby_bots_falls_back_to_two_nearest_mobile_bots(self):
+        self.state.bot_states[11]['x'] = 450.0
+        self.state.bot_states[12]['x'] = 400.0
+        self.state.bot_manifest.extend([
+            {'id': 13, 'team': 1}, {'id': 14, 'team': 1},
+            {'id': 15, 'team': 1}, {'id': 16, 'team': 1},
+            {'id': 17, 'team': 1},
+        ])
+        self.state.bot_states.update({
+            13: {'id': 13, 'team': 1, 'alive': True, 'x': 320.0, 'z': 0.0,
+                 'critical': {'destroyed': ['engineHealth']}},
+            14: {'id': 14, 'team': 1, 'alive': True, 'x': 330.0, 'z': 0.0},
+            15: {'id': 15, 'team': 1, 'alive': True, 'x': 350.0, 'z': 0.0},
+            16: {'id': 16, 'team': 1, 'alive': True, 'x': 340.0, 'z': 0.0,
+                 'critical': {'destroyed': ['leftTrackHealth']}},
+            17: {'id': 17, 'team': 1, 'alive': True, 'x': 360.0, 'z': 0.0},
+        })
+        self.state.bot_orders = {'revision': 1, 'orders': [
+            {'id': 14, 'combat_mode': 'under_fire_hold'},
+        ]}
+        message = self._message('HELPME')
+
+        accepted = self.state.submit_team_command(1, message)
+
+        self.assertEqual([15, 17], accepted['recipient_bot_ids'])
+        self.assertEqual(
+            accepted, self.state.submit_team_command(1, dict(message)))
+
+    def test_broadcast_without_nearby_bots_keeps_a_single_far_mobile_bot(self):
+        self.state.bot_states[11]['x'] = 350.0
+        self.state.bot_states[12].update({
+            'x': 320.0,
+            'critical': {'destroyed': ['rightTrackHealth']},
+        })
+
+        ack = self.state.submit_team_command(1, self._message('HELPME'))
+
+        self.assertEqual([11], ack['recipient_bot_ids'])
+
+    def test_broadcast_with_nearby_bot_does_not_supplement_from_far_bots(self):
+        self.state.bot_states[12]['x'] = 310.0
+        self.state.bot_manifest.extend([
+            {'id': 13, 'team': 1}, {'id': 14, 'team': 1},
+        ])
+        self.state.bot_states.update({
+            13: {'id': 13, 'team': 1, 'alive': True, 'x': 320.0, 'z': 0.0},
+            14: {'id': 14, 'team': 1, 'alive': True, 'x': 330.0, 'z': 0.0},
+        })
+
+        ack = self.state.submit_team_command(1, self._message('HELPME'))
+
+        self.assertEqual([11], ack['recipient_bot_ids'])
 
     def test_broadcast_preserves_emergency_orders_but_back_to_base_keeps_defenders(self):
         self.state.bot_orders = {'revision': 1, 'orders': [

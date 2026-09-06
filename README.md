@@ -79,9 +79,11 @@ whose profile changed after it started must be restarted first.
   not supported.
 - Stock battle commands can direct nearby allied Bots: request help, name a
   target, ask a Bot to follow or stop, return to base, or ping a minimap cell.
-  General requests select zero to three mobile Bots within 300 metres; a named
-  ally command addresses that Bot. Each assigned Bot replies through the stock
-  team-message system. Movement orders last up to two minutes, while short
+  General requests prefer up to three mobile Bots within 300 metres. If none
+  nearby can respond, up to two eligible Bots farther away answer instead.
+  Selection is deterministic; a named ally command addresses only that Bot.
+  Each assigned Bot replies through the stock team-message system. Movement
+  orders last up to two minutes, while short
   tactical commands last 15 seconds. Once accepted, navigation orders override
   autonomous tactical choices; unavailable Bots or missing destinations produce
   no positive reply.

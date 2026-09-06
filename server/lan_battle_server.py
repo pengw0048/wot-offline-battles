@@ -235,6 +235,7 @@ TEAM_COMMAND_MOVEMENT = frozenset((
 # radius, not a reconstruction of the client's spotting or radio mechanics.
 TEAM_COMMAND_RESPONSE_RANGE = 300.0
 TEAM_COMMAND_MAX_RECIPIENTS = 3
+TEAM_COMMAND_DISTANT_RECIPIENTS = 2
 TEAM_COMMANDS = frozenset((
     "ATTACK", "BACKTOBASE", "HELPME", "FOLLOWME", "TURNBACK",
     "HELPMEEX", "STOP", "ATTACKENEMY", "SUPPORTMEWITHFIRE",
@@ -5151,6 +5152,7 @@ class BattleState:
             if can_order and command == "ATTENTIONTOCELL":
                 can_order = self._bot_defense_context()["arena_bounds"] is not None
             if can_order:
+                recipient_limit = TEAM_COMMAND_MAX_RECIPIENTS
                 bots = list(live_bots)
                 if command in TEAM_COMMAND_ALLY_TARGETS:
                     bots = (bots if target_kind == "bot" else [])
@@ -5167,12 +5169,18 @@ class BattleState:
                         if isinstance(order, dict) and
                         isinstance(order.get("id"), int))
                     bots = [bot for bot in bots
-                            if (self._team_command_bot_can_respond(
-                                    bot, current_orders.get(bot["id"]),
-                                    command) and
-                                math.hypot(float(bot["x"]) - player.x,
-                                           float(bot["z"]) - player.z) <=
-                                TEAM_COMMAND_RESPONSE_RANGE)]
+                            if self._team_command_bot_can_respond(
+                                bot, current_orders.get(bot["id"]), command)]
+                    nearby = [bot for bot in bots
+                              if math.hypot(float(bot["x"]) - player.x,
+                                            float(bot["z"]) - player.z) <=
+                              TEAM_COMMAND_RESPONSE_RANGE]
+                    if nearby:
+                        bots = nearby
+                    else:
+                        # A distant team can still answer, without pulling
+                        # three tanks across the map for one broadcast call.
+                        recipient_limit = TEAM_COMMAND_DISTANT_RECIPIENTS
 
                 def sort_key(bot):
                     bot_id = bot["id"]
@@ -5185,7 +5193,7 @@ class BattleState:
 
                 bots.sort(key=sort_key)
                 recipients = [bot["id"]
-                              for bot in bots[:TEAM_COMMAND_MAX_RECIPIENTS]]
+                              for bot in bots[:recipient_limit]]
                 if recipients:
                     ttl = (TEAM_COMMAND_MOVEMENT_TTL_TICKS
                            if command in TEAM_COMMAND_MOVEMENT else
