@@ -1053,6 +1053,105 @@ class PostBattleContractTests(unittest.TestCase):
         self.assertEqual(original,
                          _latest_receipt(state, rejoined.account_key))
 
+    def test_alt_f4_during_a_round_still_settles_on_the_next_launch(self):
+        """A player who kills the client mid-round is settled by the server.
+
+        ``remove_player`` resolves an abandoned round from canonical bot
+        state, and the receipt reaches disk before it can be broadcast.  The
+        client is already gone, so nothing acknowledges it; a later server
+        process must still hand it to the same account, and the client must
+        apply it exactly once.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = str(Path(folder) / 'unacked_battle_receipts.json')
+            store_path = str(Path(folder) / 'postbattle_state.json')
+            account_key = 'a' * 32
+
+            state = BattleState(map_name='01_karelia', team_size=1,
+                                receipt_state_path=ledger)
+            state.client_build = CLIENT_BUILD_0922
+            state.phase = 'battle'
+            player = Player(1, _Socket(), ('127.0.0.1', 1), name='Alice',
+                            vehicle='ussr:R11_MS-1', team=1,
+                            account_key=account_key)
+            player.max_health = 1000
+            player.health = 1000
+            state.players = {1: player}
+            state._freeze_round_participants((player,))
+            state.bot_manifest = [{
+                'id': 1, 'team': 2, 'slot': 0, 'name': 'Bot-1',
+                'vehicle': 'germany:G04_PzVI_Tiger_I',
+                'health': 900, 'max_health': 1500}]
+            state.bot_states = {1: dict(state.bot_manifest[0], alive=True)}
+
+            # Alt+F4 drops the connection; the server owns the outcome.
+            state.remove_player(player.player_id)
+
+            self.assertIsNotNone(state.battle_result)
+            minted = _latest_receipt(state, account_key)
+            self.assertTrue(minted['premature_leave'])
+            # The ledger is on disk before anything could have been sent.
+            self.assertTrue(Path(ledger).is_file())
+
+            # Next launch: a fresh server process recovers the ledger and the
+            # welcome path hands the receipt to the reconnecting account.
+            relaunched = BattleState(map_name='01_karelia', team_size=1,
+                                     receipt_state_path=ledger)
+            self.assertEqual(
+                minted['receipt_id'],
+                _latest_receipt(relaunched, account_key)['receipt_id'])
+            socket = _Socket()
+            rejoined = Player(1, socket, ('127.0.0.1', 9),
+                              account_key=account_key)
+            relaunched.players = {1: rejoined}
+            self.assertTrue(relaunched._deliver_result_receipt(rejoined))
+            delivered = json.loads(socket.payloads[-1].decode('utf-8'))
+            self.assertEqual('battle_receipt', delivered['type'])
+            self.assertEqual(minted['receipt_id'], delivered['receipt_id'])
+
+            # The client settles it and acknowledges once.
+            client = postbattle_store.PostBattleStore(path=store_path)
+            client._account_key = account_key
+            self.assertTrue(client.accept(delivered))
+            self.assertEqual(1, client.progress()['battles'])
+            self.assertEqual([minted['arena_unique_id']],
+                             client.pending_arenas())
+            # A premature leave never steals focus with the results window.
+            self.assertFalse(client.should_show_immediately(
+                minted['arena_unique_id']))
+            self.assertTrue(relaunched.acknowledge_result_receipt(
+                rejoined.player_id, {'receipt_id': minted['receipt_id']}))
+            self.assertEqual([], _account_receipts(relaunched, account_key))
+            # A retried delivery after that cannot double the settlement.
+            self.assertFalse(client.accept(delivered))
+            self.assertEqual(1, client.progress()['battles'])
+
+    def test_only_ten_results_stay_reopenable_within_one_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            arenas = []
+            for index in range(postbattle_store.MAX_HISTORY + 3):
+                row = _receipt(store.account_key)
+                row['receipt_id'] = 'server:%d:1' % (400 + index)
+                row['arena_unique_id'] = ((400 + index) << 32) | 1
+                row['premature_leave'] = False
+                arenas.append(row['arena_unique_id'])
+                self.assertTrue(store.accept(row))
+                self.assertTrue(store.acknowledge(row['arena_unique_id']))
+
+            self.assertEqual(postbattle_store.MAX_HISTORY,
+                             len(store._history))
+            self.assertEqual(arenas[-1], store.latest_archived_arena())
+            # ``should_show_immediately`` answers from the archived body, so
+            # it is true only while the result can still be served.
+            for arena in arenas[-postbattle_store.MAX_HISTORY:]:
+                self.assertTrue(store.should_show_immediately(arena))
+            for arena in arenas[:-postbattle_store.MAX_HISTORY]:
+                self.assertFalse(store.should_show_immediately(arena))
+            # Every battle still counted exactly once towards progress.
+            self.assertEqual(len(arenas), store.progress()['battles'])
+
     def test_two_live_players_cannot_share_one_receipt_identity(self):
         state = BattleState(map_name='01_karelia')
         account_key = 'a' * 32

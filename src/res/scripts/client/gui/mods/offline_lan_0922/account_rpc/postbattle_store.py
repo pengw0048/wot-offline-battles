@@ -8,10 +8,11 @@ the exact client ``battle_results_shared`` packers and are never persisted.
 Only an unacknowledged receipt is persisted in full.  Once #1513 has cached a
 result and confirmed it with 1501, the archived row keeps its identity so a
 retried delivery is still applied exactly once, but its body lives only in
-this process.  Re-opening a result from the notification list therefore works
-for the whole session and not across a restart, which is the explicit product
-choice; account and per-vehicle progress, including medal counts, is carried
-by ``progress`` and does survive.
+this process, and only for the most recent MAX_HISTORY results.  Re-opening a
+result from the notification list therefore works for those, within one
+session, and not across a restart; that is the explicit product choice.
+Account and per-vehicle progress, including medal counts, is carried by
+``progress`` and does survive both.
 """
 
 from __future__ import print_function
@@ -44,7 +45,12 @@ STATE_PATH = os.path.join(
     port_config.USER_DATA_DIR, 'postbattle_state.json')
 LEGACY_STATE_PATH = os.path.join(
     port_config.LEGACY_USER_DATA_DIR, 'postbattle_state.json')
-MAX_HISTORY = 256
+# Bounds only this process's archived receipt bodies, which serve a repeated
+# 1500 for a result #1513 has already cached and confirmed.  Nothing durable
+# depends on it: an unacknowledged receipt is persisted in full, and an
+# archived row is persisted as its identity alone.  Explicit product choice --
+# ten results stay re-openable from the notification list within one session.
+MAX_HISTORY = 10
 INTERACTION_FIELDS = (
     ('spotted', 'spotted', 0, 1),
     ('death_reason', 'deathReason', -1, 10),
