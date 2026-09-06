@@ -44,7 +44,9 @@ READY_TIMEOUT_SECONDS = 90.0
 # never a frame of the battle.
 REQUEST_TIMEOUT_SECONDS = 90.0
 # What one line is assumed to cost before this machine has shown otherwise.
-INITIAL_LATENCY_SECONDS = 4.0
+# A measured session took 9.6 s for its first line, so a smaller guess only
+# means the first line waits an extra look before it is published.
+INITIAL_LATENCY_SECONDS = 10.0
 # How much longer than the average observed line to hold a scheduled one.
 LATENCY_MARGIN = 1.4
 LATENCY_SMOOTHING = 0.4
@@ -425,12 +427,24 @@ class LlamaChatBackend(object):
             self._wake.notify()
 
     def compose(self, request):
-        """Return this line's finished text, or None to fall back."""
+        """Return this line's finished text, if it has finished."""
         request_id = request.get("request_id")
         if request_id is None:
             return None
         with self._lock:
             return self._results.pop(request_id, None)
+
+    def pending(self, request):
+        """Return whether this line is still being written.
+
+        A line that is merely late is not a line that failed, and the
+        difference decides whether the caller should wait or give up.
+        """
+        request_id = request.get("request_id")
+        if request_id is None:
+            return False
+        with self._lock:
+            return request_id in self._pending
 
     # -- worker ---------------------------------------------------------
 
