@@ -7187,6 +7187,33 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             bins_before, destructibles_sensor.g_offh_destr_contact_bins)
 
+    def test_broken_skin_covering_ray_endpoint_never_recasts_backwards(self):
+        import struct
+
+        class NativeVector(_Vector):
+            def __add__(self, other):
+                return NativeVector(*(struct.unpack('f', struct.pack('f', value))[0]
+                    for value in (self.x + other.x, self.y + other.y,
+                                  self.z + other.z)))
+
+        (bigworld, math_module, area, cache, authority,
+         descriptor) = self._direction_catalog_fixture(destroyed=True)
+        start = NativeVector(0.0, 0.7, 3.0)
+        end = NativeVector(0.0, 0.7, 4.0)
+        hit = (_Vector(0.0, 0.7, 3.5), _Vector(0.0, 0.0, -1.0))
+        # A reversed ray begins inside the native skin and hits it again.
+        bigworld.wg_collideSegment.return_value = hit
+        with mock.patch.dict(sys.modules, {
+                'BigWorld': bigworld, 'Math': math_module,
+                'AreaDestructibles': area, 'DestructiblesCache': cache}), \
+                mock.patch.object(destructibles_sensor, '_get_destr_authority',
+                                  return_value=authority):
+            result = destructibles_sensor._catalog_soft_static_path(
+                1, start, end, hit, 0.0, descriptor,
+                require_pending_first=True)
+        self.assertIs(True, result)
+        bigworld.wg_collideSegment.assert_not_called()
+
     def test_pending_shared_fence_face_recasts_into_active_neighbour(self):
         (bigworld, math_module, area, cache, authority,
          descriptor) = self._direction_catalog_fixture()

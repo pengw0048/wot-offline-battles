@@ -2299,7 +2299,7 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	}
 
 
-def _confirmed_unresolved_obstacle_1513(spaceID, identity):
+def _confirmed_unresolved_obstacle_1513(spaceID, identity, vehicle_box=None):
 	"""Return exact baked OBBs for a streamed but unidentified model.
 
 	Registration proves *identity*: which descriptor the item uses, whether it
@@ -2319,6 +2319,15 @@ def _confirmed_unresolved_obstacle_1513(spaceID, identity):
 	baked = catalog.get('baked_instances', {}).get(identity)
 	if baked is None or baked['kind'] == 'falling' or not baked['boxes']:
 		return ()
+	def report_skip(reason):
+		key = (baked['descriptor_filename'], reason.split('_')[0])
+		logged = globals().get('g_offh_destr_unresolved_logs', ())
+		if key in logged or len(logged) >= _ISOLATION_LOG_TYPE_LIMIT:
+			return
+		if vehicle_box is not None and any(
+				_catalog_intersections(baked['boxes'], vehicle_box)):
+			_log_unresolved_obstacle_1513(
+				chunk_id, item_index, baked, reason=reason)
 	cache = globals().setdefault('g_offh_destr_unresolved_obstacles', {})
 	import AreaDestructibles
 	import BigWorld
@@ -2329,14 +2338,18 @@ def _confirmed_unresolved_obstacle_1513(spaceID, identity):
 	except Exception:
 		return ()
 	if mgr is None or manager_space != spaceID:
+		report_skip('manager_space')
 		return ()
 	native_count = _native_chunk_destructible_count_1513(mgr, chunk_id)
 	if native_count is None or item_index >= native_count:
 		# The chunk is no longer streamed, so neither is its geometry.
 		cache.pop(identity, None)
+		report_skip('native_count_%r' % native_count)
 		return ()
 	entry = cache.get(identity)
 	if entry is not None and entry[0] == native_count:
+		if not entry[1]:
+			report_skip('cached_placement_unproved')
 		return entry[1]
 	try:
 		chunk_matrix = observed_call(
@@ -2344,6 +2357,7 @@ def _confirmed_unresolved_obstacle_1513(spaceID, identity):
 			spaceID, chunk_id)
 		chunk_translation = getattr(chunk_matrix, 'translation', None)
 		if chunk_translation is None:
+			report_skip('chunk_translation_missing')
 			return ()
 		matrix = Math.Matrix(observed_call(
 			'native.destructible.item_matrix',
@@ -2352,29 +2366,36 @@ def _confirmed_unresolved_obstacle_1513(spaceID, identity):
 			matrix, chunk_translation, Math)
 	except Exception:
 		# A placement query that cannot answer is not evidence of a wall.
+		report_skip('native_placement_query_failed')
 		return ()
 	boxes = baked['boxes'] if signature == baked['signature'] else ()
 	cache[identity] = (native_count, boxes)
 	if boxes:
 		_log_unresolved_obstacle_1513(chunk_id, item_index, baked)
+	else:
+		report_skip('matrix_mismatch_live_%r_baked_%r' % (
+			signature, baked['signature']))
 	return boxes
 
 
-def _log_unresolved_obstacle_1513(chunk_id, item_index, baked):
+def _log_unresolved_obstacle_1513(chunk_id, item_index, baked, reason=None):
 	"""Name the first unidentified blocking model of each map resource."""
 	logged = globals().setdefault('g_offh_destr_unresolved_logs', set())
-	key = baked['descriptor_filename']
+	filename = baked['descriptor_filename']
+	key = filename if reason is None else (filename, reason.split('_')[0])
 	if key in logged or len(logged) >= _ISOLATION_LOG_TYPE_LIMIT:
 		return
 	logged.add(key)
 	try:
 		import sys
 		sys.stdout.write(
-			'[Offline LAN 0.9.22] DESTR blocking unidentified model '
+			'[Offline LAN 0.9.22] DESTR %s unidentified model '
 			'chunk=%s item=%s kind=%s name=%s map=%s '
-			'repeats=suppressed_for_battle\n' % (
-				chunk_id, item_index, baked['kind'], key,
-				(_destructible_catalog or {}).get('map') or 'unknown'))
+			'repeats=suppressed_for_battle detail=%s\n' % (
+				'blocking' if reason is None else 'unproved',
+				chunk_id, item_index, baked['kind'], filename,
+				(_destructible_catalog or {}).get('map') or 'unknown',
+				reason or 'live_placement_confirmed'))
 	except Exception:
 		# Runtime handling is authoritative; the log stream is observational.
 		pass
@@ -2413,7 +2434,8 @@ def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
 			if cache is not None:
 				cache.pop(identity, None)
 			continue
-		boxes = _confirmed_unresolved_obstacle_1513(spaceID, identity)
+		boxes = _confirmed_unresolved_obstacle_1513(
+			spaceID, identity, vehicle_box=vehicle_box)
 		if boxes:
 			combat_count('destructible_stream_unidentified')
 			unresolved.append((identity, boxes))
@@ -3139,9 +3161,18 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			current_start, segment_end, hit_point)
 		if exit_distance is None:
 			return 'pending_hard' if pending_contact else False
+		# The interval is clipped to this segment.  Decide whether any ray
+		# remains before adding the epsilon to a native float32 position:
+		# rounding can overshoot the endpoint by more than epsilon and turn
+		# a length-based check into a backwards recast through the same skin.
+		if float(exit_distance) >= (segment_end - current_start).length:
+			return 'kinetic' if kinetic_contact else True
 		next_start = current_start + direction.scale(
 			float(exit_distance) + _SHOT_RAY_EPSILON)
-		if (segment_end - next_start).length <= _SHOT_RAY_EPSILON:
+		if _vector_dot(
+				(segment_end.x - next_start.x, segment_end.y - next_start.y,
+				 segment_end.z - next_start.z),
+				(direction.x, direction.y, direction.z)) <= _SHOT_RAY_EPSILON:
 			return 'kinetic' if kinetic_contact else True
 		if recast_budget is not None:
 			if not recast_budget or int(recast_budget[0]) <= 0:
