@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import math
 from pathlib import Path
@@ -291,6 +292,71 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
                 server.bot_state_time_us - first_mapped_time_us),
         })
 
+    def test_combat_wire_roundtrip_keeps_lineage_and_real_change_guards(self):
+        server = BattleState.__new__(BattleState)
+        for roster in (['gunner1', 'driver'],
+                       ['commander', 'gunner1', 'driver', 'loader1'],
+                       ['loader2', 'loader1', 'commander', 'driver']):
+            with self.subTest(roster=roster):
+                previous = {
+                    'id': 11, 'health': 900, 'alive': True,
+                    'combat_revision': 3, 'combat_base_revision': 3,
+                    'combat_seq': 0, 'combat_ack_seq': 0,
+                    'combat_fire_elapsed': 0.0, 'combat_fire_timer': 0.0,
+                    'stun_end_server_time_ms': 0,
+                    'critical': {
+                        'devices': [
+                            {'name': 'leftTrackHealth', 'hp': 170.0,
+                             'max_hp': 170.0, 'state': 'normal'},
+                            {'name': 'gunHealth', 'hp': 54.0,
+                             'max_hp': 54.0, 'state': 'normal'},
+                        ],
+                        'destroyed': [], 'crew_ko': [], 'crew_roster': roster,
+                        'fire': False, 'ammo_rack_death': False, 'events': [],
+                    },
+                }
+                frozen = copy.deepcopy(previous)
+                raw = bot_state_rows.bot_state_codec.decode_row(
+                    bot_state_rows.row(previous), {})
+                for signature in (server._bot_combat_signature,
+                                  self.bot_runtime._combat_signature):
+                    self.assertEqual(signature(previous), signature(raw))
+                current = copy.deepcopy(raw)
+                server._reconcile_modern_bot_combat(raw, previous, current)
+                self.assertEqual(3, current['combat_base_revision'])
+                self.assertEqual(0, current['combat_ack_seq'])
+                self.assertEqual(frozen, previous)
+
+                for changed_field in ('health', 'device_hp', 'crew_ko',
+                                      'crew_roster'):
+                    with self.subTest(changed_field=changed_field):
+                        changed = copy.deepcopy(raw)
+                        critical = changed['critical']
+                        if changed_field == 'health':
+                            changed['health'] -= 1
+                        elif changed_field == 'device_hp':
+                            critical['devices'][0]['hp'] -= 1.0
+                        elif changed_field == 'crew_ko':
+                            critical['crew_ko'] = [roster[0]]
+                        else:
+                            critical['crew_roster'].remove(roster[0])
+                        for signature in (server._bot_combat_signature,
+                                          self.bot_runtime._combat_signature):
+                            self.assertNotEqual(signature(previous),
+                                                signature(changed))
+                        with self.assertRaisesRegex(
+                                ValueError, 'repeated bot combat publication'):
+                            server._reconcile_modern_bot_combat(
+                                changed, previous, copy.deepcopy(changed))
+                        # The same real change is admitted when its owner
+                        # advances the publication sequence exactly once.
+                        changed['combat_seq'] = 1
+                        current = copy.deepcopy(changed)
+                        server._reconcile_modern_bot_combat(
+                            changed, previous, current)
+                        self.assertEqual(1, current['combat_ack_seq'])
+                        self.assertEqual(3, current['combat_base_revision'])
+
     def test_external_hit_crew_roster_survives_repeated_publication(self):
         runtime, server, unused_roster = self._runtime_and_server()
         human = _human()
@@ -308,7 +374,8 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
                 'max_hp': 170.0, 'state': 'normal',
             }],
             'destroyed': [], 'crew_ko': [],
-            'crew_roster': ['driver', 'gunner1'],
+            # Descriptor crew order differs from the compact wire mask order.
+            'crew_roster': ['gunner1', 'driver'],
             'fire': False, 'ammo_rack_death': False, 'events': [],
         }
         canonical = server.bot_states[11]
@@ -317,6 +384,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
                          critical=dict(critical))
         self.assertTrue(server._commit_external_bot_combat(
             canonical, before))
+        external_revision = canonical['combat_base_revision']
 
         runtime.apply_snapshot({
             'server_tick': 2,
@@ -335,7 +403,14 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             'source_batch_horizon_us':
                 repeated['source_batch_horizon_us'],
         })), server.last_bot_state_reject)
+        self.assertEqual(external_revision,
+                         server.bot_states[11]['combat_base_revision'])
         for frame in range(1, 25):
+            runtime.apply_snapshot({
+                'server_tick': 2 + frame,
+                'bots': [dict(server.bot_states[bot_id])
+                         for bot_id in sorted(server.bot_states)],
+            })
             publication = runtime.update(
                 1.0 / 24.0, 1.1 + frame / 24.0,
                 players=[human])[0]
@@ -346,6 +421,8 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
                 'source_batch_horizon_us':
                     publication['source_batch_horizon_us'],
             })), server.last_bot_state_reject)
+            self.assertEqual(external_revision,
+                             server.bot_states[11]['combat_base_revision'])
             if server.bot_pending_projectile_launches:
                 break
         self.assertTrue(any(

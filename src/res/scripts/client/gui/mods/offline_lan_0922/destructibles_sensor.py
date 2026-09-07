@@ -2182,6 +2182,7 @@ def _stream_baked_shot_instance_1513(spaceID, identity):
 	return instance
 
 
+@observed('destructible.shot_catalog')
 def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	"""Resolve the nearest live-validated catalog OBB along a shell ray."""
 	segment = end - start
@@ -2194,17 +2195,26 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	if not instances and not baked_instances:
 		return None
 	authority = _get_destr_authority()
-	identities = set(instances)
+	identities = set()
+	contact_bins = globals().get('g_offh_destr_contact_bins', {})
+	baked_bins = catalog.get('baked_shot_bins', {})
 	effective_end = end
 	if (maximum_distance is not None and
 			float(maximum_distance) < segment_length):
+		# The exact interval test below admits the native endpoint with this
+		# tolerance; its broad phase must include the same interval at bin edges.
 		effective_end = start + segment.scale(
-			max(0.0, float(maximum_distance)) / segment_length)
+			min(segment_length, max(0.0, float(maximum_distance) + 1.0e-6)) /
+			segment_length)
 	bounds = (min(start.x, effective_end.x), max(start.x, effective_end.x),
 		min(start.z, effective_end.z), max(start.z, effective_end.z))
 	for bin_key in _baked_bin_keys_for_bounds_1513(*bounds):
-		identities.update(
-			catalog.get('baked_shot_bins', {}).get(bin_key, ()))
+		# Registration and falling-transform updates already maintain this
+		# exact live footprint index. Seeding from every registered instance
+		# makes each projectile chord re-test props across the explored map.
+		identities.update(contact_bins.get(bin_key, ()))
+		identities.update(baked_bins.get(bin_key, ()))
+	combat_count('destructible_shot_candidates', len(identities))
 	hits = {}
 	for identity in sorted(identities):
 		if _destructible_isolated_1513(identity[0], identity[1]):
