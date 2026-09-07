@@ -26,9 +26,9 @@ from gui.mods.offline_lan_0922.battle_runtime import (
     _MOVEMENT_ROTATE_RIGHT, _engine_rotation)
 from gui.mods.offline_lan_0922 import battle_runtime as \
     battle_runtime_module
-from gui.mods.offline_lan_0922 import bot_runtime, combat_rules, \
-    critical_damage, equipment_mechanics, gun_mechanics, loadout, \
-    tank_collision, vehicle_physics
+from gui.mods.offline_lan_0922 import battle_feedback, bot_runtime, \
+    combat_rules, critical_damage, equipment_mechanics, gun_mechanics, \
+    loadout, tank_collision, vehicle_physics
 from gui.mods.offline_lan_0922.entities.remote_vehicle import \
     RemoteVehicle, RemoteVehicleFactory, _RemoteFilter, \
     collide_vehicle_at_matrix
@@ -2116,6 +2116,86 @@ def _plain_bot_factors(unused_descriptor, crew_level=None):
     }
 
 
+class _ShellPriceSection(object):
+    """One ``shells.xml`` shell subsection: only the price probe is used.
+
+    #1513 ``_xml.readPrice`` decides the currency by asking the section for
+    ``<subsection>/gold`` and taking ``None`` as "priced in credits".
+    """
+
+    def __init__(self, currency):
+        self._currency = currency
+
+    def __getitem__(self, path):
+        if path == 'price/gold' and self._currency == 'gold':
+            return object()
+        return None
+
+
+class _ShellPriceResMgr(object):
+    """ResMgr stub over per-nation ``components/shells.xml`` sections."""
+
+    def __init__(self, nations, missing=()):
+        self._nations = nations
+        self._missing = set(missing)
+        self.purged = []
+
+    def openSection(self, path):
+        for nation, shells in self._nations.items():
+            if path == battle_feedback.SHELLS_XML_PATH % (nation,):
+                if nation in self._missing:
+                    return None
+                rows = [('icons', _ShellPriceSection(None))]
+                rows.extend(
+                    (name, _ShellPriceSection(currency))
+                    for name, currency in sorted(shells.items()))
+                return types.SimpleNamespace(items=lambda: list(rows))
+        return None
+
+    def purge(self, path, recursive):
+        self.purged.append((path, recursive))
+
+
+# Exact #1513 ``BattleFeedbackCommon`` constants and bit layouts.  A fake that
+# drops the shell fields cannot show that the damage log receives them.
+_NONE_SHELL_TYPE = 127
+_SHELL_TYPES_LIST = (
+    'HOLLOW_CHARGE', 'HIGH_EXPLOSIVE', 'ARMOR_PIERCING',
+    'ARMOR_PIERCING_HE', 'ARMOR_PIERCING_CR')
+_SHELL_TYPES_INDICES = dict(
+    (value, index) for index, value in enumerate(_SHELL_TYPES_LIST))
+
+
+def _pack_damage(damage, attackReasonID, isBurst=False,
+                 shellTypeID=_NONE_SHELL_TYPE, shellIsGold=False):
+    """[ 32-17 damage | 16-10 reason | 9 burst | 8-2 shell | 1 gold ]"""
+    return ((int(damage) & 65535) << 16 |
+            (int(attackReasonID) & 127) << 9 |
+            (1 if isBurst else 0) << 8 |
+            (int(shellTypeID) & 127) << 1 |
+            (1 if shellIsGold else 0))
+
+
+def _unpack_damage(packedDamage):
+    return (packedDamage >> 16 & 65535, packedDamage >> 9 & 127,
+            packedDamage >> 8 & 1, packedDamage >> 1 & 127,
+            packedDamage & 1)
+
+
+def _pack_crits(critsCount, attackReasonID,
+                shellTypeID=_NONE_SHELL_TYPE, shellIsGold=False):
+    """[ 32-17 count | 16-9 reason | 8-2 shell | 1 gold ]"""
+    return ((int(critsCount) & 65535) << 16 |
+            (int(attackReasonID) & 255) << 8 |
+            (int(shellTypeID) & 127) << 1 |
+            (1 if shellIsGold else 0))
+
+
+def _unpack_crits(packedCrits):
+    return (packedCrits >> 16 & 65535, packedCrits >> 8 & 255,
+            packedCrits >> 1 & 127, packedCrits & 1)
+
+
 def _runtime():
     avatar = _Avatar()
     compatibility = _Compatibility()
@@ -2198,6 +2278,8 @@ def _runtime():
             GUN_DAMAGED_BY_EXPLOSION=262144,
             ATTACK_IS_DIRECT_PROJECTILE=1048576,
             ATTACK_IS_EXTERNAL_EXPLOSION=2097152),
+        SHELL_TYPES_LIST=_SHELL_TYPES_LIST,
+        SHELL_TYPES_INDICES=dict(_SHELL_TYPES_INDICES),
         FINISH_REASON=types.SimpleNamespace(
             EXTERMINATION=1, BASE=2, TIMEOUT=3, FAILURE=4, TECHNICAL=5))
     arena = types.SimpleNamespace(
@@ -2280,14 +2362,13 @@ def _runtime():
             CLIENT_MASK=0xfff00000, SERVER_MASK=0x000fffff),
         compatibility=compatibility, constants=constants,
         battle_feedback_common=types.SimpleNamespace(
+            NONE_SHELL_TYPE=_NONE_SHELL_TYPE,
             BATTLE_EVENT_TYPE=types.SimpleNamespace(
                 SPOTTED=0, RADIO_ASSIST=1, TRACK_ASSIST=2, CRIT=6,
                 TANKING=5, DAMAGE=7, KILL=8, RECEIVED_CRIT=9,
                 RECEIVED_DAMAGE=10, STUN_ASSIST=11, TARGET_VISIBILITY=12,
-                packDamage=lambda damage, reason: (
-                    (int(damage) << 16) | (int(reason) << 9)),
-                packCrits=lambda count, reason: (
-                    (int(count) << 16) | (int(reason) << 8)),
+                packDamage=_pack_damage, unpackDamage=_unpack_damage,
+                packCrits=_pack_crits, unpackCrits=_unpack_crits,
                 packVisibility=lambda visible, direct: (
                     int(bool(visible)) | (int(bool(direct)) << 1)))),
         encode_gun_angles=lambda *unused: 0,
@@ -14067,7 +14148,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([7], [
             value['eventType']
             for value in battle._avatar.battle_events[0]])
-        self.assertEqual((50 << 16) | (2 << 9),
+        self.assertEqual(_pack_damage(50, 2),
                          battle._avatar.battle_events[0][0]['details'])
 
     def test_local_projectile_at_ally_keeps_stock_ally_hit_only(self):
@@ -14116,6 +14197,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
+        runtime.bigworld.entities.update({
+            10: _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                         {'health': 500}),
+            11: _Vehicle(11, _Descriptor(), _Vector(10, 0, 0), (0, 0, 0),
+                         {'health': 500})})
         attacker = {
             'engine_id': 11, 'local': False, 'kind': 'bot',
             'network_id': 2, 'state': {'team': 2}}
@@ -14124,7 +14210,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'network_id': 1, 'state': {'team': 1}}
 
         self.assertTrue(battle._present_combat_feedback({
-            'kind': 'bot_human_hit', 'damage': 0,
+            'kind': 'bot_human_hit', 'damage': 0, 'shell_index': 0,
             'blocked_damage': 320, 'shot_result': 0,
             'dead': False, 'attack_reason': 0, 'death_reason': 0,
             'source': 'shot'}, target, attacker))
@@ -14133,8 +14219,120 @@ class BattleRuntimeContractTests(unittest.TestCase):
             value['eventType']
             for value in battle._avatar.battle_events[0]])
         self.assertEqual(11, battle._avatar.battle_events[0][0]['targetID'])
-        self.assertEqual(320 << 16,
-                         battle._avatar.battle_events[0][0]['details'])
+        # Blocked damage always draws the shell column in the stock log.
+        self.assertEqual(
+            _pack_damage(320, 0, False,
+                         _SHELL_TYPES_INDICES['ARMOR_PIERCING'], False),
+            battle._avatar.battle_events[0][0]['details'])
+
+    def test_received_hit_reports_the_enemy_shell_type_and_gold_flag(self):
+        """The stock damage log draws its shell column from these fields."""
+        battle_feedback.reset_shell_price_cache()
+        self.addCleanup(battle_feedback.reset_shell_price_cache)
+        runtime = _runtime()
+        runtime.nations = types.SimpleNamespace(NAMES=('ussr',))
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        attacker_descriptor = _Descriptor()
+        shell = attacker_descriptor.gun.shots[0].shell
+        shell.kind = 'ARMOR_PIERCING_CR'
+        shell.id = (0, 12)
+        shell.name = '_37mm_UBR-160P'
+        runtime.bigworld.entities.update({
+            10: _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                         {'health': 500}),
+            11: _Vehicle(11, attacker_descriptor, _Vector(10, 0, 0),
+                         (0, 0, 0), {'health': 500})})
+        # Resolve the nation's gold-priced shells from a fake raw resource so
+        # the packed flag comes from item definitions, not from Shell.isGold.
+        self.assertEqual(
+            set(('_37mm_UBR-160P',)),
+            battle_feedback.gold_shell_names(
+                'ussr', _ShellPriceResMgr({'ussr': {
+                    '_37mm_UBR-160P': 'gold',
+                    '_37mm_UBR-167': 'credits'}})))
+        attacker = {
+            'engine_id': 11, 'local': False, 'kind': 'bot',
+            'network_id': 2, 'state': {'team': 2}}
+        target = {
+            'engine_id': 10, 'local': True, 'kind': 'player',
+            'network_id': 1, 'state': {'team': 1}}
+
+        self.assertTrue(battle._present_combat_feedback({
+            'kind': 'bot_human_hit', 'damage': 144, 'shell_index': 0,
+            'shot_result': 2, 'dead': False, 'attack_reason': 0,
+            'death_reason': 0, 'source': 'shot',
+            'critical': {'events': [{
+                'kind': 'device', 'name': 'engineHealth',
+                'state': 'critical', 'cause': 'shot'}]}}, target, attacker))
+
+        events = battle._avatar.battle_events[0]
+        self.assertEqual([10, 9], [value['eventType'] for value in events])
+        self.assertEqual(
+            (144, 0, 0, _SHELL_TYPES_INDICES['ARMOR_PIERCING_CR'], 1),
+            _unpack_damage(events[0]['details']))
+        self.assertEqual(
+            (1, 0, _SHELL_TYPES_INDICES['ARMOR_PIERCING_CR'], 1),
+            _unpack_crits(events[1]['details']))
+
+    def test_standard_shell_reports_no_gold_background(self):
+        battle_feedback.reset_shell_price_cache()
+        self.addCleanup(battle_feedback.reset_shell_price_cache)
+        runtime = _runtime()
+        runtime.nations = types.SimpleNamespace(NAMES=('ussr',))
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        attacker_descriptor = _Descriptor()
+        shell = attacker_descriptor.gun.shots[0].shell
+        shell.kind = 'HIGH_EXPLOSIVE'
+        shell.id = (0, 13)
+        shell.name = '_37mm_UBR-167'
+        runtime.bigworld.entities.update({
+            10: _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                         {'health': 500}),
+            11: _Vehicle(11, attacker_descriptor, _Vector(10, 0, 0),
+                         (0, 0, 0), {'health': 500})})
+        battle_feedback.gold_shell_names(
+            'ussr', _ShellPriceResMgr({'ussr': {
+                '_37mm_UBR-160P': 'gold', '_37mm_UBR-167': 'credits'}}))
+        attacker = {
+            'engine_id': 11, 'local': False, 'kind': 'bot',
+            'network_id': 2, 'state': {'team': 2}}
+        target = {
+            'engine_id': 10, 'local': True, 'kind': 'player',
+            'network_id': 1, 'state': {'team': 1}}
+
+        self.assertTrue(battle._present_combat_feedback({
+            'kind': 'bot_human_hit', 'damage': 90, 'shell_index': 0,
+            'shot_result': 2, 'dead': False, 'attack_reason': 0,
+            'death_reason': 0, 'source': 'shot'}, target, attacker))
+
+        events = battle._avatar.battle_events[0]
+        self.assertEqual(
+            (90, 0, 0, _SHELL_TYPES_INDICES['HIGH_EXPLOSIVE'], 0),
+            _unpack_damage(events[0]['details']))
+
+    def test_unresolvable_attacker_shell_keeps_the_damage_row(self):
+        """A missing descriptor costs the shell column, never the event."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        attacker = {
+            'engine_id': 11, 'local': False, 'kind': 'bot',
+            'network_id': 2, 'state': {'team': 2}}
+        target = {
+            'engine_id': 10, 'local': True, 'kind': 'player',
+            'network_id': 1, 'state': {'team': 1}}
+
+        self.assertTrue(battle._present_combat_feedback({
+            'kind': 'bot_human_hit', 'damage': 144, 'shell_index': 0,
+            'shot_result': 2, 'dead': False, 'attack_reason': 0,
+            'death_reason': 0, 'source': 'shot'}, target, attacker))
+
+        events = battle._avatar.battle_events[0]
+        self.assertEqual([10], [value['eventType'] for value in events])
+        self.assertEqual((144, 0, 0, _NONE_SHELL_TYPE, 0),
+                         _unpack_damage(events[0]['details']))
 
     def test_blocked_efficiency_event_is_not_replayed(self):
         runtime = _runtime()
@@ -14151,12 +14349,13 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'local': False, 'ready': True,
                 'state': {'team': 2, 'health': 500, 'alive': True}},
         }
-        battle._server_entity = mock.Mock(return_value=object())
+        battle._server_entity = mock.Mock(
+            return_value=types.SimpleNamespace(typeDescriptor=_Descriptor()))
         battle._present_combat_hit = mock.Mock(return_value=False)
         battle._apply_health = mock.Mock(return_value=True)
         message = {'events': [{
             'event_id': '1:12:0', 'kind': 'bot_human_hit',
-            'attacker_bot': 2, 'target': 1,
+            'attacker_bot': 2, 'target': 1, 'shell_index': 0,
             'damage': 0, 'blocked_damage': 320, 'shot_result': 0,
             'health': 500, 'dead': False, 'attack_reason': 0,
             'death_reason': 0, 'source': 'shot'}]}
@@ -14168,8 +14367,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([5], [
             value['eventType']
             for value in battle._avatar.battle_events[0]])
-        self.assertEqual(320 << 16,
-                         battle._avatar.battle_events[0][0]['details'])
+        self.assertEqual(
+            _pack_damage(320, 0, False,
+                         _SHELL_TYPES_INDICES['ARMOR_PIERCING'], False),
+            battle._avatar.battle_events[0][0]['details'])
 
     def test_fire_feedback_never_uses_projectile_result_or_impact_effect(self):
         runtime = _runtime()
@@ -14194,7 +14395,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual([], battle._avatar.shot_results)
         battle._avatar.terrainEffects.addNew.assert_not_called()
-        self.assertEqual((10 << 16) | (1 << 9),
+        self.assertEqual(_pack_damage(10, 1),
                          battle._avatar.battle_events[0][0]['details'])
 
     def test_combat_attack_reason_is_mandatory_and_matches_source(self):
@@ -14287,7 +14488,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((380, 0, 3), entity.health_change)
         self.assertEqual([{
             'eventType': 10, 'targetID': 10, 'count': 1,
-            'details': (120 << 16) | (3 << 9),
+            'details': _pack_damage(120, 3),
         }], battle._avatar.battle_events[0])
         self.assertEqual([], battle._avatar.hit_directions)
         self.assertEqual([], battle._avatar.shot_results)

@@ -9,6 +9,8 @@ That keeps a delayed notification from escaping into a later battle or the
 hangar while the #1513 lifecycle remains under BattleRuntime control.
 """
 
+import sys
+
 
 # Match the deterministic no-skill visibility hold.  A repeated authority
 # observation inside this window is one continuous spotting episode, not a
@@ -98,3 +100,103 @@ class SixthSenseController(object):
         holder[0] = callback
         self._pending_callback = callback
         return True
+
+
+# ``vehicles._VEHICLE_TYPE_XML_PATH + nationName + '/components/shells.xml'``:
+# the exact resource #1513 ``Cache.__readNation`` hands to ``_readShells``.
+SHELLS_XML_PATH = 'scripts/item_defs/vehicles/%s/components/shells.xml'
+
+# ``_readShells`` skips exactly these two top-level keys before it treats a
+# subsection as a shell definition.
+_NON_SHELL_SECTIONS = ('icons', 'xmlns:xmlref')
+
+# Resolved once per nation.  ``shells.xml`` is immutable client content, so
+# this never needs to follow a round, vehicle, or account change.
+_gold_shell_names = {}
+
+_reported_shell_price_failures = set()
+
+
+def reset_shell_price_cache():
+    """Drop resolved shell-price data (test isolation)."""
+    _gold_shell_names.clear()
+    _reported_shell_price_failures.clear()
+
+
+def _report_shell_price_failure(nation, reason):
+    """Write one bounded diagnostic per nation and failure reason."""
+    key = (str(nation), str(reason))
+    if key in _reported_shell_price_failures:
+        return False
+    _reported_shell_price_failures.add(key)
+    try:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] FEEDBACK shell prices unresolved: '
+            'nation=%s reason=%s\n' % (nation, reason))
+    except Exception:
+        return False
+    return True
+
+
+def _read_gold_shell_names(nation, res_mgr):
+    """Collect one nation's gold-priced shell names from its raw resource.
+
+    The exact client's own reader leaves ``Shell.isGold`` at its ``False``
+    default (``_readShell`` guards the assignment with ``IS_CELLAPP``), so the
+    value has to come from the raw item definitions.  ``_xml.readPrice``
+    decides the currency by probing ``<subsection>/gold``; this reproduces
+    that probe against the same sections ``_readShells`` iterates.
+    """
+    path = SHELLS_XML_PATH % (nation,)
+    if res_mgr is None:
+        import ResMgr
+        res_mgr = ResMgr
+    section = res_mgr.openSection(path)
+    if section is None:
+        return None
+    try:
+        names = set()
+        for name, subsection in section.items():
+            if name in _NON_SHELL_SECTIONS:
+                continue
+            if subsection['price/gold'] is not None:
+                names.add(name)
+    finally:
+        purge = getattr(res_mgr, 'purge', None)
+        if callable(purge):
+            # Match the stock readers, which release the shell XML tree as
+            # soon as they are done with it.
+            try:
+                purge(path, True)
+            except Exception:
+                pass
+    return names
+
+
+def gold_shell_names(nation, res_mgr=None):
+    """Return one nation's gold-priced shell names, or None when unresolved.
+
+    A failed or absent resource is contained here: the caller keeps the
+    ``False`` that the exact client itself reports on this seam.
+    """
+    nation = str(nation)
+    if nation in _gold_shell_names:
+        return _gold_shell_names[nation]
+    try:
+        names = _read_gold_shell_names(nation, res_mgr)
+        reason = None if names is not None else 'section_unavailable'
+    except Exception as error:
+        names = None
+        reason = '%s: %s' % (error.__class__.__name__, error)
+    _gold_shell_names[nation] = names
+    if names is None:
+        _report_shell_price_failure(nation, reason)
+    return names
+
+
+def is_gold_shell(nation, shell_name, res_mgr=None):
+    """True when ``<nation>/components/shells.xml`` prices the shell in gold."""
+    names = gold_shell_names(nation, res_mgr)
+    if names is None:
+        return False
+    return str(shell_name) in names

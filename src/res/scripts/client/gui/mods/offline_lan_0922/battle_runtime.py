@@ -23,7 +23,7 @@ from gui.mods.offline_lan_0922.artillery_controller import \
 from gui.mods.offline_lan_0922.authority_worker_probe import \
     AuthorityWorkerProbe, write_probe_record
 from gui.mods.offline_lan_0922.battle_feedback import (
-    SixthSenseController, VehicleStatePresenter)
+    SixthSenseController, VehicleStatePresenter, is_gold_shell)
 from gui.mods.offline_lan_0922.bot_runtime import (
     BOT_WATER_AVOID_DEPTH, BotRuntime, PROBE_KINDS,
     WORKER_CONTROL_SECONDS)
@@ -1645,6 +1645,7 @@ class BattleRuntime(object):
         self._bot_yaw_rates = {}
         self._track_report_time = None
         self._hit_impulse_reports = 0
+        self._feedback_shell_failures = set()
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -1962,6 +1963,7 @@ class BattleRuntime(object):
         self._bot_yaw_rates = {}
         self._track_report_time = None
         self._hit_impulse_reports = 0
+        self._feedback_shell_failures = set()
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
@@ -9547,6 +9549,88 @@ class BattleRuntime(object):
             raise RuntimeError('combat attacker shell is unavailable')
         return shot, shell
 
+    def _feedback_shell_fields(self, event, attacker_record):
+        """Resolve the shell fields #1513 packs into a battle-event detail.
+
+        ``BATTLE_EVENT_TYPE.packDamage``/``packCrits`` carry a shell type index
+        and a gold flag beside the damage and attack reason.  The stock damage
+        log reads them back through ``_DamageExtra``/``_CritsExtra`` and draws
+        the shell abbreviation for received damage, received criticals and
+        blocked damage.  Only a shot has a shell: ``isShot`` is what selects
+        the log's shell column, so fire, ramming and world collision keep
+        ``NONE_SHELL_TYPE`` exactly as the retail cell does.
+        """
+        feedback_common = getattr(
+            self._runtime, 'battle_feedback_common', None)
+        none_shell = getattr(feedback_common, 'NONE_SHELL_TYPE', None)
+        if none_shell is None:
+            raise RuntimeError(
+                '#1513 shell-type feedback sentinel is unavailable')
+        none_shell = int(none_shell)
+        if (attacker_record is None or
+                self._combat_event_source(event) != 'shot' or
+                event.get('kind') not in (
+                    'hit', 'bot_hit', 'bot_human_hit', 'bot_bot_hit')):
+            return none_shell, False
+        indices = getattr(
+            self._runtime.constants, 'SHELL_TYPES_INDICES', None)
+        if not indices:
+            raise RuntimeError('#1513 shell type indices are unavailable')
+        try:
+            unused_shot, shell = self._event_shell(attacker_record, event)
+        except RuntimeError as error:
+            # ``_present_combat_hit`` owns the fatal shell-descriptor contract
+            # for a shot and runs first.  Losing the log's shell column must
+            # never also cost the canonical damage, ribbon and counter events.
+            self._report_feedback_shell_failure(str(error))
+            return none_shell, False
+        # #1513 ``Shell.kind`` is a property over ``Shell.type.name``; the
+        # copied law reads the same two shapes.
+        kind = _field(shell, 'kind', None)
+        if kind is None:
+            kind = _field(_field(shell, 'type', None), 'name', None)
+        if kind not in indices:
+            self._report_feedback_shell_failure(
+                'shell kind is not a #1513 shell type: %r' % (kind,))
+            return none_shell, False
+        return int(indices[kind]), self._shell_is_gold(shell)
+
+    def _report_feedback_shell_failure(self, reason):
+        """Write one bounded diagnostic per distinct unresolved shell."""
+        if reason in self._feedback_shell_failures:
+            return False
+        if len(self._feedback_shell_failures) >= 32:
+            return False
+        self._feedback_shell_failures.add(reason)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] FEEDBACK damage-log shell unresolved: %s\n'
+            % (reason,))
+        return True
+
+    def _shell_is_gold(self, shell):
+        """True when the raw item definitions price this shell in gold.
+
+        ``Shell.isGold`` stays at its ``False`` default on a client: only the
+        cell app's ``_readShell`` branch assigns it.  Resolving the flag from
+        ``shells.xml`` therefore reproduces the retail value instead of
+        reporting every premium round as standard.  A failed lookup keeps
+        ``False`` -- the same answer the exact client itself carries -- and is
+        contained to the gold background of one log row.
+        """
+        identity = _field(shell, 'id', None)
+        name = _field(shell, 'name', None)
+        if name is None or not isinstance(identity, (tuple, list)) or \
+                len(identity) < 1:
+            return False
+        names = getattr(getattr(self._runtime, 'nations', None), 'NAMES', None)
+        if not names:
+            return False
+        try:
+            nation = names[int(identity[0])]
+        except (IndexError, KeyError, TypeError, ValueError):
+            return False
+        return is_gold_shell(nation, name)
+
     @staticmethod
     def _critical_hit_mask(critical):
         """Pack #1513's device/destroyed/crew hit-direction bit fields."""
@@ -10172,6 +10256,8 @@ class BattleRuntime(object):
         damage = max(0, int(event.get('damage', 0) or 0))
         if reason_id is None:
             reason_id = self._combat_attack_reason(event)
+        shell_type, shell_is_gold = self._feedback_shell_fields(
+            event, attacker_record)
         critical = event.get('critical')
         critical_count = len((critical or {}).get('events') or ())
         if attacker_record.get('local'):
@@ -10196,13 +10282,15 @@ class BattleRuntime(object):
                     'eventType': int(event_types.DAMAGE),
                     'targetID': target_id, 'count': 1,
                     'details': int(event_types.packDamage(
-                        damage, reason_id))})
+                        damage, reason_id, False, shell_type,
+                        shell_is_gold))})
             if critical_count > 0:
                 output.append({
                     'eventType': int(event_types.CRIT),
                     'targetID': target_id, 'count': 1,
                     'details': int(event_types.packCrits(
-                        critical_count, reason_id))})
+                        critical_count, reason_id, shell_type,
+                        shell_is_gold))})
             if bool(event.get('dead')):
                 output.append({
                     'eventType': int(event_types.KILL),
@@ -10285,19 +10373,22 @@ class BattleRuntime(object):
                     'eventType': int(event_types.TANKING),
                     'targetID': attacker_id, 'count': 1,
                     'details': int(event_types.packDamage(
-                        blocked_damage, reason_id))})
+                        blocked_damage, reason_id, False, shell_type,
+                        shell_is_gold))})
             if damage > 0:
                 output.append({
                     'eventType': int(event_types.RECEIVED_DAMAGE),
                     'targetID': attacker_id, 'count': 1,
                     'details': int(event_types.packDamage(
-                        damage, reason_id))})
+                        damage, reason_id, False, shell_type,
+                        shell_is_gold))})
             if critical_count > 0:
                 output.append({
                     'eventType': int(event_types.RECEIVED_CRIT),
                     'targetID': attacker_id, 'count': 1,
                     'details': int(event_types.packCrits(
-                        critical_count, reason_id))})
+                        critical_count, reason_id, shell_type,
+                        shell_is_gold))})
         if output:
             callback = getattr(self._avatar, 'onBattleEvents', None)
             if not callable(callback):
@@ -24156,6 +24247,7 @@ class BattleRuntime(object):
         self._bot_yaw_rates = {}
         self._track_report_time = None
         self._hit_impulse_reports = 0
+        self._feedback_shell_failures = set()
         self._local_speed = 0.0
         self._local_turn_speed = 0.0
         self._local_drive_turn = 0.0
