@@ -996,6 +996,21 @@ OfflineMapCreator.destroy()
   -> if local player is room host, open the next TrainingSettingsWindow
 ```
 
+## Battle-result presentation
+
+The exact #1513 `gui/battle_results/context.pyc` constructor takes
+`(arenaUniqueID, showImmediately, showIfPosted, resetCache)`.
+`BattleResultsService.requestResults` opens the window before yielding the
+result fetch, so retrying a failed fetch must not repeat `showImmediately`.
+The LAN session grants that flag once, for a receipt belonging to its live
+round and transport, after the waiting barrier naturally returns it to the
+garage. Login recovery, early departure, reconnect and an explicit Battle
+click cannot inherit that permission. Durable receipt facts such as
+`premature_leave` never grant popup permission by themselves. Recovery still
+caches the result and publishes its clickable notification without reapplying
+the settlement. Pure-data lifecycle tests cover this request contract;
+Windows acceptance remains necessary for the actual window transition.
+
 ## Post-battle achievements
 
 Wargaming's battle server, not the client, decides which medals a battle

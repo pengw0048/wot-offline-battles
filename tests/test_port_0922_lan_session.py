@@ -726,8 +726,8 @@ class LANSessionTests(unittest.TestCase):
             self.assertTrue(session._publish_postbattle_results())
 
         self.assertEqual([
-            (123, True, False, True),
-            (124, True, False, True),
+            (123, False, False, True),
+            (124, False, False, True),
             (456, False, False, True),
         ], requested)
         self.assertEqual({123, 124, 456}, session._completed_results)
@@ -772,7 +772,7 @@ class LANSessionTests(unittest.TestCase):
         session._publish_battle_service_message.assert_called_once_with(
             123, {'arenaUniqueID': 123})
 
-    def test_postbattle_result_waits_for_lobby_then_opens_stock_window(self):
+    def test_recovered_result_waits_for_lobby_without_opening_stock_window(self):
         class Store(object):
             def pending_arenas(self):
                 return [123]
@@ -811,8 +811,124 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual(self.module.POSTBATTLE_RETRY_DELAY, callbacks[0][0])
         session._publish_postbattle_progress.assert_called_once_with()
         service.requestResults.assert_called_once_with(
-            (123, True, False, True))
+            (123, False, False, True))
         self.assertEqual({123}, session._completed_results)
+
+    def _result_lifecycle(self, successes=None):
+        class Store(object):
+            def __init__(self):
+                self.rows = {}
+            def progress(self):
+                return {'battles': len(self.rows)}
+            def accept(self, row):
+                arena = row['arena_unique_id']
+                if arena in self.rows:
+                    return False
+                self.rows[arena] = row
+                return True
+            def pending_arenas(self):
+                return sorted(self.rows)
+            def service_message_data(self, arena):
+                return {'arenaUniqueID': arena}
+            def should_show_immediately(self, arena):
+                return not self.rows[arena].get('premature_leave', False)
+
+        self.session._postbattle_store = Store()
+        self.session._publish_postbattle_progress = mock.Mock()
+        self.session._publish_battle_service_message = mock.Mock(
+            return_value=True)
+        requested = []
+        outcomes = iter(successes or [True] * 10)
+        def request(context):
+            # #1513 opens the window before yielding its asynchronous fetch.
+            requested.append(context)
+            return _lazy_result(next(outcomes))
+        personality = types.ModuleType('gui.shared.personality')
+        personality.ServicesLocator = types.SimpleNamespace(
+            battleResults=types.SimpleNamespace(requestResults=request))
+        context = types.ModuleType('gui.battle_results.context')
+        context.RequestResultsContext = lambda *args: args
+        return (mock.patch.dict(sys.modules, {
+            'gui.shared.personality': personality,
+            'gui.battle_results.context': context}), requested)
+
+    def _start_result_round(self):
+        self.emit('battle_start', {
+            'round_id': 1, 'map': '01_karelia',
+            'players': [{'id': 'p1', 'vehicle': self.client.vehicle,
+                         'spawn': {'x': 1, 'y': 2, 'z': 3}}]})
+        self.assertTrue(self.session._battle_started)
+
+    def _result_receipt(self, **changes):
+        receipt = {'receipt_id': 'test:1:1', 'arena_unique_id': 123,
+                   'round_id': 1, 'premature_leave': False}
+        receipt.update(changes)
+        self.emit('battle_receipt', receipt)
+
+    def test_login_and_join_only_notify_for_recovered_watched_result(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._result_receipt()
+            self.session.join()
+            self._result_receipt()
+            self.session.on_lobby_view_loaded()
+        self.assertEqual([(123, False, False, True)], requested)
+        self.assertEqual(1, self.session._postbattle_store.progress()['battles'])
+
+    def test_natural_return_opens_only_current_result_once_even_after_fetch_failure(self):
+        patch, requested = self._result_lifecycle([False, True])
+        with patch:
+            self._start_result_round()
+            self._result_receipt()
+            self.assertEqual([], requested)
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self.session.on_lobby_view_loaded()
+            self.session.on_lobby_view_loaded()
+            self._result_receipt()
+        self.assertEqual([(123, True, False, True),
+                          (123, False, False, True)], requested)
+
+    def test_natural_return_accepts_receipt_after_waiting_barrier(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._start_result_round()
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self._result_receipt(round_id=99, arena_unique_id=99)
+            self._result_receipt()
+        self.assertEqual([(99, False, False, True),
+                          (123, True, False, True)], requested)
+
+    def test_early_leave_revokes_popup_even_for_a_watched_receipt(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._start_result_round()
+            self.session._on_local_battle_leave()
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self._result_receipt()
+        self.assertEqual([(123, False, False, True)], requested)
+
+    def test_join_revokes_natural_return_popup_while_lobby_is_loading(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._start_result_round()
+            self._result_receipt()
+            self.session._lobby_ready = lambda: False
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self.session.join()
+            self.session._lobby_ready = lambda: True
+            self.session.on_lobby_view_loaded()
+        self.assertEqual([(123, False, False, True)], requested)
+
+    def test_reconnected_transport_cannot_reuse_a_natural_return(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._start_result_round()
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self.session._client_generation += 1
+            self.session._on_event('battle_receipt', {
+                'receipt_id': 'test:1:1', 'arena_unique_id': 123,
+                'round_id': 1, 'premature_leave': False})
+        self.assertEqual([(123, False, False, True)], requested)
 
     def test_lobby_view_notification_starts_postbattle_drain_without_retry(self):
         store = mock.Mock()

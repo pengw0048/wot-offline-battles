@@ -450,6 +450,9 @@ class LANSession(object):
         self._completed_results = set()
         self._notified_results = set()
         self._archived_result_replayed = False
+        # UI intent is process-local and belongs to one live round. Durable
+        # receipts describe rewards, not permission to open a window later.
+        self._postbattle_return = None
         self.client = None
         self.snapshot = None
         self.state = 'idle'
@@ -577,7 +580,7 @@ class LANSession(object):
             self._completed_results.difference(self._notified_results))
         if not arenas and not notifications:
             return False
-        if not self._lobby_ready():
+        if self._battle_started or not self._lobby_ready():
             self._schedule_postbattle_publish()
             return False
         published = self._publish_completed_battle_notifications(
@@ -604,11 +607,16 @@ class LANSession(object):
             generation = self._client_generation
             try:
                 is_archived = arena_unique_id == archived_arena
-                show_immediately = not is_archived
-                show_policy = getattr(
-                    store, 'should_show_immediately', None)
-                if show_immediately and callable(show_policy):
-                    show_immediately = bool(show_policy(arena_unique_id))
+                returning = self._postbattle_return
+                show_immediately = bool(
+                    not is_archived and returning is not None and
+                    returning['generation'] == self._client_generation and
+                    returning['returned'] and
+                    returning['arena_unique_id'] == arena_unique_id)
+                if show_immediately:
+                    # #1513 opens the window before fetching the result. A
+                    # failed fetch may retry, but must not open it again.
+                    self._postbattle_return = None
                 def completed(success, arena=arena_unique_id,
                               archived=is_archived,
                               token=request_token,
@@ -884,6 +892,7 @@ class LANSession(object):
     def revive(self):
         """Return a stopped or parked session to a clickable Battle button."""
         self._stopped = False
+        self._postbattle_return = None
         self._cancel_retry_callback()
         self._cancel_postbattle_callback()
         self._cancel_picker_close_callback()
@@ -995,6 +1004,7 @@ class LANSession(object):
         Every state answers the click.  A click that produced neither a room
         nor a message is what makes the button look dead after a round.
         """
+        self._postbattle_return = None
         if self._stopped or self.state in ('error', 'stopped'):
             sys.stdout.write(
                 '[Offline LAN 0.9.22] LAN session was %s; rebuilding it\n' %
@@ -2019,6 +2029,12 @@ class LANSession(object):
             self._clear_pending_battle_start()
             self._starting_round_id = None
             if self._battle_started:
+                returning = self._postbattle_return
+                if (returning is not None and
+                        returning['round_id'] == self._active_round_id):
+                    # Install this before native teardown can synchronously
+                    # rebuild the lobby and publish its view-loaded event.
+                    returning['returned'] = True
                 sys.stdout.write(
                     '[Offline LAN 0.9.22] LAN round %r ended: the server '
                     'returned the room to waiting\n' % (self._active_round_id,))
@@ -2160,11 +2176,16 @@ class LANSession(object):
         # start().  Record ownership before entering it, then only commit the
         # active round if that ownership token survived the callback.
         self._starting_round_id = round_id
+        returning = {'round_id': round_id, 'arena_unique_id': None,
+                     'returned': False, 'generation': self._client_generation}
+        self._postbattle_return = returning
         try:
             started = bool(self._battle_runtime.start(
                 config, message=message, lan_client=self.client,
                 on_local_leave=self._on_local_battle_leave))
         except Exception:
+            if self._postbattle_return is returning:
+                self._postbattle_return = None
             if self._starting_round_id == round_id:
                 self._starting_round_id = None
             raise
@@ -2187,12 +2208,15 @@ class LANSession(object):
             self._pending_map = None
             self.state = 'battle'
             return True
+        if self._postbattle_return is returning:
+            self._postbattle_return = None
         return False
 
     def _on_local_battle_leave(self):
         """Retire one local round while retaining the waiting-room socket."""
         if self._stopped or not self._battle_started:
             return False
+        self._postbattle_return = None
         sys.stdout.write(
             '[Offline LAN 0.9.22] local player left LAN round %r\n' %
             (self._active_round_id,))
@@ -2546,6 +2570,14 @@ class LANSession(object):
             if callable(acknowledge):
                 acknowledge(_message_value(message, 'receipt_id'))
             if accepted:
+                returning = self._postbattle_return
+                if (returning is not None and
+                        returning['generation'] == self._client_generation and
+                        _message_value(message, 'round_id') ==
+                        returning['round_id'] and
+                        not _message_value(message, 'premature_leave', False)):
+                    returning['arena_unique_id'] = _message_value(
+                        message, 'arena_unique_id')
                 self._publish_postbattle_progress()
             self._publish_postbattle_results()
         elif kind == 'snapshot':
@@ -2636,6 +2668,7 @@ class LANSession(object):
         if self._stopped:
             return
         self._stopped = True
+        self._postbattle_return = None
         errors = []
         try:
             self._cancel_retry_callback()
