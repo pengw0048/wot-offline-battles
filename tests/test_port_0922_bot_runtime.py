@@ -2324,7 +2324,7 @@ class BotRuntimeTests(unittest.TestCase):
         state['pitch'] = math.radians(81.0)
         self.assertFalse(runtime._advance_bot_overturn(state, 0.1))
         self.assertTrue(state['_overturned'])
-        self.assertEqual((0.0, 0, 0, 0.0), (
+        self.assertEqual((7.0, 0, 0, 0.0), (
             state['speed'], state['movement_dir'], state['rotation_dir'],
             runtime._turn_speeds[11]))
         state['_overturn_time'] = 29.9
@@ -4134,6 +4134,23 @@ class BotRuntimeTests(unittest.TestCase):
             'suspension_roll_velocity': 0.0,
         }
         return runtime, state, calls
+
+    def test_bot_steep_hull_keeps_falling_without_support(self):
+        for axis in ('pitch', 'roll'):
+            with self.subTest(axis=axis):
+                runtime, state, unused_calls = self._suspension_case(
+                    lambda x, z: None)
+                state.update(y=10.0, vertical_speed=-2.0, airborne=True)
+                state[axis] = math.radians(85.0)
+                if axis == 'pitch':
+                    state['terrain_pitch'] = state[axis]
+                for unused in range(5):
+                    before = state['y']
+                    runtime._update_vertical_motion(state, 0.04)
+                    self.assertLess(state['y'], before)
+                    self.assertTrue(state['airborne'])
+                    self.assertFalse(state.get('_support_rise_blocked', False))
+                self.assertLess(state['vertical_speed'], -2.0)
 
     def _full_suspension_case(self, terrain):
         """Build the real update/ram/end-point suspension chain."""

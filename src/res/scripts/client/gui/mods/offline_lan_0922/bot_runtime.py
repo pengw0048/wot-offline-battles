@@ -4160,7 +4160,7 @@ class BotRuntime(object):
         if level != 2:
             state['_overturn_time'] = 0.0
             return False
-        state['speed'] = 0.0
+        # Disable powered control, preserving passive translation.
         state['movement_dir'] = 0
         state['rotation_dir'] = 0
         self._turn_speeds[int(state['id'])] = 0.0
@@ -4173,6 +4173,7 @@ class BotRuntime(object):
         terminal = _terminal_critical(state, descriptor, 'overturn')
         if terminal is not None:
             state['critical'] = terminal
+        state['speed'] = 0.0
         state['health'] = 0
         state['alive'] = False
         state['display_health'] = 0
@@ -6645,8 +6646,9 @@ class BotRuntime(object):
             raise RuntimeError('bot suspension produced a non-finite pose')
         invalid_pose = (
             abs(solved['height'] - _number(state.get('y'))) > 5.0 or
-            abs(solved['pitch']) > 1.2 or
-            abs(solved['roll']) > 1.2)
+            # Reject solver jumps, not a valid steep or overturned attitude.
+            abs(solved['pitch'] - physics_state['pitch']) > 1.2 or
+            abs(solved['roll'] - physics_state['roll']) > 1.2)
         raised_support = bool(
             grounded_before and solved.get('contact_count') and
             self._suspension_rise_exceeds_base(

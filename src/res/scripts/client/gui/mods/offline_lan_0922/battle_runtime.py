@@ -16517,6 +16517,30 @@ class BattleRuntime(object):
                 str(commit_status or '-')))
         return True
 
+    def _report_local_motion_stall(self, start, end, dt, throttle, path):
+        """Record bounded pose evidence when powered travel cannot advance."""
+        if dt <= 0.0 or abs(throttle) <= 0.01:
+            return False
+        dx, dz = end[0] - start[0], end[2] - start[2]
+        if dx * dx + dz * dz > (0.2 * dt) ** 2:
+            return False
+        now = self._clock()
+        if now < getattr(self, '_next_local_stall_report', 0.0):
+            return False
+        self._next_local_stall_report = now + 2.0
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] LOCAL STALL '
+            'pos=(%.3f,%.3f,%.3f) yaw=%.3f pitch=%.3f roll=%.3f '
+            'throttle=%.2f speed=%.3f vertical=%.3f '
+            'path=%s world=%s kinds=%s support_blocked=%s airborne=%s\n' % (
+                end[0], end[1], end[2], self._local_yaw,
+                self._local_pitch, self._local_roll, throttle,
+                self._local_speed, self._local_vertical_speed,
+                path or 'still', self._local_motion_status,
+                self._local_motion_kinds, self._local_support_rise_blocked,
+                self._local_airborne))
+        return True
+
     def _report_local_contact_tick(self, path, before, pitch, rise):
         """Close the tick with the drive slope, the hull rise and the skips.
 
@@ -19595,8 +19619,9 @@ class BattleRuntime(object):
             raise RuntimeError('player suspension produced a non-finite pose')
         invalid_pose = (
             abs(float(solved['height']) - position[1]) > 5.0 or
-            abs(float(solved['pitch'])) > 1.2 or
-            abs(float(solved['roll'])) > 1.2)
+            # A steep absolute attitude is valid, including while falling.
+            abs(float(solved['pitch']) - previous_pitch) > 1.2 or
+            abs(float(solved['roll']) - previous_roll) > 1.2)
         extra_rise = (
             armed_before and bool(solved.get('contact_count')) and
             tank_collision.support_rise_is_obstacle(
@@ -19966,7 +19991,6 @@ class BattleRuntime(object):
             return
         is_alive = getattr(entity, 'isAlive', None)
         stopped = (self._battle_result is not None or
-                   self._overturn_level == 2 or
                    (callable(is_alive) and not is_alive()) or
                    (not callable(is_alive) and
                     (_number(getattr(entity, 'health', 0.0)) <= 0.0 or
@@ -20000,8 +20024,18 @@ class BattleRuntime(object):
         slope_pitch = (0.0 if self._local_airborne else
                        self._smoothed_drive_pitch(position, yaw))
         siege_drive_locked = self._local_siege_drive_locked(entity)
-        throttle = 0.0 if siege_drive_locked else self._sender.forward
-        turn = (0.0 if siege_drive_locked else
+        overturned = self._overturn_level == 2
+        if overturned:
+            # Lock powered input without stopping passive gravity or momentum.
+            self._sender.forward = 0.0
+            self._sender.turn = 0.0
+            stop_input = getattr(getattr(entity, 'filter', None),
+                                 'notifyInputKeysDown', None)
+            if callable(stop_input):
+                stop_input(0, 0)
+        throttle = (0.0 if siege_drive_locked or overturned else
+                    self._sender.forward)
+        turn = (0.0 if siege_drive_locked or overturned else
                 self._local_autorotation_turn(
                     entity, self._sender.turn, throttle,
                     tracks_blocked=self._sender.handbrake))
@@ -20014,7 +20048,8 @@ class BattleRuntime(object):
         # A thrown track is physically locked and must brake through the same
         # grip-limited path as the handbrake.  A dead engine only removes drive
         # torque, so existing momentum continues to coast.
-        handbrake = (bool(self._sender.handbrake) or is_tracked or
+        handbrake = ((bool(self._sender.handbrake) and not overturned) or
+                     is_tracked or
                      siege_drive_locked)
         previous_speed = self._local_speed
         if siege_drive_locked:
@@ -20100,7 +20135,7 @@ class BattleRuntime(object):
                             vehicle_physics.HARD_CONTACT_GRIND_TICKS)
                         contact_path = 'brake'
 
-        if siege_drive_locked or is_tracked or is_engine_dead:
+        if siege_drive_locked or overturned or is_tracked or is_engine_dead:
             turn = 0.0
             self._local_turn_speed = 0.0
         self._local_drive_turn = turn
@@ -20211,6 +20246,8 @@ class BattleRuntime(object):
             contact_path, previous_speed, slope_pitch,
             position[1] - tick_pose[1])
         self._local_position, self._local_yaw = position, yaw
+        self._report_local_motion_stall(
+            tick_pose, position, dt, throttle, contact_path)
         presentation_position = self._update_local_presentation(entity, dt)
         self._avatar.updateOwnVehiclePosition(
             presentation_position,

@@ -393,17 +393,26 @@ destructible, and HE explodes at that point. Stock
 ARMOR_PIERCING/ARMOR_PIERCING_HE/ARMOR_PIERCING_CR family, so the split is the
 client's own set rather than a guess.
 
-`DESTR_TYPE_TREE` now follows the same numeric law. `destructibles.xml`
-publishes one `maxHpForShootingThrough` and one
-`projectilePiercingPowerReduction` table for every destructible type, and stock
-`Vehicle._isDestructibleMayBeBroken` runs a tree through the same
-non-structure branch it uses for fragiles and falling atoms, including
-`kineticDamageCorrection` -- which `DestructiblesCache.__readTree` does supply
--- and the same `scaledDestructibleHealth(itemScale, refHealth)`. So a tree's
-reference health is scaled exactly like any other item's. The pinned tree table
-ranges from `3` for bushes and shrubs to `70` for large firs, and 303 of its
-498 entries exceed the cap, so most large trees now fell and then stop an AP
-shell while a small tree costs the flat 25 mm.
+The local `DESTR_TYPE_TREE` adapter currently applies the same numeric law.
+This is an implementation policy, not a proved retail tree-projectile contract.
+The shared XML proves the threshold and material values, and
+`DestructiblesCache.scaledDestructibleHealth` proves the scale calculation.
+However, `Vehicle._isDestructibleMayBeBroken` consumes vehicle speed and mass:
+it is a vehicle-ram path and cannot establish which tree health the original
+server uses for shell traversal. Large-tree AP behavior therefore still needs
+independent #1513 projectile evidence; the presence of a shared XML table does
+not prove that every tree must stop AP.
+
+The official [8.10 release notes](https://worldoftanks.eu/uk/content/docs/release_notes/release-notes-810/)
+establish AP/APCR traversal through some small objects with penetration loss.
+The [1.13 release notes](https://worldoftanks.com/en/content/docs/release_notes/update-1-13-list-of-changes/)
+introduce non-SPG HE traversal through destructible objects. Stopping an old HE
+shell does not preclude explosion damage to nearby scenery. The exact #1513
+`AreaDestructibles.DestructiblesManager.onProjectileExploded` receives an
+already selected destruction list; it does not implement the server's radius,
+occlusion or damage selection. The local projectile path currently destroys
+directly hit scenery but lacks authoritative HE area destruction of nearby
+scenery, so tree-root splash parity is not established.
 
 Trees own no catalog OBB, so neither their item scale nor their exit distance
 can come from the baked catalog. Both come from the native item:

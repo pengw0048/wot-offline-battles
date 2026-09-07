@@ -6042,14 +6042,12 @@ def _native_item_scale_1513(measured, spaceID, chunk_id, item_index):
 def _tree_shoot_through_1513(measured, spaceID, decoded, shot):
 	"""Return ``(allowed, health)`` for one standing SpeedTree on a shell ray.
 
-	#1513 keeps trees under the same numeric destructible contract as every
-	other type.  ``destructibles.xml`` publishes one ``maxHpForShootingThrough``
-	and one ``projectilePiercingPowerReduction`` table for all of them, and
-	stock ``Vehicle._isDestructibleMayBeBroken`` runs a tree through the same
-	``scaledDestructibleHealth(itemScale, refHealth)`` branch it uses for
-	fragiles and falling atoms, including ``kineticDamageCorrection``, which
-	``DestructiblesCache.__readTree`` does supply.  The shell family is checked
-	first so HE and HEAT never pay for a native matrix query.
+	The local adapter applies the shared XML shooting-through threshold to
+	trees. Exact client data proves the numbers and health scaling, but the
+	stock Vehicle._isDestructibleMayBeBroken consumer is a vehicle-ram path,
+	not proof of the retail server's projectile policy for trees. This policy
+	still needs independent #1513 projectile evidence. HE/HEAT stop before
+	requesting a native item matrix.
 	"""
 	if _shot_kind_1513(shot) not in _SHOT_AP_KINDS_1513:
 		return False, None
