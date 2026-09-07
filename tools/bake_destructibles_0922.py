@@ -176,6 +176,31 @@ def _material_kinds(bsmo, collider, model_id):
                  for record in materials[first:last + 1])
 
 
+def _retains_motion_collision(bsmo, model_info, model_id):
+    """Read the compiled replacement collider, not the damage descriptor."""
+    if int(model_info['type']) != MODEL_TYPE_DESTRUCTIBLE:
+        return False
+    info = bsmo['fragile_model_info_items'][int(model_info['info_index'])]
+    replacement = int(info['destroyed_model_index'])
+    if replacement == 0xffffffff:
+        return False
+    if replacement < 0 or replacement >= len(bsmo['models_colliders']):
+        raise ValueError('BSMO model %d has an invalid destroyed model' % model_id)
+    collider = bsmo['models_colliders'][replacement]
+    first = int(collider['bsp_material_kind_begin'])
+    last = int(collider['bsp_material_kind_end'])
+    materials = bsmo['bsp_material_kinds']
+    if (not collider['bsp_section_name_fnv'] and
+            first == last == 0xffffffff):
+        return False
+    if first > last or first < 0 or last >= len(materials):
+        raise ValueError('BSMO model %d has an invalid destroyed material range' % model_id)
+    # The motion query excludes 0x80, and TRIANGLE_NOCOLLIDE is 0x10.
+    # A ruined building or railway vehicle may retain an ordinary solid BSP.
+    return any(not (int(row['flags']) & 0x90)
+               for row in materials[first:last + 1])
+
+
 def _quantize_locator_value(value):
     """Round one transform component symmetrically to the locator grid."""
     scaled = float(value) * LOCATOR_QUANTIZATION
@@ -444,7 +469,7 @@ def bake_compiled_map(map_name, map_package_data, space_data,
             continue
         resource = raw_resources.setdefault(filename, {
             'kind': kind, 'boxes': set(), 'bsmo_model_ids': [],
-            'instance_count': 0, 'model_boxes': {},
+            'instance_count': 0, 'model_boxes': {}, 'retained_boxes': set(),
         })
         if resource['kind'] != kind:
             raise ValueError('map-local kind conflict for %s' % filename)
@@ -452,6 +477,8 @@ def bake_compiled_map(map_name, map_package_data, space_data,
         resource['bsmo_model_ids'].append(model_id)
         resource['instance_count'] += instance_counts.get(model_id, 0)
         resource['model_boxes'][model_id] = rows[0]
+        if _retains_motion_collision(bsmo, model_info, model_id):
+            resource['retained_boxes'].update(rows)
         instance_model_resources[model_id] = (filename, kind)
 
     resources = {}
@@ -481,6 +508,10 @@ def bake_compiled_map(map_name, map_package_data, space_data,
             'bsmo_model_ids': sorted(raw['bsmo_model_ids']),
             'instance_count': count,
         }
+        if raw['retained_boxes']:
+            record['retained_collision_boxes'] = sorted(
+                resource_box_indexes[filename][box]
+                for box in raw['retained_boxes'])
         if raw['kind'] != 'structure' and len(boxes) > 1:
             box_indexes = dict((box, index)
                                for index, box in enumerate(boxes))

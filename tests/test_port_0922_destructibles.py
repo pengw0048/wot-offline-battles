@@ -1721,6 +1721,85 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             destructibles_sensor._publish_destroyed(
                 'fragile', 12, 3, (1, 2, 4))
 
+    def test_contact_finishes_native_hide_after_effect_without_replaying_it(self):
+        import functools
+        for kind in ('fragile', 'module'):
+            for shot in (False, True):
+                with self.subTest(kind=kind, shot=shot):
+                    manager = _Manager()
+                    area = _authority_environment(manager)
+                    manager.space_id = 1
+                    area.DESTRUCTIBLE_MATKIND = types.SimpleNamespace(NORMAL_MIN=73)
+                    callbacks = {}
+                    events = []
+                    manager._DestructiblesManager__destroyCallbacks = callbacks
+
+                    def finish(*args, **kwargs):
+                        events.append(('collision', args, kwargs))
+
+                    name = ('_DestructiblesManager__setFragileDestroyed'
+                            if kind == 'fragile' else
+                            '_DestructiblesManager__setModuleDestroyed')
+                    setattr(manager, name, finish)
+
+                    def order(*args):
+                        manager.orders.append(args)
+                        events.append(('effect',))
+                        native_args = ((1, 22, 37, True, shot, False, None)
+                                       if kind == 'fragile' else
+                                       (1, 22, 37, 1, True, shot, False))
+                        callbacks[functools.partial(finish, *native_args)] = 71
+
+                    manager.orderDestructibleDestroy = order
+                    cancel = mock.Mock()
+                    destructibles_authority.BigWorld.cancelCallback = cancel
+                    with mock.patch.dict(sys.modules, {'AreaDestructibles': area}):
+                        if kind == 'fragile':
+                            call = lambda: destructibles_authority.destroy_fragile(
+                                1, 22, 37, (0.0, 0.0, 0.0), shot)
+                            mat_kind = None
+                        else:
+                            call = lambda: destructibles_authority.destroy_module(
+                                1, 22, 37, 74, (0.0, 0.0, 0.0), shot)
+                            mat_kind = 74
+                        self.assertTrue(call())
+                        self.assertFalse(call())
+                    self.assertEqual(not shot,
+                        destructibles_authority.contact_collision_ready(22, 37, mat_kind))
+                    self.assertEqual(('effect',), events[0])
+                    if shot:
+                        self.assertEqual(1, len(events))
+                        self.assertEqual(1, len(callbacks))
+                        cancel.assert_not_called()
+                    else:
+                        self.assertEqual(2, len(events))
+                        self.assertEqual('collision', events[1][0])
+                        self.assertEqual({'delCallback': False}, events[1][2])
+                        self.assertEqual({}, callbacks)
+                        cancel.assert_called_once_with(71)
+
+    def test_contact_hide_completion_preserves_a_failed_or_foreign_callback(self):
+        import functools
+        manager = _Manager()
+        area = _authority_environment(manager)
+        manager.space_id = 1
+        method = mock.Mock(side_effect=RuntimeError('native collision not ready'))
+        manager._DestructiblesManager__setFragileDestroyed = method
+        current = functools.partial(method, 1, 22, 37, True, False, False, None)
+        foreign = functools.partial(method, 2, 22, 37, True, False, False, None)
+        callbacks = {current: 71, foreign: 72}
+        manager._DestructiblesManager__destroyCallbacks = callbacks
+        cancel = mock.Mock()
+        destructibles_authority.BigWorld.cancelCallback = cancel
+        with mock.patch.dict(sys.modules, {'AreaDestructibles': area}):
+            self.assertFalse(destructibles_authority._finish_contact_collision(
+                1, 22, 37, None, 'fragile'))
+            self.assertFalse(destructibles_authority._finish_contact_collision(
+                2, 22, 37, None, 'fragile'))
+        self.assertEqual({current: 71, foreign: 72}, callbacks)
+        method.assert_called_once()
+        cancel.assert_not_called()
+
     def test_fragile_preserves_shot_encoding_without_unmatched_native_sync(self):
         manager = _Manager()
         area = _authority_environment(manager)
@@ -4122,6 +4201,8 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             {(22, 1, None)})
         self.assertFalse(item_wide(73, 0, 1, 22))
         self.assertFalse(item_wide(74, 0, 1, 22))
+        self.assertTrue(item_wide(87, 0, 1, 22))
+        self.assertTrue(item_wide(100, 0, 1, 22))
         self.assertTrue(item_wide(73, 0, 2, 22))
         module_only = \
             destructibles_sensor._transparent_shot_surface_filter_1513(
@@ -7187,6 +7268,43 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             bins_before, destructibles_sensor.g_offh_destr_contact_bins)
 
+    def test_solid_destroyed_replacement_blocks_contact_and_obb_skip(self):
+        (bigworld, math_module, area, cache, authority,
+         descriptor) = self._direction_catalog_fixture()
+        filename = next(iter(destructibles_sensor._destructible_catalog['resources']))
+        record = destructibles_sensor._destructible_catalog['resources'][filename]
+        record['retained_collision_boxes'] = frozenset((0,))
+        hit = (_Vector(0.0, 0.7, 3.5), _Vector(0.0, 0.0, -1.0))
+        with mock.patch.dict(sys.modules, {
+                'BigWorld': bigworld, 'Math': math_module,
+                'AreaDestructibles': area, 'DestructiblesCache': cache}), \
+                mock.patch.object(destructibles_sensor, '_get_destr_authority',
+                                  return_value=authority):
+            proposal = destructibles_sensor._catalog_motion_proposal(
+                1, _Vector(), 0.0, 20.0, descriptor, 10.0,
+                dt=0.04, kinetic_speed=20.0)
+            self.assertEqual('hard', proposal['status'])
+            self.assertTrue(proposal['requires_commit'])
+            self.assertFalse(destructibles_sensor._catalog_soft_static_path(
+                1, _Vector(), _Vector(0.0, 0.7, 10.0), hit, 20.0, descriptor))
+            authority.is_destroyed.return_value = True
+            during_hide = destructibles_sensor._catalog_motion_proposal(
+                1, _Vector(), 0.0, 20.0, descriptor, 10.0,
+                dt=0.04, kinetic_speed=20.0)
+            self.assertEqual('hard', during_hide['status'])
+            # After the swap the native replacement BSP, not the original
+            # whole-item box, decides whether its wreckage blocks this ray.
+            after_hide = destructibles_sensor._catalog_motion_proposal(
+                1, _Vector(), 0.0, 20.0, descriptor, 10.3,
+                dt=0.04, kinetic_speed=20.0)
+            self.assertEqual('crushed', after_hide['status'])
+            self.assertFalse(destructibles_sensor._catalog_soft_static_path(
+                1, _Vector(), _Vector(0.0, 0.7, 10.0), hit, 20.0, descriptor,
+                require_pending_first=True))
+            self.assertIsNone(destructibles_sensor._broken_shot_surface_key_1513(
+                22, 37, 87))
+        bigworld.wg_collideSegment.assert_not_called()
+
     def test_broken_skin_covering_ray_endpoint_never_recasts_backwards(self):
         import struct
 
@@ -7926,6 +8044,7 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             self.assertTrue(collision_filter(75, 0, 37, 22))
             destroyed.add((37, None))
             self.assertFalse(collision_filter(75, 0, 37, 22))
+            self.assertTrue(collision_filter(87, 0, 37, 22))
             self.assertTrue(collision_filter(75, 0, 38, 22))
 
     def test_stationary_multi_module_structure_crushes_each_module(self):
@@ -8340,7 +8459,7 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             for line in writes))
 
     def test_pending_name_alignment_blocks_before_the_crush_law_owns_it(self):
-        """The wagon is solid while pending and crushable once identified."""
+        """A damaged wagon still blocks movement through its replacement body."""
         environment = self._prohorovka_wagon_environment(
             descriptor_available=True)
         authority = types.SimpleNamespace(
@@ -8353,12 +8472,12 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             environment['clock'][0] = 10.0 + tick
             details.append(self._wagon_sweep(
                 environment, authority, commit_enabled=True))
-            if details[-1]['status'] == 'crushed':
+            if details[-1]['accepted_now']:
                 break
 
         self.assertEqual('hard', details[0]['status'])
         self.assertIn('unidentified', details[0]['kinds'])
-        self.assertEqual('crushed', details[-1]['status'])
+        self.assertEqual('hard', details[-1]['status'])
         self.assertNotIn('unidentified', details[-1]['kinds'])
         self.assertEqual(((32637, 56, None),), details[-1]['token'])
         authority.destroy_fragile.assert_called_once()
@@ -8582,7 +8701,9 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         # then does the exact retail crush law get to decide.
         self.assertEqual('hard', pending_detail['status'])
         self.assertIn('unidentified', pending_detail['kinds'])
-        self.assertEqual('crushed', detail['status'])
+        # Its compiled destroyed module retains collision, so cosmetic
+        # destruction alone cannot admit translation through this contact.
+        self.assertEqual('hard', detail['status'])
         self.assertTrue(detail['requires_commit'])
         self.assertEqual(((32636, 25, 74),), detail['token'])
         self.assertEqual(

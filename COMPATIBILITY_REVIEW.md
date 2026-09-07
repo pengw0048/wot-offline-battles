@@ -604,6 +604,22 @@ material-hit and shell paths cannot bypass that admission with a globally
 known same-kind resource; a structure hit must also name a material module
 present in that exact admitted instance.
 
+Damage does not imply removal of collision. The compiled BSMO destroyed-model
+reference identifies modules with a solid replacement BSP; map catalogs retain
+that per-box fact. Such contacts cannot skip the original whole-item OBB, and
+destroyed-model materials 87–100 remain eligible for native motion, support and
+shell queries even after an item-wide destruction receipt. After replacement,
+the native BSP, rather than the original bounding box, owns collision.
+
+For physical fragile/module crushing, the exact stock manager starts effects
+before scheduling its collision replacement after 0.2 seconds. The adapter
+completes only the matching current-space bound callback immediately, then
+cancels its scheduled copy. Exact callback arguments, module identity and
+non-shot/non-Havok guards are required; failure preserves the scheduled owner.
+Projectile timing and falling-body animation retain their stock lifecycle.
+Pinned-bytecode ABI checks and focused tests cover these contracts; exact
+Windows playtesting remains necessary for effect continuity and contact feel.
+
 The matrix boundary is contained at the scope of its evidence. A thrown chunk-
 matrix query isolates that chunk, while a successfully returned matrix whose
 translation is temporarily `None` remains solid and retries after streaming.

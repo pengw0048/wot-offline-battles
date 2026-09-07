@@ -1289,9 +1289,15 @@ def set_catalog(catalog):
 			raise ValueError('ambiguous catalog has no locators')
 		if (kind == 'structure' or len(boxes) == 1) and locators:
 			raise ValueError('destructible catalog has unexpected locators')
+		retained_boxes = raw.get('retained_collision_boxes', ())
+		if (not isinstance(retained_boxes, (list, tuple)) or
+				any(type(index) not in _INTEGER_TYPES or
+					index < 0 or index >= len(boxes) for index in retained_boxes)):
+			raise ValueError('destructible retained collision boxes are invalid')
 		prepared[normalized] = {
 			'filename': filename, 'kind': kind, 'boxes': tuple(boxes),
 			'locators': locators,
+			'retained_collision_boxes': frozenset(retained_boxes),
 		}
 	try:
 		catalog_version = int(catalog.get('version', 1))
@@ -3078,6 +3084,20 @@ def _catalog_candidate_on_ray_1513(
 	return None
 
 
+def _catalog_retains_collision_1513(candidate):
+	"""Whether this exact module has a solid compiled destroyed replacement."""
+	record = (_destructible_catalog or {}).get('resources', {}).get(
+		_normalized_filename(candidate[3]))
+	if not record or not record.get('retained_collision_boxes'):
+		return False
+	if record['kind'] == 'structure':
+		return any(record['boxes'][index][6] == candidate[2]
+			for index in record['retained_collision_boxes'])
+	instance = globals().get('g_offh_destr_instances', {}).get(candidate[:2], {})
+	index = instance.get('box_index', 0 if len(record['boxes']) == 1 else None)
+	return index in record['retained_collision_boxes']
+
+
 def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 		collision, vel, td, recast_budget=None,
 		require_pending_first=False, allow_kinetic_first=False,
@@ -3120,6 +3140,10 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			hit_point, current_start, segment_end,
 			prefer_destroyed=(require_pending_first and candidate_index == 0))
 		if candidate is None:
+			return 'pending_hard' if pending_contact else False
+		# Damage can replace a railway vehicle with a still-solid wreck.  Its
+		# native hit must never be skipped through the old whole-item OBB.
+		if _catalog_retains_collision_1513(candidate):
 			return 'pending_hard' if pending_contact else False
 		# #1513 ``Vehicle._isDestructibleMayBeBroken`` returns True as soon as the
 		# chunk controller reports the item broken, whatever the vehicle speed and
@@ -3235,6 +3259,11 @@ def _broken_collision_filter(members, accepted_trees=()):
 			identity = (int(hit[3]), int(hit[2]))
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			# #1513's destroyed-model materials are new geometry, not the
+			# delayed original skin covered by an item-wide destruction key.
+			return True
 		if identity not in accepted_trees and (
 				identity + (hit[0],)) not in broken and (
 				identity + (None,)) not in broken:
@@ -3278,15 +3307,30 @@ def _live_broken_collision_filter_1513(members, accepted_trees=()):
 	member_ids = frozenset((int(chunk_id), int(item_index))
 		for chunk_id, item_index in members)
 
+	def keep_native_surface(hit, identity):
+		if _DIAGNOSTICS_ENABLED:
+			now = _diagnostic_time_1513()
+			pending = tuple(sorted(key for key, deadline in
+				globals().get('g_offh_destr_pending', {}).items()
+				if key[:2] in member_ids and now < deadline))
+			if pending:
+				_diagnostic_contact_1513(
+					'native_motion_keep', identity[0], identity[1],
+					fields=(('hit', tuple(hit)), ('pending', pending[:8])), now=now)
+		return True
+
 	def reject_broken_skin(*hit):
 		try:
 			identity = (int(hit[3]), int(hit[2]))
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			return keep_native_surface(hit, identity)
 		if identity in accepted_trees:
 			accepted = True
 		elif identity not in member_ids or not callable(destroyed_keys):
-			return True
+			return keep_native_surface(hit, identity)
 		else:
 			mat_kind = hit[0]
 			predicted = globals().get('g_offh_destr_speculative', set())
@@ -3296,7 +3340,7 @@ def _live_broken_collision_filter_1513(members, accepted_trees=()):
 			if (not accepted and
 					identity + (mat_kind,) not in predicted and
 					identity + (None,) not in predicted):
-				return True
+				return keep_native_surface(hit, identity)
 		globals()['g_offh_destr_ground_skips'] = globals().get(
 			'g_offh_destr_ground_skips', 0) + 1
 		return False
@@ -3376,9 +3420,11 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04,
 		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
 		motion_yaw=motion_yaw)
 	pending = globals().get('g_offh_destr_pending', {})
+	ready = getattr(_get_destr_authority(), 'contact_collision_ready', None)
 	for candidate in _catalog_contact_candidates(vehicle_box):
 		deadline = pending.get((candidate[0], candidate[1], candidate[2]))
-		if deadline is not None and float(now) < float(deadline):
+		if (deadline is not None and float(now) < float(deadline) and
+				not (callable(ready) and ready(*candidate[:3]))):
 			return True
 	return False
 
@@ -3540,6 +3586,13 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 					note_destroyed(
 						'module' if mat_kind is not None else 'fragile',
 						chunk_id, item_index, mat_kind, now)
+				if (_catalog_retains_collision_1513(candidate) and
+						float(now) < globals().get('g_offh_destr_pending', {}).get(key, 0.0) and
+						not (callable(getattr(auth, 'contact_collision_ready', None)) and
+							auth.contact_collision_ready(*key))):
+					# Keep outside the old body until the native replacement is
+					# installed. After that, its actual BSP owns motion/support.
+					blocked = True
 				crushed = True
 				if contact_candidate:
 					exact_token.add(key)
@@ -3555,6 +3608,10 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 			chunk_id, item_index, mat_kind, unused_filename, kind = (
 				candidate[:5])
 			key = (chunk_id, item_index, mat_kind)
+			if _catalog_retains_collision_1513(candidate):
+				# A legal cosmetic break does not admit translation through the
+				# replacement body during the native hiding callback window.
+				blocked = True
 			mat_info = _synthetic_mat_info(candidate, Math)
 			physical_crushable = _stock_crushable_1513(
 				mat_info, vel, td, candidate[5])
@@ -6138,6 +6195,9 @@ def _transparent_shot_surface_filter_1513(ignored_surfaces):
 			identity = int(hit[3]), int(hit[2])
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			return True
 		if identity + (None,) in ignored_surfaces:
 			return False
 		try:
@@ -6187,6 +6247,8 @@ def _broken_shot_surface_key_1513(chunk_id, item_index, mat_kind):
 	``None`` material.  A structure is accepted per module, so only the exact
 	broken module may be hidden while its siblings keep stopping the shell.
 	"""
+	if mat_kind is not None and 87 <= mat_kind <= 100:
+		return None
 	authority = _get_destr_authority()
 	identity = int(chunk_id), int(item_index)
 	if authority.is_destroyed(identity[0], identity[1], None):

@@ -84,7 +84,8 @@ def _synthetic_scene():
             {'type': 1, 'info_index': 0},
         ],
         'fragile_model_info_items': [
-            {'entry_type': 0}, {'entry_type': 1}, {'entry_type': 1}],
+            {'entry_type': kind, 'destroyed_model_index': 0xffffffff}
+            for kind in (0, 1, 1)],
         'falling_model_info_items': [{}],
         'models_colliders': [
             {'bsp_section_name_fnv': 1,
@@ -224,6 +225,23 @@ class DestructiblesBaker0922Tests(unittest.TestCase):
                                _FakeCompiledSpace):
             return self.baker.bake_compiled_map(
                 'synthetic', b'pkg', b'space', b'xml', descriptors)
+
+    def test_destroyed_replacement_materials_preserve_motion_collision(self):
+        for flags, retained in ((0x5700, True), (0x57ff, False),
+                                (0x5780, False), (0x5710, False)):
+            with self.subTest(flags=flags):
+                sections, descriptors = _synthetic_scene()
+                bsmo = sections['BSMO']._data
+                replacement = copy.deepcopy(bsmo['models_colliders'][0])
+                replacement['bsp_material_kind_begin'] = 4
+                replacement['bsp_material_kind_end'] = 4
+                bsmo['models_colliders'].append(replacement)
+                bsmo['bsp_material_kinds'].append({'flags': flags})
+                bsmo['fragile_model_info_items'][0]['destroyed_model_index'] = 4
+                data = self._bake_synthetic(sections, descriptors)
+                record = data['resources'][SYNTH_FRAGILE]
+                self.assertEqual([0] if retained else [],
+                                 record.get('retained_collision_boxes', []))
 
     def test_synthetic_wgde_wires_skip_empty_item_slots(self):
         sections, descriptors = _synthetic_scene()

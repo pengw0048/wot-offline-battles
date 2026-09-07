@@ -662,6 +662,18 @@ EXPECTED_ABI = {
         'DestructiblesManager.__destroyDestructible': (
             'self', 'chunkID', 'dmgType', 'destData',
             'isNeedAnimation', 'explosionInfo'),
+        'DestructiblesManager.__destroyFragile': (
+            'self', 'chunkID', 'destrIndex', 'isNeedAnimation',
+            'isShotDamage', 'explosionInfo'),
+        'DestructiblesManager.__destroyModule': (
+            'self', 'chunkID', 'destrIndex', 'matKind', 'isNeedAnimation',
+            'isShotDamage', 'explosionInfo'),
+        'DestructiblesManager.__setFragileDestroyed': (
+            'self', 'spaceID', 'chunkID', 'destrIndex', 'isNeedAnimation',
+            'isShotDamage', 'isHavokVisible', 'explosionInfo', 'delCallback'),
+        'DestructiblesManager.__setModuleDestroyed': (
+            'self', 'spaceID', 'chunkID', 'destrIndex', 'moduleIndex',
+            'isNeedAnimation', 'isShotDamage', 'isHavokVisible', 'delCallback'),
         'DestructiblesManager.__dropDestructible': (
             'self', 'chunkID', 'destrIndex', 'dmgType', 'fallDirYaw',
             'pitchConstr', 'fallSpeed', 'isAnimate',
