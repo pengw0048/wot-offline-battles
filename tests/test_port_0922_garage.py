@@ -719,6 +719,42 @@ class FittingRequestTests(unittest.TestCase):
         self.assertEqual(200, _TankmanDescriptor(tankmen[101]).totalXP())
         self.assertEqual(150, _TankmanDescriptor(tankmen[102]).totalXP())
 
+    def test_crew_training_uses_the_vehicle_own_crew_xp_factor(self):
+        """``crewXpFactor`` is exact #1513 data on every shipped vehicle."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['vehicles'][0]['settings'] = 0
+        vehicles, tankmen_module = _modules()
+        vehicles.getVehicleType = lambda compact_descr: types.SimpleNamespace(
+            crewXpFactor=1.5)
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles,
+            tankmen_module=tankmen_module)
+
+        state.award_battle_crew_xp(50001, 100, 1)
+
+        tankmen = state.snapshot()['vehicles'][0]['tankmen']
+        self.assertEqual(150, _TankmanDescriptor(tankmen[101]).totalXP())
+        self.assertEqual(150, _TankmanDescriptor(tankmen[102]).totalXP())
+
+    def test_crew_training_falls_back_to_the_stock_rate(self):
+        """An unreadable descriptor must not fail the battle transaction."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['vehicles'][0]['settings'] = 0
+        vehicles, tankmen_module = _modules()
+
+        def explode(unused_compact_descr):
+            raise KeyError('no such vehicle type')
+
+        vehicles.getVehicleType = explode
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles,
+            tankmen_module=tankmen_module)
+
+        state.award_battle_crew_xp(50001, 80, 1)
+
+        tankmen = state.snapshot()['vehicles'][0]['tankmen']
+        self.assertEqual(80, _TankmanDescriptor(tankmen[101]).totalXP())
+
     def test_battle_xp_does_not_accelerate_when_the_vehicle_setting_is_off(self):
         snapshot = copy.deepcopy(SNAPSHOT)
         snapshot['vehicles'][0]['settings'] = 0

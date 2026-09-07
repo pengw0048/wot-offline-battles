@@ -709,19 +709,44 @@ class GarageState(object):
         self.revision += 1
         return record
 
+    def _crew_xp_factor(self, vehicle_type_compact_descr):
+        """Return the vehicle's own crew training multiplier.
+
+        ``crewXpFactor`` is exact #1513 data: every shipped vehicle definition
+        carries it, and it is the reason a premium vehicle trains its crew
+        faster than a researchable one.  It is read on the client because the
+        client owns the descriptors; an unreadable descriptor trains at the
+        stock rate rather than failing the battle transaction.
+        """
+        try:
+            vehicles = self._vehicles_module()
+            # ``getVehicleType`` is the #1513 entry point for a *type* compact
+            # descriptor; ``VehicleDescr`` wants a full item descriptor.
+            vehicle_type = vehicles.getVehicleType(
+                _int(vehicle_type_compact_descr))
+            factor = float(getattr(vehicle_type, 'crewXpFactor', 1.0))
+        except Exception:
+            return 1.0
+        if factor <= 0.0:
+            return 1.0
+        return factor
+
     def award_battle_crew_xp(self, vehicle_type_compact_descr, battle_xp,
                              xp_to_tankman_flag):
         """Apply one battle's crew XP and return the durable award summary.
 
-        Every crew member receives the battle XP.  On an elite vehicle with
-        accelerated training enabled, the vehicle XP is diverted to the least
-        experienced crew member as one additional equal award.  The offline
-        account publishes every vehicle as elite, so the persisted vehicle
-        setting is the remaining stock eligibility check.
+        Every crew member receives the battle XP scaled by the vehicle's own
+        ``crewXpFactor``.  On an elite vehicle with accelerated training
+        enabled, the vehicle XP is diverted to the least experienced crew
+        member as one additional equal award.  The offline account publishes
+        every vehicle as elite, so the persisted vehicle setting is the
+        remaining stock eligibility check.
         """
         amount = _int(battle_xp)
         if amount < 0:
             raise GarageError('battle crew XP cannot be negative')
+        amount = int(amount * self._crew_xp_factor(
+            vehicle_type_compact_descr))
         record = self._record_by_vehicle_type(
             vehicle_type_compact_descr, touch=False)
         crew_ids = list(record.get('crew') or ())

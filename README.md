@@ -127,6 +127,15 @@ whose profile changed after it started must be restarted first.
   itself retired, cancelled before release, or that need data this
   reconstruction does not own are listed with their reason in
   `battle_achievements.py` rather than guessed.
+- Battle payments follow the published structure: Credits are a base amount
+  per vehicle tier that alone carries the 1.85 victory multiplier, a
+  tier-independent amount per point of damage, double for detecting artillery,
+  and one capture payment split between the vehicles that completed it; XP
+  counts damage and kills with the tier difference taken into account, adds 50
+  percent on a win, and returns five percent as Free XP. Wargaming never
+  published the coefficients, so those stay this build's declared values, but
+  the tier relationship is measured from the captured retail tables rather
+  than guessed.
 - Mastery badges and Marks of Excellence use the real bar. Wargaming computes
   both from the live player population, so `tools/bake_mastery_thresholds_0922.py`
   captures the published retail tables into `mastery_catalog.py`: base XP for

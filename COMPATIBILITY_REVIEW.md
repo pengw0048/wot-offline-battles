@@ -1230,11 +1230,55 @@ and emits, and the baker also bakes the client's own tier and class map so
 neither the Tier V gate nor that fallback depends on loaded item definitions.
 
 Because the reference population is retail players rather than this
-installation's Bots, the bar is the real one. It is not calibrated against this
-product's own XP policy in `server/offline_rewards.py`, which is an explicit
-offline reconstruction rather than Wargaming's formula, so how often an offline
-battle clears a retail mastery threshold is a gameplay question that only
-Windows play can answer.
+installation's Bots, the bar is the real one, which makes this product's own
+reward policy part of the same question: a retail threshold only means what it
+means in retail if the currency behind it behaves like retail's.
+
+### What the published economy actually fixes
+
+Wargaming's battle payments are cell-app code. The pinned client proves it
+cannot know the per-vehicle part: `scripts/common/items/vehicles.py` reads
+`xpFactor`, `creditsFactor` and `freeXpFactor` only under
+`if not IS_CLIENT and not IS_BOT`, and none of the 694 shipped vehicle
+definitions carries any of them. What the client *does* ship, and what
+`server/offline_rewards.py` may therefore use, is `repairCost` (with the exact
+`maxHealth * type.repairCost` structure), `crewXpFactor` on 684 vehicles and
+`premiumVehicleXPFactor` on 200.
+
+The published structure is followed rather than invented. Credits are a base
+`X * vehicle tier` that alone carries the 1.85 victory multiplier, `Y` per
+point of enemy durability destroyed independent of tier, `Z` per enemy
+detected first with `2 * Z` for an SPG, and one capture payment for a capture
+that actually completed, split equally between its participants; the published
+list carries no assisted-damage payment, so this build no longer pays one. XP
+counts damage and kills with the tier difference taken into account, spotting,
+capture and capture defence, adds 50 percent on a win, and yields five percent
+of the Combat XP as Free XP. `X`, `Y`, `Z`, the capture payment and every
+vehicle's own profitability coefficient stay this product's declared values,
+because no source publishes them.
+
+The one relationship that is recoverable is the tier one. Dividing each
+vehicle's captured Ace base-XP threshold by its captured three-mark combined
+damage and taking the median per tier gives 0.785 at Tier V falling smoothly
+to 0.295 at Tier X - a factor of 2.66 that the previous flat policy did not
+have at all. `XP_TIER_PERMILLE` is that curve normalised at Tier VIII, so the
+shape is retail's and the magnitude is unchanged at the pivot; a test
+recomputes it from the baked tables so a re-bake cannot move it silently. Two
+caveats belong with it: the measurement pairs a single-battle XP percentile
+with a 100-battle damage percentile, which is why it is used as a ratio rather
+than an absolute level, and retail publishes no mark data below Tier V, so the
+four lowest tiers hold the Tier V value instead of extrapolating.
+
+Tested against the captured mastery thresholds, a winning battle with two
+kills now needs 4370 damage for an Ace on a Tier X where the old policy needed
+2060 against a three-mark average of 3948, and Tier VIII is unchanged by
+construction. The residual sits at the bottom of the tree: the same battle
+reaches an Ace at 680 damage on a Tier V against a three-mark average of 1347,
+because a kill pays a flat 100 XP, which is large next to low-tier damage and
+is a number no source publishes. Scaling kill XP by the victim's own durability
+would remove that, and the server has the victim health to do it, but it
+replaces one unpublished constant with another and is left as a product
+decision.
 
 ## Stock map-selection lifecycle
 
