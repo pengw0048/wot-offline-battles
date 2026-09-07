@@ -52,21 +52,21 @@ class GoldShopTest(unittest.TestCase):
             return json.load(stream)
 
     def _buy(self, name, **kwargs):
-        return gold_shop.buy_vehicle(
+        return gold_shop.add_vehicle(
             self.slot, name, self.game, root=self.root,
             is_running=lambda: False, **kwargs)
 
-    def test_a_purchase_takes_the_gold_and_queues_the_vehicle(self):
+    def test_adding_preserves_the_wallet_and_queues_the_vehicle(self):
         path = self._write_state(gold=20000)
 
         result = self._buy("germany:G51_Lowe")
 
-        self.assertEqual(7500, result["gold_left"])
+        self.assertEqual("germany:G51_Lowe", result["name"])
         self.assertEqual(
             {"schema": 1, "vehicles": ["germany:G51_Lowe"]}, self._inbox())
         with io.open(path, encoding="utf-8") as stream:
             self.assertEqual(
-                7500, json.load(stream)["ledger"]["wallet"]["gold"])
+                20000, json.load(stream)["ledger"]["wallet"]["gold"])
 
     def test_a_vehicle_the_retail_shop_never_sold_is_still_offered(self):
         """145 of the 196 are reward tanks with no shop and no tree node."""
@@ -79,10 +79,8 @@ class GoldShopTest(unittest.TestCase):
     def test_a_save_that_cannot_afford_the_vehicle_keeps_its_gold(self):
         path = self._write_state(gold=100)
 
-        with self.assertRaises(gold_shop.GoldShopError):
-            self._buy("germany:G51_Lowe")
-
-        self.assertIsNone(self._inbox())
+        self._buy("germany:G51_Lowe")
+        self.assertEqual(["germany:G51_Lowe"], self._inbox()["vehicles"])
         with io.open(path, encoding="utf-8") as stream:
             self.assertEqual(
                 100, json.load(stream)["ledger"]["wallet"]["gold"])
@@ -96,35 +94,11 @@ class GoldShopTest(unittest.TestCase):
 
         self.assertIsNone(self._inbox())
 
-    def test_a_save_that_does_not_name_its_vehicles_cannot_be_sold_to(self):
-        """Only a client can turn a compact descriptor into a vehicle name.
-
-        Until the game names them, the shop cannot tell what the save owns,
-        and selling it a vehicle it already has would take the gold for a
-        delivery the client then, correctly, declines to make.
-        """
-        self._write_state(gold=40000, vehicles={
-            "12345": {"compDescr": "AAA="}})
-
-        with self.assertRaises(gold_shop.GoldShopError):
-            self._buy("germany:G51_Lowe")
-
-        self.assertIsNone(self._inbox())
-        self.assertEqual(
-            40000,
-            save_ledger.read_balances(self.slot, root=self.root)["gold"])
-        self.assertEqual(
-            1, gold_shop.unnamed_vehicles(self.slot, self.game, root=self.root))
-
-    def test_a_save_whose_vehicles_are_all_named_is_readable(self):
-        self._write_state(gold=40000, vehicles={
-            "12345": {"compDescr": "AAA=", "name": "china:Ch01_Type59"}})
-
-        self.assertEqual(
-            0, gold_shop.unnamed_vehicles(self.slot, self.game, root=self.root))
+    def test_legacy_unnamed_vehicles_are_deduplicated_by_the_client(self):
+        self._write_state(gold=0, vehicles={"12345": {"compDescr": "AAA="}})
         self._buy("germany:G51_Lowe")
-
         self.assertEqual(["germany:G51_Lowe"], self._inbox()["vehicles"])
+        self.assertEqual(0, save_ledger.read_balances(self.slot, root=self.root)["gold"])
 
     def test_a_vehicle_already_waiting_cannot_be_bought_again(self):
         self._write_state(gold=40000)
@@ -135,7 +109,7 @@ class GoldShopTest(unittest.TestCase):
 
         self.assertEqual(["germany:G51_Lowe"], self._inbox()["vehicles"])
         self.assertEqual(
-            40000 - 12500,
+            40000,
             save_ledger.read_balances(self.slot, root=self.root)["gold"])
 
     def test_two_different_vehicles_both_wait_for_the_client(self):
@@ -148,7 +122,7 @@ class GoldShopTest(unittest.TestCase):
             ["germany:G51_Lowe", "china:Ch01_Type59"],
             self._inbox()["vehicles"])
         self.assertEqual(
-            40000 - 12500 - 11500,
+            40000,
             save_ledger.read_balances(self.slot, root=self.root)["gold"])
 
     def test_a_vehicle_this_client_does_not_ship_is_refused(self):
@@ -159,17 +133,18 @@ class GoldShopTest(unittest.TestCase):
 
         self.assertIsNone(self._inbox())
 
-    def test_a_save_that_never_ran_cannot_buy_anything(self):
+    def test_a_new_save_can_add_a_vehicle_without_creating_or_charging_a_wallet(self):
+        self._buy("germany:G51_Lowe")
+        self.assertEqual(["germany:G51_Lowe"], self._inbox()["vehicles"])
+        self.assertFalse(os.path.exists(os.path.join(self.directory, 'garage_state.json')))
         with self.assertRaises(gold_shop.GoldShopError):
             self._buy("germany:G51_Lowe")
-
-        self.assertIsNone(self._inbox())
 
     def test_a_running_game_owns_the_save_and_the_purchase_is_refused(self):
         self._write_state(gold=40000)
 
         with self.assertRaises(gold_shop.GoldShopError):
-            gold_shop.buy_vehicle(
+            gold_shop.add_vehicle(
                 self.slot, "germany:G51_Lowe", self.game, root=self.root,
                 is_running=lambda: True)
 
@@ -188,9 +163,8 @@ class GoldShopTest(unittest.TestCase):
 
         self.assertTrue(offers["china:Ch01_Type59"]["owned"])
         self.assertFalse(offers["germany:G51_Lowe"]["owned"])
-        # 12000 gold buys the 11500 vehicle but not the 12500 one.
-        self.assertTrue(offers["china:Ch01_Type59"]["affordable"])
-        self.assertFalse(offers["germany:G51_Lowe"]["affordable"])
+        self.assertFalse(offers["china:Ch01_Type59"]["available"])
+        self.assertTrue(offers["germany:G51_Lowe"]["available"])
         self.assertFalse(offers["germany:G51_Lowe"]["pending"])
 
     def test_an_offer_that_was_bought_reads_as_pending(self):
@@ -205,11 +179,11 @@ class GoldShopTest(unittest.TestCase):
         self.assertTrue(offers["germany:G51_Lowe"]["pending"])
         self.assertFalse(offers["germany:G51_Lowe"]["owned"])
 
-    def test_a_save_with_no_state_offers_everything_and_affords_nothing(self):
+    def test_a_save_with_no_state_can_add_any_offered_vehicle(self):
         offers = gold_shop.list_offers(self.slot, self.game, root=self.root)
 
         self.assertEqual(2, len(offers))
-        self.assertFalse(any(offer["affordable"] for offer in offers))
+        self.assertTrue(all(offer["available"] for offer in offers))
 
 
 if __name__ == "__main__":

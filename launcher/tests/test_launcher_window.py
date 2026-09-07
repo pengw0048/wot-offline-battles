@@ -1457,7 +1457,7 @@ class WindowTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.window._gold_catalogue_cache = (None, None)
 
-    def test_the_shop_lists_every_gold_vehicle_with_its_price(self):
+    def test_the_garage_lists_vehicle_names_without_a_price(self):
         saves_root = self._saves_root()
         self._write_ledger(
             wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
@@ -1466,18 +1466,18 @@ class WindowTest(unittest.TestCase):
         values = self.window._refresh_gold_shop()
 
         self.assertEqual(
-            ("Lowe - tier 8 - 12500 gold", "Type 59 - tier 8 - 11500 gold"),
+            ("Lowe - tier 8", "Type 59 - tier 8"),
             values)
         self.assertEqual(
             "normal", self.window.buy_gold_vehicle_button.cget("state"))
 
-    def test_buying_takes_the_gold_and_queues_the_vehicle(self):
+    def test_adding_keeps_the_gold_and_queues_the_vehicle(self):
         saves_root = self._saves_root()
         self._write_ledger(
             wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
         self._with_shop()
         self.window._refresh_gold_shop()
-        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+        self.window.gold_vehicle.set("Lowe - tier 8")
 
         with mock.patch.object(core, "game_is_running", return_value=False):
             self.assertTrue(self.window._buy_gold_vehicle())
@@ -1488,29 +1488,20 @@ class WindowTest(unittest.TestCase):
                   encoding="utf-8") as stream:
             self.assertEqual(
                 ["germany:G51_Lowe"], json.load(stream)["vehicles"])
-        self.assertEqual("7500", self.window.balance_entries["gold"].get())
-        self.assertIn("Bought Lowe", self._log_text())
+        self.assertEqual("20000", self.window.balance_entries["gold"].get())
+        self.assertIn("Added Lowe", self._log_text())
         # The row now says the vehicle is waiting for the game.
         self.assertIn(
-            "Lowe - tier 8 - 12500 gold (bought)",
+            "Lowe - tier 8 (queued)",
             tuple(self.window.gold_vehicle_box.cget("values")))
 
-    def test_a_vehicle_the_save_cannot_afford_is_refused(self):
-        saves_root = self._saves_root()
-        self._write_ledger(
-            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=100)
+    def test_a_vehicle_can_be_added_with_no_gold(self):
+        self._saves_root()
         self._with_shop()
         self.window._refresh_gold_shop()
-        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
-
         with mock.patch.object(core, "game_is_running", return_value=False):
-            self.assertFalse(self.window._buy_gold_vehicle())
-
-        self.assertIn("could not be bought", self._log_text())
-        directory = os.path.join(
-            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
-        self.assertFalse(os.path.exists(
-            os.path.join(directory, "launcher_inbox.json")))
+            self.assertTrue(self.window._buy_gold_vehicle())
+        self.assertEqual("disabled", self.window.buy_gold_vehicle_button.cget("state"))
 
     def test_a_running_game_keeps_the_gold(self):
         saves_root = self._saves_root()
@@ -1518,7 +1509,7 @@ class WindowTest(unittest.TestCase):
             wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
         self._with_shop()
         self.window._refresh_gold_shop()
-        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+        self.window.gold_vehicle.set("Lowe - tier 8")
 
         with mock.patch.object(core, "game_is_running", return_value=True):
             self.assertFalse(self.window._buy_gold_vehicle())
@@ -1548,38 +1539,19 @@ class WindowTest(unittest.TestCase):
 
         values = self.window._refresh_gold_shop()
 
-        self.assertIn("Lowe - tier 8 - 12500 gold (owned)", values)
+        self.assertIn("Lowe - tier 8 (owned)", values)
 
-    def test_a_save_that_does_not_name_its_vehicles_cannot_buy(self):
-        """Such a save cannot say what it owns, so the shop must not sell."""
+    def test_legacy_unnamed_garages_do_not_block_the_add_button(self):
         saves_root = self._saves_root()
         self._write_ledger(
-            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000,
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=0,
             vehicles={"50001": {"compDescr": "AAA="}})
         self._with_shop()
-
-        values = self.window._refresh_gold_shop()
-
-        self.assertEqual(2, len(values))
-        self.assertEqual(
-            "disabled", self.window.buy_gold_vehicle_button.cget("state"))
-        self.assertEqual(
-            wot_launcher._SHOP_UNREADABLE,
-            self.window.shop_help_label.cget("text"))
-
-        self.window.gold_vehicle.set(values[0])
+        self.window._refresh_gold_shop()
+        self.assertEqual("normal", self.window.buy_gold_vehicle_button.cget("state"))
         with mock.patch.object(core, "game_is_running", return_value=False):
-            self.assertFalse(self.window._buy_gold_vehicle())
-
-        directory = os.path.join(
-            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
-        self.assertFalse(os.path.exists(
-            os.path.join(directory, "launcher_inbox.json")))
-        self.assertEqual(
-            20000,
-            wot_launcher.save_ledger.read_balances(
-                wot_launcher.save_slots.DEFAULT_SLOT_ID,
-                root=saves_root)["gold"])
+            self.assertTrue(self.window._buy_gold_vehicle())
+        self.assertEqual("0", self.window.balance_entries["gold"].get())
 
     def test_the_client_package_is_read_once_for_the_whole_session(self):
         """Reading it opens a 50 MB archive and parses ten rosters."""

@@ -1,15 +1,8 @@
-"""Buy a gold vehicle for one save, from the launcher.
+"""Add a vehicle to a save without charging its account.
 
-#1513 prices 196 vehicles in gold and marks 145 of them ``notInShop``: reward
-and event tanks the retail shop never sold and that no tech tree node leads
-to. Offline they are exactly as reachable as the rest, and the launcher is the
-only place a player can reach them, so the shop lives here.
-
-The launcher does the arithmetic and the client does the building. A purchase
-takes the gold out of the save's own ledger and leaves the vehicle's name in
-the save's launcher inbox; the next client to start that save turns the name
-into a real garage vehicle, because only a client can produce the compact
-descriptors, crew and ammunition a garage record holds.
+The launcher queues a vehicle name; the client constructs the exact native
+record on the next startup. Both sides reject duplicates, including names
+queued before the first garage or before a legacy save names its vehicles.
 """
 
 import io
@@ -87,20 +80,6 @@ def owned_vehicles(slot_id, game_root=None, environment=None, root=None):
     return sorted(set(names))
 
 
-def unnamed_vehicles(slot_id, game_root=None, environment=None, root=None):
-    """Count the garage records this save does not name.
-
-    Only a client can turn a compact descriptor into a vehicle name, so a save
-    written before records carried names says nothing about what it owns until
-    the game starts it once. The shop must not sell into such a save: it would
-    take the gold for a vehicle the client already holds and then decline,
-    correctly, to deliver a second copy.
-    """
-    return sum(
-        1 for record in _garage_records(slot_id, game_root, environment, root)
-        if not (isinstance(record.get("name"), str) and record["name"]))
-
-
 def list_offers(slot_id, game_root, environment=None, root=None,
                 catalogue=None):
     """Return every gold vehicle with what this save can do about it.
@@ -112,10 +91,6 @@ def list_offers(slot_id, game_root, environment=None, root=None,
     """
     owned = set(owned_vehicles(slot_id, game_root, environment, root))
     pending = set(pending_vehicles(slot_id, game_root, environment, root))
-    balances = save_ledger.read_balances(
-        slot_id, game_root, environment, root)
-    gold = (balances["gold"] if balances and
-            _garage_records(slot_id, game_root, environment, root) else 0)
     offers = []
     if catalogue is None:
         catalogue = vehicle_overlays.list_gold_vehicles(game_root)
@@ -123,19 +98,14 @@ def list_offers(slot_id, game_root, environment=None, root=None,
         offer = dict(row)
         offer["owned"] = row["name"] in owned
         offer["pending"] = row["name"] in pending
-        offer["affordable"] = row["gold"] <= gold
+        offer["available"] = not (offer["owned"] or offer["pending"])
         offers.append(offer)
     return offers
 
 
-def buy_vehicle(slot_id, name, game_root, environment=None, root=None,
+def add_vehicle(slot_id, name, game_root, environment=None, root=None,
                 is_running=None):
-    """Take the gold and leave the vehicle for the client to build.
-
-    The two writes cannot be one transaction across two files, so the vehicle
-    is queued before the gold is taken: a crash between them leaves a vehicle
-    the player has not paid for rather than gold that bought nothing.
-    """
+    """Queue one missing vehicle without changing any balance or garage row."""
     if is_running is None:
         try:
             from . import core
@@ -144,46 +114,27 @@ def buy_vehicle(slot_id, name, game_root, environment=None, root=None,
 
         is_running = core.game_is_running
     if callable(is_running) and is_running():
-        raise GoldShopError("Close World of Tanks before buying a vehicle.")
+        raise GoldShopError("Close World of Tanks before adding a vehicle.")
     offers = dict(
         (row["name"], row)
         for row in vehicle_overlays.list_gold_vehicles(game_root))
     offer = offers.get(str(name))
     if offer is None:
-        raise GoldShopError("This client does not sell %s." % (name,))
-    if not _garage_records(slot_id, game_root, environment, root):
-        raise GoldShopError(
-            "Start this save in the game once before buying a vehicle.")
-    if unnamed_vehicles(slot_id, game_root, environment, root):
-        raise GoldShopError(
-            "Start the game once on this save so it can list the vehicles it "
-            "already owns.")
+        raise GoldShopError("This client does not offer %s." % (name,))
     if str(name) in owned_vehicles(slot_id, game_root, environment, root):
         raise GoldShopError("This save already owns %s." % offer["label"])
     pending = pending_vehicles(slot_id, game_root, environment, root)
     if str(name) in pending:
         raise GoldShopError(
-            "%s is already bought and waiting for the game to start."
+            "%s is already queued and waiting for the game to start."
             % offer["label"])
     if len(pending) >= MAX_PENDING_VEHICLES:
         raise GoldShopError(
-            "Start the game once to receive the vehicles already bought.")
-    balances = save_ledger.read_balances(
-        slot_id, game_root, environment, root)
-    if balances is None:
-        raise GoldShopError(
-            "Start this save in the game once before buying a vehicle.")
-    if balances["gold"] < offer["gold"]:
-        raise GoldShopError(
-            "%s costs %d gold and this save has %d."
-            % (offer["label"], offer["gold"], balances["gold"]))
+            "Start the game once to receive the vehicles already queued.")
     _write_inbox(
         inbox_path(slot_id, game_root, environment, root),
         pending + [str(name)])
-    save_ledger.write_balances(
-        slot_id, {"gold": balances["gold"] - offer["gold"]},
-        game_root, environment, root, is_running=lambda: False)
-    return dict(offer, gold_left=balances["gold"] - offer["gold"])
+    return dict(offer)
 
 
 def _write_inbox(path, names):
@@ -203,4 +154,4 @@ def _write_inbox(path, names):
             os.remove(temporary)
         except (IOError, OSError):
             pass
-        raise GoldShopError("The purchase could not be saved: %s" % error)
+        raise GoldShopError("The vehicle addition could not be saved: %s" % error)

@@ -39,15 +39,9 @@ _BALANCE_LABELS = {
 }
 
 _SHOP_HELP = (
-    "Every vehicle this client prices in gold, including the reward tanks "
-    "the game's own shop never sold. A bought vehicle arrives the next time "
-    "the game starts this save. Close the game before buying.")
-# Only a client can name a saved vehicle, so a save written before records
-# carried names says nothing about what it owns.  Selling into it would take
-# the gold for a vehicle the client already holds.
-_SHOP_UNREADABLE = (
-    "This save does not yet list the vehicles it owns. Start the game once "
-    "on it and the shop can sell to it again.")
+    "Add a gold or reward vehicle to this save for free. It arrives on the "
+    "next game startup. Owned or queued vehicles cannot be added twice. "
+    "Close the game before adding vehicles.")
 
 LAUNCHER_VERSION = "0.6.13"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
@@ -164,6 +158,19 @@ _CHINESE = {
     "The balances could not be saved: %s": "余额保存失败：%s",
     "The balances could not be read: %s": "余额读取失败：%s",
     "A balance must be a whole number.": "余额必须是整数。",
+    "Garage vehicles": "车库坦克",
+    "Add to garage": "添加到车库",
+    "Gold and reward vehicle": "金币及奖励坦克",
+    "queued": "待添加",
+    "%s - tier %d": "%s - %d级",
+    "%s - tier %d (%s)": "%s - %d级（%s）",
+    "Add a gold or reward vehicle to this save for free. It arrives on the "
+    "next game startup. Owned or queued vehicles cannot be added twice. "
+    "Close the game before adding vehicles.":
+        "免费向此存档添加金币或奖励坦克，下次进入游戏时放入车库。已拥有或待添加的坦克不能重复添加；操作前请关闭游戏。",
+    "Added %s to the queue. It arrives on the next game startup.":
+        "已将 %s 加入待添加列表，下次进入游戏时放入车库。",
+    "The vehicle could not be added: %s": "添加失败：%s",
     "Shop": "商店",
     "Gold vehicle": "金币坦克",
     "Buy vehicle": "购买坦克",
@@ -752,6 +759,7 @@ class LauncherWindow(object):
             self.shop_panel, textvariable=self.gold_vehicle, values=(),
             state="readonly", width=48)
         self.gold_vehicle_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.gold_vehicle_box.bind("<<ComboboxSelected>>", self._update_vehicle_add_button)
         shop_actions = tk.Frame(self.shop_panel)
         shop_actions.grid(
             row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
@@ -950,9 +958,9 @@ class LauncherWindow(object):
         self.account_help_label.config(text=self._t(
             "Edit this save's balances and battle earnings. Before the first "
             "game, these are its starting funds. Close the game before editing."))
-        self.shop_panel.config(text=self._t("Shop"))
-        self.gold_vehicle_label.config(text=self._t("Gold vehicle"))
-        self.buy_gold_vehicle_button.config(text=self._t("Buy vehicle"))
+        self.shop_panel.config(text=self._t("Garage vehicles"))
+        self.gold_vehicle_label.config(text=self._t("Gold and reward vehicle"))
+        self.buy_gold_vehicle_button.config(text=self._t("Add to garage"))
         self.refresh_gold_shop_button.config(text=self._t("Reload"))
         self.shop_help_label.config(text=self._t(_SHOP_HELP))
         self._refresh_save_slots()
@@ -1388,14 +1396,13 @@ class LauncherWindow(object):
         if offer["owned"]:
             state = self._t("owned")
         elif offer["pending"]:
-            state = self._t("bought")
+            state = self._t("queued")
         else:
             state = ""
         if state:
-            return self._t("%s - tier %d - %d gold (%s)") % (
-                offer["label"], offer["level"], offer["gold"], state)
-        return self._t("%s - tier %d - %d gold") % (
-            offer["label"], offer["level"], offer["gold"])
+            return self._t("%s - tier %d (%s)") % (
+                offer["label"], offer["level"], state)
+        return self._t("%s - tier %d") % (offer["label"], offer["level"])
 
     def _gold_catalogue(self, game_root):
         """Return the client's gold vehicles, read once per game folder.
@@ -1432,21 +1439,15 @@ class LauncherWindow(object):
         self.gold_vehicle_box.config(values=tuple(values))
         if self.gold_vehicle.get() not in self._gold_offer_by_label:
             self.gold_vehicle.set(values[0] if values else "")
-        # A save that does not name its vehicles cannot be sold to: see
-        # gold_shop.unnamed_vehicles.  Say so where the offers are, rather
-        # than only when a purchase is refused.
-        try:
-            unreadable = (not gold_shop._garage_records(
-                self._save_slot_id, game_root or None) or
-                bool(gold_shop.unnamed_vehicles(
-                    self._save_slot_id, game_root or None)))
-        except (gold_shop.GoldShopError, save_slots.SaveSlotError):
-            unreadable = False
-        self.shop_help_label.config(
-            text=self._t(_SHOP_UNREADABLE if unreadable else _SHOP_HELP))
-        self.buy_gold_vehicle_button.config(
-            state=("normal" if values and not unreadable else "disabled"))
+        self.shop_help_label.config(text=self._t(_SHOP_HELP))
+        self._update_vehicle_add_button()
         return tuple(values)
+
+    def _update_vehicle_add_button(self, unused_event=None):
+        selected = self._gold_offer_by_label.get(self.gold_vehicle.get())
+        available = any(row["name"] == selected and row["available"]
+                        for row in self._gold_offers)
+        self.buy_gold_vehicle_button.config(state="normal" if available else "disabled")
 
     def _buy_gold_vehicle(self):
         if self._busy or self._maintenance_busy:
@@ -1458,16 +1459,16 @@ class LauncherWindow(object):
             return False
         game_root = self.game_root.get().strip()
         try:
-            bought = gold_shop.buy_vehicle(
+            bought = gold_shop.add_vehicle(
                 self._save_slot_id, name, game_root or None)
         except (gold_shop.GoldShopError, save_slots.SaveSlotError,
                 vehicle_overlays.VehicleOverlayError) as error:
-            self._log("The vehicle could not be bought: %s" % error)
+            self._log(self._t("The vehicle could not be added: %s") % error)
             return False
         self._refresh_balances()
         self._refresh_gold_shop()
         self._log(
-            "Bought %s. It arrives the next time the game starts this save."
+            self._t("Added %s to the queue. It arrives on the next game startup.")
             % bought["label"])
         return True
 
