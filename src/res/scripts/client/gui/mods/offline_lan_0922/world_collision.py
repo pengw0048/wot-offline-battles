@@ -6,7 +6,7 @@ from gui.mods.offline_lan_0922.worker_diagnostics import (
 
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
-	_try_destroy_solid_hit, _vehicle_hull_bbox,
+	_try_destroy_solid_hit, _vehicle_hull_bbox, _descriptor_value,
 	ground_collision_filter, horizontal_collision_filter,
 	prepare_horizontal_collision_filter)
 
@@ -145,6 +145,24 @@ def _hit_matches_exact_ground_top(spaceID, Math, pos, collision, look,
 		return False
 
 
+def _vehicle_motion_extents(descriptor):
+	"""Cover the chassis and mounted hull instead of only the narrow armour."""
+	hull_box = _vehicle_hull_bbox(descriptor)
+	if hull_box is None:
+		return None
+	chassis = _descriptor_value(descriptor, 'chassis')
+	tester = _descriptor_value(chassis, 'hitTester')
+	chassis_box = getattr(tester, 'bbox', None)
+	hull_position = _descriptor_value(chassis, 'hullPosition')
+	if chassis_box is None or hull_position is None:
+		raise RuntimeError('#1513 chassis collision descriptor is unavailable')
+	lower = tuple(min(float(chassis_box[0][i]),
+		float(hull_box[0][i]) + float(hull_position[i])) for i in (0, 2))
+	upper = tuple(max(float(chassis_box[1][i]),
+		float(hull_box[1][i]) + float(hull_position[i])) for i in (0, 2))
+	return max(abs(lower[0]), abs(upper[0])), -lower[1], upper[1]
+
+
 def _hull_pose_y(pitch, roll):
 	"""Return local right/up/forward contributions to world height."""
 	import math
@@ -281,7 +299,7 @@ def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
 	hull passed straight over a fully exposed 1.2 m wall.
 
 	``ground_ahead`` is a conservative continuation of the ground witnessed
-	inside the hull footprint, bounded by the native top under the endpoint.
+	inside the hull footprint.
 	The lane never ends higher than ``height`` above that estimate, and never
 	higher than the hull plane at its own leading edge, so the pose can only ever
 	lower this witness.
@@ -448,14 +466,9 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		hl_front = 3.5
 		hl_back = 3.5
 
-		bbox = _vehicle_hull_bbox(td)
-		if bbox is not None:
-			try:
-				hw = max(abs(bbox[0][0]), abs(bbox[1][0])) - 0.1
-				hl_back = abs(bbox[0][2])
-				hl_front = abs(bbox[1][2])
-			except (AttributeError, KeyError, TypeError, IndexError):
-				raise RuntimeError('#1513 hull hit tester bbox is invalid')
+		extents = _vehicle_motion_extents(td)
+		if extents is not None:
+			hw, hl_back, hl_front = extents
 
 		# Look-ahead beyond the hull. The old flat +2.0 m made an invisible
 		# wall 2 m before every obstacle, and DURING A FALL it saw the cliff
@@ -579,7 +592,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
 			# Only the pitch term lifts a lane along its own travel, so only
 			# a pitched lane samples the ground witnessed inside its footprint
-			# and at look-ahead.  A level or purely rolled hull keeps the
+			# only. A level or purely rolled hull keeps the
 			# shipped lane geometry and its exact ray count.
 			footprint_x = (pos.x + cos_y * local_end[0] +
 				sin_y * local_end[1])

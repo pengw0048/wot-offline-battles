@@ -54,6 +54,10 @@ class _Strict1513Component(object):
 
     def __init__(self, **values):
         self.__dict__.update(values)
+        if 'hull' in values and 'chassis' not in values:
+            self.chassis = _Strict1513Component(
+                hullPosition=(0.0, 0.0, 0.0),
+                hitTester=self.hull.hitTester)
 
     def _forbidden(self, *unused_args, **unused_kwargs):
         raise AssertionError('Operation is not allowed')
@@ -94,6 +98,47 @@ class _ItemMatrix(object):
 
 
 class WorldCollisionTests(unittest.TestCase):
+
+    def test_wide_tracks_hit_foundation_corner_outside_narrow_hull(self):
+        # Exact #1513 Ch24_Type64 collision-client bounds. The foundation
+        # corner overlaps the right track but misses the narrower hull.
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(hitTester=types.SimpleNamespace(bbox=(
+                (-1.15, -0.540596, -2.79015),
+                (1.15, 0.729932, 2.70431)))),
+            chassis=_Strict1513Component(
+                hullPosition=(0.0, 0.999047, 0.0),
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.565461, 0.002, -2.648121),
+                    (1.565461, 1.175350, 2.648682)))))
+        def collide(space, start, end, mask, *unused):
+            if abs(end.z - start.z) < 1.0e-9:
+                return None
+            fraction = (2.8 - start.z) / (end.z - start.z)
+            x = start.x + fraction * (end.x - start.x)
+            y = start.y + fraction * (end.y - start.y)
+            if 0.0 <= fraction <= 1.0 and 1.3 <= x <= 2.0 and 0 <= y <= 0.9:
+                return (_Vector(x, y, 2.8), _Vector(0, 0, -1), 0)
+            return None
+        bigworld = types.SimpleNamespace(wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        with mock.patch.object(world_collision, '_destroy_and_recast',
+                               return_value=False):
+            self.assertTrue(world_collision.check_horizontal_collision(
+                bigworld, types.SimpleNamespace(Vector3=_Vector),
+                1, _Vector(), 0.0, 2.0, descriptor, False, 0.1))
+
+
+    def test_motion_extents_include_mounted_hull_and_longer_tracks(self):
+        descriptor = _Strict1513Component(
+            hull=_Strict1513Component(hitTester=types.SimpleNamespace(bbox=(
+                (-1.0, -0.5, -2.0), (1.0, 0.8, 3.0)))),
+            chassis=_Strict1513Component(
+                hullPosition=(0.4, 1.0, 0.6),
+                hitTester=types.SimpleNamespace(bbox=(
+                    (-1.2, 0.0, -3.5), (1.2, 1.0, 2.5)))))
+        self.assertEqual((1.4, 3.5, 3.6),
+                         world_collision._vehicle_motion_extents(descriptor))
 
     def test_combat_timing_preserves_recasts_and_every_native_argument(self):
         from gui.mods.offline_lan_0922 import worker_diagnostics
@@ -692,13 +737,13 @@ class WorldCollisionTests(unittest.TestCase):
             if abs(start.y - 0.6) < 0.001]
         self.assertEqual(3, len(lower_rays))
         for start, end in lower_rays:
-            self.assertAlmostEqual(1.9, end.x)
+            self.assertAlmostEqual(2.0, end.x)
             self.assertGreater(end.x, start.x)
             self.assertAlmostEqual(start.z, end.z)
         lanes = sorted((start.z, start.x)
                        for start, unused_end in lower_rays)
         for (actual_z, actual_x), (expected_z, expected_x) in zip(
-                lanes, ((-4.0, -1.5), (0.0, -0.5), (6.0, -1.5))):
+                lanes, ((-4.0, -1.6), (0.0, -0.5), (6.0, -1.6))):
             self.assertAlmostEqual(expected_z, actual_z)
             self.assertAlmostEqual(expected_x, actual_x)
 
@@ -721,8 +766,8 @@ class WorldCollisionTests(unittest.TestCase):
             perp_z = -motion_x
             corners = []
             for corner_x, corner_z in (
-                    (-1.5, -4.0), (1.5, -4.0),
-                    (1.5, 6.0), (-1.5, 6.0)):
+                    (-1.6, -4.0), (1.6, -4.0),
+                    (1.6, 6.0), (-1.6, 6.0)):
                 corners.append((
                     corner_x * motion_x + corner_z * motion_z,
                     corner_x * perp_x + corner_z * perp_z,
@@ -800,8 +845,8 @@ class WorldCollisionTests(unittest.TestCase):
                 motion_x = math.sin(motion_yaw)
                 motion_z = math.cos(motion_yaw)
                 for corner_x, corner_z in (
-                        (-1.5, -4.0), (1.5, -4.0),
-                        (1.5, 6.0), (-1.5, 6.0)):
+                        (-1.6, -4.0), (1.6, -4.0),
+                        (1.6, 6.0), (-1.6, 6.0)):
                     target_x = corner_x + motion_x * 0.1
                     target_z = corner_z + motion_z * 0.1
                     distances = []
@@ -910,7 +955,7 @@ class WorldCollisionTests(unittest.TestCase):
             self.assertAlmostEqual(start.x, end.x)
         for rays in (forward_rays, reverse_rays):
             lane_positions = [start.x for start, unused_end in rays]
-            for actual, expected in zip(lane_positions, (-1.5, 0.0, 1.5)):
+            for actual, expected in zip(lane_positions, (-1.6, 0.0, 1.6)):
                 self.assertAlmostEqual(expected, actual)
 
     def test_slow_frame_sweep_reaches_wall_beyond_old_lookahead_cap(self):
