@@ -293,12 +293,10 @@ def _sanitise_badges(row):
     row['movingAvgDamage'] = max(0, min(
         _int(row.get('movingAvgDamage')),
         battle_mastery.MAX_MOVING_AVG_DAMAGE))
-    window = row.get('combinedDamage')
-    if not isinstance(window, (list, tuple)):
-        window = ()
-    row['combinedDamage'] = [
-        max(0, min(_int(value), battle_mastery.MAX_MOVING_AVG_DAMAGE))
-        for value in window][-battle_mastery.MOVING_AVERAGE_BATTLES:]
+    # Files written while the average was briefly kept as a per-battle window
+    # carry a list this build no longer reads; the average itself persisted
+    # beside it, so dropping the list loses nothing.
+    row.pop('combinedDamage', None)
 
 
 def _damage_rating_hundredths(rating):
@@ -1004,17 +1002,17 @@ class PostBattleStore(object):
     def _award_badges(self, receipt, row):
         """Fold this battle into the vehicle's retail badge state.
 
-        The stored window is the same series retail averages: the vehicle's
-        last ``MOVING_AVERAGE_BATTLES`` combined-damage results.  Mastery and
-        the mark count only ever rise, matching ``marksOnGun_condition`` and
-        the stock dossier updater, which keep the best value.
+        The stored state is the one number retail keeps: the vehicle's average
+        combined damage, advanced by this battle through the same exponential
+        moving average.  Mastery and the mark count only ever rise, matching
+        ``marksOnGun_condition`` and the stock dossier updater, which keep the
+        best value.
         """
         awards = battle_mastery.battle_awards(
             receipt['rewards']['xp'], receipt['stats'],
-            row.get('combinedDamage'), _badge_vehicle_id(receipt['vehicle']),
+            row.get('movingAvgDamage'), _badge_vehicle_id(receipt['vehicle']),
             previous_mastery=row.get('markOfMastery'),
             previous_marks=row.get('marksOnGun'))
-        row['combinedDamage'] = awards['window']
         row['markOfMastery'] = awards['bestMarkOfMastery']
         row['marksOnGun'] = awards['marksOnGun']
         row['movingAvgDamage'] = awards['movingAvgDamage']

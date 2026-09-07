@@ -146,8 +146,10 @@ whose profile changed after it started must be restarted first.
   captures the published retail tables into `mastery_catalog.py`: base XP for
   each mastery class, and average combined damage by percentile for the gun
   marks. A battle's own base XP decides the class the results screen shows,
-  and the vehicle's last 100 battles decide its marks, exactly as the client's
-  own achievement text describes.
+  and the vehicle's own average combined damage decides its marks. That
+  average is retail's: an exponential moving average over 100 battles that
+  starts from zero on a fresh vehicle, so marks take most of a hundred good
+  battles rather than one.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,

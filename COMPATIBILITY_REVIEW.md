@@ -1212,6 +1212,20 @@ Wargaming's support material supplies the one part the client text omits: the
 average counts damage dealt plus the *largest* of the track, spotting and stun
 assist values, not their sum.
 
+"The last 100 battles" is not a mean of a hundred stored results. Retail keeps
+one number and advances it as an exponential moving average with the standard
+`2 / (N + 1)` smoothing for `N = 100`: the Marks of Excellence mods players use
+to predict their next mark compute `k * (damage + largest assist) +
+(1 - k) * movingAvgDamage` with `k = 2 / 101`, against the same
+`movingAvgDamage` record the dossier carries. A vehicle with no history starts
+at zero, so one battle moves the average by about two percent of the gap and a
+first battle cannot reach a mark however good it was - which is exactly what
+happened when this port briefly averaged only the battles it had: one strong
+opening game on a Type 59 awarded three marks. Sustained combined damage of
+3000 on that vehicle now reaches its first mark after 33 battles, its second
+after 62 and its third after 109. Keeping the average instead of a window also
+means the save file holds one integer per vehicle rather than a hundred.
+
 What the client cannot supply is the population distribution, which Wargaming
 recomputes daily per region and never shipped. No 0.9.22-era table survives:
 XVM's dated expected-value archive now begins in 2024, the Internet Archive

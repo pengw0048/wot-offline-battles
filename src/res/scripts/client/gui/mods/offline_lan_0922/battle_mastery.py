@@ -38,8 +38,19 @@ from gui.mods.offline_lan_0922 import mastery_catalog
 MARK_PERCENTILES = (65, 85, 95)
 # ``marksOnGun_condition``: Tiers V-X only.
 MARKS_MIN_TIER = 5
-# ``marksOnGun_condition``: only the most recent 100 battles count.
+# ``marksOnGun_condition``: only the most recent 100 battles count.  Retail
+# implements that as an exponential moving average over 100 battles rather
+# than a mean of the last hundred results: the smoothing factor is the
+# standard ``2 / (N + 1)``, and the Marks of Excellence mods players use to
+# predict their next mark compute the next value as
+# ``k * (damage + largest assist) + (1 - k) * movingAvgDamage``.
+#
+# A vehicle with no history starts at zero, which is why a first battle cannot
+# reach a mark however good it was: one battle moves the average by about two
+# percent of the gap.  A mean of however many battles exist would hand out
+# three marks for one strong opening game.
 MOVING_AVERAGE_BATTLES = 100
+MOVING_AVERAGE_SMOOTHING = 2.0 / (MOVING_AVERAGE_BATTLES + 1)
 # The dossier records cap at these values (``dossiers2.custom.records``).
 MAX_MARK_OF_MASTERY = 4
 MAX_MARKS_ON_GUN = 3
@@ -186,29 +197,30 @@ def marks_on_gun(average, curve):
     return min(earned, MAX_MARKS_ON_GUN)
 
 
-def moving_average(window):
-    """Return the mean of the recorded window, rounded to a whole number."""
-    values = [_whole(value) for value in window or ()]
-    if not values:
-        return 0
-    total = sum(values)
-    average = int((total + len(values) // 2) // len(values))
+def next_moving_average(previous, combined):
+    """Return the vehicle's updated average combined damage.
+
+    ``k * combined + (1 - k) * previous`` with ``k = 2 / 101``, rounded to the
+    whole number the dossier record stores.
+    """
+    previous = max(0, min(_whole(previous), MAX_MOVING_AVG_DAMAGE))
+    combined = max(0, _whole(combined))
+    smoothing = MOVING_AVERAGE_SMOOTHING
+    average = int(round(smoothing * combined + (1.0 - smoothing) * previous))
     return max(0, min(average, MAX_MOVING_AVG_DAMAGE))
 
 
-def battle_awards(base_xp, stats, window, vehicle_type_cd, tier=None,
-                  tags=None, previous_mastery=0, previous_marks=0):
+def battle_awards(base_xp, stats, previous_average, vehicle_type_cd,
+                  tier=None, tags=None, previous_mastery=0, previous_marks=0):
     """Return this battle's badge outcome and the state it leaves behind.
 
-    ``window`` is the vehicle's recorded combined-damage history *before* this
-    battle.  The returned ``window`` is the retained one: the last
-    ``MOVING_AVERAGE_BATTLES`` entries, exactly the series retail averages.
+    ``previous_average`` is the vehicle's stored average combined damage
+    before this battle, which is the whole history the average needs: an
+    exponential moving average carries its own past, so no per-battle window
+    is kept on disk.
     """
     damage = combined_damage(stats)
-    retained = [_whole(value) for value in window or ()]
-    retained.append(damage)
-    retained = retained[-MOVING_AVERAGE_BATTLES:]
-    average = moving_average(retained)
+    average = next_moving_average(previous_average, damage)
     curve = marks_curve(vehicle_type_cd, tier=tier, tags=tags)
     rating = damage_rating(average, curve)
     earned_marks = marks_on_gun(average, curve)
@@ -229,7 +241,6 @@ def battle_awards(base_xp, stats, window, vehicle_type_cd, tier=None,
         'damageRating': rating,
         'movingAvgDamage': average,
         'combinedDamage': damage,
-        'window': retained,
     }
 
 

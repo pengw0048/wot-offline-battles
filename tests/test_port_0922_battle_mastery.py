@@ -227,26 +227,66 @@ class MasteryDecisionTests(unittest.TestCase):
         self.assertLess(battle_mastery.damage_rating(middle, curve),
                         float(percentiles[index + 1]))
 
-    def test_moving_average_keeps_only_the_last_hundred_battles(self):
-        window = ()
-        for battle in range(150):
+    def test_the_average_uses_the_retail_smoothing_factor(self):
+        # The Marks of Excellence mods compute the next value as
+        # ``k * (damage + largest assist) + (1 - k) * movingAvgDamage`` with
+        # ``k = 2 / (100 + 1)``.
+        self.assertEqual(battle_mastery.MOVING_AVERAGE_BATTLES, 100)
+        self.assertAlmostEqual(2.0 / 101.0,
+                               battle_mastery.MOVING_AVERAGE_SMOOTHING,
+                               places=12)
+        self.assertEqual(0, battle_mastery.next_moving_average(0, 0))
+        self.assertEqual(
+            int(round(2.0 / 101.0 * 3000)),
+            battle_mastery.next_moving_average(0, 3000))
+        self.assertEqual(
+            int(round(2.0 / 101.0 * 3000 + 99.0 / 101.0 * 1000)),
+            battle_mastery.next_moving_average(1000, 3000))
+        # A vehicle already at its own average stays there.
+        self.assertEqual(2000, battle_mastery.next_moving_average(2000, 2000))
+
+    def test_one_battle_cannot_earn_a_mark_however_good_it_was(self):
+        """A new vehicle starts at zero, so the first battle is diluted."""
+        curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]
+        three_marks = curve[mastery_catalog.MARKS_PERCENTILES.index(95)]
+        awards = battle_mastery.battle_awards(
+            0, {'damage': three_marks * 2}, 0, TYPE_59)
+        self.assertEqual(0, awards['marksOnGun'])
+        self.assertLess(awards['movingAvgDamage'], three_marks // 10)
+        self.assertLess(awards['damageRating'], 10.0)
+
+    def test_marks_arrive_only_as_the_average_converges(self):
+        curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]
+        arrived = {}
+        average = 0
+        for battle in range(1, 501):
             awards = battle_mastery.battle_awards(
-                0, {'damage': battle}, window, TYPE_59)
-            window = awards['window']
-        self.assertEqual(battle_mastery.MOVING_AVERAGE_BATTLES, len(window))
-        self.assertEqual(list(range(50, 150)), list(window))
-        # 50..149 averages 99.5, which rounds to 100.
-        self.assertEqual(100, awards['movingAvgDamage'])
+                0, {'damage': 3000}, average, TYPE_59)
+            average = awards['movingAvgDamage']
+            arrived.setdefault(awards['marksOnGun'], battle)
+        self.assertEqual([0, 1, 2, 3], sorted(arrived))
+        self.assertEqual(1, arrived[0])
+        # Sustained damage above the three-mark bar still takes most of a
+        # hundred battles to get there, and each mark in order.
+        self.assertLess(arrived[1], arrived[2])
+        self.assertLess(arrived[2], arrived[3])
+        self.assertGreater(arrived[1], 20)
+        self.assertGreater(arrived[3], 80)
+        self.assertLess(arrived[3], 200)
+        # The average converges on the damage itself, never above it.
+        self.assertLessEqual(average, 3000)
+        self.assertGreater(average, 2900)
 
     def test_earned_marks_and_mastery_never_regress(self):
         curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]
         three_marks = curve[mastery_catalog.MARKS_PERCENTILES.index(95)]
+        # Start from a vehicle that has already earned its third mark.
         awards = battle_mastery.battle_awards(
-            99999, {'damage': three_marks}, (), TYPE_59)
+            99999, {'damage': three_marks}, three_marks, TYPE_59)
         self.assertEqual(3, awards['marksOnGun'])
         self.assertEqual(4, awards['markOfMastery'])
         collapsed = battle_mastery.battle_awards(
-            1, {'damage': 0}, awards['window'], TYPE_59,
+            1, {'damage': 0}, 0, TYPE_59,
             previous_mastery=awards['bestMarkOfMastery'],
             previous_marks=awards['marksOnGun'])
         self.assertEqual(3, collapsed['marksOnGun'])
@@ -283,17 +323,33 @@ class MasteryResultTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / 'postbattle_state.json')
             store = postbattle_store.PostBattleStore(path=path)
-            receipt = _receipt(store.account_key, xp=ace_xp,
-                               damage=one_mark)
+            # A first battle is diluted by the empty history, so drive the
+            # vehicle to just under its first mark and then cross it.  Its XP
+            # stays under the third class so the crossing battle is also the
+            # first mastery badge.
+            receipt = _receipt(
+                store.account_key, damage=one_mark,
+                xp=mastery_catalog.MASTERY_XP[TYPE_59][0] - 1)
             self.assertTrue(store.accept(receipt))
-            vehicle = self._result(store, receipt)
+            row = store._progress['vehicles']['china:Ch01_Type59']
+            self.assertEqual(0, row['marksOnGun'])
+            row['movingAvgDamage'] = one_mark - 1
+
+            crossing = _receipt(store.account_key, index=2, xp=ace_xp,
+                                damage=one_mark * 3)
+            self.assertTrue(store.accept(crossing))
+            vehicle = self._result(store, crossing)
             self.assertEqual(4, vehicle['markOfMastery'])
             self.assertEqual(0, vehicle['prevMarkOfMastery'])
             self.assertEqual(1, vehicle['marksOnGun'])
-            self.assertEqual(one_mark, vehicle['movingAvgDamage'])
-            self.assertEqual(65, vehicle['damageRating'])
-            self.assertEqual(1, vehicle['battleNum'])
+            self.assertGreaterEqual(vehicle['movingAvgDamage'], one_mark)
+            # Whole percent on the wire, at or past the mark it just earned
+            # and short of the next one.
+            self.assertGreaterEqual(vehicle['damageRating'], 65)
+            self.assertLess(vehicle['damageRating'], 85)
+            self.assertEqual(2, vehicle['battleNum'])
             self.assertIn((MARKS_DB_ID, 1), vehicle['dossierPopUps'])
+            receipt = crossing
             # The hangar battle-results message names the badge from the same
             # outcome.
             message = store.service_message_data(receipt['arena_unique_id'])
@@ -302,14 +358,14 @@ class MasteryResultTests(unittest.TestCase):
 
             # A second battle at the same mark count is not a new award, and
             # the mastery badge now reports the previous best.
-            again = _receipt(store.account_key, index=2, xp=ace_xp,
+            again = _receipt(store.account_key, index=3, xp=ace_xp,
                              damage=one_mark)
             self.assertTrue(store.accept(again))
             vehicle = self._result(store, again)
             self.assertEqual(4, vehicle['markOfMastery'])
             self.assertEqual(4, vehicle['prevMarkOfMastery'])
             self.assertEqual(1, vehicle['marksOnGun'])
-            self.assertEqual(2, vehicle['battleNum'])
+            self.assertEqual(3, vehicle['battleNum'])
             self.assertNotIn((MARKS_DB_ID, 1), vehicle['dossierPopUps'])
 
     def test_premium_vehicle_xp_rides_outside_the_badge_number(self):
@@ -358,16 +414,19 @@ class MasteryResultTests(unittest.TestCase):
             self.assertTrue(store.accept(receipt))
             row = store.progress()['vehicles']['china:Ch01_Type59']
             self.assertEqual(1, row['markOfMastery'])
-            self.assertEqual([1500], row['combinedDamage'])
-            self.assertEqual(1500, row['movingAvgDamage'])
+            # 1200 damage plus the largest assist of 300, smoothed from zero.
+            self.assertEqual(
+                battle_mastery.next_moving_average(0, 1500),
+                row['movingAvgDamage'])
             self.assertGreater(row['damageRating'], 0)
             self.assertLessEqual(row['damageRating'], 10000)
+            self.assertNotIn('combinedDamage', row)
 
             restarted = postbattle_store.PostBattleStore(path=path)
             reloaded = restarted.progress()['vehicles']['china:Ch01_Type59']
             self.assertEqual(row['markOfMastery'], reloaded['markOfMastery'])
-            self.assertEqual(row['combinedDamage'],
-                             reloaded['combinedDamage'])
+            self.assertEqual(row['movingAvgDamage'],
+                             reloaded['movingAvgDamage'])
             # The class this battle earned is a pure function of its base XP,
             # so a result window rebuilt after a restart still shows it.
             vehicle = self._result(restarted, receipt)
@@ -384,6 +443,7 @@ class MasteryResultTests(unittest.TestCase):
             row['markOfMastery'] = 97
             row['damageRating'] = -5
             row['marksOnGun'] = 'three'
+            # A file written while the average was kept as a window.
             row['combinedDamage'] = list(range(200))
             Path(path).write_text(json.dumps(state), encoding='utf8')
             reloaded = postbattle_store.PostBattleStore(path=path)
@@ -392,8 +452,7 @@ class MasteryResultTests(unittest.TestCase):
                              row['markOfMastery'])
             self.assertEqual(0, row['damageRating'])
             self.assertEqual(0, row['marksOnGun'])
-            self.assertEqual(battle_mastery.MOVING_AVERAGE_BATTLES,
-                             len(row['combinedDamage']))
+            self.assertNotIn('combinedDamage', row)
 
     def test_unresolvable_vehicle_type_still_credits_the_battle(self):
         def explode(unused_name):
