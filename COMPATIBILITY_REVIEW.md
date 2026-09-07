@@ -357,6 +357,22 @@ nearest vehicle cap the search, while ambiguity fails closed. Traversal resumes
 from the exact registered OBB exit plus a small epsilon, not a fixed jump that
 could skip a thick structure or its backing geometry.
 
+An item the round has already broken is not part of the collision scene. #1513
+`Vehicle._isDestructibleMayBeBroken` reports an item as broken as soon as its
+chunk controller does, whatever the delayed hide callback still draws, and a
+falling atom keeps its native skin in the world for the whole round. Vehicle
+movement and the HE blast rays already hide those skins through the exact
+`(chunk, item, material)` native keep-callback. The solid-shell ray now uses
+the same law: a proved-broken surface is filtered out and the ray is re-cast,
+so a felled pole or a broken wall panel no longer stops later shells while
+intact sibling modules and backing walls stay authoritative. A shell that has
+just destroyed an admitted item and cannot resolve that item's registered OBB
+exit resumes at the next surface proved by the same filtered re-cast rather
+than ending on debris. Every scenery stop now carries a `stop_reason`, so a
+Windows report can distinguish the legal `above_threshold_hp` and
+`shell_family` refusals from an identity failure such as `catalog_miss`,
+`catalog_ambiguous` or `native_reject`.
+
 The exact #1513 `destructibles.xml` supplies both numeric shooting-through
 contracts: `maxHpForShootingThrough` is `19`, and every listed material has
 `projectilePiercingPowerReduction` factor/minimum values `(0, 25)`. Version
@@ -370,7 +386,19 @@ needed. A sampled remainder below 1 mm makes
 the shell disappear at that
 obstacle. An above-threshold item may be destroyed but stops traversal. Under
 the pre-1.13 HE mechanics used by #1513, HE and HEAT stop at the first
-destructible, and HE explodes at that point.
+destructible, and HE explodes at that point. Stock
+`vehicle_items.Shell.isAmmoPercingType` names exactly the same
+ARMOR_PIERCING/ARMOR_PIERCING_HE/ARMOR_PIERCING_CR family, so the split is the
+client's own set rather than a guess.
+
+`DESTR_TYPE_TREE` is a documented deviation from that numeric law. The pinned
+tree table ranges from health `3` for bushes and shrubs to `70` for large
+firs, and 303 of its 498 entries exceed `maxHpForShootingThrough`. The port
+instead makes any validated, felled SpeedTree fully transparent with no
+penetration loss and no shell-family gate, which is more permissive than the
+threshold. Applying the 19 HP cap to trees would make most large trees stop
+AP shells; that is a gameplay-feel decision that still needs an exact-Windows
+comparison, so it is recorded here rather than changed.
 
 The threshold and material reduction are exact pinned-resource evidence.
 Official same-family mechanics descriptions support the shell-family split,

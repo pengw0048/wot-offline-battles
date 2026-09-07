@@ -5877,9 +5877,24 @@ def _scaled_shot_through_health_1513(desc, mat_kind, item_scale):
 		return None
 
 
+def _shot_through_refusal_1513(shot, health):
+	"""Name why an item this shell destroyed still ended its flight.
+
+	The pinned #1513 ``destructibles.xml`` caps shooting through at
+	``maxHpForShootingThrough`` = 19, and stock ``Shell.isAmmoPercingType``
+	restricts the family to AP, APHE and APCR.  Both refusals are legal retail
+	behaviour, so a report needs to tell them apart from a failed lookup.
+	"""
+	if _shot_kind_1513(shot) not in _SHOT_AP_KINDS_1513:
+		return 'shell_family'
+	if health is None:
+		return 'health_unavailable'
+	return 'above_threshold_hp'
+
+
 def _typed_shot_result_1513(world_distance, stop_distance=None,
 		piercing_loss=0.0, continue_from=None, loss_distance=None,
-		stopped_by_destructible=False):
+		stopped_by_destructible=False, stop_reason=None):
 	return {
 		'world_distance': float(world_distance),
 		'stop_distance': (None if stop_distance is None
@@ -5890,6 +5905,9 @@ def _typed_shot_result_1513(world_distance, stop_distance=None,
 		'loss_distance': (None if loss_distance is None
 			else float(loss_distance)),
 		'stopped_by_destructible': bool(stopped_by_destructible),
+		# Names the exact branch that ended the ray.  A Windows report can then
+		# say which contract stopped a shell instead of only that one did.
+		'stop_reason': (None if stop_reason is None else str(stop_reason)),
 	}
 
 
@@ -5924,17 +5942,105 @@ def _validated_tree_shot_identity_1513(spaceID, decoded):
 	return int(chunk_id), int(item_index)
 
 
-def _transparent_tree_shot_filter_1513(ignored_trees):
-	"""Keep every native surface except an exact validated SpeedTree."""
+def _transparent_shot_surface_filter_1513(ignored_surfaces):
+	"""Keep every native surface except an exact proved-broken destructible.
+
+	``ignored_surfaces`` holds ``(chunkID, itemIndex, matKind)`` keys.  A ``None``
+	material covers the whole item, which is how SpeedTrees, fragiles and falling
+	atoms are addressed.  A structure names its exact broken module so its intact
+	sibling modules and any backing wall still stop the shell.
+	"""
 	def keep_surface(*hit):
 		# #1513 passes (matKind, collFlags, itemIndex, chunkID).  Malformed or
-		# ordinary surfaces stay authoritative; only exact tree wires are skipped.
+		# ordinary surfaces stay authoritative; only proved-broken destructible
+		# skins are skipped.
 		try:
 			identity = int(hit[3]), int(hit[2])
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
-		return identity not in ignored_trees
+		if identity + (None,) in ignored_surfaces:
+			return False
+		try:
+			material = hit[0]
+		except IndexError:
+			return True
+		try:
+			return identity + (material,) not in ignored_surfaces
+		except TypeError:
+			return True
 	return keep_surface
+
+
+def _already_broken_shot_surface_1513(decoded):
+	"""Return the exact broken identity this native shell surface belongs to.
+
+	#1513 ``Vehicle._isDestructibleMayBeBroken`` treats an item as broken as soon
+	as the chunk controller reports it, whatever the delayed hide callback still
+	draws, and a falling atom keeps its native skin in the world for the whole
+	round.  The movement path already hides those skins through
+	``ground_collision_filter``/``horizontal_collision_filter``; the shell ray
+	must use the same law or a felled pole eats every later shell.  Only a
+	destructible material range plus an accepted authority key may skip a
+	surface, so an ordinary wall is never hidden by a coincidental index.
+	"""
+	if decoded is None:
+		return None
+	unused_hit, unused_normal, chunk_id, item_index, mat_kind, unused_name = \
+		decoded
+	try:
+		if (mat_kind < _DESTRUCTIBLE_MAT_KIND_MIN_1513 or
+				mat_kind > _DESTRUCTIBLE_MAT_KIND_MAX_1513):
+			return None
+		identity = int(chunk_id), int(item_index)
+	except (TypeError, ValueError, OverflowError):
+		return None
+	if _destructible_isolated_1513(identity[0], identity[1]):
+		return None
+	return _broken_shot_surface_key_1513(
+		identity[0], identity[1], mat_kind)
+
+
+def _broken_shot_surface_key_1513(chunk_id, item_index, mat_kind):
+	"""Return the accepted key that removes one broken surface from the ray.
+
+	A tree, fragile or falling atom is accepted whole and is addressed with a
+	``None`` material.  A structure is accepted per module, so only the exact
+	broken module may be hidden while its siblings keep stopping the shell.
+	"""
+	authority = _get_destr_authority()
+	identity = int(chunk_id), int(item_index)
+	if authority.is_destroyed(identity[0], identity[1], None):
+		return identity + (None,)
+	if (mat_kind is not None and
+			authority.is_destroyed(identity[0], identity[1], mat_kind)):
+		return identity + (mat_kind,)
+	return None
+
+
+def _shot_broken_surface_advance_1513(measured, bigworld, spaceID,
+		start_pos, end_pos, identity, obstacle_distance, ignored_surfaces,
+		surface_filter):
+	"""Return a proved resume distance past one exact just-broken skin.
+
+	The item this shell destroyed no longer belongs to the collision scene, but
+	its registered OBB exit was not available, so a fixed jump could skip real
+	geometry.  Hiding this exact identity and re-casting proves that nothing
+	else stands between the contact and the next unfiltered surface, which is
+	where the caller resumes.
+	"""
+	if identity is None:
+		# The destroy order was accepted but left no readable key.  Keep the
+		# historical conservative advance rather than hiding an unknown surface.
+		return float(obstacle_distance) + 0.6
+	ignored_surfaces.add(identity)
+	next_hit = measured('native.projectile.world',
+		bigworld.wg_collideSegment,
+		spaceID, start_pos, end_pos, 128, surface_filter)
+	floor = float(obstacle_distance) + _SHOT_RAY_EPSILON
+	if next_hit is None:
+		return max(floor, (end_pos - start_pos).length)
+	return max(floor,
+		(next_hit[0] - start_pos).length - _SHOT_RAY_EPSILON)
 
 
 def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
@@ -5950,9 +6056,9 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			return function(*args)
 		return diagnostic.call(stage, function, *args)
 
-	ignored_trees = set()
-	tree_filter = _transparent_tree_shot_filter_1513(ignored_trees)
-	tree_hits = 0
+	ignored_surfaces = set()
+	surface_filter = _transparent_shot_surface_filter_1513(ignored_surfaces)
+	skipped_hits = 0
 	world_dist = 99999.0
 	world_collision = measured('native.projectile.world',
 		bigworld.wg_collideSegment,
@@ -5983,20 +6089,33 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 				_diagnostic_contact_1513(
 					'shot_material_accept', decoded[2], decoded[3],
 					fields=(('mat', decoded[4]),))
+		broken_surface = None
 		if tree_identity is not None and (
 				destruction_accepted or _get_destr_authority().is_destroyed(
 					tree_identity[0], tree_identity[1], decoded[4])):
-			if tree_identity in ignored_trees:
+			broken_surface = (tree_identity[0], tree_identity[1], None)
+		elif not destruction_accepted:
+			# A fragile, module or falling atom that this round already broke
+			# keeps its native skin while the hide callback runs, and a felled
+			# column keeps it for the whole round.  Retail removes it from
+			# collision at once, so it must not stop a later shell either.
+			broken_surface = _already_broken_shot_surface_1513(decoded)
+			if broken_surface is not None:
+				_diagnostic_contact_1513(
+					'shot_broken_skin_skip', broken_surface[0],
+					broken_surface[1], fields=(('mat', broken_surface[2]),))
+		if broken_surface is not None:
+			if broken_surface in ignored_surfaces:
 				raise RuntimeError(
-					'#1513 transparent tree shot filter did not advance')
-			ignored_trees.add(tree_identity)
-			tree_hits += 1
-			if tree_hits > 64:
+					'#1513 transparent shot surface filter did not advance')
+			ignored_surfaces.add(broken_surface)
+			skipped_hits += 1
+			if skipped_hits > 64:
 				raise RuntimeError(
-					'#1513 transparent tree shot traversal exceeded 64 hits')
+					'#1513 transparent shot traversal exceeded 64 hits')
 			world_collision = measured('native.projectile.world',
 				bigworld.wg_collideSegment,
-				spaceID, start_pos, end_pos, 128, tree_filter)
+				spaceID, start_pos, end_pos, 128, surface_filter)
 			continue
 		if destruction_accepted:
 			if shot is not None:
@@ -6015,10 +6134,17 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 						start_pos, end_pos, decoded[0])
 					if registered_exit is None:
 						if _destructible_catalog is not None:
-							return _typed_shot_result_1513(
-								world_dist, stop_distance=world_dist,
-								stopped_by_destructible=True)
-						continue_from = world_dist + 0.6
+							# The item is gone; only its exact exit is unknown.
+							# Prove the next surface instead of ending an
+							# admitted shot on debris.
+							continue_from = _shot_broken_surface_advance_1513(
+								measured, bigworld, spaceID, start_pos,
+								end_pos,
+								_broken_shot_surface_key_1513(
+									decoded[2], decoded[3], decoded[4]),
+								world_dist, ignored_surfaces, surface_filter)
+						else:
+							continue_from = world_dist + 0.6
 					else:
 						continue_from = (registered_exit +
 							_SHOT_RAY_EPSILON)
@@ -6027,7 +6153,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 						continue_from=continue_from, loss_distance=world_dist)
 				return _typed_shot_result_1513(
 					world_dist, stop_distance=world_dist,
-					stopped_by_destructible=True)
+					stopped_by_destructible=True,
+					stop_reason=_shot_through_refusal_1513(shot, health))
 			# Destructible broken by the shell: re-cast past the debris.
 			second = measured('native.projectile.world',
 				bigworld.wg_collideSegment,
@@ -6084,6 +6211,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 				'shot_catalog_miss', point=world_collision[0])
 		return (_typed_shot_result_1513(
 			world_dist, stop_distance=(world_dist
+				if world_collision is not None else None),
+			stop_reason=('catalog_miss'
 				if world_collision is not None else None))
 			if shot is not None else world_dist)
 	if catalog_hit['ambiguous']:
@@ -6093,7 +6222,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 		ambiguous_distance = float(catalog_hit['distance'])
 		return (_typed_shot_result_1513(
 			ambiguous_distance, stop_distance=ambiguous_distance,
-			stopped_by_destructible=True)
+			stopped_by_destructible=True,
+			stop_reason='catalog_ambiguous')
 			if shot is not None else ambiguous_distance)
 
 	candidate = catalog_hit['candidate']
@@ -6111,6 +6241,8 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			fields=(('kind', kind), ('mat', mat_kind)))
 		return (_typed_shot_result_1513(
 			world_dist, stop_distance=(world_dist
+				if world_collision is not None else None),
+			stop_reason=('native_reject'
 				if world_collision is not None else None))
 			if shot is not None else world_dist)
 	_diagnostic_contact_1513(
@@ -6124,15 +6256,27 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 			desc, mat_kind, candidate[5])
 		can_continue = (_shot_kind_1513(shot) in _SHOT_AP_KINDS_1513 and
 			health is not None and health <= _SHOT_THROUGH_MAX_HP_1513)
-		if can_continue and catalog_hit.get('exit_proved', True):
+		if can_continue:
+			if catalog_hit.get('exit_proved', True):
+				continue_from = (catalog_hit['exit_distance'] +
+					_SHOT_RAY_EPSILON)
+			else:
+				# Same law as the native material path: an item this shell
+				# just removed may not end the shot merely because its OBB
+				# exit was unavailable.
+				continue_from = _shot_broken_surface_advance_1513(
+					measured, bigworld, spaceID, start_pos, end_pos,
+					_broken_shot_surface_key_1513(
+						chunk_id, item_index, mat_kind),
+					catalog_hit['distance'], ignored_surfaces, surface_filter)
 			return _typed_shot_result_1513(
 				99999.0, piercing_loss=_SHOT_THROUGH_MIN_REDUCTION_1513,
-				continue_from=(catalog_hit['exit_distance'] +
-					_SHOT_RAY_EPSILON),
+				continue_from=continue_from,
 				loss_distance=catalog_hit['distance'])
 		return _typed_shot_result_1513(
 			catalog_hit['distance'], stop_distance=catalog_hit['distance'],
-			stopped_by_destructible=True)
+			stopped_by_destructible=True,
+			stop_reason=_shot_through_refusal_1513(shot, health))
 	# Re-cast beyond the proved OBB just like the legacy material path.  This
 	# lets a shell continue after a dynamic-only prop while a surviving static
 	# backing remains authoritative for structures during native replacement.

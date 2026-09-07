@@ -1843,6 +1843,7 @@ class BattleRuntime(object):
         self._projectile_visual_meta = {}
         self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
+        self._projectile_scene_stop_reasons = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None
@@ -2139,6 +2140,7 @@ class BattleRuntime(object):
         self._projectile_visual_meta = {}
         self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
+        self._projectile_scene_stop_reasons = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None
@@ -11335,6 +11337,7 @@ class BattleRuntime(object):
         self._projectile_epoch = epoch
         self._projectile_meta = {}
         self._projectile_terminal_data = {}
+        self._projectile_scene_stop_reasons = {}
         # An epoch change elects a new simulator inside the same battle. Keep
         # observational target history across that handoff: restored shells
         # resume from their last checked cursor, which can predate election.
@@ -13642,14 +13645,17 @@ class BattleRuntime(object):
         if world_blocks:
             fraction = max(
                 0.0, min(1.0, world_distance / chord_length))
+            impact = lerp3(start, end, fraction)
             self._projectile_terminal_data[projectile_id] = {
-                'impact': lerp3(start, end, fraction),
+                'impact': impact,
                 'target_key': None,
                 'collisions': None,
                 'query': None,
                 'piercing_loss': meta['piercing_loss'],
                 'penetration_factor': meta.get('penetration_factor'),
+                'stop_reason': scene.get('stop_reason'),
             }
+            self._report_shot_scene_stop(scene.get('stop_reason'), impact)
             return {'reason': 'impact', 'fraction': fraction}
         if nearest_key is not None:
             self._projectile_terminal_data[projectile_id] = {
@@ -13665,6 +13671,30 @@ class BattleRuntime(object):
             }
             return {'reason': 'impact', 'fraction': nearest_fraction}
         return None
+
+    def _report_shot_scene_stop(self, reason, impact):
+        """Name the scenery contract that ended a shot, once per round.
+
+        A player only reports that "an object ate the shell".  The branch that
+        stopped it is the whole diagnosis: a legal ``above_threshold_hp`` or
+        ``shell_family`` refusal, a penetration budget spent on destructibles,
+        or an identity failure such as ``catalog_miss``.  One line per distinct
+        reason keeps a full battle log readable.
+        """
+        if reason is None or not bool(
+                (self._config or {}).get('debug_logging', False)):
+            return False
+        reasons = self._projectile_scene_stop_reasons
+        seen = reasons.get(reason, 0)
+        reasons[reason] = seen + 1
+        if seen:
+            return False
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] SHOT scenery stop reason=%s at '
+            '(%.1f %.1f %.1f)\n' % (
+                reason, float(impact[0]), float(impact[1]),
+                float(impact[2])))
+        return True
 
     def _projectile_shot(self, meta):
         frozen = meta.get('source_shot')
@@ -23574,6 +23604,7 @@ class BattleRuntime(object):
                 'piercing_loss': initial_piercing_loss,
                 'stopped_by_destructible': False,
                 'penetration_factor': penetration_factor,
+                'stop_reason': None,
             }
         travelled = 0.0
         piercing_loss = initial_piercing_loss
@@ -23618,6 +23649,7 @@ class BattleRuntime(object):
                     'piercing_loss': piercing_loss,
                     'stopped_by_destructible': True,
                     'penetration_factor': penetration_factor,
+                    'stop_reason': 'penetration_exhausted',
                 }
             stop_distance = result.get('stop_distance')
             if stop_distance is not None:
@@ -23628,6 +23660,7 @@ class BattleRuntime(object):
                     'stopped_by_destructible': bool(
                         result.get('stopped_by_destructible')),
                     'penetration_factor': penetration_factor,
+                    'stop_reason': result.get('stop_reason'),
                 }
             advance = result.get('continue_from')
             if advance is None:
@@ -23640,6 +23673,7 @@ class BattleRuntime(object):
                     'piercing_loss': piercing_loss,
                     'stopped_by_destructible': False,
                     'penetration_factor': penetration_factor,
+                    'stop_reason': result.get('stop_reason'),
                 }
             advance = _number(advance)
             if advance <= 0.0:
@@ -23650,7 +23684,8 @@ class BattleRuntime(object):
                 return {'world_distance': 999999.0,
                         'piercing_loss': piercing_loss,
                         'stopped_by_destructible': False,
-                        'penetration_factor': penetration_factor}
+                        'penetration_factor': penetration_factor,
+                        'stop_reason': None}
         raise RuntimeError('#1513 destructible shot traversal exceeded 64 hits')
 
     @staticmethod
@@ -23986,6 +24021,7 @@ class BattleRuntime(object):
         self._projectile_visual_meta = {}
         self._projectile_visual_terminals = _RecentIdSet()
         self._projectile_terminal_data = {}
+        self._projectile_scene_stop_reasons = {}
         self._projectile_target_positions = {}
         self._projectile_position_history = []
         self._projectile_historic_pose_cache = None

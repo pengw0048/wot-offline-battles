@@ -3833,6 +3833,171 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                 self.assertIsNone(result['continue_from'])
                 self.assertEqual(0.0, result['piercing_loss'])
                 self.assertTrue(result['stopped_by_destructible'])
+                self.assertEqual('shell_family', result['stop_reason'])
+
+    def _falling_pole_shot_fixture(self, boxes):
+        """Register one exact #1513 falling atom with a live catalog OBB."""
+        filename = (
+            'content/Environment/envAM_009_Poles/normal/lod0/'
+            'envAM_009_Poles_01.model')
+        destructibles_sensor.xrange = range
+        destructibles_sensor.set_catalog(_catalog({
+            filename: {'kind': 'falling', 'boxes': boxes},
+        }))
+        record = destructibles_sensor._destructible_catalog[
+            'resources'][filename.lower()]
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        instance = {
+            'filename': filename.lower(),
+            'descriptor_filename': filename,
+            'kind': 'falling',
+            'item_scale': 1.0,
+            'boxes': destructibles_sensor._world_catalog_boxes(
+                record, _ItemMatrix(), _Vector(), math_module),
+        }
+        destructibles_sensor.g_offh_destr_instances = {(22, 1): instance}
+        destructibles_sensor.g_offh_destr_contact_bins = {}
+        destructibles_sensor._index_catalog_instance_1513(
+            destructibles_sensor.g_offh_destr_contact_bins,
+            (22, 1), instance)
+        area = types.ModuleType('AreaDestructibles')
+        area.g_destructiblesManager = object()
+        area.DESTR_TYPE_TREE = 1
+        area.DESTR_TYPE_FALLING_ATOM = 2
+        area.DESTR_TYPE_FRAGILE = 3
+        area.DESTR_TYPE_STRUCTURE = 4
+        area.g_cache = types.SimpleNamespace(
+            getDescByFilename=lambda value: (
+                {'type': 2, 'health': 18} if value == filename else None))
+        cache = types.ModuleType('DestructiblesCache')
+        cache.scaledDestructibleHealth = lambda scale, health: int(
+            math.ceil(scale * scale * health))
+        return filename, math_module, area, cache
+
+    @staticmethod
+    def _filtered_world_ray(surfaces):
+        """Reproduce the #1513 filtered ``wg_collideSegment`` contract.
+
+        ``surfaces`` are ``(distance, chunk, item, material)`` in ray order.
+        The optional fifth argument is the engine's keep-callback, which is
+        invoked with ``(matKind, collFlags, itemIndex, chunkID)``.
+        """
+        def collide(space_id, start, end, flags, keep=None):
+            for distance, chunk, item, material in surfaces:
+                if keep is not None and not keep(material, 0, item, chunk):
+                    continue
+                return (_Vector(0.0, 0.0, distance),
+                        _Vector(0.0, 0.0, -1.0))
+            return None
+        return collide
+
+    def test_broken_falling_atom_skin_no_longer_stops_a_later_shell(self):
+        """A felled pole keeps its native skin; retail stops colliding with it."""
+        filename, math_module, area, cache = self._falling_pole_shot_fixture(
+            [[-0.5, -1.0, 4.0, 0.5, 2.0, 6.0, None]])
+        surfaces = ((4.0, 22, 1, 72), (9.0, 0, 0, 5))
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = self._filtered_world_ray(surfaces)
+        bigworld.time = lambda: 10.0
+
+        def material(space_id, start, near, point, unused_filter):
+            if abs(float(point.z) - 4.0) <= 0.01:
+                return _mat_info_1513(
+                    True, point, _Vector(0, 1, 0), 72, filename, 22, 1)
+            return _mat_info_1513(
+                True, point, _Vector(0, 1, 0), 5, '', 0, 0)
+
+        bigworld.wg_getMatInfoNearPoint = material
+        destructibles_sensor.set_event_sink(lambda unused: True)
+        orders = []
+        authority = types.SimpleNamespace(
+            is_destroyed=lambda chunk, item, mat=None: (
+                (chunk, item) == (22, 1)),
+            destroy_column=lambda *args: orders.append(args) or True)
+        shot = types.SimpleNamespace(shell=types.SimpleNamespace(
+            kind='ARMOR_PIERCING'))
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': bigworld,
+                              'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            result = destructibles_sensor.shot_world_distance(
+                bigworld, 1, _Vector(), _Vector(0, 0, 20),
+                _Vector(0, 0, 1), shot)
+
+        # The wall behind the debris owns the stop, and the removed pole
+        # neither charges penetration nor is destroyed a second time.
+        self.assertEqual([], orders)
+        self.assertAlmostEqual(9.0, result['stop_distance'])
+        self.assertEqual(0.0, result['piercing_loss'])
+        self.assertFalse(result['stopped_by_destructible'])
+
+    def test_destroyed_item_without_exact_exit_still_passes_the_shell(self):
+        """An admitted shot may not end on an item it has just removed."""
+        filename, math_module, area, cache = self._falling_pole_shot_fixture(
+            [[-0.5, -1.0, 12.0, 0.5, 2.0, 14.0, None]])
+        surfaces = ((4.0, 22, 1, 72), (9.0, 0, 0, 5))
+        bigworld = types.ModuleType('BigWorld')
+        bigworld.wg_collideSegment = self._filtered_world_ray(surfaces)
+        bigworld.time = lambda: 10.0
+
+        def material(space_id, start, near, point, unused_filter):
+            if abs(float(point.z) - 4.0) <= 0.01:
+                return _mat_info_1513(
+                    True, point, _Vector(0, 1, 0), 72, filename, 22, 1)
+            return _mat_info_1513(
+                True, point, _Vector(0, 1, 0), 5, '', 0, 0)
+
+        bigworld.wg_getMatInfoNearPoint = material
+        destructibles_sensor.set_event_sink(lambda unused: True)
+        destroyed = set()
+        authority = types.SimpleNamespace(
+            is_destroyed=lambda chunk, item, mat=None: (
+                (chunk, item) in destroyed),
+            destroy_column=lambda space, chunk, item, yaw, vel, hit: (
+                destroyed.add((chunk, item)) or True))
+        shot = types.SimpleNamespace(shell=types.SimpleNamespace(
+            kind='ARMOR_PIERCING'))
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': bigworld,
+                              'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            result = destructibles_sensor.shot_world_distance(
+                bigworld, 1, _Vector(), _Vector(0, 0, 20),
+                _Vector(0, 0, 1), shot)
+
+        # The registered OBB does not cover this contact, so no exact exit
+        # exists.  The proved next surface owns the resume distance instead.
+        self.assertEqual({(22, 1)}, destroyed)
+        self.assertIsNone(result['stop_distance'])
+        self.assertEqual(25.0, result['piercing_loss'])
+        self.assertAlmostEqual(4.0, result['loss_distance'])
+        self.assertLess(result['continue_from'], 9.0)
+        self.assertGreater(result['continue_from'], 8.99)
+
+    def test_broken_surface_filter_hides_only_the_accepted_material(self):
+        """A broken module may not make its intact siblings transparent."""
+        item_wide = destructibles_sensor._transparent_shot_surface_filter_1513(
+            {(22, 1, None)})
+        self.assertFalse(item_wide(73, 0, 1, 22))
+        self.assertFalse(item_wide(74, 0, 1, 22))
+        self.assertTrue(item_wide(73, 0, 2, 22))
+        module_only = \
+            destructibles_sensor._transparent_shot_surface_filter_1513(
+                {(22, 1, 73)})
+        self.assertFalse(module_only(73, 0, 1, 22))
+        self.assertTrue(module_only(74, 0, 1, 22))
+        # A malformed native tuple never hides a surface.
+        self.assertTrue(module_only('x', 0, 1, 22))
+        self.assertTrue(module_only(73, 0))
 
     def test_unknown_shell_kind_and_missing_descriptor_stop_fail_closed(self):
         self.assertIsNone(destructibles_sensor._shot_kind_1513(
