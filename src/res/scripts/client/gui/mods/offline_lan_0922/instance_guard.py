@@ -69,13 +69,28 @@ def _load_native_bridge(path=None, imp_module=None):
     if imp_module is None:
         import imp as imp_module
     bridge = imp_module.load_dynamic(NATIVE_MODULE_NAME, path)
-    for method_name in (
-            'release_client_guard',
-            'hide_process_windows',
-            'show_process_windows'):
-        if not callable(getattr(bridge, method_name, None)):
-            raise ImportError(
-                'native instance guard bridge is missing %s' % method_name)
+    try:
+        for method_name in (
+                'install_atmosphere_owner_guard',
+                'release_client_guard',
+                'hide_process_windows',
+                'show_process_windows'):
+            if not callable(getattr(bridge, method_name, None)):
+                raise ImportError(
+                    'native instance guard bridge is missing %s' % method_name)
+        # The bridge is process-lived: the repaired native tick must remain in
+        # place while a new hangar environment is awaiting its resource load.
+        # Refuse an old/incompatible bridge before creating maps.
+        status = int(bridge.install_atmosphere_owner_guard())
+        if status != 0:
+            raise ClientInstanceGuardError('atmosphere owner guard', status)
+    except Exception:
+        # load_dynamic can publish the module before validation finishes.
+        if sys.modules.get(NATIVE_MODULE_NAME) is bridge:
+            del sys.modules[NATIVE_MODULE_NAME]
+        raise
+    sys.stdout.write(
+        '[Offline LAN 0.9.22] installed #1513 atmosphere owner guard\n')
     # Keep the sidecar importable by worker_presentation after this explicit
     # path-based load; native extensions cannot be imported out of a wotmod.
     sys.modules[NATIVE_MODULE_NAME] = bridge
