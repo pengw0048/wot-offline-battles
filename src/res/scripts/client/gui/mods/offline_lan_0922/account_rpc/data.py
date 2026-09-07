@@ -607,6 +607,42 @@ def _write_achievements(dossier, counts):
             pass
 
 
+def _write_badges(dossier, stats):
+    """Store the retail mastery badge and gun-mark state in the dossier.
+
+    ``dossiers2.custom.records`` registers all four names in the vehicle
+    ``achievements`` block: ``markOfMastery`` (max 4), ``marksOnGun`` (max 3),
+    ``damageRating`` in hundredths of a percent (max 10000) and
+    ``movingAvgDamage`` (max 60001).  The garage reads them through
+    ``MarkOfMasteryAchievement`` and ``MarkOnGunAchievement``, whose
+    ``_readDamageRating`` divides the stored value by 100.
+    """
+    if not isinstance(stats, dict):
+        return
+    values = []
+    for name, maximum in (('markOfMastery', 4), ('marksOnGun', 3),
+                          ('damageRating', 10000),
+                          ('movingAvgDamage', 60001)):
+        value = stats.get(name)
+        # Optional persisted state reaches here; only a positive whole number
+        # inside the record's range is a badge.  ``bool`` is an ``int``
+        # subclass and is never one.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            continue
+        values.append((name, min(value, maximum)))
+    if not values:
+        return
+    try:
+        block = dossier['achievements']
+    except (KeyError, TypeError):
+        return
+    for name, value in values:
+        try:
+            block[name] = value
+        except (KeyError, TypeError, ValueError):
+            continue
+
+
 def account_dossier(postbattle_progress=None, dossier_factory=None):
     """Return the account dossier compact descriptor #1513 reads.
 
@@ -677,6 +713,7 @@ def dossiers(revision=0, max_change_time=0, postbattle_progress=None,
             block2[field_name] = max(
                 0, int(stats.get(field_name, 0) or 0))
         _write_achievements(dossier, stats.get('achievements'))
+        _write_badges(dossier, stats)
         rows.append((resolver(type_name), change_time,
                      dossier.makeCompDescr()))
     # This cache version describes our dossier row schema, not battle count.

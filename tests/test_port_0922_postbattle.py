@@ -319,7 +319,9 @@ class PostBattleContractTests(unittest.TestCase):
                 }, set(service_data))
                 self.assertEqual(receipt['arena_unique_id'],
                                  service_data['arenaUniqueID'])
-                self.assertEqual({50001: {}},
+                # The per-vehicle entry now carries the mastery class the
+                # hangar message names; this battle earned none.
+                self.assertEqual({50001: {'markOfMastery': 0}},
                                  service_data['playerVehicles'])
             finally:
                 postbattle_store._vehicle_type_compact_descr = original_vehicle

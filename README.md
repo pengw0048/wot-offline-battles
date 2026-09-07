@@ -125,8 +125,15 @@ whose profile changed after it started must be restarted first.
   commemorative medals from the client's own achievement thresholds, and both
   the vehicle and the account dossier keep counting them. Medals the client
   itself retired, cancelled before release, or that need data this
-  reconstruction does not own, including Mark of Mastery, are listed with
-  their reason in `battle_achievements.py` rather than guessed.
+  reconstruction does not own are listed with their reason in
+  `battle_achievements.py` rather than guessed.
+- Mastery badges and Marks of Excellence use the real bar. Wargaming computes
+  both from the live player population, so `tools/bake_mastery_thresholds_0922.py`
+  captures the published retail tables into `mastery_catalog.py`: base XP for
+  each mastery class, and average combined damage by percentile for the gun
+  marks. A battle's own base XP decides the class the results screen shows,
+  and the vehicle's last 100 battles decide its marks, exactly as the client's
+  own achievement text describes.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,

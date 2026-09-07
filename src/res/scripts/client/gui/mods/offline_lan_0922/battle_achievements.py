@@ -132,7 +132,12 @@ UNAWARDED_ACHIEVEMENTS = {
                   "cancelled it before release",
     "medalBrothersInArms": "platoon award; this product has no platoons",
     "medalCrucialContribution": "platoon award; this product has no platoons",
-    "markOfMastery": "needs per-vehicle XP distributions retail computes",
+    "markOfMastery": "not an arena achievement: #1513 carries it on the "
+                     "personal result and the vehicle dossier instead, and "
+                     "``battle_mastery`` awards it from the captured retail "
+                     "XP table",
+    "marksOnGun": "not an arena achievement: ``battle_mastery`` awards it "
+                  "from the vehicle's own 100-battle average",
 }
 
 # Every name this server can award, under the record name #1513 stores.  The

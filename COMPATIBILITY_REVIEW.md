@@ -1173,6 +1173,69 @@ This is static and pure-data coverage. It proves which fields reach the native
 packers with which values; only acceptance on the exact Windows client can show
 the results window rendering those ribbons, counters and tooltips.
 
+### Mastery badges and Marks of Excellence
+
+Both awards rank one player against every other player who drove the same
+vehicle, so #1513 receives only the outcome. The client carries every field
+needed to render them. `battle_results_shared.VEH_FULL_RESULTS_UPDATE` holds
+`prevMarkOfMastery`, `markOfMastery`, `marksOnGun`, `movingAvgDamage`,
+`damageRating` and `battleNum`, all typed `int` with aggregation `skip`.
+`dossiers2/custom/records.py` registers the four durable records in the vehicle
+`achievements` block: `markOfMastery` (`B`, max 4), `marksOnGun` (`B`, max 3),
+`damageRating` (`H`, max 10000, hundredths of a percent) and `movingAvgDamage`
+(`H`, max 60001). `arena_bonus_type_caps.REGULAR` — this product's `bonusType`
+1 — already grants `DOSSIER_MARK_OF_MASTERY` and `DOSSIER_MARKS_ON_GUN`.
+
+The two badges reach the results window by different paths.
+`gui/battle_results/reusable/personal.py` calls
+`shared.makeMarkOfMasteryFromPersonal(results)`, which needs only
+`markOfMastery`, `prevMarkOfMastery` and `typeCompDescr`;
+`MarkOfMasteryAchievement._getIconName` then picks the `markOfMastery%drecord`
+icon when the previous best is lower. A new gun mark instead rides
+`dossierPopUps`, because `dossiers2/ui/layouts.py` puts only
+`MARK_OF_MASTERY_RECORD` in `IGNORED_BY_BATTLE_RESULTS` and leaves
+`marksOnGun` (record 295) on that path, where `makeAchievementFromPersonal`
+also reads `damageRating` for the badge tooltip.
+`DictPackers.DictPacker.pack` coerces each value with its transport type, so
+`damageRating` crosses the wire as whole percent while the dossier keeps
+hundredths — the same split retail produces, since its dossier updater applies
+`int(results['damageRating'] * 100)` to the unpacked float.
+
+The rules are the client's own text in `res/text/LC_MESSAGES/achievements.mo`.
+`markOfMasteryContent` gives the mastery classes as more battle XP than 50, 80,
+95 and 99 percent of the players who drove that vehicle in the previous seven
+days. `marksOnGun0_descr` through `marksOnGun2_descr` and
+`marksOnGun_condition` give the marks as an average above 65, 85 and 95 percent
+over the previous fourteen days, computed from the last 100 battles, updated
+every battle, never lost once earned, Tiers V-X, standard battles only.
+Wargaming's support material supplies the one part the client text omits: the
+average counts damage dealt plus the *largest* of the track, spotting and stun
+assist values, not their sum.
+
+What the client cannot supply is the population distribution, which Wargaming
+recomputes daily per region and never shipped. No 0.9.22-era table survives:
+XVM's dated expected-value archive now begins in 2024, the Internet Archive
+holds none of the 2017-2018 files, and no per-vehicle mastery or mark table
+from that period is archived on the community sites that published them.
+`tools/bake_mastery_thresholds_0922.py` therefore captures the current retail
+tables into `mastery_catalog.py`, joined to the pinned client by integer
+compact descriptor: mastery base XP from `protanki.eu/en/stats/masters` and
+combined damage per percentile from the `poliroid.me/gunmarks` service behind
+the Marks of Excellence mods. The module records each source's version stamp
+and the fetch date. Of the client's 544 playable vehicles, 537 have a mastery
+row of their own and 386 of the 393 at Tier V or above have a marks row; the
+seven Chinese-server exclusives and since-removed vehicles fall back to the
+median of the retail rows for the same tier and class, which the baker computes
+and emits, and the baker also bakes the client's own tier and class map so
+neither the Tier V gate nor that fallback depends on loaded item definitions.
+
+Because the reference population is retail players rather than this
+installation's Bots, the bar is the real one. It is not calibrated against this
+product's own XP policy in `server/offline_rewards.py`, which is an explicit
+offline reconstruction rather than Wargaming's formula, so how often an offline
+battle clears a retail mastery threshold is a gameplay question that only
+Windows play can answer.
+
 ## Stock map-selection lifecycle
 
 Before the local Account creates the lobby, a chain-safe adapter intercepts the
