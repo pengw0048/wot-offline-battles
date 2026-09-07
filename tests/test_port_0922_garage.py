@@ -113,6 +113,14 @@ SNAPSHOT = {
         'limit': 100,
     },
     'recycleBinTankmen': {},
+    # The skill-reset choices, as the shop publishes them: give the
+    # accumulated skill experience up for nothing, keep most of it for
+    # credits, keep all of it for gold.
+    'dropSkillsCosts': {
+        0: {'credits': 0, 'gold': 0, 'xpReuseFraction': 0.0},
+        1: {'credits': 200000, 'gold': 0, 'xpReuseFraction': 0.8},
+        2: {'credits': 0, 'gold': 200, 'xpReuseFraction': 1.0},
+    },
 }
 
 
@@ -277,7 +285,15 @@ class _TankmanDescriptor(object):
         self.skills.append(name)
 
     def dropSkills(self, fraction, throw):
+        # The real one keeps this share of the accumulated skill experience,
+        # which is the whole difference between the shop's three choices.
+        self.free_xp = int(self.free_xp * fraction)
         self.skills = []
+
+    def isFreeDropSkills(self):
+        # #1513: a crew member who has not finished a first skill has nothing
+        # to give up, so retail hands that one reset over for nothing.
+        return not self.skills
 
     def addXP(self, amount):
         self.free_xp += int(amount)
@@ -2071,6 +2087,74 @@ class CrewShopTests(unittest.TestCase):
         recruited = state.buy_tankman(50001, 1, 0)
 
         self.assertNotIn(recruited, state.snapshot()['recycleBinTankmen'])
+
+    # ---- the skill reset ------------------------------------------------
+
+    def _skilled(self, gold=10000, credits_amount=1000000):
+        state = self._state(gold=gold)
+        state.snapshot()['wallet']['credits'] = credits_amount
+        state.add_tankman_skill(201, 6)
+        rows = state.snapshot()['barracksTankmen']
+        rows[201] = rows[201] + b'#1000'
+        return state
+
+    def test_the_dearest_reset_keeps_everything_and_costs_gold(self):
+        state = self._skilled()
+
+        state.drop_tankman_skills(201, 2)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual([], descriptor.skills)
+        self.assertEqual(1000, descriptor.totalXP())
+        self.assertEqual(10000 - 200, state.snapshot()['wallet']['gold'])
+
+    def test_the_middle_reset_keeps_most_of_it_and_costs_credits(self):
+        state = self._skilled()
+
+        state.drop_tankman_skills(201, 1)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual(800, descriptor.totalXP())
+        self.assertEqual(
+            1000000 - 200000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(10000, state.snapshot()['wallet']['gold'])
+
+    def test_the_free_reset_gives_the_experience_up_instead(self):
+        """Nothing is free; the cheapest choice is paid for in experience."""
+        state = self._skilled()
+
+        state.drop_tankman_skills(201, 0)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual(0, descriptor.totalXP())
+        self.assertEqual(1000000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(10000, state.snapshot()['wallet']['gold'])
+
+    def test_a_crew_member_with_nothing_to_lose_is_not_charged(self):
+        """``TankmanDescr.isFreeDropSkills`` is the client's own exemption."""
+        state = self._state()
+
+        state.drop_tankman_skills(201, 2)
+
+        self.assertEqual(10000, state.snapshot()['wallet']['gold'])
+
+    def test_a_reset_the_account_cannot_pay_for_changes_nothing(self):
+        state = self._skilled(gold=50)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.drop_tankman_skills(201, 2)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_reset_choice_the_shop_never_offered_is_refused(self):
+        state = self._skilled()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.drop_tankman_skills(201, 7)
 
     # ---- the role change ------------------------------------------------
 

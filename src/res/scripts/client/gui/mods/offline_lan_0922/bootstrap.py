@@ -770,6 +770,9 @@ def _selected_vehicle(config, restore_saved=True):
             'crewPassportCost': dict(economy.PASSPORT_CHANGE_COST),
             'crewFemalePassportCost': dict(economy.FEMALE_PASSPORT_CHANGE_COST),
             'tankmenRestoreConfig': dict(economy.TANKMEN_RESTORE_CONFIG),
+            'dropSkillsCosts': dict(
+                (index, dict(choice))
+                for index, choice in economy.DROP_SKILLS_COSTS.items()),
             # Who the account dismissed and when, as the barracks' own
             # recovery list reads it.
             'recycleBinTankmen': {},

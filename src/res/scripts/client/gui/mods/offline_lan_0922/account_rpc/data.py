@@ -154,6 +154,37 @@ def recycle_bin_diff(vehicle, touched_tankmen):
     return {'tankmen': {'buffer': buffer_rows}}
 
 
+# What a snapshot written before the skill-reset table existed publishes.
+DEFAULT_DROP_SKILLS_COSTS = {
+    0: {'credits': 0, 'gold': 0, 'xpReuseFraction': 0.0},
+}
+
+
+def _drop_skills_costs(vehicle):
+    """Return the skill-reset choices, as ``SkillDropWindow`` lists them.
+
+    The window sorts the keys it is given and sends back the one the player
+    picked, so this table is both the buttons and the prices.
+    """
+    costs = vehicle.get('dropSkillsCosts')
+    if not isinstance(costs, dict) or not costs:
+        return dict(DEFAULT_DROP_SKILLS_COSTS)
+    published = {}
+    for index, choice in costs.items():
+        if not isinstance(choice, dict):
+            continue
+        try:
+            published[int(index)] = {
+                'credits': max(0, int(choice.get('credits', 0) or 0)),
+                'gold': max(0, int(choice.get('gold', 0) or 0)),
+                'xpReuseFraction': float(
+                    choice.get('xpReuseFraction', 0.0) or 0.0),
+            }
+        except (TypeError, ValueError):
+            continue
+    return published or dict(DEFAULT_DROP_SKILLS_COSTS)
+
+
 def _tankman_costs(vehicle):
     """Return the account's three recruitment choices, positionally."""
     costs = vehicle.get('tankmanCosts')
@@ -787,6 +818,10 @@ def shop(revision=0, selected_vehicle=None):
             'items': dict(empty_items),
             'freeXPToTManXPRate': 10,
             'goodies': dict(empty_goodies),
+            # SkillDropWindow reads shop.defaults.dropSkillsCost beside the
+            # live one to decide whether a choice is discounted; publishing
+            # the same table means it never shows a phantom discount.
+            'dropSkillsCost': _drop_skills_costs(vehicle),
             'paidRemovalCost': _device_removal_cost(vehicle),
             # #1513 OptionalDevice.getRemovalPrice uses a separate Money
             # value for optional devices tagged ``deluxe``.
@@ -801,17 +836,7 @@ def shop(revision=0, selected_vehicle=None):
         # Stock-compatible, non-zero exchange ratios.  The native exchange
         # dialogs divide by both freeXPConversion[0] and this tankman rate.
         'freeXPConversion': (25, 1),
-        'dropSkillsCost': {
-            0: {
-                'credits': 0, 'gold': 0, 'xpReuseFraction': 0.5,
-            },
-            1: {
-                'credits': 0, 'gold': 0, 'xpReuseFraction': 0.5,
-            },
-            2: {
-                'credits': 0, 'gold': 0, 'xpReuseFraction': 1.0,
-            },
-        },
+        'dropSkillsCost': _drop_skills_costs(vehicle),
         # The three native recruitment choices are positional: the recruit
         # window prices them from here and sends back the index.  The account
         # carries the same table, so what the window shows is what the garage

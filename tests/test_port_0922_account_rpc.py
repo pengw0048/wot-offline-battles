@@ -1240,6 +1240,21 @@ class CrewShopStreamTests(unittest.TestCase):
         self.assertEqual(50, value['passportChangeCost'])
         self.assertEqual(500, value['femalePassportChangeCost'])
 
+    def test_the_skill_reset_table_is_published_not_hard_coded(self):
+        """``SkillDropWindow`` lists whatever keys arrive, live and default."""
+        table = {
+            0: {'credits': 0, 'gold': 0, 'xpReuseFraction': 0.0},
+            1: {'credits': 200000, 'gold': 0, 'xpReuseFraction': 0.8},
+            2: {'credits': 0, 'gold': 200, 'xpReuseFraction': 1.0},
+        }
+
+        value = self._shop(dropSkillsCosts=table)
+
+        self.assertEqual(table, value['dropSkillsCost'])
+        # The window compares the live table with the default one to decide
+        # whether a choice is discounted.
+        self.assertEqual(table, value['defaults']['dropSkillsCost'])
+
     def test_the_restore_window_reaches_the_key_the_client_reads(self):
         """``ShopCommonStats.__getRestoreConfig`` reads ``restore_config``."""
         value = self._shop(tankmenRestoreConfig={

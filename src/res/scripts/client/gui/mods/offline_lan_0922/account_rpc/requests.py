@@ -218,7 +218,8 @@ def _drop_tankman_skills(context, args):
     if len(args) < 3:
         return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
     return _fitting(
-        context, lambda state: state.drop_tankman_skills(args[1]))
+        context,
+        lambda state: state.drop_tankman_skills(args[1], args[2]))
 
 
 def _train_tankman(context, args):

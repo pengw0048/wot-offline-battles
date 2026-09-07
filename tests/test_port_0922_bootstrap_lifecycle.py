@@ -645,6 +645,58 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     return bootstrap._selected_vehicle(
                         {'vehicle': 'ussr:R11_MS-1'})
 
+    def test_every_crew_price_the_garage_charges_reaches_the_snapshot(self):
+        """One missing key would make a paid crew command free and silent.
+
+        ``bootstrap`` writes these, ``data.shop`` publishes them and
+        ``garage.GarageState`` charges from them, all by the same string
+        names, so the three have to be pinned against ``economy`` together.
+        """
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        economy = modules[
+            'gui.mods.offline_lan_0922.account_rpc.economy']
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertEqual(
+            economy.CHANGE_ROLE_COST, snapshot['crewChangeRoleCost'])
+        self.assertEqual(
+            economy.PASSPORT_CHANGE_COST, snapshot['crewPassportCost'])
+        self.assertEqual(
+            economy.FEMALE_PASSPORT_CHANGE_COST,
+            snapshot['crewFemalePassportCost'])
+        self.assertEqual(
+            economy.TANKMEN_RESTORE_CONFIG,
+            snapshot['tankmenRestoreConfig'])
+        self.assertEqual(
+            economy.DROP_SKILLS_COSTS, snapshot['dropSkillsCosts'])
+        self.assertEqual({}, snapshot['recycleBinTankmen'])
+
+    def test_no_crew_price_the_shop_publishes_is_zero(self):
+        """"Nothing is free" is a property of the numbers, not of the code."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        for key in ('crewChangeRoleCost', 'crewPassportCost',
+                    'crewFemalePassportCost'):
+            self.assertTrue(
+                any(snapshot[key].values()), key)
+        restore = snapshot['tankmenRestoreConfig']
+        self.assertEqual(0, restore['freeDuration'])
+        self.assertGreater(restore['goldCost'], 0)
+        # ItemsRequester.getTankmen hides everyone older than this.
+        self.assertGreater(restore['goldDuration'], 0)
+        # The cheapest skill reset is paid for in crew experience instead.
+        self.assertEqual(
+            0.0, snapshot['dropSkillsCosts'][0]['xpReuseFraction'])
+
     def test_a_sold_vehicle_does_not_come_back_in_a_fully_unlocked_save(self):
         """The seed is what a save starts from, not a standing guarantee."""
         unused_bootstrap, everything = self._build()

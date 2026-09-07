@@ -1316,17 +1316,51 @@ class GarageState(object):
         self.revision += 1
         return tankman_id
 
-    def drop_tankman_skills(self, tankman_inventory_id):
+    def drop_tankman_skills(self, tankman_inventory_id, cost_index=0):
+        """Reset one crew member's skills, at the price they chose.
+
+        ``SkillDropWindow`` lists ``shop.dropSkillsCost`` and sends back the
+        key the player picked; each entry carries what it costs and how much
+        of the accumulated skill experience it keeps, so the reset is charged
+        for and the descriptor is dropped at that fraction rather than always
+        at the dearest option for nothing.  ``TankmanDescr.isFreeDropSkills``
+        is the one case the client itself calls free: a crew member who has
+        not finished a first skill has nothing to give up.
+        """
         rows, tankman_id = self._tankman_record(tankman_inventory_id)
         tankmen = self._tankmen_module()
+        choice = self._drop_skills_choice(cost_index)
         try:
             descriptor = tankmen.TankmanDescr(rows[tankman_id])
-            descriptor.dropSkills(1.0, False)
+            is_free = getattr(descriptor, 'isFreeDropSkills', None)
+            free = bool(is_free()) if callable(is_free) else False
+        except Exception as error:
+            raise GarageError('the client refused the skill reset: %s' % error)
+        if not free:
+            self._charge(choice)
+        try:
+            descriptor.dropSkills(
+                float(choice.get('xpReuseFraction', 0.0) or 0.0), False)
             rows[tankman_id] = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the skill reset: %s' % error)
         self.revision += 1
         return tankman_id
+
+    def _drop_skills_choice(self, cost_index):
+        """Return one published skill-reset choice, or refuse an unknown one."""
+        costs = self._snapshot.get('dropSkillsCosts')
+        costs = costs if isinstance(costs, dict) else {}
+        choice = costs.get(_int(cost_index))
+        if not isinstance(choice, dict):
+            raise GarageError(
+                'the shop does not offer skill reset %r' % (cost_index,))
+        return {
+            'credits': max(0, _int(choice.get('credits', 0))),
+            'gold': max(0, _int(choice.get('gold', 0))),
+            'xpReuseFraction': float(
+                choice.get('xpReuseFraction', 0.0) or 0.0),
+        }
 
     def train_tankman(self, tankman_inventory_id, free_xp):
         """Convert the requested free XP into crew XP at the #1513 rate."""
@@ -2108,6 +2142,11 @@ class GarageState(object):
             raise GarageError('nobody was dismissed with id %d' % wanted)
         compact_descr, dismissed_at = bin_rows[wanted]
         config = self._restore_config()
+        if not config:
+            # Without the published window and price there is nothing to
+            # charge, and handing a crew member back for free is not the
+            # answer to a snapshot that never carried the shop.
+            raise GarageError('the shop publishes no recovery window')
         elapsed = max(0, int(time.time()) - _int(dismissed_at))
         window = config.get('goldDuration', 0)
         if window and elapsed >= window:
@@ -2238,10 +2277,15 @@ class GarageState(object):
         return tankman_id
 
     def _crew_cost(self, key):
-        """Return one published crew-shop price as a currency mapping."""
+        """Return one published crew-shop price as a currency mapping.
+
+        An absent price is refused rather than treated as free: the snapshot
+        and the shop stream are built from the same key, so a missing one
+        means the client was shown a price this garage cannot charge.
+        """
         cost = self._snapshot.get(key)
         if not isinstance(cost, dict):
-            return {}
+            raise GarageError('the shop publishes no %s' % key)
         return dict((str(currency), _int(amount))
                     for currency, amount in cost.items())
 

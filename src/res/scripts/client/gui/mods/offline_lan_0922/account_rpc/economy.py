@@ -101,6 +101,18 @@ TANKMEN_RESTORE_CONFIG = {
     'limit': 100,
 }
 
+# Offline policy, not client data: ``ShopCommonStats.dropSkillsCost`` falls
+# back to an empty mapping, so what the skill-reset window offers and what
+# each choice costs are ours.  The shape is retail's -- give the accumulated
+# skill experience up for nothing, keep most of it for credits, keep all of it
+# for gold -- and ``SkillDropWindow`` lists whatever keys arrive here, so a
+# different table is a different set of buttons rather than a code change.
+DROP_SKILLS_COSTS = {
+    0: {'credits': 0, 'gold': 0, 'xpReuseFraction': 0.0},
+    1: {'credits': 200000, 'gold': 0, 'xpReuseFraction': 0.8},
+    2: {'credits': 0, 'gold': 200, 'xpReuseFraction': 1.0},
+}
+
 CAREER_WALLET = {
     CREDITS: CAREER_CREDITS, GOLD: CAREER_GOLD, FREE_XP: CAREER_FREE_XP}
 SANDBOX_WALLET = {

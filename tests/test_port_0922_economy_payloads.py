@@ -273,6 +273,14 @@ class EconomyPayloadTests(unittest.TestCase):
             [('dismiss_tankman', (100005,), {})],
             self._dispatch(commands.CMD_DISMISS_TMAN, (100005, 0, 0)))
 
+    def test_a_skill_reset_carries_the_choice_the_player_pressed(self):
+        # Inventory.__dropSkillsTman_onShopSynced -> _doCmdInt3(
+        #   CMD_TMAN_DROP_SKILLS, shopRev, tmanInvID, dropSkillsCostIdx)
+        self.assertEqual(
+            [('drop_tankman_skills', (100005, 2), {})],
+            self._dispatch(
+                commands.CMD_TMAN_DROP_SKILLS, (17, 100005, 2)))
+
     def test_hiring_a_dismissed_crew_member_carries_only_their_id(self):
         # client_recycle_bin.restoreTankman ->
         #   _doCmdInt3(CMD_TMAN_RESTORE, tmanInvID, 0, 0)
