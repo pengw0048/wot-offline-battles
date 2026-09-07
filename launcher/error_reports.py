@@ -15,6 +15,7 @@ import re
 import stat
 import struct
 import subprocess
+import threading
 import uuid
 import zipfile
 
@@ -71,6 +72,9 @@ _DUMP_FILENAMES = {
 }
 _SESSION_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _CHUNK_BYTES = 64 * 1024
+LOG_MAX_BYTES = 16 * 1024 * 1024
+LOG_RETAIN_BYTES = 4 * 1024 * 1024
+LAUNCHER_LOG_LOCK = threading.Lock()
 _DUMP_MONITOR_SLOTS = 32
 _VISIBLE_CLIENT_CLEAN_EXIT_SUFFIX = (
     b": INFO: PostProcessing.Phases.fini()")
@@ -346,6 +350,30 @@ def _checkpoint(path, kind):
     return source
 
 
+def _trim_old_log(path):
+    """Trim an idle log before taking the next session's byte checkpoint."""
+    try:
+        value = os.lstat(path)
+        if (_is_reparse_point(value) or stat.S_ISLNK(value.st_mode) or
+                not stat.S_ISREG(value.st_mode) or
+                value.st_size <= LOG_MAX_BYTES):
+            return
+        with open(path, "r+b") as stream:
+            opened = os.fstat(stream.fileno())
+            if not _same_identity(_file_identity(value),
+                                  _file_identity(opened)):
+                return
+            stream.seek(-min(LOG_RETAIN_BYTES, opened.st_size), os.SEEK_END)
+            # Drop the first potentially partial line (and UTF-8 character).
+            tail = stream.read().partition(b"\n")[2]
+            stream.seek(0)
+            stream.write(tail)
+            stream.truncate()
+    except (IOError, OSError):
+        # A locked/unavailable log must not prevent starting the game.
+        return
+
+
 def _write_state(session):
     path = session_state_path()
     directory = os.path.dirname(path)
@@ -402,16 +430,18 @@ def begin_session(game_root, needs_worker=False, local_server=False,
         expected.append(ROLE_SERVER)
     if needs_worker:
         expected.append(ROLE_HIDDEN_WORKER)
-    sources = {
-        ROLE_LAUNCHER: _checkpoint(core.launcher_log_path(), "launcher"),
-        ROLE_VISIBLE_CLIENT: _checkpoint(
-            os.path.join(game_root, _GAME_LOG_FILENAMES[ROLE_VISIBLE_CLIENT]),
-            "game"),
-    }
+    with LAUNCHER_LOG_LOCK:
+        _trim_old_log(core.launcher_log_path())
+        sources = {
+            ROLE_LAUNCHER: _checkpoint(core.launcher_log_path(), "launcher"),
+        }
+    game_roles = [ROLE_VISIBLE_CLIENT]
     if needs_worker:
-        for role in (ROLE_HIDDEN_WORKER, ROLE_HIDDEN_WORKER_STARTER):
-            sources[role] = _checkpoint(
-                os.path.join(game_root, _GAME_LOG_FILENAMES[role]), "game")
+        game_roles.extend((ROLE_HIDDEN_WORKER, ROLE_HIDDEN_WORKER_STARTER))
+    for role in game_roles:
+        path = os.path.join(game_root, _GAME_LOG_FILENAMES[role])
+        _trim_old_log(path)
+        sources[role] = _checkpoint(path, "game")
     session = {
         "schema": SESSION_SCHEMA,
         "id": session_id,

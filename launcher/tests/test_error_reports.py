@@ -71,6 +71,66 @@ class ErrorReportTest(unittest.TestCase):
             b"".join(payloads),
         ))
 
+    def test_oversized_logs_trim_before_new_session_checkpoints(self):
+        roles = (error_reports.ROLE_VISIBLE_CLIENT,
+                 error_reports.ROLE_HIDDEN_WORKER,
+                 error_reports.ROLE_HIDDEN_WORKER_STARTER)
+        paths = [core.launcher_log_path()] + [self._game_log(r) for r in roles]
+        old = b"old line\n" * 20 + "recent 中文\n".encode("utf-8")
+        for path in paths:
+            self._write(path, old)
+        with mock.patch.object(error_reports, "LOG_MAX_BYTES", 100), \
+                mock.patch.object(error_reports, "LOG_RETAIN_BYTES", 40):
+            session = error_reports.begin_session(
+                self.game, needs_worker=True, session_id=self.SESSION_1)
+        for path in paths:
+            with open(path, "rb") as stream:
+                tail = stream.read()
+            self.assertLessEqual(len(tail), 40)
+            self.assertTrue(tail.endswith("recent 中文\n".encode("utf-8")))
+            tail.decode("utf-8")
+            self._write(path, b"new session\n", "ab")
+        error_reports.finalize_session(session)
+        payloads = self._archive(error_reports.create_report())
+        self.assertEqual(len(paths), len(payloads))
+        self.assertTrue(all(p == b"new session\n" for p in payloads.values()))
+
+    def test_small_logs_and_unused_worker_logs_are_untouched(self):
+        visible = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
+        worker = self._game_log(error_reports.ROLE_HIDDEN_WORKER)
+        self._write(visible, b"small\n")
+        self._write(worker, b"worker\n" * 30)
+        with mock.patch.object(error_reports, "LOG_MAX_BYTES", 100):
+            error_reports.begin_session(self.game, session_id=self.SESSION_1)
+        for path, expected in ((visible, b"small\n"),
+                               (worker, b"worker\n" * 30)):
+            with open(path, "rb") as stream:
+                self.assertEqual(expected, stream.read())
+
+    def test_trimming_skips_symlinks_and_locked_files(self):
+        target = os.path.join(self.root, "target.log")
+        link = os.path.join(self.root, "link.log")
+        payload = b"old\n" * 50
+        self._write(target, payload)
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable")
+        with mock.patch.object(error_reports, "LOG_MAX_BYTES", 100):
+            error_reports._trim_old_log(link)
+            with mock.patch("builtins.open", side_effect=PermissionError):
+                error_reports._trim_old_log(target)
+        with open(target, "rb") as stream:
+            self.assertEqual(payload, stream.read())
+
+    def test_trimming_a_single_oversized_line_discards_partial_tail(self):
+        path = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
+        self._write(path, b"x" * 200)
+        with mock.patch.object(error_reports, "LOG_MAX_BYTES", 100), \
+                mock.patch.object(error_reports, "LOG_RETAIN_BYTES", 40):
+            error_reports._trim_old_log(path)
+        self.assertEqual(0, os.path.getsize(path))
+
     def test_single_player_report_contains_only_this_session_log_slices(self):
         visible = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
         worker = self._game_log(error_reports.ROLE_HIDDEN_WORKER)
