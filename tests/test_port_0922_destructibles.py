@@ -4087,6 +4087,33 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertLess(result['continue_from'], 9.0)
         self.assertGreater(result['continue_from'], 8.99)
 
+    def test_broken_skin_resume_preserves_catalog_only_obstacles(self):
+        """A native clear interval does not prove a catalog-only prop absent."""
+        self._falling_pole_shot_fixture(
+            [[-0.5, -1.0, 6.0, 0.5, 2.0, 7.0, None]])
+        authority = types.SimpleNamespace(
+            is_destroyed=lambda chunk, item, mat=None: item == 99)
+        for wall_distance, expected_next in ((9.0, 6.0), (None, 6.0),
+                                             (5.0, 5.0)):
+            with self.subTest(wall=wall_distance):
+                surfaces = [(4.0, 22, 99, 71)]
+                if wall_distance is not None:
+                    surfaces.append((wall_distance, 0, 0, 5))
+                bigworld = types.SimpleNamespace(
+                    wg_collideSegment=self._filtered_world_ray(surfaces))
+                ignored = set()
+                keep = destructibles_sensor._transparent_shot_surface_filter_1513(
+                    ignored)
+                with mock.patch.object(destructibles_sensor,
+                                       '_get_destr_authority',
+                                       return_value=authority):
+                    advance = destructibles_sensor._shot_broken_surface_advance_1513(
+                        lambda stage, fn, *args: fn(*args), bigworld, 1,
+                        _Vector(), _Vector(0, 0, 20), (22, 99, None),
+                        4.0, ignored, keep)
+                self.assertGreater(advance, expected_next - 0.01)
+                self.assertLess(advance, expected_next)
+
     def test_broken_surface_filter_hides_only_the_accepted_material(self):
         """A broken module may not make its intact siblings transparent."""
         item_wide = destructibles_sensor._transparent_shot_surface_filter_1513(

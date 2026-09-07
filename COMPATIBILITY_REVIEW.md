@@ -367,8 +367,10 @@ the same law: a proved-broken surface is filtered out and the ray is re-cast,
 so a felled pole or a broken wall panel no longer stops later shells while
 intact sibling modules and backing walls stay authoritative. A shell that has
 just destroyed an admitted item and cannot resolve that item's registered OBB
-exit resumes at the next surface proved by the same filtered re-cast rather
-than ending on debris. Every scenery stop now carries a `stop_reason`, so a
+exit resumes before the nearest remaining native or catalog surface rather
+than ending on debris. The filtered re-cast is also capped by the live catalog
+intersection, because a clear mask-128 ray does not exclude a dynamic-only
+prop. Every scenery stop now carries a `stop_reason`, so a
 Windows report can distinguish the legal `above_threshold_hp` and
 `shell_family` refusals from an identity failure such as `catalog_miss`,
 `catalog_ambiguous` or `native_reject`.

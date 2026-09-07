@@ -6084,10 +6084,18 @@ def _shot_broken_surface_advance_1513(measured, bigworld, spaceID,
 		bigworld.wg_collideSegment,
 		spaceID, start_pos, end_pos, 128, surface_filter)
 	floor = float(obstacle_distance) + _SHOT_RAY_EPSILON
-	if next_hit is None:
-		return max(floor, (end_pos - start_pos).length)
-	return max(floor,
-		(next_hit[0] - start_pos).length - _SHOT_RAY_EPSILON)
+	maximum = ((next_hit[0] - start_pos).length if next_hit is not None
+		else (end_pos - start_pos).length)
+	# Dynamic-only props do not necessarily participate in mask 128.  The
+	# filtered native ray proves only the static interval; cap it at the next
+	# live catalog contact as well, including unresolved/ambiguous entries.
+	catalog_hit = _catalog_shot_intersection(
+		spaceID, start_pos, end_pos, maximum)
+	if catalog_hit is not None:
+		maximum = min(maximum, float(catalog_hit['distance']))
+	if next_hit is None and catalog_hit is None:
+		return max(floor, maximum)
+	return max(floor, maximum - _SHOT_RAY_EPSILON)
 
 
 def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
