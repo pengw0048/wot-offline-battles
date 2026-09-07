@@ -1,6 +1,7 @@
 """Session-boundary and privacy tests for one-click error reports."""
 
 import datetime
+import io
 import os
 import shutil
 import struct
@@ -16,6 +17,18 @@ import error_reports
 class ErrorReportTest(unittest.TestCase):
     SESSION_1 = "20260823T120000Z-111111111111"
     SESSION_2 = "20260823T130000Z-222222222222"
+
+    def test_streamed_report_member_can_cross_zip64_limit(self):
+        payload = b"diagnostic dump data\n" * 32
+        output = io.BytesIO()
+        with mock.patch.object(zipfile, "ZIP64_LIMIT", 256):
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED,
+                                 allowZip64=True) as archive:
+                error_reports._write_slice(
+                    archive, "client.dmp", io.BytesIO(payload), len(payload))
+        with zipfile.ZipFile(io.BytesIO(output.getvalue())) as archive:
+            self.assertEqual(payload, archive.read("client.dmp"))
+            self.assertEqual(45, archive.getinfo("client.dmp").extract_version)
 
     def setUp(self):
         self.root = tempfile.mkdtemp()

@@ -835,7 +835,9 @@ def _open_valid_dump(session, role):
 
 def _write_slice(archive, archive_name, stream, length):
     remaining = int(length)
-    with archive.open(archive_name, "w") as target:
+    # Streamed members have no size in their initial header. Archive-level
+    # allowZip64 alone cannot expand that header after a large dump is copied.
+    with archive.open(archive_name, "w", force_zip64=True) as target:
         while remaining:
             payload = stream.read(min(_CHUNK_BYTES, remaining))
             if not payload:
