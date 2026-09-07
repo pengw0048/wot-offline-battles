@@ -841,7 +841,7 @@ class WorldCollisionTests(unittest.TestCase):
         def ground_profile(unused_space, unused_math, unused_pos,
                            unused_x, unused_z, unused_sin, unused_cos,
                            unused_direction, look, segment_count=6,
-                           ground_plane=None):
+                           ground_plane=None, collision_filter=None):
             segment = float(look) / float(segment_count)
             return ([index * segment * 0.5
                      for index in range(segment_count + 1)], segment)
@@ -1333,16 +1333,21 @@ class WorldCollisionTests(unittest.TestCase):
         math_module = types.SimpleNamespace(Vector3=_Vector)
 
         with mock.patch.object(
-                world_collision, 'ground_collision_filter',
-                return_value=reject_broken) as filter_factory:
+                world_collision, 'prepare_horizontal_collision_filter',
+                return_value=reject_broken) as filter_factory, \
+                mock.patch.object(
+                    world_collision, 'ground_collision_filter',
+                    side_effect=AssertionError(
+                        'the sweep must reuse its prepared filter')):
             self.assertFalse(world_collision.check_horizontal_collision(
                 bigworld, math_module, 1, _Vector(), 0.0, 20.0,
                 None, False, 0.20, pitch=-math.atan(gradient)))
 
         # Nine conservative lane-cap samples, three exact-top probes and three
         # seven-sample ground profiles all hide a destructible skin that has
-        # already been marked broken.
-        self.assertEqual(33, filter_factory.call_count)
+        # already been marked broken, and all of them carry the single filter
+        # this sweep prepared for its lane envelope.
+        self.assertEqual(1, filter_factory.call_count)
         self.assertEqual(9, len(filtered_queries))
         self.assertTrue(all(row[2] is reject_broken
                             for row in filtered_queries))
@@ -1387,7 +1392,7 @@ class WorldCollisionTests(unittest.TestCase):
         math_module = types.SimpleNamespace(Vector3=_Vector)
 
         with mock.patch.object(
-                world_collision, 'ground_collision_filter',
+                world_collision, 'prepare_horizontal_collision_filter',
                 return_value=reject_broken):
             self.assertFalse(world_collision.check_horizontal_collision(
                 bigworld, math_module, 1, _Vector(), 0.0, 20.0,
@@ -2007,7 +2012,7 @@ class WorldCollisionTests(unittest.TestCase):
 
         self.assertTrue(blocked)
 
-    def test_ground_profile_filter_skips_broken_skin_to_terrain(self):
+    def test_level_ground_profile_filter_skips_broken_skin(self):
         gradient = 0.20
         profile_look = 3.5 + 20.0 * 0.20 + 0.20
         broken_z = profile_look / 6.0 * 2.0
@@ -2047,7 +2052,7 @@ class WorldCollisionTests(unittest.TestCase):
         math_module = types.SimpleNamespace(Vector3=_Vector)
 
         with mock.patch.object(
-                world_collision, 'ground_collision_filter',
+                world_collision, 'prepare_horizontal_collision_filter',
                 return_value=reject_broken):
             self.assertFalse(world_collision.check_horizontal_collision(
                 bigworld, math_module, 1, _Vector(), 0.0, 20.0,

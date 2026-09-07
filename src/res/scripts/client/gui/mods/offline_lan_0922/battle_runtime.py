@@ -416,6 +416,7 @@ def _is_port_object(value):
     return isinstance(origin, str) and origin.startswith(_PORT_PACKAGE)
 
 
+_EMPTY_GROUND_FILTER = object()
 _FRAME_STAGE_NAMES = (
     'house', 'sync', 'critical', 'drown', 'prewarm', 'transition', 'local',
     'outline', 'bots_update', 'bot_present', 'bot_events', 'spot', 'lock',
@@ -4794,6 +4795,28 @@ class BattleRuntime(object):
         ground_filter = probe(x, z)
         return ground_filter if callable(ground_filter) else None
 
+    def _prepared_ground_filter(self, points):
+        """Build one broken-skin filter covering several ground columns.
+
+        A pass that samples many columns of one pose does not need a rebuilt
+        candidate set per column.  The prepared sweep filter covers the whole
+        envelope and still resolves each hit by its exact native identity
+        against the live accepted ledger, so it decides exactly what the
+        per-column filter decides for every column inside that envelope.
+        Returns ``None`` when this runtime cannot prepare one, which keeps the
+        per-column path in ``_suspension_ground_y``.
+        """
+        probe = getattr(
+            self._destructibles, 'prepare_horizontal_collision_filter', None)
+        if not callable(probe) or not points:
+            return None
+        xs = [float(point[0]) for point in points]
+        zs = [float(point[1]) for point in points]
+        prepared = probe(
+            self._vector((min(xs), 0.0, min(zs))),
+            self._vector((max(xs), 0.0, max(zs))))
+        return prepared if callable(prepared) else _EMPTY_GROUND_FILTER
+
     def _collide_down(self, start, end, ground_filter):
         """Vertical probe that skips the skin of an already broken item."""
         if ground_filter is None:
@@ -4850,7 +4873,8 @@ class BattleRuntime(object):
         return height
 
     def _suspension_ground_y(
-            self, x, z, minimum_y, maximum_y, flat_maximum_y=None):
+            self, x, z, minimum_y, maximum_y, flat_maximum_y=None,
+            prepared_filter=None):
         """Return ground inside one suspension contact's legal travel.
 
         Unlike the navigation column, this probe must never acquire a roof or
@@ -4862,7 +4886,10 @@ class BattleRuntime(object):
         maximum_y = float(maximum_y)
         if maximum_y < minimum_y:
             minimum_y, maximum_y = maximum_y, minimum_y
-        ground_filter = self._ground_filter(x, z)
+        ground_filter = (
+            self._ground_filter(x, z) if prepared_filter is None else
+            None if prepared_filter is _EMPTY_GROUND_FILTER else
+            prepared_filter)
         start_y = maximum_y
         for unused_layer in range(3):
             try:
@@ -18930,6 +18957,7 @@ class BattleRuntime(object):
         probe_height = float(probe_height)
         points = vehicle_physics.suspension_world_points(
             params, position, yaw)
+        prepared_filter = self._prepared_ground_filter(points)
         memory = self._local_spring_ground_memory
         if not isinstance(memory, list) or len(memory) != len(points):
             memory = [None] * len(points)
@@ -18952,7 +18980,8 @@ class BattleRuntime(object):
                 vehicle_physics.CONTACT_PENETRATION)
             value = self._suspension_ground_y(
                 x, z, minimum_y, maximum_y,
-                flat_maximum_y=spring_maximum_y)
+                flat_maximum_y=spring_maximum_y,
+                prepared_filter=prepared_filter)
             value, memory[index] = vehicle_physics.retained_ground_contact(
                 point, value, memory[index],
                 params['contact_memory_distance'], support_gradient)
@@ -18972,6 +19001,7 @@ class BattleRuntime(object):
         probe_height = float(probe_height)
         points = vehicle_physics.suspension_pseudo_world_points(
             params, position, yaw)
+        prepared_filter = self._prepared_ground_filter(points)
         memory = self._local_pseudo_ground_memory
         if not isinstance(memory, list) or len(memory) != len(points):
             memory = [None] * len(points)
@@ -18996,7 +19026,8 @@ class BattleRuntime(object):
                 if contact.get('kind') == 'track' else None)
             value = self._suspension_ground_y(
                 x, z, minimum_y, maximum_y,
-                flat_maximum_y=flat_maximum_y)
+                flat_maximum_y=flat_maximum_y,
+                prepared_filter=prepared_filter)
             value, memory[index] = vehicle_physics.retained_ground_contact(
                 point, value, memory[index],
                 params['contact_memory_distance'], support_gradient)
@@ -19032,6 +19063,10 @@ class BattleRuntime(object):
             previous_plane, motion_pose[0], motion_pose[2])
         end_ground = vehicle_physics.suspension_plane_height(
             current_plane, position[0], position[2])
+        prepared_filter = self._prepared_ground_filter(tuple(
+            (float(motion_pose[0]) + dx * fraction,
+             float(motion_pose[2]) + dz * fraction)
+            for fraction in fractions))
         for fraction in fractions:
             x = float(motion_pose[0]) + dx * fraction
             z = float(motion_pose[2]) + dz * fraction
@@ -19039,7 +19074,8 @@ class BattleRuntime(object):
             ground = self._suspension_ground_y(
                 x, z, expected - GROUND_PLANE_EPSILON,
                 expected + GROUND_PLANE_EPSILON,
-                flat_maximum_y=expected + GROUND_PLANE_EPSILON)
+                flat_maximum_y=expected + GROUND_PLANE_EPSILON,
+                prepared_filter=prepared_filter)
             if (ground is None or
                     abs(float(ground) - expected) > GROUND_PLANE_EPSILON):
                 return False
