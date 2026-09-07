@@ -283,6 +283,11 @@ EXPECTED_ABI = {
         'ArcadeCamera.setToVehicleDirection': ('self',),
     },
     'scripts/common/BattleFeedbackCommon.pyc': {
+        'BATTLE_EVENT_TYPE.packDamage': (
+            'damage', 'attackReasonID', 'isBurst', 'shellTypeID',
+            'shellIsGold'),
+        'BATTLE_EVENT_TYPE.packCrits': (
+            'critsCount', 'attackReasonID', 'shellTypeID', 'shellIsGold'),
         'BATTLE_EVENT_TYPE.packVisibility': ('isVisible', 'isDirect'),
     },
     'scripts/client/gui/battle_control/controllers/feedback_events.pyc': {
