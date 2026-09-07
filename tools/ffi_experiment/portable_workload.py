@@ -120,11 +120,13 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
+    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,contacts')
     args = parser.parse_args()
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
         parser.error('positive duration/cadence and a native module are required')
     backend = None
     stage_recorder = None
+    components = []
     messages, progress = [], []
     random.seed(17)
     with redirected():
@@ -135,6 +137,15 @@ def main():
         if args.backend != 'python':
             backend = Backend(args.module).install(navigation, batch=args.backend == 'native')
             backend.graph(runtime.navigator.grid, navigation)
+            if 'aiming' in args.components.split(','):
+                from combat_adapter import CombatBackend
+                components.append(CombatBackend(backend, fixture['fixtures']._load()).install())
+            if 'driver' in args.components.split(','):
+                from driver_adapter import DriverBackend
+                components.append(DriverBackend(backend, runtime))
+            if 'contacts' in args.components.split(','):
+                from perception_adapter import PerceptionBackend
+                components.append(PerceptionBackend(backend, runtime, fixture['fixtures']._load()))
         init_seconds = CLOCK() - init_started
         @contextlib.contextmanager
         def no_queries():
@@ -145,7 +156,7 @@ def main():
             with context as queries:
                 if args.stage_timing:
                     from stage_timing import Recorder
-                    stage_recorder = Recorder(backend)
+                    stage_recorder = Recorder(backend, runtime)
                 started = CLOCK()
                 for frame in range(int(round(args.seconds * args.fps))):
                     outgoing = runtime.update(1.0 / args.fps, 100.0 + (frame + 1) / args.fps)
@@ -168,13 +179,15 @@ def main():
                        'completed': backend.completed} if backend else {})
             snapshot = {'messages': messages, 'native_queries': queries,
                         'probes': runtime.probe_totals(), 'decisions': runtime._decision_counts,
-                        'navigation': progress}
+                        'navigation': progress, 'diagnostics': runtime.diagnostic_totals()}
         finally:
             if stage_recorder is not None:
                 stage_recorder.close()
+            for component in reversed(components):
+                component.close()
             if backend is not None:
                 backend.close()
-    report = dict(backend=args.backend, cpu_seconds=cpu_seconds,
+    report = dict(backend=args.backend, components=args.components, cpu_seconds=cpu_seconds,
                   initialization_cpu_seconds=init_seconds, native_counts=counts,
                   python=sys.version, scenario=args.scenario, map=args.map,
                   seconds=args.seconds, fps=args.fps,

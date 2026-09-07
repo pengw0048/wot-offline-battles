@@ -868,6 +868,126 @@ The measured reduction concerns this Bot loop only; it establishes neither
 Windows FPS improvement nor lower process memory use. The native graph is an
 additional copy, and no process-memory attribution was measured.
 
+A second, wider experiment extends the same bridge on production baseline
+`900744ce30c2d4b59ec86e21438b3038eec2facf`. Select it explicitly with
+`--components aiming,driver,contacts`; production source, launcher and package
+entry points still do not import the experiment. The transferred scope is:
+
+| Area | C++ ownership | Python retained at the boundary |
+| --- | --- | --- |
+| Perception | Ordered contact traversal, visibility cache, shot edges, fair probe admission/debt and team visibility leases | Exact descriptor/equipment projections, native LOS calls, human observation orchestration and publication/remembered-pose dictionaries |
+| Local driving | Complete driver state, steering leases, progress/recovery/braking, candidate fan, wreck/reverse/pivot geometry | Route orchestration and smoothing, normalized neighbour transfer and native direction/pose probes |
+| Ballistics and gun aim | Iterative moving-target intercept, physical gun reach, float32 pitch curves, hydraulic correction, gun/turret slew and final barrel orientation | Exact muzzle/part selection, mounted loadout/critical projections, gunnery rating/error/fire gating and asynchronous SPG query lifecycle |
+
+The native driver retains its state between calls. A query yield resumes the
+same operation from its initial state and already collected numeric answers;
+only C++ computation is replayed, never a Python/native query. Perception
+transfers an actor template once per pre/post-motion phase in a slice, keeps
+cache/fairness/lease state in C++, and returns at descriptor or engine leaves.
+Python materializes the original contact/message shape for existing consumers.
+Neither boundary changes elapsed time, planning budgets, accepted shots or
+one-shot events. Owned numeric buffers are synchronous; the core retains no
+Python objects, buffer addresses or BigWorld objects. Round reset retires the
+old perception owner, and runner teardown restores patches before core reset.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction | Median initialization |
+| --- | ---: | ---: | ---: | ---: |
+| Unmodified Python | 11.127597 s | 11.089077–11.275623 s | 0.00% | 0.000004 s |
+| Native A* only | 10.550740 s | 10.456242–10.628824 s | 5.18% | 0.055985 s |
+| Native A* + contacts + driving + aiming | 9.958523 s | 9.863221–10.280073 s | 10.51% | 0.061130 s |
+
+The expanded variant reduces loop CPU by 10.51% against Python and 5.61%
+against the A*-only control. Including initialization, its median cold CPU
+is 10.019653 s against 11.127600 s for Python, a 9.96% reduction.
+
+This comparison uses the same Linux aarch64 CPython 2.7.18 environment and
+29-Bot Great Wall combat scene described above. All three variants run on the
+same production baseline, sequentially in rotating order, with seven processes
+per variant and no stage instrumentation. Timing includes ordinary FFI
+marshalling and per-frame snapshot capture; initialization is separate.
+All 21 snapshots match in complete messages, native-query geometry/order,
+logical probes, decisions, per-frame navigation state, and visibility fairness
+diagnostics. Equality does not round values or use a numerical tolerance.
+
+A separate three-round instrumented comparison also preserves every snapshot.
+Its median loop reduction is 8.34%; the observer wraps roughly 53,000 native
+dispatches, so it is not the primary speed estimate. Selected inclusive stage
+medians explain where the uninstrumented gain comes from:
+
+| Stage | Python | Expanded native variant |
+| --- | ---: | ---: |
+| A* batch | 0.703828 s | 0.166939 s |
+| Ballistic stage, including retained gunnery/muzzle work | 1.140016 s | 0.790529 s |
+| Gun aiming | 0.510161 s | 0.234527 s |
+| Contacts, including adapter and message materialization | 1.114098 s | 1.262330 s |
+| Driving and route work, including the A* row above | 1.619781 s | 1.199476 s |
+
+These rows are not additive because driving includes A*. In particular, the
+contact stage becomes more expensive; the native fair scheduler also saves
+work outside that scope, so the row alone is not a total-perception estimate.
+Driver/route work outside A* remains expensive too. All native dispatches
+together take 0.475700 s, including the C++ core but excluding Python-side
+marshalling and object materialization. Remaining Python gunnery, descriptor
+projection, world-query seams and publication still execute in the loop.
+Moving these three areas therefore does not turn their entire Python parent
+stages into native computation, and calling only the fast C++ kernels a
+whole-stage speedup would be misleading.
+
+The differential checks also compare 1,200 random intercepts, 1,200 full gun
+updates and low-arc/physical-reach solves across 12 descriptor profiles, and
+3,600 driver steps with every state field and query sequence checked. They
+cover all six drive modes, hydraulic/static/missing pitch limits, critical
+module and siege states, anonymous blocker result types, and rejected opcode
+or reset packets preserving an existing owner. Perception checks cover 1,080
+Bot contact batches and 180 human observer slices with a two-probe budget:
+human/selected/fire priorities, parked debt, fire-sequence reset, pre/post-motion
+poses, hidden memory expiry, native-probe failure and round reset. These are
+synthetic contract cases, not coverage of every client descriptor or a native
+Windows acceptance session.
+
+All expanded differential checks pass against CPython 2.7.18, including the
+new aiming/driving/perception core built with AddressSanitizer and
+UndefinedBehaviorSanitizer (`detect_leaks=0`). The 236-case A* sanitizer suite
+passes with the Python 3 host bridge. A* and perception also pass ordinary
+Python 3.12.3 differential checks. Random gun updates expose one-ULP
+reference differences under Python 3.12's changed floating-point `sum`;
+restoring only Python 2's left-to-right sum in a diagnostic run removes all
+those differences. The committed core and primary measurements retain the
+unmodified Python 2 contract; Python 3 aiming is not an acceptance reference.
+Five-second full-component checks on Karelia at 30 callbacks/second and
+Prohorovka at 10 callbacks/second match every snapshot family. All 97 client
+modules and nine portable experiment modules compile with CPython 2.7 without
+writing adjacent bytecode. Host bridges build for Python 2.7 and 3, and the
+unshipped x86 PE still imports only `KERNEL32.dll` and `msvcrt.dll`.
+
+The prototype requires normalized finite numeric inputs, valid descriptor
+curves and at most 30 actors per room. It explicitly rejects unsupported
+unbounded identity streams instead of approximating the Python cache's
+over-capacity pruning order. It does not replace all `BotRuntime` logic or
+the whole hidden-worker process. The Windows bridge remains unexecuted here;
+x86 loading, floating-point parity, actual native query costs, frame pacing,
+projectile terminals, gameplay feel and process memory remain unmeasured.
+The result therefore establishes neither a 90% whole-loop CPU reduction nor
+any Windows FPS/RAM improvement.
+
+Reproduce the expanded comparison after the fixture and host build commands
+above, using fresh output directories:
+
+```bash
+"$FFI_PY27" tools/ffi_experiment/check_core_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_perception_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-core-comparison \
+  --components aiming,driver,contacts --include-astar-control --rounds 7
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-core-stages \
+  --components aiming,driver,contacts --rounds 3 --stage-timing
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;

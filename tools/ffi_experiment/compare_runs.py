@@ -28,10 +28,17 @@ def main():
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--fps', type=float, default=15)
     parser.add_argument('--include-step', action='store_true')
+    parser.add_argument('--include-astar-control', action='store_true',
+                        help='also measure native A* without the extra components')
     parser.add_argument('--stage-timing', action='store_true')
+    parser.add_argument('--components', default='')
     args = parser.parse_args()
+    if args.include_astar_control and not args.components:
+        parser.error('--include-astar-control requires --components')
     args.output.mkdir(parents=True, exist_ok=False)
     backends = ['python', 'native'] + (['native-step'] if args.include_step else [])
+    if args.include_astar_control:
+        backends.append('native-astar')
     reference = None
     waiting = []
     records = []
@@ -41,16 +48,20 @@ def main():
         for backend in order:
             output = args.output / ('%02d-%s.json' % (repeat, backend))
             command = [args.python, str(HERE / 'portable_workload.py'),
-                       '--fixture', args.fixture, '--backend', backend,
+                       '--fixture', args.fixture, '--backend',
+                       'native' if backend == 'native-astar' else backend,
                        '--module', args.module, '--map', args.map,
                        '--scenario', args.scenario, '--seconds', str(args.seconds),
                        '--fps', str(args.fps), '--output', str(output)]
             if args.stage_timing:
                 command.append('--stage-timing')
+            if backend not in ('python', 'native-astar') and args.components:
+                command.extend(('--components', args.components))
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             if result.returncode:
                 raise RuntimeError(result.stdout + result.stderr)
             report = json.loads(output.read_text())
+            report['backend'] = backend
             snapshot = report.pop('snapshot')
             if backend == 'python' and reference is None:
                 reference = snapshot
