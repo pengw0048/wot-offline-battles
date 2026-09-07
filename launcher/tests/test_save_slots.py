@@ -23,6 +23,15 @@ class SaveSlotsTests(unittest.TestCase):
         self.assertFalse(rows[0]["has_state"])
         self.assertFalse(os.path.isdir(self.root))
 
+    def test_new_saves_cannot_take_the_reserved_default_id(self):
+        for name in ('default', 'Default', 'DEFAULT'):
+            row = save_slots.create_slot(
+                name, save_slots.MODE_NEW_ACCOUNT, root=self.root)
+            self.assertNotEqual('default', row['id'].lower())
+            self.assertEqual(name, row['name'])
+            self.assertFalse(row['has_state'])
+        self.assertFalse(os.path.exists(os.path.join(self.root, 'default')))
+
     def test_a_created_save_owns_an_empty_directory_and_a_record(self):
         record = save_slots.create_slot(
             "Career", save_slots.MODE_UNLOCKED, root=self.root, now=1700)

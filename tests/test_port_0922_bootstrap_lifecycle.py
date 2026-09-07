@@ -1205,14 +1205,16 @@ class BootstrapLifecycleTests(unittest.TestCase):
         unused_sandbox_bootstrap, sandbox = self._build()
 
         def modules(snapshot):
-            record = snapshot['vehicles'][0]
             return set(
                 compact_descr
                 for item_type in range(2, 8)
-                for compact_descr in record['inventoryItems'].get(item_type, {}))
+                for compact_descr in snapshot['inventoryItems'].get(item_type, {}))
 
         stock = modules(career)
-        self.assertEqual({2002, 2003, 2004, 2005, 2006, 2007}, stock)
+        self.assertEqual({2002, 2003, 2004, 2005, 2006, 2007}, set(
+            compact_descr for item_type in range(2, 8)
+            for compact_descr in career['vehicles'][0][
+                'inventoryItems'].get(item_type, {})))
         self.assertTrue(stock < modules(sandbox))
         # A career owns only the ammunition its stock gun fires.
         self.assertEqual(

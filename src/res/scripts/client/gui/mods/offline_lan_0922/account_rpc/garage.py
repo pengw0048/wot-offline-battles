@@ -30,6 +30,8 @@ rebuild the descriptor from a stale copy and silently drop the other's change.
 
 import contextlib
 import copy
+from gui.mods.offline_lan_0922.vehicle_records import (
+    MODULE_ATTRIBUTES, mounted_module_items)
 
 EQUIPMENT_SLOT_COUNT = 3
 # vehicles.NUM_EQUIPMENT_SLOTS in #1513: the three regular slots plus the
@@ -41,17 +43,9 @@ GUN_ITEM_TYPE = 4
 OPTIONAL_DEVICE_ITEM_TYPE = 9
 SHELL_ITEM_TYPE = 10
 EQUIPMENT_ITEM_TYPE = 11
-# An optional device and a piece of equipment are owned by the account, so the
-# snapshot's top-level count is the real one.  Every other item type is
-# published per vehicle, which data.inventory folds into one account view.
 ACCOUNT_ITEM_TYPES = (OPTIONAL_DEVICE_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
-# Rounds are stock too, now that a battle spends them and a resupply is paid
-# for.  The account count covers every round the garage holds, loaded ones
-# included, which is the invariant data._validate_selected_vehicle checks.
-# ``vehicle_records.STOCKED_ITEM_TYPES`` is the same three item types read by
-# the snapshot builders, and the two are held equal by a test: this module
-# stays importable without the rest of the package.
-STOCKED_ITEM_TYPES = ACCOUNT_ITEM_TYPES + (SHELL_ITEM_TYPE,)
+# Every physical copy counts, whether it is mounted or in the depot.
+STOCKED_ITEM_TYPES = tuple(row[0] for row in MODULE_ATTRIBUTES) + (9, 10, 11)
 # The two item types #1513's shop publishes as buyable for credits even when
 # their catalogue price is gold: premium rounds and premium consumables.
 CREDIT_PRICED_GOLD_TYPES = (SHELL_ITEM_TYPE, EQUIPMENT_ITEM_TYPE)
@@ -249,10 +243,8 @@ class GarageState(object):
     def _stock_owned(self, compact_descr, item_type, count):
         """Publish the stock that arrives with a newly built vehicle.
 
-        A round, a consumable and an optional device belong to the account, so
-        two vehicles carrying one hold two of it and a new vehicle's load adds
-        to the depot.  A module is published per vehicle as the largest count
-        any one of them carries, so summing it would invent stock nobody owns.
+        The vehicle's installed modules and carried supplies are new physical
+        copies. Existing copies on another vehicle remain owned separately.
         """
         item_type = int(item_type)
         if item_type not in STOCKED_ITEM_TYPES:
@@ -829,19 +821,21 @@ class GarageState(object):
         return [_int(getattr(device, 'compactDescr', 0) or 0)
                 for device in devices]
 
-    def _require_owned_module(self, compact_descr, item_type):
+    def _require_owned_module(self, record, compact_descr, item_type):
         """Refuse to install a module the account does not own.
 
-        A module is published per vehicle as the largest count any one of them
-        carries, so the account view answers "does anything in this garage own
-        one", which is what a fitting needs; buying one raises it.
+        A copy installed on another vehicle is not a spare. Reinstalling the
+        same module on this vehicle can keep its current copy.
         """
         compact_descr = _int(compact_descr)
         if not compact_descr:
             return
         owned = _int(self._snapshot.get('inventoryItems', {}).get(
             int(item_type), {}).get(compact_descr, 0))
-        if owned < 1:
+        others = [row for row in self._records()
+                  if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+        needed = 1 + self._mounted(compact_descr, item_type, others)
+        if owned < needed:
             raise GarageError(
                 'the account does not own module %d' % compact_descr)
 
@@ -910,14 +904,14 @@ class GarageState(object):
         # Mounting is not buying.  #1513 researches a module, then sells it,
         # and offers a separate buy-and-install command for doing both at
         # once, so a module the account does not own is refused here.
-        self._require_owned_module(compact_descr, item_type)
+        self._require_owned_module(record, compact_descr, item_type)
         if is_turret and gun_compact_descr:
             # A turret swap names a gun only when the mounted one will not
             # fit; ``TurretInstaller._findAvailableGun`` then picks the first
             # of the turret's guns whose item ``isInInventory``, so the gun
             # this arrives with is one the account owns.
             self._require_owned_module(
-                gun_compact_descr, self._item_type(gun_compact_descr))
+                record, gun_compact_descr, self._item_type(gun_compact_descr))
 
         vehicles = self._vehicles_module()
         try:
@@ -954,6 +948,8 @@ class GarageState(object):
                 raise ValueError('the selected gun was not installed')
             if new_layout_key != expected_layout_key:
                 raise ValueError('the fitted descriptor did not round-trip')
+            staged.setdefault('inventoryItems', {}).update(
+                mounted_module_items(verified))
         except GarageError:
             raise
         except Exception as error:
@@ -1115,32 +1111,29 @@ class GarageState(object):
                            slot_index=0, gun_compact_descr=0):
         """Own one item and mount it on the vehicle in the same request."""
         compact_descr = _int(compact_descr)
-        # Refuse an unaffordable or unresearched item before the mount, which
-        # has already changed the record by the time a later charge could
-        # raise and leave the item mounted for nothing.
         item_type, unused_cost = self._purchase_terms(compact_descr)
-        if item_type == OPTIONAL_DEVICE_ITEM_TYPE:
-            record = self.equip_optional_device(
-                vehicle_inventory_id, compact_descr, slot_index)
-        elif item_type == EQUIPMENT_ITEM_TYPE:
-            record = self._record(vehicle_inventory_id)
-            slots = list(record.get('eqs') or [0] * EQUIPMENT_SLOT_COUNT)
-            slots += [0] * (EQUIPMENT_SLOT_COUNT - len(slots))
-            index = _int(slot_index)
-            if not 0 <= index < EQUIPMENT_SLOT_COUNT:
-                raise GarageError('a vehicle has three equipment slots')
-            slots[index] = compact_descr
-            record = self.equip_equipments(vehicle_inventory_id, slots)
-        else:
-            # Every remaining owned type is a vehicle module.  A turret buy
-            # carries its selected gun in the sixth wire value.
-            record = self.install_component(
-                vehicle_inventory_id, compact_descr, gun_compact_descr,
-                slot_index)
-        # Mount first so a refused descriptor or ammunition set cannot leave
-        # behind ownership from a failed buy-and-equip request.
-        self.buy_item(compact_descr, 1)
-        return record
+        # Installation requires a free owned copy. Buy it inside the same
+        # transaction so a native fitting refusal rolls back both the item
+        # and its payment, including any additional device-removal charge.
+        with self._transaction():
+            self.buy_item(compact_descr, 1)
+            if item_type == OPTIONAL_DEVICE_ITEM_TYPE:
+                record = self.equip_optional_device(
+                    vehicle_inventory_id, compact_descr, slot_index)
+            elif item_type == EQUIPMENT_ITEM_TYPE:
+                record = self._record(vehicle_inventory_id)
+                slots = list(record.get('eqs') or [0] * EQUIPMENT_SLOT_COUNT)
+                slots += [0] * (EQUIPMENT_SLOT_COUNT - len(slots))
+                index = _int(slot_index)
+                if not 0 <= index < EQUIPMENT_SLOT_COUNT:
+                    raise GarageError('a vehicle has three equipment slots')
+                slots[index] = compact_descr
+                record = self.equip_equipments(vehicle_inventory_id, slots)
+            else:
+                record = self.install_component(
+                    vehicle_inventory_id, compact_descr, gun_compact_descr,
+                    slot_index)
+            return record
 
     def change_vehicle_setting(self, vehicle_inventory_id, setting, is_on):
         """Set or clear one bit of a vehicle's settings mask.
@@ -1369,13 +1362,17 @@ class GarageState(object):
         amount = _int(free_xp)
         if amount <= 0:
             raise GarageError('crew training XP must be positive')
+        if amount > self._balances()['freeXP']:
+            raise GarageError('the account cannot pay for crew training')
         tankmen = self._tankmen_module()
         try:
             descriptor = tankmen.TankmanDescr(rows[tankman_id])
             descriptor.addXP(amount * FREE_XP_TO_TANKMAN_XP_RATE)
-            rows[tankman_id] = descriptor.makeCompactDescr()
+            serialized = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused crew training: %s' % error)
+        self._wallet()['freeXP'] -= amount
+        rows[tankman_id] = serialized
         self.revision += 1
         return tankman_id
 
@@ -1644,11 +1641,9 @@ class GarageState(object):
         nothing mounted that was not paid for, and only the modules the vehicle
         unlocks for free already researched.
 
-        ``buy_shells`` describes what the client asked for, but a #1513 vehicle
-        record must carry ammunition -- ``data._validate_selected_vehicle``
-        rejects an empty shell inventory -- so the vehicle always arrives with
-        the client's own default load and the load is always charged for.
-        Delivering it unpaid would let a purchase and a sale mint credits.
+        An unchecked shell option leaves a zero-count rack with the gun's
+        normal layout. Empty crew seats likewise remain real slots, and a
+        requested crew is recruited at the exact school the player chose.
         """
         compact_descr = _int(vehicle_type_compact_descr)
         if not compact_descr:
@@ -1665,44 +1660,62 @@ class GarageState(object):
         from gui.mods.offline_lan_0922 import vehicle_records
         from items import ITEM_TYPE_INDICES
 
-        vehicles = self._vehicles_module()
-        tankmen = self._tankmen_module()
-        vehicle_type = vehicles.getVehicleType(compact_descr)
-        built = vehicle_records.build_record(
-            vehicles, tankmen, ITEM_TYPE_INDICES, tuple(vehicle_type.id),
-            self._next_inventory_id(), self._next_tankman_id(),
-            self._default_vehicle_settings(),
-            [0, 0, 0], top_modules=False, own_researchable_modules=False)
-        record = built['record']
+        with self._transaction():
+            vehicles = self._vehicles_module()
+            tankmen = self._tankmen_module()
+            vehicle_type = vehicles.getVehicleType(compact_descr)
+            built = vehicle_records.build_record(
+                vehicles, tankmen, ITEM_TYPE_INDICES, tuple(vehicle_type.id),
+                self._next_inventory_id(), self._next_tankman_id(),
+                self._default_vehicle_settings(),
+                [0, 0, 0], top_modules=False, own_researchable_modules=False,
+                recruit_crew=False)
+            record = built['record']
 
-        cost = self._item_cost(compact_descr)
-        shells = [_int(value) for value in (record.get('shells') or ())]
-        for index in range(0, len(shells) - 1, 2):
-            self._add_money(cost, self._in_credits(
-                self._item_cost(shells[index], shells[index + 1]),
-                SHELL_ITEM_TYPE))
-        self._charge(cost)
-        records = self._snapshot.setdefault('vehicles', self._records())
-        records.append(record)
-        self._snapshot['vehicles'] = records
-        published = self._snapshot.setdefault('vehicleTypeCompactDescrs', set())
-        if isinstance(published, set):
-            published.add(compact_descr)
-        unlocks = self._unlocks()
-        unlocks.add(compact_descr)
-        # The vehicle's free modules come with it, exactly as #1513 records
-        # them on the type rather than as a research step the player pays for.
-        for item in (getattr(vehicle_type, 'autounlockedItems', ()) or ()):
-            unlocks.add(_int(item))
-        for item_type, items in record['inventoryItems'].items():
-            for item_compact_descr, count in items.items():
-                self._stock_owned(item_compact_descr, item_type, count)
-                self._price(item_compact_descr)
-                unlocks.add(_int(item_compact_descr))
-        self._snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
-        self._touched.add(_int(record['id']))
-        self.revision += 1
-        return record
+            cost = self._item_cost(compact_descr)
+            shells = [_int(value) for value in (record.get('shells') or ())]
+            if not buy_shells:
+                shells = [value if index % 2 == 0 else 0
+                          for index, value in enumerate(shells)]
+                record['shells'] = shells
+                record['inventoryItems'][SHELL_ITEM_TYPE] = dict(
+                    (shells[index], 0) for index in range(0, len(shells), 2))
+            for index in range(0, len(shells) - 1, 2):
+                if shells[index + 1] <= 0:
+                    continue
+                self._add_money(cost, self._in_credits(
+                    self._item_cost(shells[index], shells[index + 1]),
+                    SHELL_ITEM_TYPE))
+            self._charge(cost)
+            records = self._snapshot.setdefault('vehicles', self._records())
+            records.append(record)
+            self._snapshot['vehicles'] = records
+            if recruit_crew:
+                nation_id, vehicle_type_id = vehicle_type.id
+                for slot, roles in enumerate(vehicle_type.crewRoles):
+                    tankman_id, descriptor = self._recruit(
+                        nation_id, vehicle_type_id, roles[0], tman_cost_type_index)
+                    record['crew'][slot] = tankman_id
+                    record['tankmen'][tankman_id] = descriptor
+                    self._touched_tankmen.add(tankman_id)
+            published = self._snapshot.setdefault('vehicleTypeCompactDescrs', set())
+            if isinstance(published, set):
+                published.add(compact_descr)
+            unlocks = self._unlocks()
+            unlocks.add(compact_descr)
+            # The vehicle's free modules come with it, exactly as #1513 records
+            # them on the type rather than as a research step the player pays for.
+            for item in (getattr(vehicle_type, 'autounlockedItems', ()) or ()):
+                unlocks.add(_int(item))
+            for item_type, items in record['inventoryItems'].items():
+                for item_compact_descr, count in items.items():
+                    self._stock_owned(item_compact_descr, item_type, count)
+                    self._price(item_compact_descr)
+                    unlocks.add(_int(item_compact_descr))
+            self._snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
+            self._touched.add(_int(record['id']))
+            self.revision += 1
+            return record
 
     def sell_vehicle(self, vehicle_inventory_id, dismiss_crew=True,
                      items_from_vehicle=(), items_from_inventory=()):
@@ -2404,20 +2417,24 @@ class GarageState(object):
         saved descriptor, and only the descriptor knows what is in the slots.
         Reading the row alone would make a device mounted before a restart
         invisible, and one lot of it would mount on a second vehicle for
-        nothing.  Every other item type lives in the row and nowhere else.
+        nothing. Modules likewise live in the descriptor, while a historical
+        record's module rows may also contain researchable spare parts.
         """
         if int(item_type) == OPTIONAL_DEVICE_ITEM_TYPE:
             return _int(self._mounted_devices(record).get(
                 _int(compact_descr), 0))
+        for module_type, attribute in MODULE_ATTRIBUTES:
+            if int(item_type) == module_type:
+                descriptor = self._descriptor(record)
+                mounted = getattr(descriptor, attribute).compactDescr
+                return int(_int(mounted) == _int(compact_descr))
         return self._carried(record, item_type, compact_descr)
 
     def _mounted(self, compact_descr, item_type, records):
         """Return how many of one item the given vehicles hold between them.
 
-        An optional device, a piece of equipment or a round belongs to the
-        account, so two vehicles carrying it hold two lots of it.  A module is
-        published per vehicle as the largest count any one of them carries,
-        and summing that view would invent stock nobody owns.
+        Each installed component, optional device and carried supply uses
+        its own physical copy, including when two vehicles share a type.
         """
         counts = [self._held(record, item_type, compact_descr)
                   for record in records]

@@ -262,7 +262,8 @@ def _allocate_slot_id(name, root):
         base = "save"
     candidate = base
     suffix = 2
-    while os.path.exists(os.path.join(root, candidate)):
+    while (candidate.lower() == DEFAULT_SLOT_ID.lower() or
+           os.path.exists(os.path.join(root, candidate))):
         candidate = "%s-%d" % (base, suffix)
         suffix += 1
         if suffix > 9999:

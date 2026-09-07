@@ -9,15 +9,23 @@ Nothing in this module touches BigWorld: every client dependency arrives as an
 already imported ``items`` module or an already built descriptor.
 """
 
-# items/__init__ ITEM_TYPE_NAMES: 9 is optionalDevice, 10 is shell and 11 is
-# equipment.  Each of these belongs to the account rather than to one vehicle,
-# so two vehicles carrying one hold two of it and every count adds up across
-# the garage.  Every other item type is published per vehicle as the largest
-# count any one of them carries, and summing that view would invent stock
-# nobody owns.  The garage's resupply arithmetic and the snapshot builders both
-# read this one rule, because a resupply prices exactly what the builder
-# published.
-STOCKED_ITEM_TYPES = (9, 10, 11)
+# Item counts include mounted items. Two vehicles sharing a component type
+# still need two physical copies, just as they need two optional devices.
+MODULE_ATTRIBUTES = (
+    (2, 'chassis'), (3, 'turret'), (4, 'gun'), (5, 'engine'),
+    (6, 'fuelTank'), (7, 'radio'))
+STOCKED_ITEM_TYPES = tuple(row[0] for row in MODULE_ATTRIBUTES) + (9, 10, 11)
+
+
+def mounted_module_items(descriptor):
+    """Read the installed modules from the same descriptor the client uses."""
+    result = {}
+    for item_type, attribute in MODULE_ATTRIBUTES:
+        compact_descr = int(getattr(descriptor, attribute).compactDescr)
+        if compact_descr <= 0:
+            raise ValueError('the mounted %s has no compact descriptor' % attribute)
+        result[item_type] = {compact_descr: 1}
+    return result
 
 NEW_SKILL_SLOTS = 8
 _NEW_SKILL_XP = {}
@@ -242,7 +250,7 @@ def _turret_descriptors(vehicle_type):
 def build_record(vehicles, tankmen, item_type_indices, type_id,
                  inventory_id, next_tankman_id, settings, consumables,
                  descriptor=None, top_modules=True, role_level=None,
-                 own_researchable_modules=True):
+                 own_researchable_modules=True, recruit_crew=True):
     """Return one garage vehicle record and the catalogue it implies.
 
     ``top_modules`` fits the vehicle the way the historical sandbox garage
@@ -278,10 +286,10 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
     if role_level is None:
         role_level = tankmen.MAX_SKILL_LEVEL
     skills_mask = tankmen.getSkillsMask(())
-    crew_compact_descrs = list(tankmen.generateTankmen(
+    crew_compact_descrs = (list(tankmen.generateTankmen(
         nation_id, vehicle_type_id, descriptor.type.crewRoles,
-        False, role_level, skills_mask, False))
-    if (not crew_compact_descrs or
+        False, role_level, skills_mask, False)) if recruit_crew else [])
+    if recruit_crew and (not crew_compact_descrs or
             len(crew_compact_descrs) != len(descriptor.type.crewRoles)):
         raise ValueError('generated crew does not match vehicle crew slots')
 
@@ -369,6 +377,8 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
         crew_ids.append(next_tankman_id)
         tankman_compact_descrs[next_tankman_id] = compact_descr
         next_tankman_id += 1
+    if not recruit_crew:
+        crew_ids = [None] * len(descriptor.type.crewRoles)
 
     record = {
         'id': int(inventory_id),

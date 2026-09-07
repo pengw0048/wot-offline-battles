@@ -24,13 +24,16 @@ import sys
 
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922.account_rpc import data
-from gui.mods.offline_lan_0922.account_rpc.garage import mirror_shells_layout
+from gui.mods.offline_lan_0922.account_rpc.garage import (
+    STOCKED_ITEM_TYPES, mirror_shells_layout)
 
 
 try:
     integer_types = (int, long)
+    string_types = (basestring,)
 except NameError:
     integer_types = (int,)
+    string_types = (str,)
 
 
 # Schema 2 fixes schema 1's vehicle settings, which were stored as a shifted
@@ -39,16 +42,16 @@ except NameError:
 # consumables.  Schema 4 adds the bounded receipt journal that makes battle
 # crew XP idempotent.  Schema 5 adds the account ledger: the balances, the
 # researched items, the per-vehicle experience and which vehicles are owned.
-# Every earlier readable schema upgrades on the next save.
-SCHEMA = 6
-READABLE_SCHEMAS = (3, 4, 5, SCHEMA)
+# Schema 7 preserves module stock as well as consumables and the actual award
+# needed to replay a settlement after the post-battle file failed to commit.
+SCHEMA = 7
+READABLE_SCHEMAS = (3, 4, 5, 6, SCHEMA)
 STATE_FILE_NAME = 'garage_state.json'
 
 # ``repair`` is (outstanding cost, remaining health): a vehicle a battle left
 # damaged has to come back damaged, or a restart would be a free repair.
 _VEHICLE_INT_KEYS = (
     'eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx', 'repair')
-_ARTEFACT_ITEM_TYPES = (9, 10, 11)
 _CUSTOMIZATION_SEASONS = (1, 2, 4, 8, 15)
 MAX_BATTLE_RECEIPTS = 512
 
@@ -177,15 +180,12 @@ def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
 def _floor_account_stock(snapshot):
     """Own at least what the garage already holds.
 
-    A round, a consumable and an optional device belong to the account, and
-    ``garage.GarageState`` adds them up across every vehicle to decide what a
-    resupply must buy.  A depot count below that sum would let one lot of them
-    be mounted twice, so the whole garage is the floor under the depot.  Older
-    saves recorded the largest count one vehicle carried rather than the total,
-    and this is what raises them.
+    Every mounted module and carried supply contributes a physical copy.
+    Native restore validation rebuilds module rows from the saved descriptor
+    before this migration, so stock fittings cannot manufacture spare parts.
     """
     published = snapshot.setdefault('inventoryItems', {})
-    for item_type in _ARTEFACT_ITEM_TYPES:
+    for item_type in STOCKED_ITEM_TYPES:
         totals = {}
         for record in _records(snapshot):
             items = record.get('inventoryItems')
@@ -363,7 +363,7 @@ class GarageStore(object):
             # The launcher reads this file without a client to resolve a
             # compact descriptor with, so the save names its own vehicles.
             type_name = record.get('vehicleTypeName')
-            if isinstance(type_name, str) and type_name:
+            if isinstance(type_name, string_types) and type_name:
                 stored['name'] = type_name
             outfits = {}
             if isinstance(record.get('outfits'), dict):
@@ -419,7 +419,7 @@ class GarageStore(object):
                     item_type = int(item_type)
                 except (TypeError, ValueError):
                     continue
-                if item_type not in _ARTEFACT_ITEM_TYPES:
+                if item_type not in STOCKED_ITEM_TYPES:
                     continue
                 # An empty depot is saved as an empty depot.  A row is dropped
                 # when its count reaches zero, so omitting the whole type here
@@ -452,7 +452,7 @@ class GarageStore(object):
         names = []
         for value in vehicles.values():
             name = value.get('name') if isinstance(value, dict) else None
-            if isinstance(name, str) and name:
+            if isinstance(name, string_types) and name:
                 names.append(name)
         return sorted(set(names))
 
@@ -557,6 +557,9 @@ class GarageStore(object):
             'accelerated': bool(result['accelerated']),
             'vehicle_id': int(result['vehicle_id']),
         }
+        if 'awarded' in result:
+            marker['awarded'] = dict(result['awarded'])
+        marker['touched_items'] = copy.deepcopy(result['touched_items'])
         next_receipts = (list(self._battle_receipts) + [marker])[
             -MAX_BATTLE_RECEIPTS:]
         if self._path is not None:
@@ -603,7 +606,7 @@ class GarageStore(object):
         if isinstance(owned, dict):
             published = staged.setdefault('inventoryItems', {})
             prices = staged.get('shopItemPrices') or {}
-            for item_type in _ARTEFACT_ITEM_TYPES:
+            for item_type in STOCKED_ITEM_TYPES:
                 items = owned.get(str(item_type), owned.get(item_type))
                 counts = _int_map(items)
                 if counts is None:
@@ -623,14 +626,13 @@ class GarageStore(object):
                     if compact_descr in prices:
                         target[compact_descr] = int(count)
                 published[item_type] = target
-        _floor_account_stock(staged)
-
         _apply_ledger(staged, stored)
 
         try:
-            data._validate_selected_vehicle(staged)
             if validator is not None:
                 validator(staged)
+            _floor_account_stock(staged)
+            data._validate_selected_vehicle(staged)
         except Exception as error:
             _log('the saved garage state is inconsistent; using the stock '
                  'garage (%s)' % error)
@@ -672,11 +674,24 @@ class GarageStore(object):
                 continue
             if not receipt_id or vehicle_id <= 0:
                 continue
-            rows.append({
+            row = {
                 'receipt_id': receipt_id,
                 'accelerated': bool(raw.get('accelerated', False)),
                 'vehicle_id': vehicle_id,
-            })
+            }
+            awarded = raw.get('awarded')
+            if isinstance(awarded, dict):
+                row['awarded'] = dict(
+                    (name, max(0, _int_value(awarded.get(name))))
+                    for name in ('credits', 'xp', 'free_xp'))
+            touched = raw.get('touched_items')
+            if isinstance(touched, dict):
+                row['touched_items'] = dict(
+                    (int(item_type), _int_list(items))
+                    for item_type, items in touched.items()
+                    if _int_value(item_type) in STOCKED_ITEM_TYPES and
+                    _int_list(items) is not None)
+            rows.append(row)
         return rows[-MAX_BATTLE_RECEIPTS:]
 
     def _apply_vehicle(self, record, saved):

@@ -19,6 +19,10 @@ import os
 
 from gui.mods.offline_lan_0922 import config as port_config
 
+try:
+    string_types = (basestring,)
+except NameError:
+    string_types = (str,)
 
 INBOX_FILE_NAME = 'launcher_inbox.json'
 SCHEMA = 1
@@ -44,7 +48,7 @@ def _valid_name(value):
     is not a plain ``nation:vehicle`` identifier is rejected here rather than
     handed to the client's parser.
     """
-    if not isinstance(value, str) or not 3 <= len(value) <= 64:
+    if not isinstance(value, string_types) or not 3 <= len(value) <= 64:
         return False
     if value.count(':') != 1:
         return False

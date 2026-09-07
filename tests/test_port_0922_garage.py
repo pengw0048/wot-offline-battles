@@ -146,6 +146,10 @@ class _Descriptor(object):
         self.maxHealth = 1000
         self.type = types.SimpleNamespace(
             id=(0, VEHICLE_TYPE_ID), crewRoles=CREW_ROLES, repairCost=2.0)
+        self.chassis = _Component(2002)
+        self.engine = _Component(2005)
+        self.fuelTank = _Component(2006)
+        self.radio = _Component(2007)
         # #1513 Vehicle.shellsLayoutIdx reads both compact descriptors.
         self.turret = _Component(7001)
         self.turret.maxAmmo = 45

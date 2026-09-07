@@ -253,22 +253,19 @@ def _clamp_saved_repair(snapshot, vehicles):
 def _validate_restored_garage(snapshot):
     """Exercise saved native descriptors before publishing the Account.
 
-    ``GarageStore`` first validates the engine-free relational snapshot.  This
-    second boundary rejects a damaged compact descriptor, crew row, outfit or
-    ammunition set while the restore still lives on a detached copy.  A bad
-    save therefore falls back to the freshly built stock garage instead of
-    aborting Account synchronization and parking the client at login.
+    Rebuild installed module rows before ``GarageStore`` reconciles stock and
+    validates the relational snapshot. A saved fitting can differ from the
+    initial stock descriptor without invalidating the player's whole garage.
     """
     from items import customizations, tankmen, vehicles
-    from gui.mods.offline_lan_0922.account_rpc import data
-
-    data._validate_selected_vehicle(snapshot)
     records = snapshot.get('vehicles')
     if not isinstance(records, (list, tuple)):
         records = [snapshot]
     for record in records:
         descriptor = vehicles.VehicleDescr(
             compactDescr=record['compDescr'])
+        record.setdefault('inventoryItems', {}).update(
+            vehicle_records.mounted_module_items(descriptor))
         nation_id, vehicle_type_id = descriptor.type.id
         vehicle_type = vehicles.makeIntCompactDescrByID(
             'vehicle', nation_id, vehicle_type_id)
@@ -421,6 +418,7 @@ def _deliver_launcher_purchases(snapshot, vehicles, tankmen, settings):
     may succeed once the reason is understood.
     """
     from gui.mods.offline_lan_0922 import launcher_inbox
+    from gui.mods.offline_lan_0922.account_rpc import data
     from items import ITEM_TYPE_INDICES
 
     try:
@@ -463,6 +461,7 @@ def _deliver_launcher_purchases(snapshot, vehicles, tankmen, settings):
             continue
         try:
             _validate_restored_garage(staged)
+            data._validate_selected_vehicle(staged)
         except Exception as error:
             unbuilt.append(name)
             sys.stdout.write(
@@ -497,11 +496,8 @@ def _deliver_launcher_purchases(snapshot, vehicles, tankmen, settings):
 def _stocked_total(item_type, published, count):
     """Return the account count one more vehicle's stock leaves behind.
 
-    A round, a consumable and an optional device belong to the account, so two
-    vehicles carrying one hold two of it.  A module is published per vehicle as
-    the largest count any one of them carries, and summing that view would
-    invent stock nobody owns.  ``account_rpc.garage`` reads the same two rules
-    when it decides what a resupply has to buy.
+    All physical items, including shared module types, add their own copies.
+    ``account_rpc.garage`` uses the same rule for purchases and fitting.
     """
     if int(item_type) in STOCKED_ITEM_TYPES:
         return int(published) + int(count)
@@ -670,6 +666,10 @@ def _selected_vehicle(config, restore_saved=True):
             unlock_item_compact_descrs.update(
                 economy.autounlocked_items(
                     vehicles, vehicle_int_compact_descr))
+            # The factory's catalogue can seed sandbox spares, but a vehicle
+            # record must only claim the modules its descriptor actually fits.
+            record['inventoryItems'].update(
+                vehicle_records.mounted_module_items(built['descriptor']))
             records.append(record)
 
         if not records:

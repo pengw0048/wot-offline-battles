@@ -11337,6 +11337,11 @@ class BattleState:
                 self._commit_player_critical_progress(
                     player, _critical_payload(payload))
                 player.equipment_revision += 1
+                consumed = _exact_int(
+                    equipment.contract.get("compactDescr"), 1, 2 ** 31 - 1)
+                if consumed is not None:
+                    self._statistics_row(
+                        "player", player.player_id)["equipment_used"][str(consumed)] = 1
                 changed += 1
             payload = player_critical_mechanics.advance_critical(
                 player, max(0.0, float(dt)), now)

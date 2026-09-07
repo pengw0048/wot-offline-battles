@@ -1,5 +1,6 @@
 """The offline account economy: prices, balances, ownership and research."""
 
+import contextlib
 import copy
 import importlib.util
 from pathlib import Path
@@ -370,13 +371,15 @@ class ResearchTests(unittest.TestCase):
 
 
 class VehiclePurchaseTests(unittest.TestCase):
+    @contextlib.contextmanager
     def _built(self, records):
+        from unittest import mock
         module = types.ModuleType('gui.mods.offline_lan_0922.vehicle_records')
 
         def build_record(vehicles, tankmen, item_type_indices, type_id,
                          inventory_id, next_tankman_id, settings, consumables,
                          descriptor=None, top_modules=True, role_level=None,
-                         own_researchable_modules=True):
+                         own_researchable_modules=True, recruit_crew=True):
             records.append({
                 'inventoryID': inventory_id,
                 'settings': settings,
@@ -389,8 +392,9 @@ class VehiclePurchaseTests(unittest.TestCase):
                 'record': {
                     'id': inventory_id,
                     'compDescr': b'veh:new',
-                    'crew': [next_tankman_id],
-                    'tankmen': {next_tankman_id: b'tman'},
+                    'crew': [next_tankman_id] if recruit_crew else [None],
+                    'tankmen': ({next_tankman_id: b'tman'}
+                                if recruit_crew else {}),
                     'repair': (0, 100),
                     'lock': (0, 0),
                     'shells': [10010, 10],
@@ -415,10 +419,64 @@ class VehiclePurchaseTests(unittest.TestCase):
             'vehicleEngine': 5, 'vehicleFuelTank': 6, 'vehicleRadio': 7,
             'shell': 10,
         }
-        return {
-            'gui.mods.offline_lan_0922.vehicle_records': module,
-            'items': items,
-        }
+        package = sys.modules['gui.mods.offline_lan_0922']
+        with mock.patch.dict(sys.modules, {
+                'gui.mods.offline_lan_0922.vehicle_records': module,
+                'items': items}), mock.patch.object(
+                    package, 'vehicle_records', module, create=True):
+            yield
+
+    def test_purchase_honors_empty_rack_and_each_crew_school(self):
+        import test_port_0922_garage as crew_fixture
+        for school, role_level, credits_cost, gold_cost in (
+                (None, None, 0, 0), (0, 50, 0, 0),
+                (1, 75, 20000, 0), (2, 100, 0, 200)):
+            snapshot = _snapshot()
+            snapshot['wallet']['gold'] = 20000
+            snapshot['tankmanCosts'] = crew_fixture.GarageStateTests.CAREER_COSTS
+            vehicles = _vehicles()
+            vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+            vehicle_type.crewRoles = (('commander',),)
+            vehicles.getVehicleType = lambda cd: vehicle_type
+            unused_vehicles, tankmen = crew_fixture._modules()
+            state = GARAGE.GarageState(snapshot, vehicles_module=vehicles,
+                                       tankmen_module=tankmen)
+            with self._built([]):
+                record = state.buy_vehicle(
+                    SECOND_VEHICLE_CD, buy_shells=False,
+                    recruit_crew=school is not None,
+                    tman_cost_type_index=school or 0)
+            self.assertEqual([10010, 0], record['shells'])
+            self.assertEqual(20, state.snapshot()['inventoryItems'][10][10010])
+            self.assertEqual(100000 - credits_cost,
+                             state.snapshot()['wallet']['credits'])
+            self.assertEqual(7500 - gold_cost,
+                             state.snapshot()['wallet']['gold'])
+            if school is None:
+                self.assertEqual([None], record['crew'])
+                self.assertEqual({}, record['tankmen'])
+            else:
+                descriptor = record['tankmen'][record['crew'][0]]
+                self.assertEqual(b'tman:new:commander#%d' % role_level, descriptor)
+
+    def test_unaffordable_crew_rolls_back_the_entire_vehicle_purchase(self):
+        import test_port_0922_garage as crew_fixture
+        snapshot = _snapshot()
+        snapshot['wallet'].update(gold=20000, credits=100)
+        snapshot['tankmanCosts'] = crew_fixture.GarageStateTests.CAREER_COSTS
+        vehicles = _vehicles()
+        vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+        vehicle_type.crewRoles = (('commander',),)
+        vehicles.getVehicleType = lambda cd: vehicle_type
+        unused_vehicles, tankmen = crew_fixture._modules()
+        state = GARAGE.GarageState(snapshot, vehicles_module=vehicles,
+                                   tankmen_module=tankmen)
+        before = copy.deepcopy(state.snapshot())
+        with self._built([]), self.assertRaises(GARAGE.GarageError):
+            state.buy_vehicle(SECOND_VEHICLE_CD, recruit_crew=True,
+                              tman_cost_type_index=1)
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual({}, state.touched_items())
 
     def test_a_bought_vehicle_arrives_stock_and_charges_gold(self):
         from unittest import mock
@@ -428,8 +486,8 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['wallet']['gold'] = 20000
         vehicles = _vehicles(autounlocked=(2002,))
         state = _state(snapshot, vehicles=vehicles)
-        with mock.patch.dict(sys.modules, self._built(calls)):
-            record = state.buy_vehicle(SECOND_VEHICLE_CD)
+        with self._built(calls):
+            record = state.buy_vehicle(SECOND_VEHICLE_CD, buy_shells=True)
 
         snapshot = state.snapshot()
         self.assertEqual(1, len(calls))
@@ -460,14 +518,14 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot = _snapshot()
         snapshot['wallet']['gold'] = 20000
         state = _state(snapshot, vehicles=_vehicles())
-        with mock.patch.dict(sys.modules, self._built(calls)):
-            state.buy_vehicle(SECOND_VEHICLE_CD)
+        with self._built(calls):
+            state.buy_vehicle(SECOND_VEHICLE_CD, buy_shells=True)
 
         snapshot = state.snapshot()
         # Twenty rounds in the vehicle it already had and ten in the new one.
         self.assertEqual(30, snapshot['inventoryItems'][10][10010])
-        # A module is published per vehicle, so it stays at one.
-        self.assertEqual(1, snapshot['inventoryItems'][2][2002])
+        # Both vehicles have their own physical chassis of this type.
+        self.assertEqual(2, snapshot['inventoryItems'][2][2002])
 
     def test_a_bought_vehicle_starts_with_the_refill_switches_on(self):
         """A purchase must not differ from a vehicle the garage built itself."""
@@ -477,7 +535,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot = _snapshot()
         snapshot['wallet']['gold'] = 20000
         state = _state(snapshot, vehicles=_vehicles())
-        with mock.patch.dict(sys.modules, self._built(calls)):
+        with self._built(calls):
             state.buy_vehicle(SECOND_VEHICLE_CD)
 
         self.assertEqual(15, calls[0]['settings'])
@@ -490,7 +548,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['wallet']['gold'] = 20000
         del snapshot['defaultVehicleSettings']
         state = _state(snapshot, vehicles=_vehicles())
-        with mock.patch.dict(sys.modules, self._built(calls)):
+        with self._built(calls):
             state.buy_vehicle(SECOND_VEHICLE_CD)
 
         self.assertEqual(7, calls[0]['settings'])
@@ -503,7 +561,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['nextInventoryID'] = 9
         snapshot['wallet']['gold'] = 20000
         state = _state(snapshot)
-        with mock.patch.dict(sys.modules, self._built(calls)):
+        with self._built(calls):
             record = state.buy_vehicle(SECOND_VEHICLE_CD)
 
         self.assertNotEqual(9, record['id'])
@@ -517,7 +575,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot = _snapshot()
         snapshot['wallet']['gold'] = 100
         state = _state(snapshot)
-        with mock.patch.dict(sys.modules, self._built(calls)):
+        with self._built(calls):
             with self.assertRaises(GARAGE.GarageError):
                 state.buy_vehicle(SECOND_VEHICLE_CD)
 
@@ -533,7 +591,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['barracksTankmen'] = {103: b'tman:103'}
         calls = []
         state = _state(snapshot)
-        with mock.patch.dict(sys.modules, self._built(calls)):
+        with self._built(calls):
             state.buy_vehicle(SECOND_VEHICLE_CD)
 
         self.assertEqual(104, calls[0]['nextTankmanID'])
@@ -551,7 +609,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot['accountSlots'] = 1
         snapshot['wallet']['gold'] = 20000
         state = _state(snapshot)
-        with mock.patch.dict(sys.modules, self._built([])):
+        with self._built([]):
             with self.assertRaises(GARAGE.GarageError):
                 state.buy_vehicle(SECOND_VEHICLE_CD)
 

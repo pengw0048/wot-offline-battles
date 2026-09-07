@@ -91,6 +91,35 @@ class EquipmentProjectionTests(unittest.TestCase):
 
 class EquipmentStateTests(unittest.TestCase):
 
+    def test_server_records_automatic_extinguisher_for_battle_settlement(self):
+        from unittest import mock
+        sys.path.insert(0, str(ROOT / 'server'))
+        import lan_battle_server as server
+        battle = server.BattleState()
+        player = server.Player(player_id=1, name='Review', conn=None, address=None)
+        player.connected = player.participating = player.alive = True
+        player.critical = {'fire': True}
+        equipment = equipment_mechanics.EquipmentState(
+            equipment_mechanics.project_equipment(_defaults()[0]))
+        player.equipment_states = [equipment]
+        battle.players[1] = player
+
+        def extinguish(participant, payload):
+            participant.critical = {'fire': False}
+        with mock.patch.object(battle, '_combat_accepting', return_value=True), \
+                mock.patch.object(battle, '_commit_player_critical_progress',
+                                  side_effect=extinguish), \
+                mock.patch.object(server.player_critical_mechanics,
+                                  'apply_equipment', return_value={}), \
+                mock.patch.object(server.player_critical_mechanics,
+                                  'advance_critical', return_value=None):
+            self.assertEqual(1, battle._tick_player_critical(0.1))
+            self.assertEqual(0, battle._tick_player_critical(0.1))
+        self.assertFalse(player.critical['fire'])
+        self.assertEqual(90.0, equipment.ready_at)
+        self.assertEqual({'11001': 1},
+                         battle._statistics_row('player', 1)['equipment_used'])
+
     def test_auto_extinguisher_uses_next_canonical_observation(self):
         contract = equipment_mechanics.project_equipment(_defaults()[0])
         state = equipment_mechanics.EquipmentState(contract)
