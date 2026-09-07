@@ -14,18 +14,16 @@ except NameError:
     integer_types = (int,)
 
 
-STATE_PATH = os.path.join(
-    port_config.USER_DATA_DIR, 'account_state.json')
-LEGACY_STATE_PATH = os.path.join(
-    port_config.LEGACY_USER_DATA_DIR, 'account_state.json')
+STATE_FILE_NAME = 'account_state.json'
 
 
 class AccountState(object):
     """Persist the integer settings that #1513 normally stores server-side."""
 
-    def __init__(self, path=STATE_PATH):
-        self._path = (port_config.migrate_legacy_user_file(
-            path, LEGACY_STATE_PATH) if path == STATE_PATH else path)
+    def __init__(self, path=port_config.ACTIVE_SAVE_SLOT):
+        if path is port_config.ACTIVE_SAVE_SLOT:
+            path = port_config.save_slot_state_path(STATE_FILE_NAME)
+        self._path = path
         self._int_user_settings = {}
         self._load()
 

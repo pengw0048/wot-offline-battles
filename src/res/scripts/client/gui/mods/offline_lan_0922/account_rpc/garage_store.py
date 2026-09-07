@@ -37,15 +37,17 @@ except NameError:
 # bit index instead of a VEHICLE_SETTINGS_FLAG value.  Schema 3 drops files
 # written before every vehicle was fitted with its top modules and its three
 # consumables.  Schema 4 adds the bounded receipt journal that makes battle
-# crew XP idempotent.  Schema 3 remains readable and upgrades on the next save.
-SCHEMA = 4
-READABLE_SCHEMAS = (3, SCHEMA)
-STATE_PATH = os.path.join(
-    port_config.USER_DATA_DIR, 'garage_state.json')
-LEGACY_STATE_PATH = os.path.join(
-    port_config.LEGACY_USER_DATA_DIR, 'garage_state.json')
+# crew XP idempotent.  Schema 5 adds the account ledger: the balances, the
+# researched items, the per-vehicle experience and which vehicles are owned.
+# Every earlier readable schema upgrades on the next save.
+SCHEMA = 6
+READABLE_SCHEMAS = (3, 4, 5, SCHEMA)
+STATE_FILE_NAME = 'garage_state.json'
 
-_VEHICLE_INT_KEYS = ('eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx')
+# ``repair`` is (outstanding cost, remaining health): a vehicle a battle left
+# damaged has to come back damaged, or a restart would be a free repair.
+_VEHICLE_INT_KEYS = (
+    'eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx', 'repair')
 _ARTEFACT_ITEM_TYPES = (9, 10, 11)
 _CUSTOMIZATION_SEASONS = (1, 2, 4, 8, 15)
 MAX_BATTLE_RECEIPTS = 512
@@ -79,6 +81,226 @@ def _int_list(value):
     return result
 
 
+def _ledger_payload(snapshot):
+    """Return the account balances and research a save must keep.
+
+    The garage already owns what the player has; the ledger is the rest of it.
+    Keeping both in one file means one JSON replacement commits a purchase and
+    the item it bought together, so a hard kill can never bank one without the
+    other.
+    """
+    wallet = snapshot.get('wallet')
+    wallet = wallet if isinstance(wallet, dict) else {}
+    vehicle_xp = {}
+    saved_xp = snapshot.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        for compact_descr, experience in saved_xp.items():
+            try:
+                vehicle_xp[str(int(compact_descr))] = max(
+                    0, int(experience))
+            except (TypeError, ValueError):
+                continue
+    unlocks = snapshot.get('unlockItemCompactDescrs')
+    # A crew member in the barracks belongs to no vehicle, so there is no
+    # slot to store them against.  Their inventory id is this client's own
+    # bookkeeping and means nothing to the next one, so only the descriptor
+    # is saved and the restore hands out fresh ids.
+    barracks = []
+    for compact_descr in (snapshot.get('barracksTankmen') or {}).values():
+        encoded = _encode_bytes(compact_descr)
+        if encoded is not None:
+            barracks.append(encoded)
+    # The recycle bin outlives a restart in retail, and the window it prices
+    # is measured from the dismissal, so the timestamp is saved with the
+    # descriptor.  Inventory ids are not: the restore hands out fresh ones.
+    recycled = []
+    for compact_descr, dismissed_at in (
+            snapshot.get('recycleBinTankmen') or {}).values():
+        encoded = _encode_bytes(compact_descr)
+        if encoded is not None:
+            recycled.append([encoded, _int_value(dismissed_at)])
+    return {
+        'wallet': dict(
+            (name, max(0, int(wallet.get(name, 0) or 0)))
+            for name in ('credits', 'gold', 'freeXP')),
+        'vehicleXP': vehicle_xp,
+        'unlocks': sorted(int(value) for value in (unlocks or ())),
+        'slots': max(0, int(snapshot.get('accountSlots', 0) or 0)),
+        'berths': max(0, int(snapshot.get('accountBerths', 0) or 0)),
+        'barracks': sorted(barracks),
+        'recycleBin': sorted(recycled),
+    }
+
+
+def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
+    """Repair, reload and restock the vehicle its own settings ask for.
+
+    #1513 publishes the three switches per vehicle in ``settings`` and a fresh
+    garage vehicle starts with all of them on.  Retail settles all three when
+    the account can pay and silently leaves the vehicle as it is when it
+    cannot, which is what the player sees in the hangar either way, so each
+    one is attempted on its own and a refusal is not an error.
+    """
+    if not auto_settings:
+        return
+    repair_flag, load_flag, equip_flag = auto_settings
+    for record in state.snapshot().get('vehicles') or ():
+        if int(record.get('id', 0)) != int(vehicle_id):
+            continue
+        try:
+            settings = int(record.get('settings', 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if settings & int(repair_flag or 0):
+            try:
+                state.repair_vehicle(vehicle_id)
+            except garage_error:
+                pass
+        if settings & int(load_flag or 0):
+            layout = (record.get('shellsLayout') or {}).get(
+                tuple(record.get('shellsLayoutIdx') or ()))
+            if layout:
+                try:
+                    state.equip_shells(vehicle_id, list(layout))
+                except garage_error:
+                    pass
+        if settings & int(equip_flag or 0):
+            layout = list(record.get('eqsLayout') or ())
+            if any(layout):
+                try:
+                    state.equip_equipments(vehicle_id, layout)
+                except garage_error:
+                    pass
+        return
+
+
+def _floor_account_stock(snapshot):
+    """Own at least what the garage already holds.
+
+    A round, a consumable and an optional device belong to the account, and
+    ``garage.GarageState`` adds them up across every vehicle to decide what a
+    resupply must buy.  A depot count below that sum would let one lot of them
+    be mounted twice, so the whole garage is the floor under the depot.  Older
+    saves recorded the largest count one vehicle carried rather than the total,
+    and this is what raises them.
+    """
+    published = snapshot.setdefault('inventoryItems', {})
+    for item_type in _ARTEFACT_ITEM_TYPES:
+        totals = {}
+        for record in _records(snapshot):
+            items = record.get('inventoryItems')
+            if not isinstance(items, dict):
+                continue
+            for compact_descr, count in (_int_map(
+                    items.get(item_type) or {}) or {}).items():
+                totals[compact_descr] = totals.get(compact_descr, 0) + count
+        if not totals:
+            continue
+        target = published.setdefault(item_type, {})
+        for compact_descr, count in totals.items():
+            target[compact_descr] = max(
+                int(target.get(compact_descr, 0)), int(count))
+
+
+def _apply_ledger(staged, stored):
+    """Overlay one saved ledger, keeping the current catalogue authoritative."""
+    ledger = stored.get('ledger')
+    if not isinstance(ledger, dict):
+        # A file written before the ledger existed keeps the seeded balances
+        # rather than starting the save at zero.
+        return False
+    wallet = ledger.get('wallet')
+    if isinstance(wallet, dict):
+        staged['wallet'] = dict(
+            (name, max(0, _int_value(wallet.get(name))))
+            for name in ('credits', 'gold', 'freeXP'))
+    saved_xp = ledger.get('vehicleXP')
+    if isinstance(saved_xp, dict):
+        published = staged.setdefault('vehicleXP', {})
+        for compact_descr, experience in saved_xp.items():
+            try:
+                key = int(compact_descr)
+            except (TypeError, ValueError):
+                continue
+            # Only vehicles this client still offers keep their experience.
+            if key in published:
+                published[key] = max(0, _int_value(experience))
+    unlocks = ledger.get('unlocks')
+    if isinstance(unlocks, (list, tuple)):
+        published = staged.get('unlockItemCompactDescrs')
+        if isinstance(published, set):
+            for value in unlocks:
+                try:
+                    published.add(int(value))
+                except (TypeError, ValueError):
+                    continue
+    for name, key in (('slots', 'accountSlots'), ('berths', 'accountBerths')):
+        if name in ledger:
+            staged[key] = max(_int_value(ledger[name]),
+                              int(staged.get(key, 0) or 0))
+    barracks = ledger.get('barracks')
+    if isinstance(barracks, (list, tuple)):
+        staged['barracksTankmen'] = _restored_barracks(staged, barracks)
+    recycled = ledger.get('recycleBin')
+    if isinstance(recycled, (list, tuple)):
+        staged['recycleBinTankmen'] = _restored_recycle_bin(staged, recycled)
+    return True
+
+
+def _used_tankman_ids(staged):
+    """Return every crew inventory id the restored garage already holds."""
+    used = set()
+    for record in _records(staged):
+        for tankman_id in (record.get('tankmen') or ()):
+            used.add(_int_value(tankman_id))
+    used.update(
+        _int_value(tankman_id)
+        for tankman_id in (staged.get('barracksTankmen') or ()))
+    return used
+
+
+def _restored_barracks(staged, encoded_descriptors):
+    """Give every saved barracks crew member an id no vehicle is using."""
+    used = _used_tankman_ids(staged)
+    next_id = (max(used) + 1) if used else 100001
+    restored = {}
+    for encoded in encoded_descriptors:
+        decoded = _decode_bytes(encoded)
+        if not decoded:
+            continue
+        restored[next_id] = decoded
+        next_id += 1
+    return restored
+
+
+def _restored_recycle_bin(staged, rows):
+    """Restore who was dismissed, with ids nothing else in the garage uses.
+
+    The barracks is restored first, so its fresh ids are already taken here.
+    """
+    used = _used_tankman_ids(staged)
+    next_id = (max(used) + 1) if used else 100001
+    restored = {}
+    for row in rows:
+        try:
+            encoded, dismissed_at = row
+        except (TypeError, ValueError):
+            continue
+        decoded = _decode_bytes(encoded)
+        if not decoded:
+            continue
+        restored[next_id] = (decoded, _int_value(dismissed_at))
+        next_id += 1
+    return restored
+
+
+def _int_value(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _int_map(value):
     if not isinstance(value, dict):
         return None
@@ -98,9 +320,10 @@ def _int_map(value):
 class GarageStore(object):
     """Load and save the mutable parts of one garage snapshot."""
 
-    def __init__(self, path=STATE_PATH):
-        self._path = (port_config.migrate_legacy_user_file(
-            path, LEGACY_STATE_PATH) if path == STATE_PATH else path)
+    def __init__(self, path=port_config.ACTIVE_SAVE_SLOT):
+        if path is port_config.ACTIVE_SAVE_SLOT:
+            path = port_config.save_slot_state_path(STATE_FILE_NAME)
+        self._path = path
         self._dirty = False
         self._battle_receipts = []
         self._receipts_loaded = False
@@ -137,6 +360,11 @@ class GarageStore(object):
             compact_descr = _encode_bytes(record.get('compDescr'))
             if compact_descr is not None:
                 stored['compDescr'] = compact_descr
+            # The launcher reads this file without a client to resolve a
+            # compact descriptor with, so the save names its own vehicles.
+            type_name = record.get('vehicleTypeName')
+            if isinstance(type_name, str) and type_name:
+                stored['name'] = type_name
             outfits = {}
             if isinstance(record.get('outfits'), dict):
                 for raw_season, outfit_data in record['outfits'].items():
@@ -154,6 +382,13 @@ class GarageStore(object):
                 value = _int_list(record.get(name))
                 if value is not None:
                     stored[name] = value
+            # What the player asked the vehicle to carry, which a battle
+            # deliberately does not change: it is what auto-load buys back.
+            layout = _int_list(
+                (record.get('shellsLayout') or {}).get(
+                    tuple(record.get('shellsLayoutIdx') or ())))
+            if layout is not None:
+                stored['shellsLayout'] = layout
             try:
                 stored['settings'] = int(record.get('settings', 0) or 0)
             except (TypeError, ValueError):
@@ -163,6 +398,12 @@ class GarageStore(object):
             order = list(record.get('crew') or ())
             if isinstance(tankmen, dict):
                 for slot, tankman_id in enumerate(order):
+                    if tankman_id is None:
+                        # An unloaded seat has to be saved as empty; leaving
+                        # it out would let the next start's freshly built
+                        # crew member sit back down.
+                        crew[str(slot)] = None
+                        continue
                     encoded = _encode_bytes(tankmen.get(tankman_id))
                     if encoded is not None:
                         crew[str(slot)] = encoded
@@ -180,28 +421,73 @@ class GarageStore(object):
                     continue
                 if item_type not in _ARTEFACT_ITEM_TYPES:
                     continue
+                # An empty depot is saved as an empty depot.  A row is dropped
+                # when its count reaches zero, so omitting the whole type here
+                # would read back on the next start as "this save predates the
+                # depot" and hand the stock supply out all over again.
                 counts = _int_map(items)
-                if counts:
-                    owned[str(item_type)] = dict(
-                        (str(compact_descr), count)
-                        for compact_descr, count in counts.items())
+                owned[str(item_type)] = dict(
+                    (str(compact_descr), count)
+                    for compact_descr, count in counts.items())
         if battle_receipts is None:
             battle_receipts = self._battle_receipts
         return {
             'schema': SCHEMA, 'vehicles': vehicles, 'owned': owned,
+            'ledger': _ledger_payload(snapshot),
             'battleCrewReceipts': list(battle_receipts)[
                 -MAX_BATTLE_RECEIPTS:],
         }
 
+    def owned_vehicle_names(self):
+        """Return the ``nation:vehicle`` names this save owns.
+
+        A save written before records carried their names answers with the
+        vehicles it can name and leaves out the rest; the client fills the
+        missing ones in on its next start.
+        """
+        stored = self._read()
+        vehicles = (stored or {}).get('vehicles')
+        if not isinstance(vehicles, dict):
+            return []
+        names = []
+        for value in vehicles.values():
+            name = value.get('name') if isinstance(value, dict) else None
+            if isinstance(name, str) and name:
+                names.append(name)
+        return sorted(set(names))
+
+    def owned_vehicle_types(self):
+        """Return the vehicle type compact descriptors this save owns.
+
+        The saved vehicle map is already keyed on the type compact descriptor,
+        so ownership needs no second list that could disagree with it.  An
+        empty result means "nothing saved yet", which is what a new save is.
+        """
+        stored = self._read()
+        vehicles = (stored or {}).get('vehicles')
+        if not isinstance(vehicles, dict):
+            return []
+        owned = []
+        for key in vehicles:
+            try:
+                owned.append(int(key))
+            except (TypeError, ValueError):
+                continue
+        return owned
+
     def apply_battle_crew_xp(self, snapshot, receipt_id,
                              vehicle_type_compact_descr, battle_xp,
-                             xp_to_tankman_flag, tankmen_module=None):
-        """Apply and persist one crew award exactly once.
+                             xp_to_tankman_flag, tankmen_module=None,
+                             rewards=None, health=None, vehicles_module=None,
+                             shells_fired=None, equipment_used=None,
+                             auto_settings=None):
+        """Apply and persist one battle's whole settlement exactly once.
 
-        The compact crew descriptors and their receipt marker share one JSON
-        replacement.  A receipt retried after a disconnect therefore either
-        applies the whole award or observes the durable marker; it can never
-        add the XP twice.
+        The compact crew descriptors, the earnings, the damage the battle did
+        and their receipt marker share one JSON replacement.  A receipt
+        retried after a disconnect therefore either applies the whole
+        settlement or observes the durable marker; it can never award the XP
+        twice, and it can never bill the same damage twice either.
         """
         receipt_id = str(receipt_id or '')[:96]
         if not receipt_id:
@@ -213,11 +499,58 @@ class GarageStore(object):
                 result['applied'] = False
                 return result
 
-        from gui.mods.offline_lan_0922.account_rpc.garage import GarageState
+        from gui.mods.offline_lan_0922.account_rpc.garage import (
+            GarageError, GarageState)
+        from gui.mods.offline_lan_0922.account_rpc import economy
         staged = copy.deepcopy(snapshot)
-        state = GarageState(staged, tankmen_module=tankmen_module)
+        state = GarageState(staged, tankmen_module=tankmen_module,
+                            vehicles_module=vehicles_module)
+        # The receipt says what the battle did; what it is worth is the
+        # account's business, so the two multipliers are applied here, once,
+        # and everything downstream banks and shows the same numbers.
+        experience_percent = economy.earnings_percent(
+            snapshot.get('earningsPercent'))
+        credits_percent = experience_percent
+        if (vehicles_module is not None and economy.is_premium_vehicle(
+                vehicles_module, vehicle_type_compact_descr)):
+            credits_percent = (
+                credits_percent * economy.PREMIUM_VEHICLE_CREDITS_PERCENT
+                // 100)
+        awarded = economy.scale_rewards(
+            rewards, credits_percent=credits_percent,
+            experience_percent=experience_percent)
+        battle_xp = awarded.get('xp', battle_xp) if rewards else (
+            max(0, int(battle_xp or 0)) * experience_percent // 100)
         result = state.award_battle_crew_xp(
             vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
+        if health is not None:
+            result['repair'] = state.settle_battle_damage(
+                vehicle_type_compact_descr, health)
+        if shells_fired:
+            result['shells_spent'] = state.settle_battle_ammunition(
+                vehicle_type_compact_descr, shells_fired)
+        if equipment_used:
+            result['consumables_spent'] = state.settle_battle_consumables(
+                vehicle_type_compact_descr, equipment_used)
+        if rewards is not None:
+            # The crew award and the credits it was earned beside share one
+            # JSON replacement, so a retried receipt can never bank one
+            # without the other.
+            result['earnings'] = state.award_battle_earnings(
+                vehicle_type_compact_descr, awarded,
+                accelerated=bool(result['accelerated']))
+            # What was actually banked, so the battle-results screen and the
+            # lifetime counters report the same amounts as the wallet.
+            result['awarded'] = dict(
+                (name, int(awarded.get(name, 0) or 0))
+                for name in ('credits', 'xp', 'free_xp'))
+        _settle_automatically(
+            state, int(result['vehicle_id']), auto_settings, GarageError)
+        # Every other field of this result is plain JSON, and the store hands
+        # it straight to a caller that may well write it down.
+        result['touched_items'] = dict(
+            (int(item_type), sorted(int(value) for value in items))
+            for item_type, items in state.touched_items().items())
         staged = state.snapshot()
         marker = {
             'receipt_id': receipt_id,
@@ -269,24 +602,30 @@ class GarageStore(object):
         owned = stored.get('owned')
         if isinstance(owned, dict):
             published = staged.setdefault('inventoryItems', {})
-            for raw_type, items in owned.items():
-                try:
-                    item_type = int(raw_type)
-                except (TypeError, ValueError):
-                    continue
-                if item_type not in _ARTEFACT_ITEM_TYPES:
-                    continue
+            prices = staged.get('shopItemPrices') or {}
+            for item_type in _ARTEFACT_ITEM_TYPES:
+                items = owned.get(str(item_type), owned.get(item_type))
                 counts = _int_map(items)
-                if not counts:
+                if counts is None:
+                    # A save written before the depot was kept, or one whose
+                    # depot cannot be read, keeps whatever stock the fresh
+                    # build handed out.
                     continue
-                target = published.setdefault(item_type, {})
+                # The save is the depot.  Taking the larger of the two would
+                # hand the stock supply back every time the client started,
+                # which is a refund for every round and consumable a battle
+                # spent.
+                target = {}
                 for compact_descr, count in counts.items():
-                    # A saved file written before the current catalogue can
-                    # still name an item this client no longer offers.
-                    if compact_descr not in target:
-                        continue
-                    target[compact_descr] = max(
-                        int(target[compact_descr]), int(count))
+                    # A saved file can still name an item this client no
+                    # longer offers, and an item with no price is one the
+                    # current catalogue does not know.
+                    if compact_descr in prices:
+                        target[compact_descr] = int(count)
+                published[item_type] = target
+        _floor_account_stock(staged)
+
+        _apply_ledger(staged, stored)
 
         try:
             data._validate_selected_vehicle(staged)
@@ -385,11 +724,25 @@ class GarageStore(object):
                     continue
                 if not 0 <= slot < len(order):
                     continue
+                if encoded is None:
+                    tankmen.pop(order[slot], None)
+                    order[slot] = None
+                    record['crew'] = order
+                    changed = True
+                    continue
                 decoded = _decode_bytes(encoded)
-                if decoded:
+                if decoded and order[slot] is not None:
                     tankmen[order[slot]] = decoded
                     changed = True
-        mirror_shells_layout(record)
+        layout = _int_list(saved.get('shellsLayout'))
+        key = tuple(record.get('shellsLayoutIdx') or ())
+        if layout is not None and key and not len(layout) % 2:
+            record['shellsLayout'] = {key: layout}
+            changed = True
+        else:
+            # A save written before the layout was kept separately loaded
+            # exactly what it asked for.
+            mirror_shells_layout(record)
         # Mounted shells must stay consistent with the shell inventory that
         # data._validate_selected_vehicle cross-checks.
         shells = _int_list(record.get('shells'))
@@ -398,6 +751,18 @@ class GarageStore(object):
             for index in range(0, len(shells), 2):
                 pairs[shells[index]] = shells[index + 1]
             record.setdefault('inventoryItems', {})[10] = pairs
+        # A mounted consumable is what this vehicle holds of the account's
+        # stock, so the record has to say so or a second vehicle would mount
+        # the same one lot of it for nothing.
+        consumables = {}
+        for compact_descr in (record.get('eqs') or ()):
+            try:
+                compact_descr = int(compact_descr)
+            except (TypeError, ValueError):
+                continue
+            if compact_descr:
+                consumables[compact_descr] = 1
+        record.setdefault('inventoryItems', {})[11] = consumables
         return changed
 
     def _read(self):

@@ -112,11 +112,12 @@ def _archive_tree(source_root, destination):
 
 def _release_config():
     return {
-        'schema': 2,
+        'schema': 3,
         'enabled': True,
         'host': '127.0.0.1',
         'port': 28782,
         'name': 'Player',
+        'save_slot': 'default',
         'vehicle': 'ussr:R11_MS-1',
         'max_health': 90,
         'startupTimeoutSeconds': 30.0,

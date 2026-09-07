@@ -819,6 +819,47 @@ class ClientInstallTest(unittest.TestCase):
         self.assertEqual("mine", self._read(
             "mods/configs/offline_lan_0922/config.json"))
 
+    def test_the_selected_save_reaches_the_client_configuration(self):
+        self._stage_0_9_22()
+        self._write(self.game, "mods/configs/offline_lan_0922/config.json",
+                    json.dumps({"schema": 3, "name": "Player",
+                                "save_slot": "default"}))
+
+        core.write_settings(
+            self.game, core.PORT_0_9_22, core.MODE_SINGLE, "127.0.0.1",
+            28782, "Peng", "career-2")
+
+        config = json.loads(
+            self._read("mods/configs/offline_lan_0922/config.json"))
+        self.assertEqual("career-2", config["save_slot"])
+        self.assertEqual("Peng", config["name"])
+
+    def test_a_launch_without_a_save_leaves_the_configured_one_alone(self):
+        self._stage_0_9_22()
+        self._write(self.game, "mods/configs/offline_lan_0922/config.json",
+                    json.dumps({"schema": 3, "save_slot": "career-2"}))
+
+        core.write_settings(
+            self.game, core.PORT_0_9_22, core.MODE_SINGLE, "127.0.0.1", 28782)
+
+        config = json.loads(
+            self._read("mods/configs/offline_lan_0922/config.json"))
+        self.assertEqual("career-2", config["save_slot"])
+
+    def test_an_unusable_save_id_never_reaches_the_client(self):
+        self._stage_0_9_22()
+        self._write(self.game, "mods/configs/offline_lan_0922/config.json",
+                    json.dumps({"schema": 3, "save_slot": "default"}))
+
+        with self.assertRaises(core.LauncherError):
+            core.write_settings(
+                self.game, core.PORT_0_9_22, core.MODE_SINGLE, "127.0.0.1",
+                28782, "Peng", "../escape")
+
+        config = json.loads(
+            self._read("mods/configs/offline_lan_0922/config.json"))
+        self.assertEqual("default", config["save_slot"])
+
     def test_0_9_22_install_writes_a_missing_configuration(self):
         self._stage_0_9_22()
         core.install_client_mod(self.game, core.PORT_0_9_22, self.payload)
@@ -873,6 +914,38 @@ class ClientInstallTest(unittest.TestCase):
         self.assertEqual("theirs", self._read(
             "mods/0.9.22.0.1/com.other.mod.wotmod"))
         self.assertIn("kept the saved endpoint", " ".join(actions))
+
+    def test_startup_repair_quarantines_an_unusable_save_id(self):
+        """The client refuses to start on it, so repair has to notice it too."""
+        default_config = json.dumps({"enabled": True, "save_slot": "default"})
+        self._stage_0_9_22(default_config)
+        self._make_0_9_22_target()
+        broken = json.dumps({"enabled": True, "save_slot": "../escape"})
+        self._write(
+            self.game, "mods/configs/offline_lan_0922/config.json", broken)
+
+        core.repair_0_9_22_startup(
+            self.game, self.payload, is_running=lambda: False)
+
+        self.assertEqual(default_config, self._read(
+            "mods/configs/offline_lan_0922/config.json"))
+        self.assertEqual(broken, self._read(
+            "mods/configs/offline_lan_0922/config.json.invalid"))
+
+    def test_startup_repair_keeps_a_named_save(self):
+        default_config = json.dumps({"enabled": True})
+        self._stage_0_9_22(default_config)
+        self._make_0_9_22_target()
+        saved_config = json.dumps({"enabled": True, "save_slot": "career-2"})
+        self._write(
+            self.game, "mods/configs/offline_lan_0922/config.json",
+            saved_config)
+
+        core.repair_0_9_22_startup(
+            self.game, self.payload, is_running=lambda: False)
+
+        self.assertEqual(saved_config, self._read(
+            "mods/configs/offline_lan_0922/config.json"))
 
     def test_startup_repair_keeps_a_valid_config(self):
         default_config = json.dumps({"enabled": True})
@@ -1027,6 +1100,80 @@ class ClientInstallTest(unittest.TestCase):
         self.assertEqual("theirs", self._read(
             "mods/0.9.22.0.1/com.other.mod.wotmod"))
         self.assertIn("Deleted 7 offline saved-data file(s).", actions)
+
+    def test_reset_deletes_the_save_slots_of_an_installation_without_appdata(
+            self):
+        """Without APPDATA the client keeps its saves inside the game folder.
+
+        Leaving them behind would contradict the reset confirmation and would
+        also leave the next start reading a garage the player asked to drop.
+        """
+        default_config = json.dumps({"enabled": True})
+        self._stage_0_9_22(default_config)
+        self._make_0_9_22_target()
+        state_root = "mods/configs/offline_lan_0922/"
+        saves_root = state_root + core.SAVES_DIR_NAME_0_9_22 + "/"
+        self._write(self.game, saves_root + "default/garage_state.json", "a")
+        self._write(self.game, saves_root + "career/postbattle_state.json", "b")
+        self._write(self.game, state_root + "notes.json", "keep")
+
+        core.reset_0_9_22_state(
+            self.game, self.payload, is_running=lambda: False)
+
+        self.assertFalse(os.path.exists(os.path.join(
+            self.game, *saves_root.rstrip("/").split("/"))))
+        self.assertEqual("keep", self._read(state_root + "notes.json"))
+
+    def test_reset_deletes_save_slots_from_appdata(self):
+        default_config = json.dumps({"enabled": True})
+        self._stage_0_9_22(default_config)
+        self._make_0_9_22_target()
+        appdata = os.path.join(self.work, "appdata")
+        saves_root = os.path.join(
+            appdata, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            core.SAVES_DIR_NAME_0_9_22)
+        state_root = os.path.dirname(saves_root)
+        self._write(
+            saves_root, "default/garage_state.json", "default garage")
+        self._write(
+            saves_root, "career/postbattle_state.json", "career results")
+        self._write(state_root, "garage_state.json", "legacy garage")
+        self._write(state_root, "notes.json", "keep")
+
+        with mock.patch.dict(os.environ, {"APPDATA": appdata}):
+            core.reset_0_9_22_state(
+                self.game, self.payload, is_running=lambda: False)
+
+        self.assertFalse(os.path.exists(saves_root))
+        self.assertFalse(os.path.exists(os.path.join(
+            state_root, "garage_state.json")))
+        with open(os.path.join(state_root, "notes.json")) as stream:
+            self.assertEqual("keep", stream.read())
+
+    def test_failed_reset_restores_appdata_saves_and_legacy_state(self):
+        self._make_0_9_22_target()
+        appdata = os.path.join(self.work, "appdata")
+        saves_root = os.path.join(
+            appdata, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            core.SAVES_DIR_NAME_0_9_22)
+        state_root = os.path.dirname(saves_root)
+        self._write(
+            saves_root, "default/garage_state.json", "default garage")
+        self._write(state_root, "garage_state.json", "legacy garage")
+
+        with mock.patch.dict(os.environ, {"APPDATA": appdata}), \
+                mock.patch.object(
+                    core, "install_client_mod",
+                    side_effect=core.LauncherError("install failed")):
+            with self.assertRaisesRegex(core.LauncherError, "install failed"):
+                core.reset_0_9_22_state(
+                    self.game, self.payload, is_running=lambda: False)
+
+        with open(os.path.join(
+                saves_root, "default", "garage_state.json")) as stream:
+            self.assertEqual("default garage", stream.read())
+        with open(os.path.join(state_root, "garage_state.json")) as stream:
+            self.assertEqual("legacy garage", stream.read())
 
     def test_reset_also_deletes_only_the_isolated_client_preferences(self):
         default_config = json.dumps({"enabled": True})

@@ -41,10 +41,7 @@ except NameError:
 
 
 SCHEMA = 1
-STATE_PATH = os.path.join(
-    port_config.USER_DATA_DIR, 'postbattle_state.json')
-LEGACY_STATE_PATH = os.path.join(
-    port_config.LEGACY_USER_DATA_DIR, 'postbattle_state.json')
+STATE_FILE_NAME = 'postbattle_state.json'
 # Bounds only this process's archived receipt bodies, which serve a repeated
 # 1500 for a result #1513 has already cached and confirmed.  Nothing durable
 # depends on it: an unacknowledged receipt is persisted in full, and an
@@ -144,6 +141,41 @@ def _receipt(value):
     # is safer than silently applying an untrusted server value.
     if rewards['repair_cost'] or rewards['ammo_cost']:
         raise ValueError('offline service costs must be zero')
+    # What the account actually banked, after its own multipliers.  Only the
+    # client knows them, so this is written on the way in rather than sent:
+    # a receipt from a server has none and is worth exactly what it says.
+    awarded = None
+    raw_awarded = value.get('awarded')
+    if isinstance(raw_awarded, dict):
+        awarded = dict(
+            (name, max(0, _int(raw_awarded.get(name))))
+            for name in ('credits', 'xp', 'free_xp'))
+    shells_fired = {}
+    raw_fired = value.get('shells_fired')
+    if raw_fired is not None:
+        if not isinstance(raw_fired, dict) or len(raw_fired) > 10:
+            raise ValueError('battle receipt ammunition is invalid')
+        for index, count in raw_fired.items():
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                raise ValueError('battle receipt ammunition is invalid')
+            count = _int(count)
+            if not 0 <= index <= 9 or not 0 <= count <= 100000:
+                raise ValueError('battle receipt ammunition is invalid')
+            if count:
+                shells_fired[index] = count
+    equipment_used = []
+    raw_used = value.get('equipment_used')
+    if raw_used is not None:
+        if not isinstance(raw_used, (list, tuple)) or len(raw_used) > 3:
+            raise ValueError('battle receipt consumables are invalid')
+        for compact_descr in raw_used:
+            compact_descr = _int(compact_descr)
+            if compact_descr < 1:
+                raise ValueError('battle receipt consumables are invalid')
+            if compact_descr not in equipment_used:
+                equipment_used.append(compact_descr)
     public_results = []
     raw_public = value.get('public_results')
     if raw_public is None:
@@ -269,9 +301,21 @@ def _receipt(value):
         'premature_leave': bool(value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
-        # The personal row owns the medal list; mirroring it here keeps the
-        # durable progress transaction from re-deriving the roster.
+        # The personal row owns the medal list and the health the battle left;
+        # mirroring both here keeps the durable progress transaction from
+        # re-deriving the roster to find them.
         'achievements': list(personal['achievements']),
+        'health': personal['health'],
+        # What the account banked once its own multipliers were applied.
+        # ``None`` means nothing multiplied it, which is what every receipt
+        # written before the multiplier existed says.
+        'awarded': awarded,
+        # By the shell's index in the gun's own shot order: only the client
+        # can turn that into a shell, and only the client owns its price.
+        'shells_fired': shells_fired,
+        # Consumables come by compact descriptor, which the client does send
+        # with the mounted equipment.
+        'equipment_used': equipment_used,
         'public_results': public_results,
         'interactions': interactions,
     }
@@ -395,7 +439,12 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         import battle_results_shared as packers
     counts = achievement_counts if isinstance(achievement_counts, dict) else {}
     stats = receipt['stats']
-    rewards = receipt['rewards']
+    # #1513's own results model separates what the battle was worth from what
+    # the account was given: ``originalXP`` is the battle, ``xp`` is the
+    # award.  A save's multiplier and a premium vehicle's credit bonus are
+    # exactly that difference, so the screen shows both.
+    original = receipt['rewards']
+    rewards = receipt.get('awarded') or original
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
@@ -421,15 +470,15 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'deathReason': receipt['death_reason'],
         'killerID': 0,
         'credits': rewards['credits'],
-        'originalCredits': rewards['credits'],
+        'originalCredits': original['credits'],
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
         'xp': rewards['xp'],
-        'originalXP': rewards['xp'],
+        'originalXP': original['xp'],
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
         'freeXP': rewards['free_xp'],
-        'originalFreeXP': rewards['free_xp'],
+        'originalFreeXP': original['free_xp'],
         'factualFreeXP': rewards['free_xp'],
         'subtotalFreeXP': rewards['free_xp'],
         'gold': 0,
@@ -593,9 +642,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
 class PostBattleStore(object):
     """Apply each LAN receipt once and retain it until the native 1501 ack."""
 
-    def __init__(self, path=STATE_PATH):
-        self._path = (port_config.migrate_legacy_user_file(
-            path, LEGACY_STATE_PATH) if path == STATE_PATH else path)
+    def __init__(self, path=port_config.ACTIVE_SAVE_SLOT):
+        if path is port_config.ACTIVE_SAVE_SLOT:
+            path = port_config.save_slot_state_path(STATE_FILE_NAME)
+        self._path = path
         self._account_key = uuid.uuid4().hex
         self._pending = {}
         self._history = []
@@ -651,11 +701,17 @@ class PostBattleStore(object):
         policy = {}
         if self._progress_applier is not None:
             policy = self._progress_applier(receipt) or {}
+        awarded = policy.get('awarded')
+        if isinstance(awarded, dict):
+            receipt['awarded'] = dict(
+                (name, max(0, _int(awarded.get(name))))
+                for name in ('credits', 'xp', 'free_xp'))
+        banked = receipt['awarded'] or receipt['rewards']
         previous = self._snapshot()
         self._pending[arena_key] = receipt
         self._apply_progress(
             receipt, vehicle_xp=(0 if policy.get('accelerated') else
-                                 receipt['rewards']['xp']))
+                                 banked['xp']))
         try:
             self._save()
         except Exception:
@@ -760,7 +816,10 @@ class PostBattleStore(object):
                 }
 
     def _apply_progress(self, receipt, vehicle_xp=None):
-        rewards = receipt['rewards']
+        # The lifetime counters count what the account was given, which is
+        # what its multipliers made of the battle rather than what the server
+        # reported it did.
+        rewards = receipt.get('awarded') or receipt['rewards']
         stats = receipt['stats']
         progress = self._progress
         progress['credits'] += rewards['credits']
