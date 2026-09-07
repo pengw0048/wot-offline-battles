@@ -5979,6 +5979,13 @@ class BattleState:
         critical = state.get("critical")
         if critical:
             critical = _critical_state(_critical_payload(critical))
+            # Bot ledgers identify devices and crew by name. Descriptor crew
+            # order can differ from the compact row's mask order without any
+            # combat change. Normalize only this comparison, preserving the
+            # ordered descriptor/profile payloads used by other consumers.
+            critical["devices"].sort(key=lambda record: record["name"])
+            if "crew_roster" in critical:
+                critical["crew_roster"] = sorted(critical["crew_roster"])
             if _critical_discrete_state(critical) == (
                     (), (), (), False, False):
                 critical = None
