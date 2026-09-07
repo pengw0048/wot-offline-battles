@@ -253,7 +253,8 @@ class BootstrapLifecycleTests(unittest.TestCase):
         'usa:A01_T1_Cunningham': (1, 7),
     }
 
-    def _load(self, save_mode=None, starters=None, earnings_percent=None):
+    def _load(self, save_mode=None, starters=None, earnings_percent=None,
+              initial_wallet=None):
         events = []
         callbacks = _Callbacks()
         spaces = types.SimpleNamespace(
@@ -285,6 +286,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         # beside the mode, and the client reads both once at startup.
         config_module.save_slot_earnings_percent = lambda: (
             100 if earnings_percent is None else earnings_percent)
+        config_module.save_slot_initial_wallet = lambda: dict(initial_wallet or {})
         config_module.ACTIVE_SAVE_SLOT = object()
         # No inbox file exists unless a test writes one, so the launcher
         # delivery path is a no-op for every other test.
@@ -1135,6 +1137,11 @@ class BootstrapLifecycleTests(unittest.TestCase):
             starters=self.STARTER_NAMES)
 
         self._assert_depot_covers_the_garage(snapshot)
+
+    def test_the_first_garage_uses_the_launchers_initial_wallet(self):
+        snapshot = self._with_saved_garage(
+            (), initial_wallet={'credits': 23, 'gold': 45, 'freeXP': 67})
+        self.assertEqual({'credits': 23, 'gold': 45, 'freeXP': 67}, snapshot['wallet'])
 
     def test_the_garage_reads_the_multiplier_the_launcher_wrote(self):
         """It describes the account, like the save type, not the garage."""

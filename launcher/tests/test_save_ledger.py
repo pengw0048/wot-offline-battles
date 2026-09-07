@@ -43,6 +43,18 @@ class SaveLedgerTest(unittest.TestCase):
         with io.open(self.path, "r", encoding="utf-8") as stream:
             return json.load(stream)
 
+    def test_starting_balances_match_the_client_for_both_save_modes(self):
+        from pathlib import Path
+        import sys
+        client = Path(__file__).resolve().parents[2] / 'src/res/scripts/client'
+        sys.path.insert(0, str(client))
+        self.addCleanup(sys.path.remove, str(client))
+        from gui.mods.offline_lan_0922.account_rpc import economy
+        self.assertEqual(economy.CAREER_WALLET,
+                         save_ledger.DEFAULT_BALANCES[save_slots.MODE_NEW_ACCOUNT])
+        self.assertEqual(economy.SANDBOX_WALLET,
+                         save_ledger.DEFAULT_BALANCES[save_slots.MODE_UNLOCKED])
+
     def test_balances_are_read_from_the_saved_ledger(self):
         self._write(_state(credits_amount=250000, gold=1500, free_xp=90))
 
@@ -50,16 +62,18 @@ class SaveLedgerTest(unittest.TestCase):
             {"credits": 250000, "gold": 1500, "freeXP": 90},
             save_ledger.read_balances(self.slot, root=self.root))
 
-    def test_a_save_that_never_ran_reports_no_balances_rather_than_zero(self):
-        """The client decides what a save starts with, and has not yet."""
-        self.assertIsNone(save_ledger.read_balances(self.slot, root=self.root))
+    def test_a_save_that_never_ran_reports_initial_balances(self):
+        """A new save exposes the same initial wallet the client will use."""
+        self.assertEqual(save_ledger.DEFAULT_BALANCES[save_slots.MODE_UNLOCKED],
+                         save_ledger.read_balances(self.slot, root=self.root))
 
-    def test_a_save_written_before_the_ledger_reports_no_balances(self):
+    def test_a_save_written_before_the_ledger_reports_initial_balances(self):
         state = _state()
         del state["ledger"]
         self._write(state)
 
-        self.assertIsNone(save_ledger.read_balances(self.slot, root=self.root))
+        self.assertEqual(save_ledger.DEFAULT_BALANCES[save_slots.MODE_UNLOCKED],
+                         save_ledger.read_balances(self.slot, root=self.root))
 
     def test_only_the_balances_change_and_the_garage_is_passed_through(self):
         self._write(_state())
@@ -145,14 +159,29 @@ class SaveLedgerTest(unittest.TestCase):
 
         self.assertEqual(0, self._read()["ledger"]["wallet"]["gold"])
 
-    def test_a_save_that_never_ran_cannot_be_given_a_balance(self):
-        """There is nothing to edit until the client has written the save."""
-        with self.assertRaises(save_ledger.SaveLedgerError):
-            save_ledger.write_balances(
-                self.slot, {"gold": 1}, root=self.root,
-                is_running=lambda: False)
-
+    def test_initial_balances_are_stored_without_inventing_a_garage(self):
+        save_ledger.write_balances(
+            self.slot, {"gold": 12500}, root=self.root,
+            is_running=lambda: False)
+        self.assertEqual(12500, save_ledger.read_balances(
+            self.slot, root=self.root)["gold"])
         self.assertFalse(os.path.exists(self.path))
+        with open(os.path.join(self.directory, 'save.json')) as stream:
+            self.assertEqual(12500, json.load(stream)['initial_wallet']['gold'])
+        self._write(_state(gold=9))
+        self.assertEqual(9, save_ledger.read_balances(
+            self.slot, root=self.root)["gold"])
+
+    def test_default_legacy_wallet_is_editable_before_client_migration(self):
+        legacy = os.path.join(self.root, 'garage_state.json')
+        with open(legacy, 'w') as stream:
+            json.dump(_state(gold=15), stream)
+        root = os.path.join(self.root, 'saves')
+        save_ledger.write_balances('default', {'gold': 21}, root=root,
+                                  is_running=lambda: False)
+        with open(legacy) as stream:
+            self.assertEqual(21, json.load(stream)['ledger']['wallet']['gold'])
+        self.assertFalse(os.path.exists(os.path.join(root, 'default', 'garage_state.json')))
 
     def test_a_damaged_save_is_reported_rather_than_overwritten(self):
         with io.open(self.path, "w", encoding="utf-8") as stream:

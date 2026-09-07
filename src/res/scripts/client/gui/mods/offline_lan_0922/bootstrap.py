@@ -779,6 +779,8 @@ def _selected_vehicle(config, restore_saved=True):
             'nextInventoryID': len(records) + 1,
             'defaultVehicleSettings': default_settings,
         })
+        if restore_saved:
+            result['wallet'].update(port_config.save_slot_initial_wallet())
         if not career:
             # A sandbox has researched everything, so its tech tree is elite
             # by the same derived rule a career uses rather than by assertion.

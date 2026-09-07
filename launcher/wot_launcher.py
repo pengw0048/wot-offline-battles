@@ -140,7 +140,13 @@ _CHINESE = {
     "Gold": "金币",
     "Free experience": "自由经验",
     "Apply": "应用",
+    "Edit this save's balances and battle earnings. Before the first "
+    "game, these are its starting funds. Close the game before editing.":
+        "设置此存档的余额和战斗收益。首次进入游戏前，这些数值就是初始资金；修改前请关闭游戏。",
     "Apply balances": "应用余额",
+    "Customize save...": "自定义存档…",
+    "Customize save: %s": "自定义存档：%s",
+    "Close": "关闭",
     "Earnings multiplier": "收益倍数",
     "The earnings multiplier must be a number.": "收益倍数必须是数字。",
     "The earnings multiplier must be between %s and %s.":
@@ -628,14 +634,24 @@ class LauncherWindow(object):
         self.tools_tabs = self._ttk.Notebook(frame)
         self.tools_tabs.grid(row=3, column=0, sticky="we", pady=(0, 8))
         self.save_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
-        self.account_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
-        self.shop_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.save_dialog = tk.Toplevel(self.root)
+        self.save_dialog.withdraw()
+        self.save_dialog.transient(self.root)
+        self.save_dialog.protocol("WM_DELETE_WINDOW", self._close_save_dialog)
+        self.account_panel = tk.LabelFrame(self.save_dialog, padx=10, pady=10)
+        self.account_panel.pack(fill="x", padx=12, pady=(12, 6))
+        self.shop_panel = tk.LabelFrame(self.save_dialog, padx=10, pady=10)
+        self.shop_panel.pack(fill="x", padx=12, pady=6)
+        self.save_dialog_feedback = tk.Label(
+            self.save_dialog, text="", anchor="w", justify="left", wraplength=620)
+        self.save_dialog_feedback.pack(fill="x", padx=12, pady=6)
+        self.close_save_dialog_button = tk.Button(
+            self.save_dialog, text="", command=self._close_save_dialog)
+        self.close_save_dialog_button.pack(anchor="e", padx=12, pady=(0, 12))
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.tools_tabs.add(self.save_panel, text="")
-        self.tools_tabs.add(self.account_panel, text="")
-        self.tools_tabs.add(self.shop_panel, text="")
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
@@ -658,6 +674,9 @@ class LauncherWindow(object):
         save_actions = tk.Frame(self.save_panel)
         save_actions.grid(
             row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.customize_save_button = tk.Button(
+            save_actions, text="", command=self._open_save_dialog)
+        self.customize_save_button.pack(side="left", fill="x", expand=True)
         self.new_save_slot_button = tk.Button(
             save_actions, text="", command=self._new_save_slot)
         self.new_save_slot_button.pack(side="left", fill="x", expand=True)
@@ -912,6 +931,8 @@ class LauncherWindow(object):
             "a LAN address shown in the log."))
         self.tools_tabs.tab(self.save_panel, text=self._t("Saves"))
         self.save_slot_label.config(text=self._t("Save"))
+        self.customize_save_button.config(text=self._t("Customize save..."))
+        self.close_save_dialog_button.config(text=self._t("Close"))
         self.new_save_slot_button.config(text=self._t("New save..."))
         self.rename_save_slot_button.config(text=self._t("Rename save..."))
         self.delete_save_slot_button.config(text=self._t("Delete save..."))
@@ -919,7 +940,7 @@ class LauncherWindow(object):
             "Each save keeps its own garage, crew, account settings and "
             "battle results. The selected save is the one the game starts "
             "with."))
-        self.tools_tabs.tab(self.account_panel, text=self._t("Account"))
+        self.account_panel.config(text=self._t("Account"))
         for name, label in self.balance_labels.items():
             label.config(text=self._t(_BALANCE_LABELS[name]))
         self.apply_balances_button.config(text=self._t("Apply balances"))
@@ -927,10 +948,9 @@ class LauncherWindow(object):
         self.earnings_label.config(text=self._t("Earnings multiplier"))
         self.apply_earnings_button.config(text=self._t("Apply"))
         self.account_help_label.config(text=self._t(
-            "These are the selected save's balances. Gold cannot be earned "
-            "offline, so this is where a save gets it. Close the game before "
-            "changing them."))
-        self.tools_tabs.tab(self.shop_panel, text=self._t("Shop"))
+            "Edit this save's balances and battle earnings. Before the first "
+            "game, these are its starting funds. Close the game before editing."))
+        self.shop_panel.config(text=self._t("Shop"))
         self.gold_vehicle_label.config(text=self._t("Gold vehicle"))
         self.buy_gold_vehicle_button.config(text=self._t("Buy vehicle"))
         self.refresh_gold_shop_button.config(text=self._t("Reload"))
@@ -1235,12 +1255,27 @@ class LauncherWindow(object):
         return simpledialog.askstring(
             self._t(title), self._t("Save name:"), initialvalue=current)
 
+    def _open_save_dialog(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        self._refresh_save_slots()
+        self.save_dialog.title(self._t("Customize save: %s") % self.save_slot.get())
+        self.save_dialog_feedback.config(text="")
+        self.save_dialog.deiconify()
+        self.save_dialog.grab_set()
+        self.save_dialog.lift()
+        return True
+
+    def _close_save_dialog(self):
+        self.save_dialog.grab_release()
+        self.save_dialog.withdraw()
+
     def _refresh_balances(self, status=None):
         """Show the selected save's balances, or say why there are none.
 
-        A save that has never been started has no balances yet: the client
-        writes them the first time it builds that save's garage, from the
-        account type the save was created as.
+        Before the first game these are the save's initial balances. Once a
+        garage exists the same controls edit its actual persisted wallet.
         """
         game_root = (status or {}).get("path") or self.game_root.get().strip()
         try:
@@ -1312,7 +1347,8 @@ class LauncherWindow(object):
             self._log("The earnings multiplier could not be saved: %s" % error)
             self._refresh_earnings()
             return False
-        self._refresh_save_slots()
+        self._save_slot_records = save_slots.list_slots(game_root or None)
+        self._refresh_earnings()
         self._log("Earnings multiplier saved: %sx"
                   % self._earnings_text(percent))
         return True
@@ -1400,8 +1436,10 @@ class LauncherWindow(object):
         # gold_shop.unnamed_vehicles.  Say so where the offers are, rather
         # than only when a purchase is refused.
         try:
-            unreadable = bool(gold_shop.unnamed_vehicles(
-                self._save_slot_id, game_root or None))
+            unreadable = (not gold_shop._garage_records(
+                self._save_slot_id, game_root or None) or
+                bool(gold_shop.unnamed_vehicles(
+                    self._save_slot_id, game_root or None)))
         except (gold_shop.GoldShopError, save_slots.SaveSlotError):
             unreadable = False
         self.shop_help_label.config(
@@ -1656,6 +1694,7 @@ class LauncherWindow(object):
             self.log_view.insert("end", message.rstrip() + "\n")
             self.log_view.see("end")
             self.log_view.config(state="disabled")
+            self.save_dialog_feedback.config(text=self._t(message.rstrip()))
 
         self.root.after(0, append)
 

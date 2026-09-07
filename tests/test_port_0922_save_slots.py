@@ -29,6 +29,18 @@ class SaveSlotConfigTests(unittest.TestCase):
             self.config.set_active_save_slot,
             self.config.DEFAULT_SAVE_SLOT)
 
+    def test_initial_wallet_is_read_per_save_with_native_integer_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slot_dir = self.config.save_slot_dir('career', directory)
+            os.makedirs(slot_dir)
+            with open(os.path.join(slot_dir, 'save.json'), 'w') as stream:
+                json.dump({'initial_wallet': {
+                    'credits': 1234, 'gold': 12500, 'freeXP': 10 ** 20}}, stream)
+            self.assertEqual({'credits': 1234, 'gold': 12500,
+                              'freeXP': 2 ** 31 - 1},
+                             self.config.save_slot_initial_wallet('career', directory))
+            self.assertEqual({}, self.config.save_slot_initial_wallet('default', directory))
+
     def test_a_slot_id_may_not_escape_the_saves_directory(self):
         for value in ('', '.', '..', 'a/b', 'a\\b', '-lead', '_lead',
                       'x' * 65, None, 3):

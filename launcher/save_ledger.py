@@ -4,7 +4,9 @@ The client keeps a save's credits, gold and free experience in the ``ledger``
 section of its ``garage_state.json``.  Gold is the one currency an offline
 account can never earn -- there is no store to buy it from and no battle that
 pays it -- so the Launcher is where a player decides how much of it a save has,
-and the same panel shows the credits and free experience the save earned.
+and the same panel edits the credits and free experience the save earned.
+Before a garage exists, initial balances live in the save metadata; the client
+uses them when it creates the first garage, without fabricated vehicle data.
 
 Only one process may own that file at a time.  The client writes it at every
 accepted garage change, so every edit here refuses while a game is running,
@@ -30,11 +32,28 @@ CURRENCIES = ("credits", "gold", "freeXP")
 # The client refuses to publish a balance it cannot represent, and #1513's own
 # account fields are 32-bit signed.
 MAX_BALANCE = 2 ** 31 - 1
+INITIAL_WALLET_KEY = "initial_wallet"
+DEFAULT_BALANCES = {
+    save_slots.MODE_NEW_ACCOUNT: {"credits": 100000, "gold": 0, "freeXP": 0},
+    save_slots.MODE_UNLOCKED: {
+        "credits": 100000000, "gold": 1000000, "freeXP": 100000000},
+}
 
 
 def ledger_path(slot_id, game_root=None, environment=None, root=None):
     directory = save_slots.slot_dir(slot_id, game_root, environment, root)
-    return os.path.join(directory, LEDGER_FILE_NAME)
+    path = os.path.join(directory, LEDGER_FILE_NAME)
+    if slot_id == save_slots.DEFAULT_SLOT_ID and not os.path.isfile(path):
+        # Match the client's default-slot migration order before its first run.
+        legacy_dirs = [os.path.dirname(os.path.dirname(directory))]
+        if game_root is not None and root is None:
+            legacy_dirs.append(os.path.join(
+                game_root, *save_slots.LEGACY_RELATIVE.split("/")))
+        for legacy in legacy_dirs:
+            candidate = os.path.join(legacy, LEDGER_FILE_NAME)
+            if os.path.isfile(candidate):
+                return candidate
+    return path
 
 
 def _read_state(path):
@@ -57,28 +76,29 @@ def _balance(value):
         return 0
 
 
-def read_balances(slot_id, game_root=None, environment=None, root=None):
-    """Return one save's balances, or None if it has never been started.
+def _initial_balances(slot_id, game_root=None, environment=None, root=None):
+    path = save_slots.metadata_path(slot_id, game_root, environment, root)
+    metadata = _read_state(path) or {}
+    mode = metadata.get("mode", save_slots.MODE_UNLOCKED)
+    balances = dict(DEFAULT_BALANCES.get(mode, DEFAULT_BALANCES[save_slots.MODE_UNLOCKED]))
+    initial = metadata.get(INITIAL_WALLET_KEY)
+    if isinstance(initial, dict):
+        balances.update((name, _balance(initial[name]))
+                        for name in CURRENCIES if name in initial)
+    return balances
 
-    A save that has not run yet has no state file at all.  That is not an
-    error and not a zero balance: the client decides what a new save starts
-    with, from the account type it was created as, and it has not done so yet.
-    """
+
+def read_balances(slot_id, game_root=None, environment=None, root=None):
+    """Read the earned wallet, or the editable initial wallet before startup."""
     try:
         path = ledger_path(slot_id, game_root, environment, root)
     except save_slots.SaveSlotError:
-        # Without APPDATA or a game folder there is no save to read, which is
-        # the same answer as a save that has never been started.
         return None
     state = _read_state(path)
-    if state is None:
-        return None
-    ledger = state.get("ledger")
+    ledger = state.get("ledger") if state else None
     wallet = ledger.get("wallet") if isinstance(ledger, dict) else None
     if not isinstance(wallet, dict):
-        # A save written before the ledger existed keeps its garage; the
-        # client seeds the balances the next time it starts.
-        return None
+        return _initial_balances(slot_id, game_root, environment, root)
     return dict((name, _balance(wallet.get(name))) for name in CURRENCIES)
 
 
@@ -86,9 +106,8 @@ def write_balances(slot_id, balances, game_root=None, environment=None,
                    root=None, is_running=None):
     """Replace one save's balances, keeping everything else it holds.
 
-    Only the three balance fields are rewritten.  The garage, the crew, the
-    research and the battle receipts in the same file belong to the client and
-    are passed through untouched.
+    Existing garages keep their crew, research and receipts untouched.
+    A save without a garage stores initial balances in save.json instead.
     """
     if is_running is None:
         try:
@@ -106,16 +125,22 @@ def write_balances(slot_id, balances, game_root=None, environment=None,
         raise SaveLedgerError(str(error))
     state = _read_state(path)
     if state is None:
-        raise SaveLedgerError(
-            "Start this save in the game once before changing its balances.")
-    ledger = state.get("ledger")
+        updated = _initial_balances(slot_id, game_root, environment, root)
+        updated.update((name, _balance(balances[name]))
+                       for name in CURRENCIES if name in balances)
+        metadata_path = save_slots.metadata_path(
+            slot_id, game_root, environment, root)
+        metadata = _read_state(metadata_path) or {}
+        metadata[INITIAL_WALLET_KEY] = updated
+        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+        _write_state(metadata_path, metadata)
+        return updated
+    ledger = state.setdefault("ledger", {})
     if not isinstance(ledger, dict):
-        raise SaveLedgerError(
-            "Start this save in the game once before changing its balances.")
+        raise SaveLedgerError("The save is not in the expected format.")
     wallet = ledger.get("wallet")
     if not isinstance(wallet, dict):
-        raise SaveLedgerError(
-            "Start this save in the game once before changing its balances.")
+        wallet = _initial_balances(slot_id, game_root, environment, root)
     updated = dict(wallet)
     for name in CURRENCIES:
         if name in balances:

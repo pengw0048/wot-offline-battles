@@ -479,6 +479,28 @@ def save_slot_mode(slot=None, user_data_dir=None):
     return mode if mode in SAVE_MODES else SAVE_MODE_UNLOCKED
 
 
+def save_slot_initial_wallet(slot=None, user_data_dir=None):
+    """Read launcher-selected starting balances; a saved ledger takes priority."""
+    path = os.path.join(
+        save_slot_dir(slot, user_data_dir), SAVE_METADATA_FILE_NAME)
+    try:
+        with open(path, 'rb') as stream:
+            value = json.load(stream)
+        wallet = value.get('initial_wallet') if isinstance(value, dict) else None
+    except (IOError, OSError, TypeError, ValueError):
+        return {}
+    if not isinstance(wallet, dict):
+        return {}
+    result = {}
+    for name in ('credits', 'gold', 'freeXP'):
+        if name in wallet:
+            try:
+                result[name] = max(0, min(2 ** 31 - 1, int(wallet[name])))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return result
+
+
 def save_slot_earnings_percent(slot=None, user_data_dir=None):
     """Return what the active save multiplies its battle earnings by.
 

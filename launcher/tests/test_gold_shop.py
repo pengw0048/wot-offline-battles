@@ -35,7 +35,8 @@ class GoldShopTest(unittest.TestCase):
     def _write_state(self, gold=0, vehicles=None):
         state = {
             "schema": 5,
-            "vehicles": vehicles if vehicles is not None else {},
+            "vehicles": vehicles if vehicles is not None else {
+                "1": {"name": "ussr:R11_MS-1"}},
             "ledger": {"wallet": {"credits": 0, "gold": gold, "freeXP": 0}},
         }
         path = os.path.join(self.directory, "garage_state.json")

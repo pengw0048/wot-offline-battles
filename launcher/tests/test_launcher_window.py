@@ -128,8 +128,8 @@ class _StringVar(object):
 
 
 class _Root(_Widget):
-    def __init__(self):
-        _Widget.__init__(self)
+    def __init__(self, master=None):
+        _Widget.__init__(self, master)
         self.destroyed = False
         self.mainloop_called = False
 
@@ -145,12 +145,31 @@ class _Root(_Widget):
     def destroy(self):
         self.destroyed = True
 
+    def withdraw(self):
+        self.options['visible'] = False
+
+    def deiconify(self):
+        self.options['visible'] = True
+
+    def transient(self, parent):
+        self.options['transient'] = parent
+
+    def grab_set(self):
+        self.options['grabbed'] = True
+
+    def grab_release(self):
+        self.options['grabbed'] = False
+
+    def lift(self):
+        pass
+
     def mainloop(self):
         self.mainloop_called = True
 
 
 class _FakeTk(object):
     Tk = _Root
+    Toplevel = _Root
     Frame = _Widget
     LabelFrame = _Widget
     Label = _Widget
@@ -1263,6 +1282,18 @@ class WindowTest(unittest.TestCase):
             }, stream)
         return path
 
+    def test_customize_opens_a_modal_for_the_selected_save(self):
+        self._saves_root()
+        self.assertNotIn(self.window.account_panel, self.window.tools_tabs.tabs)
+        self.assertNotIn(self.window.shop_panel, self.window.tools_tabs.tabs)
+        self.assertEqual(self.window.save_dialog, self.window.account_panel.master)
+        self.assertTrue(self.window._open_save_dialog())
+        self.assertTrue(self.window.save_dialog.options['visible'])
+        self.assertTrue(self.window.save_dialog.options['grabbed'])
+        self.window._close_save_dialog()
+        self.assertFalse(self.window.save_dialog.options['visible'])
+        self.assertFalse(self.window.save_dialog.options['grabbed'])
+
     def test_the_panel_shows_the_selected_saves_balances(self):
         saves_root = self._saves_root()
         self._write_ledger(
@@ -1285,9 +1316,9 @@ class WindowTest(unittest.TestCase):
         self.assertEqual("2.5", self.window.earnings_entry.get())
 
     def test_the_multiplier_can_be_set_before_the_save_has_ever_run(self):
-        """Unlike the balances, it is the launcher's own record."""
+        """Earnings and initial balances are configurable before startup."""
         self._saves_root()
-        self.assertFalse(self.window._refresh_balances())
+        self.assertTrue(self.window._refresh_balances())
 
         self.window.earnings_entry.delete(0, "end")
         self.window.earnings_entry.insert(0, "3")
@@ -1328,16 +1359,16 @@ class WindowTest(unittest.TestCase):
                 wot_launcher.save_slots.DEFAULT_SLOT_ID,
                 root=saves_root)["earnings_percent"])
 
-    def test_a_save_that_never_ran_cannot_be_edited_yet(self):
-        """The client writes a save's first balances, not the launcher."""
+    def test_a_save_that_never_ran_has_editable_initial_balances(self):
+        """New saves expose editable starting funds before a garage exists."""
         self._saves_root()
 
-        self.assertFalse(self.window._refresh_balances())
+        self.assertTrue(self.window._refresh_balances())
 
         self.assertEqual(
-            "disabled", self.window.apply_balances_button.cget("state"))
+            "normal", self.window.apply_balances_button.cget("state"))
         self.assertEqual(
-            "disabled", self.window.balance_entries["gold"].cget("state"))
+            "normal", self.window.balance_entries["gold"].cget("state"))
 
     def test_applying_a_balance_writes_it_into_the_save(self):
         saves_root = self._saves_root()

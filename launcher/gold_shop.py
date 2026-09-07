@@ -66,9 +66,7 @@ def pending_vehicles(slot_id, game_root=None, environment=None, root=None):
 def _garage_records(slot_id, game_root=None, environment=None, root=None):
     """Return this save's garage records, empty when it has no garage yet."""
     try:
-        path = os.path.join(
-            save_slots.slot_dir(slot_id, game_root, environment, root),
-            LEDGER_FILE_NAME)
+        path = save_ledger.ledger_path(slot_id, game_root, environment, root)
     except save_slots.SaveSlotError:
         return []
     value = _read_json(path)
@@ -116,7 +114,8 @@ def list_offers(slot_id, game_root, environment=None, root=None,
     pending = set(pending_vehicles(slot_id, game_root, environment, root))
     balances = save_ledger.read_balances(
         slot_id, game_root, environment, root)
-    gold = balances["gold"] if balances else 0
+    gold = (balances["gold"] if balances and
+            _garage_records(slot_id, game_root, environment, root) else 0)
     offers = []
     if catalogue is None:
         catalogue = vehicle_overlays.list_gold_vehicles(game_root)
@@ -152,6 +151,9 @@ def buy_vehicle(slot_id, name, game_root, environment=None, root=None,
     offer = offers.get(str(name))
     if offer is None:
         raise GoldShopError("This client does not sell %s." % (name,))
+    if not _garage_records(slot_id, game_root, environment, root):
+        raise GoldShopError(
+            "Start this save in the game once before buying a vehicle.")
     if unnamed_vehicles(slot_id, game_root, environment, root):
         raise GoldShopError(
             "Start the game once on this save so it can list the vehicles it "
