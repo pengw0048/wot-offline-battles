@@ -1269,6 +1269,19 @@ with a 100-battle damage percentile, which is why it is used as a ratio rather
 than an absolute level, and retail publishes no mark data below Tier V, so the
 four lowest tiers hold the Tier V value instead of extrapolating.
 
+The premium-vehicle bonus sits outside the badge. `premiumVehicleXPFactor`,
+which 200 shipped vehicles carry, is applied to the banked XP and Free XP and
+never to the number the mastery badge ranks: `originalXP` stays the bare battle
+XP the badge reads, while `xp`, `factualXP` and `subtotalXP` carry the bonus.
+The results window learns it the way retail does rather than as an unexplained
+difference - `ValueReplay.addMultipliedValue` records
+`record += round(original * premiumVehicleXPFactor100 / 100)` in the XP and
+Free XP chains, which is exactly the step
+`gui.battle_results.components.details` renders its own `premiumVehicleXP` row
+from, and the chain writes the total back through the connector so the packed
+value and the breakdown agree. Crew training stays on the bare battle XP with
+only `crewXpFactor` applied.
+
 Tested against the captured mastery thresholds, a winning battle with two
 kills now needs 4370 damage for an Ace on a Tier X where the old policy needed
 2060 against a three-mark average of 3948, and Tier VIII is unchanged by

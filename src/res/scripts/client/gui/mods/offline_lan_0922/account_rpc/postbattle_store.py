@@ -340,6 +340,35 @@ def _badge_vehicle_id(type_name):
         return 0
 
 
+def _premium_bonus(value, factor_100):
+    """Return the premium-vehicle bonus for one amount.
+
+    ``ValueReplay.__opAddCoeff`` computes ``round(value * factor100 / 100)``,
+    so the same rounding is used here and the packed total matches the total
+    the chain writes back.
+    """
+    return int(round(max(0, _int(value)) * max(0, _int(factor_100)) / 100.0))
+
+
+def _premium_vehicle_xp_factor_100(type_name):
+    """Return the vehicle's own premium XP bonus in hundredths, or zero.
+
+    ``premiumVehicleXPFactor`` is exact #1513 data on 200 of the shipped
+    vehicles and is the retail premium-vehicle XP bonus.  It is deliberately
+    *outside* the number the mastery badge reads: the badge ranks the bare
+    battle XP, and this bonus is added on top of what the account banks, which
+    is how retail orders the two.
+    """
+    try:
+        from items import vehicles
+        vehicle_type = vehicles.getVehicleType(
+            _vehicle_type_compact_descr(type_name))
+        factor = float(getattr(vehicle_type, 'premiumVehicleXPFactor', 0.0))
+    except Exception:
+        return 0
+    return max(0, int(round(factor * 100)))
+
+
 def _arena_type_id(geometry_name):
     import ArenaType
     items = getattr(ArenaType.g_cache, 'iteritems', ArenaType.g_cache.items)
@@ -351,12 +380,24 @@ def _arena_type_id(geometry_name):
 
 
 def _add_value_replays(packers, vehicle, replay_types=None):
-    """Populate the non-empty replay chains consumed by the #1513 UI."""
+    """Populate the non-empty replay chains consumed by the #1513 UI.
+
+    The premium-vehicle bonus is one step in the XP and Free XP chains rather
+    than a bare difference between the original and the total:
+    ``ValueReplay.addMultipliedValue`` records
+    ``record += round(original * premiumVehicleXPFactor100 / 100)``, and
+    ``gui.battle_results.components.details`` renders its own
+    ``premiumVehicleXP`` row from exactly that step.  The chain also writes the
+    total back through the connector, so the packed ``xp`` stays consistent
+    with the breakdown the player sees.
+    """
     if replay_types is None:
         from ValueReplay import ValueReplay, ValueReplayConnector
     else:
         ValueReplay, ValueReplayConnector = replay_types
     connector = ValueReplayConnector(packers.VEH_FULL_RESULTS, vehicle)
+    premium_factor_100 = max(0, _int(vehicle.get(
+        'premiumVehicleXPFactor100')))
     for record_name, start_name, result_name in (
             ('credits', 'originalCredits', 'creditsReplay'),
             ('xp', 'originalXP', 'xpReplay'),
@@ -365,6 +406,9 @@ def _add_value_replays(packers, vehicle, replay_types=None):
             ('crystal', 'originalCrystal', 'crystalReplay')):
         replay = ValueReplay(
             connector, recordName=record_name, startRecordName=start_name)
+        if premium_factor_100 and record_name in ('xp', 'freeXP'):
+            replay.addMultipliedValue(
+                start_name, 'premiumVehicleXPFactor100')
         vehicle[result_name] = replay.pack()
 
 
@@ -496,6 +540,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
+    premium_factor_100 = _premium_vehicle_xp_factor_100(receipt['vehicle'])
+    premium_xp = _premium_bonus(rewards['xp'], premium_factor_100)
+    premium_free_xp = _premium_bonus(
+        rewards['free_xp'], premium_factor_100)
     vehicle = {
         'accountDBID': account_dbid,
         'typeCompDescr': vehicle_type_cd,
@@ -521,14 +569,19 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'originalCredits': rewards['credits'],
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
-        'xp': rewards['xp'],
+        # ``originalXP`` is the bare battle XP the mastery badge ranks; the
+        # premium-vehicle bonus is added on top of the totals below and by the
+        # replay chain, never inside the number the badge reads.
+        'xp': rewards['xp'] + premium_xp,
         'originalXP': rewards['xp'],
-        'factualXP': rewards['xp'],
-        'subtotalXP': rewards['xp'],
-        'freeXP': rewards['free_xp'],
+        'factualXP': rewards['xp'] + premium_xp,
+        'subtotalXP': rewards['xp'] + premium_xp,
+        'premiumVehicleXP': premium_xp,
+        'premiumVehicleXPFactor100': premium_factor_100,
+        'freeXP': rewards['free_xp'] + premium_free_xp,
         'originalFreeXP': rewards['free_xp'],
-        'factualFreeXP': rewards['free_xp'],
-        'subtotalFreeXP': rewards['free_xp'],
+        'factualFreeXP': rewards['free_xp'] + premium_free_xp,
+        'subtotalFreeXP': rewards['free_xp'] + premium_free_xp,
         'gold': 0,
         'originalGold': 0,
         'crystal': 0,
@@ -757,9 +810,14 @@ class PostBattleStore(object):
             policy = self._progress_applier(receipt) or {}
         previous = self._snapshot()
         self._pending[arena_key] = receipt
+        # The premium-vehicle bonus is banked with the battle XP; only the
+        # bare number stays the badge's input.
+        banked_xp = receipt['rewards']['xp'] + _premium_bonus(
+            receipt['rewards']['xp'],
+            _premium_vehicle_xp_factor_100(receipt['vehicle']))
         self._apply_progress(
             receipt, vehicle_xp=(0 if policy.get('accelerated') else
-                                 receipt['rewards']['xp']))
+                                 banked_xp))
         try:
             self._save()
         except Exception:
@@ -882,7 +940,9 @@ class PostBattleStore(object):
         stats = receipt['stats']
         progress = self._progress
         progress['credits'] += rewards['credits']
-        progress['freeXP'] += rewards['free_xp']
+        progress['freeXP'] += rewards['free_xp'] + _premium_bonus(
+            rewards['free_xp'],
+            _premium_vehicle_xp_factor_100(receipt['vehicle']))
         progress['battles'] += 1
         progress['wins'] += int(receipt['winner'] == receipt['team'])
         progress['losses'] = int(progress.get('losses', 0)) + int(

@@ -65,10 +65,21 @@ class _ReplayConnector(object):
 
 
 class _Replay(object):
+    steps = []
+
     def __init__(self, connector, recordName=None, startRecordName=None):
         self.connector = connector
         self.record_name = recordName
         self.start_name = startRecordName
+
+    def addMultipliedValue(self, other, coeff):
+        # The stock chain writes the total back through the connector.
+        self.connector.values[self.record_name] = (
+            self.connector.values[other] +
+            int(round(self.connector.values[other] *
+                      self.connector.values[coeff] / 100.0)))
+        _Replay.steps.append((self.record_name, other, coeff))
+        return self
 
     def pack(self):
         return ('SET:%s:%s' % (

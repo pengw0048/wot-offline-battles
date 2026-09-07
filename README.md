@@ -136,6 +136,10 @@ whose profile changed after it started must be restarted first.
   published the coefficients, so those stay this build's declared values, but
   the tier relationship is measured from the captured retail tables rather
   than guessed.
+- A premium vehicle's own XP bonus and crew-training rate come from the
+  client's own `premiumVehicleXPFactor` and `crewXpFactor`. The XP bonus is
+  banked and shown in the results breakdown, but it never enters the number
+  the mastery badge ranks, which stays the bare battle XP.
 - Mastery badges and Marks of Excellence use the real bar. Wargaming computes
   both from the live player population, so `tools/bake_mastery_thresholds_0922.py`
   captures the published retail tables into `mastery_catalog.py`: base XP for

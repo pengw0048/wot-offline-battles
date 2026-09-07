@@ -10,6 +10,7 @@ silently.
 import json
 import sys
 import tempfile
+from unittest import mock
 from pathlib import Path
 import unittest
 
@@ -62,10 +63,21 @@ class _ReplayConnector(object):
 
 
 class _Replay(object):
+    steps = []
+
     def __init__(self, connector, recordName=None, startRecordName=None):
         self.connector = connector
         self.record_name = recordName
         self.start_name = startRecordName
+
+    def addMultipliedValue(self, other, coeff):
+        # The stock chain writes the total back through the connector.
+        self.connector.values[self.record_name] = (
+            self.connector.values[other] +
+            int(round(self.connector.values[other] *
+                      self.connector.values[coeff] / 100.0)))
+        _Replay.steps.append((self.record_name, other, coeff))
+        return self
 
     def pack(self):
         return b'replay'
@@ -300,6 +312,41 @@ class MasteryResultTests(unittest.TestCase):
             self.assertEqual(2, vehicle['battleNum'])
             self.assertNotIn((MARKS_DB_ID, 1), vehicle['dossierPopUps'])
 
+    def test_premium_vehicle_xp_rides_outside_the_badge_number(self):
+        """Retail ranks the bare battle XP; the bonus is added on top."""
+        third_class = mastery_catalog.MASTERY_XP[TYPE_59][0]
+        original_factor = postbattle_store._premium_vehicle_xp_factor_100
+        postbattle_store._premium_vehicle_xp_factor_100 = lambda unused: 50
+        self.addCleanup(setattr, postbattle_store,
+                        '_premium_vehicle_xp_factor_100', original_factor)
+        _Replay.steps = []
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            # One XP short of the third class on the bare number, but well
+            # past it once a 50 percent bonus is added.
+            receipt = _receipt(store.account_key, xp=third_class - 1)
+            self.assertTrue(store.accept(receipt))
+            vehicle = self._result(store, receipt)
+
+            self.assertEqual(0, vehicle['markOfMastery'])
+            self.assertEqual(third_class - 1, vehicle['originalXP'])
+            bonus = int(round((third_class - 1) * 0.5))
+            self.assertEqual(third_class - 1 + bonus, vehicle['xp'])
+            self.assertEqual(bonus, vehicle['premiumVehicleXP'])
+            self.assertEqual(50, vehicle['premiumVehicleXPFactor100'])
+            # The #1513 breakdown renders that bonus from the chain step.
+            self.assertIn(('xp', 'originalXP', 'premiumVehicleXPFactor100'),
+                          _Replay.steps)
+            self.assertIn(
+                ('freeXP', 'originalFreeXP', 'premiumVehicleXPFactor100'),
+                _Replay.steps)
+            # The account banks the bonus even though the badge ignored it.
+            progress = store.progress()
+            row = progress['vehicles']['china:Ch01_Type59']
+            self.assertEqual(third_class - 1 + bonus, row['xp'])
+            self.assertEqual(30 + int(round(30 * 0.5)), progress['freeXP'])
+
     def test_badge_state_persists_and_survives_a_restart(self):
         third_class = mastery_catalog.MASTERY_XP[TYPE_59][0]
         with tempfile.TemporaryDirectory() as folder:
@@ -362,6 +409,56 @@ class MasteryResultTests(unittest.TestCase):
             self.assertEqual(99999, row['xp'])
             self.assertEqual(0, row['markOfMastery'])
             self.assertEqual(0, row['marksOnGun'])
+
+
+class PremiumVehicleFactorTests(unittest.TestCase):
+    def _with_vehicles(self, module):
+        import types
+        items = types.ModuleType('items')
+        items.vehicles = module
+        return mock.patch.dict(
+            sys.modules, {'items': items, 'items.vehicles': module})
+
+    def test_the_factor_is_read_from_the_client_vehicle_type(self):
+        import types
+        module = types.ModuleType('items.vehicles')
+        module.getVehicleType = lambda compact_descr: types.SimpleNamespace(
+            premiumVehicleXPFactor=0.6)
+        original = postbattle_store._vehicle_type_compact_descr
+        postbattle_store._vehicle_type_compact_descr = lambda unused: TYPE_59
+        self.addCleanup(setattr, postbattle_store,
+                        '_vehicle_type_compact_descr', original)
+        with self._with_vehicles(module):
+            self.assertEqual(60, postbattle_store.
+                             _premium_vehicle_xp_factor_100('china:Ch01_Type59'))
+
+    def test_a_researchable_vehicle_and_an_unreadable_one_earn_no_bonus(self):
+        import types
+        module = types.ModuleType('items.vehicles')
+        module.getVehicleType = lambda compact_descr: types.SimpleNamespace(
+            premiumVehicleXPFactor=0.0)
+        original = postbattle_store._vehicle_type_compact_descr
+        postbattle_store._vehicle_type_compact_descr = lambda unused: 1
+        self.addCleanup(setattr, postbattle_store,
+                        '_vehicle_type_compact_descr', original)
+        with self._with_vehicles(module):
+            self.assertEqual(0, postbattle_store.
+                             _premium_vehicle_xp_factor_100('ussr:R04_T-34'))
+
+        def explode(unused_compact_descr):
+            raise KeyError('no such vehicle type')
+
+        module.getVehicleType = explode
+        with self._with_vehicles(module):
+            self.assertEqual(0, postbattle_store.
+                             _premium_vehicle_xp_factor_100('ussr:R04_T-34'))
+
+    def test_the_bonus_rounds_the_way_the_stock_replay_chain_rounds(self):
+        # ``ValueReplay.__opAddCoeff`` uses round(value * factor100 / 100).
+        self.assertEqual(0, postbattle_store._premium_bonus(700, 0))
+        self.assertEqual(70, postbattle_store._premium_bonus(700, 10))
+        self.assertEqual(4, postbattle_store._premium_bonus(75, 5))
+        self.assertEqual(0, postbattle_store._premium_bonus(-5, 50))
 
 
 class MasteryDossierTests(unittest.TestCase):
