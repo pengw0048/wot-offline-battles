@@ -18938,8 +18938,41 @@ class BattleRuntime(object):
             return bool(clearer(token))
         return False
 
+    def _support_column(self, x, z, hint_y, maximum_y=None):
+        """Return one layered support column below rejected upper faces."""
+        ray_end = self._vector((x, -1000.0, z))
+        ray_start = self._vector((x, float(hint_y) + 2.0, z))
+        ground_filter = self._ground_filter(x, z)
+        for unused_layer in range(4):
+            try:
+                hit = self._collide_down(
+                    ray_start, ray_end, ground_filter)
+            except Exception:
+                hit = None
+            if hit is None:
+                return None
+            candidate = float(hit[0].y)
+            above_limit = (maximum_y is not None and
+                           candidate > float(maximum_y))
+            ground_facing = True
+            try:
+                ground_facing = float(hit[1].y) > 0.5
+            except (AttributeError, IndexError, TypeError, ValueError):
+                # Engine-free compatibility probes historically supplied
+                # only the hit point. Production #1513 always supplies the
+                # normal, so this fallback cannot turn a live wall into
+                # support.
+                ground_facing = maximum_y is None
+            if not above_limit and ground_facing:
+                return candidate
+            next_y = candidate - 0.05
+            if next_y <= float(ray_end.y) + 0.01:
+                return None
+            ray_start = self._vector((x, next_y, z))
+        return None
+
     def _terrain_support(self, position, yaw, descriptor=None,
-                         maximum_y=None):
+                         maximum_y=None, follow_gap=None):
         """Copy 0.8.2 layered front/centre/back support probes.
 
         ``maximum_y`` asks the vertical ray to look below an upper hit which
@@ -18947,59 +18980,60 @@ class BattleRuntime(object):
         decks and low ruins: horizontal hull rays still own the real wall,
         while a harmless overhead/top face must not replace the floor and
         trap the vehicle in an endless support rollback.
+
+        ``follow_gap`` enables the chassis-end straddle law.  A tracked hull
+        rests on its chassis ends, so a trench, slot or crater narrower than
+        the tank must not lower the whole body into it merely because the
+        centre column found its floor.  The two extra lateral columns are
+        sampled only at that fall transition.
         """
         half_length = 2.5
+        half_width = 1.5
         try:
             hit_tester = _field(
                 _field(descriptor, 'hull', {}), 'hitTester', None)
             bbox = getattr(hit_tester, 'bbox', None)
             half_length = max(1.5, abs(float(bbox[1][2])))
+            half_width = max(0.3, max(abs(float(bbox[0][0])),
+                                      abs(float(bbox[1][0]))))
         except (TypeError, ValueError, IndexError, AttributeError):
             pass
         sine, cosine = math.sin(yaw), math.cos(yaw)
         highest = None
         centre = None
+        front = None
+        rear = None
         for distance in (half_length, 0.0, -half_length):
             x = position[0] + sine * distance
             z = position[2] + cosine * distance
-            ray_end = self._vector((x, -1000.0, z))
-            ray_start = self._vector((x, position[1] + 2.0, z))
-            ground_filter = self._ground_filter(x, z)
-            value = None
-            for unused_layer in range(4):
-                try:
-                    hit = self._collide_down(
-                        ray_start, ray_end, ground_filter)
-                except Exception:
-                    hit = None
-                if hit is None:
-                    break
-                candidate = float(hit[0].y)
-                above_limit = (maximum_y is not None and
-                               candidate > float(maximum_y))
-                ground_facing = True
-                try:
-                    ground_facing = float(hit[1].y) > 0.5
-                except (AttributeError, IndexError, TypeError, ValueError):
-                    # Engine-free compatibility probes historically supplied
-                    # only the hit point. Production #1513 always supplies the
-                    # normal, so this fallback cannot turn a live wall into
-                    # support.
-                    ground_facing = maximum_y is None
-                if not above_limit and ground_facing:
-                    value = candidate
-                    break
-                next_y = candidate - 0.05
-                if next_y <= float(ray_end.y) + 0.01:
-                    break
-                ray_start = self._vector((x, next_y, z))
+            value = self._support_column(
+                x, z, position[1], maximum_y)
             if value is None:
                 continue
             if highest is None or value > highest:
                 highest = value
             if distance == 0.0:
                 centre = value
-        return highest, centre
+            elif distance > 0.0:
+                front = value
+            else:
+                rear = value
+        if (centre is None or follow_gap is None or
+                position[1] - centre <= float(follow_gap)):
+            return highest, centre
+        lateral = tuple(
+            self._support_column(
+                position[0] + offset[0], position[2] + offset[1],
+                position[1], maximum_y)
+            for offset in tank_collision.chassis_span_offsets(
+                yaw, half_width, half_length)[1])
+        bridged = tank_collision.straddled_support(
+            position[1], follow_gap, ((front, rear), lateral))
+        if bridged is None or bridged <= centre:
+            return highest, centre
+        if highest is None or bridged > highest:
+            highest = bridged
+        return highest, bridged
 
     def _report_local_suspension_trial(self, outcome):
         """Publish each distinct player suspension activation outcome once.
@@ -19353,15 +19387,15 @@ class BattleRuntime(object):
     def _update_vertical_motion_legacy(self, entity, position, yaw, dt):
         """Copy vertical motion while rejecting false raised support."""
         self._local_support_rise_blocked = False
+        snap_gap = vehicle_physics.ground_follow_gap(
+            self._local_speed, self._local_last_pitch, dt)
         highest, centre = self._terrain_support(
-            position, yaw, entity.typeDescriptor)
+            position, yaw, entity.typeDescriptor, follow_gap=snap_gap)
         # Front/rear hits keep a hull supported across a narrow ditch, but the
         # real distance to that support decides whether it can still be
         # followed.
         ground = centre if centre is not None else highest
         if ground is not None:
-            snap_gap = vehicle_physics.ground_follow_gap(
-                self._local_speed, self._local_last_pitch, dt)
             max_climb = max(0.6, abs(self._local_speed) * dt * 2.5)
             com_gap = position[1] - ground
             land_y = ground if centre is None else centre

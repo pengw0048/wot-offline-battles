@@ -19793,6 +19793,69 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 RuntimeError, 'native suspension ground hit is malformed'):
             battle._suspension_ground_y(0.0, 0.0, -0.5, 0.8)
 
+    def _legacy_support_battle(self, columns, floor):
+        """Return a legacy-vertical player over one sampled ground field."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_suspension_disabled = True
+        entity = _Vehicle(
+            10, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+        calls = []
+
+        def collide(space_id, start, end, flags, *rest):
+            calls.append((round(start.x, 1), round(start.z, 1)))
+            height = columns.get(
+                (round(start.x, 1), round(start.z, 1)), floor)
+            return (_Vector(start.x, height, start.z),
+                    _Vector(0.0, 1.0, 0.0), 2)
+
+        runtime.bigworld.wg_collideSegment = collide
+        return battle, entity, calls
+
+    def test_player_bridges_a_trench_narrower_than_its_chassis(self):
+        """The human hull must straddle a slot its centre column falls into."""
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(0.0, 3.5): 10.0, (0.0, -3.5): 10.0}, 7.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertFalse(battle._local_airborne)
+        self.assertEqual(0.0, battle._local_vertical_speed)
+
+    def test_player_bridges_a_slot_running_along_its_hull(self):
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(1.7, 0.0): 9.95, (-1.7, 0.0): 10.0}, 7.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertFalse(battle._local_airborne)
+
+    def test_player_still_falls_where_only_one_chassis_end_is_supported(self):
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(0.0, -3.5): 10.0}, 0.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertTrue(battle._local_airborne)
+        self.assertLess(position[1], 10.0)
+
+    def test_player_flat_ground_keeps_the_three_column_support_probe(self):
+        battle, entity, calls = self._legacy_support_battle({}, 10.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertEqual(
+            [(0.0, 3.5), (0.0, 0.0), (0.0, -3.5)], calls)
+
     def test_local_suspension_samples_twenty_two_columns_once_per_tick(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

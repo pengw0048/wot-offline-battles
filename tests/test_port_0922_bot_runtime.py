@@ -4158,6 +4158,85 @@ class BotRuntimeTests(unittest.TestCase):
                 self.assertAlmostEqual(gradient,
                     state['_suspension_ground_plane']['gradient_z'], places=4)
 
+    def _trench_probe(self, floor, rims):
+        """Return a probe whose centre column drops into a narrow trench.
+
+        ``rims`` maps a chassis-end offset key to its ground height, so one
+        fixture can describe a bridged trench, a longitudinal slot and a plain
+        cliff edge with the same geometry the runtime samples.
+        """
+        calls = []
+
+        def probe(x, z, unused_hint):
+            calls.append((round(x, 3), round(z, 3)))
+            key = (round(x, 1), round(z, 1))
+            return rims.get(key, floor)
+
+        return probe, calls
+
+    def test_bot_bridges_a_trench_narrower_than_its_chassis(self):
+        """Stalingrad's trenches must not swallow a straddling hull."""
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True, airborne=False,
+                     vertical_speed=0.0)
+        probe, calls = self._trench_probe(
+            7.0, {(0.0, 3.5): 10.0, (0.0, -3.5): 10.0})
+        self.runtime._physics_ground_probe = probe
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.04))
+
+        self.assertAlmostEqual(10.0, state['y'], places=6)
+        self.assertFalse(state['airborne'])
+        self.assertAlmostEqual(0.0, state['vertical_speed'], places=6)
+        # One centre column on flat ground, five only at the fall transition.
+        self.assertEqual(5, len(calls))
+
+    def test_bot_bridges_a_slot_running_along_its_hull(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True, airborne=False,
+                     vertical_speed=0.0)
+        probe, unused_calls = self._trench_probe(
+            7.0, {(1.5, 0.0): 9.95, (-1.5, 0.0): 10.0})
+        self.runtime._physics_ground_probe = probe
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.04))
+
+        self.assertAlmostEqual(10.0, state['y'], places=6)
+        self.assertFalse(state['airborne'])
+
+    def test_bot_still_falls_off_a_cliff_edge_with_one_supported_end(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True, airborne=False,
+                     vertical_speed=0.0)
+        probe, unused_calls = self._trench_probe(
+            0.0, {(0.0, -3.5): 10.0})
+        self.runtime._physics_ground_probe = probe
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.04))
+
+        self.assertTrue(state['airborne'])
+        self.assertLess(state['y'], 10.0)
+
+    def test_bot_keeps_the_single_column_fast_path_on_flat_ground(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=4.0,
+                     grounded_once=True, airborne=False,
+                     vertical_speed=0.0)
+        probe, calls = self._trench_probe(10.0, {})
+        self.runtime._physics_ground_probe = probe
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.04))
+
+        self.assertEqual(1, len(calls))
+        self.assertAlmostEqual(10.0, state['y'], places=6)
+
     def test_bot_steep_hull_keeps_falling_without_support(self):
         for axis in ('pitch', 'roll'):
             with self.subTest(axis=axis):

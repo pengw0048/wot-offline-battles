@@ -649,5 +649,53 @@ class TankCollisionTests(unittest.TestCase):
             against_wreck['correction'][0], against_live['correction'][0])
 
 
+class StraddledSupportTests(unittest.TestCase):
+    def test_opposing_ends_bridge_a_slot_narrower_than_the_hull(self):
+        """A trench under the centre column must not lower the hull."""
+        support = tank_collision.straddled_support(
+            10.0, 1.0, ((10.0, 9.6), (None, None)))
+
+        self.assertAlmostEqual(10.0, support)
+
+    def test_one_supported_end_is_a_cliff_edge_and_not_a_bridge(self):
+        self.assertIsNone(tank_collision.straddled_support(
+            10.0, 1.0, ((10.0, None), (None, 9.9))))
+        self.assertIsNone(tank_collision.straddled_support(
+            10.0, 1.0, ((10.0, 2.0), (3.0, 9.9))))
+
+    def test_a_raised_end_is_never_straddle_evidence(self):
+        """A side ray on a wall top must not lift the hull."""
+        self.assertIsNone(tank_collision.straddled_support(
+            10.0, 2.5, ((11.0, 10.0), (None, None))))
+
+    def test_the_lateral_axis_bridges_a_longitudinal_trench(self):
+        support = tank_collision.straddled_support(
+            4.0, 0.9, ((1.0, 1.0), (4.05, 3.9)))
+
+        self.assertAlmostEqual(4.05, support)
+
+    def test_span_offsets_follow_the_chassis_axes(self):
+        (front, rear), (right, left) = tank_collision.chassis_span_offsets(
+            0.0, 1.7, 3.5)
+
+        self.assertAlmostEqual(0.0, front[0])
+        self.assertAlmostEqual(3.5, front[1])
+        self.assertAlmostEqual(0.0, rear[0])
+        self.assertAlmostEqual(-3.5, rear[1])
+        self.assertAlmostEqual(1.7, right[0])
+        self.assertAlmostEqual(0.0, right[1])
+        self.assertAlmostEqual(-1.7, left[0])
+        self.assertAlmostEqual(0.0, left[1])
+
+    def test_span_offsets_rotate_with_yaw(self):
+        (front, unused_rear), (right, unused_left) = (
+            tank_collision.chassis_span_offsets(math.pi / 2.0, 1.7, 3.5))
+
+        self.assertAlmostEqual(3.5, front[0])
+        self.assertAlmostEqual(0.0, front[1], places=6)
+        self.assertAlmostEqual(0.0, right[0], places=6)
+        self.assertAlmostEqual(-1.7, right[1])
+
+
 if __name__ == '__main__':
     unittest.main()
