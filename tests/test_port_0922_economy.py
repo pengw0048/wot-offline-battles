@@ -426,6 +426,24 @@ class VehiclePurchaseTests(unittest.TestCase):
                     package, 'vehicle_records', module, create=True):
             yield
 
+    def test_permanent_purchase_accepts_the_exact_client_sentinel(self):
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 20000
+        state = _state(snapshot)
+        with self._built([]):
+            record = state.buy_vehicle(SECOND_VEHICLE_CD, rent_period=-1)
+        self.assertEqual(SECOND_VEHICLE_CD, record['vehicleTypeCompactDescr'])
+        self.assertEqual(2, len(state.snapshot()['vehicles']))
+        self.assertLess(state.snapshot()['wallet']['gold'], 20000)
+
+    def test_rental_purchase_is_refused_without_changing_the_account(self):
+        for period in (0, 1, 7, 30):
+            state = _state(_snapshot())
+            before = copy.deepcopy(state.snapshot())
+            with self.assertRaises(GARAGE.GarageError):
+                state.buy_vehicle(SECOND_VEHICLE_CD, rent_period=period)
+            self.assertEqual(before, state.snapshot())
+
     def test_purchase_honors_empty_rack_and_each_crew_school(self):
         import test_port_0922_garage as crew_fixture
         for school, role_level, credits_cost, gold_cost in (

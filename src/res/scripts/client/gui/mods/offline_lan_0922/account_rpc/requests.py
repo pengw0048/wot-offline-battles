@@ -379,7 +379,7 @@ def _buy_vehicle(context, args):
     if len(values) < 3:
         return Result(commands.RES_FAILURE, 'INVALID_PURCHASE_REQUEST')
     flags = _int(values[2])
-    rent_period = values[4] if len(values) > 4 else 0
+    rent_period = values[4] if len(values) > 4 else -1
     tman_cost_type_index = values[3] if len(values) > 3 else 0
     return _fitting(context, lambda state: state.buy_vehicle(
         values[1],

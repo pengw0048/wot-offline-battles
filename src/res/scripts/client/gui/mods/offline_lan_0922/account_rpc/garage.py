@@ -1655,7 +1655,7 @@ class GarageState(object):
 
     def buy_vehicle(self, vehicle_type_compact_descr, buy_shells=False,
                     recruit_crew=False, tman_cost_type_index=0,
-                    rent_period=0):
+                    rent_period=-1):
         """Own one more vehicle, stock, and pay the catalogue price for it.
 
         A bought vehicle arrives exactly as retail sells it: the stock fitting,
@@ -1669,7 +1669,8 @@ class GarageState(object):
         compact_descr = _int(vehicle_type_compact_descr)
         if not compact_descr:
             raise GarageError('a purchase needs a vehicle type')
-        if rent_period:
+        # #1513 VehicleBuyer sends -1 for a permanent purchase.
+        if _int(rent_period) != -1:
             raise GarageError('offline vehicles are not rented')
         for record in self._records():
             if _int(record.get('vehicleTypeCompactDescr', 0)) == compact_descr:

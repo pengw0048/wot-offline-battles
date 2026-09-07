@@ -116,17 +116,17 @@ class EconomyPayloadTests(unittest.TestCase):
         self.assertEqual(
             [('buy_vehicle', (50001,), {
                 'buy_shells': True, 'recruit_crew': True,
-                'tman_cost_type_index': 0, 'rent_period': 0})],
+                'tman_cost_type_index': 0, 'rent_period': -1})],
             self._dispatch(
-                commands.CMD_BUY_VEHICLE, ([42, 50001, flags, 0, 0],)))
+                commands.CMD_BUY_VEHICLE, ([42, 50001, flags, 0, -1],)))
 
     def test_buying_a_vehicle_without_extras_recruits_nothing(self):
         self.assertEqual(
             [('buy_vehicle', (50001,), {
                 'buy_shells': False, 'recruit_crew': False,
-                'tman_cost_type_index': 0, 'rent_period': 0})],
+                'tman_cost_type_index': 0, 'rent_period': -1})],
             self._dispatch(
-                commands.CMD_BUY_VEHICLE, ([42, 50001, 0, 0, 0],)))
+                commands.CMD_BUY_VEHICLE, ([42, 50001, 0, 0, -1],)))
 
     def test_buying_an_item_carries_the_credit_price_switch(self):
         # _doCmdInt4(CMD_BUY_ITEM, cacheRev, itemShopID, count,
