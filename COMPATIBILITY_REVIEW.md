@@ -826,6 +826,116 @@ one authority slice and template/remembered-pose identity. Each observer keeps
 its own contact object and visibility flags; new poses and slices invalidate
 that reuse.
 
+An isolated A* FFI experiment lives under `tools/ffi_experiment/`; no production
+module, launcher or package imports it. Its baseline is
+`e0600d4851dbca350849568a261bf77bfab7d3f7`. The C++ core retains a copied baked
+graph and resumable search heaps, costs and parents. The adapter transfers
+changed penalties and batches paid expansions in the existing fair order,
+returning at each completed search so the unchanged Python finalizer runs
+before another search advances. Nearest-cell selection, ground/native probes,
+path smoothing, tactical decisions, motion and publication remain Python-owned.
+There is no change to cadence, expansion credits, hazards or collision safety.
+Only explicit experiment runners install and restore the temporary patches;
+the experiment requires a baked graph and one backend owner per process.
+
+The 2026-09-07 Linux aarch64 measurement used CPython 2.7.18, the Great Wall
+combat fixture, 29 Bots, 30 simulated seconds and 15 frame callbacks/second.
+Seven independent processes per variant ran sequentially in rotating order
+on a shared development host; this was not a dedicated hardware benchmark.
+The following CPU times include normal adapter marshalling and per-frame
+snapshot capture, but exclude fixture/process startup and JSON serialization.
+The separate native initialization includes module loading and graph transfer.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction | Median initialization |
+| --- | ---: | ---: | ---: | ---: |
+| Unmodified Python | 11.298922 s | 11.256200–11.394970 s | — | 0.000006 s |
+| Native A*, one FFI call per paid step | 10.941449 s | 10.852666–11.318563 s | 3.16% | 0.055710 s |
+| Native A*, fair batch | 10.640391 s | 10.530723–10.886375 s | 5.83% | 0.055796 s |
+
+Including initialization, median cold CPU was 11.298928 s for Python and
+10.695704 s for the batch variant, a 5.34% reduction. Both native variants
+performed 28,800 expansions and completed 51 searches. Total dispatch calls
+fell from 29,046 to 520 with batching; these include setup and result transfers.
+All 21 runs matched the Python reference exactly for complete outgoing
+messages, native-query geometry/order, logical probes, decisions, and every
+frame's navigation queues, paths, credits, completion counters and last-frame
+markers. Equality uses complete values, without rounding or tolerances.
+
+A separate three-round Python/batch comparison with `--stage-timing` explains
+the scope of that gain. Median inclusive A* batch CPU fell from 0.718622 s to
+0.170766 s: 76.24% less CPU, or 4.21 times faster, including dispatch,
+marshalling, scheduling and the unchanged Python path finalizer. A* accounted
+for only 6.10% of the instrumented baseline loop. Native dispatch itself took
+0.067323 s, but it excludes Python-side transfer and finalization, so comparing
+that number alone with the original complete A* stage would overstate speedup.
+Instrumentation is separate from the primary seven-round timing above.
+
+Selected mutually exclusive stage medians in that instrumented baseline were
+17.51% for motion/collision handling, 10.14% for contacts, 9.91% for ballistics,
+7.95% for driving/route work outside A*, 4.75% for gun aim, 3.17% for publication
+encoding, 2.86% for supplemental shot lanes, and 1.73% for longitudinal/traverse
+formulas. Another 31.93% remained inside the control slice outside those chosen
+scopes; work outside the slice and observer overhead also remain. These are
+host fixture costs, not measured Windows native-engine costs. They identify
+unmigrated work, not a claim that all of it is independently safe to move.
+This experiment therefore does not measure the ceiling of migrating the whole
+Bot loop, and does not establish a 90% whole-loop reduction.
+
+`check_parity.py` additionally compares exact paths, completion-step boundaries
+and timed-penalty expiry across 200 generated graphs and 36 searches on the
+shipped Karelia, Prohorovka and Great Wall graphs. It exercises missing cells,
+disconnection, shallow/fatal hazards, avoidance, changing local/global/hard
+penalties, expansion caps, cancellation, invalid commands and repeated cleanup.
+The workload exporter adapts only test scaffolding to Python 2; it executes
+production client modules directly. Its Python 3 output is independently
+checked against the runner importing the original fixtures.
+
+The final differential suite passed separately on CPython 2.7.18 and 3.12.3.
+Five-second workload checks also matched on Karelia at 30 callbacks/second and
+Prohorovka at 10 callbacks/second; these smoke runs are behavior evidence only,
+not additional timing estimates.
+The same 236-case suite passed with the host core and bridge compiled with
+AddressSanitizer and UndefinedBehaviorSanitizer (`detect_leaks=0`); this checks
+the exercised host bounds/undefined-behavior paths, not Windows bridge safety
+or leak freedom.
+
+Reproduce the primary comparison with a compatible host CPython 2.7.18 and
+Python 3 for fixture extraction/orchestration (each output directory must be
+new):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+export FFI_PY27=/path/to/cpython-2.7.18/bin/python2.7
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-host
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --random-cases 200
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-comparison \
+  --rounds 7 --include-step
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-stages \
+  --rounds 3 --stage-timing
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-x86
+```
+
+The last command cross-compiles a separate, unshipped x86 `.pyd` and checks its
+PE export/import contract. Its bridge reuses the reviewed instance-guard
+`Py_InitModule4`/`PyInt_FromLong` RVAs, checks the executable identity and code
+prologues, and requires a tuple/int layout self-test before dispatch. It passes
+only owned numeric buffers and retains no Python/native-engine objects. The
+host bridge uses the host Python C API instead; its timing does not include
+the Windows bridge's `VirtualQuery` guards. Cross-compilation does not prove
+loading, pointer/layout safety, x86 floating-point parity or speed in the
+embedded CPython 2.7.7 runtime. The experiment has not run on exact Windows
+#1513, and the synthetic workload acknowledges launches without simulating
+projectile terminals, rendering, real native-query cost or network delay.
+The measured reduction concerns this Bot loop only; it establishes neither
+Windows FPS improvement nor lower process memory use. The native graph is an
+additional copy, and no process-memory attribution was measured.
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
