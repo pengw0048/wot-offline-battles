@@ -85,7 +85,9 @@ SNAPSHOT = {
     # bootstrap's top-level catalogue covers every per-record item plus
     # the account-wide device and equipment stock.
     'inventoryItems': {
-        2: {2002: 1}, 3: {2003: 1}, 4: {2004: 1},
+        # 3333 and 4444 are the spare turret and gun this account researched
+        # and bought; a module has to be owned before it can be mounted.
+        2: {2002: 1}, 3: {2003: 1, 3333: 1}, 4: {2004: 1, 4444: 1},
         5: {2005: 1}, 6: {2006: 1}, 7: {2007: 1},
         9: {9001: 200, 9002: 200},
         10: {10010: 20, 10011: 10},
@@ -397,14 +399,191 @@ class GarageStateTests(unittest.TestCase):
         self.assertIn(b'3333', record['compDescr'])
         self.assertEqual((3333, 4444), record['shellsLayoutIdx'])
 
-    def test_a_gun_swap_refills_the_default_ammunition(self):
+    def test_a_gun_swap_leaves_the_rack_empty_and_the_layout_to_buy(self):
+        """Fitting a gun is not buying its ammunition."""
         self.state.install_component(9, 4444)
 
-        self.assertIn(b'4444', self._record()['compDescr'])
-        self.assertEqual([20010, 30, 20011, 15], self._record()['shells'])
+        record = self._record()
+        self.assertIn(b'4444', record['compDescr'])
+        self.assertEqual([20010, 0, 20011, 0], record['shells'])
+        self.assertEqual({20010: 0, 20011: 0}, record['inventoryItems'][10])
+        # The new gun's default load is what the resupply button and the
+        # vehicle's own auto-load switch will pay for.
         self.assertEqual(
-            {20010: 30, 20011: 15},
-            self._record()['inventoryItems'][10])
+            {(7001, 4444): [20010, 30, 20011, 15]}, record['shellsLayout'])
+        self.assertEqual(
+            0, self.state.snapshot()['inventoryItems'][10][20010])
+
+    def test_a_module_the_account_does_not_own_cannot_be_mounted(self):
+        """Mounting is not buying: #1513 sells a module before it fits one."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        del snapshot['inventoryItems'][4][4444]
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.install_component(9, 4444)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_bought_module_can_then_be_mounted(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        del snapshot['inventoryItems'][4][4444]
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][4444] = {'credits': 3000}
+        snapshot['unlockItemCompactDescrs'] = set()
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+        state.buy_item(4444)
+        state.install_component(9, 4444)
+
+        self.assertIn(b'4444', state.snapshot()['vehicles'][0]['compDescr'])
+        self.assertEqual(
+            100000 - 3000, state.snapshot()['wallet']['credits'])
+
+    def test_an_optional_device_the_account_does_not_own_is_refused(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][9] = {9001: 0, 9002: 200}
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_optional_device(9, 9001, 0)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_one_optional_device_cannot_be_mounted_on_two_vehicles(self):
+        """A device belongs to the account, so one lot of it fits one slot."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][9] = {9001: 1}
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        state.equip_optional_device(9, 9001, 0)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_optional_device(10, 9001, 0)
+
+    def test_a_device_mounted_before_a_restart_still_holds_its_lot(self):
+        """A restored record carries the saved descriptor and a stock row.
+
+        ``vehicle_records.build_record`` never writes an optional-device row,
+        so a device mounted before a restart lives only in the descriptor.
+        Counting the row alone would let the same one lot of it mount again.
+        """
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][9] = {9001: 1}
+        restored = snapshot['vehicles'][0]
+        restored['compDescr'] = (
+            b"veh:9|dev=[(0, 9001)]|comp=[]|turret=7001|gun=7002")
+        restored['inventoryItems'].pop(9, None)
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['compDescr'] = b'veh:9'
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.equip_optional_device(10, 9001, 0)
+
+    def test_selling_a_restored_vehicle_refunds_the_device_it_carries(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][9] = {9001: 1}
+        snapshot['shopItemPrices'][9001] = {'credits': 4000}
+        snapshot['wallet'] = {'credits': 0, 'gold': 0, 'freeXP': 0}
+        restored = snapshot['vehicles'][0]
+        restored['compDescr'] = (
+            b"veh:9|dev=[(0, 9001)]|comp=[]|turret=7001|gun=7002")
+        restored['inventoryItems'].pop(9, None)
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['compDescr'] = b'veh:9'
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+        state.sell_vehicle(9, items_from_vehicle=[9001])
+
+        self.assertEqual(2000, state.snapshot()['wallet']['credits'])
+
+    def test_moving_a_device_between_slots_needs_no_second_one(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['inventoryItems'][9] = {9001: 1}
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        state.equip_optional_device(9, 9001, 0)
+
+        state.equip_optional_device(9, 0, 0)
+        state.equip_optional_device(9, 9001, 2)
+
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual({9001: 1}, record['inventoryItems'][9])
+
+    def test_taking_a_device_off_leaves_the_record_saying_so(self):
+        state = self.state
+        state.equip_optional_device(9, 9001, 0)
+
+        state.equip_optional_device(9, 0, 0)
+
+        self.assertEqual({}, self._record()['inventoryItems'][9])
+
+    def test_a_turret_swap_keeps_the_gun_it_arrived_with(self):
+        """#1513 sends a gun only when the mounted one will not fit.
+
+        ``TurretInstaller.__init__`` starts at ``gunCD = 0`` and only calls
+        ``_findAvailableGun`` when the current gun fails ``mayInstall``, so the
+        ordinary turret swap must not need a second gun to be owned.
+        """
+        state = self.state
+
+        state.install_component(9, 3333, 0, 0)
+
+        record = self._record()
+        self.assertEqual((3333, 7002), tuple(record['shellsLayoutIdx']))
+
+    def test_a_turret_swap_refuses_a_gun_the_account_sold(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        del snapshot['inventoryItems'][4][4444]
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.install_component(9, 3333, 4444, 0)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_the_stock_gun_goes_back_on_after_a_swap(self):
+        """Installing a module must not spend the one it replaced."""
+        state = self.state
+        state.install_component(9, 4444, 0, 0)
+
+        state.install_component(9, 2004, 0, 0)
+
+        self.assertEqual((7001, 2004), tuple(self._record()['shellsLayoutIdx']))
 
     def test_a_descriptor_failure_leaves_the_old_fitting_and_ammo_intact(self):
         vehicles, tankmen = _modules()
@@ -560,8 +739,8 @@ class GarageStateTests(unittest.TestCase):
 
         record = self._record()
         self.assertEqual((7001, 4444), record['shellsLayoutIdx'])
-        self.assertEqual({(7001, 4444): record['shells']},
-                         record['shellsLayout'])
+        self.assertEqual([20010, 30, 20011, 15],
+                         record['shellsLayout'][(7001, 4444)])
 
     def test_a_battle_booster_layout_leaves_the_regular_slots_alone(self):
         self.state.equip_equipments(9, [11001, 0, 0])
@@ -1520,9 +1699,13 @@ class FittingRequestTests(unittest.TestCase):
         snapshot = self.state.snapshot()
         record = snapshot['vehicles'][0]
         self.assertEqual((3333, 4444), record['shellsLayoutIdx'])
-        self.assertEqual([20010, 30, 20011, 15], record['shells'])
-        # The mount is also a purchase, so the account owns the turret.
-        self.assertEqual(1, snapshot['inventoryItems'][3][3333])
+        # The turret was bought; its gun's ammunition was not.
+        self.assertEqual([20010, 0, 20011, 0], record['shells'])
+        self.assertEqual(
+            [20010, 30, 20011, 15], record['shellsLayout'][(3333, 4444)])
+        # The mount is also a purchase, so the account owns one more turret
+        # than the spare it started with.
+        self.assertEqual(2, snapshot['inventoryItems'][3][3333])
 
     def test_refused_buy_and_equip_does_not_publish_new_ownership(self):
         vehicles, tankmen = _modules()
@@ -1535,12 +1718,12 @@ class FittingRequestTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = self._dispatch(
                 self.commands.CMD_BUY_AND_EQUIP_ITEM,
-                ([77, 3333, 9, 0, 0, 4444],))
+                ([77, 3355, 9, 0, 0, 4444],))
 
         self.assertEqual(self.commands.RES_FAILURE, result.result_id)
         self.assertEqual(before, self.state.snapshot())
         self.assertNotIn(
-            3333, self.state.snapshot()['inventoryItems'].get(3, {}))
+            3355, self.state.snapshot()['inventoryItems'].get(3, {}))
         self.assertEqual([], self.pushed)
 
     def test_equip_shells_updates_the_published_inventory(self):
@@ -2086,11 +2269,14 @@ class GaragePersistenceTests(unittest.TestCase):
         restored = fresh['vehicles'][0]
         self.assertEqual((7001, 4444),
                          tuple(restored['shellsLayoutIdx']))
-        self.assertEqual([20010, 30, 20011, 15], restored['shells'])
-        self.assertEqual({20010: 30, 20011: 15},
+        # The gun was fitted and never loaded, so the rack is still empty and
+        # the layout still names what buying it back would cost.
+        self.assertEqual([20010, 0, 20011, 0], restored['shells'])
+        self.assertEqual({20010: 0, 20011: 0},
                          restored['inventoryItems'][10])
-        self.assertEqual(30, fresh['inventoryItems'][10][20010])
-        self.assertEqual(15, fresh['inventoryItems'][10][20011])
+        self.assertEqual(
+            [20010, 30, 20011, 15],
+            restored['shellsLayout'][(7001, 4444)])
         _load('data')._validate_selected_vehicle(fresh)
 
     def test_a_saved_shell_outside_the_current_catalogue_falls_back_atomically(self):

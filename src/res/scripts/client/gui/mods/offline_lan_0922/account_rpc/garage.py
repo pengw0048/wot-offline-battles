@@ -725,6 +725,11 @@ class GarageState(object):
         # Whatever is in the slot now is what leaves it, whether the slot is
         # being emptied or swapped.
         outgoing = self._device_in_slot(record, slot_index)
+        # Mounting is not buying.  #1513 sells an optional device through the
+        # shop and offers a separate buy-and-install command for doing both,
+        # so a device the account does not own is refused here rather than
+        # handed over.
+        self._require_owned_device(record, device_compact_descr, slot_index)
         destroyed = 0
         if outgoing and not self._is_removable(outgoing):
             if paid_removal:
@@ -745,12 +750,87 @@ class GarageState(object):
                     device_compact_descr, slot_index)
 
         self._rebuild_descriptor(record, mutate)
-        self._own(record, device_compact_descr, 9)
-        self._price(device_compact_descr)
+        # The record states what the vehicle holds, which is what the
+        # descriptor now says rather than everything it has ever carried.
+        record.setdefault('inventoryItems', {})[
+            OPTIONAL_DEVICE_ITEM_TYPE] = self._mounted_devices(record)
+        if device_compact_descr:
+            self._publish_owned(
+                device_compact_descr, OPTIONAL_DEVICE_ITEM_TYPE,
+                self._mounted(device_compact_descr,
+                              OPTIONAL_DEVICE_ITEM_TYPE, self._records()))
+            self._price(device_compact_descr)
         if destroyed:
             self._destroy_device(destroyed)
         self.revision += 1
         return record
+
+    def _mounted_devices(self, record):
+        """Return what one vehicle's descriptor currently has in its slots."""
+        vehicles = self._vehicles_module()
+        mounted = {}
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            devices = list(getattr(descriptor, 'optionalDevices', ()) or ())
+        except Exception:
+            return dict(record.get('inventoryItems', {}).get(
+                OPTIONAL_DEVICE_ITEM_TYPE, {}))
+        for device in devices:
+            compact_descr = _int(getattr(device, 'compactDescr', 0) or 0)
+            if compact_descr:
+                mounted[compact_descr] = mounted.get(compact_descr, 0) + 1
+        return mounted
+
+    def _require_owned_device(self, record, compact_descr, slot_index):
+        """Refuse to mount an optional device the account does not own.
+
+        A device belongs to the account, so what this vehicle would hold after
+        the mount plus what every other vehicle already holds is what the
+        depot has to cover.
+        """
+        if not compact_descr:
+            return
+        owned = _int(self._snapshot.get('inventoryItems', {}).get(
+            OPTIONAL_DEVICE_ITEM_TYPE, {}).get(compact_descr, 0))
+        others = [row for row in self._records()
+                  if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+        wanted = self._mounted(
+            compact_descr, OPTIONAL_DEVICE_ITEM_TYPE, others) + 1
+        # The slot being filled gives its own device back first, so replacing
+        # a device with itself needs nothing new.
+        for slot, mounted in enumerate(self._device_slots(record)):
+            if mounted == compact_descr and slot != _int(slot_index):
+                wanted += 1
+        if owned < wanted:
+            raise GarageError(
+                'the account does not own optional device %d' % compact_descr)
+
+    def _device_slots(self, record):
+        """Return one vehicle's slots as compact descriptors, zero for empty."""
+        vehicles = self._vehicles_module()
+        try:
+            descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+            devices = list(getattr(descriptor, 'optionalDevices', ()) or ())
+        except Exception:
+            return []
+        return [_int(getattr(device, 'compactDescr', 0) or 0)
+                for device in devices]
+
+    def _require_owned_module(self, compact_descr, item_type):
+        """Refuse to install a module the account does not own.
+
+        A module is published per vehicle as the largest count any one of them
+        carries, so the account view answers "does anything in this garage own
+        one", which is what a fitting needs; buying one raises it.
+        """
+        compact_descr = _int(compact_descr)
+        if not compact_descr:
+            return
+        owned = _int(self._snapshot.get('inventoryItems', {}).get(
+            int(item_type), {}).get(compact_descr, 0))
+        if owned < 1:
+            raise GarageError(
+                'the account does not own module %d' % compact_descr)
 
     def _destroy_device(self, compact_descr):
         """Take one complex device out of the account, as removing it does."""
@@ -814,6 +894,17 @@ class GarageState(object):
         position_index = _int(position_index)
         item_type = self._item_type(compact_descr)
         is_turret = item_type == TURRET_ITEM_TYPE
+        # Mounting is not buying.  #1513 researches a module, then sells it,
+        # and offers a separate buy-and-install command for doing both at
+        # once, so a module the account does not own is refused here.
+        self._require_owned_module(compact_descr, item_type)
+        if is_turret and gun_compact_descr:
+            # A turret swap names a gun only when the mounted one will not
+            # fit; ``TurretInstaller._findAvailableGun`` then picks the first
+            # of the turret's guns whose item ``isInInventory``, so the gun
+            # this arrives with is one the account owns.
+            self._require_owned_module(
+                gun_compact_descr, self._item_type(gun_compact_descr))
 
         vehicles = self._vehicles_module()
         try:
@@ -858,12 +949,19 @@ class GarageState(object):
         staged['compDescr'] = serialized
         staged['shellsLayoutIdx'] = new_layout_key
         if new_layout_key != old_layout_key:
+            # A new gun arrives with an empty rack.  Its default load becomes
+            # the layout, which is what the resupply button and the vehicle's
+            # own auto-load switch buy; handing the rounds over here would be
+            # free ammunition every time a gun changed.
             shells = self._validated_default_ammo(vehicles, verified)
-            staged['shells'] = shells
+            staged['shellsLayout'] = {new_layout_key: list(shells)}
+            staged['shells'] = [
+                value if index % 2 == 0 else 0
+                for index, value in enumerate(shells)]
             staged.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = dict(
-                (shells[index], shells[index + 1])
-                for index in range(0, len(shells), 2))
-        mirror_shells_layout(staged)
+                (shells[index], 0) for index in range(0, len(shells), 2))
+        else:
+            mirror_shells_layout(staged)
 
         # Everything above is validation-only.  Publish the descriptor,
         # layout and ammunition together once no native operation can fail.
@@ -875,8 +973,10 @@ class GarageState(object):
             self._price(gun_compact_descr)
         if new_layout_key != old_layout_key:
             for index in range(0, len(shells), 2):
-                self._publish_owned(
-                    shells[index], SHELL_ITEM_TYPE, shells[index + 1])
+                # The rack is empty, so nothing is owned here that was not
+                # already; this only keeps the new gun's rounds priced and
+                # visible in the depot.
+                self._publish_owned(shells[index], SHELL_ITEM_TYPE, 0)
                 self._price(shells[index])
         self.revision += 1
         return record
@@ -1978,7 +2078,7 @@ class GarageState(object):
         """
         compact_descr = _int(compact_descr)
         item_type = self._item_type(compact_descr)
-        carried = self._carried(record, item_type, compact_descr)
+        carried = self._held(record, item_type, compact_descr)
         if item_type != SHELL_ITEM_TYPE:
             # Only rounds are carried by the dozen; #1513 pays one unit for
             # each mounted equipment and optional device.
@@ -2016,6 +2116,21 @@ class GarageState(object):
         return _int(record.get('inventoryItems', {}).get(
             int(item_type), {}).get(compact_descr, 0))
 
+    def _held(self, record, item_type, compact_descr):
+        """Return what one vehicle holds of an item, its descriptor first.
+
+        A record's optional-device row is written when a device is mounted,
+        but a record rebuilt for a save arrives with a stock row beside the
+        saved descriptor, and only the descriptor knows what is in the slots.
+        Reading the row alone would make a device mounted before a restart
+        invisible, and one lot of it would mount on a second vehicle for
+        nothing.  Every other item type lives in the row and nowhere else.
+        """
+        if int(item_type) == OPTIONAL_DEVICE_ITEM_TYPE:
+            return _int(self._mounted_devices(record).get(
+                _int(compact_descr), 0))
+        return self._carried(record, item_type, compact_descr)
+
     def _mounted(self, compact_descr, item_type, records):
         """Return how many of one item the given vehicles hold between them.
 
@@ -2024,7 +2139,7 @@ class GarageState(object):
         published per vehicle as the largest count any one of them carries,
         and summing that view would invent stock nobody owns.
         """
-        counts = [self._carried(record, item_type, compact_descr)
+        counts = [self._held(record, item_type, compact_descr)
                   for record in records]
         if int(item_type) in STOCKED_ITEM_TYPES:
             return sum(counts)
