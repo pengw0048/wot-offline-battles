@@ -248,7 +248,8 @@ def _ground_top(spaceID, Math, pos, x, z, look, ground_plane=None,
 @observed('motion.ground_ahead')
 def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		footprint_x, footprint_z, end_x, end_z, look, ground_plane=None,
-		collision_filter=_UNPREPARED_COLLISION_FILTER):
+		collision_filter=_UNPREPARED_COLLISION_FILTER, descending=False,
+		support_start_y=None):
 	"""Extend only support witnessed under the current hull footprint.
 
 	A lower floor beyond a crest is not occupied by this horizontal sweep.
@@ -264,6 +265,25 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 	footprint_ground = _ground_top(
 		spaceID, Math, pos, footprint_x, footprint_z, look, ground_plane,
 		collision_filter)
+	if descending and start_ground is not None and footprint_ground is not None:
+		if (support_start_y is not None and
+				float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
+			# The witness starts above its old support while leaving the crest.
+			# A floor below it cannot lower the occupied hull's collision ray.
+			return None
+		# A crest can already lie beneath the front of the footprint while
+		# the body is still supported behind it. A chord through that lower
+		# floor is outside the occupied hull. Confirm the middle of the
+		# support chord before allowing it to pull a descending ray down.
+		middle_ground = _ground_top(
+			spaceID, Math, pos, (start_x + footprint_x) * 0.5,
+			(start_z + footprint_z) * 0.5, look, ground_plane,
+			collision_filter)
+		if (middle_ground is None or
+				float(middle_ground) >
+				(float(start_ground) + float(footprint_ground)) * 0.5 +
+				_GROUND_HIT_EPSILON):
+			return None
 	try:
 		inside_length = math.sqrt(
 			(float(footprint_x) - float(start_x)) ** 2 +
@@ -590,10 +610,13 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				pose_y != (0.0, 1.0, 0.0) and
 				(abs(local_end[0] - ray_local_end[0]) > 1.0e-9 or
 				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
-			# Only the pitch term lifts a lane along its own travel, so only
-			# a pitched lane samples the ground witnessed inside its footprint
-			# only. A level or purely rolled hull keeps the
-			# shipped lane geometry and its exact ray count.
+			# Preserve continuous-slope wall coverage in either direction, but
+			# do not let a lower floor under the leading edge turn a crest
+			# departure into an artificial downward collision chord.
+			descending_lane = (
+				(local_end[0] - local_start[0]) * pose_y[0] +
+				(local_end[1] - local_start[1]) * pose_y[2] < -1.0e-9)
+
 			footprint_x = (pos.x + cos_y * local_end[0] +
 				sin_y * local_end[1])
 			footprint_z = (pos.z - sin_y * local_end[0] +
@@ -601,7 +624,10 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			_ground_ahead = (
 				_lane_ground_ahead(spaceID, Math, pos,
 					x1, z1, footprint_x, footprint_z,
-					x2, z2, target_len, ground_plane, _sweep_filter)
+					x2, z2, target_len, ground_plane, _sweep_filter,
+					descending=descending_lane,
+					support_start_y=(pos.y + local_start[0] * pose_y[0] +
+						local_start[1] * pose_y[2]))
 				if pose_y[2] else None)
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)

@@ -28,10 +28,10 @@ BOT_TIER_MODE_RANDOM = 'random'
 BOT_TIER_MODE_SAME = 'same'
 BOT_TIER_MODE_MINUS1_0 = 'minus1_0'
 BOT_TIER_MODE_0_PLUS1 = '0_plus1'
-BOT_TIER_MODE_MINUS1_PLUS2 = 'minus1_plus2'
+BOT_TIER_MODE_MINUS1_PLUS1 = 'minus1_plus1'
 BOT_TIER_MODES = (
 	BOT_TIER_MODE_RANDOM, BOT_TIER_MODE_SAME, BOT_TIER_MODE_MINUS1_0,
-	BOT_TIER_MODE_0_PLUS1, BOT_TIER_MODE_MINUS1_PLUS2)
+	BOT_TIER_MODE_0_PLUS1, BOT_TIER_MODE_MINUS1_PLUS1)
 
 
 def _number(value, default=0.0):
@@ -173,8 +173,8 @@ def bot_match_tiers(player_tier, mode, mode_roll=0.5, side_roll=0.5,
 		BOT_TIER_MODE_SAME: (player_tier,),
 		BOT_TIER_MODE_MINUS1_0: (player_tier - 1, player_tier),
 		BOT_TIER_MODE_0_PLUS1: (player_tier, player_tier + 1),
-		BOT_TIER_MODE_MINUS1_PLUS2: (
-			player_tier - 1, player_tier, player_tier + 1, player_tier + 2),
+		BOT_TIER_MODE_MINUS1_PLUS1: (
+			player_tier - 1, player_tier, player_tier + 1),
 	}[mode]
 	return tuple(value for value in desired if value in available)
 

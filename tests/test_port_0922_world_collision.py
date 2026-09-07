@@ -1645,6 +1645,64 @@ class WorldCollisionTests(unittest.TestCase):
                         gradient, hull_pitch, wall_z, 1.2,
                         wall_end=wall_end, velocity=velocity))
 
+    def test_descending_crest_inside_footprint_does_not_stop_departure(self):
+        # The front of a supported tank already hangs over a steeper descent.
+        # The physical hull ray is clear; lowering it to front-wheel ground
+        # creates an artificial intersection in the gentle part of the crest.
+        for direction in (-1.0, 1.0):
+            for wall in (False, True):
+                def ground(u):
+                    return -0.2 * u if u <= 1.0 else -0.2 - 1.7 * (u - 1.0)
+
+                def collide(space, start, end, mask, *filters):
+                    u0, u1 = direction * start.z, direction * end.z
+                    if _vertical_ray(start, end):
+                        y = ground(u0)
+                        if min(start.y, end.y) <= y <= max(start.y, end.y):
+                            return (_Vector(start.x, y, start.z),)
+                        return None
+                    du, dy = u1 - u0, end.y - start.y
+                    hits = []
+                    for slope, intercept, lower, upper in (
+                            (-0.2, 0.0, -100.0, 1.0),
+                            (-1.7, 1.5, 1.0, 100.0)):
+                        denom = dy - slope * du
+                        if abs(denom) <= 1.0e-9:
+                            continue
+                        fraction = (slope * u0 + intercept - start.y) / denom
+                        u = u0 + fraction * du
+                        if 0.0 <= fraction <= 1.0 and lower <= u <= upper:
+                            hits.append((fraction, _Vector(0, 1, -slope * direction)))
+                    if wall and abs(du) > 1.0e-9:
+                        fraction = (2.5 - u0) / du
+                        y = start.y + fraction * dy
+                        if 0.0 <= fraction <= 1.0 and ground(2.5) <= y <= 0.9:
+                            hits.append((fraction, _Vector(0, 0, -direction)))
+                    if not hits:
+                        return None
+                    fraction, normal = min(hits, key=lambda row: row[0])
+                    return (start + (end - start).scale(fraction), normal, 0)
+
+                with self.subTest(direction=direction, wall=wall):
+                    scene = types.SimpleNamespace(wg_collideSegment=collide,
+                        wg_getMatInfoNearPoint=_miss_mat_info_1513)
+                    self.assertEqual('hard' if wall else 'clear',
+                        world_collision.check_horizontal_collision(
+                            scene, types.SimpleNamespace(Vector3=_Vector),
+                            1, _Vector(), 0.0, 15.0 * direction,
+                            None, False, 0.04, True, commit_enabled=False,
+                            pitch=direction * math.atan(0.2)))
+
+    def test_departed_hull_cannot_follow_a_floor_below_its_support_start(self):
+        scene = types.SimpleNamespace(wg_collideSegment=self._pitched_hull_scene(-0.4),
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        with mock.patch.dict(sys.modules, {'BigWorld': scene}):
+            cap = world_collision._lane_ground_ahead(
+                1, types.SimpleNamespace(Vector3=_Vector), _Vector(0, 1, 0),
+                0, -0.5, 0, 3.5, 0, 5.0, 5.5,
+                collision_filter=None, descending=True, support_start_y=1.1)
+        self.assertIsNone(cap)
+
     def test_lower_floor_beyond_crest_does_not_pull_hull_ray_into_ground(self):
         for direction in (1.0, -1.0):
             for wall_top in (None, 1.2):

@@ -143,7 +143,7 @@ RESULT_INTERACTION_LIMITS = {
     'target_kills': (0, 255),
 }
 BOT_TIER_MODES = frozenset((
-    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus2'))
+    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus1'))
 BOT_SKILL_MODES = frozenset(bot_gunnery.SKILL_MODES)
 SENDER_JOIN_TIMEOUT = 0.1
 SEND_STALL_TIMEOUT = 5.0

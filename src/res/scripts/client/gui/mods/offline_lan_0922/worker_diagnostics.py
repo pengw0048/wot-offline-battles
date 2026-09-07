@@ -20,6 +20,7 @@ MAX_WAIT_SAMPLES = 512
 MAX_ACTOR_SLICES = 128
 MAX_CAPTURE_ACTORS = 64
 MAX_FRAME_ACTORS_REPORTED = 6
+MAX_ACTOR_STAGES_REPORTED = 8
 MAX_GEOMETRY_KEYS = 2048
 
 # Only synchronous, instrumented Python calls bind this observer. No native
@@ -577,10 +578,21 @@ class WorkerCombatDiagnostics(object):
             -item[1]['stages'].get('bot.actor', (0, 0.0))[1], item[0]))
         if limit is not None:
             ordered = ordered[:limit]
-        return [{'slice': key[0], 'bot': key[1],
-                 'stages': self._stage_rows(row['stages']),
-                 'counts': dict(row['counts'])}
-                for key, row in ordered]
+        result = []
+        for key, row in ordered:
+            # Global frame/capture stages remain complete. Repeating every
+            # nested stage for all 29 actors produced a 200 KB synchronous
+            # log burst and a measured 90 ms diagnostic stall on #1513.
+            # Keep every actor/counter, with its most expensive stage calls.
+            stages = sorted(row['stages'].items(), key=lambda item: (
+                -item[1][3], -item[1][1], item[0]))
+            result.append({
+                'slice': key[0], 'bot': key[1],
+                'stages': self._stage_rows(dict(stages[:MAX_ACTOR_STAGES_REPORTED])),
+                'stages_omitted': max(0, len(stages) - MAX_ACTOR_STAGES_REPORTED),
+                'counts': dict(row['counts']),
+            })
+        return result
 
     def _complete_capture(self, reason):
         self._completed.append({

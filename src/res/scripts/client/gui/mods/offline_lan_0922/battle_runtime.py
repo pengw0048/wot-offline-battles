@@ -15697,6 +15697,10 @@ class BattleRuntime(object):
             elif self._bots is not None and getattr(
                     self._bots, '_shot_lane_pending_pairs', 0):
                 trigger = 'lane_queue'
+            elif raw_dt > 0.1:
+                # Capture repeated motion/destruction stalls even before the
+                # first projectile or shot-lane request starts combat timing.
+                trigger = 'slow_frame'
             combat_diagnostic.begin_frame(frame_id, now, trigger)
             diagnostics.note_combat_captures(
                 combat_diagnostic.drain_completed())
