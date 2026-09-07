@@ -139,7 +139,14 @@ _CHINESE = {
     "Credits": "银币",
     "Gold": "金币",
     "Free experience": "自由经验",
+    "Apply": "应用",
     "Apply balances": "应用余额",
+    "Earnings multiplier": "收益倍数",
+    "The earnings multiplier must be a number.": "收益倍数必须是数字。",
+    "The earnings multiplier must be between %s and %s.":
+        "收益倍数必须在 %s 到 %s 之间。",
+    "The earnings multiplier could not be saved: %s": "收益倍数保存失败：%s",
+    "Earnings multiplier saved: %sx": "收益倍数已保存：%s 倍",
     "Reload": "重新读取",
     "These are the selected save's balances. Gold cannot be earned offline, "
     "so this is where a save gets it. Close the game before changing them.":
@@ -678,9 +685,24 @@ class LauncherWindow(object):
             entry = tk.Entry(self.account_panel, width=16)
             entry.grid(row=row, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
             self.balance_entries[name] = entry
+        # What this save multiplies its battle earnings by.  It belongs to the
+        # launcher's own save record rather than to the client's state, so it
+        # can be set on a save that has never been started.
+        self.earnings_label = tk.Label(self.account_panel, text="")
+        self.earnings_label.grid(
+            row=len(save_ledger.CURRENCIES), column=0, sticky="w", pady=(0, 4))
+        earnings_row = tk.Frame(self.account_panel)
+        earnings_row.grid(
+            row=len(save_ledger.CURRENCIES), column=1, sticky="w",
+            padx=(6, 0), pady=(0, 4))
+        self.earnings_entry = tk.Entry(earnings_row, width=8)
+        self.earnings_entry.pack(side="left")
+        self.apply_earnings_button = tk.Button(
+            earnings_row, text="", command=self._apply_earnings)
+        self.apply_earnings_button.pack(side="left", padx=(6, 0))
         account_actions = tk.Frame(self.account_panel)
         account_actions.grid(
-            row=len(save_ledger.CURRENCIES), column=0, columnspan=2,
+            row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
             sticky="we", pady=(6, 0))
         self.apply_balances_button = tk.Button(
             account_actions, text="", command=self._apply_balances)
@@ -693,7 +715,7 @@ class LauncherWindow(object):
             self.account_panel, text="", anchor="w", justify="left",
             wraplength=620)
         self.account_help_label.grid(
-            row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
+            row=len(save_ledger.CURRENCIES) + 2, column=0, columnspan=2,
             sticky="we", pady=(8, 0))
         self.account_panel.grid_columnconfigure(1, weight=1)
 
@@ -900,6 +922,8 @@ class LauncherWindow(object):
             label.config(text=self._t(_BALANCE_LABELS[name]))
         self.apply_balances_button.config(text=self._t("Apply balances"))
         self.reload_balances_button.config(text=self._t("Reload"))
+        self.earnings_label.config(text=self._t("Earnings multiplier"))
+        self.apply_earnings_button.config(text=self._t("Apply"))
         self.account_help_label.config(text=self._t(
             "These are the selected save's balances. Gold cannot be earned "
             "offline, so this is where a save gets it. Close the game before "
@@ -1189,6 +1213,7 @@ class LauncherWindow(object):
         # both follow it.
         if hasattr(self, "balance_entries"):
             self._refresh_balances(status)
+            self._refresh_earnings()
             self._refresh_gold_shop(status)
         return tuple(values)
 
@@ -1234,6 +1259,61 @@ class LauncherWindow(object):
         state = "normal" if editable else "disabled"
         self.apply_balances_button.config(state=state)
         return editable
+
+    def _selected_save_record(self):
+        for record in getattr(self, "_save_slot_records", ()):
+            if record["id"] == self._save_slot_id:
+                return record
+        return None
+
+    def _refresh_earnings(self):
+        """Show the selected save's earnings multiplier as a plain number.
+
+        It is stored as a whole percentage so the two runtimes that read the
+        file agree on it, and shown the way a player says it: 2.5.
+        """
+        record = self._selected_save_record()
+        percent = (save_slots.DEFAULT_EARNINGS_PERCENT if record is None
+                   else record["earnings_percent"])
+        self.earnings_entry.delete(0, "end")
+        self.earnings_entry.insert(0, self._earnings_text(percent))
+        return percent
+
+    @staticmethod
+    def _earnings_text(percent):
+        text = "%.2f" % (percent / 100.0)
+        return text.rstrip("0").rstrip(".") or "0"
+
+    def _apply_earnings(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        raw = self.earnings_entry.get().strip().rstrip("xX\u00d7")
+        try:
+            percent = int(round(float(raw) * 100))
+        except ValueError:
+            self._log("The earnings multiplier must be a number.")
+            self._refresh_earnings()
+            return False
+        if not (save_slots.MIN_EARNINGS_PERCENT <= percent <=
+                save_slots.MAX_EARNINGS_PERCENT):
+            self._log("The earnings multiplier must be between %s and %s."
+                      % (self._earnings_text(save_slots.MIN_EARNINGS_PERCENT),
+                         self._earnings_text(save_slots.MAX_EARNINGS_PERCENT)))
+            self._refresh_earnings()
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            save_slots.set_earnings_percent(
+                self._save_slot_id, percent, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("The earnings multiplier could not be saved: %s" % error)
+            self._refresh_earnings()
+            return False
+        self._refresh_save_slots()
+        self._log("Earnings multiplier saved: %sx"
+                  % self._earnings_text(percent))
+        return True
 
     def _apply_balances(self):
         if self._busy or self._maintenance_busy:

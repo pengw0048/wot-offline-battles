@@ -458,9 +458,26 @@ class GarageStore(object):
 
         from gui.mods.offline_lan_0922.account_rpc.garage import (
             GarageError, GarageState)
+        from gui.mods.offline_lan_0922.account_rpc import economy
         staged = copy.deepcopy(snapshot)
         state = GarageState(staged, tankmen_module=tankmen_module,
                             vehicles_module=vehicles_module)
+        # The receipt says what the battle did; what it is worth is the
+        # account's business, so the two multipliers are applied here, once,
+        # and everything downstream banks and shows the same numbers.
+        experience_percent = economy.earnings_percent(
+            snapshot.get('earningsPercent'))
+        credits_percent = experience_percent
+        if (vehicles_module is not None and economy.is_premium_vehicle(
+                vehicles_module, vehicle_type_compact_descr)):
+            credits_percent = (
+                credits_percent * economy.PREMIUM_VEHICLE_CREDITS_PERCENT
+                // 100)
+        awarded = economy.scale_rewards(
+            rewards, credits_percent=credits_percent,
+            experience_percent=experience_percent)
+        battle_xp = awarded.get('xp', battle_xp) if rewards else (
+            max(0, int(battle_xp or 0)) * experience_percent // 100)
         result = state.award_battle_crew_xp(
             vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
         if health is not None:
@@ -477,8 +494,13 @@ class GarageStore(object):
             # JSON replacement, so a retried receipt can never bank one
             # without the other.
             result['earnings'] = state.award_battle_earnings(
-                vehicle_type_compact_descr, rewards,
+                vehicle_type_compact_descr, awarded,
                 accelerated=bool(result['accelerated']))
+            # What was actually banked, so the battle-results screen and the
+            # lifetime counters report the same amounts as the wallet.
+            result['awarded'] = dict(
+                (name, int(awarded.get(name, 0) or 0))
+                for name in ('credits', 'xp', 'free_xp'))
         _settle_automatically(
             state, int(result['vehicle_id']), auto_settings, GarageError)
         # Every other field of this result is plain JSON, and the store hands

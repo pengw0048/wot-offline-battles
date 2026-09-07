@@ -62,6 +62,23 @@ SANDBOX_FREE_XP = 100000000
 SANDBOX_GARAGE_SLOTS = 2000
 SANDBOX_BARRACKS_BERTHS = 2000
 
+# What one save multiplies its battle earnings by, as a percentage.  The
+# launcher owns the number and writes it beside the save's mode; this is the
+# value a save that never set one plays at.
+DEFAULT_EARNINGS_PERCENT = 100
+MIN_EARNINGS_PERCENT = 1
+MAX_EARNINGS_PERCENT = 10000
+
+# Offline policy, like the exchange rate: #1513 knows which vehicles are
+# premium -- ``Vehicle.isPremium`` is ``'premium' in type.tags`` -- but what a
+# premium vehicle earns is a server coefficient the client never receives.
+# Retail premium tanks make roughly half again the credits of an ordinary tank
+# of the same tier, which is what a player buys them for, so that is the number
+# here.  Experience is deliberately not multiplied: a retail premium vehicle
+# earns credits, not experience.
+PREMIUM_VEHICLE_CREDITS_PERCENT = 150
+PREMIUM_VEHICLE_TAG = 'premium'
+
 CAREER_WALLET = {
     CREDITS: CAREER_CREDITS, GOLD: CAREER_GOLD, FREE_XP: CAREER_FREE_XP}
 SANDBOX_WALLET = {
@@ -128,6 +145,60 @@ def normalized_wallet(value):
     for name in wallet:
         wallet[name] = max(0, _int(value.get(name)))
     return wallet
+
+
+def earnings_percent(value, default=DEFAULT_EARNINGS_PERCENT):
+    """Return one save's earnings multiplier as a whole percentage.
+
+    It is stored and carried as an integer percent rather than a fraction so
+    that the launcher, the save file and this client agree on the exact value;
+    a float would round differently in the two Python runtimes that write it.
+    """
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_EARNINGS_PERCENT, min(MAX_EARNINGS_PERCENT, percent))
+
+
+def is_premium_vehicle(vehicles_module, vehicle_type_compact_descr):
+    """Report whether #1513 calls this vehicle a premium one.
+
+    ``gui.shared.gui_items.Vehicle.isPremium`` is exactly
+    ``'premium' in type.tags``, so the tag on the live vehicle type is the
+    client's own answer rather than an inference from the price.
+    """
+    try:
+        vehicle_type = vehicles_module.getVehicleType(
+            int(vehicle_type_compact_descr))
+        tags = getattr(vehicle_type, 'tags', ()) or ()
+    except Exception:
+        return False
+    return PREMIUM_VEHICLE_TAG in tags
+
+
+def scale_rewards(rewards, credits_percent=100, experience_percent=100):
+    """Return one battle's rewards after the account's own multipliers.
+
+    The receipt states what the battle did; the multipliers are the account's,
+    so the client applies them.  Credits and experience are scaled separately
+    because a premium vehicle earns credits alone, while the save's own
+    multiplier moves both.
+    """
+    rewards = rewards if isinstance(rewards, dict) else {}
+    scaled = dict(rewards)
+    factors = (
+        ('credits', credits_percent),
+        ('xp', experience_percent),
+        ('free_xp', experience_percent),
+    )
+    for name, percent in factors:
+        try:
+            base = max(0, int(rewards.get(name, 0) or 0))
+        except (TypeError, ValueError):
+            base = 0
+        scaled[name] = base * max(0, int(percent)) // 100
+    return scaled
 
 
 def price_index(vehicles_module, nations_module):

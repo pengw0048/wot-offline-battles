@@ -37,6 +37,68 @@ class SaveSlotsTests(unittest.TestCase):
                   "rb") as stream:
             self.assertEqual("Career", json.load(stream)["name"])
 
+    def test_a_new_save_earns_at_the_ordinary_rate(self):
+        record = save_slots.create_slot(
+            "Career", save_slots.MODE_UNLOCKED, root=self.root)
+
+        self.assertEqual(100, record["earnings_percent"])
+
+    def test_a_saves_earnings_multiplier_is_kept_and_read_back(self):
+        """The client reads this number and scales what every battle pays."""
+        record = save_slots.create_slot(
+            "Rich", save_slots.MODE_NEW_ACCOUNT, root=self.root,
+            earnings_percent=250)
+
+        self.assertEqual(250, record["earnings_percent"])
+        with open(os.path.join(record["path"], save_slots.METADATA_NAME),
+                  "rb") as stream:
+            self.assertEqual(250, json.load(stream)["earnings_percent"])
+        self.assertEqual(
+            250, save_slots.read_slot(record["id"], root=self.root)[
+                "earnings_percent"])
+
+    def test_the_multiplier_can_be_changed_before_the_save_is_ever_played(self):
+        """It is the launcher's own record, not the client's state."""
+        record = save_slots.set_earnings_percent(
+            save_slots.DEFAULT_SLOT_ID, 300, root=self.root)
+
+        self.assertEqual(300, record["earnings_percent"])
+        self.assertEqual(
+            300, save_slots.read_slot(
+                save_slots.DEFAULT_SLOT_ID, root=self.root)[
+                    "earnings_percent"])
+
+    def test_an_impossible_multiplier_is_clamped_rather_than_stored(self):
+        for wanted, expected in ((0, 1), (-5, 1), (99999, 10000),
+                                 ("lots", 100), (None, 100)):
+            record = save_slots.set_earnings_percent(
+                save_slots.DEFAULT_SLOT_ID, wanted, root=self.root)
+            self.assertEqual(expected, record["earnings_percent"], wanted)
+
+    def test_renaming_a_save_keeps_its_multiplier(self):
+        created = save_slots.create_slot(
+            "Rich", save_slots.MODE_UNLOCKED, root=self.root,
+            earnings_percent=175)
+
+        renamed = save_slots.rename_slot(
+            created["id"], "Richer", root=self.root)
+
+        self.assertEqual(175, renamed["earnings_percent"])
+
+    def test_a_save_written_before_the_multiplier_earns_ordinarily(self):
+        record = save_slots.create_slot(
+            "Old", save_slots.MODE_UNLOCKED, root=self.root)
+        path = os.path.join(record["path"], save_slots.METADATA_NAME)
+        with open(path, "rb") as stream:
+            metadata = json.load(stream)
+        del metadata["earnings_percent"]
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+
+        self.assertEqual(
+            100, save_slots.read_slot(record["id"], root=self.root)[
+                "earnings_percent"])
+
     def test_a_non_ascii_name_still_produces_a_usable_directory_name(self):
         record = save_slots.create_slot(
             "生涯存档", save_slots.MODE_UNLOCKED, root=self.root)

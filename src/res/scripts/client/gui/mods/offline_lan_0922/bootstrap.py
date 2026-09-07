@@ -742,6 +742,13 @@ def _selected_vehicle(config, restore_saved=True):
             'equipmentCount': artefact_counts['equipment'],
             'notInShopItems': not_in_shop_items,
             'saveMode': save_mode,
+            # What this save multiplies its battle earnings by.  It is read
+            # once here, beside the mode, because both are the launcher's
+            # description of the account rather than anything the garage
+            # earns; the hidden worker builds no save and plays at 100.
+            'earningsPercent': economy.earnings_percent(
+                port_config.save_slot_earnings_percent()
+                if restore_saved else economy.DEFAULT_EARNINGS_PERCENT),
             'wallet': (economy.CAREER_WALLET.copy() if career else
                        economy.SANDBOX_WALLET.copy()),
             'vehicleXP': dict(

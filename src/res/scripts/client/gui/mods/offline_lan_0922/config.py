@@ -61,6 +61,13 @@ SAVE_METADATA_FILE_NAME = 'save.json'
 SAVE_MODE_UNLOCKED = 'unlocked'
 SAVE_MODE_NEW_ACCOUNT = 'new_account'
 SAVE_MODES = frozenset((SAVE_MODE_UNLOCKED, SAVE_MODE_NEW_ACCOUNT))
+# The launcher also writes what this save multiplies its earnings by, as a
+# whole percentage rather than a fraction: the launcher runs on Python 3 and
+# this client on Python 2.7, and an integer means the same thing in both.
+SAVE_EARNINGS_KEY = 'earnings_percent'
+DEFAULT_SAVE_EARNINGS_PERCENT = 100
+MIN_SAVE_EARNINGS_PERCENT = 1
+MAX_SAVE_EARNINGS_PERCENT = 10000
 # A slot id becomes one directory name, so keep it to characters that need no
 # escaping on Windows and cannot walk out of the saves root.
 _SAVE_SLOT_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
@@ -461,6 +468,31 @@ def save_slot_mode(slot=None, user_data_dir=None):
     except (IOError, OSError, TypeError, ValueError):
         return SAVE_MODE_UNLOCKED
     return mode if mode in SAVE_MODES else SAVE_MODE_UNLOCKED
+
+
+def save_slot_earnings_percent(slot=None, user_data_dir=None):
+    """Return what the active save multiplies its battle earnings by.
+
+    The launcher owns ``save.json`` and writes a whole percentage there, so
+    100 is an ordinary save and 250 earns two and a half times as much.  A
+    save that never set one, or a file this client cannot read, plays at the
+    ordinary rate rather than at a guess.
+    """
+    path = os.path.join(
+        save_slot_dir(slot, user_data_dir), SAVE_METADATA_FILE_NAME)
+    try:
+        with open(path, 'rb') as stream:
+            value = json.load(stream)
+        percent = (value.get(SAVE_EARNINGS_KEY)
+                   if isinstance(value, dict) else None)
+    except (IOError, OSError, TypeError, ValueError):
+        return DEFAULT_SAVE_EARNINGS_PERCENT
+    try:
+        percent = int(percent)
+    except (TypeError, ValueError):
+        return DEFAULT_SAVE_EARNINGS_PERCENT
+    return max(MIN_SAVE_EARNINGS_PERCENT,
+               min(MAX_SAVE_EARNINGS_PERCENT, percent))
 
 
 def saves_root(user_data_dir=None):

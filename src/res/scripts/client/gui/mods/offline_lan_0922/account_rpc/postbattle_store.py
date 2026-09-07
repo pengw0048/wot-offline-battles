@@ -126,6 +126,15 @@ def _receipt(value):
     # is safer than silently applying an untrusted server value.
     if rewards['repair_cost'] or rewards['ammo_cost']:
         raise ValueError('offline service costs must be zero')
+    # What the account actually banked, after its own multipliers.  Only the
+    # client knows them, so this is written on the way in rather than sent:
+    # a receipt from a server has none and is worth exactly what it says.
+    awarded = None
+    raw_awarded = value.get('awarded')
+    if isinstance(raw_awarded, dict):
+        awarded = dict(
+            (name, max(0, _int(raw_awarded.get(name))))
+            for name in ('credits', 'xp', 'free_xp'))
     shells_fired = {}
     raw_fired = value.get('shells_fired')
     if raw_fired is not None:
@@ -282,6 +291,10 @@ def _receipt(value):
         # re-deriving the roster to find them.
         'achievements': list(personal['achievements']),
         'health': personal['health'],
+        # What the account banked once its own multipliers were applied.
+        # ``None`` means nothing multiplied it, which is what every receipt
+        # written before the multiplier existed says.
+        'awarded': awarded,
         # By the shell's index in the gun's own shot order: only the client
         # can turn that into a shell, and only the client owns its price.
         'shells_fired': shells_fired,
@@ -411,7 +424,12 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         import battle_results_shared as packers
     counts = achievement_counts if isinstance(achievement_counts, dict) else {}
     stats = receipt['stats']
-    rewards = receipt['rewards']
+    # #1513's own results model separates what the battle was worth from what
+    # the account was given: ``originalXP`` is the battle, ``xp`` is the
+    # award.  A save's multiplier and a premium vehicle's credit bonus are
+    # exactly that difference, so the screen shows both.
+    original = receipt['rewards']
+    rewards = receipt.get('awarded') or original
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
@@ -437,15 +455,15 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'deathReason': receipt['death_reason'],
         'killerID': 0,
         'credits': rewards['credits'],
-        'originalCredits': rewards['credits'],
+        'originalCredits': original['credits'],
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
         'xp': rewards['xp'],
-        'originalXP': rewards['xp'],
+        'originalXP': original['xp'],
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
         'freeXP': rewards['free_xp'],
-        'originalFreeXP': rewards['free_xp'],
+        'originalFreeXP': original['free_xp'],
         'factualFreeXP': rewards['free_xp'],
         'subtotalFreeXP': rewards['free_xp'],
         'gold': 0,
@@ -668,11 +686,17 @@ class PostBattleStore(object):
         policy = {}
         if self._progress_applier is not None:
             policy = self._progress_applier(receipt) or {}
+        awarded = policy.get('awarded')
+        if isinstance(awarded, dict):
+            receipt['awarded'] = dict(
+                (name, max(0, _int(awarded.get(name))))
+                for name in ('credits', 'xp', 'free_xp'))
+        banked = receipt['awarded'] or receipt['rewards']
         previous = self._snapshot()
         self._pending[arena_key] = receipt
         self._apply_progress(
             receipt, vehicle_xp=(0 if policy.get('accelerated') else
-                                 receipt['rewards']['xp']))
+                                 banked['xp']))
         try:
             self._save()
         except Exception:
@@ -763,7 +787,10 @@ class PostBattleStore(object):
         return True
 
     def _apply_progress(self, receipt, vehicle_xp=None):
-        rewards = receipt['rewards']
+        # The lifetime counters count what the account was given, which is
+        # what its multipliers made of the battle rather than what the server
+        # reported it did.
+        rewards = receipt.get('awarded') or receipt['rewards']
         stats = receipt['stats']
         progress = self._progress
         progress['credits'] += rewards['credits']

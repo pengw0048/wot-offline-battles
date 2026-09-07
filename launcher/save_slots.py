@@ -39,6 +39,16 @@ MODE_UNLOCKED = "unlocked"
 MODE_NEW_ACCOUNT = "new_account"
 MODES = (MODE_UNLOCKED, MODE_NEW_ACCOUNT)
 
+# What a save multiplies its battle earnings by, as a whole percentage.  The
+# client reads this and scales the credits and experience every battle pays,
+# so 100 is an ordinary save and 250 earns two and a half times as much.  It
+# is an integer rather than a fraction because the launcher writes it from
+# Python 3 and the game reads it from Python 2.7.
+EARNINGS_KEY = "earnings_percent"
+DEFAULT_EARNINGS_PERCENT = 100
+MIN_EARNINGS_PERCENT = 1
+MAX_EARNINGS_PERCENT = 10000
+
 MAX_SLOT_NAME_LENGTH = 64
 STATE_FILE_NAMES = (
     "garage_state.json",
@@ -152,6 +162,15 @@ def _write_metadata(path, value):
     os.replace(temporary, path)
 
 
+def normalized_earnings_percent(value):
+    """Return one save's earnings multiplier, clamped to what it may be."""
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_EARNINGS_PERCENT
+    return max(MIN_EARNINGS_PERCENT, min(MAX_EARNINGS_PERCENT, percent))
+
+
 def _record(slot_id, directory, metadata):
     """Return one displayable slot record.
 
@@ -174,6 +193,8 @@ def _record(slot_id, directory, metadata):
         "id": slot_id,
         "name": " ".join(name.split())[:MAX_SLOT_NAME_LENGTH],
         "mode": mode,
+        "earnings_percent": normalized_earnings_percent(
+            metadata.get(EARNINGS_KEY, DEFAULT_EARNINGS_PERCENT)),
         "created": created,
         "path": directory,
         "has_state": any(
@@ -250,7 +271,7 @@ def _allocate_slot_id(name, root):
 
 
 def create_slot(name, mode, game_root=None, environment=None, root=None,
-                now=None):
+                now=None, earnings_percent=DEFAULT_EARNINGS_PERCENT):
     """Create one empty slot directory and its ``save.json`` record.
 
     The state files are deliberately not written here.  The client creates each
@@ -274,6 +295,7 @@ def create_slot(name, mode, game_root=None, environment=None, root=None,
             "id": slot_id,
             "name": name,
             "mode": mode,
+            EARNINGS_KEY: normalized_earnings_percent(earnings_percent),
             "created": int(time.time() if now is None else now),
         })
     except (IOError, OSError) as error:
@@ -299,12 +321,45 @@ def rename_slot(slot_id, name, game_root=None, environment=None, root=None):
         "id": slot_id,
         "name": name,
         "mode": record["mode"],
+        EARNINGS_KEY: record["earnings_percent"],
         "created": record["created"] or int(time.time()),
     })
     try:
         _write_metadata(path, metadata)
     except (IOError, OSError) as error:
         raise SaveSlotError("The save could not be renamed: %s" % error)
+    return read_slot(slot_id, game_root, environment, root)
+
+
+def set_earnings_percent(slot_id, percent, game_root=None, environment=None,
+                         root=None):
+    """Change what one save multiplies its battle earnings by.
+
+    Unlike the balances, this lives in the launcher's own ``save.json`` rather
+    than in the client's state, so it can be set on a save that has never been
+    started -- which is when a player most wants to decide it.
+    """
+    percent = normalized_earnings_percent(percent)
+    record = read_slot(slot_id, game_root, environment, root)
+    if not os.path.isdir(record["path"]):
+        try:
+            os.makedirs(record["path"])
+        except (IOError, OSError) as error:
+            raise SaveSlotError("The save could not be changed: %s" % error)
+    path = os.path.join(record["path"], METADATA_NAME)
+    metadata = _read_metadata(path) or {}
+    metadata.update({
+        "schema": METADATA_SCHEMA,
+        "id": slot_id,
+        "name": record["name"],
+        "mode": record["mode"],
+        EARNINGS_KEY: percent,
+        "created": record["created"] or int(time.time()),
+    })
+    try:
+        _write_metadata(path, metadata)
+    except (IOError, OSError) as error:
+        raise SaveSlotError("The save could not be changed: %s" % error)
     return read_slot(slot_id, game_root, environment, root)
 
 

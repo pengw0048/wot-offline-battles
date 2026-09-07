@@ -108,6 +108,8 @@ class _Component(object):
 
 # The fixture's only vehicle is nation 0, type 9, with a two-seat crew.
 CREW_ROLES = (('commander',), ('driver',))
+# A vehicle this fixture's client marks premium, which is what a gold tank is.
+PREMIUM_VEHICLE_CD = 50003
 VEHICLE_TYPE_ID = 9
 
 
@@ -262,7 +264,12 @@ def _modules():
         getVehicleType=lambda compact_descr: types.SimpleNamespace(
             id=(0, VEHICLE_TYPE_ID if compact_descr == 50001
                 else compact_descr % 1000),
-            crewRoles=CREW_ROLES),
+            crewRoles=CREW_ROLES,
+            # gui_items.Vehicle.isPremium is 'premium' in type.tags, and
+            # #1513's own VehicleType carries a frozenset.  50003 is this
+            # fixture's gold tank.
+            tags=frozenset(
+                ('premium',) if compact_descr == PREMIUM_VEHICLE_CD else ())),
         getTypeOfCompactDescr=item_type)
     # #1513's own table, out of items/components/skills_constants.pyc: the
     # five roles come first and every command sends an index into it.
@@ -2290,6 +2297,100 @@ class GaragePersistenceTests(unittest.TestCase):
 
         self.assertEqual([20010, 20011], result['touched_items'][10])
         self.assertEqual([11001], result['touched_items'][11])
+
+    def _earning_snapshot(self, percent=None, vehicle_type=50001):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 0, 'gold': 0, 'freeXP': 0}
+        snapshot['vehicles'][0]['vehicleTypeCompactDescr'] = vehicle_type
+        snapshot['vehicleTypeCompactDescrs'] = {vehicle_type}
+        snapshot['shopItemPrices'][vehicle_type] = {'credits': 0, 'gold': 0}
+        if percent is not None:
+            snapshot['earningsPercent'] = percent
+        return snapshot
+
+    REWARDS = {'credits': 1000, 'xp': 200, 'free_xp': 10}
+
+    def _settle(self, snapshot, receipt_id):
+        vehicles, tankmen = _modules()
+        return self._store().apply_battle_crew_xp(
+            snapshot, receipt_id,
+            int(snapshot['vehicles'][0]['vehicleTypeCompactDescr']),
+            self.REWARDS['xp'], 1, tankmen_module=tankmen,
+            rewards=dict(self.REWARDS), vehicles_module=vehicles)
+
+    def test_a_save_without_a_multiplier_earns_what_the_battle_paid(self):
+        snapshot = self._earning_snapshot()
+
+        result = self._settle(snapshot, 'server:20:1')
+
+        self.assertEqual(1000, snapshot['wallet']['credits'])
+        self.assertEqual(10, snapshot['wallet']['freeXP'])
+        self.assertEqual(200, snapshot['vehicleXP'][50001])
+        self.assertEqual(
+            {'credits': 1000, 'xp': 200, 'free_xp': 10}, result['awarded'])
+
+    def test_the_launchers_multiplier_moves_credits_and_experience(self):
+        """One number on the save, applied to everything a battle pays."""
+        snapshot = self._earning_snapshot(percent=250)
+
+        result = self._settle(snapshot, 'server:21:1')
+
+        self.assertEqual(2500, snapshot['wallet']['credits'])
+        self.assertEqual(25, snapshot['wallet']['freeXP'])
+        self.assertEqual(500, snapshot['vehicleXP'][50001])
+        self.assertEqual(
+            {'credits': 2500, 'xp': 500, 'free_xp': 25}, result['awarded'])
+        # The crew was trained on the multiplied experience too: #1513 gives
+        # each crew member the battle's whole experience, not a share of it.
+        self.assertEqual(500, _TankmanDescriptor(
+            snapshot['vehicles'][0]['tankmen'][101]).totalXP())
+
+    def test_a_gold_tank_earns_more_credits_and_the_same_experience(self):
+        """#1513 calls it premium; retail sells it for the credits."""
+        snapshot = self._earning_snapshot(vehicle_type=PREMIUM_VEHICLE_CD)
+
+        result = self._settle(snapshot, 'server:22:1')
+
+        self.assertEqual(1500, snapshot['wallet']['credits'])
+        self.assertEqual(200, snapshot['vehicleXP'][PREMIUM_VEHICLE_CD])
+        self.assertEqual(10, snapshot['wallet']['freeXP'])
+        self.assertEqual(
+            {'credits': 1500, 'xp': 200, 'free_xp': 10}, result['awarded'])
+
+    def test_a_gold_tank_on_a_multiplied_save_takes_both(self):
+        snapshot = self._earning_snapshot(
+            percent=200, vehicle_type=PREMIUM_VEHICLE_CD)
+
+        self._settle(snapshot, 'server:23:1')
+
+        self.assertEqual(3000, snapshot['wallet']['credits'])
+        self.assertEqual(400, snapshot['vehicleXP'][PREMIUM_VEHICLE_CD])
+
+    def test_a_multiplier_the_save_cannot_mean_is_ignored(self):
+        snapshot = self._earning_snapshot(percent='lots')
+
+        self._settle(snapshot, 'server:24:1')
+
+        self.assertEqual(1000, snapshot['wallet']['credits'])
+
+    def test_a_receipt_with_no_earnings_row_still_trains_on_the_multiplier(
+            self):
+        """Crew experience is experience, whether or not credits came with it.
+
+        A receipt written before the earnings row existed carries only the
+        battle experience, and that is still what the save multiplies.
+        """
+        snapshot = self._earning_snapshot(percent=250)
+        unused_vehicles, tankmen = _modules()
+
+        self._store().apply_battle_crew_xp(
+            snapshot, 'server:25:1', 50001, 200, 1, tankmen_module=tankmen)
+
+        # Only the earnings row banks vehicle experience, so a receipt
+        # without one trains the crew and pays nothing.
+        self.assertEqual(500, _TankmanDescriptor(
+            snapshot['vehicles'][0]['tankmen'][101]).totalXP())
+        self.assertNotIn('vehicleXP', snapshot)
 
     def test_a_receipt_without_a_health_reading_bills_nothing(self):
         """A receipt written before the settlement existed stays readable."""

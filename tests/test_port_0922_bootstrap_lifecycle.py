@@ -253,7 +253,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         'usa:A01_T1_Cunningham': (1, 7),
     }
 
-    def _load(self, save_mode=None, starters=None):
+    def _load(self, save_mode=None, starters=None, earnings_percent=None):
         events = []
         callbacks = _Callbacks()
         spaces = types.SimpleNamespace(
@@ -281,6 +281,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
         config_module.SAVE_MODE_NEW_ACCOUNT = 'new_account'
         config_module.save_slot_mode = lambda: (
             save_mode or config_module.SAVE_MODE_UNLOCKED)
+        # The launcher writes what this save multiplies its earnings by
+        # beside the mode, and the client reads both once at startup.
+        config_module.save_slot_earnings_percent = lambda: (
+            100 if earnings_percent is None else earnings_percent)
         config_module.ACTIVE_SAVE_SLOT = object()
         # No inbox file exists unless a test writes one, so the launcher
         # delivery path is a no-op for every other test.
@@ -1074,6 +1078,28 @@ class BootstrapLifecycleTests(unittest.TestCase):
             starters=self.STARTER_NAMES)
 
         self._assert_depot_covers_the_garage(snapshot)
+
+    def test_the_garage_reads_the_multiplier_the_launcher_wrote(self):
+        """It describes the account, like the save type, not the garage."""
+        snapshot = self._with_saved_garage((), earnings_percent=250)
+
+        self.assertEqual(250, snapshot['earningsPercent'])
+
+    def test_a_save_without_a_multiplier_earns_at_the_ordinary_rate(self):
+        snapshot = self._with_saved_garage(())
+
+        self.assertEqual(100, snapshot['earningsPercent'])
+
+    def test_a_hidden_worker_builds_no_save_and_earns_nothing_extra(self):
+        """It has no save to read, so it must not read one."""
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load(earnings_percent=250)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+
+        self.assertEqual(100, snapshot['earningsPercent'])
 
     def test_a_rack_a_battle_emptied_still_restores(self):
         """A last round fired must not cost the player the whole save."""

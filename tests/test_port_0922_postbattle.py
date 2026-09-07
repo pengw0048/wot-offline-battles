@@ -1,6 +1,8 @@
 import base64
 import json
+import os
 import pickle
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -117,6 +119,23 @@ def _receipt(account_key='account-key-123456'):
         'stats': dict(receipt['stats']),
     }]
     return receipt
+
+
+def _packed_vehicle(receipt):
+    """Return the per-vehicle fields #1513's results screen is given."""
+    packers = _Packers()
+    original_vehicle = postbattle_store._vehicle_type_compact_descr
+    original_arena = postbattle_store._arena_type_id
+    try:
+        postbattle_store._vehicle_type_compact_descr = lambda unused: 50001
+        postbattle_store._arena_type_id = lambda unused: 70001
+        postbattle_store.pack_battle_result(
+            receipt, packers=packers,
+            replay_types=(_Replay, _ReplayConnector))
+    finally:
+        postbattle_store._vehicle_type_compact_descr = original_vehicle
+        postbattle_store._arena_type_id = original_arena
+    return dict(packers.calls)['VEH_FULL_RESULTS']
 
 
 def _interaction(target_kind='bot', target_id=17, **updates):
@@ -437,6 +456,49 @@ class PostBattleContractTests(unittest.TestCase):
         for replay_name in ('creditsReplay', 'xpReplay', 'freeXPReplay',
                             'goldReplay', 'crystalReplay'):
             self.assertTrue(vehicle_fields[replay_name])
+
+    def test_the_results_screen_shows_what_the_account_was_given(self):
+        """#1513's own model separates the battle from the award.
+
+        A save's earnings multiplier and a premium vehicle's credit bonus are
+        exactly that difference, so ``originalXP`` stays the battle and ``xp``
+        becomes what the wallet received.
+        """
+        receipt = _receipt()
+        receipt['awarded'] = {'credits': 10500, 'xp': 1200, 'free_xp': 60}
+
+        fields = _packed_vehicle(receipt)
+
+        self.assertEqual(10500, fields['credits'])
+        self.assertEqual(4200, fields['originalCredits'])
+        self.assertEqual(1200, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(60, fields['freeXP'])
+        self.assertEqual(30, fields['originalFreeXP'])
+
+    def test_a_receipt_with_no_multiplier_shows_one_number_twice(self):
+        fields = _packed_vehicle(_receipt())
+
+        self.assertEqual(4200, fields['credits'])
+        self.assertEqual(4200, fields['originalCredits'])
+        self.assertEqual(600, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+
+    def test_the_lifetime_counters_count_what_was_banked(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        store = postbattle_store.PostBattleStore(
+            path=os.path.join(directory, 'postbattle_state.json'))
+        store.set_progress_applier(lambda receipt: {
+            'awarded': {'credits': 10500, 'xp': 1200, 'free_xp': 60}})
+
+        self.assertTrue(store.accept(_receipt(store.account_key)))
+
+        progress = store.progress()
+        self.assertEqual(10500, progress['credits'])
+        self.assertEqual(60, progress['freeXP'])
+        self.assertEqual(
+            1200, progress['vehicles']['ussr:R11_MS-1']['xp'])
 
     def test_blocked_damage_reaches_the_native_result_and_dossier(self):
         state = BattleState(map_name='01_karelia', team_size=1)

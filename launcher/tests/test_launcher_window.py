@@ -1249,6 +1249,58 @@ class WindowTest(unittest.TestCase):
         self.assertEqual("1500", self.window.balance_entries["gold"].get())
         self.assertEqual("90", self.window.balance_entries["freeXP"].get())
 
+    def test_the_panel_shows_the_selected_saves_earnings_multiplier(self):
+        saves_root = self._saves_root()
+        wot_launcher.save_slots.set_earnings_percent(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, 250, root=saves_root)
+        self.window._refresh_save_slots()
+
+        self.assertEqual("2.5", self.window.earnings_entry.get())
+
+    def test_the_multiplier_can_be_set_before_the_save_has_ever_run(self):
+        """Unlike the balances, it is the launcher's own record."""
+        self._saves_root()
+        self.assertFalse(self.window._refresh_balances())
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "3")
+        self.assertTrue(self.window._apply_earnings())
+
+        self.assertEqual(
+            300, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=self._saves_root())["earnings_percent"])
+        self.assertEqual("3", self.window.earnings_entry.get())
+
+    def test_a_multiplier_that_is_not_a_number_changes_nothing(self):
+        saves_root = self._saves_root()
+        wot_launcher.save_slots.set_earnings_percent(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, 150, root=saves_root)
+        self.window._refresh_save_slots()
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "plenty")
+        self.assertFalse(self.window._apply_earnings())
+
+        self.assertEqual(
+            150, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["earnings_percent"])
+        self.assertEqual("1.5", self.window.earnings_entry.get())
+
+    def test_a_multiplier_outside_the_allowed_range_is_refused(self):
+        saves_root = self._saves_root()
+        self.window._refresh_save_slots()
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "0")
+        self.assertFalse(self.window._apply_earnings())
+
+        self.assertEqual(
+            100, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["earnings_percent"])
+
     def test_a_save_that_never_ran_cannot_be_edited_yet(self):
         """The client writes a save's first balances, not the launcher."""
         self._saves_root()
