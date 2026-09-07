@@ -610,6 +610,7 @@ class GarageState(object):
                 wanted[compact_descr] = wanted.get(compact_descr, 0) + 1
         purchase = {}
         for compact_descr, count in wanted.items():
+            self._require_offered_item(compact_descr)
             needed = count + self._mounted(
                 compact_descr, EQUIPMENT_ITEM_TYPE, others)
             missing = needed - _int(owned.get(compact_descr, 0))
@@ -1066,6 +1067,12 @@ class GarageState(object):
         self.revision += 1
         return compact_descr
 
+    def _require_offered_item(self, compact_descr):
+        if (compact_descr in (self._snapshot.get('notInShopItems') or ()) and
+                compact_descr not in (self._snapshot.get('shopItemPrices') or {})):
+            raise GarageError('item %d is not offered in standard battles' %
+                              compact_descr)
+
     def _purchase_terms(self, compact_descr, count=1, gold_for_credits=False):
         """Return one purchase's item type and price, or refuse it.
 
@@ -1075,6 +1082,7 @@ class GarageState(object):
         """
         if not compact_descr:
             raise GarageError('a purchase needs an item')
+        self._require_offered_item(compact_descr)
         item_type = self._item_type(compact_descr)
         # Only modules are researched. #1513 sells shells, consumables and
         # optional devices straight from the shop, so gating them on the

@@ -802,10 +802,18 @@ def _check_bootstrap_selected_vehicle(port_root):
     code = functions.get('_selected_vehicle')
     if code is None:
         raise ValueError('bootstrap.py is missing _selected_vehicle')
-    missing_names = sorted(
-        set(BOOTSTRAP_SELECTED_VEHICLE_NAMES) - set(code.co_names))
-    missing_literals = sorted(
-        set(BOOTSTRAP_SELECTED_VEHICLE_LITERALS) - set(code.co_consts))
+    # The vehicle factory owns descriptor and crew generation; bootstrap
+    # owns the account-wide catalogue assembled from those records.
+    factory_path = os.path.join(os.path.dirname(path), 'vehicle_records.py')
+    with open(factory_path, 'rb') as source_file:
+        factory_root = compile(source_file.read(), factory_path, 'exec')
+    factory = dict(_walk_code(factory_root)).get('build_record')
+    if factory is None or 'build_record' not in code.co_names:
+        raise ValueError('bootstrap is not using the shared vehicle factory')
+    names = set(code.co_names) | set(factory.co_names)
+    literals = set(code.co_consts) | set(factory.co_consts)
+    missing_names = sorted(set(BOOTSTRAP_SELECTED_VEHICLE_NAMES) - names)
+    missing_literals = sorted(set(BOOTSTRAP_SELECTED_VEHICLE_LITERALS) - literals)
     if missing_names or missing_literals:
         raise ValueError(
             'bootstrap selected vehicle contract changed; names=%r literals=%r' %

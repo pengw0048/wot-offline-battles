@@ -1076,7 +1076,7 @@ class AccountRpcTests(unittest.TestCase):
 
         bootstrap = (
             CLIENT_SCRIPTS / 'gui' / 'mods' / 'offline_lan_0922' /
-            'bootstrap.py').read_text(encoding='utf-8')
+            'vehicle_records.py').read_text(encoding='utf-8')
         self.assertEqual(
             'VehicleDescr.makeCompactDescr',
             validator['selectedVehicleCompDescrProducer'])
@@ -1396,6 +1396,34 @@ class DepotTests(unittest.TestCase):
         result.before_response()
         self.assertEqual(1, len(pushed))
         return pushed[0]['inventory']
+
+    def test_purchase_publishes_balance_before_acknowledgement(self):
+        state = self._garage(item_type=11)
+        events = []
+        def publish(diff, after_publish):
+            self.assertEqual(60000, diff['stats']['credits'])
+            self.assertEqual(2, diff['inventory'][11][4444])
+            events.append('update')
+            after_publish()
+            return True
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': lambda diff: None,
+             'push_update_and_wait': publish}, (42, 4444, 2, 0))
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response(lambda: events.append('response'))
+        self.assertEqual(['update', 'response'], events)
+
+    def test_special_mode_item_cannot_be_bought_or_supplied(self):
+        state = self._garage(item_type=11)
+        state.snapshot()['notInShopItems'] = {4444}
+        state.snapshot()['shopItemPrices'].pop(4444)
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(account_requests.garage.GarageError):
+            state.buy_item(4444)
+        with self.assertRaises(account_requests.garage.GarageError):
+            state.equip_equipments(9, [4444, 0, 0])
+        self.assertEqual(before, state.snapshot())
 
     def test_a_bought_spare_module_reaches_the_depot(self):
         state = self._garage()

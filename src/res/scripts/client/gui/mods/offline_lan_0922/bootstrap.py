@@ -16,8 +16,7 @@ from gui.mods.offline_lan_0922.account_rpc import economy
 from gui.mods.offline_lan_0922.vehicle_records import (
     STOCKED_ITEM_TYPES,
     default_consumables, default_vehicle_settings, offers_in_random_battle,
-    top_up_new_skill_slots, vehicle_type_guns, vehicle_type_modules,
-    with_new_skill_slots)
+    vehicle_type_guns, vehicle_type_modules)
 from gui.mods.offline_lan_0922.vehicle_configuration import (
     install_top_modules as _install_top_modules,
     is_standard_battle_vehicle as _is_standard_battle_vehicle,
@@ -54,31 +53,6 @@ _postbattle_store = None
 
 
 
-
-
-def _migrate_saved_crew_skill_slots(snapshot, tankmen):
-    """Top up restored crew without replacing any learned skill."""
-    records = snapshot.get('vehicles') if isinstance(snapshot, dict) else None
-    if not isinstance(records, (list, tuple)):
-        records = [snapshot]
-    migrated = 0
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        crew = list(record.get('crew') or ())
-        tankman_rows = record.get('tankmen')
-        if not isinstance(tankman_rows, dict):
-            continue
-        for tankman_id in crew:
-            compact_descr = tankman_rows.get(tankman_id)
-            if compact_descr is None:
-                continue
-            descriptor = tankmen.TankmanDescr(compact_descr)
-            if not top_up_new_skill_slots(tankmen, descriptor):
-                continue
-            tankman_rows[tankman_id] = descriptor.makeCompactDescr()
-            migrated += 1
-    return migrated
 
 
 def _schedule(delay, function):
@@ -184,11 +158,9 @@ def _restore_garage(snapshot):
     store = _garage_store()
     if store is None:
         return False
-    migrated = [0]
 
     def validate(staged):
-        from items import tankmen, vehicles
-        migrated[0] = _migrate_saved_crew_skill_slots(staged, tankmen)
+        from items import vehicles
         _clamp_saved_repair(staged, vehicles)
         return _validate_restored_garage(staged)
 
@@ -209,17 +181,12 @@ def _restore_garage(snapshot):
         1 for record in (snapshot.get('vehicles') or ())
         if isinstance(record, dict) and
         str(record.get('vehicleTypeName') or '') not in named)
-    if migrated[0] or unnamed:
+    if unnamed:
         store.mark_dirty()
         if store.flush(snapshot):
-            if migrated[0]:
-                sys.stdout.write(
-                    '[Offline LAN 0.9.22] upgraded saved skill choices for %d '
-                    'crew member(s)\n' % migrated[0])
-            if unnamed:
-                sys.stdout.write(
-                    '[Offline LAN 0.9.22] named %d saved vehicle(s) for the '
-                    'launcher\n' % unnamed)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] named %d saved vehicle(s) for the '
+                'launcher\n' % unnamed)
     return restored
 
 
@@ -691,6 +658,9 @@ def _selected_vehicle(config, restore_saved=True):
                 except (TypeError, ValueError, AttributeError):
                     continue
                 if not offers_in_random_battle(descriptor):
+                    # The baked prices already contain special-mode items.
+                    shop_item_prices.pop(compact_descr, None)
+                    not_in_shop_items.add(compact_descr)
                     continue
                 shop_item_prices.setdefault(
                     compact_descr, {'credits': 0})

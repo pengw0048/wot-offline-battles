@@ -27,9 +27,6 @@ def mounted_module_items(descriptor):
         result[item_type] = {compact_descr: 1}
     return result
 
-NEW_SKILL_SLOTS = 8
-_NEW_SKILL_XP = {}
-
 
 def default_vehicle_settings():
     """Return the VEHICLE_SETTINGS_FLAG mask a fresh garage vehicle starts with.
@@ -42,73 +39,6 @@ def default_vehicle_settings():
             VEHICLE_SETTINGS_FLAG.AUTO_REPAIR |
             VEHICLE_SETTINGS_FLAG.AUTO_LOAD |
             VEHICLE_SETTINGS_FLAG.AUTO_EQUIP)
-
-
-def _new_skill_xp(tankmen, descriptor, trained,
-                  choices=NEW_SKILL_SLOTS):
-    """Return the free XP that leaves ``choices`` skills to pick.
-
-    #1513's ``Tankman.newSkillCount`` offers one more skill for every skill the
-    stored free XP can train to ``tankmen.MAX_SKILL_LEVEL``, plus the one it
-    starts.  The cost depends only on how many skills the crewman already has.
-    """
-    key = (trained, choices)
-    if key not in _NEW_SKILL_XP:
-        _NEW_SKILL_XP[key] = sum(
-            descriptor.levelUpXpCost(level, trained + step)
-            for step in range(1, choices)
-            for level in range(tankmen.MAX_SKILL_LEVEL))
-    return _NEW_SKILL_XP[key]
-
-
-def top_up_new_skill_slots(tankmen, descriptor):
-    """Give one parsed crewman NEW_SKILL_SLOTS total skill choices.
-
-    Learned skills stay selected.  XP is added only when the learned and still
-    selectable skills would otherwise total less than the offline minimum.
-    """
-    maximum = int(tankmen.MAX_SKILL_LEVEL)
-    selected = int(descriptor.lastSkillNumber)
-    missing = NEW_SKILL_SLOTS - selected
-    if missing <= 0:
-        return False
-    trained = max(0, selected - int(descriptor.freeSkillsNumber))
-
-    role_level = int(getattr(descriptor, 'roleLevel', maximum))
-    if role_level != maximum:
-        # Offline crew is generated at 100%.  Do not silently retrain a saved
-        # descriptor from another source just to make secondary slots appear.
-        return False
-    last_skill_level = int(getattr(
-        descriptor, 'lastSkillLevel', maximum))
-    required = 0
-    incomplete = False
-    if trained and last_skill_level < maximum:
-        required += sum(
-            descriptor.levelUpXpCost(level, trained)
-            for level in range(max(0, last_skill_level), maximum))
-        incomplete = True
-    required += _new_skill_xp(
-        tankmen, descriptor, trained, choices=missing)
-
-    current = max(0, int(descriptor.freeXP))
-    if current >= required and not incomplete:
-        return False
-    delta = max(0, required - current)
-    # addXP consumes the budget into the current skill first.  Merely assigning
-    # freeXP would leave #1513's newSkillCount blocked below 100%.
-    descriptor.addXP(delta)
-    return True
-
-
-def with_new_skill_slots(tankmen, descriptor):
-    """Return the tankman with NEW_SKILL_SLOTS skills left for the player.
-
-    No skill is chosen here; the player picks all of them.  The caller already
-    unpacked this descriptor to validate the crew slot, so it is reused.
-    """
-    top_up_new_skill_slots(tankmen, descriptor)
-    return descriptor.makeCompactDescr()
 
 
 def _component_compact_descrs(value, seen):
@@ -280,9 +210,7 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
     if top_modules:
         install_top_modules(descriptor)
 
-    # A fresh offline crew starts without preselected perks.  The free-XP
-    # budget below exposes the requested empty slots, so the player remains the
-    # sole owner of every skill choice.
+    # Fresh crew has no secondary skills or gifted skill experience.
     if role_level is None:
         role_level = tankmen.MAX_SKILL_LEVEL
     skills_mask = tankmen.getSkillsMask(())
@@ -302,7 +230,7 @@ def build_record(vehicles, tankmen, item_type_indices, type_id,
                 tankman_descr.role != roles[0]):
             raise ValueError(
                 'generated tankman does not match vehicle crew slot')
-        validated_tankmen.append(with_new_skill_slots(tankmen, tankman_descr))
+        validated_tankmen.append(tankman_descr.makeCompactDescr())
 
     components = (
         ('vehicleChassis', descriptor.chassis),
