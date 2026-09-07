@@ -2267,6 +2267,55 @@ class CrewShopTests(unittest.TestCase):
             state.change_tankman_passport(201, 1, -1, 0, 11, 0, 22, 0, 33)
 
 
+class CrewShopFailureTests(unittest.TestCase):
+    """A crew command the client refuses halfway must not cost money.
+
+    ``_fitting`` reports one result for the whole command and has no way to
+    undo a charge, so every one of these charges only once the client has
+    accepted the change and written it down.
+    """
+
+    def setUp(self):
+        unused_requests, unused_commands, self.garage = _request_modules()
+
+    def _state(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 1000000, 'gold': 10000, 'freeXP': 0}
+        snapshot['accountBerths'] = 5
+        snapshot['barracksTankmen'] = {201: b'tman:201'}
+        vehicles, tankmen = _modules()
+
+        class _Refusing(_TankmanDescriptor):
+            def makeCompactDescr(self):
+                raise ValueError('the descriptor could not be written')
+
+        tankmen.TankmanDescr = _Refusing
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def _assert_unchanged(self, mutate):
+        state = self._state()
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            mutate(state)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_role_change_the_client_cannot_write_down_costs_nothing(self):
+        self._assert_unchanged(
+            lambda state: state.change_tankman_role(201, 3, 50002))
+
+    def test_a_passport_the_client_cannot_write_down_costs_nothing(self):
+        self._assert_unchanged(
+            lambda state: state.change_tankman_passport(
+                201, 0, -1, 0, 11, 0, 22, 0, 33))
+
+    def test_a_reset_the_client_cannot_write_down_costs_nothing(self):
+        self._assert_unchanged(
+            lambda state: state.drop_tankman_skills(201, 2))
+
+
 class StockRuleTests(unittest.TestCase):
     """The builders and the garage must agree on what the account owns."""
 

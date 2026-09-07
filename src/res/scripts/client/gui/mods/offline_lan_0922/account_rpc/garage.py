@@ -1336,14 +1336,15 @@ class GarageState(object):
             free = bool(is_free()) if callable(is_free) else False
         except Exception as error:
             raise GarageError('the client refused the skill reset: %s' % error)
-        if not free:
-            self._charge(choice)
         try:
             descriptor.dropSkills(
                 float(choice.get('xpReuseFraction', 0.0) or 0.0), False)
-            rows[tankman_id] = descriptor.makeCompactDescr()
+            serialized = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the skill reset: %s' % error)
+        if not free:
+            self._charge(choice)
+        rows[tankman_id] = serialized
         self.revision += 1
         return tankman_id
 
@@ -2219,13 +2220,19 @@ class GarageState(object):
                 # refused rather than allowed to make the save unloadable.
                 raise GarageError(
                     'take this crew member out of the vehicle first')
-        self._charge(self._crew_cost('crewChangeRoleCost'))
+        cost = self._crew_cost('crewChangeRoleCost')
+        # Serialize before charging.  The client can accept a change and
+        # still refuse to write it down, and ``_fitting`` reports one result
+        # for the whole command, so nothing that can fail may follow the
+        # money leaving the wallet.
         try:
             descriptor.role = role
             descriptor.vehicleTypeID = _int(vehicle_type_id)
-            rows[tankman_id] = descriptor.makeCompactDescr()
+            serialized = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the role change: %s' % error)
+        self._charge(cost)
+        rows[tankman_id] = serialized
         self.revision += 1
         return tankman_id
 
@@ -2267,12 +2274,13 @@ class GarageState(object):
             raise GarageError('the client refused the passport: %s' % error)
         if not accepted:
             raise GarageError('the client refused the passport: %s' % reason)
-        self._charge(cost)
         try:
             descriptor.replacePassport(context)
-            rows[tankman_id] = descriptor.makeCompactDescr()
+            serialized = descriptor.makeCompactDescr()
         except Exception as error:
             raise GarageError('the client refused the passport: %s' % error)
+        self._charge(cost)
+        rows[tankman_id] = serialized
         self.revision += 1
         return tankman_id
 
