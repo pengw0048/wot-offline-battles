@@ -6039,21 +6039,54 @@ class BotRuntime(object):
         return self._suspension_rise_exceeds_base(
             position[1], support)
 
-    def _terrain_support(self, state):
+    def _ground_probe_at(self, x, z, hint):
+        """Run one accounted physics ground column."""
+        self._probe_totals[3] += 1
+        probe_started = self._probe_started()
+        try:
+            return self._physics_ground_probe(x, z, hint)
+        finally:
+            self._probe_finished(3, probe_started)
+
+    def _straddled_terrain_support(self, state, position, follow_gap):
+        """Return chassis-end support when the centre column drops away.
+
+        A tracked hull rests on its chassis ends. Stalingrad's trenches and
+        shell craters are narrower than a tank, so a centre-only support law
+        lowers the whole body into them and the horizontal hull rays then fire
+        from inside the walls. Probe the four chassis ends only at this fall
+        transition and keep the single-ray fast path everywhere else.
+        """
+        yaw = _number(state.get('yaw'))
+        half_length = max(1.5, _number(state.get('half_length'), 3.5))
+        half_width = max(0.3, _number(state.get('half_width'), 1.7))
+        axis_samples = []
+        for pair in tank_collision.chassis_span_offsets(
+                yaw, half_width, half_length):
+            axis_samples.append(tuple(
+                self._ground_probe_at(
+                    position[0] + offset[0], position[2] + offset[1],
+                    position[1])
+                for offset in pair))
+        return tank_collision.straddled_support(
+            position[1], follow_gap, axis_samples)
+
+    def _terrain_support(self, state, follow_gap=None):
         """Probe centre first, then the 0.8.2 edge fallback when unsupported."""
         position = _position(state)
         yaw = _number(state.get('yaw'))
         half_length = max(1.5, _number(state.get('half_length'), 3.5))
         sine, cosine = math.sin(yaw), math.cos(yaw)
-        self._probe_totals[3] += 1
-        probe_started = self._probe_started()
-        try:
-            centre = self._physics_ground_probe(
-                position[0], position[2], position[1])
-        finally:
-            self._probe_finished(3, probe_started)
+        centre = self._ground_probe_at(
+            position[0], position[2], position[1])
         if centre is not None:
             centre = float(centre)
+            if (follow_gap is not None and
+                    position[1] - centre > float(follow_gap)):
+                bridged = self._straddled_terrain_support(
+                    state, position, follow_gap)
+                if bridged is not None and bridged > centre:
+                    return bridged, bridged
             # The vertical law below always selects centre while it exists;
             # front/back could not affect the realised pose on this branch.
             return centre, centre
@@ -6061,12 +6094,7 @@ class BotRuntime(object):
         for distance in (half_length, -half_length):
             x = position[0] + sine * distance
             z = position[2] + cosine * distance
-            self._probe_totals[3] += 1
-            probe_started = self._probe_started()
-            try:
-                value = self._physics_ground_probe(x, z, position[1])
-            finally:
-                self._probe_finished(3, probe_started)
+            value = self._ground_probe_at(x, z, position[1])
             if value is None:
                 continue
             value = float(value)
@@ -6782,7 +6810,9 @@ class BotRuntime(object):
                 state['push_z'] = 0.0
                 self._turn_speeds[int(state['id'])] = 0.0
                 return True
-        highest, centre = self._terrain_support(state)
+        snap_gap = vehicle_physics.ground_follow_gap(
+            state['speed'], state.get('last_drive_pitch', 0.0), step)
+        highest, centre = self._terrain_support(state, snap_gap)
         # Front/rear hits keep a bot supported across a narrow ditch, but use
         # their real CoM distance below so a remote valley floor cannot pull
         # the bot down in one tick.
@@ -6792,8 +6822,6 @@ class BotRuntime(object):
                           'grounded_before': state.get('grounded_once', False)})
         if ground is not None:
             speed = abs(state['speed'])
-            snap_gap = vehicle_physics.ground_follow_gap(
-                state['speed'], state.get('last_drive_pitch', 0.0), step)
             max_climb = max(0.6, speed * step * 2.5)
             support_rise_obstacle = bool(
                 state.get('grounded_once', False) and
