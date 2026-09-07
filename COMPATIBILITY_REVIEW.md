@@ -391,14 +391,36 @@ destructible, and HE explodes at that point. Stock
 ARMOR_PIERCING/ARMOR_PIERCING_HE/ARMOR_PIERCING_CR family, so the split is the
 client's own set rather than a guess.
 
-`DESTR_TYPE_TREE` is a documented deviation from that numeric law. The pinned
-tree table ranges from health `3` for bushes and shrubs to `70` for large
-firs, and 303 of its 498 entries exceed `maxHpForShootingThrough`. The port
-instead makes any validated, felled SpeedTree fully transparent with no
-penetration loss and no shell-family gate, which is more permissive than the
-threshold. Applying the 19 HP cap to trees would make most large trees stop
-AP shells; that is a gameplay-feel decision that still needs an exact-Windows
-comparison, so it is recorded here rather than changed.
+`DESTR_TYPE_TREE` now follows the same numeric law. `destructibles.xml`
+publishes one `maxHpForShootingThrough` and one
+`projectilePiercingPowerReduction` table for every destructible type, and stock
+`Vehicle._isDestructibleMayBeBroken` runs a tree through the same
+non-structure branch it uses for fragiles and falling atoms, including
+`kineticDamageCorrection` -- which `DestructiblesCache.__readTree` does supply
+-- and the same `scaledDestructibleHealth(itemScale, refHealth)`. So a tree's
+reference health is scaled exactly like any other item's. The pinned tree table
+ranges from `3` for bushes and shrubs to `70` for large firs, and 303 of its
+498 entries exceed the cap, so most large trees now fell and then stop an AP
+shell while a small tree costs the flat 25 mm.
+
+Trees own no catalog OBB, so neither their item scale nor their exit distance
+can come from the baked catalog. Both come from the native item:
+`wg_getDestructibleMatrix` shares one native index space with
+`wg_getChunkDestrFilenames` and `wg_getDestructibleEffectCategory`, so a slot
+already proved resolved and named by the tree identity gate resolves there
+too, and `_matrix_item_scale_1513` reads the stock scale convention from it.
+The scale is frozen while the tree still stands, before the native fall can
+move its matrix, and the shell family is tested first so HE and HEAT never pay
+for the query. A tree the round has already felled keeps the broken-skin rule:
+it is not collision, costs no penetration and is never felled twice.
+
+Two boundaries remain unproved on this path. A native matrix query that fails
+for a resolved, named tree leaves no scale, which stops the shell and records
+`health_unavailable` rather than guessing a scale. And soft vegetation below
+health `10` -- 177 of the 498 entries, all bushes, shrubs and ferns -- is still
+excluded by the existing vegetation gate, so it is never felled and never
+tested against the cap; whether such an item can produce a mask-128 shell
+contact at all has not been observed on the exact client.
 
 The threshold and material reduction are exact pinned-resource evidence.
 Official same-family mechanics descriptions support the shell-family split,

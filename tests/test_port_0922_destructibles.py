@@ -3566,7 +3566,7 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertTrue(lookups)
         self.assertEqual({filename}, set(lookups))
 
-    def test_typed_native_trees_are_transparent_without_skipping_wall(self):
+    def test_typed_native_felled_trees_are_transparent_without_wall(self):
         filenames = (
             'speedtree/45_North_America/Maple.spt',
             'speedtree/45_North_America/Oak.spt')
@@ -3613,18 +3613,11 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         for shell_kind in (
                 'ARMOR_PIERCING', 'ARMOR_PIERCING_CR',
                 'ARMOR_PIERCING_HE', 'HOLLOW_CHARGE', 'HIGH_EXPLOSIVE'):
-            destroyed = set()
             calls = []
-
-            def destroy_tree(*args):
-                calls.append(args)
-                destroyed.add(args[2])
-                return True
-
             authority = types.SimpleNamespace(
-                is_destroyed=lambda unused_chunk, item, unused_mat=None: (
-                    item in destroyed),
-                destroy_tree=destroy_tree)
+                is_destroyed=lambda unused_chunk, unused_item,
+                unused_mat=None: True,
+                destroy_tree=lambda *args: calls.append(args) or True)
             shot = types.SimpleNamespace(shell=types.SimpleNamespace(
                 kind=shell_kind))
             with mock.patch.dict(
@@ -3640,15 +3633,126 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                     bigworld, 1, _Vector(), _Vector(0, 0, 20),
                     _Vector(0, 0, 1), shot)
 
+            # Both trees were already felled this round, so no shell family
+            # pays for their residual skin and the wall behind them still
+            # owns the stop.
             for result in (first, repeated):
                 self.assertAlmostEqual(5.1, result['stop_distance'])
                 self.assertIsNone(result['continue_from'])
                 self.assertEqual(0.0, result['piercing_loss'])
                 self.assertFalse(result['stopped_by_destructible'])
-            self.assertEqual(2, len(calls), shell_kind)
-            self.assertEqual(
-                {(1, 22, 1), (1, 22, 2)},
-                {call[:3] for call in calls})
+            self.assertEqual([], calls, shell_kind)
+
+    def _standing_tree_shot(self, tree_health, item_scale, shell_kind):
+        """Fire one shell at a single standing #1513 SpeedTree."""
+        filename = 'speedtree/45_North_America/Maple.spt'
+        tree_point = _Vector(0.0, 0.0, 5.0)
+        wall = _Vector(0.0, 0.0, 9.0)
+        matrix_queries = []
+        math_module = types.ModuleType('Math')
+        math_module.Vector3 = _Vector
+        math_module.Matrix = lambda value: value
+        bigworld = types.ModuleType('BigWorld')
+
+        def collide(unused_space, unused_start, unused_end, unused_mask,
+                    collision_filter=None):
+            if (collision_filter is None or
+                    collision_filter(71, 0, 1, 22)):
+                return tree_point, _Vector(0.0, 0.0, -1.0)
+            return wall, _Vector(0.0, 0.0, -1.0)
+
+        bigworld.wg_collideSegment = collide
+
+        def material(unused_space, unused_start, unused_stop, point,
+                     unused_callback):
+            if abs(float(point.z) - 5.0) <= 0.01:
+                return _mat_info_1513(
+                    True, point, _Vector(0, 1, 0), 71, filename, 22, 1)
+            return _mat_info_1513(
+                True, point, _Vector(0, 1, 0), 5, '', 0, 0)
+
+        bigworld.wg_getMatInfoNearPoint = material
+
+        def item_matrix(space_id, chunk_id, item_index):
+            matrix_queries.append((space_id, chunk_id, item_index))
+            return _ItemMatrix(scale=item_scale)
+
+        bigworld.wg_getDestructibleMatrix = item_matrix
+        area = types.ModuleType('AreaDestructibles')
+        area.g_destructiblesManager = _Manager()
+        area.DESTR_TYPE_TREE = 1
+        area.DESTR_TYPE_FALLING_ATOM = 2
+        area.DESTR_TYPE_FRAGILE = 3
+        area.DESTR_TYPE_STRUCTURE = 4
+        area.g_cache = types.SimpleNamespace(
+            getDescByFilename=lambda value: (
+                {'type': 1, 'health': tree_health}
+                if value == filename else None))
+        cache = types.ModuleType('DestructiblesCache')
+        cache.scaledDestructibleHealth = lambda scale, health: int(
+            math.ceil(scale * scale * health))
+        destructibles_sensor.set_event_sink(lambda unused: True)
+        felled = []
+        authority = types.SimpleNamespace(
+            is_destroyed=lambda *unused: False,
+            destroy_tree=lambda *args: felled.append(args) or True)
+        shot = types.SimpleNamespace(shell=types.SimpleNamespace(
+            kind=shell_kind))
+        with mock.patch.dict(
+                sys.modules, {'BigWorld': bigworld,
+                              'AreaDestructibles': area,
+                              'DestructiblesCache': cache,
+                              'Math': math_module}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority):
+            result = destructibles_sensor.shot_world_distance(
+                bigworld, 1, _Vector(), _Vector(0, 0, 20),
+                _Vector(0, 0, 1), shot)
+        return result, felled, matrix_queries
+
+    def test_standing_tree_below_the_threshold_costs_25mm_and_passes(self):
+        result, felled, queries = self._standing_tree_shot(
+            18, 1.0, 'ARMOR_PIERCING')
+        self.assertEqual(1, len(felled))
+        self.assertEqual((1, 22, 1), felled[0][:3])
+        self.assertEqual([(1, 22, 1)], queries)
+        self.assertIsNone(result['stop_distance'])
+        self.assertEqual(25.0, result['piercing_loss'])
+        self.assertAlmostEqual(5.0, result['loss_distance'])
+        # Trees have no catalog OBB, so the proved next surface is the exit.
+        self.assertLess(result['continue_from'], 9.0)
+        self.assertGreater(result['continue_from'], 8.99)
+
+    def test_standing_tree_above_the_threshold_falls_and_stops_the_shell(self):
+        result, felled, unused_queries = self._standing_tree_shot(
+            20, 1.0, 'ARMOR_PIERCING')
+        self.assertEqual(1, len(felled))
+        self.assertAlmostEqual(5.0, result['stop_distance'])
+        self.assertIsNone(result['continue_from'])
+        self.assertEqual(0.0, result['piercing_loss'])
+        self.assertTrue(result['stopped_by_destructible'])
+        self.assertEqual('above_threshold_hp', result['stop_reason'])
+
+    def test_tree_threshold_uses_the_native_scaled_health(self):
+        """ceil(1.2 * 1.2 * 18) = 26 exceeds maxHpForShootingThrough."""
+        result, felled, queries = self._standing_tree_shot(
+            18, 1.2, 'ARMOR_PIERCING')
+        self.assertEqual([(1, 22, 1)], queries)
+        self.assertEqual(1, len(felled))
+        self.assertAlmostEqual(5.0, result['stop_distance'])
+        self.assertEqual('above_threshold_hp', result['stop_reason'])
+
+    def test_he_and_heat_stop_at_a_tree_without_a_matrix_query(self):
+        for shell_kind in ('HIGH_EXPLOSIVE', 'HOLLOW_CHARGE'):
+            result, felled, queries = self._standing_tree_shot(
+                18, 1.0, shell_kind)
+            self.assertEqual(1, len(felled), shell_kind)
+            self.assertAlmostEqual(5.0, result['stop_distance'], msg=shell_kind)
+            self.assertTrue(result['stopped_by_destructible'], shell_kind)
+            self.assertEqual('shell_family', result['stop_reason'])
+            # The family gate is decided before any native scale is read.
+            self.assertEqual([], queries, shell_kind)
 
     def test_catalog_obstacle_stops_before_native_trees_are_destroyed(self):
         destructibles_sensor.xrange = range

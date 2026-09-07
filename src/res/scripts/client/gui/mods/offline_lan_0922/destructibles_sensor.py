@@ -6017,6 +6017,53 @@ def _broken_shot_surface_key_1513(chunk_id, item_index, mat_kind):
 	return None
 
 
+def _native_item_scale_1513(measured, spaceID, chunk_id, item_index):
+	"""Read one native destructible item scale without quarantining the slot.
+
+	``wg_getDestructibleMatrix`` shares the exact native item index space with
+	``wg_getChunkDestrFilenames`` and ``wg_getDestructibleEffectCategory``, so a
+	SpeedTree slot already proved resolved and named by the tree identity gate
+	resolves here too.  Trees own no catalog OBB, so this is the only scale
+	source for them.  A failed query is an anomaly for the caller to classify,
+	not evidence that the slot is unsafe.
+	"""
+	import BigWorld
+	import Math
+	try:
+		matrix = Math.Matrix(measured(
+			'native.destructible.item_matrix',
+			BigWorld.wg_getDestructibleMatrix,
+			spaceID, int(chunk_id), int(item_index)))
+		return _matrix_item_scale_1513(matrix, Math)
+	except Exception:
+		return None
+
+
+def _tree_shoot_through_1513(measured, spaceID, decoded, shot):
+	"""Return ``(allowed, health)`` for one standing SpeedTree on a shell ray.
+
+	#1513 keeps trees under the same numeric destructible contract as every
+	other type.  ``destructibles.xml`` publishes one ``maxHpForShootingThrough``
+	and one ``projectilePiercingPowerReduction`` table for all of them, and
+	stock ``Vehicle._isDestructibleMayBeBroken`` runs a tree through the same
+	``scaledDestructibleHealth(itemScale, refHealth)`` branch it uses for
+	fragiles and falling atoms, including ``kineticDamageCorrection``, which
+	``DestructiblesCache.__readTree`` does supply.  The shell family is checked
+	first so HE and HEAT never pay for a native matrix query.
+	"""
+	if _shot_kind_1513(shot) not in _SHOT_AP_KINDS_1513:
+		return False, None
+	import AreaDestructibles
+	desc = _runtime_material_descriptor_1513(
+		AreaDestructibles, decoded[5], decoded[2], decoded[3])
+	health = _scaled_shot_through_health_1513(
+		desc, decoded[4],
+		_native_item_scale_1513(
+			measured, spaceID, decoded[2], decoded[3]))
+	return (health is not None and
+		health <= _SHOT_THROUGH_MAX_HP_1513), health
+
+
 def _shot_broken_surface_advance_1513(measured, bigworld, spaceID,
 		start_pos, end_pos, identity, obstacle_distance, ignored_surfaces,
 		surface_filter):
@@ -6082,6 +6129,15 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 				spaceID, start_pos, end_pos, world_dist)
 			if catalog_hit is not None:
 				break
+		tree_shoot_through = None
+		if (tree_identity is not None and shot is not None and
+				not _get_destr_authority().is_destroyed(
+					tree_identity[0], tree_identity[1], decoded[4])):
+			# Freeze this standing tree's own scaled health before the
+			# native fall can move its item matrix.  The legacy float
+			# contract has no shell to test and keeps tree transparency.
+			tree_shoot_through = _tree_shoot_through_1513(
+				measured, spaceID, decoded, shot)
 		destruction_accepted = _try_destroy_destructible(
 			spaceID, mat_info, shot_yaw, 12.0, True)
 		if destruction_accepted:
@@ -6093,7 +6149,30 @@ def shot_world_distance(bigworld, spaceID, start_pos, end_pos, dir_vec,
 		if tree_identity is not None and (
 				destruction_accepted or _get_destr_authority().is_destroyed(
 					tree_identity[0], tree_identity[1], decoded[4])):
-			broken_surface = (tree_identity[0], tree_identity[1], None)
+			tree_key = (tree_identity[0], tree_identity[1], None)
+			if not (destruction_accepted and
+					tree_shoot_through is not None):
+				# A tree the round already felled is not collision at all.
+				broken_surface = tree_key
+			elif not tree_shoot_through[0]:
+				# Above the threshold, or HE/HEAT: felled, but the shell
+				# ends here exactly like any other destructible.
+				return _typed_shot_result_1513(
+					world_dist, stop_distance=world_dist,
+					stopped_by_destructible=True,
+					stop_reason=_shot_through_refusal_1513(
+						shot, tree_shoot_through[1]))
+			else:
+				# Trees own no catalog OBB, so the proved next surface is
+				# the only exit evidence available for one.
+				return _typed_shot_result_1513(
+					99999.0,
+					piercing_loss=_SHOT_THROUGH_MIN_REDUCTION_1513,
+					continue_from=_shot_broken_surface_advance_1513(
+						measured, bigworld, spaceID, start_pos, end_pos,
+						tree_key, world_dist, ignored_surfaces,
+						surface_filter),
+					loss_distance=world_dist)
 		elif not destruction_accepted:
 			# A fragile, module or falling atom that this round already broke
 			# keeps its native skin while the hide callback runs, and a felled
