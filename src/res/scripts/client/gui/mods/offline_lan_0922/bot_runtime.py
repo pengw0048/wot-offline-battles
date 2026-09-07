@@ -843,8 +843,8 @@ def _critical_signature(payload):
                      (payload.get('destroyed') or ()))),
         tuple(sorted(str(name) for name in
                      (payload.get('crew_ko') or ()))),
-        tuple(str(name) for name in
-              (payload.get('crew_roster') or ())),
+        tuple(sorted(str(name) for name in
+                     (payload.get('crew_roster') or ()))),
         bool(payload.get('fire', False)),
         bool(payload.get('ammo_rack_death', False)))
     if signature == ((), (), (), (), False, False):

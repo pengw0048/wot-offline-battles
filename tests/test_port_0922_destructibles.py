@@ -4771,6 +4771,96 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertIn('native=-1 wire=live_validated', writes[0])
         self.assertIn('repeats=suppressed_for_battle', writes[0])
 
+    def test_shot_query_work_does_not_grow_with_distant_registered_props(self):
+        destructibles_sensor.xrange = range
+        axes = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        authority = types.SimpleNamespace(is_destroyed=lambda *unused: False)
+        for distant_count in (0, 64, 1079):
+            with self.subTest(distant_count=distant_count):
+                centers = [(0.0, 0.0, 5.0)] + [
+                    (1000.0 + index * 8.0, 0.0, 1000.0)
+                    for index in range(distant_count)]
+                instances = {
+                    (22, index): {
+                        'filename': 'test.model', 'kind': 'fragile',
+                        'item_scale': 1.0, 'boxes': ((center, axes, None),),
+                    } for index, center in enumerate(centers)}
+                destructibles_sensor.g_offh_destr_instances = instances
+                bins = destructibles_sensor.g_offh_destr_contact_bins = {}
+                for identity, instance in instances.items():
+                    destructibles_sensor._index_catalog_instance_1513(
+                        bins, identity, instance)
+                with mock.patch.object(
+                        destructibles_sensor, '_get_destr_authority',
+                        return_value=authority), mock.patch.object(
+                        destructibles_sensor, '_segment_world_box_interval',
+                        wraps=destructibles_sensor._segment_world_box_interval
+                        ) as intersections:
+                    hit = destructibles_sensor._catalog_shot_intersection(
+                        1, _Vector(), _Vector(0.0, 0.0, 20.0))
+                self.assertEqual((22, 0), hit['candidate'][:2])
+                self.assertAlmostEqual(4.0, hit['distance'])
+                self.assertEqual(1, intersections.call_count)
+
+    def test_shot_query_keeps_live_modules_at_bin_edges_and_native_cap(self):
+        destructibles_sensor.xrange = range
+        axes = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        instance = {
+            'filename': 'test.model', 'kind': 'structure', 'item_scale': 1.0,
+            'boxes': (((8.0, 0.0, 40.0), axes, 73),
+                      ((8.0, 0.0, 20.0), axes, 74)),
+        }
+        destructibles_sensor.g_offh_destr_instances = {(22, 1): instance}
+        bins = destructibles_sensor.g_offh_destr_contact_bins = {}
+        destructibles_sensor._index_catalog_instance_1513(
+            bins, (22, 1), instance)
+        destroyed = set()
+        authority = types.SimpleNamespace(is_destroyed=lambda *key: (
+            key in destroyed))
+        with mock.patch.object(
+                destructibles_sensor, '_get_destr_authority',
+                return_value=authority):
+            # Reverse travel on an exact cell edge must include the module
+            # touching the native endpoint, but nothing behind that endpoint.
+            start, end = _Vector(8.0, 0.0, 60.0), _Vector(8.0, 0.0, 0.0)
+            self.assertIsNone(destructibles_sensor._catalog_shot_intersection(
+                1, start, end, 18.0))
+            hit = destructibles_sensor._catalog_shot_intersection(
+                1, start, end, 19.0)
+            self.assertEqual((22, 1, 73), hit['candidate'][:3])
+            self.assertAlmostEqual(19.0, hit['distance'])
+            destroyed.add((22, 1, 73))
+            self.assertIsNone(destructibles_sensor._catalog_shot_intersection(
+                1, start, end, 19.0))
+            hit = destructibles_sensor._catalog_shot_intersection(
+                1, start, end)
+            self.assertEqual((22, 1, 74), hit['candidate'][:3])
+            self.assertAlmostEqual(39.0, hit['distance'])
+            destructibles_sensor._drop_isolated_destructible_1513(22, 1)
+            self.assertIsNone(destructibles_sensor._catalog_shot_intersection(
+                1, start, end))
+
+    def test_shot_query_native_cap_tolerance_crosses_a_spatial_bin_edge(self):
+        destructibles_sensor.xrange = range
+        instance = {
+            'filename': 'test.model', 'kind': 'fragile', 'item_scale': 1.0,
+            'boxes': (((0.0, 0.0, 9.0),
+                       ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                        (0.0, 0.0, 1.0)), None),),
+        }
+        destructibles_sensor.g_offh_destr_instances = {(22, 1): instance}
+        bins = destructibles_sensor.g_offh_destr_contact_bins = {}
+        destructibles_sensor._index_catalog_instance_1513(
+            bins, (22, 1), instance)
+        authority = types.SimpleNamespace(is_destroyed=lambda *unused: False)
+        with mock.patch.object(
+                destructibles_sensor, '_get_destr_authority',
+                return_value=authority):
+            hit = destructibles_sensor._catalog_shot_intersection(
+                1, _Vector(), _Vector(0.0, 0.0, 20.0), 8.0 - 0.5e-6)
+        self.assertEqual((22, 1), hit['candidate'][:2])
+        self.assertAlmostEqual(8.0, hit['distance'])
+
     def test_handlerless_effect_category_reaches_shot_intersection(self):
         unused_filename, area, bigworld, math_module = (
             self._streamed_fragile_fixture())
