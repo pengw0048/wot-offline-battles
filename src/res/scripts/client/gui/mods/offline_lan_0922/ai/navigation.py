@@ -33,6 +33,8 @@ BAKED_FATAL_HAZARDS = 1 | 2
 BAKED_SHALLOW_WATER = 4
 # Cache compact answers, not crossed-cell lists, in the 32-bit worker.
 MAX_BAKED_CORRIDOR_CACHE = 2048
+# Share only visited cells, never expand the complete graph in the x86 worker.
+MAX_BAKED_SEARCH_EDGE_CACHE = 2048
 BAKED_SHALLOW_WATER_PENALTY = 4.0
 BAKED_EDGE_CLEARANCE_WEIGHT = 0.20
 BAKED_FORMAT_NAME = 'offline-lan-0922-navgraph'
@@ -184,6 +186,8 @@ class TerrainGrid(object):
 		self.prebaked = True
 		self._baked_corridor_cache = {}
 		self._baked_corridor_order = deque()
+		self._baked_search_edge_cache = {}
+		self._baked_search_edge_order = deque()
 
 	def cell_for(self, point):
 		origin_x, origin_z = self._baked_origin if self.prebaked else (0.0, 0.0)
@@ -815,6 +819,44 @@ class TerrainGrid(object):
 		mask = int(self._baked_links[index]) & 0xff
 		return self._LINK_COUNTS[mask]
 
+	def _baked_search_edges(self, cell):
+		"""Share immutable directed-edge inputs across this map's Bot searches.
+
+		Keep run and slope cost separate so A* retains its exact floating-point
+		addition order. Wrecks, expiring failures, per-Bot vetoes and avoid points
+		are live search inputs and never enter this cache.
+		"""
+		cached = self._baked_search_edge_cache.get(cell)
+		if cached is not None:
+			combat_count('nav_baked_edges_reused')
+			return cached
+		combat_count('nav_baked_edges_built')
+		current_y = self._baked_cell_height(cell)
+		grade_divisor = max(0.05, self._baked_max_grade)
+		edges = []
+		for unused_dx, unused_dz, length_scale, next_cell, next_y in \
+				self._baked_neighbours(cell):
+			run = self.cell_size * length_scale
+			delta_y = next_y - current_y
+			slope = abs(delta_y) / max(run, 0.1)
+			slope_ratio = slope / grade_divisor
+			slope_cost = run * slope_ratio * slope_ratio * 6.0
+			if delta_y < 0.0:
+				slope_cost *= 1.25
+			edge_key = ((cell, next_cell) if cell < next_cell else
+			            (next_cell, cell))
+			edges.append((
+				next_cell, next_y, run, slope_cost,
+				self._penalty(next_cell, None, False),
+				self._penalty(next_cell, None, True), edge_key))
+		cached = tuple(edges)
+		self._baked_search_edge_cache[cell] = cached
+		self._baked_search_edge_order.append(cell)
+		while len(self._baked_search_edge_order) > MAX_BAKED_SEARCH_EDGE_CACHE:
+			self._baked_search_edge_cache.pop(
+				self._baked_search_edge_order.popleft(), None)
+		return cached
+
 	def _baked_clearance_penalty(self, cell):
 		"""Prefer the middle of a proved corridor without inventing new links.
 
@@ -1006,52 +1048,60 @@ class TerrainGrid(object):
 				reached = current
 				break
 			current_y = heights[current]
-			grade_limit = (self._baked_max_grade if self.prebaked else
-			               min(self.max_grade_up, self.max_grade_down))
-			grade_divisor = max(0.05, grade_limit)
 			if self.prebaked:
-				neighbours = self._baked_neighbours(current)
+				neighbours = self._baked_search_edges(current)
 			else:
-				neighbours = ((dx, dz, length,
-					(current[0] + dx, current[1] + dz),
-					self._edge(current, current_y,
-					           (current[0] + dx, current[1] + dz)))
-					for dx, dz, length in self._NEIGHBOURS)
-			for offset_x, offset_z, length_scale, next_cell, next_y in neighbours:
-				if next_y is None:
-					continue
-				edge_key = (tuple(sorted((current, next_cell)))
-				            if hard_edge_penalties or edge_penalties else None)
+				grade_divisor = max(
+					0.05, min(self.max_grade_up, self.max_grade_down))
+				neighbours = self._NEIGHBOURS
+			for edge in neighbours:
+				if self.prebaked:
+					(next_cell, next_y, run, slope_cost,
+					 plain_penalty, clearance_penalty, edge_key) = edge
+					terrain_penalty = (clearance_penalty if prefer_clearance else
+					                   plain_penalty)
+				else:
+					offset_x, offset_z, length_scale = edge
+					next_cell = (current[0] + offset_x, current[1] + offset_z)
+					next_y = self._edge(current, current_y, next_cell)
+					if next_y is None:
+						continue
+					edge_key = tuple(sorted((current, next_cell)))
+					if (hard_edge_penalties and
+							edge_key in hard_edge_penalties):
+						continue
+					if offset_x and offset_z:
+						# Do not squeeze diagonally across a blocked corner.
+						if (self._edge(current, current_y,
+						               (current[0] + offset_x, current[1])) is None or
+						        self._edge(current, current_y,
+						               (current[0], current[1] + offset_z)) is None):
+							continue
+					run = self.cell_size * length_scale
+					delta_y = next_y - current_y
+					slope = abs(delta_y) / max(run, 0.1)
+					slope_ratio = slope / grade_divisor
+					# Descending retains the greater cost of the copied planner.
+					slope_cost = run * slope_ratio * slope_ratio * 6.0
+					if delta_y < 0.0:
+						slope_cost *= 1.25
+					terrain_penalty = 0.0
 				if (hard_edge_penalties and
 						edge_key in hard_edge_penalties):
 					continue
-				if offset_x and offset_z and not self.prebaked:
-					# Do not squeeze diagonally across a blocked corner.
-					if (self._edge(current, current_y,
-					               (current[0] + offset_x, current[1])) is None or
-					        self._edge(current, current_y,
-					               (current[0], current[1] + offset_z)) is None):
-						continue
-				run = self.cell_size * length_scale
-				delta_y = next_y - current_y
-				slope = abs(delta_y) / max(run, 0.1)
-				slope_ratio = slope / grade_divisor
-				# Risk rises non-linearly near the controllable-grade limit.  A
-				# downhill edge costs a little more because braking and lateral
-				# slide leave less recovery room than climbing the same surface.
-				slope_cost = run * slope_ratio * slope_ratio * 6.0
-				if delta_y < 0.0:
-					slope_cost *= 1.25
+				if avoid_points or not self.prebaked:
+					terrain_penalty = self._penalty(
+						next_cell, avoid_points, prefer_clearance)
 				local_penalty = 0.0
 				if edge_penalties:
 					local_penalty = float(edge_penalties.get(edge_key, 0.0))
+				failed_penalty = 0.0
+				if self._failed_edges or self._static_hull_edges:
+					failed_penalty = max(
+						self._static_hull_edges.get(edge_key, 0.0),
+						self._failed_edge_timed_penalty(edge_key, now))
 				new_cost = (cost_so_far[current] + run + slope_cost +
-				            self._penalty(
-				                next_cell, avoid_points, prefer_clearance) +
-				            (self._failed_edge_penalty(current, next_cell, now)
-				             if (self._failed_edges or
-				                 self._static_hull_edges) else 0.0) +
-				            local_penalty)
+				            terrain_penalty + failed_penalty + local_penalty)
 				if next_cell not in cost_so_far or new_cost < cost_so_far[next_cell]:
 					cost_so_far[next_cell] = new_cost
 					came_from[next_cell] = current
