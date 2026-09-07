@@ -44,6 +44,9 @@ class _RecordingGarage(object):
     def touched_tankmen(self):
         return set()
 
+    def touched_recycled(self):
+        return set()
+
     def snapshot(self):
         return {}
 
@@ -269,6 +272,40 @@ class EconomyPayloadTests(unittest.TestCase):
         self.assertEqual(
             [('dismiss_tankman', (100005,), {})],
             self._dispatch(commands.CMD_DISMISS_TMAN, (100005, 0, 0)))
+
+    def test_hiring_a_dismissed_crew_member_carries_only_their_id(self):
+        # client_recycle_bin.restoreTankman ->
+        #   _doCmdInt3(CMD_TMAN_RESTORE, tmanInvID, 0, 0)
+        self.assertEqual(
+            [('restore_tankman', (100005,), {})],
+            self._dispatch(commands.CMD_TMAN_RESTORE, (100005, 0, 0)))
+
+    def test_a_role_change_carries_the_role_index_and_the_vehicle(self):
+        # Inventory.__changeTankmanRole_onShopSynced -> _doCmdInt4(
+        #   CMD_TMAN_CHANGE_ROLE, shopRev, tmanInvID, roleIdx,
+        #   vehTypeCompDescr)
+        self.assertEqual(
+            [('change_tankman_role', (100005, 3, 50002), {})],
+            self._dispatch(
+                commands.CMD_TMAN_CHANGE_ROLE, (17, 100005, 3, 50002)))
+
+    def test_a_passport_carries_ten_values_with_minus_one_for_unchanged(self):
+        # Inventory.__replacePassport_onShopSynced -> _doCmdIntArr(
+        #   CMD_TMAN_PASSPORT, [shopRev, tmanInvID, isPremium, isFemale,
+        #   fnGroupID, firstNameID, lnGroupID, lastNameID, iGroupID, iconID])
+        self.assertEqual(
+            [('change_tankman_passport',
+              (100005, 0, -1, 0, 11, 0, -1, 0, -1), {})],
+            self._dispatch(
+                commands.CMD_TMAN_PASSPORT,
+                ([17, 100005, 0, -1, 0, 11, 0, -1, 0, -1],)))
+
+    def test_a_truncated_crew_shop_payload_is_refused_instead_of_guessed(self):
+        for args in ((17, 100005, 3), (17,), ()):
+            self._refuse(commands.CMD_TMAN_CHANGE_ROLE, args)
+        for args in (([17, 100005, 0, -1, 0, 11, 0, -1, 0],), ([],), ()):
+            self._refuse(commands.CMD_TMAN_PASSPORT, args)
+        self._refuse(commands.CMD_TMAN_RESTORE, ())
 
     def test_a_truncated_crew_payload_is_refused_instead_of_guessed(self):
         for args in ((10, 2), (10,), ()):

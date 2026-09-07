@@ -91,11 +91,18 @@ def _fitting(context, mutate, extension=None):
     touched = state.touched_vehicles()
     touched_items = state.touched_items()
     moved_tankmen = state.touched_tankmen()
+    moved_recycled = state.touched_recycled()
 
     def publish(on_complete=None):
         diff = data.inventory(
             state.snapshot(), validate=False, only_vehicles=touched,
             only_items=touched_items, touched_tankmen=moved_tankmen)
+        if moved_recycled:
+            # PlayerAccount._update hands every diff to the recycle bin, so
+            # who was dismissed and who was hired back travel with the same
+            # push that moved them out of the barracks.
+            diff['recycleBin'] = data.recycle_bin_diff(
+                state.snapshot(), moved_recycled)
         built = _clock()
         completed = [False]
 
@@ -259,6 +266,36 @@ def _retrain_crew(context, args):
         return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
     return _fitting(
         context, lambda state: state.retrain_crew(values[1], values[2:]))
+
+
+def _restore_tankman(context, args):
+    # client_recycle_bin.restoreTankman -> _doCmdInt3(CMD_TMAN_RESTORE,
+    # tmanInvID, 0, 0).
+    if len(args) < 1:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.restore_tankman(args[0]))
+
+
+def _change_tankman_role(context, args):
+    # Inventory.__changeTankmanRole_onShopSynced -> _doCmdInt4(
+    #   CMD_TMAN_CHANGE_ROLE, shopRev, tmanInvID, roleIdx, vehTypeCompDescr).
+    if len(args) < 4:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.change_tankman_role(
+        args[1], args[2], args[3]))
+
+
+def _change_tankman_passport(context, args):
+    # Inventory.__replacePassport_onShopSynced -> _doCmdIntArr(
+    #   CMD_TMAN_PASSPORT, [shopRev, tmanInvID, isPremium, isFemale,
+    #   fnGroupID, firstNameID, lnGroupID, lastNameID, iGroupID, iconID]),
+    # with -1 in place of every field the player left alone.
+    values = list(args[0] if args else ())
+    if len(values) < 10:
+        return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
+    return _fitting(context, lambda state: state.change_tankman_passport(
+        values[1], values[2], values[3], values[4], values[5],
+        values[6], values[7], values[8], values[9]))
 
 
 def _return_crew(context, args):
@@ -615,6 +652,9 @@ HANDLERS = {
     commands.CMD_REPAIR: _repair,
     commands.CMD_TMAN_RESPEC: _retrain_tankman,
     commands.CMD_TMAN_MULTI_RESPEC: _retrain_crew,
+    commands.CMD_TMAN_RESTORE: _restore_tankman,
+    commands.CMD_TMAN_CHANGE_ROLE: _change_tankman_role,
+    commands.CMD_TMAN_PASSPORT: _change_tankman_passport,
     commands.CMD_RETURN_CREW: _return_crew,
     commands.CMD_BUY_TMAN: _buy_tankman,
     commands.CMD_BUY_AND_EQUIP_TMAN: _buy_and_equip_tankman,

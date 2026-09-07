@@ -132,6 +132,7 @@ class GarageState(object):
         self._touched = set()
         self._touched_items = {}
         self._touched_tankmen = set()
+        self._touched_recycled = set()
         self.revision = 0
 
     def snapshot(self):
@@ -197,6 +198,12 @@ class GarageState(object):
         """Return the owned items mutated since the last call, then reset."""
         touched = self._touched_items
         self._touched_items = {}
+        return touched
+
+    def touched_recycled(self):
+        """Return and clear the recycle-bin rows a command moved."""
+        touched = set(self._touched_recycled)
+        self._touched_recycled = set()
         return touched
 
     def _tankman_record(self, tankman_inventory_id):
@@ -271,6 +278,7 @@ class GarageState(object):
             (item_type, set(items))
             for item_type, items in self._touched_items.items())
         touched_tankmen = set(self._touched_tankmen)
+        touched_recycled = set(self._touched_recycled)
         revision = self.revision
         try:
             yield
@@ -280,6 +288,7 @@ class GarageState(object):
             self._touched = touched
             self._touched_items = touched_items
             self._touched_tankmen = touched_tankmen
+            self._touched_recycled = touched_recycled
             self.revision = revision
             raise
 
@@ -472,8 +481,12 @@ class GarageState(object):
                 if value is not None)
         # A crew member in the barracks still owns their inventory id, and a
         # reused one makes the whole restored garage invalid rather than one
-        # vehicle wrong.
+        # vehicle wrong.  So does a dismissed one: ``ItemsRequester.
+        # getTankmen`` builds one collection keyed by inventory id over the
+        # active crew and the recycle bin together, so a reissued id would
+        # replace a live crew member in the barracks with a dismissed one.
         used.update(_int(value) for value in self._barracks())
+        used.update(_int(value) for value in self._recycle_bin())
         return (max(used) + 1) if used else 100001
 
     # ---- barracks -------------------------------------------------------
@@ -1699,6 +1712,10 @@ class GarageState(object):
         self._touched.add(_int(record.get('id', 0)))
         for tankman_id, tankman_compact_descr in crew_rows.items():
             if dismiss_crew:
+                # #1513's own RestoreController counts these separately as
+                # "deleted by selling", so they land in the same bin a
+                # dismissal fills and can be hired back from it.
+                self._to_recycle_bin(tankman_id, tankman_compact_descr)
                 self._touched_tankmen.add(_int(tankman_id))
             else:
                 self._to_barracks(tankman_id, tankman_compact_descr)
@@ -2005,6 +2022,7 @@ class GarageState(object):
         wanted = _int(tankman_inventory_id)
         barracks = self._barracks()
         if wanted in barracks:
+            self._to_recycle_bin(wanted, barracks[wanted])
             del barracks[wanted]
             self._touched_tankmen.add(wanted)
             self.revision += 1
@@ -2013,6 +2031,7 @@ class GarageState(object):
             rows = record.get('tankmen')
             if not isinstance(rows, dict) or wanted not in rows:
                 continue
+            self._to_recycle_bin(wanted, rows[wanted])
             del rows[wanted]
             crew = list(record.get('crew') or ())
             self._remember_last_crew(
@@ -2026,6 +2045,215 @@ class GarageState(object):
             self.revision += 1
             return wanted
         raise GarageError('unknown tankman inventory id %d' % wanted)
+
+    # ---- the recycle bin ------------------------------------------------
+
+    def _recycle_bin(self):
+        """Return who this account dismissed, keyed by their inventory id."""
+        bin_rows = self._snapshot.get('recycleBinTankmen')
+        if not isinstance(bin_rows, dict):
+            bin_rows = {}
+            self._snapshot['recycleBinTankmen'] = bin_rows
+        return bin_rows
+
+    def _restore_config(self):
+        """Return the recycle bin's window and price, as the shop shows it."""
+        config = self._snapshot.get('tankmenRestoreConfig')
+        if not isinstance(config, dict):
+            return {}
+        result = {}
+        for name in ('freeDuration', 'goldDuration', 'goldCost', 'limit'):
+            result[name] = _int(config.get(name, 0) or 0)
+        return result
+
+    def _to_recycle_bin(self, tankman_id, compact_descr):
+        """Remember one dismissed crew member so they can be hired back.
+
+        #1513 reads the bin through ``RecycleBinRequester.getTankmen``, which
+        keeps ``{tmanInvID: (compactDescr, dismissedAt)}`` and drops anyone
+        whose dismissal is older than the shop's billable duration.
+        ``time_utils.getTimeDeltaTilNow`` compares against ``datetime.utcnow``,
+        so the timestamp is a plain UTC epoch second.
+        """
+        import time
+
+        config = self._restore_config()
+        limit = config.get('limit', 0)
+        bin_rows = self._recycle_bin()
+        bin_rows[_int(tankman_id)] = (compact_descr, int(time.time()))
+        self._touched_recycled.add(_int(tankman_id))
+        if limit > 0 and len(bin_rows) > limit:
+            # The bin is a fixed-length buffer in #1513 as well; the oldest
+            # dismissal is the one that falls out of it.
+            for oldest in sorted(
+                    bin_rows, key=lambda key: _int(bin_rows[key][1]))[
+                        :len(bin_rows) - limit]:
+                del bin_rows[oldest]
+                self._touched_recycled.add(_int(oldest))
+
+    def restore_tankman(self, tankman_inventory_id):
+        """Hire one dismissed crew member back into the barracks.
+
+        ``client_recycle_bin.restoreTankman`` sends only the inventory id, and
+        ``restore_contoller.getTankmenRestoreInfo`` is what priced it on
+        screen: free while the dismissal is younger than ``freeDuration``,
+        the configured cost after that, and gone once the billable window has
+        passed.  All three are settled here from the same published numbers.
+        """
+        import time
+
+        wanted = _int(tankman_inventory_id)
+        bin_rows = self._recycle_bin()
+        if wanted not in bin_rows:
+            raise GarageError('nobody was dismissed with id %d' % wanted)
+        compact_descr, dismissed_at = bin_rows[wanted]
+        config = self._restore_config()
+        elapsed = max(0, int(time.time()) - _int(dismissed_at))
+        window = config.get('goldDuration', 0)
+        if window and elapsed >= window:
+            raise GarageError(
+                'crew member %d can no longer be recovered' % wanted)
+        # #1513 adds a BarracksSlotsValidator for exactly one berth before it
+        # lets the player press the button.
+        self._require_berths(1)
+        if elapsed >= config.get('freeDuration', 0):
+            self._charge({'gold': config.get('goldCost', 0)})
+        del bin_rows[wanted]
+        self._touched_recycled.add(wanted)
+        self._to_barracks(wanted, compact_descr)
+        self.revision += 1
+        return wanted
+
+    def change_tankman_role(self, tankman_inventory_id, role_index,
+                            vehicle_type_compact_descr):
+        """Retrain one crew member into another role, as the shop sells it.
+
+        ``Inventory.changeTankmanRole`` carries the role index into
+        ``tankmen.SKILL_NAMES`` and the vehicle type the new role belongs to,
+        and ``TankmanChangeRole`` prices it at ``shop.changeRoleCost`` in gold.
+        The client's own ``tankmenGroupCanChangeRole`` decides whether this
+        crew member's group offers more than one role at all.
+        """
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
+        tankmen = self._tankmen_module()
+        vehicles = self._vehicles_module()
+        compact_descr = _int(vehicle_type_compact_descr)
+        names = list(getattr(tankmen, 'SKILL_NAMES', ()) or ())
+        roles = set(getattr(tankmen, 'ROLES', ()) or ())
+        try:
+            role = names[_int(role_index)]
+        except (IndexError, TypeError):
+            raise GarageError('unknown crew role index %r' % (role_index,))
+        if roles and role not in roles:
+            raise GarageError('%s is a skill, not a crew role' % role)
+        try:
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
+            vehicle_type = vehicles.getVehicleType(compact_descr)
+            nation_id, vehicle_type_id = vehicle_type.id
+            crew_roles = tuple(vehicle_type.crewRoles)
+        except Exception as error:
+            raise GarageError('the client refused the role change: %s' % error)
+        if _int(descriptor.nationID) != _int(nation_id):
+            raise GarageError('a crew member cannot change nation')
+        if not any(role in seat for seat in crew_roles):
+            raise GarageError('this vehicle has no %s' % role)
+        can_change = getattr(tankmen, 'tankmenGroupCanChangeRole', None)
+        if can_change is not None:
+            try:
+                allowed = can_change(
+                    _int(descriptor.nationID), _int(descriptor.gid),
+                    bool(descriptor.isPremium))
+            except Exception:
+                allowed = True
+            if not allowed:
+                raise GarageError(
+                    'this crew member cannot change role')
+        seat = self._seat_of(tankman_id)
+        if seat is not None:
+            record, slot = seat
+            record_roles = self._crew_roles(record)
+            if (_int(record.get('vehicleTypeCompactDescr', 0)) != compact_descr
+                    or not 0 <= slot < len(record_roles)
+                    or role not in record_roles[slot]):
+                # The restore boundary requires every seated crew member to
+                # match their seat, so a change that would break it is
+                # refused rather than allowed to make the save unloadable.
+                raise GarageError(
+                    'take this crew member out of the vehicle first')
+        self._charge(self._crew_cost('crewChangeRoleCost'))
+        try:
+            descriptor.role = role
+            descriptor.vehicleTypeID = _int(vehicle_type_id)
+            rows[tankman_id] = descriptor.makeCompactDescr()
+        except Exception as error:
+            raise GarageError('the client refused the role change: %s' % error)
+        self.revision += 1
+        return tankman_id
+
+    def change_tankman_passport(self, tankman_inventory_id, is_premium,
+                                is_female, first_name_group, first_name,
+                                last_name_group, last_name, icon_group, icon):
+        """Give one crew member another name and face.
+
+        ``Inventory.replacePassport`` sends ``-1`` for every field the player
+        left alone, and ``TankmanDescr.validatePassport`` turns the request
+        into the exact four values ``replacePassport`` applies.  The price is
+        the one ``TankmanChangePassport`` shows, which depends on the crew
+        member's current sex rather than the requested one.
+        """
+        rows, tankman_id = self._tankman_record(tankman_inventory_id)
+        tankmen = self._tankmen_module()
+        try:
+            descriptor = tankmen.TankmanDescr(rows[tankman_id])
+        except Exception as error:
+            raise GarageError('the client refused the passport: %s' % error)
+        if bool(_int(is_premium)) != bool(descriptor.isPremium):
+            raise GarageError(
+                'the passport request names the wrong crew member kind')
+        cost = self._crew_cost(
+            'crewFemalePassportCost' if descriptor.isFemale
+            else 'crewPassportCost')
+        wanted_female = _int(is_female)
+        try:
+            accepted, reason, context = descriptor.validatePassport(
+                bool(_int(is_premium)),
+                None if wanted_female < 0 else bool(wanted_female),
+                _int(first_name_group),
+                None if _int(first_name) < 0 else _int(first_name),
+                _int(last_name_group),
+                None if _int(last_name) < 0 else _int(last_name),
+                _int(icon_group),
+                None if _int(icon) < 0 else _int(icon))
+        except Exception as error:
+            raise GarageError('the client refused the passport: %s' % error)
+        if not accepted:
+            raise GarageError('the client refused the passport: %s' % reason)
+        self._charge(cost)
+        try:
+            descriptor.replacePassport(context)
+            rows[tankman_id] = descriptor.makeCompactDescr()
+        except Exception as error:
+            raise GarageError('the client refused the passport: %s' % error)
+        self.revision += 1
+        return tankman_id
+
+    def _crew_cost(self, key):
+        """Return one published crew-shop price as a currency mapping."""
+        cost = self._snapshot.get(key)
+        if not isinstance(cost, dict):
+            return {}
+        return dict((str(currency), _int(amount))
+                    for currency, amount in cost.items())
+
+    def _seat_of(self, tankman_id):
+        """Return the record and slot one crew member occupies, or None."""
+        wanted = _int(tankman_id)
+        for record in self._records():
+            crew = list(record.get('crew') or ())
+            for slot, value in enumerate(crew):
+                if value is not None and _int(value) == wanted:
+                    return record, slot
+        return None
 
     def _crew_roles(self, record):
         vehicles = self._vehicles_module()

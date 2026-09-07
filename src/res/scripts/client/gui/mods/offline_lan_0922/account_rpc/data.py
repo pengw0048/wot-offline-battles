@@ -69,6 +69,91 @@ def _device_removal_cost(vehicle):
                 for currency, amount in cost.items())
 
 
+def _crew_cost(vehicle, key, currency='gold'):
+    """Return one published crew-shop price as the client reads it.
+
+    ``ShopCommonStats.changeRoleCost`` and the two passport costs are plain
+    gold amounts rather than ``Money`` mappings, so the shop publishes the
+    amount and the garage charges the same mapping it was built from.
+    """
+    cost = vehicle.get(key)
+    if not isinstance(cost, dict):
+        return 0
+    try:
+        return max(0, int(cost.get(currency, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _restore_config(vehicle):
+    """Return the recycle bin's window and price for #1513's shop cache.
+
+    ``ShopCommonStats.tankmenRestoreConfig`` reads ``goldDuration`` and
+    ``goldCost`` on this Chinese build, and ``ItemsRequester.getTankmen``
+    uses that duration to decide who still appears in the barracks recovery
+    list, so publishing zero there would hide the whole bin.
+    """
+    config = vehicle.get('tankmenRestoreConfig')
+    if not isinstance(config, dict):
+        config = {}
+    tankmen = {}
+    for name in ('freeDuration', 'goldDuration', 'goldCost', 'limit'):
+        try:
+            tankmen[name] = max(0, int(config.get(name, 0) or 0))
+        except (TypeError, ValueError):
+            tankmen[name] = 0
+    return {'tankmen': tankmen, 'vehicles': {}}
+
+
+def _recycle_bin(vehicle):
+    """Return the dismissed crew #1513's own recycle bin cache carries.
+
+    ``ClientRecycleBin.synchronize`` copies the whole ``recycleBin`` diff into
+    its cache, and ``RecycleBinRequester.getTankmen`` reads
+    ``recycleBin['tankmen']['buffer']`` as ``{tmanInvID: (compactDescr,
+    dismissedAt)}``.
+    """
+    rows = vehicle.get('recycleBinTankmen')
+    buffer_rows = {}
+    if isinstance(rows, dict):
+        for tankman_id, entry in rows.items():
+            try:
+                compact_descr, dismissed_at = entry
+                buffer_rows[int(tankman_id)] = (
+                    compact_descr, int(dismissed_at))
+            except (TypeError, ValueError):
+                continue
+    return {'tankmen': {'buffer': buffer_rows}, 'vehicles': {'buffer': {}}}
+
+
+def recycle_bin_diff(vehicle, touched_tankmen):
+    """Return the recycle-bin rows one command moved, as a #1513 diff.
+
+    ``ClientRecycleBin.synchronize`` runs the pushed section through
+    ``diff_utils.synchronizeDicts``, which recurses into nested dictionaries
+    and pops a key only when the diff carries it with the value ``None``, so
+    a crew member who left the bin has to be named that way.
+    """
+    rows = vehicle.get('recycleBinTankmen')
+    rows = rows if isinstance(rows, dict) else {}
+    buffer_rows = {}
+    for tankman_id in (touched_tankmen or ()):
+        try:
+            tankman_id = int(tankman_id)
+        except (TypeError, ValueError):
+            continue
+        entry = rows.get(tankman_id)
+        if entry is None:
+            buffer_rows[tankman_id] = None
+            continue
+        try:
+            compact_descr, dismissed_at = entry
+        except (TypeError, ValueError):
+            continue
+        buffer_rows[tankman_id] = (compact_descr, int(dismissed_at))
+    return {'tankmen': {'buffer': buffer_rows}}
+
+
 def _tankman_costs(vehicle):
     """Return the account's three recruitment choices, positionally."""
     costs = vehicle.get('tankmanCosts')
@@ -643,7 +728,8 @@ def sync_data(revision=0, selected_vehicle=None, int_user_settings=None,
         'goodies': {},
         'groupLocks': {'groupBattles': [], 'isGroupLocked': []},
         'vehiclesGroupMapping': {},
-        'recycleBin': {},
+        'recycleBin': _recycle_bin(
+            selected_vehicle if isinstance(selected_vehicle, dict) else {}),
         'ranked': {},
         'badges': (),
         'newYear': {},
@@ -748,7 +834,15 @@ def shop(revision=0, selected_vehicle=None):
         # crystal-price fallback.
         'paidDeluxeRemovalCost': {'crystal': 0},
         'dailyXPFactor': 1,
-        'changeRoleCost': 0,
+        # The crew shop.  These three are #1513's own ShopCommonStats
+        # fallbacks rather than offline policy, and the garage charges the
+        # same numbers the player is shown here.
+        'changeRoleCost': _crew_cost(vehicle, 'crewChangeRoleCost'),
+        'passportChangeCost': _crew_cost(vehicle, 'crewPassportCost'),
+        'femalePassportChangeCost': _crew_cost(
+            vehicle, 'crewFemalePassportCost'),
+        # ShopCommonStats.__getRestoreConfig reads this exact key.
+        'restore_config': _restore_config(vehicle),
         'freeXPToTManXPRate': 10,
         # Offline policy, not a #1513 value: the gold exchange rate is
         # server state the client never receives. 400 credits per gold is the

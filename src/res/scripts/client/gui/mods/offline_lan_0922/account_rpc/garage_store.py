@@ -110,6 +110,15 @@ def _ledger_payload(snapshot):
         encoded = _encode_bytes(compact_descr)
         if encoded is not None:
             barracks.append(encoded)
+    # The recycle bin outlives a restart in retail, and the window it prices
+    # is measured from the dismissal, so the timestamp is saved with the
+    # descriptor.  Inventory ids are not: the restore hands out fresh ones.
+    recycled = []
+    for compact_descr, dismissed_at in (
+            snapshot.get('recycleBinTankmen') or {}).values():
+        encoded = _encode_bytes(compact_descr)
+        if encoded is not None:
+            recycled.append([encoded, _int_value(dismissed_at)])
     return {
         'wallet': dict(
             (name, max(0, int(wallet.get(name, 0) or 0)))
@@ -119,6 +128,7 @@ def _ledger_payload(snapshot):
         'slots': max(0, int(snapshot.get('accountSlots', 0) or 0)),
         'berths': max(0, int(snapshot.get('accountBerths', 0) or 0)),
         'barracks': sorted(barracks),
+        'recycleBin': sorted(recycled),
     }
 
 
@@ -231,15 +241,27 @@ def _apply_ledger(staged, stored):
     barracks = ledger.get('barracks')
     if isinstance(barracks, (list, tuple)):
         staged['barracksTankmen'] = _restored_barracks(staged, barracks)
+    recycled = ledger.get('recycleBin')
+    if isinstance(recycled, (list, tuple)):
+        staged['recycleBinTankmen'] = _restored_recycle_bin(staged, recycled)
     return True
 
 
-def _restored_barracks(staged, encoded_descriptors):
-    """Give every saved barracks crew member an id no vehicle is using."""
+def _used_tankman_ids(staged):
+    """Return every crew inventory id the restored garage already holds."""
     used = set()
     for record in _records(staged):
         for tankman_id in (record.get('tankmen') or ()):
             used.add(_int_value(tankman_id))
+    used.update(
+        _int_value(tankman_id)
+        for tankman_id in (staged.get('barracksTankmen') or ()))
+    return used
+
+
+def _restored_barracks(staged, encoded_descriptors):
+    """Give every saved barracks crew member an id no vehicle is using."""
+    used = _used_tankman_ids(staged)
     next_id = (max(used) + 1) if used else 100001
     restored = {}
     for encoded in encoded_descriptors:
@@ -247,6 +269,27 @@ def _restored_barracks(staged, encoded_descriptors):
         if not decoded:
             continue
         restored[next_id] = decoded
+        next_id += 1
+    return restored
+
+
+def _restored_recycle_bin(staged, rows):
+    """Restore who was dismissed, with ids nothing else in the garage uses.
+
+    The barracks is restored first, so its fresh ids are already taken here.
+    """
+    used = _used_tankman_ids(staged)
+    next_id = (max(used) + 1) if used else 100001
+    restored = {}
+    for row in rows:
+        try:
+            encoded, dismissed_at = row
+        except (TypeError, ValueError):
+            continue
+        decoded = _decode_bytes(encoded)
+        if not decoded:
+            continue
+        restored[next_id] = (decoded, _int_value(dismissed_at))
         next_id += 1
     return restored
 

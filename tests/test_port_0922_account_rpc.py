@@ -1107,7 +1107,11 @@ class AccountRpcTests(unittest.TestCase):
 
         # Exact #1513 ShopRequester supplies disabled objects for these
         # optional keys when they are absent. Keep them absent instead of
-        # publishing a second, unverified server-side schema.
+        # publishing a second, unverified server-side schema.  ``restore_config``
+        # left this list once the recycle bin was implemented: with the key
+        # absent the requester's zero billable duration hides every dismissed
+        # crew member from the barracks, so it is now a read schema rather
+        # than an unused one.
         for key in chain['defaultedShopKeys']:
             self.assertNotIn(key, values['shop'])
         self.assertEqual({}, values['syncData']['newYear'])
@@ -1215,6 +1219,69 @@ class AccountRpcTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CrewShopStreamTests(unittest.TestCase):
+    """What the crew shop and the recycle bin look like on the wire."""
+
+    def _shop(self, **overrides):
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle.update(overrides)
+        return account_data.shop(selected_vehicle=vehicle)
+
+    def test_the_crew_shop_publishes_the_prices_the_garage_charges(self):
+        """ShopCommonStats falls back to 600, 50 and 500 gold."""
+        value = self._shop(
+            crewChangeRoleCost={'gold': 600},
+            crewPassportCost={'gold': 50},
+            crewFemalePassportCost={'gold': 500})
+
+        self.assertEqual(600, value['changeRoleCost'])
+        self.assertEqual(50, value['passportChangeCost'])
+        self.assertEqual(500, value['femalePassportChangeCost'])
+
+    def test_the_restore_window_reaches_the_key_the_client_reads(self):
+        """``ShopCommonStats.__getRestoreConfig`` reads ``restore_config``."""
+        value = self._shop(tankmenRestoreConfig={
+            'freeDuration': 0, 'goldDuration': 604800,
+            'goldCost': 100, 'limit': 100})
+
+        tankmen = value['restore_config']['tankmen']
+        self.assertEqual(0, tankmen['freeDuration'])
+        # ItemsRequester.getTankmen hides everyone older than this, so a zero
+        # would empty the barracks recovery list.
+        self.assertEqual(604800, tankmen['goldDuration'])
+        self.assertEqual(100, tankmen['goldCost'])
+        self.assertEqual(100, tankmen['limit'])
+
+    def test_the_recycle_bin_reaches_the_buffer_the_requester_reads(self):
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle['recycleBinTankmen'] = {201: (b'tman:201', 1700000000)}
+
+        value = account_data.sync_data(selected_vehicle=vehicle)
+
+        self.assertEqual(
+            {201: (b'tman:201', 1700000000)},
+            value['recycleBin']['tankmen']['buffer'])
+
+    def test_a_garage_with_nobody_dismissed_still_publishes_the_key(self):
+        """#1513 only creates the cache entry when the key is in the diff."""
+        value = account_data.sync_data(
+            selected_vehicle=copy.deepcopy(SELECTED_VEHICLE))
+
+        self.assertEqual({}, value['recycleBin']['tankmen']['buffer'])
+
+    def test_hiring_one_back_names_them_as_gone_rather_than_omitting_them(
+            self):
+        """``synchronizeDicts`` pops a key only for an explicit ``None``."""
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle['recycleBinTankmen'] = {202: (b'tman:202', 1700000000)}
+
+        diff = account_data.recycle_bin_diff(vehicle, {201, 202})
+
+        self.assertIsNone(diff['tankmen']['buffer'][201])
+        self.assertEqual(
+            (b'tman:202', 1700000000), diff['tankmen']['buffer'][202])
 
 
 class SaleDiffTests(unittest.TestCase):

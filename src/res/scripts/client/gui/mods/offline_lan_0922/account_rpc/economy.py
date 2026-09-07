@@ -79,6 +79,28 @@ MAX_EARNINGS_PERCENT = 10000
 PREMIUM_VEHICLE_CREDITS_PERCENT = 150
 PREMIUM_VEHICLE_TAG = 'premium'
 
+# What #1513's own ``ShopCommonStats`` falls back to when the shop stream does
+# not carry the key, in gold.  These are shipped client values, not policy, so
+# the offline shop publishes exactly them and the garage charges exactly them.
+CHANGE_ROLE_COST = {'gold': 600}
+PASSPORT_CHANGE_COST = {'gold': 50}
+FEMALE_PASSPORT_CHANGE_COST = {'gold': 500}
+
+# The recycle bin holds a dismissed crew member until the window closes, and
+# hiring them back costs what the shop says.  #1513 receives the whole window
+# and price from a server it never reaches here, so these are offline policy.
+# ``freeDuration`` of zero means nothing is ever handed back for free;
+# ``limit`` is the client's own default.  ``ShopCommonStats.
+# tankmenRestoreConfig`` reads ``goldDuration``/``goldCost`` on this Chinese
+# build, and ``ItemsRequester.getTankmen`` uses that duration to decide who is
+# still in the barracks list, so a zero there would hide the whole bin.
+TANKMEN_RESTORE_CONFIG = {
+    'freeDuration': 0,
+    'goldDuration': 7 * 24 * 60 * 60,
+    'goldCost': 100,
+    'limit': 100,
+}
+
 CAREER_WALLET = {
     CREDITS: CAREER_CREDITS, GOLD: CAREER_GOLD, FREE_XP: CAREER_FREE_XP}
 SANDBOX_WALLET = {

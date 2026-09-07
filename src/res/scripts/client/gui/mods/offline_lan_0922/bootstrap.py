@@ -763,6 +763,16 @@ def _selected_vehicle(config, restore_saved=True):
             'deviceRemovalCost': dict(
                 economy.CAREER_DEVICE_REMOVAL if career else
                 economy.SANDBOX_DEVICE_REMOVAL),
+            # The crew shop.  A role change and a passport replacement are
+            # priced by this client's own shipped defaults; the recycle bin's
+            # window and price are offline policy.
+            'crewChangeRoleCost': dict(economy.CHANGE_ROLE_COST),
+            'crewPassportCost': dict(economy.PASSPORT_CHANGE_COST),
+            'crewFemalePassportCost': dict(economy.FEMALE_PASSPORT_CHANGE_COST),
+            'tankmenRestoreConfig': dict(economy.TANKMEN_RESTORE_CONFIG),
+            # Who the account dismissed and when, as the barracks' own
+            # recovery list reads it.
+            'recycleBinTankmen': {},
             'nextInventoryID': len(records) + 1,
             'defaultVehicleSettings': default_settings,
         })

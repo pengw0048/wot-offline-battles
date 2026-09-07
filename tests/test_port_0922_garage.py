@@ -2,6 +2,7 @@ import contextlib
 import copy
 import importlib.util
 import io
+import json
 import os
 import ast
 import shutil
@@ -100,6 +101,18 @@ SNAPSHOT = {
     'unlockItemCompactDescrs': set(),
     'shopNationCount': 9,
     'customizationItemCount': 1,
+    # The crew shop, as bootstrap publishes it: #1513's own ShopCommonStats
+    # fallbacks for the two paid rewrites, and the offline recycle-bin policy.
+    'crewChangeRoleCost': {'gold': 600},
+    'crewPassportCost': {'gold': 50},
+    'crewFemalePassportCost': {'gold': 500},
+    'tankmenRestoreConfig': {
+        'freeDuration': 0,
+        'goldDuration': 7 * 24 * 60 * 60,
+        'goldCost': 100,
+        'limit': 100,
+    },
+    'recycleBinTankmen': {},
 }
 
 
@@ -191,30 +204,72 @@ class _Descriptor(object):
             self.turret.compactDescr, self.gun.compactDescr)
 
 
+# What the fake's passport reads as until a command replaces it.
+DEFAULT_PASSPORT = (False, 1, 2, 3)
+
+
+def _default_role(compact_descr):
+    identity = compact_descr.rsplit(b':', 1)[-1]
+    try:
+        return CREW_ROLES[(int(identity) - 101) % len(CREW_ROLES)][0]
+    except ValueError:
+        return CREW_ROLES[0][0]
+
+
 class _TankmanDescriptor(object):
     def __init__(self, compact_descr):
         # The real TankmanDescr parses its skills out of the compact
         # descriptor, so the fake must round-trip them too.
         base, _, encoded = compact_descr.partition(b'|')
         encoded, _, xp = encoded.partition(b'#')
-        self.compact_descr = base
         self.skills = [name.decode('ascii')
                        for name in encoded.split(b',') if name]
         self.free_xp = int(xp or 0)
         # The real descriptor also carries where this crew member belongs,
-        # which is what decides whether a seat will take them.
+        # which is what decides whether a seat will take them, plus the role
+        # and the passport every crew command rewrites in place.
         self.nationID = 0
         self.vehicleTypeID = VEHICLE_TYPE_ID
+        base, _, passport = base.partition(b'~')
+        base, _, role = base.partition(b'!')
         base, _, retrained = base.partition(b'@')
         self.compact_descr = base
         if retrained:
             self.vehicleTypeID = int(retrained)
-        identity = base.rsplit(b':', 1)[-1]
-        try:
-            self.role = CREW_ROLES[
-                (int(identity) - 101) % len(CREW_ROLES)][0]
-        except ValueError:
-            self.role = CREW_ROLES[0][0]
+        self.role = _default_role(base)
+        if role:
+            self.role = role.decode('ascii')
+        # The fixture's crew all come from name group 0 and are not premium.
+        self.gid = 0
+        self.isPremium = False
+        (self.isFemale, self.firstNameID, self.lastNameID,
+         self.iconID) = DEFAULT_PASSPORT
+        if passport:
+            female, first, last, icon = passport.split(b',')
+            self.isFemale = female == b'1'
+            self.firstNameID = int(first)
+            self.lastNameID = int(last)
+            self.iconID = int(icon)
+
+    def validatePassport(self, isPremium, isFemale, fnGroupID, firstNameID,
+                         lnGroupID, lastNameID, iGroupID, iconID):
+        """Return what #1513 returns: ``(accepted, reason, replacement)``."""
+        if isFemale is None:
+            isFemale = self.isFemale
+        if firstNameID is None:
+            firstNameID = self.firstNameID
+        if lastNameID is None:
+            lastNameID = self.lastNameID
+        if iconID is None:
+            iconID = self.iconID
+        for group in (fnGroupID, lnGroupID, iGroupID):
+            if group != 0:
+                return False, 'Invalid group', None
+        return True, '', (isFemale, firstNameID, lastNameID, iconID)
+
+    def replacePassport(self, ctx):
+        (self.isFemale, self.firstNameID, self.lastNameID,
+         self.iconID) = ctx
 
     def addSkill(self, name):
         if name in self.skills:
@@ -243,6 +298,14 @@ class _TankmanDescriptor(object):
         result = self.compact_descr
         if self.vehicleTypeID != VEHICLE_TYPE_ID:
             result += b'@%d' % self.vehicleTypeID
+        if self.role != _default_role(self.compact_descr):
+            result += b'!' + self.role.encode('ascii')
+        passport = (self.isFemale, self.firstNameID, self.lastNameID,
+                    self.iconID)
+        if passport != DEFAULT_PASSPORT:
+            result += b'~%d,%d,%d,%d' % (
+                1 if self.isFemale else 0, self.firstNameID,
+                self.lastNameID, self.iconID)
         result += b'|' + ','.join(self.skills).encode('ascii')
         return result if not self.free_xp else (
             result + b'#' + str(self.free_xp).encode('ascii'))
@@ -292,6 +355,10 @@ def _modules():
         SKILL_NAMES=tuple(skill_names),
         ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
         getSkillsMask=lambda names: 0,
+        # #1513's own rule: a crew member can change role only when their
+        # name group offers more than one.  Group 0 does; nothing else here.
+        tankmenGroupCanChangeRole=(
+            lambda nationID, groupID, isPremium: groupID == 0),
         generateTankmen=generate_tankmen)
     return vehicles, tankmen
 
@@ -1878,6 +1945,244 @@ class FittingRequestTests(unittest.TestCase):
             self.state.snapshot(), self.context['selected_vehicle'])
 
 
+class CrewShopTests(unittest.TestCase):
+    """The three crew commands #1513 prices through the shop."""
+
+    def setUp(self):
+        unused_requests, unused_commands, self.garage = _request_modules()
+
+    def _state(self, gold=10000, berths=5, barracks=None):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 0, 'gold': gold, 'freeXP': 0}
+        snapshot['accountBerths'] = berths
+        snapshot['barracksTankmen'] = dict(
+            barracks if barracks is not None else {201: b'tman:201'})
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+
+    # ---- the recycle bin ------------------------------------------------
+
+    def test_a_dismissed_crew_member_waits_in_the_recycle_bin(self):
+        """#1513's barracks offers to hire them back, so they are kept."""
+        state = self._state()
+
+        state.dismiss_tankman(201)
+
+        bin_rows = state.snapshot()['recycleBinTankmen']
+        self.assertEqual(b'tman:201', bin_rows[201][0])
+        self.assertGreater(bin_rows[201][1], 0)
+        self.assertEqual({}, state.snapshot()['barracksTankmen'])
+
+    def test_hiring_one_back_costs_gold_and_uses_a_berth(self):
+        state = self._state(gold=10000)
+        state.dismiss_tankman(201)
+
+        state.restore_tankman(201)
+
+        self.assertEqual(
+            b'tman:201', state.snapshot()['barracksTankmen'][201])
+        self.assertEqual({}, state.snapshot()['recycleBinTankmen'])
+        self.assertEqual(10000 - 100, state.snapshot()['wallet']['gold'])
+
+    def test_hiring_one_back_without_the_gold_changes_nothing(self):
+        state = self._state(gold=50)
+        state.dismiss_tankman(201)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.restore_tankman(201)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_hiring_one_back_with_no_free_berth_is_refused(self):
+        """#1513 adds a BarracksSlotsValidator for exactly one berth."""
+        state = self._state(berths=2, barracks={201: b'tman:201'})
+        state.dismiss_tankman(201)
+        state.snapshot()['barracksTankmen'].update(
+            {301: b'tman:301', 302: b'tman:302'})
+
+        with self.assertRaises(self.garage.GarageError):
+            state.restore_tankman(201)
+
+    def test_a_dismissal_older_than_the_window_can_no_longer_be_undone(self):
+        state = self._state()
+        state.dismiss_tankman(201)
+        descriptor, dismissed_at = state.snapshot()['recycleBinTankmen'][201]
+        state.snapshot()['recycleBinTankmen'][201] = (
+            descriptor, dismissed_at - 8 * 24 * 60 * 60)
+
+        with self.assertRaises(self.garage.GarageError):
+            state.restore_tankman(201)
+
+    def test_nobody_else_can_be_hired_out_of_the_bin(self):
+        state = self._state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.restore_tankman(999)
+
+    def test_the_bin_holds_only_as_many_as_the_shop_published(self):
+        state = self._state(
+            barracks=dict((300 + index, b'tman:%d' % (300 + index))
+                          for index in range(4)))
+        state.snapshot()['tankmenRestoreConfig']['limit'] = 2
+
+        for index in range(4):
+            state.dismiss_tankman(300 + index)
+
+        self.assertEqual(2, len(state.snapshot()['recycleBinTankmen']))
+
+    def test_a_sold_vehicles_dismissed_crew_lands_in_the_bin(self):
+        """#1513 counts these separately but recovers them the same way."""
+        state = self._state()
+        snapshot = state.snapshot()
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [301, 302]
+        second['tankmen'] = {301: b'tman:301', 302: b'tman:302'}
+        snapshot['vehicles'].append(second)
+        snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
+
+        state.sell_vehicle(10, dismiss_crew=True)
+
+        self.assertEqual(
+            set([301, 302]), set(state.snapshot()['recycleBinTankmen']))
+
+    def test_a_new_recruit_never_takes_a_dismissed_members_id(self):
+        """One collection is keyed by id over the crew and the bin together.
+
+        ``ItemsRequester.getTankmen`` builds ``result[invID]`` from the active
+        crew and then from the recycle bin, so a reissued id would put a
+        dismissed crew member where a live one belongs.
+        """
+        state = self._state(barracks={})
+        snapshot = state.snapshot()
+        snapshot['barracksTankmen'] = {103: b'tman:103'}
+        snapshot['shopItemPrices'][50001] = {'credits': 0, 'gold': 0}
+        snapshot['tankmanCosts'] = [
+            {'credits': 0, 'gold': 0, 'roleLevel': 50,
+             'baseRoleLoss': 0.0, 'classChangeRoleLoss': 0.0,
+             'isPremium': False}] * 3
+        snapshot['unlockItemCompactDescrs'] = {50001}
+        state.dismiss_tankman(103)
+
+        # 1 is the commander, the fixture vehicle's first seat.
+        recruited = state.buy_tankman(50001, 1, 0)
+
+        self.assertNotIn(recruited, state.snapshot()['recycleBinTankmen'])
+
+    # ---- the role change ------------------------------------------------
+
+    def test_a_role_change_costs_the_price_the_client_shows(self):
+        state = self._state()
+
+        state.change_tankman_role(201, 3, 50002)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual('driver', descriptor.role)
+        self.assertEqual(2, descriptor.vehicleTypeID)
+        self.assertEqual(10000 - 600, state.snapshot()['wallet']['gold'])
+
+    def test_a_role_change_the_account_cannot_pay_for_changes_nothing(self):
+        state = self._state(gold=100)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.change_tankman_role(201, 3, 50002)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_role_a_vehicle_has_no_seat_for_is_refused(self):
+        state = self._state()
+
+        with self.assertRaises(self.garage.GarageError):
+            # 5 is the loader; this fixture's vehicle seats two.
+            state.change_tankman_role(201, 5, 50002)
+
+    def test_a_group_that_offers_one_role_cannot_change_it(self):
+        """``tankmen.tankmenGroupCanChangeRole`` is the client's own rule."""
+        state = self._state()
+        vehicles, tankmen = _modules()
+        tankmen.tankmenGroupCanChangeRole = (
+            lambda nationID, groupID, isPremium: False)
+        state._tankmen = tankmen
+
+        with self.assertRaises(self.garage.GarageError):
+            state.change_tankman_role(201, 3, 50002)
+
+    def test_a_seated_crew_member_keeps_the_seat_they_still_fit(self):
+        """The restore boundary requires a seat and its occupant to match."""
+        state = self._state()
+
+        with self.assertRaises(self.garage.GarageError):
+            # 101 is the commander of the fixture's vehicle; a driver does
+            # not belong in the commander's seat.
+            state.change_tankman_role(101, 3, 50001)
+
+    def test_a_role_index_that_names_a_skill_is_refused(self):
+        state = self._state()
+
+        with self.assertRaises(self.garage.GarageError):
+            # 6 is 'repair', a skill rather than a crew role.
+            state.change_tankman_role(201, 6, 50002)
+
+    # ---- the passport ---------------------------------------------------
+
+    def test_a_passport_replacement_costs_what_the_shop_shows(self):
+        state = self._state()
+
+        state.change_tankman_passport(201, 0, -1, 0, 11, 0, 22, 0, 33)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual((11, 22, 33), (descriptor.firstNameID,
+                                        descriptor.lastNameID,
+                                        descriptor.iconID))
+        self.assertFalse(descriptor.isFemale)
+        self.assertEqual(10000 - 50, state.snapshot()['wallet']['gold'])
+
+    def test_a_field_the_player_left_alone_arrives_as_minus_one(self):
+        state = self._state()
+
+        state.change_tankman_passport(201, 0, -1, 0, 11, 0, -1, 0, -1)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual((11, 2, 3), (descriptor.firstNameID,
+                                      descriptor.lastNameID,
+                                      descriptor.iconID))
+
+    def test_a_female_crew_members_passport_costs_more(self):
+        state = self._state()
+        state.change_tankman_passport(201, 0, 1, 0, 11, 0, 22, 0, 33)
+        spent = 10000 - state.snapshot()['wallet']['gold']
+        self.assertEqual(50, spent)
+
+        # She is female now, so the second replacement is the dearer one.
+        state.change_tankman_passport(201, 0, -1, 0, 12, 0, 23, 0, 34)
+
+        self.assertEqual(
+            10000 - 50 - 500, state.snapshot()['wallet']['gold'])
+
+    def test_a_passport_the_client_refuses_charges_nothing(self):
+        state = self._state()
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            # Name group 7 is not one this account may buy from.
+            state.change_tankman_passport(201, 0, -1, 7, 11, 0, 22, 0, 33)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_passport_naming_the_wrong_crew_kind_is_refused(self):
+        state = self._state()
+
+        with self.assertRaises(self.garage.GarageError):
+            state.change_tankman_passport(201, 1, -1, 0, 11, 0, 22, 0, 33)
+
+
 class StockRuleTests(unittest.TestCase):
     """The builders and the garage must agree on what the account owns."""
 
@@ -2577,6 +2882,62 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertEqual(500, _TankmanDescriptor(
             snapshot['vehicles'][0]['tankmen'][101]).totalXP())
         self.assertNotIn('vehicleXP', snapshot)
+
+    def test_a_dismissed_crew_member_survives_a_restart(self):
+        """Retail keeps the recovery window across a session, so this does."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['barracksTankmen'] = {201: b'tman:201'}
+        snapshot['accountBerths'] = 5
+        state = self._state(snapshot)
+        state.dismiss_tankman(201)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        fresh = copy.deepcopy(SNAPSHOT)
+        self.assertTrue(self._store().apply(fresh))
+
+        recycled = fresh['recycleBinTankmen']
+        self.assertEqual(1, len(recycled))
+        descriptor, dismissed_at = list(recycled.values())[0]
+        self.assertEqual(b'tman:201', descriptor)
+        self.assertGreater(dismissed_at, 0)
+
+    def test_a_restored_bin_uses_ids_nothing_else_in_the_garage_holds(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['barracksTankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['accountBerths'] = 5
+        state = self._state(snapshot)
+        state.dismiss_tankman(202)
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        fresh = copy.deepcopy(SNAPSHOT)
+        self.assertTrue(self._store().apply(fresh))
+
+        used = set(fresh['barracksTankmen'])
+        used.update(
+            int(tankman_id)
+            for record in fresh['vehicles']
+            for tankman_id in (record.get('tankmen') or ()))
+        self.assertFalse(used & set(fresh['recycleBinTankmen']))
+
+    def test_a_save_written_before_the_bin_existed_restores_empty(self):
+        state = self._state()
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+        with io.open(self.path, 'r', encoding='utf-8') as stream:
+            saved = json.loads(stream.read())
+        saved['ledger'].pop('recycleBin', None)
+        with io.open(self.path, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps(saved))
+
+        fresh = copy.deepcopy(SNAPSHOT)
+        self.assertTrue(self._store().apply(fresh))
+
+        self.assertEqual({}, fresh['recycleBinTankmen'])
 
     def test_a_receipt_without_a_health_reading_bills_nothing(self):
         """A receipt written before the settlement existed stays readable."""
