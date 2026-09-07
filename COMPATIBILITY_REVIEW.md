@@ -1282,16 +1282,25 @@ from, and the chain writes the total back through the connector so the packed
 value and the breakdown agree. Crew training stays on the bare battle XP with
 only `crewXpFactor` applied.
 
-Tested against the captured mastery thresholds, a winning battle with two
-kills now needs 4370 damage for an Ace on a Tier X where the old policy needed
-2060 against a three-mark average of 3948, and Tier VIII is unchanged by
-construction. The residual sits at the bottom of the tree: the same battle
-reaches an Ace at 680 damage on a Tier V against a three-mark average of 1347,
-because a kill pays a flat 100 XP, which is large next to low-tier damage and
-is a number no source publishes. Scaling kill XP by the victim's own durability
-would remove that, and the server has the victim health to do it, but it
-replaces one unpublished constant with another and is left as a product
-decision.
+A kill is paid the same way, by what was killed. Wargaming's own wording is
+that a kill counts with the difference in vehicle tiers taken into account, and
+the victim's maximum durability is that difference in a unit both sides of this
+port already own exactly, so kill XP is `victim durability / 14` and the plain
+frag count pays nothing by itself. The divisor is pinned by the same pivot rule:
+the median stock durability of the client's Tier VIII vehicles is 1400, so a
+Tier VIII kill still pays the 100 XP the previous flat rule paid, while a kill
+is worth 148 damage-equivalent at Tier V and 704 at Tier X instead of a flat
+500 everywhere. `_killed_durability` reads the kill ledger's own per-target
+rows, so nothing new is persisted or put on the wire.
+
+Tested against the captured mastery thresholds, a winning battle with two kills
+and 300 assisted damage now reaches an Ace at 1380 damage on a Tier V, 2770 on
+a Tier VIII and 3950 on a Tier X, against captured three-mark averages of 1347,
+2659 and 3948. The old flat policy needed 1675, 2765 and 2060 for the same
+badge, so the whole tree now sits within a few percent of the retail bar
+instead of only the middle of it. That agreement is a consistency check on the
+two anchors rather than proof of the absolute level: it says the shape is right,
+and only Windows play can say how the resulting pace feels.
 
 ## Stock map-selection lifecycle
 

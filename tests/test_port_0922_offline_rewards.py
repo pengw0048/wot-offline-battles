@@ -65,18 +65,40 @@ class TierAnchorTests(unittest.TestCase):
 
     def test_the_same_battle_pays_less_xp_as_tier_rises(self):
         battle = {'damage_dealt': 2000, 'kills': 3, 'spotted': 2}
-        rewards = [compute_offline_rewards(battle, False, True, tier)['xp']
-                   for tier in range(5, 11)]
+        rewards = [compute_offline_rewards(
+            battle, False, True, tier, killed_durability=4200)['xp']
+            for tier in range(5, 11)]
         self.assertEqual(sorted(rewards, reverse=True), rewards)
         self.assertGreater(rewards[0], rewards[-1])
         # Spotting XP carries no tier relationship, so the ratio of the
         # damage-driven part is what moves.
-        combat = 2000 // 5 + 3 * 100
+        combat = (2000 // 5 +
+                  4200 // offline_rewards.KILL_XP_DURABILITY_DIVISOR)
         for offset, tier in enumerate(range(5, 11)):
             expected = (offline_rewards.OFFLINE_PARTICIPATION_XP +
                         combat * offline_rewards.XP_TIER_PERMILLE[tier] //
                         1000 + 2 * 20)
             self.assertEqual(expected, rewards[offset])
+
+    def test_a_kill_is_paid_by_what_was_killed(self):
+        """Wargaming: a kill counts with the tier difference taken in."""
+        base = compute_offline_rewards({}, False, True, 8)
+        # The plain frag count carries no XP of its own any more.
+        self.assertEqual(base['xp'], compute_offline_rewards(
+            {'kills': 3}, False, True, 8)['xp'])
+        small = compute_offline_rewards(
+            {'kills': 1}, False, True, 8, killed_durability=420)['xp']
+        large = compute_offline_rewards(
+            {'kills': 1}, False, True, 8, killed_durability=2000)['xp']
+        self.assertGreater(large, small)
+        self.assertEqual(
+            base['xp'] + 2000 // offline_rewards.KILL_XP_DURABILITY_DIVISOR,
+            large)
+        # A Tier VIII kill of a median Tier VIII vehicle keeps the 100 XP the
+        # previous flat rule paid, which is how the divisor is pinned.
+        self.assertEqual(base['xp'] + 100, compute_offline_rewards(
+            {'kills': 1}, False, True, offline_rewards.XP_TIER_PIVOT,
+            killed_durability=1400)['xp'])
 
 
 class CreditStructureTests(unittest.TestCase):
@@ -196,6 +218,21 @@ class ServerRewardInputTests(unittest.TestCase):
         state._statistics_interaction(('bot', 13), ('bot', 12))['spotted'] = 0
         self.assertEqual(0, state._spotted_spg_count('bot', 13))
         self.assertEqual(0, state._spotted_spg_count('bot', 11))
+
+    def test_killed_durability_sums_the_victims_own_health(self):
+        state = self._state()
+        # Bot 13 destroys one medium and one SPG on the other team.
+        state.bot_states[11]['max_health'] = 900
+        state.bot_states[12]['max_health'] = 240
+        for target in (('bot', 11), ('bot', 12)):
+            state._statistics_interaction(('bot', 13), target)[
+                'target_kills'] = 1
+        self.assertEqual(1140, state._killed_durability('bot', 13))
+        # A target that was damaged but never destroyed adds nothing.
+        state._statistics_interaction(('bot', 13), ('bot', 11))[
+            'target_kills'] = 0
+        self.assertEqual(240, state._killed_durability('bot', 13))
+        self.assertEqual(0, state._killed_durability('bot', 11))
 
     def test_capture_split_needs_a_completed_capture_and_participation(self):
         state = self._state()

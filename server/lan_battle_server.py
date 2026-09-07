@@ -9519,6 +9519,27 @@ class BattleState:
                 count += 1
         return count
 
+    def _killed_durability(self, kind, vehicle_id):
+        """Return the total durability of the vehicles one actor destroyed.
+
+        Retail counts a kill with the difference in vehicle tiers taken into
+        account, and the victim's own maximum durability is that difference in
+        the unit both sides of this port already know exactly.  The kill
+        ledger already writes ``target_kills`` on the per-target row, so this
+        stays a reward-time question and never becomes a persisted statistic.
+        """
+        interactions = self.vehicle_interactions.get(
+            (str(kind), int(vehicle_id)), {})
+        total = 0
+        for row in interactions.values():
+            killed = max(0, int(row.get("target_kills", 0) or 0))
+            if not killed:
+                continue
+            identity = (str(row.get("target_kind", "")),
+                        int(row.get("target_id", 0) or 0))
+            total += killed * self._vehicle_max_health(identity)
+        return total
+
     def _capture_participants(self, kind, vehicle_id, team):
         """Return the split for a completed capture, or zero.
 
@@ -9570,7 +9591,9 @@ class BattleState:
                 participated=True, vehicle_tier=tier,
                 spotted_spgs=self._spotted_spg_count("player", player_id),
                 capture_participants=self._capture_participants(
-                    "player", player_id, participant["team"]))["xp"]
+                    "player", player_id, participant["team"]),
+                killed_durability=self._killed_durability(
+                    "player", player_id))["xp"]
             rows.append({
                 "actor_kind": "player", "actor_id": player_id,
                 "name": participant["name"],
@@ -9616,6 +9639,7 @@ class BattleState:
                 spotted_spgs=self._spotted_spg_count("bot", bot_id),
                 capture_participants=self._capture_participants(
                     "bot", bot_id, identity["team"]),
+                killed_durability=self._killed_durability("bot", bot_id),
                 vehicle_tier=self._result_vehicle_tier(
                     identity["vehicle"]))["xp"]
             rows.append({
@@ -9703,7 +9727,9 @@ class BattleState:
                     spotted_spgs=self._spotted_spg_count(
                         "player", player_id),
                     capture_participants=self._capture_participants(
-                        "player", player_id, participant["team"]))
+                        "player", player_id, participant["team"]),
+                    killed_durability=self._killed_durability(
+                        "player", player_id))
                 receipt = {
                     "type": "battle_receipt",
                     "protocol": PROTOCOL_VERSION,

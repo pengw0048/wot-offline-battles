@@ -131,8 +131,9 @@ whose profile changed after it started must be restarted first.
   per vehicle tier that alone carries the 1.85 victory multiplier, a
   tier-independent amount per point of damage, double for detecting artillery,
   and one capture payment split between the vehicles that completed it; XP
-  counts damage and kills with the tier difference taken into account, adds 50
-  percent on a win, and returns five percent as Free XP. Wargaming never
+  counts damage and kills with the tier difference taken into account - a
+  kill is worth the durability of the vehicle destroyed, not a flat amount
+  per frag - adds 50 percent on a win, and returns five percent as Free XP. Wargaming never
   published the coefficients, so those stay this build's declared values, but
   the tier relationship is measured from the captured retail tables rather
   than guessed.

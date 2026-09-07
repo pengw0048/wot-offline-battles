@@ -19,13 +19,16 @@ Credits, from Wargaming/Lesta support material:
 Experience, from Wargaming support material: damage and kills count with the
 difference in vehicle tiers taken into account, spotting, base capture and
 capture defence count, a win adds 50 percent, and Free XP is five percent of
-the Combat XP.
+the Combat XP.  A kill is therefore paid by the durability of the vehicle
+destroyed rather than as a flat amount per frag; see
+``KILL_XP_DURABILITY_DIVISOR``.
 
 ``X``, ``Y``, ``Z``, the capture payment and each vehicle's own profitability
 coefficient are not published, so the named values below remain an explicit
-offline policy.  The one relationship that *is* recoverable is how retail XP
-per point of damage falls with vehicle tier; see ``XP_TIER_PERMILLE``.
-Offline battles have zero ammunition and repair costs.
+offline policy.  The two relationships that *are* recoverable are how retail XP
+per point of damage falls with vehicle tier (``XP_TIER_PERMILLE``) and that a
+kill is worth what was killed.  Offline battles have zero ammunition and repair
+costs.
 """
 
 
@@ -40,6 +43,16 @@ OFFLINE_SPG_SPOTTING_MULTIPLIER = 2
 # One completed capture is worth this much, split between its participants.
 OFFLINE_CAPTURE_CREDITS = 1000
 OFFLINE_PARTICIPATION_XP = 100
+# Wargaming's support material says a kill counts "with the difference in
+# vehicle tiers taken into account", and the durability of the vehicle
+# destroyed is that difference measured in the only unit both sides of this
+# port already own exactly.  The divisor is pinned the same way
+# ``XP_TIER_PERMILLE`` is pinned: the median stock durability of the client's
+# Tier VIII vehicles is 1400, so dividing by 14 leaves a Tier VIII kill worth
+# the 100 XP it was worth under the previous flat rule, and every other tier
+# moves relative to it.  Median stock durability per tier, measured from the
+# pinned client: 115, 152, 215, 310, 420, 720, 960, 1400, 1610, 2000.
+KILL_XP_DURABILITY_DIVISOR = 14
 OFFLINE_WIN_CREDITS_FACTOR_100 = 185
 OFFLINE_WIN_XP_FACTOR_100 = 150
 OFFLINE_FREE_XP_PERCENT = 5
@@ -67,15 +80,19 @@ XP_TIER_PIVOT = 8
 
 def compute_offline_rewards(statistics, won, participated=True,
                             vehicle_tier=1, spotted_spgs=0,
-                            capture_participants=0):
+                            capture_participants=0, killed_durability=0):
     """Return one actor's Credits, XP and Free XP for a finished battle.
 
     ``spotted_spgs`` is how many of the actor's own first detections were
     SPGs; it is a subset of ``spotted``.  ``capture_participants`` is zero
     unless a capture by this actor's team completed with this actor taking
     part, in which case it is the number of vehicles the payment is split
-    between.  Both are decided by the server, which owns the detection and
-    capture ledgers, and neither is persisted as a battle statistic.
+    between.  ``killed_durability`` is the total maximum durability of the
+    vehicles this actor destroyed, and it is what pays kill XP: the plain
+    ``kills`` count carries no XP of its own, because a kill is worth the
+    vehicle killed.  All three are decided by the server, which owns the
+    detection, capture and kill ledgers, and none is persisted as a battle
+    statistic.
     """
     statistics = statistics if isinstance(statistics, dict) else {}
 
@@ -89,7 +106,6 @@ def compute_offline_rewards(statistics, won, participated=True,
     assist = (value("damage_assisted_track") +
               value("damage_assisted_radio") +
               value("damage_assisted_stun"))
-    kills = value("kills")
     spotted = value("spotted")
     capture = value("capture_points")
     dropped_capture = value("dropped_capture_points")
@@ -106,10 +122,15 @@ def compute_offline_rewards(statistics, won, participated=True,
         capture_participants = max(0, int(capture_participants))
     except (TypeError, ValueError, OverflowError):
         capture_participants = 0
+    try:
+        killed_durability = max(0, int(killed_durability))
+    except (TypeError, ValueError, OverflowError):
+        killed_durability = 0
 
     # Damage, assisted damage and kills carry the tier relationship; integer
     # permille arithmetic keeps the server's reward deterministic.
-    combat_xp_terms = damage // 5 + assist // 10 + kills * 100
+    combat_xp_terms = (damage // 5 + assist // 10 +
+                       killed_durability // KILL_XP_DURABILITY_DIVISOR)
     tier_permille = XP_TIER_PERMILLE.get(
         vehicle_tier, XP_TIER_PERMILLE[XP_TIER_PIVOT])
     base_xp = (participation +
