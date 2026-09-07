@@ -231,14 +231,13 @@ def _ground_top(spaceID, Math, pos, x, z, look, ground_plane=None,
 def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		footprint_x, footprint_z, end_x, end_z, look, ground_plane=None,
 		collision_filter=_UNPREPARED_COLLISION_FILTER):
-	"""Conservatively extend the ground observed inside the hull footprint.
+	"""Extend only support witnessed under the current hull footprint.
 
-	A downward ``wg_collideSegment`` returns the first surface, which can be a
-	wall or roof rather than terrain.  The look-ahead endpoint can also lie past
-	a cliff and return no hit.  Both shapes must not lift a pitched lane over the
-	obstacle.  The lane start and its footprint edge are still under the current
-	hull, so extend that witnessed ground trend and accept the endpoint top only
-	when it is lower.
+	A lower floor beyond a crest is not occupied by this horizontal sweep.
+	Pulling its endpoint down to that floor creates an artificial diagonal
+	through the cliff top and blocks departure in both travel directions.
+	The under-hull trend still caps a nose-up ray against real walls ahead;
+	vertical integration owns contact with a lower landing surface.
 	"""
 	import math
 	start_ground = _ground_top(
@@ -246,9 +245,6 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		collision_filter)
 	footprint_ground = _ground_top(
 		spaceID, Math, pos, footprint_x, footprint_z, look, ground_plane,
-		collision_filter)
-	end_ground = _ground_top(
-		spaceID, Math, pos, end_x, end_z, look, ground_plane,
 		collision_filter)
 	try:
 		inside_length = math.sqrt(
@@ -262,15 +258,13 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 			extrapolated = (float(start_ground) +
 				(float(footprint_ground) - float(start_ground)) *
 				full_length / inside_length)
-			return (extrapolated if end_ground is None else
-				min(float(end_ground), extrapolated))
+			return extrapolated
 		inside_tops = [float(value) for value in (
 			start_ground, footprint_ground) if value is not None]
 		if inside_tops:
 			inside_top = min(inside_tops)
-			return (inside_top if end_ground is None else
-				min(float(end_ground), inside_top))
-		return None if end_ground is None else float(end_ground)
+			return inside_top
+		return None
 	except (TypeError, ValueError, OverflowError):
 		return None
 

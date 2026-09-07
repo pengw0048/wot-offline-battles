@@ -20285,6 +20285,53 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual([(5.0, True)], impacts)
 
+    def test_local_suspension_fast_fall_cannot_skip_ground(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_vertical_speed = -30.0
+        entity = _Vehicle(10, _suspension_descriptor(), _Vector(0, 2, 0),
+                          (0, 0, 0), {'health': 500})
+        battle._suspension_ground_y = lambda x, z, lo, hi, **kwargs: (
+            0.0 if lo <= 0.0 <= hi else None)
+        position = (0.0, 2.0, 0.0)
+        for unused in range(5):
+            battle._local_support_tick_pose = position
+            battle._local_support_motion_pose = position
+            position = battle._update_vertical_motion(
+                entity, position, 0.0, 0.1)
+            self.assertGreater(position[1], -0.02)
+        self.assertFalse(battle._local_airborne)
+        self.assertFalse(battle._local_support_rise_blocked)
+
+    def test_local_suspension_inclined_plane_does_not_invent_overturn(self):
+        for angle in (35.0, 45.0, 55.0):
+            with self.subTest(angle=angle):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._local_fall_armed = True
+                battle._local_pitch = -math.radians(angle)
+                entity = _Vehicle(10, _suspension_descriptor(), _Vector(),
+                                  (0, 0, 0), {'health': 500})
+                gradient = math.tan(math.radians(angle))
+                battle._suspension_ground_y = (
+                    lambda x, z, lo, hi, **kwargs:
+                    z * gradient if lo <= z * gradient <= hi else None)
+                position = (0.0, 0.0, 0.0)
+                for unused in range(100):
+                    battle._local_support_tick_pose = position
+                    battle._local_support_motion_pose = position
+                    position = battle._update_vertical_motion(
+                        entity, position, 0.0, 0.04)
+                    self.assertAlmostEqual(-math.radians(angle),
+                                           battle._local_pitch, places=4)
+                    self.assertGreater(battle._local_surface_up_cosine, 0.5)
+                self.assertAlmostEqual(gradient,
+                    battle._local_ground_plane['gradient_z'], places=4)
+
     def test_local_steep_hull_keeps_falling_without_support(self):
         for axis in ('pitch', 'roll'):
             with self.subTest(axis=axis):

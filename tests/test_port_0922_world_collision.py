@@ -1176,7 +1176,7 @@ class WorldCollisionTests(unittest.TestCase):
                 None, False, 0.20,
                 pitch=-math.atan(world_gradient)))
             self.assertEqual(9, counts['horizontal'])
-            self.assertEqual(33, counts['ground'])
+            self.assertEqual(30, counts['ground'])
 
     def test_exact_top_rejects_wall_hidden_by_coarse_profile(self):
         gradient = 0.20
@@ -1441,7 +1441,7 @@ class WorldCollisionTests(unittest.TestCase):
                 pitch=-math.atan(world_gradient)))
             self.assertEqual(9, counts['horizontal'])
             self.assertEqual(9, counts['seams'])
-            self.assertEqual(39, counts['ground'])
+            self.assertEqual(36, counts['ground'])
 
     def test_airborne_posed_chord_admits_continuous_slope(self):
         gradient = 0.50
@@ -1480,9 +1480,9 @@ class WorldCollisionTests(unittest.TestCase):
                     bigworld, math_module, 1, _Vector(), 0.0, velocity,
                     None, True, 0.20, True, commit_enabled=False,
                     pitch=-math.atan(world_gradient)))
-            # Each lane confirms its in-footprint trend, look-ahead top and
+            # Each lane confirms its in-footprint trend and
             # continuous ground profile before accepting the native slope.
-            self.assertEqual(30, ground_calls[0])
+            self.assertEqual(27, ground_calls[0])
 
     @staticmethod
     def _pitched_hull_scene(ground_gradient, wall_z=None, wall_top=None,
@@ -1599,6 +1599,41 @@ class WorldCollisionTests(unittest.TestCase):
                     self._pitched_hull_status(
                         gradient, hull_pitch, wall_z, 1.2,
                         wall_end=wall_end, velocity=velocity))
+
+    def test_lower_floor_beyond_crest_does_not_pull_hull_ray_into_ground(self):
+        for direction in (1.0, -1.0):
+            for wall_top in (None, 1.2):
+                with self.subTest(direction=direction, wall_top=wall_top):
+                    def collide(unused_space, start, end, unused_mask, *unused):
+                        candidates = []
+                        dy, dz = end.y - start.y, end.z - start.z
+                        if abs(dy) > 1.0e-9:
+                            for height in (0.0, -4.0):
+                                t = (height - start.y) / dy
+                                z = direction * (start.z + dz * t)
+                                if 0.0 <= t <= 1.0 and (
+                                        z <= 4.0 if height == 0.0 else z >= 4.0):
+                                    candidates.append((t, _Vector(0, 1, 0)))
+                        if abs(dz) > 1.0e-9:
+                            t = (direction * 4.0 - start.z) / dz
+                            height = start.y + dy * t
+                            top = 0.0 if wall_top is None else wall_top
+                            if 0.0 <= t <= 1.0 and -4.0 <= height <= top:
+                                candidates.append((t, _Vector(0, 0, direction)))
+                        if not candidates:
+                            return None
+                        t, normal = min(candidates, key=lambda row: row[0])
+                        return (start + (end - start).scale(t), normal, 0)
+                    world = types.SimpleNamespace(
+                        wg_collideSegment=collide,
+                        wg_getMatInfoNearPoint=_miss_mat_info_1513)
+                    status = world_collision.check_horizontal_collision(
+                        world, types.SimpleNamespace(Vector3=_Vector),
+                        1, _Vector(), 0.0, direction * 20.0,
+                        None, False, 0.1, True, commit_enabled=False,
+                        pitch=direction * 0.1)
+                    self.assertEqual('clear' if wall_top is None else 'hard',
+                                     status)
 
     def test_missing_ground_beyond_cliff_cannot_remove_the_pose_cap(self):
         pitch = math.atan(0.40)

@@ -5839,14 +5839,16 @@ class BotRuntime(object):
 
     def _suspension_ground_samples(self, state, params,
                                    probe_height=None,
-                                   support_gradient=None):
+                                   support_gradient=None, sweep_drop=0.0):
         """Sample the five damper positions on each track exactly once."""
         position = _position(state)
         body_height = (position[1] if probe_height is None else
                        float(probe_height))
         yaw = _number(state.get('yaw'))
         points = vehicle_physics.suspension_world_points(
-            params, position, yaw)
+            params, position, yaw,
+            _number(state.get('terrain_pitch', state.get('pitch'))),
+            _number(state.get('roll')))
         memory = state.get('_spring_ground_memory')
         if not isinstance(memory, list) or len(memory) != len(points):
             memory = [None] * len(points)
@@ -5858,11 +5860,11 @@ class BotRuntime(object):
             x, z = point
             spring = params['springs'][index]
             spring_height = (
-                body_height - spring['z'] * math.sin(pitch) +
-                spring['x'] * math.sin(roll))
+                body_height + vehicle_physics.suspension_point_offset(
+                    spring, pitch, roll)[1])
             minimum_y = (
                 spring_height - spring['rest_length'] -
-                vehicle_physics.CONTACT_PENETRATION)
+                vehicle_physics.CONTACT_PENETRATION - sweep_drop)
             spring_maximum_y = (
                 spring_height + spring['max_compression'] -
                 spring['static_compression'] + 0.05)
@@ -5882,14 +5884,16 @@ class BotRuntime(object):
 
     def _suspension_pseudo_ground_samples(self, state, params,
                                           probe_height=None,
-                                          support_gradient=None):
+                                          support_gradient=None, sweep_drop=0.0):
         """Sample track-gap and belly contacts once for this authority tick."""
         position = _position(state)
         body_height = (position[1] if probe_height is None else
                        float(probe_height))
         yaw = _number(state.get('yaw'))
         points = vehicle_physics.suspension_pseudo_world_points(
-            params, position, yaw)
+            params, position, yaw,
+            _number(state.get('terrain_pitch', state.get('pitch'))),
+            _number(state.get('roll')))
         memory = state.get('_pseudo_ground_memory')
         if not isinstance(memory, list) or len(memory) != len(points):
             memory = [None] * len(points)
@@ -5901,12 +5905,11 @@ class BotRuntime(object):
             x, z = point
             contact = params['pseudo_contacts'][index]
             point_height = (
-                body_height + _number(contact.get('y')) -
-                contact['z'] * math.sin(pitch) +
-                contact['x'] * math.sin(roll))
+                body_height + vehicle_physics.suspension_point_offset(
+                    contact, pitch, roll)[1])
             minimum_y = (
                 point_height - params['rest_length'] -
-                vehicle_physics.CONTACT_PENETRATION)
+                vehicle_physics.CONTACT_PENETRATION - sweep_drop)
             rise = (params['clearance']
                     if contact.get('kind') == 'track' else 0.0)
             maximum_y = (
@@ -5926,11 +5929,12 @@ class BotRuntime(object):
         return tuple(result)
 
     @staticmethod
-    def _suspension_world_ground_plane(params, ground, position, yaw):
+    def _suspension_world_ground_plane(
+            params, ground, position, yaw, pitch=0.0, roll=0.0):
         """Fit one spring batch and bind its local centre to world X/Z."""
         return vehicle_physics.suspension_world_ground_plane(
             params, ground, position, yaw,
-            SUSPENSION_GROUND_PLANE_EPSILON)
+            SUSPENSION_GROUND_PLANE_EPSILON, pitch, roll)
 
     @staticmethod
     def _suspension_plane_height(plane, x, z):
@@ -6565,12 +6569,16 @@ class BotRuntime(object):
                 (float(position[2]) - float(motion_pose[2])))
         probe_height = self._suspension_probe_height_for_motion(
             position, motion_pose, previous_plane)
+        sweep_drop = vehicle_physics.suspension_vertical_sweep_drop(
+            _number(state.get('vertical_speed')), step)
         ground = self._suspension_ground_samples(
-            state, params, probe_height, support_gradient)
+            state, params, probe_height, support_gradient, sweep_drop)
         pseudo_ground = self._suspension_pseudo_ground_samples(
-            state, params, probe_height, support_gradient)
+            state, params, probe_height, support_gradient, sweep_drop)
         current_plane = self._suspension_world_ground_plane(
-            params, ground, position, _number(state.get('yaw')))
+            params, ground, position, _number(state.get('yaw')),
+            _number(state.get('terrain_pitch', state.get('pitch'))),
+            _number(state.get('roll')))
         no_sampled_support = bool(
             all(value is None for value in ground) and
             all(value is None for value in pseudo_ground))

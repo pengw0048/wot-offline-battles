@@ -4135,6 +4135,29 @@ class BotRuntimeTests(unittest.TestCase):
         }
         return runtime, state, calls
 
+    def test_bot_suspension_fast_fall_cannot_skip_ground(self):
+        runtime, state, unused_calls = self._suspension_case(lambda x, z: 0.0)
+        state.update(y=2.0, vertical_speed=-30.0, airborne=True)
+        for unused in range(5):
+            runtime._update_vertical_motion(state, 0.1)
+            self.assertGreater(state['y'], -0.02)
+        self.assertFalse(state['airborne'])
+
+    def test_bot_suspension_inclined_plane_does_not_invent_overturn(self):
+        for angle in (35.0, 45.0, 55.0):
+            with self.subTest(angle=angle):
+                gradient = math.tan(math.radians(angle))
+                runtime, state, unused_calls = self._suspension_case(
+                    lambda x, z: (z * gradient, math.cos(math.radians(angle))))
+                state.update(pitch=-math.radians(angle),
+                             terrain_pitch=-math.radians(angle))
+                for unused in range(100):
+                    runtime._update_vertical_motion(state, 0.04)
+                    self.assertAlmostEqual(-math.radians(angle),
+                                           state['terrain_pitch'], places=4)
+                self.assertAlmostEqual(gradient,
+                    state['_suspension_ground_plane']['gradient_z'], places=4)
+
     def test_bot_steep_hull_keeps_falling_without_support(self):
         for axis in ('pitch', 'roll'):
             with self.subTest(axis=axis):
@@ -4708,13 +4731,22 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(5.0, first_pose[0], places=6)
         self.assertGreater(first_pose[1], 1.8)
         self.assertAlmostEqual(5.0, state['x'], places=6)
-        self.assertAlmostEqual(2.0, state['y'], delta=0.01)
         self.assertFalse(state['airborne'])
         self.assertTrue(state['grounded_once'])
         self.assertIsInstance(state.get('_suspension_ground_plane'), dict)
         # 22 primary + 22 endpoint + three bounded path centres, followed by
         # two ordinary 22-column batches while the springs settle.
         self.assertEqual(91, len(calls))
+
+        # A posed spring footprint moves while the body settles. Wait for the
+        # resulting damper transient instead of assuming a three-frame rest.
+        for index in range(60):
+            if abs(state['y'] - 2.0) < 0.01 and abs(state['vertical_speed']) < 0.01:
+                break
+            runtime.update(0.1, 1.3 + 0.1 * index)
+        self.assertAlmostEqual(5.0, state['x'], places=6)
+        self.assertAlmostEqual(2.0, state['y'], delta=0.01)
+        self.assertLess(abs(state['vertical_speed']), 0.01)
 
     def test_small_ram_endpoint_corrections_follow_a_continuous_downslope(
             self):

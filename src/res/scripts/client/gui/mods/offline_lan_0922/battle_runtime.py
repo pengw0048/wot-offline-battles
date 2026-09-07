@@ -19092,7 +19092,7 @@ class BattleRuntime(object):
 
     def _local_suspension_ground_samples(
             self, position, yaw, probe_height=None,
-            support_gradient=None):
+            support_gradient=None, sweep_drop=0.0):
         """Sample every real damper once for this copied-physics tick."""
         params = self._local_suspension_params
         if not isinstance(params, dict):
@@ -19101,7 +19101,7 @@ class BattleRuntime(object):
             probe_height = position[1]
         probe_height = float(probe_height)
         points = vehicle_physics.suspension_world_points(
-            params, position, yaw)
+            params, position, yaw, self._local_pitch, self._local_roll)
         prepared_filter = self._prepared_ground_filter(points)
         memory = self._local_spring_ground_memory
         if not isinstance(memory, list) or len(memory) != len(points):
@@ -19111,11 +19111,11 @@ class BattleRuntime(object):
             x, z = point
             spring = params['springs'][index]
             spring_height = (
-                probe_height - spring['z'] * math.sin(self._local_pitch) +
-                spring['x'] * math.sin(self._local_roll))
+                probe_height + vehicle_physics.suspension_point_offset(
+                    spring, self._local_pitch, self._local_roll)[1])
             minimum_y = (
                 spring_height - spring['rest_length'] -
-                vehicle_physics.CONTACT_PENETRATION)
+                vehicle_physics.CONTACT_PENETRATION - sweep_drop)
             spring_maximum_y = (
                 spring_height + spring['max_compression'] -
                 spring['static_compression'] + 0.05)
@@ -19136,7 +19136,7 @@ class BattleRuntime(object):
 
     def _local_suspension_pseudo_ground_samples(
             self, position, yaw, probe_height=None,
-            support_gradient=None):
+            support_gradient=None, sweep_drop=0.0):
         """Sample every track/belly constraint once for this physics tick."""
         params = self._local_suspension_params
         if not isinstance(params, dict):
@@ -19145,7 +19145,7 @@ class BattleRuntime(object):
             probe_height = position[1]
         probe_height = float(probe_height)
         points = vehicle_physics.suspension_pseudo_world_points(
-            params, position, yaw)
+            params, position, yaw, self._local_pitch, self._local_roll)
         prepared_filter = self._prepared_ground_filter(points)
         memory = self._local_pseudo_ground_memory
         if not isinstance(memory, list) or len(memory) != len(points):
@@ -19155,12 +19155,11 @@ class BattleRuntime(object):
             x, z = point
             contact = params['pseudo_contacts'][index]
             point_height = (
-                probe_height + _number(contact.get('y')) -
-                contact['z'] * math.sin(self._local_pitch) +
-                contact['x'] * math.sin(self._local_roll))
+                probe_height + vehicle_physics.suspension_point_offset(
+                    contact, self._local_pitch, self._local_roll)[1])
             minimum_y = (
                 point_height - params['rest_length'] -
-                vehicle_physics.CONTACT_PENETRATION)
+                vehicle_physics.CONTACT_PENETRATION - sweep_drop)
             rise = (params['clearance']
                     if contact.get('kind') == 'track' else 0.0)
             maximum_y = (
@@ -19248,7 +19247,7 @@ class BattleRuntime(object):
             previous_plane, current_plane, motion_pose, position)
 
     def _commit_local_suspension_metadata(
-            self, position, yaw, solved, ground, plane=None):
+            self, position, yaw, solved, ground, plane=None, sample_pose=None):
         """Publish distinct body-attitude and terrain-slope metadata."""
         contacting = [value for value in ground if value is not None]
         if not contacting or solved.get('airborne'):
@@ -19269,7 +19268,8 @@ class BattleRuntime(object):
         if plane is None:
             plane = vehicle_physics.suspension_world_ground_plane(
                 self._local_suspension_params, ground, position, yaw,
-                GROUND_PLANE_EPSILON)
+                GROUND_PLANE_EPSILON,
+                *(sample_pose or (self._local_pitch, self._local_roll)))
         if plane is None:
             self._local_ground_plane = None
             self._local_downhill = (0.0, 0.0, 0.0)
@@ -19540,12 +19540,14 @@ class BattleRuntime(object):
                 self._local_suspension_support_gradient = None
         probe_height = self._local_suspension_predicted_probe_height(
             position, motion_pose, previous_plane)
+        sweep_drop = vehicle_physics.suspension_vertical_sweep_drop(
+            self._local_vertical_speed + support_speed_delta, dt)
         ground = self._local_suspension_ground_samples(
             position, yaw, probe_height=probe_height,
-            support_gradient=support_gradient)
+            support_gradient=support_gradient, sweep_drop=sweep_drop)
         pseudo_ground = self._local_suspension_pseudo_ground_samples(
             position, yaw, probe_height=probe_height,
-            support_gradient=support_gradient)
+            support_gradient=support_gradient, sweep_drop=sweep_drop)
         if (not armed_before and
                 (not ground or all(value is None for value in ground)) and
                 (not pseudo_ground or
@@ -19558,7 +19560,8 @@ class BattleRuntime(object):
             self._local_suspension_support_gradient = None
             return position
         current_plane = vehicle_physics.suspension_world_ground_plane(
-            params, ground, position, yaw, GROUND_PLANE_EPSILON)
+            params, ground, position, yaw, GROUND_PLANE_EPSILON,
+            self._local_pitch, self._local_roll)
         before_airborne = bool(self._local_airborne)
         before_vertical_speed = (
             float(self._local_vertical_speed) + support_speed_delta)
@@ -19691,7 +19694,8 @@ class BattleRuntime(object):
             self._local_turn_speed = 0.0
             self._local_drive_turn = 0.0
         self._commit_local_suspension_metadata(
-            position, yaw, solved, ground, plane=current_plane)
+            position, yaw, solved, ground, plane=current_plane,
+            sample_pose=(previous_pitch, previous_roll))
         return position
 
     def _resettle_local_suspension_endpoint(
