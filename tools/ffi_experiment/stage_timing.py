@@ -10,7 +10,7 @@ CLOCK = time.process_time if hasattr(time, 'process_time') else time.clock
 
 
 class Recorder(object):
-    def __init__(self, backend=None):
+    def __init__(self, backend=None, runtime=None):
         self.rows = {}
         self.stack = []
         self.patches = []
@@ -38,6 +38,9 @@ class Recorder(object):
         if backend is not None:
             specs.append((backend.module, 'dispatch', 'native.dispatch'))
         for owner, name, label in specs:
+            if (owner is bot.BotRuntime and runtime is not None and
+                    name in runtime.__dict__):
+                owner = runtime
             self.wrap(owner, name, label)
 
     def wrap(self, owner, name, label):

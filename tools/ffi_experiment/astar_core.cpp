@@ -2,6 +2,9 @@
  * floating-point addition order, partial-path rules and fair scheduling.
  * Geometry probing and path finalization remain with the Python owner. */
 #include "astar_core.h"
+#include "combat_core.h"
+#include "driver_core.h"
+#include "perception_core.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -280,7 +283,16 @@ int execute(double *b, int n) {
 }
 extern "C" int offline_astar_dispatch(double *buffer, int count) {
     if (!buffer || count < 1 || count > 12000012) return 1;
-    try { return execute(buffer, count); }
+    try {
+        if (!std::isfinite(buffer[0]) || buffer[0] != std::floor(buffer[0]) ||
+            buffer[0] < 0 || buffer[0] > 1000000000) return 2;
+        if (buffer[0] == 0 && count != 1) return 2;
+        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); }
+        if (buffer[0] >= 300) return offline_perception_dispatch(buffer, count);
+        if (buffer[0] >= 200) return offline_driver_dispatch(buffer, count);
+        if (buffer[0] >= 100) return offline_combat_dispatch(buffer, count);
+        return execute(buffer, count);
+    }
     catch (const Invalid &) { return 2; }
     catch (const std::bad_alloc &) { return 3; }
     catch (const std::exception &) { return 4; }
