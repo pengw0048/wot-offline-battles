@@ -553,6 +553,12 @@ def _invalidate_chunk_native_names_1513(chunk_id):
 		for key in list(cache):
 			if key[1] == chunk_id:
 				cache.pop(key, None)
+	# Placement proof belongs to this streaming lifetime too: a reload can
+	# reuse the same native slot count with a different item matrix.
+	unresolved = globals().get('g_offh_destr_unresolved_obstacles', {})
+	for identity in list(unresolved):
+		if identity[0] == chunk_id:
+			unresolved.pop(identity, None)
 	_release_item_name_query_focus_1513_for_chunk(chunk_id)
 
 
@@ -1105,6 +1111,8 @@ def _clear_runtime_registry(preserve_spatial_batch=False):
 			'g_offh_destr_catalog_published',
 			'g_offh_destr_catalog_publish_pending',
 			'g_offh_destr_falling_active', 'g_offh_destr_ground_skips',
+			'g_offh_destr_unresolved_obstacles',
+			'g_offh_destr_unresolved_logs',
 			'g_offh_destr_broken_cache',
 			'g_offh_destr_item_names',
 			'g_offh_destr_native_name_lists',
@@ -2291,24 +2299,125 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	}
 
 
+def _confirmed_unresolved_obstacle_1513(spaceID, identity):
+	"""Return exact baked OBBs for a streamed but unidentified model.
+
+	Registration proves *identity*: which descriptor the item uses, whether it
+	may be destroyed and which native event names it.  Blocking a hull needs
+	only *placement*, and the pinned catalog already owns that.  When the chunk
+	is streamed and the live item matrix still reproduces the pinned locator
+	signature, the model is standing exactly where the catalog says, so it must
+	keep stopping a hull even while its identity stays unresolved.  Anything
+	else - a chunk that is not streamed, a live matrix that contradicts the
+	catalog, or a falling body that has left its authored pose - returns no box
+	rather than inventing a wall.
+	"""
+	chunk_id, item_index = identity
+	catalog = _destructible_catalog
+	if catalog is None:
+		return ()
+	baked = catalog.get('baked_instances', {}).get(identity)
+	if baked is None or baked['kind'] == 'falling' or not baked['boxes']:
+		return ()
+	cache = globals().setdefault('g_offh_destr_unresolved_obstacles', {})
+	import AreaDestructibles
+	import BigWorld
+	import Math
+	mgr = getattr(AreaDestructibles, 'g_destructiblesManager', None)
+	try:
+		manager_space = None if mgr is None else mgr.getSpaceID()
+	except Exception:
+		return ()
+	if mgr is None or manager_space != spaceID:
+		return ()
+	native_count = _native_chunk_destructible_count_1513(mgr, chunk_id)
+	if native_count is None or item_index >= native_count:
+		# The chunk is no longer streamed, so neither is its geometry.
+		cache.pop(identity, None)
+		return ()
+	entry = cache.get(identity)
+	if entry is not None and entry[0] == native_count:
+		return entry[1]
+	try:
+		chunk_matrix = observed_call(
+			'native.destructible.chunk_matrix', BigWorld.wg_getChunkMatrix,
+			spaceID, chunk_id)
+		chunk_translation = getattr(chunk_matrix, 'translation', None)
+		if chunk_translation is None:
+			return ()
+		matrix = Math.Matrix(observed_call(
+			'native.destructible.item_matrix',
+			BigWorld.wg_getDestructibleMatrix, spaceID, chunk_id, item_index))
+		signature, unused_located = _catalog_instance_for_matrix_1513(
+			matrix, chunk_translation, Math)
+	except Exception:
+		# A placement query that cannot answer is not evidence of a wall.
+		return ()
+	boxes = baked['boxes'] if signature == baked['signature'] else ()
+	cache[identity] = (native_count, boxes)
+	if boxes:
+		_log_unresolved_obstacle_1513(chunk_id, item_index, baked)
+	return boxes
+
+
+def _log_unresolved_obstacle_1513(chunk_id, item_index, baked):
+	"""Name the first unidentified blocking model of each map resource."""
+	logged = globals().setdefault('g_offh_destr_unresolved_logs', set())
+	key = baked['descriptor_filename']
+	if key in logged or len(logged) >= _ISOLATION_LOG_TYPE_LIMIT:
+		return
+	logged.add(key)
+	try:
+		import sys
+		sys.stdout.write(
+			'[Offline LAN 0.9.22] DESTR blocking unidentified model '
+			'chunk=%s item=%s kind=%s name=%s map=%s '
+			'repeats=suppressed_for_battle\n' % (
+				chunk_id, item_index, baked['kind'], key,
+				(_destructible_catalog or {}).get('map') or 'unknown'))
+	except Exception:
+		# Runtime handling is authoritative; the log stream is observational.
+		pass
+
+
 @_batched_spatial_mutations_1513
 @observed('destructible.stream_motion')
 def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
-	"""Live-validate catalog wires covering one exact vehicle sweep."""
+	"""Live-validate catalog wires covering one exact vehicle sweep.
+
+	Returns the world boxes of every streamed model the sweep reaches that
+	registration could not identify.  Those models are solid in the engine but
+	invisible to the registered-candidate path, and three hull lanes at three
+	fixed heights can pass straight through an open frame such as #1513's
+	girder flatcar, so the caller must still stop the hull on them.
+	"""
 	catalog = _destructible_catalog or {}
 	if not catalog.get('has_instance_index'):
-		return
+		return ()
 	identities = set()
 	for bin_key in _baked_bin_keys_for_bounds_1513(
 			*_box_xz_bounds(vehicle_box)):
 		identities.update(
 			catalog.get('baked_shot_bins', {}).get(bin_key, ()))
 	instances = globals().get('g_offh_destr_instances', {})
+	unresolved = []
+	cache = globals().get('g_offh_destr_unresolved_obstacles')
 	for identity in sorted(identities):
 		combat_count('destructible_stream_candidates')
-		if identity not in instances:
-			combat_count('destructible_stream_missing')
-			_stream_baked_shot_instance_1513(spaceID, identity)
+		if identity in instances:
+			if cache is not None:
+				cache.pop(identity, None)
+			continue
+		combat_count('destructible_stream_missing')
+		if _stream_baked_shot_instance_1513(spaceID, identity) is not None:
+			if cache is not None:
+				cache.pop(identity, None)
+			continue
+		boxes = _confirmed_unresolved_obstacle_1513(spaceID, identity)
+		if boxes:
+			combat_count('destructible_stream_unidentified')
+			unresolved.append((identity, boxes))
+	return tuple(unresolved)
 
 
 def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None,
@@ -3243,6 +3352,17 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04,
 	return False
 
 
+def _unidentified_hull_contact_1513(unresolved, vehicle_box, authority):
+	"""Return whether an unidentified streamed model still fills the sweep."""
+	for identity, boxes in unresolved:
+		chunk_id, item_index = identity
+		for world_box in _catalog_intersections(boxes, vehicle_box):
+			if authority.is_destroyed(chunk_id, item_index, world_box[2]):
+				continue
+			return True
+	return False
+
+
 @observed('destructible.hull_guard')
 def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04,
 		motion_yaw=None):
@@ -3250,10 +3370,22 @@ def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04,
 	bbox = _vehicle_hull_bbox(td)
 	if _destructible_catalog is None or bbox is None:
 		return False
-	return bool(_catalog_contact_candidates(
-		_vehicle_swept_box(
-			pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
-			motion_yaw=motion_yaw)))
+	vehicle_box = _vehicle_swept_box(
+		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
+		motion_yaw=motion_yaw)
+	if _catalog_contact_candidates(vehicle_box):
+		return True
+	# A receipt-reuse caller must not step past a model the full sweep already
+	# proved solid but unidentified.  Read only the confirmed placements that
+	# sweep cached; this guard adds no native query of its own.
+	cache = globals().get('g_offh_destr_unresolved_obstacles')
+	if not cache:
+		return False
+	instances = globals().get('g_offh_destr_instances', {})
+	return _unidentified_hull_contact_1513(
+		[(identity, entry[1]) for identity, entry in cache.items()
+		 if identity not in instances],
+		vehicle_box, _get_destr_authority())
 
 
 def _catalog_motion_result(status, token=None, accepted_now=False,
@@ -3318,9 +3450,14 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	# The visible player does not run the authority Bot scan that normally
 	# populates the live item registry.  Admit only checksum-pinned wires in the
 	# current hull bins through the same read-only native validation as shells.
-	_stream_baked_motion_instances_1513(spaceID, vehicle_box)
+	unresolved = _stream_baked_motion_instances_1513(spaceID, vehicle_box)
 	candidates = _catalog_contact_candidates(vehicle_box)
-	if not candidates:
+	# An unidentified model is real geometry this sweep cannot name, destroy or
+	# publish.  #1513 keeps it solid, so the hull stops on it until a later tick
+	# resolves its identity and the ordinary crush law can decide.
+	unidentified = bool(unresolved) and _unidentified_hull_contact_1513(
+		unresolved, vehicle_box, auth)
+	if not candidates and not unidentified:
 		return _catalog_motion_result(
 			'pending' if publish_failures else 'clear', publish_failures,
 			return_status=return_status, return_detail=return_detail,
@@ -3335,13 +3472,15 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		pos, yaw, bbox, travel=float(vel) * max(0.0, float(dt)),
 		motion_yaw=motion_yaw)
 		if kinetic_speed is not None else None)
-	blocked = False
+	blocked = bool(unidentified)
 	crushed = False
 	kinetic = False
 	approach = False
 	publication_pending = bool(publish_failures)
 	exact_token = set(publish_failures)
 	contact_kinds = set(publish_kinds)
+	if unidentified:
+		contact_kinds.add('unidentified')
 	commit_candidates = []
 
 	for identity in sorted(grouped):
