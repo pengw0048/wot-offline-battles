@@ -52,6 +52,7 @@ python -m PyInstaller `
     --specpath $SpecRoot `
     --paths (Join-Path $RepoRoot "tools") `
     --hidden-import packed_xml `
+    --hidden-import vehicle_prices `
     --add-data "$PayloadRoot\servers;servers" `
     --add-data "$PayloadRoot\client;client" `
     (Join-Path $LauncherRoot "wot_launcher.py")

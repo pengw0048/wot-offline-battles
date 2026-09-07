@@ -5,6 +5,7 @@ wiring and the guard paths are covered.
 """
 
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -43,6 +44,30 @@ class _Widget(object):
 
     def cget(self, name):
         return self.options.get(name)
+
+
+class _Entry(_Widget):
+    """The real Entry keeps its own text, which the balance panel reads."""
+
+    def __init__(self, master=None, **options):
+        _Widget.__init__(self, master, **options)
+        self.text = ""
+
+    def insert(self, index, value):
+        position = len(self.text) if index == "end" else int(index)
+        self.text = self.text[:position] + str(value) + self.text[position:]
+
+    def delete(self, first, last=None):
+        first = 0 if first == "end" else int(first)
+        if last is None:
+            self.text = self.text[:first] + self.text[first + 1:]
+        elif last == "end":
+            self.text = self.text[:first]
+        else:
+            self.text = self.text[:first] + self.text[int(last):]
+
+    def get(self):
+        return self.text
 
 
 class _Text(_Widget):
@@ -129,7 +154,7 @@ class _FakeTk(object):
     Frame = _Widget
     LabelFrame = _Widget
     Label = _Widget
-    Entry = _Widget
+    Entry = _Entry
     Button = _Widget
     Checkbutton = _Widget
     Radiobutton = _Widget
@@ -1040,6 +1065,503 @@ class WindowTest(unittest.TestCase):
 
         self.assertIn("could not be checked", self._log_text())
         self.assertIn("unsafe overlay path", self._log_text())
+
+    def _saves_root(self):
+        root = os.path.join(self.settings_dir, "appdata")
+        patch = mock.patch.dict(os.environ, {"APPDATA": root})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.window._refresh_save_slots()
+        return os.path.join(
+            root, "Wargaming.net", "WorldOfTanks", "offline_lan_0922",
+            "saves")
+
+    def test_the_default_save_is_offered_and_cannot_be_deleted(self):
+        self._saves_root()
+
+        self.assertEqual(
+            ("%s - %s" % (self.window._t("Default save"),
+                          self.window._t("Fully unlocked")),),
+            tuple(self.window.save_slot_box.cget("values")))
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual(
+            "disabled", self.window.delete_save_slot_button.cget("state"))
+        self.assertFalse(self.window._delete_save_slot())
+        self.assertIn("default save cannot be deleted", self._log_text())
+
+    _CANCELLED = None
+
+    def _new_save(self, name="Career",
+                  mode=wot_launcher.save_slots.MODE_UNLOCKED):
+        """Create one save the way the two dialogs would.
+
+        ``mode=None`` is the player cancelling the save-type question.
+        """
+        with mock.patch.object(
+                self.window, "_ask_save_slot_name", return_value=name):
+            with mock.patch.object(
+                    self.window, "_ask_save_slot_mode", return_value=mode):
+                return self.window._new_save_slot()
+
+    def test_a_new_save_becomes_the_selected_one_and_is_remembered(self):
+        saves_root = self._saves_root()
+        self.assertTrue(self._new_save())
+
+        self.assertNotEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual(
+            "Career - %s" % self.window._t("Fully unlocked"),
+            self.window.save_slot.get())
+        self.assertTrue(os.path.isdir(
+            os.path.join(saves_root, self.window._save_slot_id)))
+        self.assertEqual(
+            self.window._save_slot_id,
+            core.load_settings().get("save_slot"))
+        self.assertEqual(
+            "normal", self.window.delete_save_slot_button.cget("state"))
+
+    def test_selecting_another_save_records_it_for_the_next_launch(self):
+        self._saves_root()
+        self._new_save()
+        career = self.window._save_slot_id
+
+        self.window.save_slot.set("%s - %s" % (
+            self.window._t("Default save"),
+            self.window._t("Fully unlocked")))
+        self.assertTrue(self.window._save_slot_selected())
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            core.load_settings().get("save_slot"))
+
+        self.window.save_slot.set(
+            "Career - %s" % self.window._t("Fully unlocked"))
+        self.assertTrue(self.window._save_slot_selected())
+        self.assertEqual(career, self.window._save_slot_id)
+
+    def test_deleting_the_selected_save_returns_to_the_default(self):
+        saves_root = self._saves_root()
+        self._new_save()
+        career = self.window._save_slot_id
+
+        with mock.patch.object(
+                self.window, "_confirm_delete_save_slot", return_value=False):
+            self.assertFalse(self.window._delete_save_slot())
+        self.assertTrue(os.path.isdir(os.path.join(saves_root, career)))
+
+        with mock.patch.object(
+                self.window, "_confirm_delete_save_slot", return_value=True):
+            self.assertTrue(self.window._delete_save_slot())
+
+        self.assertFalse(os.path.exists(os.path.join(saves_root, career)))
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+
+    def test_a_save_cannot_be_deleted_while_any_game_client_is_running(self):
+        saves_root = self._saves_root()
+        self._new_save()
+        career = self.window._save_slot_id
+
+        with mock.patch.object(core, "game_is_running", return_value=True), \
+                mock.patch.object(
+                    self.window, "_confirm_delete_save_slot") as confirm:
+            self.assertFalse(self.window._delete_save_slot())
+
+        confirm.assert_not_called()
+        self.assertTrue(os.path.isdir(os.path.join(saves_root, career)))
+        self.assertIn(
+            "Close World of Tanks before deleting a save", self._log_text())
+
+    def test_a_save_deleted_outside_the_launcher_falls_back_to_the_default(
+            self):
+        saves_root = self._saves_root()
+        self._new_save()
+        shutil.rmtree(os.path.join(saves_root, self.window._save_slot_id))
+
+        self.window._refresh_save_slots()
+
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+
+    def test_saves_with_the_same_name_stay_distinguishable(self):
+        self._saves_root()
+        self._new_save()
+        first = self.window._save_slot_id
+        self._new_save()
+        second = self.window._save_slot_id
+
+        labels = tuple(self.window.save_slot_box.cget("values"))
+        unlocked = self.window._t("Fully unlocked")
+        self.assertEqual(3, len(labels))
+        self.assertIn("Career (%s) - %s" % (first, unlocked), labels)
+        self.assertIn("Career (%s) - %s" % (second, unlocked), labels)
+
+    def test_a_career_save_is_created_and_labelled_as_a_new_account(self):
+        """The save type is the whole difference between the two garages."""
+        self._saves_root()
+        self.assertTrue(self._new_save(
+            mode=wot_launcher.save_slots.MODE_NEW_ACCOUNT))
+
+        record = self.window._selected_save_slot_record()
+        self.assertEqual(
+            wot_launcher.save_slots.MODE_NEW_ACCOUNT, record["mode"])
+        self.assertEqual(
+            "Career - %s" % self.window._t("New account"),
+            self.window.save_slot.get())
+
+    def test_cancelling_the_save_type_creates_nothing(self):
+        saves_root = self._saves_root()
+
+        self.assertFalse(self._new_save(mode=self._CANCELLED))
+
+        self.assertEqual(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID,
+            self.window._save_slot_id)
+        self.assertFalse(
+            os.path.isdir(saves_root) and os.listdir(saves_root))
+
+    def test_a_save_named_like_the_default_stays_distinguishable(self):
+        self._saves_root()
+        default_label = self.window._t("Default save")
+        self._new_save(name=default_label)
+        custom = self.window._save_slot_id
+
+        labels = tuple(self.window.save_slot_box.cget("values"))
+        unlocked = self.window._t("Fully unlocked")
+        self.assertIn(
+            "%s (%s) - %s" % (
+                default_label, wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                unlocked),
+            labels)
+        self.assertIn(
+            "%s (%s) - %s" % (default_label, custom, unlocked), labels)
+
+    def _write_ledger(self, slot_id, saves_root, vehicles=None, **balances):
+        directory = os.path.join(saves_root, slot_id)
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        wallet = {"credits": 0, "gold": 0, "freeXP": 0}
+        wallet.update(balances)
+        if vehicles is None:
+            # A save the game has started names every vehicle it owns; the
+            # shop reads those names to know what it must not sell twice.
+            vehicles = {
+                "50001": {"compDescr": "AAA=", "name": "ussr:R11_MS-1"}}
+        path = os.path.join(directory, "garage_state.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump({
+                "schema": 5,
+                "vehicles": vehicles,
+                "ledger": {"wallet": wallet, "unlocks": [50001]},
+            }, stream)
+        return path
+
+    def test_the_panel_shows_the_selected_saves_balances(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root,
+            credits=250000, gold=1500, freeXP=90)
+
+        self.assertTrue(self.window._refresh_balances())
+
+        self.assertEqual(
+            "250000", self.window.balance_entries["credits"].get())
+        self.assertEqual("1500", self.window.balance_entries["gold"].get())
+        self.assertEqual("90", self.window.balance_entries["freeXP"].get())
+
+    def test_the_panel_shows_the_selected_saves_earnings_multiplier(self):
+        saves_root = self._saves_root()
+        wot_launcher.save_slots.set_earnings_percent(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, 250, root=saves_root)
+        self.window._refresh_save_slots()
+
+        self.assertEqual("2.5", self.window.earnings_entry.get())
+
+    def test_the_multiplier_can_be_set_before_the_save_has_ever_run(self):
+        """Unlike the balances, it is the launcher's own record."""
+        self._saves_root()
+        self.assertFalse(self.window._refresh_balances())
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "3")
+        self.assertTrue(self.window._apply_earnings())
+
+        self.assertEqual(
+            300, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=self._saves_root())["earnings_percent"])
+        self.assertEqual("3", self.window.earnings_entry.get())
+
+    def test_a_multiplier_that_is_not_a_number_changes_nothing(self):
+        saves_root = self._saves_root()
+        wot_launcher.save_slots.set_earnings_percent(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, 150, root=saves_root)
+        self.window._refresh_save_slots()
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "plenty")
+        self.assertFalse(self.window._apply_earnings())
+
+        self.assertEqual(
+            150, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["earnings_percent"])
+        self.assertEqual("1.5", self.window.earnings_entry.get())
+
+    def test_a_multiplier_outside_the_allowed_range_is_refused(self):
+        saves_root = self._saves_root()
+        self.window._refresh_save_slots()
+
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "0")
+        self.assertFalse(self.window._apply_earnings())
+
+        self.assertEqual(
+            100, wot_launcher.save_slots.read_slot(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["earnings_percent"])
+
+    def test_a_save_that_never_ran_cannot_be_edited_yet(self):
+        """The client writes a save's first balances, not the launcher."""
+        self._saves_root()
+
+        self.assertFalse(self.window._refresh_balances())
+
+        self.assertEqual(
+            "disabled", self.window.apply_balances_button.cget("state"))
+        self.assertEqual(
+            "disabled", self.window.balance_entries["gold"].cget("state"))
+
+    def test_applying_a_balance_writes_it_into_the_save(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root,
+            credits=100000)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "12500")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            wallet = json.load(stream)["ledger"]["wallet"]
+        self.assertEqual(12500, wallet["gold"])
+        self.assertEqual(100000, wallet["credits"])
+        self.assertIn("Balances saved", self._log_text())
+
+    def test_a_running_game_keeps_its_own_balances(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=7)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "999")
+
+        with mock.patch.object(core, "game_is_running", return_value=True):
+            self.assertFalse(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            self.assertEqual(
+                7, json.load(stream)["ledger"]["wallet"]["gold"])
+        self.assertIn("Close World of Tanks", self._log_text())
+        # The panel goes back to what the save actually holds.
+        self.assertEqual("7", self.window.balance_entries["gold"].get())
+
+    def test_a_balance_that_is_not_a_number_is_refused(self):
+        saves_root = self._saves_root()
+        path = self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=7)
+        self.window._refresh_balances()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "lots")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._apply_balances())
+
+        with open(path, encoding="utf-8") as stream:
+            self.assertEqual(
+                7, json.load(stream)["ledger"]["wallet"]["gold"])
+        self.assertIn("whole number", self._log_text())
+
+    def test_the_balances_follow_the_selected_save(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=1)
+        self._new_save()
+        career = self.window._save_slot_id
+        self._write_ledger(career, saves_root, gold=22222)
+
+        self.window._refresh_save_slots()
+        self.assertEqual("22222", self.window.balance_entries["gold"].get())
+
+        self.window.save_slot.set("%s - %s" % (
+            self.window._t("Default save"),
+            self.window._t("Fully unlocked")))
+        self.window._save_slot_selected()
+
+        self.assertEqual("1", self.window.balance_entries["gold"].get())
+
+    _GOLD_VEHICLES = [
+        {"nation": "germany", "vehicle": "G51_Lowe",
+         "name": "germany:G51_Lowe", "label": "Lowe", "level": 8,
+         "gold": 12500, "notInShop": False},
+        {"nation": "china", "vehicle": "Ch01_Type59",
+         "name": "china:Ch01_Type59", "label": "Type 59", "level": 8,
+         "gold": 11500, "notInShop": True},
+    ]
+
+    def _with_shop(self):
+        patch = mock.patch.object(
+            wot_launcher.vehicle_overlays, "list_gold_vehicles",
+            return_value=[dict(row) for row in self._GOLD_VEHICLES])
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.window._gold_catalogue_cache = (None, None)
+
+    def test_the_shop_lists_every_gold_vehicle_with_its_price(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertEqual(
+            ("Lowe - tier 8 - 12500 gold", "Type 59 - tier 8 - 11500 gold"),
+            values)
+        self.assertEqual(
+            "normal", self.window.buy_gold_vehicle_button.cget("state"))
+
+    def test_buying_takes_the_gold_and_queues_the_vehicle(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window._buy_gold_vehicle())
+
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        with open(os.path.join(directory, "launcher_inbox.json"),
+                  encoding="utf-8") as stream:
+            self.assertEqual(
+                ["germany:G51_Lowe"], json.load(stream)["vehicles"])
+        self.assertEqual("7500", self.window.balance_entries["gold"].get())
+        self.assertIn("Bought Lowe", self._log_text())
+        # The row now says the vehicle is waiting for the game.
+        self.assertIn(
+            "Lowe - tier 8 - 12500 gold (bought)",
+            tuple(self.window.gold_vehicle_box.cget("values")))
+
+    def test_a_vehicle_the_save_cannot_afford_is_refused(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=100)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        self.assertIn("could not be bought", self._log_text())
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        self.assertFalse(os.path.exists(
+            os.path.join(directory, "launcher_inbox.json")))
+
+    def test_a_running_game_keeps_the_gold(self):
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_vehicle.set("Lowe - tier 8 - 12500 gold")
+
+        with mock.patch.object(core, "game_is_running", return_value=True):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        self.assertIn("Close World of Tanks", self._log_text())
+        self.assertEqual(
+            20000,
+            wot_launcher.save_ledger.read_balances(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["gold"])
+
+    def test_a_vehicle_the_save_owns_is_shown_as_owned(self):
+        saves_root = self._saves_root()
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        with open(os.path.join(directory, "garage_state.json"), "w",
+                  encoding="utf-8") as stream:
+            json.dump({
+                "schema": 5,
+                "vehicles": {"1": {"name": "germany:G51_Lowe"}},
+                "ledger": {"wallet": {
+                    "credits": 0, "gold": 20000, "freeXP": 0}},
+            }, stream)
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertIn("Lowe - tier 8 - 12500 gold (owned)", values)
+
+    def test_a_save_that_does_not_name_its_vehicles_cannot_buy(self):
+        """Such a save cannot say what it owns, so the shop must not sell."""
+        saves_root = self._saves_root()
+        self._write_ledger(
+            wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000,
+            vehicles={"50001": {"compDescr": "AAA="}})
+        self._with_shop()
+
+        values = self.window._refresh_gold_shop()
+
+        self.assertEqual(2, len(values))
+        self.assertEqual(
+            "disabled", self.window.buy_gold_vehicle_button.cget("state"))
+        self.assertEqual(
+            wot_launcher._SHOP_UNREADABLE,
+            self.window.shop_help_label.cget("text"))
+
+        self.window.gold_vehicle.set(values[0])
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertFalse(self.window._buy_gold_vehicle())
+
+        directory = os.path.join(
+            saves_root, wot_launcher.save_slots.DEFAULT_SLOT_ID)
+        self.assertFalse(os.path.exists(
+            os.path.join(directory, "launcher_inbox.json")))
+        self.assertEqual(
+            20000,
+            wot_launcher.save_ledger.read_balances(
+                wot_launcher.save_slots.DEFAULT_SLOT_ID,
+                root=saves_root)["gold"])
+
+    def test_the_client_package_is_read_once_for_the_whole_session(self):
+        """Reading it opens a 50 MB archive and parses ten rosters."""
+        self._saves_root()
+        with mock.patch.object(
+                wot_launcher.vehicle_overlays, "list_gold_vehicles",
+                return_value=[dict(row) for row in self._GOLD_VEHICLES]) as read:
+            self.window._gold_catalogue_cache = (None, None)
+            self.window._refresh_gold_shop()
+            self.window._refresh_gold_shop()
+            self.window._refresh_gold_shop()
+
+        self.assertEqual(1, read.call_count)
 
     def test_new_profile_is_selected_and_opened(self):
         with mock.patch(
