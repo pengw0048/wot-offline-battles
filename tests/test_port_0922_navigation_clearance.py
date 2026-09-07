@@ -8,7 +8,7 @@ CLIENT_SCRIPTS = PORT_ROOT / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922.ai.navigation import (
-    BAKED_SHALLOW_WATER, MAX_BAKED_CORRIDOR_CACHE,
+    BAKED_SHALLOW_WATER, MAX_BAKED_CORRIDOR_CACHE, MAX_BAKED_SEARCH_EDGE_CACHE,
     TerrainGrid, TerrainNavigator,
 )
 
@@ -56,6 +56,82 @@ def _graph(width, height, open_cells):
 
 
 class BakedClearanceNavigationTests(unittest.TestCase):
+    def test_repeated_search_reuses_baked_edges_with_identical_path(self):
+        graph = _graph(17, 7, (
+            (x, z) for z in range(7) for x in range(17)))
+        graph['heights_mm'] = tuple(
+            x * 300 + z * 100 for z in range(7) for x in range(17))
+        graph['hazards'] = tuple(
+            BAKED_SHALLOW_WATER if x == 8 and z < 5 else 0
+            for z in range(7) for x in range(17))
+        grid = TerrainGrid(lambda *unused: None, baked_graph=graph)
+        calls = []
+        original = grid._baked_neighbours
+
+        def neighbours(cell):
+            calls.append(cell)
+            return original(cell)
+
+        grid._baked_neighbours = neighbours
+        start, goal = (0.0, 0.3, 12.0), (64.0, 5.1, 12.0)
+        first = grid.plan(start, goal, prefer_clearance=True)
+        self.assertTrue(first)
+        self.assertTrue(calls)
+        calls[:] = []
+        self.assertEqual(first, grid.plan(start, goal, prefer_clearance=True))
+        self.assertEqual([], calls)
+
+    def test_shared_baked_edges_keep_live_wrecks_failures_and_bot_vetoes(self):
+        graph = _graph(9, 5, (
+            (x, z) for z in range(5) for x in range(9)))
+        grid = TerrainGrid(lambda *unused: None, baked_graph=graph)
+        # Inspect the actual A* edges before independent path smoothing.
+        grid._smooth = lambda path, *unused: tuple(path)
+        start, goal = (0.0, 0.0, 8.0), (32.0, 0.0, 8.0)
+        edge = ((3, 2), (4, 2))
+
+        def plan(**kwargs):
+            return grid.plan(start, goal, prefer_clearance=False, **kwargs)
+
+        def crosses(path):
+            cells = [grid.cell_for(point) for point in path]
+            return edge in [tuple(sorted(pair))
+                            for pair in zip(cells, cells[1:])]
+
+        original = plan()
+        self.assertTrue(crosses(original))
+        self.assertEqual(original, plan())
+        self.assertFalse(crosses(plan(hard_edge_penalties={edge})))
+        self.assertFalse(crosses(plan(edge_penalties={edge: 240.0})))
+        self.assertFalse(crosses(plan(avoid_points=[(16.0, 0.0, 8.0)])))
+        self.assertEqual(original, plan())
+        grid._failed_edges[edge] = (3.0, 240.0)
+        self.assertFalse(crosses(plan(now=2.0)))
+        self.assertEqual(original, plan(now=3.0))
+        grid.set_static_hulls([(71, 16.0, 8.0, 0.0, 1.6, 1.6)])
+        self.assertFalse(crosses(plan(now=4.0)))
+        grid.set_static_hulls([])
+        self.assertEqual(original, plan(now=5.0))
+
+    def test_baked_search_edge_cache_is_bounded_and_resets_with_map(self):
+        graph = _graph(48, 48, (
+            (x, z) for z in range(48) for x in range(48)))
+        grid = TerrainGrid(lambda *unused: None, baked_graph=graph)
+        for z in range(48):
+            for x in range(48):
+                grid._baked_search_edges((x, z))
+        self.assertEqual(MAX_BAKED_SEARCH_EDGE_CACHE,
+                         len(grid._baked_search_edge_cache))
+        self.assertEqual(MAX_BAKED_SEARCH_EDGE_CACHE,
+                         len(grid._baked_search_edge_order))
+        self.assertTrue(grid._baked_search_edges((0, 0)))
+        self.assertEqual(MAX_BAKED_SEARCH_EDGE_CACHE,
+                         len(grid._baked_search_edge_cache))
+        replacement = _graph(2, 1, ((0, 0),))
+        grid._install_baked_graph(replacement)
+        self.assertEqual({}, grid._baked_search_edge_cache)
+        self.assertEqual((), grid._baked_search_edges((0, 0)))
+
     def test_baked_corridor_reuse_keeps_world_bounds_and_live_penalties(self):
         graph = _graph(4, 1, ((x, 0) for x in range(4)))
         grid = TerrainGrid(lambda *unused: 0.0, baked_graph=graph)
