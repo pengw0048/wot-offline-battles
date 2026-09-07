@@ -64,6 +64,7 @@ def _fitting(context, mutate, extension=None):
     """
     started = _clock()
     state = _garage(context)
+    previous_stats = data.stats(state.snapshot())['stats']
     state.touched_vehicles()
     state.touched_items()
     try:
@@ -100,9 +101,12 @@ def _fitting(context, mutate, extension=None):
         # StatsRequester merges these fields before the command callback.
         # Publish the ledger with the inventory for every paid garage action.
         current_stats = data.stats(state.snapshot())['stats']
-        diff['stats'] = dict((name, current_stats[name]) for name in (
+        changed_stats = dict((name, current_stats[name]) for name in (
             'credits', 'gold', 'freeXP', 'slots', 'berths',
-            'vehTypeXP', 'unlocks', 'eliteVehicles'))
+            'vehTypeXP', 'unlocks', 'eliteVehicles')
+            if current_stats[name] != previous_stats[name])
+        if changed_stats:
+            diff['stats'] = changed_stats
         if moved_recycled:
             # PlayerAccount._update hands every diff to the recycle bin, so
             # who was dismissed and who was hired back travel with the same

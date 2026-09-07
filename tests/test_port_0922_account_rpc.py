@@ -1401,7 +1401,7 @@ class DepotTests(unittest.TestCase):
         state = self._garage(item_type=11)
         events = []
         def publish(diff, after_publish):
-            self.assertEqual(60000, diff['stats']['credits'])
+            self.assertEqual({'credits': 60000}, diff['stats'])
             self.assertEqual(2, diff['inventory'][11][4444])
             events.append('update')
             after_publish()
@@ -1413,6 +1413,19 @@ class DepotTests(unittest.TestCase):
         self.assertEqual(commands.RES_SUCCESS, result.result_id)
         result.before_response(lambda: events.append('response'))
         self.assertEqual(['update', 'response'], events)
+
+    def test_gold_purchase_publishes_only_the_changed_gold_balance(self):
+        state = self._garage(item_type=11)
+        state.snapshot()['wallet']['gold'] = 100
+        state.snapshot()['shopItemPrices'][4444] = {'gold': 5}
+        pushed = []
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': pushed.append}, (42, 4444, 2, 0))
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual({'gold': 90}, pushed[0]['stats'])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
 
     def test_special_mode_item_cannot_be_bought_or_supplied(self):
         state = self._garage(item_type=11)

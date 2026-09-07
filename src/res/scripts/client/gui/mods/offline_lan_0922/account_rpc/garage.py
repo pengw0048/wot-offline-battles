@@ -96,16 +96,22 @@ def mirror_shells_layout(record):
     so the layout is always exactly what is loaded.
     """
     key = record.get('shellsLayoutIdx')
-    record['shellsLayout'] = (
-        {tuple(key): list(record.get('shells') or ())} if key else {})
+    previous = (record.get('shellsLayout') or {}).get(tuple(key or ()), ())
+    alternative = set(abs(value) for value in previous[::2] if value < 0)
+    loaded = list(record.get('shells') or ())
+    for index in range(0, len(loaded), 2):
+        if loaded[index] in alternative:
+            loaded[index] = -loaded[index]
+    record['shellsLayout'] = {tuple(key): loaded} if key else {}
 
 
-def _layout_pairs(values, slot_limit=None):
+def _layout_pairs(values, slot_limit=None, preserve_currency=False):
     """Decode a flat #1513 layout into ``(compactDescr, count)`` pairs."""
     values = [_int(value) for value in (values or ())]
     if len(values) % 2:
         raise GarageError('a layout must contain descriptor/count pairs')
-    pairs = [(abs(values[index]), values[index + 1])
+    pairs = [((values[index] if preserve_currency else abs(values[index])),
+              values[index + 1])
              for index in range(0, len(values), 2)]
     if slot_limit is not None and len(pairs) > slot_limit:
         raise GarageError('a layout carries at most %d slots' % slot_limit)
@@ -294,7 +300,13 @@ class GarageState(object):
         covers every round the garage holds, loaded ones included, so what has
         to be bought is whatever the new layouts need above it.
         """
-        values = [_int(value) for value in (shells or ())]
+        # account_shared.LayoutIterator: a negative descriptor selects
+        # itemAltPrice (credits); positive keeps itemPrice (possibly gold).
+        layout = [_int(value) for value in (shells or ())]
+        values = [abs(value) if index % 2 == 0 else value
+                  for index, value in enumerate(layout)]
+        alternative_items = set(abs(value) for value in layout[::2]
+                                if value < 0)
         if len(values) % 2:
             raise GarageError('shells must be descriptor/count pairs')
         record = self._record(vehicle_inventory_id, touch=False)
@@ -318,10 +330,11 @@ class GarageState(object):
                 purchase[compact_descr] = missing
         # Every refusal happens before the first round is loaded, so a load
         # the account cannot pay for leaves the vehicle exactly as it was.
-        self._charge(self._shells_cost(purchase))
+        self._charge(self._shells_cost(purchase, alternative_items))
         self._touched.add(_int(record.get('id', 0)))
         record['shells'] = values
-        mirror_shells_layout(record)
+        key = record.get('shellsLayoutIdx')
+        record['shellsLayout'] = {tuple(key): layout} if key else {}
         record.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = pairs
         for compact_descr in pairs:
             self._publish_owned(
@@ -332,16 +345,13 @@ class GarageState(object):
         self.revision += 1
         return record
 
-    def _shells_cost(self, purchase):
-        """Price a resupply, in the currency #1513 charges for each shell.
-
-        A gold shell is bought for credits at the published exchange rate, the
-        same rule a gold shell already follows everywhere else in the garage.
-        """
+    def _shells_cost(self, purchase, alternative_items=()):
+        """Price rounds in the currency selected by #1513 LayoutIterator."""
         total = {}
         for compact_descr, count in dict(purchase or {}).items():
-            price = self._in_credits(
-                self._item_cost(compact_descr, count), SHELL_ITEM_TYPE)
+            price = self._item_cost(compact_descr, count)
+            if compact_descr in alternative_items:
+                price = self._in_credits(price, SHELL_ITEM_TYPE)
             for currency, value in price.items():
                 total[currency] = _int(total.get(currency, 0)) + _int(value)
         return total
@@ -567,7 +577,9 @@ class GarageState(object):
         does, so the layout is filled from the depot and whatever the depot is
         short of is paid for at this client's prices.
         """
-        values = [_int(value) for value in (equipments or ())]
+        layout = [_int(value) for value in (equipments or ())]
+        values = [abs(value) for value in layout]
+        alternative_items = set(abs(value) for value in layout if value < 0)
         if len(values) > EQUIPMENT_PAYLOAD_SLOT_COUNT:
             raise GarageError('an equipment payload carries at most four slots')
         # The trailing battle-booster slot has no published counterpart.
@@ -577,13 +589,14 @@ class GarageState(object):
         purchase, owned = self._consumables_to_buy(record, values)
         # Every refusal happens before the first slot is filled, so a layout
         # the account cannot pay for leaves the vehicle exactly as it was.
-        self._charge(self._consumables_cost(purchase))
+        self._charge(self._consumables_cost(purchase, alternative_items))
         self._touched.add(_int(record.get('id', 0)))
         record['eqs'] = values
         # The vehicle is at its layout again, which is what the player asked
         # for.  Vehicle.isAutoEquipFull compares the two and warns when they
         # differ, and a battle is what makes them differ.
-        record['eqsLayout'] = list(values)
+        record['eqsLayout'] = (layout[:EQUIPMENT_SLOT_COUNT] +
+                               [0] * EQUIPMENT_SLOT_COUNT)[:EQUIPMENT_SLOT_COUNT]
         for compact_descr in values:
             if not compact_descr:
                 continue
@@ -618,12 +631,13 @@ class GarageState(object):
                 purchase[compact_descr] = missing
         return purchase, owned
 
-    def _consumables_cost(self, purchase):
+    def _consumables_cost(self, purchase, alternative_items=()):
         """Price a consumable resupply, in the currency #1513 charges."""
         total = {}
         for compact_descr, count in dict(purchase or {}).items():
-            price = self._in_credits(
-                self._item_cost(compact_descr, count), EQUIPMENT_ITEM_TYPE)
+            price = self._item_cost(compact_descr, count)
+            if compact_descr in alternative_items:
+                price = self._in_credits(price, EQUIPMENT_ITEM_TYPE)
             for currency, value in price.items():
                 total[currency] = _int(total.get(currency, 0)) + _int(value)
         return total
@@ -673,27 +687,26 @@ class GarageState(object):
     def set_layouts(self, vehicle_inventory_id, shells_layout=None,
                     equipment_type=EQUIPMENT_TYPE_REGULAR,
                     equipments_layout=None):
-        """Store one layout and load the vehicle to it.
-
-        Offline stock is unlimited, so the "fill" half of the request is the
-        mount itself: the client shows ``eqs`` and ``shells``, not the layout.
-        """
-        record = self._record(vehicle_inventory_id)
-        if shells_layout is not None:
-            flat = []
-            for compact_descr, count in _layout_pairs(shells_layout):
-                flat.extend((compact_descr, count))
-            self.equip_shells(vehicle_inventory_id, flat)
-        if (equipments_layout is not None and
-                _int(equipment_type) == EQUIPMENT_TYPE_REGULAR):
-            pairs = _layout_pairs(
-                equipments_layout, EQUIPMENT_PAYLOAD_SLOT_COUNT)
-            slots = [compact_descr
-                     for compact_descr, unused_count in pairs
-                     ][:EQUIPMENT_SLOT_COUNT]
-            self.equip_equipments(vehicle_inventory_id, slots)
-        self.revision += 1
-        return record
+        """Apply the signed currency choices and both purchases atomically."""
+        with self._transaction():
+            record = self._record(vehicle_inventory_id)
+            if shells_layout is not None:
+                flat = []
+                for compact_descr, count in _layout_pairs(
+                        shells_layout, preserve_currency=True):
+                    flat.extend((compact_descr, count))
+                self.equip_shells(vehicle_inventory_id, flat)
+            if (equipments_layout is not None and
+                    _int(equipment_type) == EQUIPMENT_TYPE_REGULAR):
+                pairs = _layout_pairs(
+                    equipments_layout, EQUIPMENT_PAYLOAD_SLOT_COUNT,
+                    preserve_currency=True)
+                slots = [compact_descr
+                         for compact_descr, unused_count in pairs
+                         ][:EQUIPMENT_SLOT_COUNT]
+                self.equip_equipments(vehicle_inventory_id, slots)
+            self.revision += 1
+            return record
 
     # ---- optional devices and modules -----------------------------------
 

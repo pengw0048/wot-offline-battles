@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -783,15 +784,76 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual([10010, 12], self._record()['shells'])
         self.assertEqual({10010: 12}, self._record()['inventoryItems'][10])
 
-    def test_an_alternative_price_descriptor_is_stored_unsigned(self):
+    def test_an_alternative_price_layout_keeps_its_currency_choice(self):
         # account_shared.LayoutIterator reads a negative descriptor as
         # "buy for the alternative price" and takes its absolute value.
         self.state.set_layouts(
             9, [-10010, 12], 0, [-11001, 1, 0, 0, 0, 0, 0, 0])
 
-        self.assertEqual({(7001, 7002): [10010, 12]},
+        self.assertEqual({(7001, 7002): [-10010, 12]},
                          self._record()['shellsLayout'])
         self.assertEqual([11001, 0, 0], self._record()['eqs'])
+
+    def _priced_supply_state(self):
+        snapshot = self.state.snapshot()
+        snapshot['wallet'] = {'credits': 100000, 'gold': 100, 'freeXP': 0}
+        snapshot['shopItemPrices'][10010] = {'gold': 2}
+        snapshot['shopItemPrices'][11001] = {'gold': 5}
+        snapshot['inventoryItems'][11] = {}
+        return snapshot
+
+    def test_supply_currency_matches_each_signed_layout_choice(self):
+        for shell_sign, equipment_sign, credits, gold in (
+                (1, 1, 100000, 85), (-1, -1, 94000, 100),
+                (-1, 1, 96000, 95), (1, -1, 98000, 90)):
+            self.setUp()
+            snapshot = self._priced_supply_state()
+            shells = [shell_sign * 10010, 25, 10011, 10]
+            eqs = [equipment_sign * 11001, 1, 0, 0, 0, 0, 0, 0]
+            self.state.set_layouts(9, shells, 0, eqs)
+            self.assertEqual(credits, snapshot['wallet']['credits'])
+            self.assertEqual(gold, snapshot['wallet']['gold'])
+            self.assertEqual([10010, 25, 10011, 10], self._record()['shells'])
+            self.assertEqual([11001, 0, 0], self._record()['eqs'])
+            # Reapplying the filled layout spends neither currency again.
+            self.state.set_layouts(9, shells, 0, eqs)
+            self.assertEqual(credits, snapshot['wallet']['credits'])
+            self.assertEqual(gold, snapshot['wallet']['gold'])
+
+    def test_second_supply_failure_rolls_back_the_whole_operation(self):
+        snapshot = self._priced_supply_state()
+        snapshot['wallet']['gold'] = 10
+        before = copy.deepcopy(snapshot)
+        revision = self.state.revision
+        with self.assertRaises(self.garage.GarageError):
+            self.state.set_layouts(9, [10010, 25, 10011, 10], 0,
+                                   [11001, 1, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(before, self.state.snapshot())
+        self.assertEqual(revision, self.state.revision)
+        self.assertFalse(self.state.touched_vehicles())
+        self.assertFalse(self.state.touched_items())
+
+    def test_automatic_resupply_uses_the_saved_currency_choice(self):
+        for sign, credits, gold in ((1, 100000, 78), (-1, 91200, 100)):
+            self.setUp()
+            snapshot = self._priced_supply_state()
+            self.state.set_layouts(9, [sign * 10010, 25, 10011, 10], 0,
+                                   [sign * 11001, 1, 0, 0, 0, 0, 0, 0])
+            self._record()['settings'] = 12
+            fired_shell = types.SimpleNamespace(compactDescr=10010)
+            descriptor = types.SimpleNamespace(gun=types.SimpleNamespace(
+                shots=[types.SimpleNamespace(shell=fired_shell)]))
+            with mock.patch.object(self.state, '_descriptor',
+                                   return_value=descriptor):
+                self.assertEqual({10010: 1},
+                    self.state.settle_battle_ammunition(50001, {0: 1}))
+            self.state.settle_battle_consumables(50001, [11001])
+            store = _load('garage_store')
+            store._settle_automatically(self.state, 9, (2, 4, 8),
+                                       self.garage.GarageError)
+            self.assertEqual(credits, snapshot['wallet']['credits'])
+            self.assertEqual(gold, snapshot['wallet']['gold'])
+            self.assertEqual(sign * 11001, self._record()['eqsLayout'][0])
 
     def test_a_setting_is_a_flag_value_not_a_bit_index(self):
         # VEHICLE_SETTINGS_FLAG.AUTO_REPAIR is the value #1513 sends.
@@ -2666,7 +2728,7 @@ class GaragePersistenceTests(unittest.TestCase):
         state.equip_equipments(9, [11001, 0, 0])
         state.equip_shells(9, [10010, 38, 10011, 9])
         state.set_layouts(
-            9, [10010, 38, 10011, 9], 0, [11001, 1, 0, 0, 0, 0, 0, 0])
+            9, [-10010, 38, 10011, 9], 0, [-11001, 1, 0, 0, 0, 0, 0, 0])
         state.add_tankman_skill(101, 9)
         # VEHICLE_SETTINGS_FLAG.AUTO_EQUIP, the value #1513 itself sends.
         state.change_vehicle_setting(9, 8, 1)
@@ -2680,9 +2742,9 @@ class GaragePersistenceTests(unittest.TestCase):
                          restored['compDescr'])
         self.assertEqual([11001, 0, 0], restored['eqs'])
         self.assertEqual([10010, 38, 10011, 9], restored['shells'])
-        self.assertEqual({(7001, 7002): [10010, 38, 10011, 9]},
+        self.assertEqual({(7001, 7002): [-10010, 38, 10011, 9]},
                          restored['shellsLayout'])
-        self.assertEqual([11001, 0, 0], restored['eqsLayout'])
+        self.assertEqual([-11001, 0, 0], restored['eqsLayout'])
         self.assertEqual(8, restored['settings'])
         self.assertEqual(b'tman:101|brotherhood', restored['tankmen'][101])
         # The reloaded shells must still match the shell inventory that

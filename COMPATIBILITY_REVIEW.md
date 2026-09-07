@@ -2057,12 +2057,14 @@ The source audit deliberately keeps the following differences visible:
   `CMD_BUY_AND_EQUIP_ITEM` 308 carries
   `[cacheRev, compDescr, vehInvID, slotIdx, isPaidRemoval, gunCompDescr]`;
   `CMD_VEH_SETTINGS` 107 is the per-vehicle settings mask, not a purchase.
-  Balances are unlimited by choice: the offline shop publishes every item at
-  zero price, so a deduction would always subtract nothing, and ownership is the
-  only part of a purchase with an observable effect. Buying a VEHICLE is a
-  separate surface that is not implemented: `Shop.buy` routes a vehicle to
-  `buyVehicle`, which needs its own command plus a new inventory record, crew
-  and slot;
+  Purchases debit the saved account ledger and publish changed balances with
+  the inventory before acknowledging the command. For maintenance command 108,
+  the exact `account_shared.LayoutIterator` returns
+  `(abs(compDescr), count, compDescr < 0)`. `VehicleLayoutProcessor` selects
+  `buyPrices.itemAltPrice` for a negative descriptor and `itemPrice` otherwise.
+  The adapter preserves that sign in saved layouts and automatic resupply,
+  while loaded item IDs remain positive. A combined ammunition/consumable
+  purchase commits both parts or rolls back both parts;
 - the garage now persists to `mods/configs/offline_lan_0922/garage_state.json`,
   a sibling of `account_state.json` so each file keeps one owner. It stores
   mounted devices and modules through the vehicle's compact descriptor, plus
