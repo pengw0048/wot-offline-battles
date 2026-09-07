@@ -19818,6 +19818,66 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._local_left_flying)
         self.assertFalse(battle._local_right_flying)
 
+    def test_local_suspension_tick_prepares_one_broken_skin_filter(self):
+        """The 22 columns of one pose share the prepared envelope filter."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        skin_filter = lambda *unused_hit: False
+        prepared = mock.Mock(return_value=skin_filter)
+        battle._destructibles = types.SimpleNamespace(
+            prepare_horizontal_collision_filter=prepared,
+            ground_collision_filter=mock.Mock(
+                side_effect=AssertionError(
+                    'a shared pose must not rebuild a per-column filter')))
+        filters = []
+
+        def collision(unused_space, start, unused_end, unused_mask,
+                      ground_filter=None):
+            filters.append(ground_filter)
+            return (_Vector(start.x, 0.0, start.z), _Vector(0.0, 1.0, 0.0))
+
+        runtime.bigworld.wg_collideSegment = collision
+
+        battle._update_vertical_motion(entity, (0.0, 0.0, 0.0), 0.0, 0.1)
+
+        # One prepared filter per sample pass, not one per sampled column.
+        self.assertEqual(2, prepared.call_count)
+        self.assertEqual(22, len(filters))
+        self.assertTrue(all(value is skin_filter for value in filters))
+
+    def test_local_suspension_tick_probes_unfiltered_with_nothing_broken(self):
+        """An envelope with nothing broken keeps the shipped bare query."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._destructibles = types.SimpleNamespace(
+            prepare_horizontal_collision_filter=lambda *unused: None,
+            ground_collision_filter=mock.Mock(
+                side_effect=AssertionError(
+                    'a prepared empty envelope must not be rebuilt')))
+        widths = []
+
+        def collision(unused_space, start, unused_end, unused_mask,
+                      *filters):
+            widths.append(len(filters))
+            return (_Vector(start.x, 0.0, start.z), _Vector(0.0, 1.0, 0.0))
+
+        runtime.bigworld.wg_collideSegment = collision
+
+        battle._update_vertical_motion(entity, (0.0, 0.0, 0.0), 0.0, 0.1)
+
+        self.assertEqual(22, len(widths))
+        self.assertEqual({0}, set(widths))
+
     def test_local_suspension_solves_slope_pitch_and_ground_metadata(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
