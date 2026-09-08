@@ -27,8 +27,9 @@ destroyed rather than as a flat amount per frag; see
 coefficient are not published, so the named values below remain an explicit
 offline policy. The tier curve (``XP_TIER_PERMILLE``) and durability-based
 kill payment are offline balance proxies. Percentile ratios do not identify retail XP
-coefficients, and durability does not uniquely determine vehicle tier. Offline
-battles have zero ammunition and repair costs.
+coefficients, and durability does not uniquely determine vehicle tier. The
+client settles ammunition, repair and consumable costs using garage prices;
+server receipts leave their cost fields at zero to avoid charging twice.
 """
 
 

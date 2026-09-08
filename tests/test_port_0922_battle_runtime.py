@@ -7774,6 +7774,19 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'CurrentVehicle': current_vehicle}):
             self.assertEqual({}, battle._local_ammo_layout())
 
+    def test_mounted_zero_id_manual_extinguisher_is_preserved(self):
+        runtime = _runtime()
+        descriptor = types.SimpleNamespace(
+            id=(15, 0), compactDescr=251, name='handExtinguishers',
+            cooldownSeconds=90.0, reuseCount=1)
+        runtime.vehicles.g_cache.equipments = lambda: {0: descriptor}
+        battle = BattleRuntime(runtime)
+        battle._local_mounted_equipments = lambda: [251]
+        states = battle._default_equipments()
+        self.assertEqual(1, len(states))
+        self.assertEqual(0, states[0].contract['id'])
+        self.assertEqual(251, states[0].contract['compactDescr'])
+
     def test_mounted_rations_are_published_without_an_activation_action(self):
         runtime = _runtime()
         descriptor = types.SimpleNamespace(

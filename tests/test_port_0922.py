@@ -347,7 +347,7 @@ class PortSourceTests(unittest.TestCase):
         build_script = (PORT_ROOT / 'build_for_client.sh').read_text(
             encoding='utf-8')
 
-        self.assertEqual('0.6.14', packager.MOD_VERSION)
+        self.assertEqual('0.7.0', packager.MOD_VERSION)
         self.assertEqual(packager.MOD_VERSION, package.PORT_VERSION)
         self.assertEqual(packager.MOD_VERSION, meta_version)
         self.assertIn(
@@ -472,7 +472,7 @@ class PortSourceTests(unittest.TestCase):
                 config_path.parent / packager.BUILD_IDENTITY_FILENAME
             ).read_text(encoding='utf-8'))
             self.assertEqual(1, identity['schema'])
-            self.assertEqual('0.6.14', identity['semanticVersion'])
+            self.assertEqual('0.7.0', identity['semanticVersion'])
             self.assertRegex(
                 identity['buildIdentity'],
                 r'^local-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
@@ -853,7 +853,8 @@ class PortConfigTests(unittest.TestCase):
 
             migrated = config_module.load(str(path))
 
-            self.assertEqual(2, migrated['schema'])
+            self.assertEqual(
+                config_module.DEFAULT_CONFIG['schema'], migrated['schema'])
             self.assertTrue(migrated['native_remote_vehicles'])
 
             path.write_text(
@@ -6378,6 +6379,21 @@ class BootstrapContractTests(unittest.TestCase):
         vehicle_configuration.is_standard_battle_vehicle = mock.Mock(
             return_value=True)
         vehicle_configuration.top_component = mock.Mock()
+        vehicle_records = _load_port_source('vehicle_records')
+        # ``economy`` imports the generated catalogue at module level so the
+        # object bootstrap captures is the real one; both have to execute
+        # while the stub package is installed.
+        price_catalogue = _load_port_source('price_catalogue')
+        with mock.patch.dict(sys.modules, {
+                'gui': types.ModuleType('gui'),
+                'gui.mods': types.ModuleType('gui.mods'),
+                'gui.mods.offline_lan_0922': package,
+                'gui.mods.offline_lan_0922.price_catalogue': price_catalogue}):
+            package.price_catalogue = price_catalogue
+            economy = _load_port_source('account_rpc/economy')
+        account_rpc_package = types.ModuleType(
+            'gui.mods.offline_lan_0922.account_rpc')
+        account_rpc_package.economy = economy
         instance_guard = types.ModuleType(
             'gui.mods.offline_lan_0922.instance_guard')
         instance_guard.release_if_requested = mock.Mock(return_value=False)
@@ -6467,12 +6483,16 @@ class BootstrapContractTests(unittest.TestCase):
             'gui.shared.utils.HangarSpace': hangar_module,
             'gui.mods': types.ModuleType('gui.mods'),
             'gui.mods.offline_lan_0922': package,
+            'gui.mods.offline_lan_0922.price_catalogue': price_catalogue,
+            'gui.mods.offline_lan_0922.account_rpc': account_rpc_package,
+            'gui.mods.offline_lan_0922.account_rpc.economy': economy,
             'gui.mods.offline_lan_0922.compat': compatibility_module,
             'gui.mods.offline_lan_0922.config': config,
             'gui.mods.offline_lan_0922.instance_guard': instance_guard,
             'gui.mods.offline_lan_0922.vehicle_blacklist': vehicle_blacklist,
             'gui.mods.offline_lan_0922.vehicle_configuration':
                 vehicle_configuration,
+            'gui.mods.offline_lan_0922.vehicle_records': vehicle_records,
             'gui.mods.offline_lan_0922.account_rpc.state': state_module,
             'gui.mods.offline_lan_0922.account_rpc.postbattle_store':
                 postbattle_module,

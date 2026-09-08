@@ -7077,7 +7077,7 @@ class BattleRuntime(object):
                 contract = equipment_mechanics.project_equipment(descriptor)
             except (TypeError, ValueError, IndexError, AttributeError):
                 continue
-            if contract['id'] <= 0 or contract['compactDescr'] <= 0:
+            if contract['id'] < 0 or contract['compactDescr'] <= 0:
                 continue
             result.append(equipment_mechanics.EquipmentState(contract))
         return result

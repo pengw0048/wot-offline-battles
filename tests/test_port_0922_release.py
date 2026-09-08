@@ -23,6 +23,12 @@ class ReleaseBuilderTests(unittest.TestCase):
             self.assertNotIn(name, source, name)
 
     def test_the_state_owners_write_only_into_the_external_user_directory(self):
+        """Each store names its file and defers the location to one owner.
+
+        ``config.save_slot_state_path`` is that owner: it puts the file inside
+        the active save slot below the external user directory, and migrates
+        the pre-save-slot locations for the default slot.
+        """
         package = (PORT_ROOT / 'src' / 'res' / 'scripts' / 'client' / 'gui' /
                    'mods' / 'offline_lan_0922')
         for module, name in (
@@ -32,8 +38,16 @@ class ReleaseBuilderTests(unittest.TestCase):
                  'postbattle_state.json')):
             source = (package / module).read_text(encoding='utf-8')
             self.assertIn(name, source, module)
-            self.assertIn('port_config.USER_DATA_DIR', source, module)
-            self.assertIn('migrate_legacy_user_file', source, module)
+            self.assertIn('port_config.ACTIVE_SAVE_SLOT', source, module)
+            self.assertIn(
+                'port_config.save_slot_state_path(STATE_FILE_NAME)',
+                source, module)
+            self.assertNotIn('port_config.USER_DATA_DIR', source, module)
+
+        config_source = (package / 'config.py').read_text(encoding='utf-8')
+        self.assertIn('def save_slot_state_path(', config_source)
+        self.assertIn('USER_DATA_DIR', config_source)
+        self.assertIn('migrate_legacy_user_file', config_source)
 
 
 if __name__ == '__main__':

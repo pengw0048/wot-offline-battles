@@ -184,26 +184,35 @@ class AccountRpcTests(unittest.TestCase):
         self._run()
         self.assertEqual([(31, commands.RES_SUCCESS, '')], self.player.responses)
 
-    def test_postbattle_progress_pushes_resources_and_vehicle_xp_now(self):
+    def test_postbattle_progress_pushes_the_banked_ledger_now(self):
+        """The garage banked the battle; the push reads what it banked.
+
+        Credits, free experience and vehicle experience are spent by
+        purchases and research, so the garage snapshot owns them and the
+        post-battle push reports that balance rather than a running total the
+        result store keeps for its own counters.
+        """
         class Store(object):
             def progress(self):
-                return {
-                    'credits': 700, 'freeXP': 30,
-                    'vehicles': {'ussr:R11_MS-1': {'xp': 600}},
-                }
+                return {'battles': 1, 'wins': 1}
 
         vehicles_module = types.ModuleType('items.vehicles')
         vehicles_module.VehicleDescr = lambda typeName=None: (
             types.SimpleNamespace(type=types.SimpleNamespace(id=(0, 1))))
         vehicles_module.makeIntCompactDescrByID = (
             lambda unused_type, unused_nation, unused_vehicle: 50001)
+        vehicles_module.getVehicleType = lambda compact_descr: (
+            types.SimpleNamespace(unlocksDescrs=()))
         items_module = types.ModuleType('items')
         items_module.vehicles = vehicles_module
         server = FakeServer(
             lambda: self.player,
             lambda delay, fn: self.pending.append((delay, fn)), {
                 'selected_vehicle': {
-                    'vehicleTypeCompactDescrs': [50001]},
+                    'vehicleTypeCompactDescrs': [50001],
+                    'wallet': {'credits': 700, 'gold': 5, 'freeXP': 30},
+                    'vehicleXP': {50001: 600},
+                },
                 'postbattle_store': Store(),
             })
         with mock.patch.dict(sys.modules, {
@@ -213,16 +222,64 @@ class AccountRpcTests(unittest.TestCase):
 
         update = pickle.loads(self.player.updates[-1])
         self.assertEqual(
-            {'credits', 'freeXP', 'vehTypeXP', 'dossier'},
+            {'credits', 'gold', 'freeXP', 'vehTypeXP', 'dossier'},
             set(update['stats']))
         self.assertNotIn('eliteVehicles', update['stats'])
         self.assertNotIn('unlocks', update['stats'])
-        self.assertEqual(account_data.OFFLINE_CREDITS + 700,
-                         update['stats']['credits'])
-        self.assertEqual(account_data.OFFLINE_FREE_XP + 30,
-                         update['stats']['freeXP'])
+        self.assertEqual(700, update['stats']['credits'])
+        self.assertEqual(5, update['stats']['gold'])
+        self.assertEqual(30, update['stats']['freeXP'])
         self.assertEqual(600, update['stats']['vehTypeXP'][50001])
         self.assertEqual(1, self.player.dossier_resyncs)
+
+    def test_postbattle_progress_publishes_the_depot_rows_it_moved(self):
+        """A battle spends rounds and consumables and may buy them back.
+
+        ``synchronizeDicts`` merges what the diff names and leaves the rest of
+        the cache alone, so a push that carried only the vehicle would leave
+        the client showing ammunition the account no longer has.
+        """
+        class Store(object):
+            def progress(self):
+                return {'battles': 1, 'wins': 1}
+
+        vehicles_module = types.ModuleType('items.vehicles')
+        vehicles_module.VehicleDescr = lambda typeName=None: (
+            types.SimpleNamespace(type=types.SimpleNamespace(id=(0, 1))))
+        vehicles_module.makeIntCompactDescrByID = (
+            lambda unused_type, unused_nation, unused_vehicle: 50001)
+        vehicles_module.getVehicleType = lambda compact_descr: (
+            types.SimpleNamespace(unlocksDescrs=()))
+        items_module = types.ModuleType('items')
+        items_module.vehicles = vehicles_module
+        touched_items = {10: set([20010]), 11: set([11001])}
+        server = FakeServer(
+            lambda: self.player,
+            lambda delay, fn: self.pending.append((delay, fn)), {
+                'selected_vehicle': {
+                    'vehicleTypeCompactDescrs': [50001],
+                    'wallet': {'credits': 700, 'gold': 5, 'freeXP': 30},
+                    'vehicleXP': {50001: 600},
+                    'inventoryItems': {
+                        10: {20010: 18, 20011: 15}, 11: {},
+                    },
+                },
+                'postbattle_store': Store(),
+                'postbattle_touched_items': touched_items,
+            })
+        with mock.patch.dict(sys.modules, {
+                'items': items_module, 'items.vehicles': vehicles_module}):
+            self.assertTrue(server.publish_postbattle_progress())
+            self._run()
+
+        update = pickle.loads(self.player.updates[-1])
+        self.assertEqual({20010: 18}, update['inventory'][10])
+        # A count that reached zero is published as a removal, which is the
+        # only thing synchronizeDicts reads as "drop this".
+        self.assertEqual({11001: None}, update['inventory'][11])
+        # The push consumed them, so a later one does not repeat them.
+        self.assertEqual(set(), touched_items[10])
+        self.assertEqual(set(), touched_items[11])
 
     def test_stats_update_does_not_run_the_inventory_refresh_fallback(self):
         with mock.patch(
@@ -244,6 +301,47 @@ class AccountRpcTests(unittest.TestCase):
         refresh.assert_called_once()
         self.assertEqual(diff['inventory'],
                          refresh.call_args[0][0]['inventory'])
+
+    def test_a_recruit_answers_through_the_ext_response_the_shop_reads(self):
+        """Shop.buyTankman's callback reads ext['tmanInvID'] and nothing else.
+
+        A plain onCmdResponse leaves the recruit window with no id to select,
+        so the whole recruitment has to travel the pickled ext path.
+        """
+        snapshot = _full_garage_snapshot()
+        snapshot['accountBerths'] = 4
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+
+        vehicles = types.SimpleNamespace(
+            getVehicleType=lambda compact_descr: types.SimpleNamespace(
+                id=(0, 1), crewRoles=(('commander',), ('driver',))))
+        tankmen = types.SimpleNamespace(
+            SKILL_NAMES=('reserved', 'commander', 'radioman', 'driver'),
+            ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
+            getSkillsMask=lambda names: 0,
+            generateTankmen=lambda *args: [b'recruit'])
+        context = {
+            'garage': account_requests.garage.GarageState(
+                snapshot, vehicles_module=vehicles, tankmen_module=tankmen),
+        }
+        server = FakeServer(
+            lambda: self.player,
+            lambda delay, fn: self.pending.append((delay, fn)), context)
+
+        server.doCmdInt4(51, commands.CMD_BUY_TMAN, 0, 50001, 3, 0)
+        # The response waits for the garage refresh, which schedules its own
+        # callback, so drain the queue rather than assuming one step.
+        while self.pending:
+            self._run()
+
+        request_id, result_id, error, ext = self.player.ext_responses[0]
+        self.assertEqual(51, request_id)
+        self.assertEqual(commands.RES_SUCCESS, result_id)
+        self.assertEqual('', error)
+        tankman_id = pickle.loads(ext)['tmanInvID']
+        self.assertEqual(
+            {tankman_id: b'recruit'},
+            context['garage'].snapshot()['barracksTankmen'])
 
     def test_add_skill_success_waits_for_current_vehicle_refresh(self):
         trace = []
@@ -796,8 +894,10 @@ class AccountRpcTests(unittest.TestCase):
 
         self.assertEqual({9001: 200, 9002: 200}, value['inventory'][9])
         self.assertEqual({11001: 200}, value['inventory'][11])
-        # The per-vehicle records stay untouched by the account catalogue.
-        self.assertEqual({10010: 20, 10011: 10}, value['inventory'][10])
+        # Loaded rounds are published on the vehicle, leaving no depot stock.
+        self.assertEqual({10010: 0, 10011: 0}, value['inventory'][10])
+        self.assertEqual([10010, 20, 10011, 10],
+                         value['inventory'][1]['shells'][9])
 
     def test_full_garage_expands_every_vehicle_and_tankman_foreign_key(self):
         garage = _full_garage_snapshot()
@@ -867,13 +967,14 @@ class AccountRpcTests(unittest.TestCase):
             garage['unlockItemCompactDescrs'].issubset(stats['unlocks']))
 
     def test_incomplete_selected_vehicle_is_rejected_before_hangar_build(self):
-        with self.assertRaisesRegex(ValueError, 'crew and tankmen'):
+        with self.assertRaisesRegex(ValueError, 'one seat per role'):
             account_data.sync_data(
                 selected_vehicle={'id': 9, 'compDescr': b'compact'})
 
     def test_selected_vehicle_relational_contract_rejects_semantic_empties(self):
         cases = (
-            ('crew and tankmen', lambda value: value.update(crew=[])),
+            # An empty seat is legal; a vehicle with no seats at all is not.
+            ('one seat per role', lambda value: value.update(crew=[])),
             ('crew ids must be positive',
              lambda value: (
                  value.update(crew=[-101, 102]),
@@ -882,8 +983,10 @@ class AccountRpcTests(unittest.TestCase):
             ('crew ids must resolve',
              lambda value: value['tankmen'].pop(102)),
             ('lock must contain two', lambda value: value.update(lock=0)),
-            ('health must be positive',
-             lambda value: value.update(repair=(0, 0))),
+            # A health of 0 is a destroyed vehicle waiting for repair, which
+            # #1513 renders; a negative bill is nothing it can render.
+            ('repair cost cannot be negative',
+             lambda value: value.update(repair=(-1, 100))),
             ('eqs must contain three', lambda value: value.update(eqs=[])),
             ('descriptor/count pairs',
              lambda value: value.update(shells=[10010])),
@@ -976,7 +1079,7 @@ class AccountRpcTests(unittest.TestCase):
 
         bootstrap = (
             CLIENT_SCRIPTS / 'gui' / 'mods' / 'offline_lan_0922' /
-            'bootstrap.py').read_text(encoding='utf-8')
+            'vehicle_records.py').read_text(encoding='utf-8')
         self.assertEqual(
             'VehicleDescr.makeCompactDescr',
             validator['selectedVehicleCompDescrProducer'])
@@ -1007,7 +1110,11 @@ class AccountRpcTests(unittest.TestCase):
 
         # Exact #1513 ShopRequester supplies disabled objects for these
         # optional keys when they are absent. Keep them absent instead of
-        # publishing a second, unverified server-side schema.
+        # publishing a second, unverified server-side schema.  ``restore_config``
+        # left this list once the recycle bin was implemented: with the key
+        # absent the requester's zero billable duration hides every dismissed
+        # crew member from the barracks, so it is now a read schema rather
+        # than an unused one.
         for key in chain['defaultedShopKeys']:
             self.assertNotIn(key, values['shop'])
         self.assertEqual({}, values['syncData']['newYear'])
@@ -1044,7 +1151,7 @@ class AccountRpcTests(unittest.TestCase):
         for change in value[1]:
             self.assertEqual(
                 CONTRACT['dossiers']['changeTupleArity'], len(change))
-        self.assertEqual((1, []), value)
+        self.assertEqual((2, []), value)
 
     def test_old_chat_mailbox_does_not_echo_command_as_chat_action(self):
         events = []
@@ -1115,3 +1222,306 @@ class AccountRpcTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CrewShopStreamTests(unittest.TestCase):
+    """What the crew shop and the recycle bin look like on the wire."""
+
+    def _shop(self, **overrides):
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle.update(overrides)
+        return account_data.shop(selected_vehicle=vehicle)
+
+    def test_the_crew_shop_publishes_the_prices_the_garage_charges(self):
+        """ShopCommonStats falls back to 600, 50 and 500 gold."""
+        value = self._shop(
+            crewChangeRoleCost={'gold': 600},
+            crewPassportCost={'gold': 50},
+            crewFemalePassportCost={'gold': 500})
+
+        self.assertEqual(600, value['changeRoleCost'])
+        self.assertEqual(50, value['passportChangeCost'])
+        self.assertEqual(500, value['femalePassportChangeCost'])
+
+    def test_the_skill_reset_table_is_published_not_hard_coded(self):
+        """``SkillDropWindow`` lists whatever keys arrive, live and default."""
+        table = {
+            0: {'credits': 0, 'gold': 0, 'xpReuseFraction': 0.0},
+            1: {'credits': 200000, 'gold': 0, 'xpReuseFraction': 0.8},
+            2: {'credits': 0, 'gold': 200, 'xpReuseFraction': 1.0},
+        }
+
+        value = self._shop(dropSkillsCosts=table)
+
+        self.assertEqual(table, value['dropSkillsCost'])
+        # The window compares the live table with the default one to decide
+        # whether a choice is discounted.
+        self.assertEqual(table, value['defaults']['dropSkillsCost'])
+
+    def test_the_restore_window_reaches_the_key_the_client_reads(self):
+        """``ShopCommonStats.__getRestoreConfig`` reads ``restore_config``."""
+        value = self._shop(tankmenRestoreConfig={
+            'freeDuration': 0, 'goldDuration': 604800,
+            'goldCost': 100, 'limit': 100})
+
+        tankmen = value['restore_config']['tankmen']
+        self.assertEqual(0, tankmen['freeDuration'])
+        # ItemsRequester.getTankmen hides everyone older than this, so a zero
+        # would empty the barracks recovery list.
+        self.assertEqual(604800, tankmen['goldDuration'])
+        self.assertEqual(100, tankmen['goldCost'])
+        self.assertEqual(100, tankmen['limit'])
+
+    def test_the_recycle_bin_reaches_the_buffer_the_requester_reads(self):
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle['recycleBinTankmen'] = {201: (b'tman:201', 1700000000)}
+
+        value = account_data.sync_data(selected_vehicle=vehicle)
+
+        self.assertEqual(
+            {201: (b'tman:201', 1700000000)},
+            value['recycleBin']['tankmen']['buffer'])
+
+    def test_a_garage_with_nobody_dismissed_still_publishes_the_key(self):
+        """#1513 only creates the cache entry when the key is in the diff."""
+        value = account_data.sync_data(
+            selected_vehicle=copy.deepcopy(SELECTED_VEHICLE))
+
+        self.assertEqual({}, value['recycleBin']['tankmen']['buffer'])
+
+    def test_hiring_one_back_names_them_as_gone_rather_than_omitting_them(
+            self):
+        """``synchronizeDicts`` pops a key only for an explicit ``None``."""
+        vehicle = copy.deepcopy(SELECTED_VEHICLE)
+        vehicle['recycleBinTankmen'] = {202: (b'tman:202', 1700000000)}
+
+        diff = account_data.recycle_bin_diff(vehicle, {201, 202})
+
+        self.assertIsNone(diff['tankmen']['buffer'][201])
+        self.assertEqual(
+            (b'tman:202', 1700000000), diff['tankmen']['buffer'][202])
+
+
+class SaleDiffTests(unittest.TestCase):
+    """A sale has to reach the client, not just the snapshot.
+
+    #1513 merges an inventory diff through
+    ``shared_utils.account_helpers.diff_utils.synchronizeDicts``, which pops a
+    cached key only when the diff carries that key with the value ``None``.
+    A vehicle simply left out of the diff stays in the player's hangar.
+    """
+
+    def _sell(self, args):
+        snapshot = _full_garage_snapshot()
+        snapshot['wallet'] = {'credits': 1000, 'gold': 0, 'freeXP': 0}
+        state = account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: 10,
+                VehicleDescr=lambda compactDescr: types.SimpleNamespace(
+                    getDevices=lambda: ([], [], []))))
+        pushed = []
+        context = {'garage': state, 'push_update': pushed.append}
+        result = account_requests.dispatch(
+            commands.CMD_SELL_VEHICLE, context, args)
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual(1, len(pushed))
+        return pushed[0]['inventory'], state.snapshot()
+
+    def test_a_sold_vehicle_is_published_as_removed(self):
+        diff, snapshot = self._sell(([17, 10, 1, 0, 0],))
+
+        self.assertEqual(1, len(snapshot['vehicles']))
+        vehicles = diff[account_data.VEHICLE_ITEM_TYPE]
+        self.assertIsNone(vehicles['compDescr'][10])
+        self.assertIsNone(vehicles['crew'][10])
+        # The vehicle that stayed is not touched by the same diff.
+        self.assertNotIn(9, vehicles['compDescr'])
+
+    def test_the_crew_of_a_sold_vehicle_is_published_as_removed(self):
+        """Left out, they would reappear in the client as barracks crew."""
+        diff, unused_snapshot = self._sell(([17, 10, 1, 0, 0],))
+
+        tankmen = diff[account_data.TANKMAN_ITEM_TYPE]
+        self.assertIsNone(tankmen['compDescr'][201])
+        self.assertIsNone(tankmen['compDescr'][202])
+        self.assertIsNone(tankmen['vehicle'][201])
+
+    def test_an_item_sold_down_to_nothing_is_published_as_removed(self):
+        diff, snapshot = self._sell(([17, 10, 1, 1, 11010, 0],))
+
+        self.assertNotIn(11010, snapshot['inventoryItems'][10])
+        self.assertIsNone(diff[10][11010])
+
+    def test_a_full_sync_never_carries_a_removal_marker(self):
+        """Only a delta removes; a full sync replaces the cache outright."""
+        diff = account_data.inventory(
+            _full_garage_snapshot(), validate=False)['inventory']
+
+        for section in diff.values():
+            for value in section.values():
+                self.assertIsNotNone(value)
+
+
+class ExchangeRateTests(unittest.TestCase):
+    def test_the_published_rate_is_the_rate_the_garage_charges(self):
+        """The client displays one and the garage charges the other."""
+        self.assertEqual(
+            account_data.OFFLINE_GOLD_EXCHANGE_RATE,
+            account_requests.garage.GOLD_EXCHANGE_RATE)
+        self.assertEqual(
+            account_data.OFFLINE_SELL_PRICE_FACTOR,
+            account_requests.garage.SELL_PRICE_FACTOR)
+
+
+class DepotTests(unittest.TestCase):
+    """A bought spare exists in the account, not on any vehicle.
+
+    The snapshot keeps both views of an item: what each vehicle carries and
+    what the account owns. Only the second one can hold a spare, so a purchase
+    that is never mounted is visible to the client only if the account view is
+    published.
+    """
+
+    def _garage(self, item_type=4):
+        snapshot = _full_garage_snapshot()
+        snapshot['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][4444] = {'credits': 20000}
+        snapshot['unlockItemCompactDescrs'].add(4444)
+        return account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: item_type))
+
+    def _buy(self, state, args):
+        pushed = []
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': pushed.append}, args)
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual(1, len(pushed))
+        return pushed[0]['inventory']
+
+    def test_purchase_publishes_balance_before_acknowledgement(self):
+        state = self._garage(item_type=11)
+        events = []
+        def publish(diff, after_publish):
+            self.assertEqual({'credits': 60000}, diff['stats'])
+            self.assertEqual(2, diff['inventory'][11][4444])
+            events.append('update')
+            after_publish()
+            return True
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': lambda diff: None,
+             'push_update_and_wait': publish}, (42, 4444, 2, 0))
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response(lambda: events.append('response'))
+        self.assertEqual(['update', 'response'], events)
+
+    def test_gold_purchase_publishes_only_the_changed_gold_balance(self):
+        state = self._garage(item_type=11)
+        state.snapshot()['wallet']['gold'] = 100
+        state.snapshot()['shopItemPrices'][4444] = {'gold': 5}
+        pushed = []
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM,
+            {'garage': state, 'push_update': pushed.append}, (42, 4444, 2, 0))
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        result.before_response()
+        self.assertEqual({'gold': 90}, pushed[0]['stats'])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_research_update_publishes_only_the_new_unlock(self):
+        state = self._garage()
+        state.snapshot()['unlockItemCompactDescrs'] = {50001, 2002, 12300}
+        pushed = []
+        result = account_requests._fitting(
+            {'garage': state, 'push_update': pushed.append},
+            lambda garage: garage.snapshot()['unlockItemCompactDescrs'].add(4444))
+        result.before_response()
+        self.assertEqual({4444}, pushed[0]['stats']['unlocks'])
+
+    def test_special_mode_item_cannot_be_bought_or_supplied(self):
+        state = self._garage(item_type=11)
+        state.snapshot()['notInShopItems'] = {4444}
+        state.snapshot()['shopItemPrices'].pop(4444)
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(account_requests.garage.GarageError):
+            state.buy_item(4444)
+        with self.assertRaises(account_requests.garage.GarageError):
+            state.equip_equipments(9, [4444, 0, 0])
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_bought_spare_module_reaches_the_depot(self):
+        state = self._garage()
+
+        diff = self._buy(state, (42, 4444, 2, 0))
+
+        self.assertEqual(2, diff[4][4444])
+        self.assertEqual(
+            100000 - 40000, state.snapshot()['wallet']['credits'])
+
+    def test_a_bought_optional_device_reaches_the_depot(self):
+        state = self._garage(item_type=9)
+
+        diff = self._buy(state, (42, 4444, 1, 0))
+
+        self.assertEqual(1, diff[9][4444])
+
+    def test_buying_ammunition_puts_the_rounds_in_the_depot(self):
+        """A publication rule must not delete what the account owns.
+
+        Rounds are stock, so a depot purchase publishes the new count. Saying
+        ``None`` would tell the client to drop the rounds the player just paid
+        for.
+        """
+        state = self._garage(item_type=10)
+        state.snapshot()['shopItemPrices'][11010] = {'credits': 100}
+        state.snapshot()['unlockItemCompactDescrs'].add(11010)
+
+        diff = self._buy(state, (42, 11010, 10, 0))
+
+        self.assertEqual(10, diff[10][11010])
+        self.assertEqual(
+            40, state.snapshot()['inventoryItems'][10][11010])
+
+    def test_a_refused_purchase_leaves_the_save_untouched(self):
+        """A check that can still refuse must not write anything first."""
+        snapshot = _full_garage_snapshot()
+        state = account_requests.garage.GarageState(
+            snapshot, vehicles_module=types.SimpleNamespace(
+                getTypeOfCompactDescr=lambda compact_descr: 4))
+        snapshot['wallet'] = {'credits': 10, 'gold': 0, 'freeXP': 0}
+        snapshot['shopItemPrices'][4444] = {'credits': 20000}
+        snapshot['unlockItemCompactDescrs'].add(4444)
+        before = copy.deepcopy(state.snapshot())
+
+        result = account_requests.dispatch(
+            commands.CMD_BUY_ITEM, {'garage': state}, (42, 4444, 1, 0))
+
+        self.assertEqual(commands.RES_FAILURE, result.result_id)
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_startup_garage_separates_carried_items_from_depot_stock(self):
+        """The wire depot contains only copies not installed on any vehicle."""
+        snapshot = _full_garage_snapshot()
+        published = account_data.inventory(
+            snapshot, validate=False)['inventory']
+
+        for item_type in tuple(range(2, 8)) + (10,):
+            for compact_descr, count in snapshot['inventoryItems'][item_type].items():
+                mounted = sum(record['inventoryItems'].get(item_type, {}).get(
+                    compact_descr, 0) for record in snapshot['vehicles'])
+                self.assertEqual(max(0, count - mounted),
+                                 published[item_type][compact_descr])
+
+    def test_ammunition_is_published_as_the_stock_outside_vehicles(self):
+        """The player's 400 owned rounds include the 30 already loaded."""
+        snapshot = _full_garage_snapshot()
+        snapshot['inventoryItems'][10][11010] = 400
+
+        published = account_data.inventory(
+            snapshot, validate=False)['inventory']
+
+        self.assertEqual(370, published[10][11010])

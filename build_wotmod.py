@@ -23,7 +23,7 @@ import navigation_graph_schema as _navigation_schema
 
 
 MOD_ID = 'org.peng.offline_lan_0922'
-MOD_VERSION = '0.6.14'
+MOD_VERSION = '0.7.0'
 BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 BUILD_IDENTITY_FILENAME = 'build_identity.json'
 BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
@@ -112,11 +112,12 @@ def _archive_tree(source_root, destination):
 
 def _release_config():
     return {
-        'schema': 2,
+        'schema': 3,
         'enabled': True,
         'host': '127.0.0.1',
         'port': 28782,
         'name': 'Player',
+        'save_slot': 'default',
         'vehicle': 'ussr:R11_MS-1',
         'max_health': 90,
         'startupTimeoutSeconds': 30.0,

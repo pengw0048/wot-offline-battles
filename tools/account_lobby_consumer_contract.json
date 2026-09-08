@@ -254,12 +254,21 @@
       "syncData.stats.refSystem.referrals",
       "shop.goodies",
       "shop.goodies.goodies",
-      "shop.refSystem"
+      "shop.refSystem",
+      "shop.restore_config",
+      "shop.restore_config.tankmen",
+      "syncData.recycleBin",
+      "syncData.recycleBin.tankmen"
     ],
     "numberPaths": [
       "syncData.stats.credits",
       "syncData.stats.gold",
       "syncData.stats.crystal",
+      "shop.changeRoleCost",
+      "shop.passportChangeCost",
+      "shop.femalePassportChangeCost",
+      "shop.restore_config.tankmen.goldDuration",
+      "shop.restore_config.tankmen.goldCost",
       "syncData.account.attrs",
       "syncData.account.premiumExpiryTime"
     ],
@@ -273,7 +282,7 @@
       "syncData.stats.playLimits": 2,
       "serverSettings.wallet": 2
     },
-    "defaultedShopKeys": ["tradeIn", "restore_config"],
+    "defaultedShopKeys": ["tradeIn"],
     "directServerSettingsKeys": ["wallet"],
     "newYearEmptySyncDataIsSupported": true
   },

@@ -1,6 +1,8 @@
 import base64
 import json
+import os
 import pickle
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -71,6 +73,7 @@ class _Replay(object):
         self.connector = connector
         self.record_name = recordName
         self.start_name = startRecordName
+        self.connector.values[recordName] = self.connector.values[startRecordName]
 
     def addMultipliedValue(self, other, coeff):
         # The stock chain writes the total back through the connector.
@@ -132,6 +135,23 @@ def _receipt(account_key='account-key-123456'):
     return receipt
 
 
+def _packed_vehicle(receipt):
+    """Return the per-vehicle fields #1513's results screen is given."""
+    packers = _Packers()
+    original_vehicle = postbattle_store._vehicle_type_compact_descr
+    original_arena = postbattle_store._arena_type_id
+    try:
+        postbattle_store._vehicle_type_compact_descr = lambda unused: 50001
+        postbattle_store._arena_type_id = lambda unused: 70001
+        postbattle_store.pack_battle_result(
+            receipt, packers=packers,
+            replay_types=(_Replay, _ReplayConnector))
+    finally:
+        postbattle_store._vehicle_type_compact_descr = original_vehicle
+        postbattle_store._arena_type_id = original_arena
+    return dict(packers.calls)['VEH_FULL_RESULTS']
+
+
 def _interaction(target_kind='bot', target_id=17, **updates):
     value = dict(
         (name, minimum if name == 'death_reason' else 0)
@@ -158,7 +178,8 @@ class PostBattleContractTests(unittest.TestCase):
 
         class Dossier(object):
             def __init__(self):
-                self.blocks = {'a15x15': {}, 'a15x15_2': {}}
+                self.blocks = {'a15x15': {}, 'a15x15_2': {},
+                               'total': {}, 'max15x15': {}}
             def __getitem__(self, name):
                 return self.blocks[name]
             def makeCompDescr(self):
@@ -180,9 +201,9 @@ class PostBattleContractTests(unittest.TestCase):
             'capturePoints': 5, 'droppedCapturePoints': 2,
             'survivedBattles': 1, 'changeTime': 7}}}
         version, rows = data.dossiers(
-            1, 6, progress, dossier_factory=factory,
+            2, 6, progress, dossier_factory=factory,
             vehicle_type_resolver=lambda unused: 50001)
-        self.assertEqual(1, version)
+        self.assertEqual(2, version)
         self.assertEqual(50001, rows[0][0])
         self.assertEqual(7, rows[0][1])
         self.assertEqual({
@@ -190,14 +211,62 @@ class PostBattleContractTests(unittest.TestCase):
             'frags': 2, 'damageDealt': 900, 'shots': 8,
             'directHits': 6, 'spotted': 1, 'damageReceived': 300,
             'capturePoints': 5, 'droppedCapturePoints': 2,
-            'survivedBattles': 1}, rows[0][2]['a15x15'])
+            'survivedBattles': 1, 'winAndSurvived': 0},
+            rows[0][2]['a15x15'])
         self.assertEqual({
             'piercings': 4, 'damageBlockedByArmor': 100,
             'damageAssistedTrack': 80, 'damageAssistedRadio': 40,
-            'damageAssistedStun': 0}, rows[0][2]['a15x15_2'])
-        self.assertEqual((1, []), data.dossiers(
-            1, 7, progress, dossier_factory=factory,
+            'damageAssistedStun': 0, 'originalXP': 0,
+            'directHitsReceived': 0, 'potentialDamageReceived': 0},
+            rows[0][2]['a15x15_2'])
+        self.assertEqual((2, []), data.dossiers(
+            2, 7, progress, dossier_factory=factory,
             vehicle_type_resolver=lambda unused: 50001))
+
+    def test_a_receipt_carries_the_health_and_the_rounds_it_fired(self):
+        """The bill is priced by the client; the receipt states the facts."""
+        raw = _receipt()
+        raw['public_results'][0]['health'] = 40
+        raw['shells_fired'] = {'0': 12, '1': 3}
+
+        stored = postbattle_store._receipt(raw)
+
+        self.assertEqual(40, stored['health'])
+        self.assertEqual({0: 12, 1: 3}, stored['shells_fired'])
+        self.assertEqual([], stored['equipment_used'])
+        # A bill is still refused: only the client can price a shell.
+        self.assertEqual(0, stored['rewards']['ammo_cost'])
+
+    def test_a_receipt_without_the_ammunition_section_fired_nothing(self):
+        stored = postbattle_store._receipt(_receipt())
+
+        self.assertEqual({}, stored['shells_fired'])
+        self.assertEqual([], stored['equipment_used'])
+        self.assertEqual(100, stored['health'])
+
+    def test_a_receipt_carries_the_consumables_it_used_once_each(self):
+        """#1513 consumes one of each however many times it was activated."""
+        raw = _receipt()
+        raw['equipment_used'] = [11001, 11001, 11002]
+
+        stored = postbattle_store._receipt(raw)
+
+        self.assertEqual([11001, 11002], stored['equipment_used'])
+
+    def test_a_malformed_consumable_section_is_refused(self):
+        for used in ([0], [-1], ['a'], [1, 2, 3, 4], {'a': 1}):
+            raw = _receipt()
+            raw['equipment_used'] = used
+            with self.assertRaises(ValueError):
+                postbattle_store._receipt(raw)
+
+    def test_a_malformed_ammunition_section_is_refused(self):
+        for fired in ({'10': 1}, {'0': -1}, {'a': 1}, {'0': 1000000},
+                      [1, 2], dict((str(index), 1) for index in range(11))):
+            raw = _receipt()
+            raw['shells_fired'] = fired
+            with self.assertRaises(ValueError):
+                postbattle_store._receipt(raw)
 
     def test_draw_is_not_a_loss_and_receipt_stats_accumulate(self):
         store = postbattle_store.PostBattleStore(path=None)
@@ -215,7 +284,7 @@ class PostBattleContractTests(unittest.TestCase):
         self.assertEqual(receipt['stats']['piercings'], vehicle['piercings'])
         self.assertEqual(1, vehicle['survivedBattles'])
 
-    def test_accelerated_training_diverts_vehicle_xp_once(self):
+    def test_accelerated_training_keeps_lifetime_dossier_xp_once(self):
         store = postbattle_store.PostBattleStore(path=None)
         calls = []
         store.set_progress_applier(
@@ -228,7 +297,8 @@ class PostBattleContractTests(unittest.TestCase):
 
         self.assertEqual([receipt['receipt_id']], calls)
         self.assertEqual(
-            0, store.progress()['vehicles'][receipt['vehicle']]['xp'])
+            receipt['rewards']['xp'],
+            store.progress()['vehicles'][receipt['vehicle']]['xp'])
         self.assertEqual(receipt['rewards']['credits'],
                          store.progress()['credits'])
 
@@ -615,6 +685,77 @@ class PostBattleContractTests(unittest.TestCase):
         for replay_name in ('creditsReplay', 'xpReplay', 'freeXPReplay',
                             'goldReplay', 'crystalReplay'):
             self.assertTrue(vehicle_fields[replay_name])
+
+    def test_the_results_screen_shows_what_the_account_was_given(self):
+        """#1513's own model separates the battle from the award.
+
+        A save's earnings multiplier and a premium vehicle's credit bonus are
+        exactly that difference, so ``originalXP`` stays the battle and ``xp``
+        becomes what the wallet received.
+        """
+        receipt = _receipt()
+        receipt['awarded'] = {'credits': 10500, 'xp': 1200, 'free_xp': 60}
+
+        fields = _packed_vehicle(receipt)
+
+        self.assertEqual(10500, fields['credits'])
+        self.assertEqual(4200, fields['originalCredits'])
+        self.assertEqual(1200, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(60, fields['freeXP'])
+        self.assertEqual(30, fields['originalFreeXP'])
+
+    def test_durable_premium_awards_are_not_paid_twice_in_results(self):
+        receipt = _receipt()
+        receipt['awarded'] = {'credits': 12600, 'xp': 1800, 'free_xp': 90}
+        with mock.patch.object(postbattle_store,
+                               '_premium_vehicle_xp_factor_100', return_value=50):
+            fields = _packed_vehicle(receipt)
+            store = postbattle_store.PostBattleStore(path=None)
+            store.set_progress_applier(lambda unused: {
+                'awarded': receipt['awarded'], 'accelerated': True})
+            current = dict(receipt, account_key=store.account_key)
+            self.assertTrue(store.accept(current))
+            self.assertFalse(store.accept(current))
+            with mock.patch.object(postbattle_store,
+                                   '_vehicle_type_compact_descr', return_value=1), \
+                    mock.patch.object(postbattle_store,
+                                      '_arena_type_id', return_value=1):
+                self.assertEqual(1800, store.service_message_data(
+                    receipt['arena_unique_id'])['xp'])
+            self.assertEqual(90, store.progress()['freeXP'])
+            row = store.progress()['vehicles'][receipt['vehicle']]
+            self.assertEqual(1800, row['xp'])
+            self.assertEqual(600, row['originalXP'])
+            self.assertEqual(1800, row['maxXP'])
+        self.assertEqual(1800, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(90, fields['freeXP'])
+        self.assertEqual(30, fields['originalFreeXP'])
+
+    def test_a_receipt_with_no_multiplier_shows_one_number_twice(self):
+        fields = _packed_vehicle(_receipt())
+
+        self.assertEqual(4200, fields['credits'])
+        self.assertEqual(4200, fields['originalCredits'])
+        self.assertEqual(600, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+
+    def test_the_lifetime_counters_count_what_was_banked(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        store = postbattle_store.PostBattleStore(
+            path=os.path.join(directory, 'postbattle_state.json'))
+        store.set_progress_applier(lambda receipt: {
+            'awarded': {'credits': 10500, 'xp': 1200, 'free_xp': 60}})
+
+        self.assertTrue(store.accept(_receipt(store.account_key)))
+
+        progress = store.progress()
+        self.assertEqual(10500, progress['credits'])
+        self.assertEqual(60, progress['freeXP'])
+        self.assertEqual(
+            1200, progress['vehicles']['ussr:R11_MS-1']['xp'])
 
     def test_blocked_damage_reaches_the_native_result_and_dossier(self):
         state = BattleState(map_name='01_karelia', team_size=1)

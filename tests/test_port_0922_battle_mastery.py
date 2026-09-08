@@ -537,6 +537,7 @@ class MasteryDossierTests(unittest.TestCase):
         class Dossier(object):
             def __init__(self):
                 self.blocks = {'a15x15': {}, 'a15x15_2': {},
+                               'max15x15': {}, 'total': {},
                                'achievements': written}
 
             def __getitem__(self, name):
@@ -552,7 +553,7 @@ class MasteryDossierTests(unittest.TestCase):
         version, rows = data.dossiers(
             1, 0, progress, dossier_factory=lambda unused: Dossier(),
             vehicle_type_resolver=lambda unused: TYPE_59)
-        self.assertEqual(1, version)
+        self.assertEqual(data._VEHICLE_DOSSIER_VERSION, version)
         self.assertEqual([(TYPE_59, 3, 'descr')], rows)
         self.assertEqual({'markOfMastery': 4, 'marksOnGun': 2,
                           'damageRating': 8642,

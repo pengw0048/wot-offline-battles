@@ -447,9 +447,10 @@ def _canonical_equipment(value):
             contract = equipment_mechanics._validate_contract(raw)
         except (TypeError, ValueError):
             return None
+        # #1513 handExtinguishers has local ID 0 and compact descriptor 251.
         equipment_id = contract['id']
         compact_descriptor = contract['compactDescr']
-        if (equipment_id <= 0 or compact_descriptor <= 0 or
+        if (equipment_id < 0 or compact_descriptor <= 0 or
                 equipment_id in ids or
                 compact_descriptor in compact_descriptors):
             return None

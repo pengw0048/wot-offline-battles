@@ -20,15 +20,30 @@ if __package__ in (None, ""):
     import core
     import error_reports
     import i18n
+    import gold_shop
+    import save_ledger
+    import save_slots
     import vehicle_editor_ui
     import vehicle_overlays
 else:
     from . import (
-        bot_lineup_profiles, bot_lineup_ui, core, error_reports, i18n,
-        vehicle_editor_ui, vehicle_overlays)
+        bot_lineup_profiles, bot_lineup_ui, core, error_reports, gold_shop,
+        i18n, save_ledger, save_slots, vehicle_editor_ui, vehicle_overlays)
 
 
-LAUNCHER_VERSION = "0.6.14"
+# The three balances a save carries, in the order the panel shows them.
+_BALANCE_LABELS = {
+    "credits": "Credits",
+    "gold": "Gold",
+    "freeXP": "Free experience",
+}
+
+_SHOP_HELP = (
+    "Add a gold or reward vehicle to this save for free. It arrives on the "
+    "next game startup. Owned or queued vehicles cannot be added twice. "
+    "Close the game before adding vehicles.")
+
+LAUNCHER_VERSION = "0.7.0"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
 
 _CHINESE = {
@@ -105,6 +120,94 @@ _CHINESE = {
         "无法移除本机车辆属性方案：%s",
     "Vehicle profiles are available for the 0.9.22 client.":
         "车辆属性方案仅适用于 0.9.22 客户端。",
+    "Saves": "存档",
+    "Save": "存档",
+    "Default save": "默认存档",
+    "New save...": "新建存档…",
+    "Rename save...": "重命名存档…",
+    "Delete save...": "删除存档…",
+    "New save": "新建存档",
+    "Rename save": "重命名存档",
+    "Save name:": "存档名称：",
+    "Account": "账号",
+    "Credits": "银币",
+    "Gold": "金币",
+    "Free experience": "自由经验",
+    "Apply": "应用",
+    "Edit this save's balances and battle earnings. Before the first "
+    "game, these are its starting funds. Close the game before editing.":
+        "设置此存档的余额和战斗收益。首次进入游戏前，这些数值就是初始资金；修改前请关闭游戏。",
+    "Apply balances": "应用余额",
+    "Customize save...": "自定义存档…",
+    "Customize save: %s": "自定义存档：%s",
+    "Close": "关闭",
+    "Earnings multiplier": "收益倍数",
+    "The earnings multiplier must be a number.": "收益倍数必须是数字。",
+    "The earnings multiplier must be between %s and %s.":
+        "收益倍数必须在 %s 到 %s 之间。",
+    "The earnings multiplier could not be saved: %s": "收益倍数保存失败：%s",
+    "Earnings multiplier saved: %sx": "收益倍数已保存：%s 倍",
+    "Reload": "重新读取",
+    "These are the selected save's balances. Gold cannot be earned offline, "
+    "so this is where a save gets it. Close the game before changing them.":
+        "这是当前选中存档的余额。离线状态下无法赚取金币，因此金币在这里设置。"
+        "修改前请先关闭游戏。",
+    "Start this save in the game once before changing its balances.":
+        "请先在游戏里启动一次该存档，然后再修改余额。",
+    "Balances saved: %s": "余额已保存：%s",
+    "The balances could not be saved: %s": "余额保存失败：%s",
+    "The balances could not be read: %s": "余额读取失败：%s",
+    "A balance must be a whole number.": "余额必须是整数。",
+    "Garage vehicles": "车库坦克",
+    "Add to garage": "添加到车库",
+    "Gold and reward vehicle": "金币及奖励坦克",
+    "queued": "待添加",
+    "%s - tier %d": "%s - %d级",
+    "%s - tier %d (%s)": "%s - %d级（%s）",
+    "Add a gold or reward vehicle to this save for free. It arrives on the "
+    "next game startup. Owned or queued vehicles cannot be added twice. "
+    "Close the game before adding vehicles.":
+        "免费向此存档添加金币或奖励坦克，下次进入游戏时放入车库。已拥有或待添加的坦克不能重复添加；操作前请关闭游戏。",
+    "Added %s to the queue. It arrives on the next game startup.":
+        "已将 %s 加入待添加列表，下次进入游戏时放入车库。",
+    "The vehicle could not be added: %s": "添加失败：%s",
+    "Shop": "商店",
+    "Gold vehicle": "金币坦克",
+    "Buy vehicle": "购买坦克",
+    "Every vehicle this client prices in gold, including the reward tanks the "
+    "game's own shop never sold. A bought vehicle arrives the next time the "
+    "game starts this save. Close the game before buying.":
+        "这个客户端里所有标价金币的坦克，包括游戏商店从来不卖的奖励车。"
+        "买下的坦克会在下次用该存档进入游戏时到账。购买前请先关闭游戏。",
+    "This save does not yet list the vehicles it owns. Start the game once "
+    "on it and the shop can sell to it again.":
+        "这个存档还没有记录自己拥有哪些坦克。用它进一次游戏，商店就能继续卖了。",
+    "owned": "已拥有",
+    "bought": "已购买",
+    "%s - tier %d - %d gold": "%s - %d级 - %d金币",
+    "%s - tier %d - %d gold (%s)": "%s - %d级 - %d金币（%s）",
+    "The gold vehicles could not be listed: %s": "金币坦克列表读取失败：%s",
+    "Select a vehicle to buy.": "请先选择要购买的坦克。",
+    "Bought %s. It arrives the next time the game starts this save.":
+        "已购买 %s，下次用该存档进入游戏时到账。",
+    "The vehicle could not be bought: %s": "购买失败：%s",
+    "New account": "新账号",
+    "Fully unlocked": "全解锁",
+    "Save type": "存档类型",
+    "Start '%s' as a new World of Tanks account?\n\n"
+    "Yes: the tier 1 starter tanks, 100000 credits and an empty tech tree. "
+    "Everything else is researched and bought in the garage.\n\n"
+    "No: every vehicle, module and consumable is already owned.":
+        "把存档“%s”作为全新的坦克世界账号开始吗？\n\n"
+        "是：只有一级初始坦克、100000 银币，科技树全部未解锁，其余全部在车库里研发和购买。\n\n"
+        "否：所有坦克、模块和消耗品一开始就已拥有。",
+    "Delete save?": "删除存档？",
+    "Delete save '%s'? Its garage, crew, account settings and battle "
+    "results are removed permanently.":
+        "确定删除存档“%s”吗？它的车库、乘员、账号设置和战斗记录将被永久删除。",
+    "Each save keeps its own garage, crew, account settings and battle "
+    "results. The selected save is the one the game starts with.":
+        "每个存档有独立的车库、乘员、账号设置和战斗记录。启动游戏时使用当前选中的存档。",
     "Repair": "修复",
     "Repair startup (keep saved data)": "修复启动问题（保留存档）",
     "Normal client stuck loading? Clean preferences...":
@@ -537,12 +640,142 @@ class LauncherWindow(object):
 
         self.tools_tabs = self._ttk.Notebook(frame)
         self.tools_tabs.grid(row=3, column=0, sticky="we", pady=(0, 8))
+        self.save_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.save_dialog = tk.Toplevel(self.root)
+        self.save_dialog.withdraw()
+        self.save_dialog.transient(self.root)
+        self.save_dialog.protocol("WM_DELETE_WINDOW", self._close_save_dialog)
+        self.account_panel = tk.LabelFrame(self.save_dialog, padx=10, pady=10)
+        self.account_panel.pack(fill="x", padx=12, pady=(12, 6))
+        self.shop_panel = tk.LabelFrame(self.save_dialog, padx=10, pady=10)
+        self.shop_panel.pack(fill="x", padx=12, pady=6)
+        self.save_dialog_feedback = tk.Label(
+            self.save_dialog, text="", anchor="w", justify="left", wraplength=620)
+        self.save_dialog_feedback.pack(fill="x", padx=12, pady=6)
+        self.close_save_dialog_button = tk.Button(
+            self.save_dialog, text="", command=self._close_save_dialog)
+        self.close_save_dialog_button.pack(anchor="e", padx=12, pady=(0, 12))
         self.vehicle_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.bot_lineup_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
         self.repair_panel = tk.Frame(self.tools_tabs, padx=10, pady=10)
+        self.tools_tabs.add(self.save_panel, text="")
         self.tools_tabs.add(self.vehicle_panel, text="")
         self.tools_tabs.add(self.bot_lineup_panel, text="")
         self.tools_tabs.add(self.repair_panel, text="")
+
+        self._save_slot_records = []
+        self._save_slot_id_by_label = {}
+        self._save_slot_id = str(
+            settings.get("save_slot") or save_slots.DEFAULT_SLOT_ID)
+        if not save_slots.valid_slot_id(self._save_slot_id):
+            self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+        self.save_slot_label = tk.Label(self.save_panel, text="")
+        self.save_slot_label.grid(row=0, column=0, sticky="w")
+        self.save_slot = tk.StringVar(value="")
+        self.save_slot_box = self._ttk.Combobox(
+            self.save_panel, textvariable=self.save_slot, values=(),
+            state="readonly", width=40)
+        self.save_slot_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.save_slot_box.bind(
+            "<<ComboboxSelected>>", self._save_slot_selected)
+        save_actions = tk.Frame(self.save_panel)
+        save_actions.grid(
+            row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.customize_save_button = tk.Button(
+            save_actions, text="", command=self._open_save_dialog)
+        self.customize_save_button.pack(side="left", fill="x", expand=True)
+        self.new_save_slot_button = tk.Button(
+            save_actions, text="", command=self._new_save_slot)
+        self.new_save_slot_button.pack(side="left", fill="x", expand=True)
+        self.rename_save_slot_button = tk.Button(
+            save_actions, text="", command=self._rename_save_slot)
+        self.rename_save_slot_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.delete_save_slot_button = tk.Button(
+            save_actions, text="", command=self._delete_save_slot)
+        self.delete_save_slot_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.save_help_label = tk.Label(
+            self.save_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.save_help_label.grid(
+            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self.save_panel.grid_columnconfigure(1, weight=1)
+
+        # Gold is the one currency an offline account can never earn, so the
+        # amount a save has is a decision rather than a result.
+        self.balance_entries = {}
+        self.balance_labels = {}
+        for row, name in enumerate(save_ledger.CURRENCIES):
+            label = tk.Label(self.account_panel, text="")
+            label.grid(row=row, column=0, sticky="w", pady=(0, 4))
+            self.balance_labels[name] = label
+            entry = tk.Entry(self.account_panel, width=16)
+            entry.grid(row=row, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
+            self.balance_entries[name] = entry
+        # What this save multiplies its battle earnings by.  It belongs to the
+        # launcher's own save record rather than to the client's state, so it
+        # can be set on a save that has never been started.
+        self.earnings_label = tk.Label(self.account_panel, text="")
+        self.earnings_label.grid(
+            row=len(save_ledger.CURRENCIES), column=0, sticky="w", pady=(0, 4))
+        earnings_row = tk.Frame(self.account_panel)
+        earnings_row.grid(
+            row=len(save_ledger.CURRENCIES), column=1, sticky="w",
+            padx=(6, 0), pady=(0, 4))
+        self.earnings_entry = tk.Entry(earnings_row, width=8)
+        self.earnings_entry.pack(side="left")
+        self.apply_earnings_button = tk.Button(
+            earnings_row, text="", command=self._apply_earnings)
+        self.apply_earnings_button.pack(side="left", padx=(6, 0))
+        account_actions = tk.Frame(self.account_panel)
+        account_actions.grid(
+            row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
+            sticky="we", pady=(6, 0))
+        self.apply_balances_button = tk.Button(
+            account_actions, text="", command=self._apply_balances)
+        self.apply_balances_button.pack(side="left", fill="x", expand=True)
+        self.reload_balances_button = tk.Button(
+            account_actions, text="", command=self._refresh_balances)
+        self.reload_balances_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.account_help_label = tk.Label(
+            self.account_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.account_help_label.grid(
+            row=len(save_ledger.CURRENCIES) + 2, column=0, columnspan=2,
+            sticky="we", pady=(8, 0))
+        self.account_panel.grid_columnconfigure(1, weight=1)
+
+        # 145 of the 196 vehicles #1513 prices in gold are marked notInShop:
+        # reward tanks the retail shop never sold and no tech tree leads to.
+        # This is the only place a player can reach them.
+        self._gold_offers = []
+        self._gold_offer_by_label = {}
+        self.gold_vehicle_label = tk.Label(self.shop_panel, text="")
+        self.gold_vehicle_label.grid(row=0, column=0, sticky="w")
+        self.gold_vehicle = tk.StringVar(value="")
+        self.gold_vehicle_box = self._ttk.Combobox(
+            self.shop_panel, textvariable=self.gold_vehicle, values=(),
+            state="readonly", width=48)
+        self.gold_vehicle_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.gold_vehicle_box.bind("<<ComboboxSelected>>", self._update_vehicle_add_button)
+        shop_actions = tk.Frame(self.shop_panel)
+        shop_actions.grid(
+            row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.buy_gold_vehicle_button = tk.Button(
+            shop_actions, text="", command=self._buy_gold_vehicle)
+        self.buy_gold_vehicle_button.pack(side="left", fill="x", expand=True)
+        self.refresh_gold_shop_button = tk.Button(
+            shop_actions, text="", command=self._refresh_gold_shop)
+        self.refresh_gold_shop_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.shop_help_label = tk.Label(
+            self.shop_panel, text="", anchor="w", justify="left",
+            wraplength=620)
+        self.shop_help_label.grid(
+            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self.shop_panel.grid_columnconfigure(1, weight=1)
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
             settings.get("bot_lineup_profiles"))
@@ -633,20 +866,6 @@ class LauncherWindow(object):
             self.log_panel, height=10, width=72, state="disabled",
                                 wrap="none")
         self.log_view.pack(fill="both", expand=True)
-        self.author_text = tk.StringVar(value=(
-            "作者：伪红学家  Bilibili：@tiancaihb  GitHub: "
-            "https://github.com/pengw0048/wot-offline-battles"))
-        self.author_entry = tk.Entry(
-            frame, textvariable=self.author_text, state="readonly",
-            relief="flat", borderwidth=0, highlightthickness=0)
-        self.author_entry.grid(row=5, column=0, sticky="we", pady=(8, 0))
-        self.qq_group_text = tk.StringVar(value=(
-            "坦克世界QQ群：1108778562、302519768"))
-        self.qq_group_entry = tk.Entry(
-            frame, textvariable=self.qq_group_text, state="readonly",
-            relief="flat", borderwidth=0, highlightthickness=0)
-        self.qq_group_entry.grid(
-            row=6, column=0, sticky="we", pady=(2, 0))
         self.distribution_notice_text = tk.StringVar(value=(
             "本mod免费传播、开源、欢迎二创，使用无需付费，售卖与本人无关，"
             "仅供个人学习交流"))
@@ -655,7 +874,7 @@ class LauncherWindow(object):
             state="readonly", relief="flat", borderwidth=0,
             highlightthickness=0)
         self.distribution_notice_entry.grid(
-            row=7, column=0, sticky="we", pady=(2, 0))
+            row=5, column=0, sticky="we", pady=(8, 0))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(4, weight=1)
 
@@ -704,6 +923,33 @@ class LauncherWindow(object):
         self.network_help_label.config(text=self._t(
             "To host: start the server, then join the game. Other players use "
             "a LAN address shown in the log."))
+        self.tools_tabs.tab(self.save_panel, text=self._t("Saves"))
+        self.save_slot_label.config(text=self._t("Save"))
+        self.customize_save_button.config(text=self._t("Customize save..."))
+        self.close_save_dialog_button.config(text=self._t("Close"))
+        self.new_save_slot_button.config(text=self._t("New save..."))
+        self.rename_save_slot_button.config(text=self._t("Rename save..."))
+        self.delete_save_slot_button.config(text=self._t("Delete save..."))
+        self.save_help_label.config(text=self._t(
+            "Each save keeps its own garage, crew, account settings and "
+            "battle results. The selected save is the one the game starts "
+            "with."))
+        self.account_panel.config(text=self._t("Account"))
+        for name, label in self.balance_labels.items():
+            label.config(text=self._t(_BALANCE_LABELS[name]))
+        self.apply_balances_button.config(text=self._t("Apply balances"))
+        self.reload_balances_button.config(text=self._t("Reload"))
+        self.earnings_label.config(text=self._t("Earnings multiplier"))
+        self.apply_earnings_button.config(text=self._t("Apply"))
+        self.account_help_label.config(text=self._t(
+            "Edit this save's balances and battle earnings. Before the first "
+            "game, these are its starting funds. Close the game before editing."))
+        self.shop_panel.config(text=self._t("Garage vehicles"))
+        self.gold_vehicle_label.config(text=self._t("Gold and reward vehicle"))
+        self.buy_gold_vehicle_button.config(text=self._t("Add to garage"))
+        self.refresh_gold_shop_button.config(text=self._t("Reload"))
+        self.shop_help_label.config(text=self._t(_SHOP_HELP))
+        self._refresh_save_slots()
         self.tools_tabs.tab(
             self.vehicle_panel, text=self._t("Vehicle modifier"))
         self.tools_tabs.tab(
@@ -805,6 +1051,7 @@ class LauncherWindow(object):
         self._selected_client = status["client"]
         self._refresh_profiles(status)
         self._refresh_bot_lineup_profiles()
+        self._refresh_save_slots(status)
         self._update_action_controls()
         self._refresh_mode()
         return status
@@ -920,6 +1167,409 @@ class LauncherWindow(object):
         self._update_action_controls()
         self._save_settings()
 
+    def _save_slot_label(self, record):
+        """Return one unambiguous list entry for a save.
+
+        Two saves may carry the same name, and the default save has no name
+        until the player renames it, so the label falls back to the directory
+        id whenever the name alone would not identify the save.
+        """
+        def display_name(row):
+            if (row["id"] == save_slots.DEFAULT_SLOT_ID and
+                    row["name"] == save_slots.DEFAULT_SLOT_ID):
+                return self._t("Default save")
+            return row["name"]
+
+        name = display_name(record)
+        same_name = sum(
+            1 for row in self._save_slot_records
+            if display_name(row) == name)
+        if same_name > 1:
+            name = "%s (%s)" % (name, record["id"])
+        return "%s - %s" % (name, self._t(
+            "New account" if record.get("mode") == save_slots.MODE_NEW_ACCOUNT
+            else "Fully unlocked"))
+
+    def _refresh_save_slots(self, status=None):
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            records = save_slots.list_slots(game_root or None)
+        except save_slots.SaveSlotError as error:
+            # Without APPDATA a save still needs the game folder to live in.
+            # Keep the launcher usable and let the player pick a folder first.
+            if hasattr(self, "log_view"):
+                self._log("Saves could not be listed: %s" % error)
+            records = []
+        self._save_slot_records = list(records)
+        self._save_slot_id_by_label = {}
+        values = []
+        for record in self._save_slot_records:
+            label = self._save_slot_label(record)
+            self._save_slot_id_by_label[label] = record["id"]
+            values.append(label)
+        self.save_slot_box.config(values=tuple(values))
+        selected = [label for label, slot_id
+                    in self._save_slot_id_by_label.items()
+                    if slot_id == self._save_slot_id]
+        if selected:
+            self.save_slot.set(selected[0])
+        elif values:
+            # The selected save was deleted outside the launcher.  Fall back to
+            # the default rather than starting the game with a save id that no
+            # longer resolves to any progress.
+            self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+            self.save_slot.set(values[0])
+        else:
+            self.save_slot.set("")
+        self.delete_save_slot_button.config(
+            state=("disabled"
+                   if self._save_slot_id == save_slots.DEFAULT_SLOT_ID
+                   else "normal"))
+        # The balances and what they can buy belong to the selected save, so
+        # both follow it.
+        if hasattr(self, "balance_entries"):
+            self._refresh_balances(status)
+            self._refresh_earnings()
+            self._refresh_gold_shop(status)
+        return tuple(values)
+
+    def _save_slot_selected(self, unused_event=None):
+        slot_id = self._save_slot_id_by_label.get(self.save_slot.get())
+        if slot_id is None or slot_id == self._save_slot_id:
+            return False
+        self._save_slot_id = slot_id
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Selected save '%s'." % self.save_slot.get())
+        return True
+
+    def _ask_save_slot_name(self, title, current=None):
+        from tkinter import simpledialog
+
+        return simpledialog.askstring(
+            self._t(title), self._t("Save name:"), initialvalue=current)
+
+    def _open_save_dialog(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        self._refresh_save_slots()
+        self.save_dialog.title(self._t("Customize save: %s") % self.save_slot.get())
+        self.save_dialog_feedback.config(text="")
+        self.save_dialog.deiconify()
+        self.save_dialog.grab_set()
+        self.save_dialog.lift()
+        return True
+
+    def _close_save_dialog(self):
+        self.save_dialog.grab_release()
+        self.save_dialog.withdraw()
+
+    def _refresh_balances(self, status=None):
+        """Show the selected save's balances, or say why there are none.
+
+        Before the first game these are the save's initial balances. Once a
+        garage exists the same controls edit its actual persisted wallet.
+        """
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            balances = save_ledger.read_balances(
+                self._save_slot_id, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            if hasattr(self, "log_view"):
+                self._log("The balances could not be read: %s" % error)
+            balances = None
+        editable = balances is not None
+        for name, entry in self.balance_entries.items():
+            entry.config(state="normal")
+            entry.delete(0, "end")
+            if editable:
+                entry.insert(0, str(balances.get(name, 0)))
+            else:
+                entry.config(state="disabled")
+        state = "normal" if editable else "disabled"
+        self.apply_balances_button.config(state=state)
+        return editable
+
+    def _selected_save_record(self):
+        for record in getattr(self, "_save_slot_records", ()):
+            if record["id"] == self._save_slot_id:
+                return record
+        return None
+
+    def _refresh_earnings(self):
+        """Show the selected save's earnings multiplier as a plain number.
+
+        It is stored as a whole percentage so the two runtimes that read the
+        file agree on it, and shown the way a player says it: 2.5.
+        """
+        record = self._selected_save_record()
+        percent = (save_slots.DEFAULT_EARNINGS_PERCENT if record is None
+                   else record["earnings_percent"])
+        self.earnings_entry.delete(0, "end")
+        self.earnings_entry.insert(0, self._earnings_text(percent))
+        return percent
+
+    @staticmethod
+    def _earnings_text(percent):
+        text = "%.2f" % (percent / 100.0)
+        return text.rstrip("0").rstrip(".") or "0"
+
+    def _apply_earnings(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        raw = self.earnings_entry.get().strip().rstrip("xX\u00d7")
+        try:
+            percent = int(round(float(raw) * 100))
+        except ValueError:
+            self._log("The earnings multiplier must be a number.")
+            self._refresh_earnings()
+            return False
+        if not (save_slots.MIN_EARNINGS_PERCENT <= percent <=
+                save_slots.MAX_EARNINGS_PERCENT):
+            self._log("The earnings multiplier must be between %s and %s."
+                      % (self._earnings_text(save_slots.MIN_EARNINGS_PERCENT),
+                         self._earnings_text(save_slots.MAX_EARNINGS_PERCENT)))
+            self._refresh_earnings()
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            save_slots.set_earnings_percent(
+                self._save_slot_id, percent, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("The earnings multiplier could not be saved: %s" % error)
+            self._refresh_earnings()
+            return False
+        self._save_slot_records = save_slots.list_slots(game_root or None)
+        self._refresh_earnings()
+        self._log("Earnings multiplier saved: %sx"
+                  % self._earnings_text(percent))
+        return True
+
+    def _apply_balances(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        wanted = {}
+        for name, entry in self.balance_entries.items():
+            raw = entry.get().strip()
+            if not raw:
+                continue
+            try:
+                wanted[name] = int(raw)
+            except ValueError:
+                self._log("A balance must be a whole number.")
+                return False
+        if not wanted:
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            balances = save_ledger.write_balances(
+                self._save_slot_id, wanted, game_root or None)
+        except save_ledger.SaveLedgerError as error:
+            self._log("The balances could not be saved: %s" % error)
+            self._refresh_balances()
+            return False
+        self._refresh_balances()
+        self._log("Balances saved: %s" % ", ".join(
+            "%s %d" % (self._t(_BALANCE_LABELS[name]), balances[name])
+            for name in save_ledger.CURRENCIES))
+        return True
+
+    def _gold_offer_label(self, offer):
+        """Return one shop row: what it is, what it costs, and its state."""
+        if offer["owned"]:
+            state = self._t("owned")
+        elif offer["pending"]:
+            state = self._t("queued")
+        else:
+            state = ""
+        if state:
+            return self._t("%s - tier %d (%s)") % (
+                offer["label"], offer["level"], state)
+        return self._t("%s - tier %d") % (offer["label"], offer["level"])
+
+    def _gold_catalogue(self, game_root):
+        """Return the client's gold vehicles, read once per game folder.
+
+        Reading them opens the client's package and parses every nation's
+        roster, and nothing about an installed client changes while the
+        launcher runs.
+        """
+        cached_root, cached = getattr(self, "_gold_catalogue_cache", (None, None))
+        if cached is not None and cached_root == game_root:
+            return cached
+        catalogue = vehicle_overlays.list_gold_vehicles(game_root)
+        self._gold_catalogue_cache = (game_root, catalogue)
+        return catalogue
+
+    def _refresh_gold_shop(self, status=None):
+        game_root = (status or {}).get("path") or self.game_root.get().strip()
+        try:
+            offers = gold_shop.list_offers(
+                self._save_slot_id, game_root or None,
+                catalogue=self._gold_catalogue(game_root or None))
+        except (gold_shop.GoldShopError, save_slots.SaveSlotError,
+                vehicle_overlays.VehicleOverlayError) as error:
+            if hasattr(self, "log_view"):
+                self._log("The gold vehicles could not be listed: %s" % error)
+            offers = []
+        self._gold_offers = offers
+        self._gold_offer_by_label = {}
+        values = []
+        for offer in offers:
+            label = self._gold_offer_label(offer)
+            self._gold_offer_by_label[label] = offer["name"]
+            values.append(label)
+        self.gold_vehicle_box.config(values=tuple(values))
+        if self.gold_vehicle.get() not in self._gold_offer_by_label:
+            self.gold_vehicle.set(values[0] if values else "")
+        self.shop_help_label.config(text=self._t(_SHOP_HELP))
+        self._update_vehicle_add_button()
+        return tuple(values)
+
+    def _update_vehicle_add_button(self, unused_event=None):
+        selected = self._gold_offer_by_label.get(self.gold_vehicle.get())
+        available = any(row["name"] == selected and row["available"]
+                        for row in self._gold_offers)
+        self.buy_gold_vehicle_button.config(state="normal" if available else "disabled")
+
+    def _buy_gold_vehicle(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        name = self._gold_offer_by_label.get(self.gold_vehicle.get())
+        if name is None:
+            self._log("Select a vehicle to buy.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            bought = gold_shop.add_vehicle(
+                self._save_slot_id, name, game_root or None)
+        except (gold_shop.GoldShopError, save_slots.SaveSlotError,
+                vehicle_overlays.VehicleOverlayError) as error:
+            self._log(self._t("The vehicle could not be added: %s") % error)
+            return False
+        self._refresh_balances()
+        self._refresh_gold_shop()
+        self._log(
+            self._t("Added %s to the queue. It arrives on the next game startup.")
+            % bought["label"])
+        return True
+
+    def _ask_save_slot_mode(self, name):
+        """Ask which account a new save starts from, or None to cancel.
+
+        The two modes are the whole difference between the historical garage
+        and a career, so the choice is made once, when the save is created,
+        and never changes afterwards.
+        """
+        from tkinter import messagebox
+
+        answer = messagebox.askyesnocancel(
+            self._t("Save type"),
+            self._t(
+                "Start '%s' as a new World of Tanks account?\n\n"
+                "Yes: the tier 1 starter tanks, 100000 credits and an empty "
+                "tech tree. Everything else is researched and bought in the "
+                "garage.\n\n"
+                "No: every vehicle, module and consumable is already owned.")
+            % name)
+        if answer is None:
+            return None
+        return (save_slots.MODE_NEW_ACCOUNT if answer
+                else save_slots.MODE_UNLOCKED)
+
+    def _confirm_delete_save_slot(self, label):
+        from tkinter import messagebox
+
+        return messagebox.askyesno(
+            self._t("Delete save?"),
+            self._t("Delete save '%s'? Its garage, crew, account settings "
+                    "and battle results are removed permanently.") % label,
+            icon="warning")
+
+    def _selected_save_slot_record(self):
+        for record in self._save_slot_records:
+            if record["id"] == self._save_slot_id:
+                return record
+        return None
+
+    def _new_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        game_root = self.game_root.get().strip()
+        raw_name = self._ask_save_slot_name("New save")
+        if raw_name is None:
+            return False
+        mode = self._ask_save_slot_mode(raw_name.strip() or self._t("New save"))
+        if mode is None:
+            return False
+        try:
+            record = save_slots.create_slot(
+                raw_name, mode, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not create the save: %s" % error)
+            return False
+        self._save_slot_id = record["id"]
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Created save '%s'." % record["name"])
+        return True
+
+    def _rename_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        record = self._selected_save_slot_record()
+        if record is None:
+            self._log("Select a save before renaming it.")
+            return False
+        game_root = self.game_root.get().strip()
+        current = ("" if record["name"] == record["id"] else record["name"])
+        raw_name = self._ask_save_slot_name("Rename save", current)
+        if raw_name is None:
+            return False
+        try:
+            renamed = save_slots.rename_slot(
+                record["id"], raw_name, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not rename the save: %s" % error)
+            return False
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Renamed save to '%s'." % renamed["name"])
+        return True
+
+    def _delete_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        if core.game_is_running():
+            self._log("Close World of Tanks before deleting a save.")
+            return False
+        record = self._selected_save_slot_record()
+        if record is None or record["id"] == save_slots.DEFAULT_SLOT_ID:
+            self._log("The default save cannot be deleted.")
+            return False
+        label = self.save_slot.get()
+        if not self._confirm_delete_save_slot(label):
+            self._log("Save deletion was cancelled.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            save_slots.delete_slot(record["id"], game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log("Could not delete the save: %s" % error)
+            return False
+        self._save_slot_id = save_slots.DEFAULT_SLOT_ID
+        self._refresh_save_slots()
+        self._save_settings()
+        self._log("Deleted save '%s'." % record["name"])
+        return True
+
     def _refresh_bot_lineup_profiles(self):
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
             self._bot_lineup_store)
@@ -1031,6 +1681,7 @@ class LauncherWindow(object):
             self.log_view.insert("end", message.rstrip() + "\n")
             self.log_view.see("end")
             self.log_view.config(state="disabled")
+            self.save_dialog_feedback.config(text=self._t(message.rstrip()))
 
         self.root.after(0, append)
 
@@ -1366,6 +2017,7 @@ class LauncherWindow(object):
             "vehicle_profile": self.vehicle_profile.get().strip(),
             "bot_lineup_profile": self.bot_lineup_profile.get().strip(),
             "bot_lineup_profiles": self._bot_lineup_store,
+            "save_slot": self._save_slot_id,
             "language": self.language_preference,
             "free_notice_seen": self._free_notice_seen,
             COLLECT_CRASH_REPORTS_SETTING:
@@ -1848,8 +2500,9 @@ class LauncherWindow(object):
                             prepared["installedMembers"],
                             "" if prepared["installedMembers"] == 1 else "s"))
                 self._log(core.ensure_0_9_22_preferences_isolation(game_root))
-            for path in core.write_settings(game_root, session["client"],
-                                            session["mode"], host, port, name):
+            for path in core.write_settings(
+                    game_root, session["client"], session["mode"], host, port,
+                    name, self._save_slot_id):
                 self._log("Wrote %s" % path)
             if session["needs_server"]:
                 start_options = {
