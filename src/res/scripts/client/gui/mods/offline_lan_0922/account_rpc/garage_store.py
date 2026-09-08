@@ -148,6 +148,26 @@ def _ledger_payload(snapshot):
     }
 
 
+def _contained(refused, name, operation, garage_error):
+    """Run one settlement step so a refusal costs that step and nothing else.
+
+    A battle is worth what it is worth.  Every step of the settlement below
+    the award touches one vehicle's own state -- its crew, its repair bill,
+    its rounds, its consumables -- and any of them can refuse for a reason
+    the player cannot see: a fitting this client will not rebuild, a crew
+    descriptor it rejects, a vehicle the garage no longer holds.  None of
+    that may cost the player the credits and experience the battle earned,
+    so each step is attempted on its own and its refusal recorded by name.
+    Every step raises before it mutates the staged snapshot, so a refusal
+    leaves nothing half applied.
+    """
+    try:
+        return operation()
+    except garage_error as error:
+        refused.append('%s (%s)' % (name, error))
+        return None
+
+
 def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
     """Attempt each enabled service independently and record actual debits."""
     costs = economy.service_costs(None)
@@ -667,6 +687,7 @@ class GarageStore(object):
                     _int_value(vehicle_type_compact_descr)), 0)
                 result['xp_by_tankman'] = dict(
                     self._session_crew_xp.get(receipt_id, {}))
+                result.setdefault('refused', [])
                 result['applied'] = False
                 return result
 
@@ -692,8 +713,26 @@ class GarageStore(object):
             experience_percent=experience_percent)
         battle_xp = awarded.get('xp', battle_xp) if rewards else (
             max(0, int(battle_xp or 0)) * experience_percent // 100)
-        result = state.award_battle_crew_xp(
-            vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
+        # What the battle earned does not depend on the vehicle it was
+        # fought in beyond the multipliers above, so no per-vehicle step may
+        # take the award away.  Each of them is contained; the award is not.
+        refused = []
+        result = {
+            'accelerated': False,
+            'vehicle_id': next((
+                _int_value(record.get('id')) for record in _records(staged)
+                if _int_value(record.get('vehicleTypeCompactDescr')) ==
+                _int_value(vehicle_type_compact_descr)), 0),
+            'weakest_tankman_id': 0,
+            'xp_by_tankman': {},
+        }
+        crew = _contained(
+            refused, 'crew experience',
+            lambda: state.award_battle_crew_xp(
+                vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag),
+            GarageError)
+        if crew is not None:
+            result.update(crew)
         # Crew training owns crewXpFactor; bank the separate vehicle XP
         # bonus exactly once without multiplying the crew award again.
         premium_factor = economy.premium_vehicle_xp_factor_100(
@@ -702,18 +741,25 @@ class GarageStore(object):
             awarded[name] += economy.premium_xp_bonus(
                 awarded[name], premium_factor)
         if health is not None:
-            result['repair'] = state.settle_battle_damage(
-                vehicle_type_compact_descr, health)
+            result['repair'] = _contained(
+                refused, 'repair bill',
+                lambda: state.settle_battle_damage(
+                    vehicle_type_compact_descr, health), GarageError)
         if shells_fired:
-            result['shells_spent'] = state.settle_battle_ammunition(
-                vehicle_type_compact_descr, shells_fired)
+            result['shells_spent'] = _contained(
+                refused, 'rounds fired',
+                lambda: state.settle_battle_ammunition(
+                    vehicle_type_compact_descr, shells_fired), GarageError)
         if equipment_used:
-            result['consumables_spent'] = state.settle_battle_consumables(
-                vehicle_type_compact_descr, equipment_used)
+            result['consumables_spent'] = _contained(
+                refused, 'consumables used',
+                lambda: state.settle_battle_consumables(
+                    vehicle_type_compact_descr, equipment_used), GarageError)
         if rewards is not None:
-            # The crew award and the credits it was earned beside share one
-            # JSON replacement, so a retried receipt can never bank one
-            # without the other.
+            # The award needs no vehicle record: the wallet and the vehicle's
+            # experience are both keyed by the type this battle was fought
+            # in.  It shares the crew award's one JSON replacement, so a
+            # retried receipt can never bank one without the other.
             result['earnings'] = state.award_battle_earnings(
                 vehicle_type_compact_descr, awarded,
                 accelerated=bool(result['accelerated']))
@@ -722,6 +768,10 @@ class GarageStore(object):
             result['awarded'] = dict(
                 (name, int(awarded.get(name, 0) or 0))
                 for name in ('credits', 'xp', 'free_xp'))
+        if refused:
+            _log('battle settlement refused %s for receipt %s; the award was '
+                 'banked anyway' % (', '.join(refused), receipt_id))
+        result['refused'] = list(refused)
         result['service_costs'] = _settle_automatically(
             state, int(result['vehicle_id']), auto_settings, GarageError)
         # Every other field of this result is plain JSON, and the store hands
@@ -945,12 +995,16 @@ class GarageStore(object):
                 vehicle_id = int(raw.get('vehicle_id', 0))
             except (TypeError, ValueError):
                 continue
-            if not receipt_id or vehicle_id <= 0:
+            if not receipt_id:
                 continue
             row = {
                 'receipt_id': receipt_id,
                 'accelerated': bool(raw.get('accelerated', False)),
-                'vehicle_id': vehicle_id,
+                # The receipt id is what makes this marker idempotent.  A
+                # settlement whose per-vehicle steps all refused still banked
+                # the award and still names no vehicle, so dropping the row
+                # for that would pay the same battle twice.
+                'vehicle_id': max(0, vehicle_id),
             }
             awarded = raw.get('awarded')
             if isinstance(awarded, dict):

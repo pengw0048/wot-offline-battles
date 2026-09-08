@@ -352,6 +352,63 @@ class EconomyRegressionTests(unittest.TestCase):
         self.assertEqual((200, 0), packed['autoLoadCost'])
         self.assertEqual((0, 50, 0), packed['autoEquipCost'])
 
+    def test_a_refused_vehicle_step_still_banks_what_the_battle_earned(self):
+        """A battle is worth what it is worth, whatever the tank has become.
+
+        The crew award, the repair bill, the rounds and the consumables each
+        settle one vehicle's own state and each can refuse -- a fitting this
+        client will not rebuild, a vehicle the garage no longer holds.  None
+        of them may cost the player the credits the battle earned.
+        """
+        record = self.stock['vehicles'][0]
+        record['settings'] = 14
+        record['eqs'] = [11001, 0, 0]
+        self.stock['inventoryItems'][10] = {20010: 30}
+        before = int(self.stock['wallet']['credits'])
+        store = self.stores.GarageStore(self.path)
+
+        # 59999 is no vehicle this garage holds, so every per-vehicle step
+        # refuses for the same reason a changed one would.
+        applied = store.apply_battle_crew_xp(
+            self.stock, 'refused:1:1', 59999, 100, 1,
+            tankmen_module=self.tankmen, vehicles_module=self.vehicles,
+            health=400, shells_fired={0: 2}, equipment_used=[11001],
+            auto_settings=(2, 4, 8),
+            rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
+
+        self.assertTrue(applied['applied'])
+        self.assertEqual({'credits': 1000, 'xp': 100, 'free_xp': 5},
+                         applied['awarded'])
+        self.assertEqual(before + 1000, self.stock['wallet']['credits'])
+        self.assertEqual(4, len(applied['refused']))
+        self.assertEqual({}, applied['xp_by_tankman'])
+        self.assertFalse(applied['accelerated'])
+        # The refusal is durable too: a retried receipt observes the marker
+        # rather than banking the award a second time.
+        retry = self.stores.GarageStore(self.path).apply_battle_crew_xp(
+            self.stock, 'refused:1:1', 59999, 100, 1,
+            tankmen_module=self.tankmen, vehicles_module=self.vehicles,
+            rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
+        self.assertFalse(retry['applied'])
+        self.assertEqual(before + 1000, self.stock['wallet']['credits'])
+
+    def test_one_refused_step_does_not_stop_the_others(self):
+        """Containment is per step, not per settlement."""
+        store = self.stores.GarageStore(self.path)
+        with mock.patch.object(self.garage.GarageState, 'settle_battle_damage',
+                               side_effect=self.garage.GarageError('refused')):
+            applied = store.apply_battle_crew_xp(
+                self.stock, 'partial:1:1', 50001, 100, 1,
+                tankmen_module=self.tankmen, vehicles_module=self.vehicles,
+                health=400,
+                rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
+
+        self.assertEqual(1, len(applied['refused']))
+        self.assertIn('repair bill', applied['refused'][0])
+        # The crew still trained and the wallet still moved.
+        self.assertTrue(applied['xp_by_tankman'])
+        self.assertEqual(1000, applied['awarded']['credits'])
+
     def test_mentor_uses_the_native_factor_for_other_crew_before_consumption(self):
         self.stock['vehicles'][0]['eqs'] = [11001, 0, 0]
         seen = []
