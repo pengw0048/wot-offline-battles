@@ -249,28 +249,44 @@ def quarantine_state_file(path, tag, copies=STATE_QUARANTINE_COPIES):
             break
     else:
         return None
+    # Make room first: a copy that is trimmed the moment it is written would
+    # leave the player with older evidence than the file just refused.
+    _trim_quarantine(path, tag, max(1, int(copies)) - 1)
     try:
         _copy_file(path, candidate)
     except (IOError, OSError):
         return None
-    _trim_quarantine(path, tag, copies)
     return candidate
 
 
 def _trim_quarantine(path, tag, copies):
-    """Drop the oldest quarantined copies of one file beyond ``copies``."""
+    """Drop the oldest quarantined copies of one file beyond ``copies``.
+
+    Ordered by write time rather than by name: a trimmed name becomes free
+    again, so the next copy can take it back and name order stops matching
+    the order the copies were made in.
+    """
     directory = os.path.dirname(path) or '.'
     base, extension = os.path.splitext(os.path.basename(path))
     prefix = '%s.%s-' % (base, tag)
+    rows = []
     try:
-        names = sorted(
-            name for name in os.listdir(directory)
-            if name.startswith(prefix) and name.endswith(extension or '.json'))
+        names = [name for name in os.listdir(directory)
+                 if name.startswith(prefix) and
+                 name.endswith(extension or '.json')]
     except (IOError, OSError):
         return
-    for name in names[:max(0, len(names) - max(1, int(copies)))]:
+    for name in names:
+        full_path = os.path.join(directory, name)
         try:
-            os.unlink(os.path.join(directory, name))
+            rows.append((os.path.getmtime(full_path), name, full_path))
+        except (IOError, OSError):
+            continue
+    rows.sort()
+    for unused_stamp, unused_name, full_path in rows[
+            :max(0, len(rows) - max(0, int(copies)))]:
+        try:
+            os.unlink(full_path)
         except (IOError, OSError):
             pass
 
