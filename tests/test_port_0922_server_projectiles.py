@@ -1048,6 +1048,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'target_team': 2, 'target_alive': True,
             'retired_target': False, 'damage': 100,
             'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
@@ -1098,6 +1099,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'target_team': 2, 'target_alive': True,
             'retired_target': False, 'damage': 100,
             'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
@@ -1139,6 +1141,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'target_team': 2, 'target_alive': True,
             'retired_target': False, 'damage': 910,
             'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
             'pose': (10.0, 1.0, 0.0), 'critical': critical,
             # The worker records HP actually lost, capped to the rack pool,
             # even when the source shell's module damage was 2000.
