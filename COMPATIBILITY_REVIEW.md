@@ -1056,6 +1056,108 @@ python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
   --components aiming,driver,contacts --rounds 3 --stage-timing
 ```
 
+A third experiment targets the heaviest remaining bounded calculation class:
+the horizontal world-collision controller inside `_resolve_bot_motion`. It
+ports `_check_horizontal_collision` and its numeric helpers, including pitched
+and rolled hull lanes, diagonal sweeps, clamped ray endpoints, terrain support
+and directional profiles, independent raised-wall checks, and ordered hit
+resolution. Python retains descriptor projection, actual engine queries,
+collision filters and destruction/recast operations. This is the inner sweep,
+not the entire motion resolver or a replacement for BigWorld physics.
+
+Two measurements separate computation throughput from the cost of that live
+boundary. Both retain the preceding production baseline and host environment.
+The computation measurement records the original Python controller's ordered
+engine/destruction leaves for the same 30-second scene: 5,038 sweeps and 82,273
+leaf requests. Each native tape is checked for exact query geometry, order and
+terminal result before registration. Python replay is also checked once before
+timing; C++ retains those checks during timing. The complete trace capture
+preserves all six workload snapshot families.
+
+| Recorded computation | Median CPU per 5,038-sweep pass |
+| --- | ---: |
+| Original Python controller with recorded leaf answers | 0.902043 s |
+| C++ controller with persistent numeric tapes, one bulk call | 0.002550 s |
+
+This is a 353.72x speedup and 99.72% reduction for the recorded controller.
+Five alternating pairs run in one CPython 2.7.18 process, with three corpus
+passes per Python sample and 300 per native sample, normalized per pass.
+Native timed samples last 0.763–0.792 s, avoiding a sub-millisecond timer claim.
+One-time native tape transfer, copy and validation costs another 0.124456 s.
+Both variants use preprojected descriptor extents. Python uses host
+`Math.Vector3` fakes; this measures controller logic and object plumbing,
+not isolated scalar arithmetic or exact Windows vector-object costs.
+Preknown leaf answers and persistent native tapes make this an optimistic
+computation estimate. It excludes live engine cost and ongoing marshalling;
+these tapes must never supply cached physics to a live battle.
+
+The actual adapter instead yields each original query to Python, retains hit
+objects and filters only on the Python stack, and resumes with owned numeric
+answers. Like the earlier driver prototype, continuation recomputes the C++
+prefix from saved answers without repeating engine calls. Every sweep drops
+its native job in `finally`. It neither removes collision checks nor changes
+destruction order. A three-round, rotating-order comparison, with nine fresh
+processes and no instrumentation, measures that integration separately:
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.236298 s | 11.138337–11.446382 s | 0.00% |
+| Previous A* + contacts + driving + aiming | 10.103238 s | 10.001199–10.181124 s | 10.08% |
+| Previous components + world controller | 10.650484 s | 10.629813–10.657850 s | 5.21% |
+
+All nine complete snapshots match exactly. The new boundary therefore adds
+about 0.55 s relative to the previous native control; its kernel throughput
+does not translate into an integration win. A separate one-round instrumented
+comparison also matches. The world stage grows from 1.344940 s in Python to
+2.196308 s with the adapter. Total native dispatches grow from 52,943 to
+145,292: 82,273 query continuations plus two owner calls per sweep. C++ prefix
+recomputation, Python object conversion, dispatch and retained leaves all remain
+costs. Instrumented totals include observer overhead and are not the primary
+speed estimate.
+
+In that instrumented Python run, the whole world stage takes 11.54% of loop
+CPU, including its leaves. Even making that entire stage free would save only
+that share. Making it free on top of the previous native control gives an
+optimistic 22.39% total reduction in this fixture. That bound includes removing
+leaf costs which the numeric port cannot actually remove. A 99.72% kernel
+reduction establishes adequate calculation throughput, but a 90% whole-loop
+target requires a much larger fraction of state and loop work to stay native
+with sufficiently cheap engine and publication boundaries. This experiment
+does not establish that such a complete migration reaches the target.
+
+The existing physical scenarios, executed by a Python 3 host runner, provide
+145 exact shadow traces and 75 tests passing through both the shadow and actual
+adapter. One additional source test
+replaces the entire terrain-profile helper with invented heights, so it remains
+source-only; it does not provide native leaf-contract evidence. The new world
+core also passes those checks with AddressSanitizer and UndefinedBehaviorSanitizer
+(`detect_leaks=0`, halt on error). The host bridges and unshipped x86 bridge
+build; the latter still imports only `KERNEL32.dll` and `msvcrt.dll`. Production
+source and shipping entry points remain unchanged. CPython 2.7 compiles all 97
+client modules and 12 portable experiment modules. The shared dispatcher's
+56-case A* regression also passes exact path and completion comparisons.
+Exact Windows #1513 loading,
+floating-point parity, real native-query cost and frame pacing remain unproved.
+
+Reproduce the new measurements after building the fixture and host module above:
+
+```bash
+"$FFI_PY27" tools/ffi_experiment/portable_workload.py \
+  --fixture /tmp/ffi-fixture.json --backend python \
+  --output /tmp/ffi-world-recording.json --world-trace-output /tmp/ffi-world-tapes.json
+"$FFI_PY27" tools/ffi_experiment/benchmark_world.py \
+  --fixture /tmp/ffi-fixture.json --module /tmp/ffi-host/offline_astar_native.so \
+  --trace /tmp/ffi-world-tapes.json --output /tmp/ffi-world-kernel.json \
+  --rounds 5 --loops 3 --native-loops 300
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json \
+  --components aiming,driver,contacts,world --control-components aiming,driver,contacts \
+  --rounds 3 --output /tmp/ffi-world-comparison
+tools/ffi_experiment/build_host.sh python3 /tmp/ffi-world-host3
+python3 tools/ffi_experiment/check_world_parity.py \
+  --module /tmp/ffi-world-host3/offline_astar_native.so
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;

@@ -32,6 +32,8 @@ def main():
                         help='also measure native A* without the extra components')
     parser.add_argument('--stage-timing', action='store_true')
     parser.add_argument('--components', default='')
+    parser.add_argument('--control-components', default='',
+                        help='also run a native variant with this component subset')
     args = parser.parse_args()
     if args.include_astar_control and not args.components:
         parser.error('--include-astar-control requires --components')
@@ -39,6 +41,8 @@ def main():
     backends = ['python', 'native'] + (['native-step'] if args.include_step else [])
     if args.include_astar_control:
         backends.append('native-astar')
+    if args.control_components:
+        backends.append('native-control')
     reference = None
     waiting = []
     records = []
@@ -49,13 +53,15 @@ def main():
             output = args.output / ('%02d-%s.json' % (repeat, backend))
             command = [args.python, str(HERE / 'portable_workload.py'),
                        '--fixture', args.fixture, '--backend',
-                       'native' if backend == 'native-astar' else backend,
+                       'native' if backend in ('native-astar', 'native-control') else backend,
                        '--module', args.module, '--map', args.map,
                        '--scenario', args.scenario, '--seconds', str(args.seconds),
                        '--fps', str(args.fps), '--output', str(output)]
             if args.stage_timing:
                 command.append('--stage-timing')
-            if backend not in ('python', 'native-astar') and args.components:
+            if backend == 'native-control':
+                command.extend(('--components', args.control_components))
+            elif backend not in ('python', 'native-astar') and args.components:
                 command.extend(('--components', args.components))
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             if result.returncode:

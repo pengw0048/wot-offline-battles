@@ -19,6 +19,7 @@ class Recorder(object):
         nav = importlib.import_module(prefix + 'ai.navigation')
         driver = importlib.import_module(prefix + 'ai.adapter')
         battle = importlib.import_module(prefix + 'battle_runtime')
+        world = importlib.import_module(prefix + 'world_collision')
         specs = [
             (bot.BotRuntime, '_update_once', 'bot.slice'),
             (bot.BotRuntime, '_contacts_for', 'contacts'),
@@ -28,6 +29,7 @@ class Recorder(object):
             # its containing driver call, including route work outside A*.
             (driver.BotAdapter, 'decide_with_order', 'driving.and.route'),
             (battle.BattleRuntime, '_resolve_bot_motion', 'motion.collision'),
+            (world, '_check_horizontal_collision', 'motion.world'),
             (bot.BotRuntime, '_cadenced_ballistic_solution', 'ballistics'),
             (bot.BotRuntime, '_update_gun_aim', 'gun.aim'),
             (bot.BotRuntime, '_service_shot_lane_work', 'shot.lanes'),

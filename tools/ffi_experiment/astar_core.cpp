@@ -5,6 +5,7 @@
 #include "combat_core.h"
 #include "driver_core.h"
 #include "perception_core.h"
+#include "world_core.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -287,7 +288,8 @@ extern "C" int offline_astar_dispatch(double *buffer, int count) {
         if (!std::isfinite(buffer[0]) || buffer[0] != std::floor(buffer[0]) ||
             buffer[0] < 0 || buffer[0] > 1000000000) return 2;
         if (buffer[0] == 0 && count != 1) return 2;
-        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); }
+        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); offline_world_reset(); }
+        if (buffer[0] >= 400) return offline_world_dispatch(buffer, count);
         if (buffer[0] >= 300) return offline_perception_dispatch(buffer, count);
         if (buffer[0] >= 200) return offline_driver_dispatch(buffer, count);
         if (buffer[0] >= 100) return offline_combat_dispatch(buffer, count);
