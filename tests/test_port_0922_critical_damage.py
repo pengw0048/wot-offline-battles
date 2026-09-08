@@ -321,14 +321,21 @@ class CriticalDamageTests(unittest.TestCase):
             'ussr:R38_KV-220_beta': ('ussr', 'kv220action'),
             'ussr:R67_M3_LL': ('ussr', 'm3stuartll'),
         }
+        # Decoded geometry now resolves ahead of the retained archetypes, so
+        # this asserts on the authored-plus-alias table itself: that is what
+        # the suffix-guess guard is about, and it is unchanged.
         for vehicle_name, profile_key in expected.items():
             with self.subTest(vehicle=vehicle_name):
-                actual_key, profile = internal_hit_layouts._compiled_profile(
-                    vehicle_name)
+                actual_key, profile = internal_hit_layouts._profile_for_key(
+                    internal_hit_layouts._profile_key(vehicle_name))
                 self.assertEqual(profile_key, actual_key)
                 self.assertIs(
                     internal_layout_profiles.PROFILES[profile_key], profile)
 
+        # These reused an old display name and must never pick the legacy
+        # interior up through the authored or alias table.  Whether they end
+        # up with decoded geometry is a separate question, answered by the
+        # decoded-interior tests.
         for vehicle_name in (
                 'germany:G102_Pz_III',
                 'germany:G101_StuG_III',
@@ -338,8 +345,8 @@ class CriticalDamageTests(unittest.TestCase):
                 'usa:A91_T71',
                 'ussr:R999_MS-1'):
             with self.subTest(unmapped=vehicle_name):
-                unused_key, profile = internal_hit_layouts._compiled_profile(
-                    vehicle_name)
+                unused_key, profile = internal_hit_layouts._profile_for_key(
+                    internal_hit_layouts._profile_key(vehicle_name))
                 self.assertIsNone(profile)
 
     def test_internal_layout_0922_crew_drift_bindings(self):
@@ -389,7 +396,13 @@ class CriticalDamageTests(unittest.TestCase):
                      target['crew_index'], target['zone_id'])
                     for target in layout['targets']
                     if target['kind'] == 'crew')
-                self.assertEqual(expected, actual)
+                unused_key, profile = internal_hit_layouts._compiled_profile(
+                    vehicle_name)
+                zones = internal_hit_layouts._profile_record(
+                    profile)['crew_zones']
+                self.assertEqual(
+                    tuple(row[:3] + (zones[row[2]][1],) for row in expected),
+                    actual)
 
     def test_layout_prewarm_waits_for_complete_native_bounds(self):
         descriptor = _layout_descriptor(

@@ -19,6 +19,14 @@ except Exception:
 		_layout_store = None
 
 try:
+	from gui.mods.offline_lan_0922 import internal_layout_console as _layout_console
+except Exception:
+	try:
+		import internal_layout_console as _layout_console
+	except Exception:
+		_layout_console = None
+
+try:
 	from gui.mods.offline_lan_0922 import internal_layout_profiles as _layout_profiles
 except Exception:
 	try:
@@ -63,7 +71,7 @@ except Exception:
 		return _decorate
 
 
-LAYOUT_KEY = 14
+LAYOUT_KEY = 15
 _LAYOUT_MODE = 'profile'
 
 
@@ -211,12 +219,68 @@ def _profile_key(vehicle_name):
 	return nation, _normal_name(parts[1])
 
 
+def _decoded_layout(key):
+	'''The decoded interior for this vehicle, or None.
+
+	These zones are collision surfaces read out of the exact-era resources by
+	tools/bake_internal_layout_console_0922.py, not reconstructions, so they
+	take precedence over the retained archetypes.  Centres and half extents
+	are already fractions of the component's collision bounding box, which is
+	the same bound this client's hit tester reports, so they drop straight
+	into the profile record the rest of this module expects.'''
+	if _layout_console is None:
+		return None
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None:
+		return None
+	try:
+		(vehicle_class, tier, crew_roles, from_archetype, module_zones,
+			crew_zones) = record
+		confidence = getattr(_layout_console, 'CONFIDENCE', 'decoded')
+		source = 'decoded_collision_surfaces'
+		if from_archetype:
+			# The resources model no traverse mechanism for a casemate and
+			# sometimes no separate optic, so those entities keep the retained
+			# archetype and the source says which.
+			source = '%s+archetype:%s' % (source, ','.join(from_archetype))
+		return (source, vehicle_class, tier, confidence, tuple(crew_roles),
+			tuple(module_zones), tuple(crew_zones))
+	except Exception:
+		LOG_EXCEPTION('modules', 'decoded_layout_read_failed')
+		return None
+
+
+def decoded_archetype_entities(vehicle_name):
+	'''Entities in a decoded layout that the resources do not model.'''
+	if _layout_console is None:
+		return ()
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return ()
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	return tuple(record[3]) if record is not None else ()
+
+
+def decoded_layout_available(vehicle_name):
+	'''True when this vehicle's interior comes from decoded geometry.'''
+	key = _profile_key(vehicle_name)
+	return key is not None and _decoded_layout(key) is not None
+
+
 def _compiled_profile(vehicle_name):
 	if _layout_profiles is None:
 		return None, None
 	key = _profile_key(vehicle_name)
 	if key is None:
 		return None, None
+	decoded = _decoded_layout(key)
+	if decoded is not None:
+		return key, decoded
+	return _profile_for_key(key)
+
+
+def _profile_for_key(key):
+	'''The retained archetype for this key, through the alias table.'''
 	profile = _layout_profiles.PROFILES.get(key)
 	if profile is not None:
 		return key, profile
@@ -663,6 +727,12 @@ def build_layout(vehicle_descriptor, log_build=True):
 		vehicle_descriptor)
 	profile_key, compiled_profile = _compiled_profile(vehicle_name)
 	profile = _profile_record(compiled_profile)
+	decoded_geometry = decoded_layout_available(vehicle_name)
+	if _layout_console is not None:
+		layouts = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', None)
+		if (not isinstance(layouts, dict) or
+				getattr(_layout_console, 'DECODED_COUNT', -1) != len(layouts)):
+			errors.append('decoded_layout_table_invalid')
 	if _layout_profiles is None:
 		errors.append('compiled_profile_module_unavailable')
 	elif (getattr(_layout_profiles, 'PROFILE_COUNT', 0) != 251 or
@@ -839,6 +909,9 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'layout_key': LAYOUT_KEY,
 		'layout_mode': _LAYOUT_MODE,
 		'profile_key': profile_key,
+		'profile_geometry_provenance': ('decoded_collision_surfaces'
+			if decoded_geometry else 'reconstructed_archetype'),
+		'profile_archetype_entities': decoded_archetype_entities(vehicle_name),
 		'profile_source_id': (profile['source_id']
 			if profile is not None else None),
 		'profile_confidence': (profile['confidence']
