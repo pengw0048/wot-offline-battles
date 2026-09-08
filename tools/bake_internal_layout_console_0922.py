@@ -150,6 +150,27 @@ REQUIRED_ENTITIES = ('ammoBay', 'engine', 'fuelTank', 'radio',
 CREW_SURFACES = ('commander', 'driver', 'gunner_1', 'gunner_2', 'loader_1',
                  'loader_2', 'radioman_1', 'radioman_2')
 REQUEST_PAUSE = 0.25
+# Catalogue entries that are the same physical tank as another entry, where
+# neither the model-path rule nor the content-hash rule sees it because the
+# variant was published with its own model directory and its own resources.
+# Each pair is reviewed, not guessed: both entries share the item_defs
+# per-vehicle code slot -- Ch01_Type59 and Ch01_Type59_Gold are one vehicle
+# published twice -- and the same vehicle class, and the tool additionally
+# requires the donor to be decoded and the two crew rosters to be a
+# permutation of one another before it will inherit.  A suffix is never
+# matched on its own; that is how an old profile gets attached to an
+# unrelated vehicle which happened to reuse a name.
+SAME_TANK_ALIASES = {
+    # The premium Type 59, identical hull and identical crew roster.
+    'china:Ch01_Type59_Gold': 'china:Ch01_Type59',
+    # The 113's Beijing Opera livery.  Its roster lists the driver and gunner
+    # in the other order, so the crew zones are remapped by role below.
+    'china:Ch22_113_Beijing_Opera': 'china:Ch22_113',
+    # VK 45.02 (P) Ausf. B's second catalogue identity, identical roster.
+    'germany:G58_VK4502P7': 'germany:G58_VK4502P',
+    # Object 907A, identical roster to the Object 907.
+    'ussr:R95_Object_907A': 'ussr:R95_Object_907',
+}
 
 
 def _client_identity(client_root):
@@ -501,6 +522,39 @@ def crew_surface_names(roster):
         else:
             names.append('%s_%d' % (role, counters[role]))
     return names
+
+
+def _remap_crew(crew_zones, donor_roster, target_roster):
+    """The donor's crew zones in the target's roster order, or None.
+
+    Two catalogue identities of one tank can list the same crew in a
+    different order -- the 113 Beijing Opera has the driver and gunner
+    swapped against the 113 -- and build_layout indexes crew zones by the
+    live descriptor's slot.  Copying positionally would seat the driver in the
+    gunner's station, so match the slots by role and refuse the alias if the
+    rosters are not a permutation of each other.
+    """
+    if len(donor_roster) != len(target_roster):
+        return None
+    if len(crew_zones) != len(donor_roster):
+        return None
+    available = list(range(len(donor_roster)))
+    order = []
+    for slot in target_roster:
+        match = None
+        for index in available:
+            if donor_roster[index] == slot:
+                match = index
+                break
+        if match is None:
+            return None
+        available.remove(match)
+        order.append(match)
+    # Keep each zone's own id aligned with the slot it now occupies.
+    return tuple(
+        (crew_zones[source][0], 'crew_%02d' % target_index)
+        + tuple(crew_zones[source][2:])
+        for target_index, source in enumerate(order))
 
 
 def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
@@ -879,6 +933,39 @@ def main():
     print('inherited by identical catalogue twin: %d (%d of them matched on '
           'byte-identical PC collision primitives)'
           % (len(inherited), by_content_hull))
+
+    aliased = 0
+    for key, donor in sorted(SAME_TANK_ALIASES.items()):
+        if key in decoded:
+            continue
+        if key not in vehicles:
+            print('  alias %s declined: not in this client' % key)
+            continue
+        if donor not in decoded:
+            print('  alias %s declined: donor %s is not decoded'
+                  % (key, donor))
+            continue
+        if vehicles[key]['vehicle_class'] != vehicles[donor]['vehicle_class']:
+            print('  alias %s declined: class differs from %s' % (key, donor))
+            continue
+        # decoded holds (class, tier, crew, module_zones, crew_zones,
+        # unmodelled); only render() reorders it for the generated table.
+        unused_class, unused_tier, unused_crew, modules, crew_zones, holes = (
+            decoded[donor])
+        remapped = _remap_crew(crew_zones, vehicles[donor]['crew'],
+                               vehicles[key]['crew'])
+        if remapped is None:
+            print('  alias %s declined: roster is not a permutation of %s'
+                  % (key, donor))
+            continue
+        decoded[key] = (vehicles[key]['vehicle_class'],
+                        vehicles[key]['tier'], vehicles[key]['crew'],
+                        modules, remapped, holes)
+        audit.setdefault(key, {})['inherited_from'] = donor
+        audit[key]['reason'] = 'same_tank_alias'
+        rejected.pop(key, None)
+        aliased += 1
+    print('inherited through a reviewed same-tank alias: %d' % aliased)
 
     output.write_text(render(version, build, len(vehicles), decoded,
                              args.max_residual, sorted(sources)),

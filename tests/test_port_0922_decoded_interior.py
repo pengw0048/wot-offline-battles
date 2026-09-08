@@ -267,6 +267,89 @@ class UnmodelledModuleTests(unittest.TestCase):
         self.assertTrue(validation['missing'])
 
 
+class SameTankAliasTests(unittest.TestCase):
+    """Catalogue entries that are one physical tank published twice.
+
+    Neither the model-path rule nor the content-hash rule sees these, because
+    the variant ships its own model directory and its own resources, so the
+    pairs are reviewed by hand.  What must hold is that a pair really is one
+    vehicle and that the crew is remapped by role: two identities of one tank
+    can list the same crew in a different slot order, and copying positionally
+    would seat the driver in the gunner's station.
+    """
+
+    def setUp(self):
+        tools = ROOT / 'tools'
+        if str(tools) not in sys.path:
+            sys.path.insert(0, str(tools))
+        try:
+            import bake_internal_layout_console_0922 as baker
+        except ImportError as error:  # pragma: no cover - tool deps absent
+            self.skipTest('baker not importable: %s' % error)
+        self.baker = baker
+        self.layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
+
+    def test_every_alias_pair_shares_the_item_defs_vehicle_slot(self):
+        # The slot is the per-vehicle code, so Ch01_Type59 and
+        # Ch01_Type59_Gold are one vehicle.  A bare suffix match is what
+        # attaches an old profile to an unrelated vehicle that reused a name,
+        # so the pair must agree on the slot, not merely look similar.
+        import re
+        for target, donor in self.baker.SAME_TANK_ALIASES.items():
+            with self.subTest(target=target):
+                pattern = r'^([a-z]+):([A-Za-z]+[0-9]+)'
+                left = re.match(pattern, target)
+                right = re.match(pattern, donor)
+                self.assertIsNotNone(left)
+                self.assertIsNotNone(right)
+                self.assertEqual(left.group(1), right.group(1))
+                self.assertEqual(left.group(2), right.group(2))
+
+    def test_an_aliased_record_carries_the_donor_geometry(self):
+        applied = 0
+        for target, donor in self.baker.SAME_TANK_ALIASES.items():
+            target_key = internal_hit_layouts._profile_key(target)
+            donor_key = internal_hit_layouts._profile_key(donor)
+            if target_key not in self.layouts or donor_key not in self.layouts:
+                continue
+            applied += 1
+            with self.subTest(target=target):
+                a, b = self.layouts[target_key], self.layouts[donor_key]
+                # Same modules, same holes, and the same set of crew stations.
+                self.assertEqual(b[4], a[4])
+                self.assertEqual(b[3], a[3])
+                self.assertEqual(sorted(zone[2] for zone in b[5]),
+                                 sorted(zone[2] for zone in a[5]))
+        self.assertTrue(applied, 'no alias pair reached the table')
+
+    def test_crew_zones_follow_the_target_roster_order(self):
+        for target in self.baker.SAME_TANK_ALIASES:
+            key = internal_hit_layouts._profile_key(target)
+            record = self.layouts.get(key)
+            if record is None:
+                continue
+            with self.subTest(target=target):
+                roster, crew = record[2], record[5]
+                self.assertEqual(len(roster), len(crew))
+                for index, zone in enumerate(crew):
+                    self.assertEqual('crew_%02d' % index, zone[1])
+
+    def test_the_remap_refuses_a_roster_that_is_not_a_permutation(self):
+        zones = (('hull', 'crew_00', (0.1, 0.2, 0.3), (0.01, 0.02, 0.03)),
+                 ('turret', 'crew_01', (0.4, 0.5, 0.6), (0.04, 0.05, 0.06)))
+        donor = (('commander',), ('gunner',))
+        self.assertIsNotNone(
+            self.baker._remap_crew(zones, donor, donor))
+        swapped = self.baker._remap_crew(
+            zones, donor, (('gunner',), ('commander',)))
+        self.assertEqual((0.4, 0.5, 0.6), swapped[0][2])
+        self.assertEqual('crew_00', swapped[0][1])
+        self.assertIsNone(self.baker._remap_crew(
+            zones, donor, (('driver',), ('commander',))))
+        self.assertIsNone(self.baker._remap_crew(
+            zones, donor, (('commander',), ('gunner',), ('driver',))))
+
+
 class HullRegistrationRuleTests(unittest.TestCase):
     """The rule that decides whether a decoded hull registers at all.
 
