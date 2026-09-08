@@ -12706,13 +12706,15 @@ class BattleRuntimeContractTests(unittest.TestCase):
             value['eventType']
             for value in battle._avatar.battle_events[0]])
 
-    def _blocked_hit_fixture(self):
+    def _blocked_hit_fixture(self, shell_kind='ARMOR_PIERCING'):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
         target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
                           {'health': 500})
-        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+        attacker_descriptor = _Descriptor()
+        attacker_descriptor.gun.shots[0].shell.kind = shell_kind
+        attacker = _Vehicle(11, attacker_descriptor, _Vector(10, 0, 0),
                             (0, 0, 0), {'health': 500})
         runtime.bigworld.entities.update({10: target, 11: attacker})
         battle._local_position = (0.0, 0.0, 0.0)
@@ -12777,24 +12779,37 @@ class BattleRuntimeContractTests(unittest.TestCase):
         without being stopped -- an absorbed splash, or a penetration that
         only broke modules -- keeps retail's unlabelled critical marker
         rather than a blocked ``0``.
+
+        ``HIGH_EXPLOSIVE`` never claims the blocked marker either:
+        ``#battle_results:common/tooltip/armor/description`` excludes HE and
+        HESH from the armour ledger, and #1513 has one shell kind for both.
+        HEAT and APHE are not excluded.
         """
-        for label, event, expected in (
-                ('ricochet', {
+        for label, kind, event, expected in (
+                ('ricochet', 'ARMOR_PIERCING', {
                     'shot_result': 0, 'damage': 0}, (100, True)),
-                ('non-penetration', {
+                ('non-penetration', 'ARMOR_PIERCING', {
                     'shot_result': 1, 'damage': 0}, (100, True)),
-                ('absorbed splash', {
+                ('HEAT non-penetration', 'HOLLOW_CHARGE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('APHE non-penetration', 'ARMOR_PIERCING_HE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('HE non-penetration', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 0}, (0, False)),
+                ('HE ricochet', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 0, 'damage': 0}, (0, False)),
+                ('absorbed splash', 'HIGH_EXPLOSIVE', {
                     'shot_result': 1, 'damage': 0, 'splash': True},
                  (0, False)),
-                ('module-only penetration', {
+                ('module-only penetration', 'ARMOR_PIERCING', {
                     'shot_result': 2, 'damage': 0}, (0, False)),
-                ('penetration', {
+                ('penetration', 'ARMOR_PIERCING', {
                     'shot_result': 2, 'damage': 144}, (144, False)),
-                ('leaking non-penetration', {
+                ('leaking HE non-penetration', 'HIGH_EXPLOSIVE', {
                     'shot_result': 1, 'damage': 40}, (40, False))):
             with self.subTest(label):
                 battle, target_record, attacker_record = (
-                    self._blocked_hit_fixture())
+                    self._blocked_hit_fixture(shell_kind=kind))
                 event = dict({
                     'kind': 'bot_human_hit', 'world_pose': True,
                     'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,

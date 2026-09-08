@@ -9966,15 +9966,21 @@ class BattleRuntime(object):
         published for every hit that removed no hit points.
 
         A direct shell stopped by armour is the blocked case, and it never
-        drew a damage roll, so it carries the shell's published damage.  A
-        splash is not a stopped shell: its damage falls off with distance
-        before armour absorbs the rest, and the armour ledger excludes
-        splash for the same reason, so an absorbed near miss keeps retail's
-        unlabelled critical marker instead of claiming a blocked value.
+        drew a damage roll, so it carries the shell's published damage.
+        Three hits are not that case and keep retail's unlabelled critical
+        marker.  A splash is not a stopped shell: its damage falls off with
+        distance before armour absorbs the rest.  An ``HIGH_EXPLOSIVE``
+        shell is excluded by the client's own armour-ledger rule in
+        ``#battle_results:common/tooltip/armor/description`` -- "HE and HESH
+        shells are not included" -- and ``IS_HIGH_EXPLOSIVE`` reaches
+        ``HitData`` but no #1513 view reads it, so ``isBlocked`` is the only
+        place that rule can be expressed.  A penetration that removed no hit
+        points broke modules; armour stopped nothing.
         """
         blocked = bool(
             damage <= 0 and not bool(event.get('splash', False)) and
-            max(0, min(int(event.get('shot_result', 2)), 2)) != 2)
+            max(0, min(int(event.get('shot_result', 2)), 2)) != 2 and
+            not combat_rules.is_he(shot))
         if not blocked:
             return damage, False
         return max(0, int(combat_rules.shell_nominal_damage(shot))), True
@@ -14022,7 +14028,8 @@ class BattleRuntime(object):
                            critical, hull_damage, critical_delta,
                            target_position=None, damage_sticker=None,
                            potential_damage=None,
-                           structural_armor_hit=None):
+                           structural_armor_hit=None,
+                           high_explosive=None):
         target_kind = record.get('kind')
         if target_kind == 'human':
             target_kind = 'player'
@@ -14052,6 +14059,15 @@ class BattleRuntime(object):
             # Preserve the exact armour contact layer already chosen by the
             # worker instead of trying to reconstruct it on the server.
             effect['structural_armor_hit'] = bool(structural_armor_hit)
+        if high_explosive is not None:
+            # The exact client states its own armour-ledger rule in
+            # ``#battle_results:common/tooltip/armor/description``: the
+            # counter takes ricochets and non-penetrations, and "HE and
+            # HESH shells are not included".  #1513 has one shell kind for
+            # both, ``HIGH_EXPLOSIVE``, and the server owns the ledger but
+            # holds no descriptors, so the worker publishes the shell fact
+            # and the server applies the rule.
+            effect['high_explosive'] = bool(high_explosive)
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
@@ -14359,7 +14375,8 @@ class BattleRuntime(object):
             potential_damage=potential_damage,
             structural_armor_hit=(
                 contact is not None and
-                contact.get('layer') == 'structural'))
+                contact.get('layer') == 'structural'),
+            high_explosive=is_he)
 
     def _projectile_ricochet_contact(
             self, meta, state, terminal_data, collisions, contact):

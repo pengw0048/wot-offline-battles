@@ -1051,6 +1051,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
+            'structural_armor_hit': True, 'high_explosive': False,
             'stun_end_server_time_ms': 0,
         }
         record = {
@@ -1100,6 +1101,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
+            'structural_armor_hit': True, 'high_explosive': False,
             'stun_end_server_time_ms': 0,
         }
         record = {
@@ -3069,6 +3071,38 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 self.assertEqual(
                     blocked, state.vehicle_interactions[
                         ('player', 2)]['player:1']['damage_blocked'])
+
+    def test_high_explosive_never_credits_blocked_damage(self):
+        """#1513 keeps HE and HESH out of its own armour ledger.
+
+        ``#battle_results:common/tooltip/armor/description`` states the rule
+        the ``ArmorItemPacker`` tooltip shows over the blocked total: the
+        counter takes ricochets and non-penetrations, and "HE and HESH
+        shells are not included".  #1513 has one shell kind for both.  The
+        potential damage the results screen reports is a separate column
+        with no such exclusion, so it still accumulates.
+        """
+        for shot_result, damage in ((0, 0), (1, 0), (1, 200)):
+            with self.subTest(shot_result=shot_result, damage=damage):
+                state = _state()
+                self.assertTrue(_launch_authority(state, _launch()))
+
+                self.assertTrue(state.resolve_projectile(
+                    SIMULATION_WORKER_AUTHORITY_ID,
+                    _resolve('1:p:1:1', direct=_effect(
+                        damage=damage, shot_result=shot_result,
+                        potential_damage=390, high_explosive=True))))
+
+                hit = [event for event in state.pending_events
+                       if event.get('kind') == 'hit'][-1]
+                self.assertEqual(0, hit['blocked_damage'])
+                victim_row = state._statistics_row('player', 2)
+                self.assertEqual(0, victim_row['damage_blocked'])
+                self.assertEqual(0, state.vehicle_interactions[
+                    ('player', 2)]['player:1']['damage_blocked'])
+                # The separate potential-damage column is untouched.
+                self.assertEqual(
+                    390, victim_row['potential_damage_received'])
 
     def test_first_ricochet_credits_one_bounce_and_no_penetration(self):
         state = _state()

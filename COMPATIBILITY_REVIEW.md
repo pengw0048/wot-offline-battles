@@ -2202,16 +2202,34 @@ The damage log panel's blocked rows and its running total come from one
 number, the `TANKING` battle event, whose totals
 `PersonalEfficiencyController._onPlayerFeedbackReceived` accumulates
 client-side from `Avatar.onBattleEvents`; `_BET.ARMOR` maps the same event to
-the `BATTLE_EVENTS.BLOCKED_DAMAGE` ribbon. The value itself is a product
-choice, not a recovered contract -- the cell app that packs retail's `damage`
-argument and blocked ledger is not in the reviewed package, and neither is
-`res/text/LC_MESSAGES/battle_results.mo`, which carries the client's own
-`ArmorItemPacker` wording. This port reports the shell's published
+the `BATTLE_EVENTS.BLOCKED_DAMAGE` ribbon.
+
+`res/text/LC_MESSAGES/battle_results.mo` states the ledger rule the client
+itself shows. `EfficiencyTooltipData` binds `BATTLE_EFFICIENCY_TYPES.ARMOR` to
+`ArmorItemPacker` (`gui/shared/tooltips/efficiency.pyc`), whose header is
+`common/tooltip/armor/header` (装甲抵挡) and whose description is
+`common/tooltip/armor/description`: "计数: / • 跳弹 / • 未击穿 / HE与HESH炮弹不
+包含在内。" -- the counter takes ricochets and non-penetrations, and HE and
+HESH shells are not included. #1513 has a single `HIGH_EXPLOSIVE` kind for
+both, and `combat_rules.is_he` already reads exactly that kind, so `HEAT`
+(`HOLLOW_CHARGE`) and `APHE` (`ARMOR_PIERCING_HE`) keep their blocked credit
+even though `ingame_gui.mo` abbreviates `ARMOR_PIERCING_HE` and
+`HIGH_EXPLOSIVE` to the same `damageLog/shellType` label, `HE`. The battle
+server owns the ledger but holds no descriptors, so the worker publishes the
+shell fact beside `structural_armor_hit` and the server applies the rule.
+`IS_HIGH_EXPLOSIVE` does reach `HitData`, but no #1513 view reads it, so
+`isBlocked` is the only place the same rule can be expressed on the indicator.
+
+The remaining choice is the blocked value itself, which no reviewed file
+fixes: the cell app that packs retail's `damage` argument and blocked ledger
+is not in the package. This port reports the shell's published
 `shell.damage[0]`, because a shell that never pierced never drew a damage
-roll; a penetration keeps the roll it actually spent. Splash is excluded on
-both surfaces: its damage falls off with distance before armour absorbs the
-rest, so an absorbed near miss stays an unlabelled critical marker and
-credits no blocked damage.
+roll; a penetration keeps the roll it actually spent. Splash is excluded from
+both surfaces -- its damage falls off with distance before armour absorbs the
+rest -- so an absorbed near miss stays an unlabelled critical marker and
+credits nothing. The separate `potentialDamageReceived` column carries no such
+exclusion in any reviewed text, so it still accumulates every direct hit; that
+asymmetry is the client's rule, not a derived identity.
 
 ## AI, room and round boundaries
 

@@ -484,6 +484,9 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
         self.assertEqual(400, effect['potential_damage'])
         self.assertGreater(
             effect['potential_damage'] - effect['damage'], 0)
+        # The server holds no descriptors, so the shell kind travels with
+        # the terminal and keeps HE out of the armour ledger there.
+        self.assertIs(True, effect['high_explosive'])
 
     def test_penetrating_he_keeps_full_direct_damage_without_surface_search(self):
         battle, meta, unused_target, unused_collision, terminal, state = \

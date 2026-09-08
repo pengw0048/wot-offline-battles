@@ -5600,6 +5600,7 @@ class BattleProjectileTests(unittest.TestCase):
                 self.assertEqual(result, effect['shot_result'])
                 self.assertEqual(damage, effect['damage'])
                 self.assertEqual(potential, effect['potential_damage'])
+                self.assertIs(False, effect['high_explosive'])
                 self.assertEqual(
                     (390.0, 32.5), gaussian.call_args.args)
 
