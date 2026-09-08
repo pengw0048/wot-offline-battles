@@ -35,6 +35,15 @@ jobs:
         with:
           name: wot-0.9.22-lan-server-windows
           path: dist
+      # Never build into dist/: the client artifact below uploads dist/*,
+      # and the launcher job unpacks that before it is packaged.
+      - name: Build the native exception trail probe
+        run: sh tools/build_native_exception_trail_probe.sh native-probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-native-exception-trail-probe
+          path: native-probe/native_exception_trail.exe
+          if-no-files-found: error
       - name: Build Python 2.7 0.9.22 LAN client
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
@@ -234,6 +243,27 @@ jobs:
             dist/server/WoT-0.9.22-LAN-Server.exe
             dist/server/README.txt
           if-no-files-found: error
+
+  windows-native-exception-trail:
+    # The recorder only exists because #1513 consumes its own unhandled
+    # exceptions. Only Windows can show that the vectored handler observes a
+    # real first-chance fault, filters it, and leaves the thread untouched.
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wot-0.9.22-native-exception-trail-probe
+          path: probe
+      - name: Run the first-chance exception trail probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $probe = Join-Path $PWD "probe\native_exception_trail.exe"
+          & $probe
+          if ($LASTEXITCODE -ne 0) {
+              throw "native exception trail probe failed ($LASTEXITCODE)"
+          }
 
   windows-launcher:
     runs-on: windows-latest

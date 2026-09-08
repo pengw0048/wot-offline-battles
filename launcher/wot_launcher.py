@@ -307,6 +307,7 @@ FULL_CRASH_DUMPS_SETTING = "full_crash_dumps"
 PROCDUMP_CONSENT_SETTING = "procdump_download_consent"
 PROCDUMP_PATH_ENV = "WOT_OFFLINE_PROCDUMP_PATH"
 CRASH_DUMP_PATH_ENV = "WOT_OFFLINE_CRASH_DUMP_PATH"
+EXCEPTION_TRAIL_PATH_ENV = "WOT_OFFLINE_EXCEPTION_TRAIL_PATH"
 CRASH_DUMP_MODE_ENV = "WOT_OFFLINE_CRASH_DUMP_MODE"
 _LAUNCHER_LOG_LOCK = error_reports.LAUNCHER_LOG_LOCK
 
@@ -1978,6 +1979,8 @@ class LauncherWindow(object):
         try:
             dump_path = error_reports.session_dump_path(
                 self._active_report_session, role)
+            trail_path = error_reports.session_trail_path(
+                self._active_report_session, role)
         except core.LauncherError as error:
             self._log("Crash report collection could not start: %s" % error)
             return environment
@@ -1985,6 +1988,10 @@ class LauncherWindow(object):
         environment[CRASH_DUMP_PATH_ENV] = dump_path
         environment[CRASH_DUMP_MODE_ENV] = (
             "full" if self._full_crash_dump_enabled else "mini")
+        # The engine consumes its own unhandled exceptions, so a termination
+        # dump often has no faulting thread left. The native sidecar records
+        # the fault itself; this path is where it appends.
+        environment[EXCEPTION_TRAIL_PATH_ENV] = trail_path
         return environment
 
     def _confirm_crash_report(self):
