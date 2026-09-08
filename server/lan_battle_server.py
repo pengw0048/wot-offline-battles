@@ -912,6 +912,13 @@ def _bot_lineup_allowed_names(catalog):
     }
     excluded_names = {
         "germany:G138_VK168_02_Mauerbrecher",
+        "germany:G79_Pz_IV_AusfGH",
+        "uk:GB70_FV4202_105",
+        "usa:A08_T23",
+        "usa:A15_T57",
+        "usa:A26_T18",
+        "ussr:R05_KV",
+        "ussr:R70_T_50_2",
     }
     # ``secret`` also hides honest tanks, so it withholds an entry only when
     # stock marks it a tutorial copy or a helper by its item_defs name.

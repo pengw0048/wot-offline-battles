@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Bake the list of #1513 vehicles whose client resources are absent.
+"""Bake the list of #1513 vehicles with absent or placeholder resources.
 
 The pinned client advertises vehicle types in ``list.xml`` whose art was never
 shipped.  Loading such a type builds a valid descriptor, then fails inside
 ``BSPModel.loadBspModel`` and aborts the round.  This tool reads every vehicle
 item definition, checks each required client resource against the exact package
 members, and writes the generated blacklist module the port imports.
+Retired vehicles pointing at R00_Placeholder are also excluded even though
+those shared placeholder files exist.
 
     python3 tools/bake_vehicle_blacklist_0922.py "$WOT_0922_CLIENT"
 """
@@ -43,8 +45,8 @@ Do not edit by hand.  Run
 ``tools/bake_vehicle_blacklist_0922.py "$WOT_0922_CLIENT"`` to
 regenerate it against the pinned client.
 
-Each entry lists the exact resource paths the vehicle item definition
-references and no package member provides.
+Each entry lists required resource paths that are absent from the packages
+or point at the retired-vehicle R00_Placeholder instead of real vehicle art.
 """
 
 CLIENT_VERSION = %(version)r
@@ -58,12 +60,12 @@ FOOTER = '''}
 
 
 def is_unusable(name):
-    """Return whether the pinned client lacks this vehicle's resources."""
+    """Return whether the pinned client lacks usable vehicle resources."""
     return str(name or '') in UNUSABLE_VEHICLES
 
 
 def missing_resources(name):
-    """Return the absent resource paths recorded for one vehicle name."""
+    """Return absent or placeholder resource paths for one vehicle name."""
     return UNUSABLE_VEHICLES.get(str(name or ''), ())
 '''
 
@@ -127,7 +129,7 @@ def _vehicle_names(archive, nation):
 
 
 def scan(client_root):
-    """Return the catalogue size and every vehicle missing a resource."""
+    """Return the catalogue size and vehicles with unusable resources."""
     members = _resource_members(client_root)
     package = client_root / SCRIPTS_PACKAGE
     unusable = {}
@@ -152,7 +154,9 @@ def scan(client_root):
                         if not path.endswith(suffix):
                             continue
                         resource = value.decode('ascii', 'replace')
-                        if _normalize(resource) not in members:
+                        normalized = _normalize(resource)
+                        if (normalized not in members or normalized.startswith(
+                                'vehicles/russian/r00_placeholder/')):
                             missing.add(resource)
                 if missing:
                     unusable[name] = tuple(sorted(missing))

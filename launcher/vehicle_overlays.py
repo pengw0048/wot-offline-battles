@@ -780,7 +780,9 @@ def list_vehicle_choices(game_root):
 
 def _vehicle_translations(game_root, nation):
     """Load one stock vehicle catalog, falling back to internal names."""
-    relative = "res/text/LC_MESSAGES/%s_vehicles.mo" % nation
+    # #1513 uses uk for item_defs but gb for its British translation catalog.
+    catalog = "gb" if nation == "uk" else nation
+    relative = "res/text/LC_MESSAGES/%s_vehicles.mo" % catalog
     try:
         path = _game_owned_path(
             game_root, os.path.join(game_root, *relative.split("/")),

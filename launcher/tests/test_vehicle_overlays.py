@@ -847,6 +847,26 @@ class VehicleOverlayTest(unittest.TestCase):
         self.assertEqual("heavyTank", type5["vehicleClass"])
         self.assertEqual(10, type5["level"])
 
+    def test_british_catalog_uses_gb_and_preserves_fv4202_resource_id(self):
+        self._write("res/text/LC_MESSAGES/gb_vehicles.mo", b"catalog fixture")
+        translations = mock.Mock()
+        translations.gettext.return_value = "FV4202"
+        with mock.patch.object(
+                vehicle_overlays.gettext, "GNUTranslations",
+                return_value=translations) as loader:
+            actual = vehicle_overlays._vehicle_translations(self.game, "uk")
+        loader.assert_called_once()
+        self.assertIs(translations, actual)
+        record = {
+            "vehicle": "GB70_N_FV4202_105",
+            "shortUserString": "#gb_vehicles:GB70_N_FV4202_105_short",
+        }
+        self.assertEqual("FV4202", vehicle_overlays._vehicle_label(
+            record, actual))
+        translations.gettext.assert_called_once_with(
+            "GB70_N_FV4202_105_short")
+        self.assertEqual("GB70_N_FV4202_105", record["vehicle"])
+
     def test_catalog_prefix_is_hidden_only_in_human_facing_fields(self):
         record = vehicle_overlays._choice_record(
             "ussr", "R11_MS-1", "vehicle", self.VEHICLE,

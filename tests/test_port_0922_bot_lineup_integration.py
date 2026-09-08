@@ -311,8 +311,25 @@ class BotLineupIntegrationTests(unittest.TestCase):
          ('heavyTank', 'lockOutfit', 'lockCrew', 'unrecoverable'), True),
         ('japan:J30_Edelweiss',
          ('mediumTank', 'lockOutfit', 'lockCrew', 'unrecoverable'), True),
-        # A retired tank keeps an honest name and level while it is hidden.
-        ('usa:A08_T23', ('mediumTank', 'secret', 'unrecoverable'), True),
+        # Retired placeholder models must never reach any battle catalogue.
+        ('usa:A08_T23', ('mediumTank', 'secret', 'unrecoverable'), False),
+        ('usa:A15_T57', ('SPG', 'secret', 'unrecoverable'), False),
+        ('usa:A26_T18', ('AT-SPG', 'secret', 'unrecoverable'), False),
+        ('ussr:R05_KV', ('heavyTank', 'secret', 'unrecoverable'), False),
+        ('ussr:R70_T_50_2', ('lightTank', 'secret', 'unrecoverable'), False),
+        ('germany:G79_Pz_IV_AusfGH', ('mediumTank', 'secret'), False),
+        ('uk:GB70_FV4202_105', ('mediumTank', 'secret'), False),
+        # Real models remain usable, including the retained hidden vehicles.
+        ('uk:GB70_N_FV4202_105', ('mediumTank', 'HD'), True),
+        ('germany:G85_Auf_Panther', ('lightTank', 'secret'), True),
+        ('ussr:R75_SU122_54', ('AT-SPG', 'secret'), True),
+        ('ussr:R96_Object_430B', ('mediumTank', 'secret'), True),
+        ('ussr:R93_Object263B', ('AT-SPG', 'secret'), True),
+        ('germany:G98_Waffentrager_E100', ('AT-SPG', 'secret'), True),
+        ('germany:G98_Waffentrager_E100_P', ('AT-SPG',), True),
+        ('usa:A67_T57_58', ('heavyTank',), True),
+        ('usa:A108_T18_HMC', ('SPG',), True),
+        ('usa:A86_T23E3', ('mediumTank',), True),
         ('ussr:R07_T-34-85_bootcamp', ('mediumTank', 'secret'), False),
         ('ussr:R45_IS-7_fallout', ('heavyTank', 'fallout', 'secret'), False),
         ('ussr:R07_T-34-85_training',
@@ -371,6 +388,15 @@ class BotLineupIntegrationTests(unittest.TestCase):
             self.assertEqual(expected, admitted, name)
             self.assertEqual(
                 admitted, self._launcher_admits(name, tags), name)
+            runtime = types.SimpleNamespace(
+                nations=types.SimpleNamespace(
+                    AVAILABLE_NAMES=('all',), INDICES={'all': 0}),
+                vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
+                    getList=lambda unused_nation_id: {1: entry})))
+            self.assertEqual(admitted, bool(
+                descriptor_donation.vehicle_catalog(runtime)), name)
+            self.assertEqual(admitted, not BattleRuntime._vehicle_excluded(
+                entry), name)
             server_names = server_runtime._bot_lineup_allowed_names([{
                 'name': name, 'level': 5, 'tags': list(tags),
             }])

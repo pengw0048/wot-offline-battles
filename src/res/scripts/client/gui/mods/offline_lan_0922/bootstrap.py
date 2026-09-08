@@ -512,7 +512,7 @@ def _selected_vehicle(config, restore_saved=True):
                         'vehicle type is not available in standard battles')
                 if vehicle_blacklist.is_unusable(descriptor.type.name):
                     raise ValueError(
-                        'this client has no resources for %s: %s' % (
+                        'this client has no usable resources for %s: %s' % (
                             descriptor.type.name, ', '.join(
                                 vehicle_blacklist.missing_resources(
                                     descriptor.type.name))))

@@ -16,6 +16,13 @@ MAX_VEHICLE_TYPE_NAME_LENGTH = 96
 # future catalogue refresh cannot silently make the two selectors diverge.
 UNUSABLE_BOT_VEHICLES_0922 = frozenset((
     "germany:G138_VK168_02_Mauerbrecher",
+    "germany:G79_Pz_IV_AusfGH",
+    "uk:GB70_FV4202_105",
+    "usa:A08_T23",
+    "usa:A15_T57",
+    "usa:A26_T18",
+    "ussr:R05_KV",
+    "ussr:R70_T_50_2",
 ))
 # The exact set vehicle_configuration.NON_STANDARD_BATTLE_TAGS applies in the
 # mod, bound by a parity test.  ``secret`` is deliberately absent: a hidden
