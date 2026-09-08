@@ -87,6 +87,16 @@ class _Replay(object):
             startRecordName]
         _Replay.steps.append((recordName, 'SET', startRecordName))
 
+    def __mul__(self, other):
+        # ``__opMul`` is ``int(round(value * factor / 100.0))`` under the
+        # embedded CPython 2.7, which rounds a half away from zero.
+        self.connector.values[self.record_name] = int(
+            self.connector.values[self.record_name] *
+            self.connector.values[other] / 100.0 + 0.5)
+        self.chain.append('MUL:%s' % other)
+        _Replay.steps.append((self.record_name, 'MUL', other))
+        return self
+
     def __add__(self, other):
         self.connector.values[self.record_name] += self.connector.values[
             other]
@@ -818,6 +828,58 @@ class PostBattleContractTests(unittest.TestCase):
             ('xp', 'ADD', 'boosterXP'),
             ('freeXP', 'SET', 'originalFreeXP'),
             ('freeXP', 'ADD', 'boosterFreeXP'),
+            ('gold', 'SET', 'originalGold'),
+            ('crystal', 'SET', 'originalCrystal')], _Replay.steps)
+
+    def test_a_premium_vehicle_earns_its_credits_in_the_battle_row(self):
+        """Retail has no results row for a premium vehicle's credit income.
+
+        The vehicle's own profitability is inside the base credits the server
+        pays, so the results screen puts this port's coefficient back there
+        and the boosters row carries only the save's own multiplier.
+        """
+        _Replay.steps = []
+        receipt = _receipt()
+        # 150 percent of the battle's 4200 credits, doubled again by a save.
+        receipt['awarded'] = {'credits': 12600, 'xp': 600, 'free_xp': 30}
+
+        with mock.patch.object(
+                postbattle_store, '_premium_vehicle_credits',
+                side_effect=lambda unused, amount: amount * 150 // 100):
+            fields = _packed_vehicle(receipt)
+
+        self.assertEqual(12600, fields['credits'])
+        self.assertEqual(6300, fields['originalCredits'])
+        self.assertEqual(6300, fields['boosterCredits'])
+        self.assertIn(('credits', 'SET', 'originalCredits'), _Replay.steps)
+        self.assertIn(('credits', 'ADD', 'boosterCredits'), _Replay.steps)
+
+    def test_the_premium_vehicle_experience_row_is_a_factor_step(self):
+        """#1513 draws that row from a record named by the factor.
+
+        Only ``ValueReplay.__mul__`` records a step under a factor name, so
+        the packed factor is the total multiplier the chain applies rather
+        than the descriptor's bare bonus.
+        """
+        _Replay.steps = []
+        with mock.patch.object(postbattle_store,
+                               '_premium_vehicle_xp_factor_100',
+                               return_value=50):
+            fields = _packed_vehicle(_receipt())
+
+        self.assertEqual(150, fields['premiumVehicleXPFactor100'])
+        self.assertEqual(300, fields['premiumVehicleXP'])
+        self.assertEqual(900, fields['xp'])
+        self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(0, fields['boosterXP'])
+        self.assertEqual(45, fields['freeXP'])
+        self.assertEqual(30, fields['originalFreeXP'])
+        self.assertEqual([
+            ('credits', 'SET', 'originalCredits'),
+            ('xp', 'SET', 'originalXP'),
+            ('xp', 'MUL', 'premiumVehicleXPFactor100'),
+            ('freeXP', 'SET', 'originalFreeXP'),
+            ('freeXP', 'MUL', 'premiumVehicleXPFactor100'),
             ('gold', 'SET', 'originalGold'),
             ('crystal', 'SET', 'originalCrystal')], _Replay.steps)
 

@@ -437,22 +437,62 @@ def _arena_type_id(geometry_name):
     return 0
 
 
-def _account_award_split(battle_amount, awarded_amount):
-    """Split what the account banked into the battle's income and its bonus.
+def _multiplied(amount, factor_100):
+    """Return what ``ValueReplay.__mul__`` makes of one amount.
 
-    #1513 draws the first row of both detail tables from the record named
-    ``originalCredits``/``originalXP``/``originalFreeXP`` and every later row
-    from a record named by the value that step applied, so any difference
-    between what the battle produced and what the account banked has to be a
-    real step of the chain.  A save that multiplies earnings *down* has no
-    #1513 row that honestly names the reduction, so the reduced amount becomes
-    the battle's own income rather than an invented penalty row.
+    ``__opMul`` is ``int(round(value * factor / 100.0))`` under the embedded
+    CPython 2.7, which rounds a half away from zero.  Python 3 rounds it to
+    even, so the arithmetic is written out rather than delegated to ``round``.
+    """
+    amount = max(0, _int(amount))
+    factor_100 = max(0, _int(factor_100))
+    if factor_100 <= 100:
+        return amount
+    return int(amount * factor_100 / 100.0 + 0.5)
+
+
+def _premium_vehicle_credits(type_name, battle_credits):
+    """Return the battle's credit income on this vehicle.
+
+    Retail has no results row for a premium vehicle's higher credit income:
+    the vehicle's own profitability is inside the base credits the server
+    pays, which is where ``MoneyDetailsBlock`` draws it.  This port applies
+    that coefficient in the garage settlement instead, so the results screen
+    puts it back where retail keeps it.  A vehicle this client cannot resolve
+    earns the plain battle amount rather than a guess.
+    """
+    battle_credits = max(0, _int(battle_credits))
+    try:
+        from items import vehicles
+        premium = economy.is_premium_vehicle(
+            vehicles, _vehicle_type_compact_descr(type_name))
+    except Exception:
+        return battle_credits
+    if not premium:
+        return battle_credits
+    return (battle_credits *
+            max(0, _int(economy.PREMIUM_VEHICLE_CREDITS_PERCENT)) // 100)
+
+
+def _account_award_split(battle_amount, awarded_amount, factor_100=0):
+    """Split what the account banked across the rows #1513 can draw.
+
+    The first row of both detail tables is the record named
+    ``originalCredits``/``originalXP``/``originalFreeXP``, and every later row
+    is a record named by the value its step applied, so a difference between
+    what the battle produced and what the account banked has to be a real step
+    of the chain.  ``factor_100`` is the premium-vehicle experience step, which
+    #1513 draws as its own row; whatever the account's save multiplier adds on
+    top of it is the boosters row.  A save that multiplies earnings *down* has
+    no #1513 row that honestly names the reduction, so the reduced amount
+    becomes the battle's own income rather than an invented penalty row.
     """
     battle_amount = max(0, _int(battle_amount))
     awarded_amount = max(0, _int(awarded_amount))
-    if awarded_amount >= battle_amount:
-        return battle_amount, awarded_amount - battle_amount
-    return awarded_amount, 0
+    multiplied = _multiplied(battle_amount, factor_100)
+    if awarded_amount < multiplied:
+        return awarded_amount, 0
+    return battle_amount, awarded_amount - multiplied
 
 
 def _add_value_replays(packers, vehicle, replay_types=None):
@@ -462,31 +502,36 @@ def _add_value_replays(packers, vehicle, replay_types=None):
     ``gui.battle_results.reusable.records.ReplayRecords`` stores that step
     under exactly that name.  ``MoneyDetailsBlock``/``XPDetailsBlock``
     therefore read their first row from ``originalCredits``/``originalXP``/
-    ``originalFreeXP`` and their boosters row from ``boosterCredits``/
-    ``boosterXP``/``boosterFreeXP``.  Starting a chain anywhere else leaves
-    the first row reading a record that does not exist, which #1513 draws as
-    zero, so every chain starts at the battle's own income and adds the
-    account's own bonus as one further step named by a row the table draws.
-    ``ValueReplay.__add__`` writes the running total back through the
-    connector, so the packed total stays consistent with the breakdown.
+    ``originalFreeXP``, the premium-vehicle row from
+    ``premiumVehicleXPFactor100`` -- a factor name, so only a factor step
+    writes it -- and the boosters row from ``boosterCredits``/``boosterXP``/
+    ``boosterFreeXP``.  Starting a chain anywhere else, or applying the factor
+    with ``addMultipliedValue``, leaves a row reading a record that does not
+    exist, which #1513 draws as zero.  ``ValueReplay.__mul__`` and
+    ``__add__`` write the running total back through the connector, so the
+    packed total stays consistent with the breakdown.
     """
     if replay_types is None:
         from ValueReplay import ValueReplay, ValueReplayConnector
     else:
         ValueReplay, ValueReplayConnector = replay_types
     connector = ValueReplayConnector(packers.VEH_FULL_RESULTS, vehicle)
-    for record_name, start_name, bonus_name, result_name in (
-            ('credits', 'originalCredits', 'boosterCredits', 'creditsReplay'),
-            ('xp', 'originalXP', 'boosterXP', 'xpReplay'),
-            ('freeXP', 'originalFreeXP', 'boosterFreeXP', 'freeXPReplay'),
-            ('gold', 'originalGold', None, 'goldReplay'),
-            ('crystal', 'originalCrystal', None, 'crystalReplay')):
+    for record_name, start_name, factor_name, bonus_name, result_name in (
+            ('credits', 'originalCredits', None, 'boosterCredits',
+             'creditsReplay'),
+            ('xp', 'originalXP', 'premiumVehicleXPFactor100', 'boosterXP',
+             'xpReplay'),
+            ('freeXP', 'originalFreeXP', 'premiumVehicleXPFactor100',
+             'boosterFreeXP', 'freeXPReplay'),
+            ('gold', 'originalGold', None, None, 'goldReplay'),
+            ('crystal', 'originalCrystal', None, None, 'crystalReplay')):
         replay = ValueReplay(
             connector, recordName=record_name, startRecordName=start_name)
+        if factor_name is not None and _int(vehicle.get(factor_name)) > 100:
+            replay = replay * factor_name
         if bonus_name is not None and vehicle[bonus_name]:
             replay = replay + bonus_name
         vehicle[result_name] = replay.pack()
-
 
 def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
                               interaction_details_type=None):
@@ -623,18 +668,29 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
+    # A premium vehicle earns more of both, and #1513 presents the two the
+    # way retail does: its credit profitability is inside the battle's own
+    # income, and its experience bonus is a factor step the results screen
+    # draws as the 'premium vehicle' row.  The packed factor is therefore the
+    # total multiplier the chain applies, not the descriptor's bare bonus.
     premium_factor_100 = _premium_vehicle_xp_factor_100(receipt['vehicle'])
-    premium_xp = _premium_bonus(original['xp'], premium_factor_100)
-    # The account's own multipliers -- a save's earnings percentage and a
-    # premium vehicle's credit and experience bonuses -- are what the banked
-    # amount has above the battle's own income.  #1513 has one row for an
-    # account-owned multiplier on a finished battle, the boosters row, and it
-    # reads the amount from these three records.
+    xp_factor_100 = 100 + premium_factor_100 if premium_factor_100 else 0
+    if (rewards['xp'] < _multiplied(original['xp'], xp_factor_100) or
+            rewards['free_xp'] < _multiplied(
+                original['free_xp'], xp_factor_100)):
+        # One packed factor drives both chains, so a save that banked less
+        # than the factor alone would produce drops it from both.
+        xp_factor_100 = 0
+    premium_xp = _multiplied(original['xp'], xp_factor_100) - original['xp']
+    # Whatever the account banked above that is its save multiplier, which is
+    # #1513's one row for an account-owned multiplier on a finished battle.
     base_credits, booster_credits = _account_award_split(
-        original['credits'], rewards['credits'])
-    base_xp, booster_xp = _account_award_split(original['xp'], rewards['xp'])
+        _premium_vehicle_credits(receipt['vehicle'], original['credits']),
+        rewards['credits'])
+    base_xp, booster_xp = _account_award_split(
+        original['xp'], rewards['xp'], xp_factor_100)
     base_free_xp, booster_free_xp = _account_award_split(
-        original['free_xp'], rewards['free_xp'])
+        original['free_xp'], rewards['free_xp'], xp_factor_100)
     vehicle = {
         'accountDBID': account_dbid,
         'typeCompDescr': vehicle_type_cd,
@@ -669,12 +725,8 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'boosterXP': booster_xp,
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
-        # The bonus this vehicle's own descriptor is worth, for a reader of
-        # the packed result.  #1513's premium-vehicle row reads a record named
-        # by the factor rather than by the amount, and no step of this chain
-        # writes one, so the screen shows the bonus in the boosters row.
         'premiumVehicleXP': premium_xp,
-        'premiumVehicleXPFactor100': premium_factor_100,
+        'premiumVehicleXPFactor100': xp_factor_100,
         'freeXP': rewards['free_xp'],
         'originalFreeXP': base_free_xp,
         'boosterFreeXP': booster_free_xp,

@@ -1378,19 +1378,35 @@ name of the value its step applied. `ValueReplay.__iter__` yields
 else. `MoneyDetailsBlock.__getBaseCredits` reads `originalCredits`,
 `XPDetailsBlock.__getBaseXPs` reads `originalXP` and `originalFreeXP`, the
 boosters rows read `boosterCredits`, `boosterXP` and `boosterFreeXP`, and a
-name no step applied reads as zero. Two consequences are load-bearing for
-this port: a chain must start at `original*`, or the results screen draws the
-battle's own income as zero while the total row stays right; and
-`addMultipliedValue(startName, factor)` records the step under `startName`,
-which *replaces* the base record with the bonus rather than adding a row.
-The account's own multipliers - the save's earnings percentage and this
-port's premium-vehicle credit and experience bonuses - are therefore packed
+name no step applied reads as zero. Three consequences are load-bearing for
+this port. A chain must start at `original*`, or the results screen draws the
+battle's own income as zero while the total row stays right.
+`addMultipliedValue(startName, factor)` records its step under `startName`,
+which *replaces* the base record with the bonus rather than adding a row -
+only `__mul__` and `applyFactorToTag`, whose first parameter is the factor,
+write a factor-named record, which is why the premium-vehicle row and
+`_XPReplayRecords`' `xpToShow = xp - premiumVehicleXPFactor100` both read one.
+And a factor step's packed field is therefore the *total* multiplier the chain
+applies, not the descriptor's bonus: `premiumVehicleXPFactor` defaults to
+`DEFAULT_PREMIUM_VEHICLE_XP_FACTOR = 0.0` and is a bonus fraction, so a 0.5
+vehicle packs 150.
+
+This port therefore presents its two account-side coefficients where retail
+keeps them. A premium vehicle's credit income has no retail row - vehicle
+profitability is inside the base credits the server pays - so
+`PREMIUM_VEHICLE_CREDITS_PERCENT` is folded into `originalCredits`. Its
+experience bonus has one, `details/calculations/premiumVehicleXP`, so it is a
+`__mul__` step by `premiumVehicleXPFactor100`; one visible consequence is that
+`xpToShow`, which the summary panel draws, then excludes it exactly as #1513
+computes. Whatever the save's earnings multiplier adds above those is packed
 as `boosterCredits`, `boosterXP` and `boosterFreeXP` and added with one `ADD`
-step, which is the single #1513 row for an account-owned multiplier on a
-finished battle. `ValueReplay.__add__` writes the running total back through
-the connector, so the packed total, the breakdown and the wallet agree. An
-award below the battle's own income has no #1513 row that honestly names the
-reduction, so `original*` reports the reduced amount instead.
+step, the single #1513 row for an account-owned multiplier on a finished
+battle. `__mul__` and `__add__` both write the running total back through the
+connector, so the packed total, the breakdown and the wallet agree; a sweep
+over 13,680 combinations of battle XP, save percentage and vehicle factor
+confirms the chain lands exactly on the banked amount. An award below the
+battle's own income has no #1513 row that honestly names the reduction, so
+`original*` reports the reduced amount instead.
 
 Kill XP uses victim durability as an offline balance proxy. This does not
 implement an exact tier-difference rule: equal-tier vehicles can have different

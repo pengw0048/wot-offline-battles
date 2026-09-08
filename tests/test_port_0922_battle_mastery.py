@@ -82,6 +82,16 @@ class _Replay(object):
             startRecordName]
         _Replay.steps.append((recordName, 'SET', startRecordName))
 
+    def __mul__(self, other):
+        # ``__opMul`` is ``int(round(value * factor / 100.0))`` under the
+        # embedded CPython 2.7, which rounds a half away from zero.
+        self.connector.values[self.record_name] = int(
+            self.connector.values[self.record_name] *
+            self.connector.values[other] / 100.0 + 0.5)
+        self.chain.append('MUL:%s' % other)
+        _Replay.steps.append((self.record_name, 'MUL', other))
+        return self
+
     def __add__(self, other):
         self.connector.values[self.record_name] += self.connector.values[
             other]
@@ -411,15 +421,18 @@ class MasteryResultTests(unittest.TestCase):
             bonus = int(round((third_class - 1) * 0.5))
             self.assertEqual(third_class - 1 + bonus, vehicle['xp'])
             self.assertEqual(bonus, vehicle['premiumVehicleXP'])
-            self.assertEqual(50, vehicle['premiumVehicleXPFactor100'])
-            # #1513 draws the first row of the XP table from the record named
-            # originalXP, so the chain starts there and the bonus is the one
-            # further step the boosters row reads.
+            # #1513's premium-vehicle row reads a record named by the factor,
+            # which only a factor step writes, so the packed field is the
+            # total multiplier the chain applies.
+            self.assertEqual(150, vehicle['premiumVehicleXPFactor100'])
             self.assertIn(('xp', 'SET', 'originalXP'), _Replay.steps)
-            self.assertIn(('xp', 'ADD', 'boosterXP'), _Replay.steps)
-            self.assertEqual(bonus, vehicle['boosterXP'])
-            self.assertIn(('freeXP', 'SET', 'originalFreeXP'), _Replay.steps)
-            self.assertIn(('freeXP', 'ADD', 'boosterFreeXP'), _Replay.steps)
+            self.assertIn(('xp', 'MUL', 'premiumVehicleXPFactor100'),
+                          _Replay.steps)
+            self.assertIn(('freeXP', 'MUL', 'premiumVehicleXPFactor100'),
+                          _Replay.steps)
+            # Nothing multiplied this save, so there is no boosters row.
+            self.assertEqual(0, vehicle['boosterXP'])
+            self.assertNotIn(('xp', 'ADD', 'boosterXP'), _Replay.steps)
             message = store.service_message_data(receipt['arena_unique_id'])
             self.assertEqual(vehicle['xp'], message['xp'])
             # The account banks the bonus even though the badge ignored it.

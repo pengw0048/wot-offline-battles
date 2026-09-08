@@ -1369,6 +1369,16 @@ class _Replay(object):
             startRecordName]
         _Replay.steps.append((recordName, 'SET', startRecordName))
 
+    def __mul__(self, other):
+        # ``__opMul`` is ``int(round(value * factor / 100.0))`` under the
+        # embedded CPython 2.7, which rounds a half away from zero.
+        self.connector.values[self.record_name] = int(
+            self.connector.values[self.record_name] *
+            self.connector.values[other] / 100.0 + 0.5)
+        self.chain.append('MUL:%s' % other)
+        _Replay.steps.append((self.record_name, 'MUL', other))
+        return self
+
     def __add__(self, other):
         self.connector.values[self.record_name] += self.connector.values[
             other]
