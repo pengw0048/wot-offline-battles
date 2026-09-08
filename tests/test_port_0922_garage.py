@@ -2511,6 +2511,67 @@ class GarageSaveDurabilityTests(unittest.TestCase):
             self.assertTrue(store.flush(snapshot))
         return store, snapshot
 
+    def test_a_researched_guns_own_rounds_do_not_refuse_the_save(self):
+        """The v0.7.0 loss, from a real client log.
+
+        Installing a researched gun loads the rounds that gun fires.  Rounds
+        are never researched in #1513, so nothing ever put them in the
+        account's unlocked set, and the next start refused the whole career
+        with "every garage vehicle, module and shell must be unlocked".
+        """
+        snapshot = self._career_snapshot()
+        # The catalogue prices the researched gun's own rounds, as bootstrap
+        # publishes every mountable gun's ammunition.
+        snapshot['shopItemPrices'].update({
+            4444: {'credits': 0, 'gold': 0},
+            7001: {'credits': 0, 'gold': 0},
+            20010: {'credits': 0, 'gold': 0},
+            20011: {'credits': 0, 'gold': 0},
+        })
+        snapshot['inventoryItems'][10].update({20010: 30, 20011: 15})
+        # The researched gun is unlocked, as researching it is what made it
+        # installable; its rounds never are.
+        snapshot['unlockItemCompactDescrs'].update((4444, 7001))
+        state = self._state(snapshot)
+        state.install_component(9, 4444)
+        snapshot = state.snapshot()
+        store = self._store()
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(store.flush(snapshot))
+
+        fresh = copy.deepcopy(snapshot)
+        for record in fresh['vehicles']:
+            record['shells'] = [10010, 20, 10011, 10]
+            record['shellsLayout'] = {(7001, 7002): [10010, 20, 10011, 10]}
+            record['shellsLayoutIdx'] = (7001, 7002)
+            record['inventoryItems'][10] = {10010: 20, 10011: 10}
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            restored = self._store().apply(fresh)
+
+        self.assertNotIn('must be unlocked', log.getvalue())
+        self.assertTrue(restored)
+        self.assertEqual(
+            (7001, 4444), tuple(fresh['vehicles'][0]['shellsLayoutIdx']))
+
+    def test_a_rack_with_no_rows_is_refused_rather_than_saved(self):
+        """Every live garage state has to be one the next start can read.
+
+        A rack with no rows at all is not a garage this port can publish, so
+        the command that would produce one is refused while the garage is
+        still writable.  A combined layout request that names no round is
+        setting nothing, not emptying the rack.
+        """
+        snapshot = self._career_snapshot()
+        state = self._state(snapshot)
+
+        self.assertRaises(
+            self.garage.GarageError, state.equip_shells, 9, [])
+        state.set_layouts(9, shells_layout=[])
+
+        self.assertEqual(
+            [10010, 20, 10011, 10], state.snapshot()['vehicles'][0]['shells'])
+
     def test_a_payload_with_no_vehicles_never_replaces_a_saved_garage(self):
         """The shape a fresh or empty snapshot writes, and the reported bug.
 

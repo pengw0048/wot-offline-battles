@@ -302,7 +302,14 @@ def _validate_selected_vehicle(vehicle):
             required_prices = set()
             for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (10,):
                 required_prices.update(inventory_items[item_type])
-            installed_item_compact_descrs.update(required_prices)
+            # Only the researchable module types belong in the unlock
+            # requirement below.  #1513 researches item types 2-7; rounds are
+            # bought, never researched, so nothing ever unlocks them and a
+            # gun's own ammunition arrives with the gun.  Requiring them
+            # refused every career that installed a researched gun.
+            for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES:
+                installed_item_compact_descrs.update(
+                    inventory_items[item_type])
             if not required_prices.issubset(set(item_prices)):
                 raise ValueError(
                     'selected vehicle modules and shells must have shop prices')
