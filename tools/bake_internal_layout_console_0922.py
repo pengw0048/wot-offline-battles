@@ -72,6 +72,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from packed_xml import read_packed_xml, TYPE_COMPRESSED_STRING, TYPE_ELEMENT
 from hkx_module_geometry import (UnsupportedPackfile, module_surfaces,
                                  outer_shell)
+from bw_primitives_geometry import (UnsupportedPrimitives,
+                                    module_surfaces as primitive_surfaces)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
@@ -261,6 +263,18 @@ def _open_package(body, password):
     return archive
 
 
+# Console shipped its collision proxies as Havok packfiles up to console4.9
+# and as BigWorld .primitives from console4.10 on, so both containers have to
+# be read to reach the whole roster.  The two decoders were written
+# independently and cross-check exactly: on the AT 7, whose hull is in both
+# console4.3 (Havok) and console4.13 (primitives), all 24 shared surface
+# centres agree to 0.000 m.
+CONTAINERS = (
+    ('.hkx', module_surfaces, UnsupportedPackfile),
+    ('.primitives', primitive_surfaces, UnsupportedPrimitives),
+)
+
+
 def console_parts(body, password=None):
     """{port parent: decoded surfaces} for one Console collision package."""
     parts = {}
@@ -270,17 +284,23 @@ def console_parts(body, password=None):
                 raise UnsupportedPackfile('encrypted member: '
                                           + info.filename)
             leaf = info.filename.rsplit('/', 1)[-1].lower()
-            for suffix, parent in PART_PARENTS:
-                if leaf.endswith('_%s_proxy.hkx' % suffix) or \
-                        leaf.endswith('%s_proxy.hkx' % suffix):
-                    try:
-                        parts[parent] = module_surfaces(archive.read(info))
-                    except UnsupportedPackfile:
-                        pass
-                    except RuntimeError as error:
-                        raise UnsupportedPackfile('member unreadable: %s'
-                                                  % error)
-                    break
+            for extension, decode, unsupported in CONTAINERS:
+                matched = None
+                for suffix, parent in PART_PARENTS:
+                    if leaf.endswith('_%s_proxy%s' % (suffix, extension)) or \
+                            leaf.endswith('%s_proxy%s' % (suffix, extension)):
+                        matched = parent
+                        break
+                if matched is None:
+                    continue
+                try:
+                    parts[matched] = decode(archive.read(info))
+                except unsupported:
+                    pass
+                except RuntimeError as error:
+                    raise UnsupportedPackfile('member unreadable: %s'
+                                              % error)
+                break
     return parts
 
 
