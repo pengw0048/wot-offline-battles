@@ -100,6 +100,16 @@ class VehiclePhysicsDescriptorTests(unittest.TestCase):
 
 class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
 
+    def test_drive_pitch_projects_terrain_and_rejects_missing_support(self):
+        plane = {'gradient_x': 0.2, 'gradient_z': -0.3}
+        for yaw, tangent in ((0.0, -0.3), (math.pi, 0.3),
+                             (math.pi / 2.0, 0.2)):
+            self.assertAlmostEqual(-math.atan(tangent),
+                vehicle_physics.suspension_drive_pitch(plane, yaw))
+        for invalid in (None, {}, {'gradient_x': float('nan'), 'gradient_z': 0}):
+            self.assertIsNone(vehicle_physics.suspension_drive_pitch(invalid, 0.0))
+        self.assertIsNone(vehicle_physics.suspension_drive_pitch(plane, float('inf')))
+
     def test_suspension_contacts_share_the_collision_ypr_transform(self):
         from gui.mods.offline_lan_0922 import tank_collision
         point = {'x': 1.2, 'y': 0.4, 'z': -2.0}

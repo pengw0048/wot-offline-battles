@@ -1143,6 +1143,19 @@ def suspension_support_vertical_velocity(plane, velocity_x, velocity_z):
 	return gradient_x * velocity_x + gradient_z * velocity_z
 
 
+def suspension_drive_pitch(plane, yaw):
+	"""Project contacted terrain onto the hull-forward drive axis."""
+	try:
+		yaw = float(yaw)
+		if math.isnan(yaw) or math.isinf(yaw):
+			return None
+	except (TypeError, ValueError, OverflowError):
+		return None
+	tangent = suspension_support_vertical_velocity(
+		plane, math.sin(yaw), math.cos(yaw))
+	return None if tangent is None else -math.atan(tangent)
+
+
 def landing_impact_speed(world_velocity, support_normal):
 	'''Return closing speed along one trustworthy upward support normal.
 

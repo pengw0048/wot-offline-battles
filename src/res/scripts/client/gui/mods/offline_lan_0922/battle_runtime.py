@@ -17068,12 +17068,18 @@ class BattleRuntime(object):
         return self._commit_ground_plane(plane, force_raw=force_raw)
 
     def _drive_pitch(self, position, yaw):
-        """Copy the 0.8.2 close-range drive slope probe exactly.
+        """Use contacted terrain for drive gravity, then the legacy probe.
 
-        This is deliberately separate from the four-point visual hull pose.
-        The drive law skips bridge decks above the hull and clamps walls and
-        cliff faces before their gradient reaches longitudinal physics.
+        A centre-line probe may fall into a trench while the tracks still
+        bridge its banks. That floor is not the grade carrying this vehicle.
+        The suspension plane excludes unsupported samples and body rocking.
         """
+        if (self._local_suspension_params is not None and
+                not self._local_suspension_disabled):
+            supported_pitch = vehicle_physics.suspension_drive_pitch(
+                self._local_ground_plane, yaw)
+            if supported_pitch is not None:
+                return supported_pitch
         sine, cosine = math.sin(yaw), math.cos(yaw)
         distance = 2.0
         wall_rise = distance * 1.43

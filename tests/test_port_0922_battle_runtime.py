@@ -21642,6 +21642,50 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((0.0, 0.0, 0.0), position)
         self.assertGreater(battle._local_slide_speed, 0.0)
 
+    def test_supported_tracks_do_not_use_trench_floor_as_drive_grade(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        # Both tracks bridge a short depression around the centre-line probe
+        # at z=2.0. Every contacting road wheel is still on the level banks.
+        params = {'springs': [{'x': x, 'y': 0.0, 'z': z}
+                             for x in (-1.0, 1.0)
+                             for z in (-2.4, -1.2, 0.0, 1.2, 2.4)]}
+        battle._local_suspension_params = params
+        battle._local_ground_plane = vehicle_physics.suspension_world_ground_plane(
+            params, (0.0,) * 10, (0.0, 0.0, 0.0), 0.0, 0.15)
+        # Deliberately rock the rendered body; its attitude is not the grade.
+        battle._local_pitch = -0.2
+        runtime.bigworld.wg_collideSegment = mock.Mock(side_effect=(
+            lambda space, start, end, mask: (
+                _Vector(start.x, -1.5 if start.z > 0 else 0.0, start.z),)))
+
+        self.assertEqual(0.0, battle._drive_pitch((0.0, 0.0, 0.0), 0.0))
+        runtime.bigworld.wg_collideSegment.assert_not_called()
+
+    def test_suspension_drive_grade_follows_current_heading_not_body_rock(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_suspension_params = {'springs': ()}
+        battle._local_ground_plane = {'gradient_x': 0.2, 'gradient_z': -0.3}
+        battle._local_pitch, battle._local_roll = 0.5, -0.4
+        battle._collide_down = mock.Mock(side_effect=AssertionError('extra query'))
+        for yaw, tangent in ((0.0, -0.3), (math.pi, 0.3),
+                             (math.pi / 2.0, 0.2)):
+            self.assertAlmostEqual(-math.atan(tangent),
+                battle._drive_pitch((0.0, 0.0, 0.0), yaw))
+
+    def test_retired_suspension_does_not_supply_cached_drive_grade(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_suspension_params = {'springs': ()}
+        battle._local_suspension_disabled = True
+        battle._local_ground_plane = {'gradient_x': 0.0, 'gradient_z': 0.0}
+        runtime.bigworld.wg_collideSegment = lambda space, start, end, mask: (
+            _Vector(start.x, 0.2 * start.z, start.z),)
+        self.assertAlmostEqual(-math.atan(0.2),
+            battle._drive_pitch((0.0, 0.0, 0.0), 0.0))
+
     def test_drive_pitch_skips_bridge_deck_above_the_hull(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

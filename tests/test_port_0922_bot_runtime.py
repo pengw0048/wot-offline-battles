@@ -4442,6 +4442,25 @@ class BotRuntimeTests(unittest.TestCase):
         })
         return runtime, state, calls
 
+    def test_bot_drive_uses_contacted_plane_instead_of_corridor_grade(self):
+        runtime, state, unused_calls = self._full_suspension_case(
+            lambda x, z: 0.0)
+        self.assertFalse(runtime._update_vertical_motion(state, 0.04))
+        self.assertIn('_suspension_ground_plane', state)
+        command = self._stationary_command()
+        command.update(throttle=1.0, movement_intent=True,
+                       move_position=(0.0, 0.0, 10.0),
+                       combat_mode='advance', recovery_mode='drive')
+        runtime.adapter.decide = lambda *unused: dict(command)
+        runtime.direction_probe = lambda *unused: {
+            'clear': True, 'collision': False, 'slope': 0.375}
+        state['speed'] = 4.0
+
+        runtime.update(0.1, 1.1)
+
+        self.assertAlmostEqual(0.0, state['last_drive_pitch'])
+        self.assertGreater(state['speed'], 4.0)
+
     def test_ten_spring_bot_samples_22_contacts_once_per_outer_tick(self):
         runtime, state, calls = self._suspension_case(
             lambda unused_x, unused_z: 0.0)

@@ -11628,6 +11628,14 @@ class BotRuntime(object):
                     path_clear = False
                     throttle = 0.0
                     state['movement_dir'] = 0
+                # The corridor grade ranks future navigation, but a trench
+                # below that probe need not support the tracks now. Reuse the
+                # accepted suspension plane for drive gravity, projected onto
+                # the post-turn hull heading used by this integration slice.
+                supported_pitch = vehicle_physics.suspension_drive_pitch(
+                    state.get('_suspension_ground_plane'), candidate_hull_yaw)
+                if supported_pitch is not None:
+                    slope_pitch = supported_pitch
                 previous_speed = state['speed']
                 speed = (0.0 if siege_motion_locked else
                     vehicle_physics.longitudinal_step(
