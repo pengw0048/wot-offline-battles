@@ -16615,6 +16615,10 @@ class BattleRuntime(object):
                 path or 'still', self._local_motion_status,
                 self._local_motion_kinds, self._local_support_rise_blocked,
                 self._local_airborne))
+        trace = getattr(self, '_local_world_collision_trace', None)
+        if self._local_motion_status == 'hard' and trace and trace.get('reason'):
+            sys.stdout.write('[Offline LAN 0.9.22] LOCAL HARD CONTACT %s\n' %
+                             json.dumps(trace, sort_keys=True))
         return True
 
     def _report_local_contact_tick(self, path, before, pitch, rise):
@@ -17614,6 +17618,7 @@ class BattleRuntime(object):
         self._local_motion_cap_crushed = False
         self._local_motion_kinds = '-'
         self._local_motion_status = 'clear'
+        self._local_world_collision_trace = {}
         if not self._arena_motion_is_clear(
                 entity, position, yaw, speed, dt, hull_yaw=hull_yaw):
             self._local_motion_kinds = 'arena'
@@ -17718,7 +17723,8 @@ class BattleRuntime(object):
                     entity.typeDescriptor, self._local_airborne, dt, True,
                     True, kinetic_speed, commit_enabled=False,
                     pitch=self._local_pitch, roll=self._local_roll,
-                    motion_yaw=world_motion_yaw)
+                    motion_yaw=world_motion_yaw,
+                    trace=self._local_world_collision_trace)
                 if isinstance(world_status, bool):
                     world_status = 'hard' if world_status else 'clear'
                 if world_status not in ('clear', 'kinetic'):
@@ -17736,7 +17742,8 @@ class BattleRuntime(object):
             bool(kinetic_speed is not None), kinetic_speed,
             commit_enabled=False,
             pitch=self._local_pitch, roll=self._local_roll,
-            motion_yaw=world_motion_yaw)
+            motion_yaw=world_motion_yaw,
+            trace=self._local_world_collision_trace)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         if world_status == 'hard':

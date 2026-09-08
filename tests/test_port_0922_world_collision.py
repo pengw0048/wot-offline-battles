@@ -1311,6 +1311,42 @@ class WorldCollisionTests(unittest.TestCase):
                 None, False, 0.20, True, commit_enabled=False))
         self.assertEqual(0, ground_queries[0])
 
+    def test_hard_trace_preserves_queries_and_clears_previous_hit(self):
+        queries = []
+        blocked = [True]
+
+        def collide(space, start, end, mask, *filters):
+            queries.append((start.x, start.y, start.z, end.x, end.y, end.z))
+            if not blocked[0] or _vertical_ray(start, end):
+                return None
+            return (start + (end - start).scale(0.5),
+                    _Vector(0, 0, -1), 0)
+
+        scene = types.SimpleNamespace(wg_collideSegment=collide,
+            wg_getMatInfoNearPoint=_miss_mat_info_1513)
+        args = (scene, types.SimpleNamespace(Vector3=_Vector),
+                1, _Vector(), 0.0, 1.0, None, False, 0.04, True)
+        with mock.patch.object(world_collision, '_destroy_and_recast',
+                               return_value=False):
+            self.assertEqual('hard', world_collision.check_horizontal_collision(
+                *args, commit_enabled=False))
+            baseline = list(queries)
+            queries[:] = []
+            trace = {}
+            self.assertEqual('hard', world_collision.check_horizontal_collision(
+                *args, commit_enabled=False, trace=trace))
+            self.assertEqual(baseline, queries)
+            self.assertEqual('solid_lane', trace['reason'])
+            self.assertEqual((0.0, 0.0, -1.0), trace['normal'])
+            self.assertEqual((1.5, 3.5, 3.5), trace['extents'])
+            for actual, expected in zip(trace['hit'], (-1.5, 0.6, 1.7)):
+                self.assertAlmostEqual(expected, actual)
+            blocked[0] = False
+            self.assertEqual('clear', world_collision.check_horizontal_collision(
+                *args, commit_enabled=False, trace=trace))
+            self.assertNotIn('reason', trace)
+            self.assertNotIn('hit', trace)
+
     def test_exact_ground_top_uses_one_millimetre_epsilon(self):
         point = _Vector(1.0, 2.0, 3.0)
         top_y = [point.y]
