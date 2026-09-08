@@ -43,10 +43,17 @@ class DecodedInteriorTableTests(unittest.TestCase):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
                 self.assertEqual(2, len(key))
-                (vehicle_class, tier, roster, from_archetype, modules,
-                 crew) = record
+                (vehicle_class, tier, roster, from_archetype, unmodelled,
+                 modules, crew) = record
                 for entity in from_archetype:
                     self.assertIn(entity, MODULE_ENTITIES)
+                for entity in unmodelled:
+                    self.assertIn(entity, MODULE_ENTITIES)
+                    # An entity is either placed or declared unavailable,
+                    # never both.
+                    self.assertNotIn(entity, from_archetype)
+                    self.assertNotIn(entity,
+                                     set(zone[0] for zone in modules))
                 self.assertTrue(vehicle_class)
                 self.assertTrue(1 <= tier <= 10)
                 self.assertTrue(roster)
@@ -78,7 +85,7 @@ class DecodedInteriorTableTests(unittest.TestCase):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
                 centres = [tuple(round(value, 4) for value in zone[2])
-                           for zone in record[5]]
+                           for zone in record[6]]
                 self.assertEqual(len(centres), len(set(centres)))
 
     def test_decoded_vehicles_cover_every_module_target(self):
@@ -89,9 +96,13 @@ class DecodedInteriorTableTests(unittest.TestCase):
                     'surveyingDevice', 'turretRotator')
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
-                entities = set(zone[0] for zone in record[4])
+                entities = set(zone[0] for zone in record[5])
+                # A target is accounted for either by a zone or by being
+                # declared unavailable; validate_layout accepts both and
+                # nothing else.
+                accounted = entities | set(record[4])
                 for entity in required:
-                    self.assertIn(entity, entities)
+                    self.assertIn(entity, accounted)
 
 
 class DecodedInteriorResolutionTests(unittest.TestCase):
@@ -108,8 +119,8 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
         self.assertEqual('decoded', profile[3])
         self.assertTrue(profile[0].startswith('decoded_collision_surfaces'))
         self.assertIsNot(internal_layout_profiles.PROFILES[key], profile)
-        self.assertEqual(layouts[key][4], profile[5])
-        self.assertEqual(layouts[key][5], profile[6])
+        self.assertEqual(layouts[key][5], profile[5])
+        self.assertEqual(layouts[key][6], profile[6])
 
     def test_decoded_layout_available_matches_the_table(self):
         layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
@@ -166,12 +177,87 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
             if record is None:
                 continue
             with self.subTest(vehicle=vehicle):
-                engines = [zone for zone in record[4]
+                engines = [zone for zone in record[5]
                            if zone[0] == 'engine' and zone[1] == 'hull']
                 self.assertTrue(engines)
                 self.assertLess(min(zone[3][2] for zone in engines), 0.5)
                 checked += 1
         self.assertTrue(checked, 'none of the sampled hulls were decoded')
+
+
+class UnmodelledModuleTests(unittest.TestCase):
+    """A module the resources do not model is unavailable, never invented.
+
+    Console models no traverse mechanism for a fixed superstructure and
+    sometimes no separate optic.  Discarding such a vehicle's decoded
+    ammunition rack, engine, fuel tank, radio and full crew to protect that
+    one module is what left these tanks with no interior at all, so the port
+    publishes the module unavailable instead -- the same contract it already
+    uses for a track with no native collision extra.
+    """
+
+    def setUp(self):
+        self.layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
+        self.records = sorted(key for key, record in self.layouts.items()
+                              if record[4])
+
+    def test_some_vehicle_declares_an_unmodelled_module(self):
+        self.assertTrue(self.records,
+                        'expected vehicles whose resources model no traverse')
+
+    def test_an_unmodelled_module_is_named_in_the_source(self):
+        key = self.records[0]
+        unused_key, profile = internal_hit_layouts._compiled_profile(
+            '%s:%s' % key)
+        self.assertIsNotNone(profile)
+        self.assertIn('+unmodelled:', profile[0])
+        for entity in self.layouts[key][4]:
+            self.assertIn(entity, profile[0])
+
+    def test_the_helper_reports_exactly_the_recorded_entities(self):
+        key = self.records[0]
+        self.assertEqual(
+            tuple(self.layouts[key][4]),
+            internal_hit_layouts.decoded_unmodelled_entities('%s:%s' % key))
+        pure = sorted(k for k, record in self.layouts.items()
+                      if not record[4])
+        self.assertTrue(pure)
+        self.assertEqual((),
+                         internal_hit_layouts.decoded_unmodelled_entities(
+                             '%s:%s' % pure[0]))
+
+    def test_validate_layout_accepts_an_unmodelled_target(self):
+        # The mode must be treated as an honest boundary, not as a hole that
+        # invalidates the layout -- otherwise these vehicles gain nothing.
+        layout = {
+            'targets': (),
+            'expected_module_entities': ('turretRotator',),
+            'expected_crew_entities': (),
+            'logical_entity_sources': {
+                'turretRotator': {'mode': 'RESOURCE_GEOMETRY_UNMODELLED'},
+            },
+            'official_geometry': {},
+            'parent_transforms': {},
+            'required_parents': (),
+        }
+        validation = internal_hit_layouts.validate_layout(layout)
+        self.assertEqual([], list(validation['missing']))
+
+    def test_an_unknown_source_mode_still_fails(self):
+        # The guard above must not have widened into accepting anything.
+        layout = {
+            'targets': (),
+            'expected_module_entities': ('turretRotator',),
+            'expected_crew_entities': (),
+            'logical_entity_sources': {
+                'turretRotator': {'mode': 'SOMETHING_ELSE'},
+            },
+            'official_geometry': {},
+            'parent_transforms': {},
+            'required_parents': (),
+        }
+        validation = internal_hit_layouts.validate_layout(layout)
+        self.assertTrue(validation['missing'])
 
 
 class HullRegistrationRuleTests(unittest.TestCase):

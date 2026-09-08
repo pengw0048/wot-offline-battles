@@ -55,6 +55,7 @@ interior inside it.
 import argparse
 import base64
 import collections
+import hashlib
 import io
 import json
 import os
@@ -319,6 +320,40 @@ def residual(surfaces, bound):
                  for axis in range(3))
 
 
+def pc_primitive_hashes(cache, entry):
+    """Content fingerprint of a vehicle's PC collision primitives.
+
+    Two catalogue entries whose collision primitives are byte-identical are
+    the same mesh in the same frame, so one's decoded interior is the other's
+    by identity.  Returns a hashable key, or None when no PC package is
+    cached for the vehicle.
+    """
+    for package in PC_PACKAGES:
+        path = cache / ('%s_collision-%d.data' % (package,
+                                                  entry['archive_id']))
+        if not path.exists():
+            continue
+        body = path.read_bytes()
+        if not body:
+            continue
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(body))
+        except zipfile.BadZipFile:
+            continue
+        parts = {}
+        for info in archive.infolist():
+            leaf = info.filename.rsplit('/', 1)[-1].lower()
+            if not leaf.endswith('.primitives_processed'):
+                continue
+            try:
+                data = archive.read(info)
+            except (RuntimeError, NotImplementedError):
+                continue
+            parts[leaf] = hashlib.sha1(data).hexdigest()
+        return tuple(sorted(parts.items())) or None
+    return None
+
+
 def floor_offset(surfaces, bound):
     """How far the Console shell's lowest plate sits off the PC box floor.
 
@@ -528,18 +563,31 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
     # provenance and the record says which were not decoded.
     located = set(zone[0] for zone in module_zones)
     from_archetype = []
+    unmodelled = []
     for entity in REQUIRED_ENTITIES:
         if entity in located:
             continue
         borrowed = archetype_zones(key, entity)
-        if not borrowed:
-            return None, 'module_absent:' + entity, residuals
-        module_zones.extend(borrowed)
-        from_archetype.append(entity)
+        if borrowed:
+            module_zones.extend(borrowed)
+            from_archetype.append(entity)
+            continue
+        # No decoded surface and no archetype either.  Declare the entity
+        # explicitly unavailable rather than discarding the vehicle: the port
+        # already has that contract for the tracks it scores natively, and
+        # `validate_layout` accepts a target whose source says so.  The
+        # alternative is what this tool used to do -- throw away a complete
+        # decoded ammunition rack, engine, fuel tank, radio and crew because
+        # Console models no traverse mechanism for a fixed superstructure --
+        # which leaves the vehicle with no interior at all.  Nothing is
+        # invented for it and the record names it, so a reader can tell an
+        # unhittable module from a placed one.
+        unmodelled.append(entity)
     if not module_zones:
         return None, 'no_module_surfaces', residuals
     return ((tuple(module_zones), tuple(crew_zones),
-             tuple(sorted(from_archetype))), None, residuals)
+             tuple(sorted(from_archetype)), tuple(sorted(unmodelled))),
+            None, residuals)
 
 
 HEADER = '''# -*- coding: utf-8 -*-
@@ -589,8 +637,9 @@ DECODED_COUNT = %(decoded)d
 CONFIDENCE = 'decoded'
 
 # vehicle key -> (vehicle class, tier, crew roster, entities taken from the
-# retained archetype because the resources do not model them, module zones,
-# crew zones)
+# retained archetype because the resources do not model them, entities the
+# resources do not model and no archetype covers -- explicitly unavailable,
+# never invented -- module zones, crew zones)
 CONSOLE_LAYOUTS_0922 = {
 '''
 
@@ -605,13 +654,13 @@ def render(version, build, catalogue, decoded, max_residual, sources):
                      'sources': tuple(sources), 'pc_package': PC_PACKAGE}
     for key in sorted(decoded):
         (vehicle_class, tier, roster, module_zones, crew_zones,
-         from_archetype) = decoded[key]
+         from_archetype, unmodelled) = decoded[key]
         # Key on the same normalized (nation, name) the runtime derives from
         # a descriptor, so the lookup needs no translation.
         text += ('    %r: (\n        %r,\n        %d,\n        %r,\n'
-                 '        %r,\n        (\n'
+                 '        %r,\n        %r,\n        (\n'
                  % (internal_hit_layouts._profile_key(key), vehicle_class,
-                    tier, roster, from_archetype))
+                    tier, roster, from_archetype, unmodelled))
         for zone in module_zones:
             text += '            %r,\n' % (zone,)
         text += '        ),\n        (\n'
@@ -716,6 +765,7 @@ def main():
             'module_zones': len(built[0]),
             'crew_zones': len(built[1]),
             'entities_from_archetype': list(built[2]),
+            'entities_unmodelled': list(built[3]),
         })
         if attempts:
             entry['earlier_attempts'] = attempts
@@ -742,12 +792,40 @@ def main():
         candidates = donors.get(tank_identity(vehicles[key]), [])
         if len(candidates) == 1:
             inherited[key] = candidates[0]
+
+    # A variant published under its own model directory still has the same
+    # geometry when its PC collision primitives are byte-identical to another
+    # vehicle's.  Identical bytes are the same mesh in the same frame, so this
+    # is identity as much as the path rule above is -- it just recognizes it
+    # from content rather than from a name.  Only exact whole-set matches
+    # count; a shared hull alone would not fix the turret.
+    fingerprints = {}
+    for key in sorted(vehicles):
+        parts = pc_primitive_hashes(cache, vehicles[key])
+        if parts:
+            fingerprints[key] = parts
+    by_content = collections.defaultdict(list)
+    for key in decoded:
+        if key in fingerprints:
+            by_content[fingerprints[key]].append(key)
+    by_content_hull = 0
+    for key in sorted(rejected):
+        if key in inherited or key not in fingerprints:
+            continue
+        candidates = [name for name in by_content.get(fingerprints[key], [])
+                      if vehicles[name]['crew'] == vehicles[key]['crew']]
+        if len(set(candidates)) == 1:
+            inherited[key] = candidates[0]
+            by_content_hull += 1
+
     for key, donor in inherited.items():
         decoded[key] = decoded[donor]
         audit.setdefault(key, {})['inherited_from'] = donor
         audit[key]['reason'] = 'inherited_identical_tank'
         del rejected[key]
-    print('inherited by identical catalogue twin: %d' % len(inherited))
+    print('inherited by identical catalogue twin: %d (%d of them matched on '
+          'byte-identical PC collision primitives)'
+          % (len(inherited), by_content_hull))
 
     output.write_text(render(version, build, len(vehicles), decoded,
                              args.max_residual, sorted(sources)),

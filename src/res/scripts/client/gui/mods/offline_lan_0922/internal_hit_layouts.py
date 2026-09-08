@@ -234,8 +234,8 @@ def _decoded_layout(key):
 	if record is None:
 		return None
 	try:
-		(vehicle_class, tier, crew_roles, from_archetype, module_zones,
-			crew_zones) = record
+		(vehicle_class, tier, crew_roles, from_archetype, unmodelled,
+			module_zones, crew_zones) = record
 		confidence = getattr(_layout_console, 'CONFIDENCE', 'decoded')
 		source = 'decoded_collision_surfaces'
 		if from_archetype:
@@ -243,11 +243,36 @@ def _decoded_layout(key):
 			# sometimes no separate optic, so those entities keep the retained
 			# archetype and the source says which.
 			source = '%s+archetype:%s' % (source, ','.join(from_archetype))
+		if unmodelled:
+			# Neither the resources nor an archetype cover these, so they are
+			# published as explicitly unavailable rather than invented.
+			source = '%s+unmodelled:%s' % (source, ','.join(unmodelled))
 		return (source, vehicle_class, tier, confidence, tuple(crew_roles),
 			tuple(module_zones), tuple(crew_zones))
 	except Exception:
 		LOG_EXCEPTION('modules', 'decoded_layout_read_failed')
 		return None
+
+
+def decoded_unmodelled_entities(vehicle_name):
+	'''Module targets a decoded vehicle's resources do not model at all.
+
+	These carry no zone and are reported unavailable, the same way the tracks
+	are when no native collision extra was donated.  The alternative would be
+	to discard a vehicle's decoded ammunition rack, engine, fuel tank, radio
+	and crew because Console models no traverse mechanism for its fixed
+	superstructure, which is how these vehicles ended up with no interior at
+	all.  Nothing is invented for them.
+	'''
+	if _layout_console is None:
+		return ()
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return ()
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None or len(record) < 5:
+		return ()
+	return tuple(record[4])
 
 
 def decoded_archetype_entities(vehicle_name):
@@ -804,6 +829,8 @@ def build_layout(vehicle_descriptor, log_build=True):
 			})
 
 	candidate_entities = set(item['entity'] for item in candidate_specs)
+	unmodelled_entities = (frozenset(decoded_unmodelled_entities(vehicle_name))
+		if decoded_geometry else frozenset())
 	logical_entity_sources = {}
 	expected_entities = list(MODULE_TARGETS)
 	expected_entities.extend(item['entity'] for item in crew)
@@ -824,6 +851,16 @@ def build_layout(vehicle_descriptor, log_build=True):
 			if entity in OPTIONAL_NATIVE_GEOMETRY_TARGETS:
 				logical_entity_sources[entity] = {
 					'mode': 'OPTIONAL_NATIVE_COLLISION_GEOMETRY',
+				}
+			elif entity in unmodelled_entities:
+				# The exact-era resources model no surface for this module on
+				# this vehicle and no archetype covers it, so it is published
+				# unavailable rather than placed at a guessed position.  Every
+				# other module and every crew station here is decoded.
+				logical_entity_sources[entity] = {
+					'mode': 'RESOURCE_GEOMETRY_UNMODELLED',
+					'profile_source_id': (profile['source_id']
+						if profile is not None else None),
 				}
 			else:
 				logical_entity_sources[entity] = {
@@ -912,6 +949,7 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'profile_geometry_provenance': ('decoded_collision_surfaces'
 			if decoded_geometry else 'reconstructed_archetype'),
 		'profile_archetype_entities': decoded_archetype_entities(vehicle_name),
+		'profile_unmodelled_entities': tuple(sorted(unmodelled_entities)),
 		'profile_source_id': (profile['source_id']
 			if profile is not None else None),
 		'profile_confidence': (profile['confidence']
@@ -1170,6 +1208,12 @@ def validate_layout(layout):
 		elif mode == 'OPTIONAL_NATIVE_COLLISION_GEOMETRY':
 			# Honest server boundary: no native MaterialInfo was donated, and no
 			# synthetic track box participates in the interior resolver.
+			continue
+		elif mode == 'RESOURCE_GEOMETRY_UNMODELLED':
+			# Honest resource boundary, the same contract: the exact-era
+			# resources model no surface for this module on this vehicle, so it
+			# is unavailable rather than invented.  The rest of the interior is
+			# decoded geometry and stays usable.
 			continue
 		else:
 			missing.append('geometry_source:' + entity)
