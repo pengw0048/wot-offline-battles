@@ -173,6 +173,19 @@ def _combat_descriptor(reload_time=0.5, clip=(2, 0.2),
         hull=hull, maxHealth=1000)
 
 
+def _wide_track_descriptor():
+    """Return the exact #1513 Ch24_Type64 bounds used by world-collision tests."""
+    descriptor = _combat_descriptor()
+    descriptor.chassis.hitTester = _HitTester1513(
+        (-1.565461, 0.002, -2.648121),
+        (1.565461, 1.175350, 2.648682))
+    descriptor.hull.hitTester = _HitTester1513(
+        (-1.15, -0.540596, -2.79015),
+        (1.15, 0.729932, 2.70431))
+    descriptor.chassis.hullPosition = (0.0, 0.999047, 0.0)
+    return descriptor
+
+
 def _suspension_descriptor():
     descriptor = _combat_descriptor()
     descriptor.physics.update({
@@ -4207,6 +4220,26 @@ class BotRuntimeTests(unittest.TestCase):
 
         self.assertAlmostEqual(10.0, state['y'], places=6)
         self.assertFalse(state['airborne'])
+
+    def test_bot_support_uses_wide_chassis_not_narrower_hull(self):
+        descriptor = _wide_track_descriptor()
+        half_length, half_width = self.module._hull_dimensions(descriptor)
+        self.assertAlmostEqual(2.648682, half_length)
+        self.assertAlmostEqual(1.565461, half_width)
+        state = {
+            'x': 0.0, 'y': 10.0, 'z': 0.0, 'yaw': 0.0,
+            'half_length': half_length, 'half_width': half_width,
+        }
+        probe, calls = self._trench_probe(
+            7.0, {(1.6, 0.0): 10.0, (-1.6, 0.0): 10.0})
+        runtime = self.module.BotRuntime(1, physics_ground_probe=probe)
+
+        highest, centre = runtime._terrain_support(state, follow_gap=1.0)
+
+        self.assertAlmostEqual(10.0, highest)
+        self.assertAlmostEqual(10.0, centre)
+        self.assertIn((1.565, 0.0), calls)
+        self.assertIn((-1.565, 0.0), calls)
 
     def test_bot_still_falls_off_a_cliff_edge_with_one_supported_end(self):
         self.runtime.battle_start(self.start)

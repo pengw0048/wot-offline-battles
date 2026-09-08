@@ -18990,13 +18990,17 @@ class BattleRuntime(object):
         half_length = 2.5
         half_width = 1.5
         try:
-            hit_tester = _field(
-                _field(descriptor, 'hull', {}), 'hitTester', None)
-            bbox = getattr(hit_tester, 'bbox', None)
-            half_length = max(1.5, abs(float(bbox[1][2])))
-            half_width = max(0.3, max(abs(float(bbox[0][0])),
-                                      abs(float(bbox[1][0]))))
-        except (TypeError, ValueError, IndexError, AttributeError):
+            # Support belongs to the tracks/chassis.  The mounted hull can be
+            # narrower, so using its armour bbox leaves real track ends
+            # unprobed and lets a narrow slot swallow the vehicle.  Reuse the
+            # descriptor-derived chassis shape which the Bot and ram paths
+            # already use; its x/z footprint is deliberately independent from
+            # the mounted hull's vertical extension.
+            support_shape = tank_collision.chassis_shape(descriptor)
+            half_width = max(0.3, float(support_shape[0]))
+            half_length = max(1.5, float(support_shape[1]))
+        except (RuntimeError, TypeError, ValueError, IndexError,
+                AttributeError):
             pass
         sine, cosine = math.sin(yaw), math.cos(yaw)
         highest = None
