@@ -280,12 +280,14 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 	footprint_ground = _ground_top(
 		spaceID, Math, pos, footprint_x, footprint_z, look, ground_plane,
 		collision_filter)
+	if (start_ground is not None and support_start_y is not None and
+			float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
+		# A floor below the posed chassis is not its support. This also applies
+		# to outward corner lanes, whose clamped local endpoints coincide: they
+		# have no descending pose trend even when a trench lies below them.
+		# Pulling their end down to that floor invents a collision with the lip.
+		return None
 	if descending and start_ground is not None and footprint_ground is not None:
-		if (support_start_y is not None and
-				float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
-			# The witness starts above its old support while leaving the crest.
-			# A floor below it cannot lower the occupied hull's collision ray.
-			return None
 		# A crest can already lie beneath the front of the footprint while
 		# the body is still supported behind it. A chord through that lower
 		# floor is outside the occupied hull. Confirm the middle of the

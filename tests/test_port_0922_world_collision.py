@@ -1729,6 +1729,68 @@ class WorldCollisionTests(unittest.TestCase):
                             None, False, 0.04, True, commit_enabled=False,
                             pitch=direction * math.atan(0.2)))
 
+    def test_normandy_trench_corner_does_not_lower_occupied_hull_ray(self):
+        # #1513 Type 62 LOCAL HARD CONTACT at 2026-09-08 10:28:08.969.
+        # A 0.4 m outward corner lane was lowered from 71.824 to 70.248 m
+        # by the 69.648 m trench floor. It hit the flat lip at 71.185 m.
+        # Reconstruct that discontinuity; a real wall above the lip still
+        # occupies the physical hull lane and must remain blocking.
+        floor, lip = 69.64762115478516, 71.1848373413086
+        extents = (1.4029690027236938, 2.885922908782959, 2.7345070838928223)
+        for mirror in (-1.0, 1.0):
+            yaw = mirror * -2.3640474101574105
+            motion_yaw = mirror * -3.3640474101574105
+            sx, sz = math.sin(motion_yaw), math.cos(motion_yaw)
+            corner_u = (mirror * -17.4951171875 * sx +
+                        -386.9683532714844 * sz)
+            edge_u = corner_u + 0.1
+            wall_u = corner_u + 0.3
+            for wall in (False, True):
+                for velocity in (-1.3819551129510972, 1.3819551129510972):
+                    def collide(space, start, end, mask, *filters):
+                        u0 = start.x * sx + start.z * sz
+                        u1 = end.x * sx + end.z * sz
+                        du, dy = u1 - u0, end.y - start.y
+                        hits = []
+                        if abs(dy) > 1.0e-9:
+                            for level, lower_side in ((floor, True), (lip, False)):
+                                t = (level - start.y) / dy
+                                u = u0 + t * du
+                                on_surface = u <= edge_u if lower_side else u >= edge_u
+                                if 0.0 <= t <= 1.0 and on_surface:
+                                    hits.append((t, _Vector(0, 1, 0)))
+                        if abs(du) > 1.0e-9:
+                            faces = [(edge_u, floor, lip)]
+                            if wall:
+                                faces.append((wall_u, lip, lip + 1.2))
+                            for face_u, bottom, top in faces:
+                                t = (face_u - u0) / du
+                                y = start.y + t * dy
+                                if 0.0 <= t <= 1.0 and bottom <= y <= top:
+                                    hits.append((t, _Vector(-sx, 0, -sz)))
+                        if not hits:
+                            return None
+                        t, normal = min(hits, key=lambda hit: hit[0])
+                        return start + (end - start).scale(t), normal, 0
+
+                    scene = types.SimpleNamespace(wg_collideSegment=collide,
+                        wg_getMatInfoNearPoint=_miss_mat_info_1513)
+                    trace = {}
+                    with self.subTest(mirror=mirror, wall=wall, velocity=velocity), \
+                            mock.patch.object(world_collision, '_vehicle_motion_extents',
+                                              return_value=extents), \
+                            mock.patch.object(world_collision, '_destroy_and_recast',
+                                              return_value=False):
+                        status = world_collision.check_horizontal_collision(
+                            scene, types.SimpleNamespace(Vector3=_Vector),
+                            1, _Vector(mirror * -14.576963424682617,
+                                       71.03958892822266, -386.0038757324219),
+                            yaw, velocity, None, False, 0.0200042724609375, True,
+                            commit_enabled=False, motion_yaw=motion_yaw,
+                            pitch=-0.02338010148582502,
+                            roll=mirror * 0.08774969656052144, trace=trace)
+                        self.assertEqual('hard' if wall else 'clear', status, trace)
+
     def test_departed_hull_cannot_follow_a_floor_below_its_support_start(self):
         scene = types.SimpleNamespace(wg_collideSegment=self._pitched_hull_scene(-0.4),
             wg_getMatInfoNearPoint=_miss_mat_info_1513)
