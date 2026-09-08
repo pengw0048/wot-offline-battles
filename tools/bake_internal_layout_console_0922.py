@@ -16,9 +16,12 @@ Nothing is invented.  A vehicle with no source is reported as having none.
 
 Provenance of every number this writes:
 
-* geometry: WOTInspector's Armor Inspector data archive, package
-  ``console4.3`` (2018-02-07) with ``console4.13`` (2020-07-16) filling gaps,
-  member ``console/vehicles/<nation>/<code>/<part>_proxy.hkx``;
+* geometry: WOTInspector's Armor Inspector data archive.  Each vehicle takes
+  the first package, in order of release distance from this client, that
+  yields a complete layout registering against the PC bounds -- so
+  ``console4.3`` (2018-02-07, six days after this build) wherever it exists,
+  and a later or earlier package only where it does not.  The package used is
+  recorded per vehicle;
 * the reference frame: package ``pc9.22.0`` (2018-02-06), member
   ``pc/vehicles/<nation>/<code>/collision_client/<Part>.visual_processed``,
   whose ``<boundingBox>`` is the same bound the running client's hit tester
@@ -72,8 +75,36 @@ TARGET_BUILD = '1513'
 SCRIPTS_PACKAGE = 'res/packages/scripts.pkg'
 ARCHIVE = ('https://wotinspector-archive.s3.eu-central-003.backblazeb2.com'
            '/ai/%s/collision-%d.data')
-CONSOLE_PACKAGES = ('console4.3', 'console4.13')
-PC_PACKAGE = 'pc9.22.0'
+# Every archived Console package, ordered by how close its release is to this
+# client's 2018-02-01 build.  A vehicle takes the first package that yields a
+# complete layout registering against the PC bounds, so the era-closest data
+# wins wherever it exists and the later packages only fill genuine gaps --
+# a vehicle absent from console4.3, or one whose traverse mechanism that
+# package does not model.  The package actually used is recorded per vehicle.
+CONSOLE_PACKAGES = (
+    'console4.3',      # 2018-02-07, six days after this client
+    'console4.1',      # 2017-11-07
+    'console4.4',      # 2018-04-17
+    'console3.9',      # 2017-07-30
+    'console4.5',      # 2018-07-15
+    'console3.6',      # 2017-05-18
+    'console4.6',      # 2018-09-04
+    'console3.5',      # 2017-03-02
+    'console4.7',      # 2018-11-11
+    'console3.4',      # 2016-12-14
+    'console4.8',      # 2019-02-13
+    'console3.3',      # 2016-10-05
+    'console4.9',      # 2019-04-04
+    'console4.10-1',   # 2019-07-06
+    'console4.11',     # 2019-10-16
+    'console4.10',     # 2019-11-20
+    'console4.12',     # 2020-02-21
+    'console4.13',     # 2020-07-16
+)
+# The reference frame must stay era-close, because it defines what the baked
+# fractions are fractions of.  pc9.22.0 is this client's own build.
+PC_PACKAGES = ('pc9.22.0', 'pc9.21.0', 'pc9.20.1.1', 'pc9.20.1', 'pc1.0.0')
+PC_PACKAGE = PC_PACKAGES[0]
 # The nation order the client uses to build a vehicle's compact descriptor,
 # which is also the id the archive keys its packages on:
 # (list.xml id << 8) | (nation index << 4) | ITEM_TYPE_VEHICLE.
@@ -581,8 +612,19 @@ def main():
         order = order[:args.limit]
     for position, key in enumerate(order):
         vehicle = vehicles[key]
-        console = None
-        used = None
+        pc = {}
+        pc_used = None
+        for package in PC_PACKAGES:
+            body = fetch(cache, package, vehicle['archive_id'], requests)
+            if body is None:
+                continue
+            bounds = pc_bounds(body)
+            if 'hull' in bounds:
+                pc, pc_used = bounds, package
+                break
+        entry = {'reference_frame': pc_used}
+        best = None
+        attempts = {}
         for package in CONSOLE_PACKAGES:
             body = fetch(cache, package, vehicle['archive_id'], requests)
             if body is None:
@@ -590,35 +632,48 @@ def main():
             try:
                 parts = console_parts(body)
             except UnsupportedPackfile as error:
-                audit.setdefault(key, {})['%s_error' % package] = str(error)
+                attempts[package] = str(error)
                 continue
-            if parts:
-                console, used = parts, package
+            if not parts:
+                attempts[package] = 'no named surfaces'
+                continue
+            built, reason, residuals = build_vehicle(
+                key, vehicle, parts, pc, args.max_residual,
+                args.max_overshoot)
+            if built is not None:
+                best = (package, parts, built, residuals)
                 break
-        if console is None:
-            rejected[key] = 'no_console_source'
-            audit.setdefault(key, {})['reason'] = 'no_console_source'
+            attempts[package] = reason
+        if best is None:
+            entry['attempts'] = attempts
+            # Report why the era-closest package that had this vehicle at all
+            # failed, not whichever name sorts first: a later package being
+            # encrypted says nothing about the vehicle.
+            informative = [attempts[package] for package in CONSOLE_PACKAGES
+                           if package in attempts
+                           and 'encrypted' not in attempts[package]
+                           and attempts[package] != 'no named surfaces']
+            rejected[key] = (informative[0] if informative
+                             else 'no_console_source')
+            entry['reason'] = rejected[key]
+            audit[key] = entry
             continue
-        pc_body = fetch(cache, PC_PACKAGE, vehicle['archive_id'], requests)
-        pc = pc_bounds(pc_body) if pc_body else {}
-        built, reason, residuals = build_vehicle(
-            key, vehicle, console, pc, args.max_residual, args.max_overshoot)
-        audit[key] = {
-            'package': used,
+        package, parts, built, residuals = best
+        sources.add(package)
+        entry.update({
+            'package': package,
             'residuals': residuals,
             'surfaces': dict((parent, sorted(surfaces))
-                             for parent, surfaces in console.items()),
-        }
-        if built is None:
-            rejected[key] = reason
-            audit[key]['reason'] = reason
-            continue
-        sources.add(used)
+                             for parent, surfaces in parts.items()),
+            'module_zones': len(built[0]),
+            'crew_zones': len(built[1]),
+            'entities_from_archetype': list(built[2]),
+        })
+        if attempts:
+            entry['earlier_attempts'] = attempts
+        audit[key] = entry
         decoded[key] = ((vehicle['vehicle_class'], vehicle['tier'],
                          vehicle['crew']) + built)
-        audit[key]['module_zones'] = len(built[0])
-        audit[key]['crew_zones'] = len(built[1])
-        audit[key]['entities_from_archetype'] = list(built[2])
         if (position + 1) % 25 == 0:
             print('  %d/%d processed, %d decoded'
                   % (position + 1, len(order), len(decoded)))
