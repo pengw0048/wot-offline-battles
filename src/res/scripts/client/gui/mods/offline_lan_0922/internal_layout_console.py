@@ -41,7 +41,7 @@ GEOMETRY_SOURCES = ('console3.4', 'console3.5', 'console3.6', 'console3.9', 'con
 REFERENCE_FRAME_SOURCE = 'pc9.22.0'
 MAX_HULL_REGISTRATION_M = 0.35
 CATALOGUE_SIZE = 680
-DECODED_COUNT = 647
+DECODED_COUNT = 648
 CONFIDENCE = 'decoded'
 
 # vehicle key -> (vehicle class, tier, crew roster, module targets the source
@@ -11962,6 +11962,29 @@ CONSOLE_LAYOUTS_0922 = {
         (
             ('turret', 'crew_00', (0.4223, 0.545, 0.489), (0.1961, 0.4361, 0.1856)),
             ('hull', 'crew_01', (0.4312, 0.4756, 0.761), (0.1342, 0.4592, 0.1255)),
+        ),
+    ),
+    ('ussr', 'r127t44100p'): (
+        'mediumTank',
+        8,
+        (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4075, 0.6357), (0.2549, 0.3292, 0.1867)),
+            ('engine', 'hull', 'engine', (0.4274, 0.4476, 0.2682), (0.229, 0.3798, 0.0749)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5581, 0.4612, 0.6286), (0.2137, 0.3706, 0.3226)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.344, 0.9671, 0.768), (0.1415, 0.0329, 0.0268)),
+            ('engine', 'hull', 'transmission', (0.5007, 0.3769, 0.1102), (0.3022, 0.2404, 0.0824)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5004, 0.9528, 0.5034), (0.2043, 0.1057, 0.1051)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5, 0.6338, 0.1265), (0.2216, 0.2057, 0.0743)),
+            ('radio', 'turret', 'radio', (0.1, 0.5787, 0.524), (0.0941, 0.1527, 0.0801)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2895, 0.9314, 0.499), (0.0442, 0.0686, 0.0787)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3105, 0.4663, 0.4338), (0.1045, 0.4188, 0.1704)),
+            ('turret', 'crew_01', (0.3105, 0.4188, 0.6199), (0.1045, 0.4188, 0.1415)),
+            ('hull', 'crew_02', (0.3511, 0.4601, 0.8487), (0.0717, 0.453, 0.1075)),
+            ('turret', 'crew_03', (0.7143, 0.446, 0.4594), (0.1045, 0.4188, 0.1704)),
         ),
     ),
     ('ussr', 'r128kv4kreslavskiy'): (

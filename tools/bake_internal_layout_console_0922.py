@@ -311,6 +311,12 @@ SAME_TANK_ALIASES = {
     'germany:G58_VK4502P7': 'germany:G58_VK4502P',
     # Object 907A, identical roster to the Object 907.
     'ussr:R95_Object_907A': 'ussr:R95_Object_907',
+    # The premium T-44-100.  This pair does not share the item_defs slot, so
+    # it is admitted on the other evidence _alias_evidence accepts: the two
+    # hulls' PC collision bounds are identical to four decimals and the crew
+    # rosters match.  The client exports a separate collision mesh per
+    # variant, so the bytes differ while the hull does not.
+    'ussr:R127_T44_100_P': 'ussr:R122_T44_100',
 }
 
 
@@ -696,6 +702,63 @@ def _package_is_for(body, code, password=None):
         return False
     return any(('/%s_' % slot) in name or ('/%s/' % slot) in name
                for name in names)
+
+
+def _pc_hull_bound(cache, vehicle, key):
+    """The PC hull bounding box for one vehicle, or None."""
+    ids = (vehicle['archive_id'],) + ALTERNATE_ARCHIVE_IDS.get(key, ())
+    for package in PC_PACKAGES:
+        for archive_id in ids:
+            path = cache / ('%s_collision-%d.data' % (package, archive_id))
+            if not path.exists():
+                continue
+            body = path.read_bytes()
+            if not body:
+                continue
+            try:
+                names = zipfile.ZipFile(io.BytesIO(body)).namelist()
+            except zipfile.BadZipFile:
+                continue
+            if not any(vehicle['code'].lower() in member.lower()
+                       for member in names):
+                continue
+            bounds = pc_bounds(body)
+            if 'hull' in bounds:
+                return bounds['hull']
+    return None
+
+
+def _alias_evidence(cache, vehicles, key, donor):
+    """Why these two catalogue entries are one tank, or None to refuse.
+
+    Two kinds are accepted, both checked here rather than asserted in the
+    table.  ``slot`` is the item_defs per-vehicle code: Ch01_Type59 and
+    Ch01_Type59_Gold are one vehicle published twice.  ``hull_bounds`` is a
+    measurement, for a pair that does not share the slot -- the T-44-100 (P)
+    against the T-44-100 -- where the two hulls' PC collision bounds are
+    identical to four decimals and the crew rosters match.  The client exports
+    a separate collision mesh per variant, so byte identity is too strict to
+    recognize that; the bound is not.
+
+    A bare name suffix is never evidence on its own, which is how an old
+    profile gets attached to an unrelated vehicle that reused a name.
+    """
+    if vehicles[key]['vehicle_class'] != vehicles[donor]['vehicle_class']:
+        return None
+    if _vehicle_slot(vehicles[key]['code']) == _vehicle_slot(
+            vehicles[donor]['code']):
+        return 'slot'
+    if vehicles[key]['crew'] != vehicles[donor]['crew']:
+        return None
+    mine = _pc_hull_bound(cache, vehicles[key], key)
+    theirs = _pc_hull_bound(cache, vehicles[donor], donor)
+    if mine is None or theirs is None:
+        return None
+    for side in range(2):
+        for axis in range(3):
+            if round(mine[side][axis], 4) != round(theirs[side][axis], 4):
+                return None
+    return 'hull_bounds'
 
 
 def _remap_crew(crew_zones, donor_roster, target_roster):
@@ -1151,8 +1214,9 @@ def main():
             print('  alias %s declined: donor %s is not decoded'
                   % (key, donor))
             continue
-        if vehicles[key]['vehicle_class'] != vehicles[donor]['vehicle_class']:
-            print('  alias %s declined: class differs from %s' % (key, donor))
+        evidence = _alias_evidence(cache, vehicles, key, donor)
+        if evidence is None:
+            print('  alias %s declined: no evidence it is %s' % (key, donor))
             continue
         # decoded holds (class, tier, crew, module_zones, crew_zones,
         # unmodelled); only render() reorders it for the generated table.
@@ -1168,7 +1232,7 @@ def main():
                         vehicles[key]['tier'], vehicles[key]['crew'],
                         modules, remapped, holes)
         audit.setdefault(key, {})['inherited_from'] = donor
-        audit[key]['reason'] = 'same_tank_alias'
+        audit[key]['reason'] = 'same_tank_alias:' + evidence
         rejected.pop(key, None)
         aliased += 1
     print('inherited through a reviewed same-tank alias: %d' % aliased)

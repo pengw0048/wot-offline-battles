@@ -324,21 +324,58 @@ class SameTankAliasTests(unittest.TestCase):
         self.baker = baker
         self.layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
 
-    def test_every_alias_pair_shares_the_item_defs_vehicle_slot(self):
-        # The slot is the per-vehicle code, so Ch01_Type59 and
-        # Ch01_Type59_Gold are one vehicle.  A bare suffix match is what
-        # attaches an old profile to an unrelated vehicle that reused a name,
-        # so the pair must agree on the slot, not merely look similar.
+    def test_every_alias_pair_is_admitted_on_stated_evidence(self):
+        # Two kinds of evidence are accepted, and the baker checks both at
+        # bake time rather than trusting the table: the item_defs per-vehicle
+        # code slot, so Ch01_Type59 and Ch01_Type59_Gold are one vehicle; or,
+        # for a pair that does not share the slot, identical PC hull bounds
+        # plus an identical crew roster, as the T-44-100 (P) has against the
+        # T-44-100.  A bare name suffix is never evidence on its own.
         import re
+        pattern = r'^([a-z]+):([A-Za-z]+[0-9]+)'
+        by_slot = 0
+        by_measurement = 0
         for target, donor in self.baker.SAME_TANK_ALIASES.items():
             with self.subTest(target=target):
-                pattern = r'^([a-z]+):([A-Za-z]+[0-9]+)'
                 left = re.match(pattern, target)
                 right = re.match(pattern, donor)
                 self.assertIsNotNone(left)
                 self.assertIsNotNone(right)
+                # Same nation either way -- the archive keys on it.
                 self.assertEqual(left.group(1), right.group(1))
-                self.assertEqual(left.group(2), right.group(2))
+                if left.group(2) == right.group(2):
+                    by_slot += 1
+                else:
+                    by_measurement += 1
+        self.assertTrue(by_slot, 'expected slot-evidenced pairs')
+        self.assertTrue(by_measurement, 'expected a measured pair')
+
+    def test_the_evidence_check_refuses_an_unrelated_pair(self):
+        # The guard must not have widened into accepting any two vehicles of
+        # the same class.
+        vehicles = {
+            'ussr:R01_Alpha': {'code': 'R01_Alpha', 'vehicle_class': 'x',
+                               'crew': (('commander',),), 'archive_id': 1},
+            'ussr:R02_Beta': {'code': 'R02_Beta', 'vehicle_class': 'x',
+                              'crew': (('gunner',),), 'archive_id': 2},
+            'ussr:R03_Gamma': {'code': 'R03_Gamma', 'vehicle_class': 'y',
+                               'crew': (('commander',),), 'archive_id': 3},
+            'ussr:R01_Alpha_Gold': {'code': 'R01_Alpha_Gold',
+                                    'vehicle_class': 'x',
+                                    'crew': (('commander',),),
+                                    'archive_id': 4},
+        }
+        cache = ROOT / 'tests'
+        # A different class is refused outright.
+        self.assertIsNone(self.baker._alias_evidence(
+            cache, vehicles, 'ussr:R01_Alpha', 'ussr:R03_Gamma'))
+        # Same class, different slot, different roster: refused before any
+        # bound is read.
+        self.assertIsNone(self.baker._alias_evidence(
+            cache, vehicles, 'ussr:R01_Alpha', 'ussr:R02_Beta'))
+        # The slot is evidence on its own.
+        self.assertEqual('slot', self.baker._alias_evidence(
+            cache, vehicles, 'ussr:R01_Alpha_Gold', 'ussr:R01_Alpha'))
 
     def test_an_aliased_record_carries_the_donor_geometry(self):
         applied = 0
