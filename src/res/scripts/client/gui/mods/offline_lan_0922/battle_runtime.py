@@ -23413,6 +23413,16 @@ class BattleRuntime(object):
         crew_active = bool(state.get('alive', health > 0)) and health > 0
         dead = health <= 0 or not crew_active
         crew_knockout = health > 0 and not crew_active
+        critical = state.get('critical') or {}
+        ammo_rack_death = bool(
+            health <= 0 and critical.get('ammo_rack_death', False))
+        native_health = display_health if dead and display_health > 0 else health
+        if ammo_rack_death and not self._worker_mode:
+            # #1513's marker and damage-state consumers require raw special
+            # health. LAN HP stays nonnegative. Do not mark TURRET_DETACHED:
+            # that requires a real DetachedTurret entity and its handshake.
+            native_health = int(
+                self._runtime.constants.SPECIAL_VEHICLE_HEALTH.AMMO_BAY_DESTROYED)
         # Blind non-lethal hits stay private, but death is public authority:
         # native shutdown, the wreck, the kill and statistics form one edge.
         suppress_combat_presentation = bool(
@@ -23432,6 +23442,18 @@ class BattleRuntime(object):
             # Replayed combat events and late snapshots may repeat a terminal
             # state. Keep the durable signature current without replaying
             # native death callbacks, effects, markers or kill notifications.
+            if ammo_rack_death and not self._worker_mode:
+                entity = self._server_entity(engine_id)
+                if entity is None:
+                    return
+                if entity.health != native_health:
+                    entity.health = native_health
+                    # A terminal snapshot may arrive before the critical
+                    # cause. Correct the bar without replaying native death,
+                    # kill credit, postmortem activation or the explosion.
+                    self._avatar.guiSessionProvider.setVehicleHealth(
+                        bool(record.get('local')), engine_id, native_health,
+                        int(attacker_id), int(attack_reason_id))
             self._last_health[engine_id] = signature
             return
         if not durable_changed and not force_cause:
@@ -23492,8 +23514,6 @@ class BattleRuntime(object):
                         critical=death_payload,
                         attribute_attacker=death_cause not in (
                             'drowning', 'world_collision', 'overturn'))
-        preserve_inactive_hull = dead and display_health > 0
-        native_health = display_health if preserve_inactive_hull else health
         if self._worker_mode:
             entity.health = native_health
             notifier = getattr(entity, 'set_health', None)
@@ -23576,7 +23596,8 @@ class BattleRuntime(object):
                     self._sender.forward = 0.0
                     self._sender.turn = 0.0
             self._avatar.updateVehicleHealth(
-                engine_id, display_health, int(reason_id),
+                engine_id, native_health if ammo_rack_death else display_health,
+                int(reason_id),
                 crew_active, False)
         if not previous_dead and dead:
             if not suppress_combat_presentation:

@@ -2267,6 +2267,8 @@ def _runtime():
             'overturn': 7},
         AMMOBAY_DESTRUCTION_MODE=types.SimpleNamespace(
             POWDER_BURN_OFF=0, POWDER_EXPLOSION=1, HE_DETONATION=2),
+        SPECIAL_VEHICLE_HEALTH=types.SimpleNamespace(
+            AMMO_BAY_DESTROYED=-5, TURRET_DETACHED=-13),
         DAMAGE_INFO_INDICES={
             'DEVICE_DESTROYED_AT_FIRE': 10,
             'DEVICE_CRITICAL_AT_WORLD_COLLISION': 11,
@@ -27135,6 +27137,91 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._apply_health(record, {'health': 0})
 
         self.assertEqual((0, 0, 0), entity.health_change)
+
+    def test_ammo_rack_death_preserves_special_health_at_all_consumers(self):
+        for local in (False, True):
+            with self.subTest(local=local):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._binding = mock.Mock()
+                entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                                  {'health': 500})
+                runtime.bigworld.entities[10] = entity
+                record = {'engine_id': 10, 'local': local,
+                          'presentation': not local, 'native_remote': True}
+                state = {'health': 0, 'display_health': 0, 'alive': False,
+                         'critical': {'ammo_rack_death': True}}
+
+                def exact_avatar_update(vehicle_id, raw_health, *unused):
+                    # PlayerAvatar.updateVehicleHealth writes rawHealth back
+                    # into Vehicle after the first local death notification.
+                    entity.health = raw_health
+
+                battle._avatar.updateVehicleHealth = mock.Mock(
+                    side_effect=exact_avatar_update)
+                entity.onHealthChanged = mock.Mock(wraps=entity.onHealthChanged)
+                with mock.patch.object(critical_damage, 'apply_death',
+                                       return_value=None):
+                    battle._apply_health(record, state, attacker_id=11)
+                    battle._apply_health(record, state, attacker_id=11,
+                                         force_cause=True)
+
+                self.assertEqual(-5, entity.health)
+                entity.onHealthChanged.assert_called_once_with(-5, 11, 0)
+                self.assertEqual(0, state['health'])
+                self.assertEqual(0, state['display_health'])
+                battle._binding.arena_vehicle_killed.assert_called_once()
+                if local:
+                    battle._avatar.updateVehicleHealth.assert_called_once_with(
+                        10, -5, 0, False, False)
+                else:
+                    battle._avatar.guiSessionProvider.setVehicleHealth.\
+                        assert_called_once_with(False, 10, -5, 11, 0)
+
+    def test_late_ammo_rack_cause_corrects_marker_without_replaying_death(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        record = {'engine_id': 10, 'local': False,
+                  'presentation': True, 'native_remote': True}
+        state = {'health': 0, 'alive': False}
+        entity.onHealthChanged = mock.Mock(wraps=entity.onHealthChanged)
+        with mock.patch.object(critical_damage, 'apply_death',
+                               return_value=None):
+            battle._apply_health(record, state, attacker_id=11)
+            state['critical'] = {'ammo_rack_death': True}
+            battle._apply_health(record, state, attacker_id=11)
+            battle._apply_health(record, state, attacker_id=11)
+        self.assertEqual(-5, entity.health)
+        entity.onHealthChanged.assert_called_once_with(0, 11, 0)
+        battle._binding.arena_vehicle_killed.assert_called_once()
+        self.assertEqual([
+            mock.call(False, 10, 0, 11, 0),
+            mock.call(False, 10, -5, 11, 0)],
+            battle._avatar.guiSessionProvider.setVehicleHealth.call_args_list)
+
+    def test_worker_keeps_numeric_health_when_ammo_rack_detonates(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle._avatar = runtime.bigworld.avatar
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        record = {'engine_id': 10, 'local': False}
+        state = {'health': 0, 'alive': False,
+                 'critical': {'ammo_rack_death': True}}
+        with mock.patch.object(critical_damage, 'apply_death', return_value=None):
+            battle._apply_health(record, state)
+            battle._apply_health(record, state)
+        self.assertEqual(0, entity.health)
+        self.assertFalse(entity.isCrewActive)
+        battle._avatar.guiSessionProvider.setVehicleHealth.assert_not_called()
 
     def test_local_death_crosses_stock_postmortem_activation_boundary(self):
         runtime = _runtime()

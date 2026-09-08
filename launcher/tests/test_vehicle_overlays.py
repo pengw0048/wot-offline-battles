@@ -1122,15 +1122,15 @@ class VehicleOverlayTest(unittest.TestCase):
         field_path = "Shell-A/damage/devices"
 
         result = vehicle_overlays.apply_vehicle_edit(
-            self.game, self.SHELLS, field_path, "30",
+            self.game, self.SHELLS, field_path, "2000",
             is_running=lambda: False)
 
         value = vehicle_overlays._find_value(
             self._root(self.SHELLS), field_path)
         self.assertEqual(packed.TYPE_INTEGER, value.value_type)
-        self.assertEqual(30, value.value)
+        self.assertEqual(2000, value.value)
         self.assertEqual("27", result["originalValue"])
-        self.assertEqual("30", result["currentValue"])
+        self.assertEqual("2000", result["currentValue"])
 
     def test_ids_resources_compressed_strings_and_missing_children_are_refused(self):
         refused = (

@@ -1049,6 +1049,50 @@ class CriticalDamageTests(unittest.TestCase):
         self.assertTrue(payload['ammo_rack_death'])
         self.assertEqual('ammo_rack', payload['events'][-1]['kind'])
 
+    def test_2000_module_damage_detonates_a_reached_rack_after_one_saving_throw(self):
+        kinds = ('ARMOR_PIERCING', 'ARMOR_PIERCING_CR', 'HOLLOW_CHARGE',
+                 'ARMOR_PIERCING_HE', 'HIGH_EXPLOSIVE')
+        for kind in kinds:
+            for target_id in (1, 999):
+                for chance_roll in (0.269, 0.270):
+                    with self.subTest(kind=kind, target=target_id,
+                                      chance_roll=chance_roll):
+                        vehicle = types.SimpleNamespace(
+                            id=target_id, health=500,
+                            typeDescriptor=_descriptor(),
+                            position=object(), matrix=object(),
+                            getComponents=lambda: ())
+                        shell = {'kind': kind, 'damage': (100.0, 2000.0)}
+                        # These are reached module contacts. Native and
+                        # reconstructed multi-box contacts must not add rolls.
+                        mat = _Material('ammoBayHealth', chance=0.27)
+                        hits = ((1.0, 1.0, mat, None), (1.2, 1.0, mat, None))
+                        with mock.patch.dict(sys.modules, {
+                                'BigWorld': self.bigworld, 'Math': self.math}), \
+                                mock.patch('random.uniform',
+                                           side_effect=lambda low, high: low), \
+                                mock.patch('random.random',
+                                           return_value=chance_roll) as roll, \
+                                mock.patch.object(critical_damage,
+                                    '_offh_internal_cone_hits', return_value=()):
+                            if kind == 'HIGH_EXPLOSIVE':
+                                damage, payload, delta = critical_damage.propose_explosion(
+                                    vehicle, hits, object(), object(), 100, shell,
+                                    attacker_id=2, with_delta=True)
+                            else:
+                                damage, payload, delta = critical_damage.propose_direct(
+                                    vehicle, hits, object(), object(), 100, shell,
+                                    attacker_id=2, penetrated=True, with_delta=True)
+                        roll.assert_called_once()
+                        if chance_roll < 0.27:
+                            self.assertEqual(510, damage)
+                            self.assertTrue(payload['ammo_rack_death'])
+                            self.assertEqual(100.0, delta['devices'][0]['hp_loss'])
+                        else:
+                            self.assertEqual(100, damage)
+                            self.assertFalse((payload or {}).get('ammo_rack_death'))
+                            self.assertEqual([], delta['devices'])
+
     def test_proposal_records_module_operation_before_stale_hp_clamp(self):
         vehicle = types.SimpleNamespace(
             id=1, health=500, typeDescriptor=_descriptor(),

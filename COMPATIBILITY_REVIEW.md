@@ -2014,7 +2014,7 @@ only exact Windows acceptance can prove that the native HULL output is visible
 and that its magnitude feels correct.
 
 Critical-hit calculation follows the same proposal/commit boundary. The
-firing client runs a device law derived from the retired predecessor against an
+hidden worker runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision
 components and critical state. That calculation cannot change the live target
 or invoke native kill
@@ -2029,6 +2029,73 @@ accepted revision exactly once.
 Repair reports remain pending until the server acknowledges their proposal
 revision, so a successful socket write or an older snapshot cannot rewind the
 HUD state.
+
+The internal-module model is a reconstruction, not the recovered #1513
+server collision model. Native component collision queries supply the armour
+and exposed-device contacts; `internal_layout_profiles.py` supplies interior
+boxes fitted to the selected component bounds and transformed by the current
+vehicle/turret/gun pose. `BattleRuntime._vehicle_trace` limits solid-shell
+travel to ten calibres from the first vehicle material. HE uses the separate
+finite interior cone. The active critical loop scores each reached device
+once, using the shell's independent `damage[1]` channel. The current device
+roll is uniform within +/-25%; the available client contracts do not establish
+that server-side distribution. The common ammo-bay material specifies device
+damage and 0.27 for both projectile and explosion hit chances. Deadeye adds
+three percentage points for AP/APCR/HEAT. A successful hit that reduces the
+rack to zero destroys the vehicle without a second detonation roll.
+
+The launcher editor writes `damage/devices`, and the mounted-shell snapshot
+and projectile launch preserve a value of 2000. Tests cover AP, APCR, HEAT,
+APHE and HE, player and Bot victims, the 27% saving-throw boundary and duplicate
+contacts with one rack. Even the low 1500 damage roll destroys a reached
+ordinary rack after its saving throw. This proves the numerical path once a
+module contact exists; it does not prove that a retail aiming point intersects
+the reconstructed box. A missing/invalid profile supplies no internal contact,
+so raising damage cannot fix missing geometry. Run the read-only inventory:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 tools/audit_internal_layouts.py \
+  "$WOT_0922_CLIENT/res/packages/scripts.pkg"
+```
+
+The reviewed resource catalog has 680 listed vehicle definitions: 248 match
+the retained profiles and their #1513 crew-role bindings, and 432 lack a
+profile. These totals include special/training variants and the one vehicle
+already excluded for missing client art. A profile match does not validate
+its geometry against the retail server. Filling the missing entries with
+generic boxes or enlarging existing boxes would change gameplay without
+establishing correctness; this audit does neither.
+
+Ammo-rack death also has a separate presentation contract. LAN health remains
+zero, but the stock Vehicle, marker feedback and local
+`PlayerAvatar.updateVehicleHealth` receive
+`SPECIAL_VEHICLE_HEALTH.AMMO_BAY_DESTROYED` (-5). The marker consumer preserves
+that special negative value, while it normalizes ordinary negative health to
+zero. The Avatar writes its raw argument back into the Vehicle at local death,
+so passing zero there would erase an earlier correction. A late critical cause
+corrects the marker without repeating the death/kill/postmortem callbacks.
+The ABI audit pins the negative constants and marker consumer; regression
+tests fail against the old zero-only presentation for local, remote and late
+ammo-rack deaths.
+
+Turret flight remains unimplemented. `Vehicle.showAmmoBayEffect` only forwards
+mode and fireball volume to `CompoundAppearance`; its projected-speed argument
+is unused. The separate `DetachedTurret` entity, `WGTurretFilter`, vehicle
+confirmation and motion inputs own detachment. The port creates no such entity
+and supplies no authoritative detached-turret motion. It therefore must not
+publish `TURRET_DETACHED` (-13) or claim flight was fixed by an explosion call.
+WG's [Update 9.0 notes](https://worldoftanks.com/en/content/docs/release_notes/90-update-notes/)
+establish the intended turret-detachment feature. Its later
+[Object 277 explanation](https://worldoftanks.com/en/news/general-news/3-soviet-tanks-get-adjustments/)
+also confirms that changing internal module geometry changes ammo-rack
+exposure; those later vehicle values are not imported into #1513.
+
+The resource inventory and CPython 2.7 bytecode audit can run on an isolated
+`scripts.pkg`. That is only resource/contract evidence. The investigation did
+not have a complete Chinese HD installation passing `inspect_client.py`, all
+vehicle collision assets, a retail server model, or Windows gameplay evidence.
+The repaired marker still needs exact #1513 rendering acceptance; the missing
+layouts and detached-turret implementation remain explicit product gaps.
 
 Track damage follows the detailed model Update 6.4 introduced. A track
 material's live `damageKind` selects the shell damage channel:

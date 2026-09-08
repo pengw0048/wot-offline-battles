@@ -452,6 +452,26 @@ class EffectiveParamsContractTests(unittest.TestCase):
             contract.MAX_CRITICAL_DEVICE_HP + 1.0
         self.assertIsNone(contract.canonical(over_limit))
 
+    def test_2000_module_damage_survives_snapshot_and_launch_for_every_shell_kind(self):
+        from gui.mods.offline_lan_0922.lan_client import _strict_projectile_source_shot
+        for kind in ('ARMOR_PIERCING', 'ARMOR_PIERCING_CR', 'HOLLOW_CHARGE',
+                     'ARMOR_PIERCING_HE', 'HIGH_EXPLOSIVE'):
+            with self.subTest(kind=kind):
+                source = effective_params()
+                shell = source['gun']['shots'][0]['source_shot']['shell']
+                shell['kind'] = kind
+                shell['damage'][1] = 2000.0
+                canonical = contract.canonical(source)
+                self.assertIsNotNone(canonical)
+                frozen = _strict_projectile_source_shot(
+                    canonical['gun']['shots'][0]['source_shot'])
+                self.assertIsNotNone(frozen)
+                self.assertEqual(2000.0, frozen['shell']['damage'][1])
+                # A subsequent editor/shell selection change cannot rebind
+                # the law already admitted for this projectile.
+                shell['damage'][1] = 1.0
+                self.assertEqual(2000.0, frozen['shell']['damage'][1])
+
     def test_snapshot_preserves_complete_he_shell_factors(self):
         source = effective_params()
         shell = source['gun']['shots'][0]['source_shot']['shell']
