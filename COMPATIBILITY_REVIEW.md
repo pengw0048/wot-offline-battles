@@ -1242,6 +1242,149 @@ This is static and pure-data coverage. It proves which fields reach the native
 packers with which values; only acceptance on the exact Windows client can show
 the results window rendering those ribbons, counters and tooltips.
 
+### Mastery badges and Marks of Excellence
+
+Both awards rank one player against every other player who drove the same
+vehicle, so #1513 receives only the outcome. The client carries every field
+needed to render them. `battle_results_shared.VEH_FULL_RESULTS_UPDATE` holds
+`prevMarkOfMastery`, `markOfMastery`, `marksOnGun`, `movingAvgDamage`,
+`damageRating` and `battleNum`, all typed `int` with aggregation `skip`.
+`dossiers2/custom/records.py` registers the four durable records in the vehicle
+`achievements` block: `markOfMastery` (`B`, max 4), `marksOnGun` (`B`, max 3),
+`damageRating` (`H`, max 10000, hundredths of a percent) and `movingAvgDamage`
+(`H`, max 60001). `arena_bonus_type_caps.REGULAR` — this product's `bonusType`
+1 — already grants `DOSSIER_MARK_OF_MASTERY` and `DOSSIER_MARKS_ON_GUN`.
+
+The two badges reach the results window by different paths.
+`gui/battle_results/reusable/personal.py` calls
+`shared.makeMarkOfMasteryFromPersonal(results)`, which needs only
+`markOfMastery`, `prevMarkOfMastery` and `typeCompDescr`;
+`MarkOfMasteryAchievement._getIconName` then picks the `markOfMastery%drecord`
+icon when the previous best is lower. A new gun mark instead rides
+`dossierPopUps`, because `dossiers2/ui/layouts.py` puts only
+`MARK_OF_MASTERY_RECORD` in `IGNORED_BY_BATTLE_RESULTS` and leaves
+`marksOnGun` (record 295) on that path, where `makeAchievementFromPersonal`
+also reads `damageRating` for the badge tooltip.
+`DictPackers.DictPacker.pack` coerces each value with its transport type, so
+`damageRating` crosses the wire as whole percent while the dossier keeps
+hundredths — the same split retail produces, since its dossier updater applies
+`int(results['damageRating'] * 100)` to the unpacked float.
+
+The rules are the client's own text in `res/text/LC_MESSAGES/achievements.mo`.
+`markOfMasteryContent` gives the mastery classes as more battle XP than 50, 80,
+95 and 99 percent of the players who drove that vehicle in the previous seven
+days. `marksOnGun0_descr` through `marksOnGun2_descr` and
+`marksOnGun_condition` give the marks as an average above 65, 85 and 95 percent
+over the previous fourteen days, computed from the last 100 battles, updated
+every battle, never lost once earned, Tiers V-X, standard battles only.
+Wargaming's support material supplies the one part the client text omits: the
+average counts damage dealt plus the *largest* of the track, spotting and stun
+assist values, not their sum.
+
+"The last 100 battles" is not a mean of a hundred stored results. Retail keeps
+one number and advances it as an exponential moving average with the standard
+`2 / (N + 1)` smoothing for `N = 100`: the Marks of Excellence mods players use
+to predict their next mark compute `k * (damage + largest assist) +
+(1 - k) * movingAvgDamage` with `k = 2 / 101`, against the same
+`movingAvgDamage` record the dossier carries. A vehicle with no history starts
+at zero, so one battle moves the average by about two percent of the gap and a
+first battle cannot reach a mark however good it was - which is exactly what
+happened when this port briefly averaged only the battles it had: one strong
+opening game on a Type 59 awarded three marks. Sustained combined damage of
+3000 on that vehicle now reaches its first mark after 33 battles, its second
+after 62 and its third after 109. Keeping the average instead of a window also
+means the save file holds one integer per vehicle rather than a hundred.
+
+What the client cannot supply is the population distribution, which Wargaming
+recomputes daily per region and never shipped. No 0.9.22-era table survives:
+XVM's dated expected-value archive now begins in 2024, the Internet Archive
+holds none of the 2017-2018 files, and no per-vehicle mastery or mark table
+from that period is archived on the community sites that published them.
+`tools/bake_mastery_thresholds_0922.py` therefore captures the current retail
+tables into `mastery_catalog.py`, joined to the pinned client by integer
+compact descriptor: mastery base XP from `protanki.eu/en/stats/masters` and
+combined damage per percentile from the `poliroid.me/gunmarks` service behind
+the Marks of Excellence mods. The module records each source's version stamp
+and the fetch date. Of the client's 544 playable vehicles, 537 have a mastery
+row of their own and 386 of the 393 at Tier V or above have a marks row; the
+seven Chinese-server exclusives and since-removed vehicles fall back to the
+median of the retail rows for the same tier and class, which the baker computes
+and emits, and the baker also bakes the client's own tier and class map so
+neither the Tier V gate nor that fallback depends on loaded item definitions.
+
+Because the reference population is retail players rather than this
+installation's Bots, the bar is the real one, which makes this product's own
+reward policy part of the same question: a retail threshold only means what it
+means in retail if the currency behind it behaves like retail's.
+
+### What the published economy actually fixes
+
+Wargaming's battle payments are cell-app code. The pinned client proves it
+cannot know the per-vehicle part: `scripts/common/items/vehicles.py` reads
+`xpFactor`, `creditsFactor` and `freeXpFactor` only under
+`if not IS_CLIENT and not IS_BOT`, and none of the 694 shipped vehicle
+definitions carries any of them. What the client *does* ship, and what
+`server/offline_rewards.py` may therefore use, is `repairCost` (with the exact
+`maxHealth * type.repairCost` structure), `crewXpFactor` on 684 vehicles and
+`premiumVehicleXPFactor` on 200.
+
+The published structure is followed rather than invented. Credits are a base
+`X * vehicle tier` that alone carries the 1.85 victory multiplier, `Y` per
+point of enemy durability destroyed independent of tier, `Z` per enemy
+detected first with `2 * Z` for an SPG, and one capture payment for a capture
+that actually completed, split equally between its participants; the published
+list carries no assisted-damage payment, so this build no longer pays one. XP
+counts damage and kills with the tier difference taken into account, spotting,
+capture and capture defence, adds 50 percent on a win, and yields five percent
+of the Combat XP as Free XP. `X`, `Y`, `Z`, the capture payment and every
+vehicle's own profitability coefficient stay this product's declared values,
+because no source publishes them.
+
+The offline tier curve is a balance approximation. Dividing each
+vehicle's captured Ace base-XP threshold by its captured three-mark combined
+damage and taking the median per tier gives 0.785 at Tier V falling smoothly
+to 0.295 at Tier X - a factor of 2.66 that the previous flat policy did not
+have at all. `XP_TIER_PERMILLE` is that curve normalised at Tier VIII, so the
+shape follows this proxy and the magnitude is unchanged at the pivot; a test
+recomputes it from the baked tables so a re-bake cannot move it silently. Two
+caveats belong with it: the measurement pairs a single-battle XP percentile
+with a 100-battle damage percentile, which is why it is used as a ratio rather
+than an absolute level, and retail publishes no mark data below Tier V, so the
+four lowest tiers hold the Tier V value instead of extrapolating.
+
+The premium-vehicle bonus sits outside the badge. `premiumVehicleXPFactor`,
+which 200 shipped vehicles carry, is applied to the banked XP and Free XP and
+never to the number the mastery badge ranks: `originalXP` stays the bare battle
+XP the badge reads, while `xp`, `factualXP` and `subtotalXP` carry the bonus.
+The results window learns it the way retail does rather than as an unexplained
+difference - `ValueReplay.addMultipliedValue` records
+`record += round(original * premiumVehicleXPFactor100 / 100)` in the XP and
+Free XP chains, which is exactly the step
+`gui.battle_results.components.details` renders its own `premiumVehicleXP` row
+from, and the chain writes the total back through the connector so the packed
+value and the breakdown agree. Crew training stays on the bare battle XP with
+only `crewXpFactor` applied.
+
+Kill XP uses victim durability as an offline balance proxy. This does not
+implement an exact tier-difference rule: equal-tier vehicles can have different
+durability, and these tables do not identify retail reward coefficients.
+Before applying the offline tier curve, kill XP is `victim durability / 14`; the plain
+frag count pays nothing by itself. The divisor is pinned by the same pivot rule:
+the median stock durability of the client's Tier VIII vehicles is 1400, so a
+Tier VIII kill still pays the 100 XP the previous flat rule paid, while a kill
+is worth 148 damage-equivalent at Tier V and 704 at Tier X instead of a flat
+500 everywhere. `_killed_durability` reads the kill ledger's own per-target
+rows, so nothing new is persisted or put on the wire.
+
+Tested against the captured mastery thresholds, a winning battle with two kills
+and 300 assisted damage now reaches an Ace at 1380 damage on a Tier V, 2770 on
+a Tier VIII and 3950 on a Tier X, against captured three-mark averages of 1347,
+2659 and 3948. The old flat policy needed 1675, 2765 and 2060 for the same
+badge, so the whole tree now sits within a few percent of the retail bar
+instead of only the middle of it. That agreement is a consistency check on the
+two anchors, not evidence that the retail reward formula or curve was recovered.
+Only Windows play can say how the resulting pace feels.
+
 ## Stock map-selection lifecycle
 
 Before the local Account creates the lobby, a chain-safe adapter intercepts the

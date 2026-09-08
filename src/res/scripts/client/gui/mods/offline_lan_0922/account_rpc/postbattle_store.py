@@ -29,6 +29,7 @@ try:
 except ImportError:
     import pickle as _pickle
 
+from gui.mods.offline_lan_0922 import battle_mastery
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922.battle_achievements import (
     AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
@@ -277,6 +278,40 @@ def _receipt(value):
     }
 
 
+def _sanitise_badges(row):
+    """Clamp persisted badge state to what the native dossier block accepts.
+
+    The state file is optional, editable and can be half-written, and the
+    dossier block coerces with ``int``; a value outside its record range would
+    break the account snapshot the whole garage is built from.
+    """
+    row['markOfMastery'] = max(0, min(
+        _int(row.get('markOfMastery')), battle_mastery.MAX_MARK_OF_MASTERY))
+    row['marksOnGun'] = max(0, min(
+        _int(row.get('marksOnGun')), battle_mastery.MAX_MARKS_ON_GUN))
+    row['damageRating'] = max(0, min(_int(row.get('damageRating')), 10000))
+    row['movingAvgDamage'] = max(0, min(
+        _int(row.get('movingAvgDamage')),
+        battle_mastery.MAX_MOVING_AVG_DAMAGE))
+    # Files written while the average was briefly kept as a per-battle window
+    # carry a list this build no longer reads; the average itself persisted
+    # beside it, so dropping the list loses nothing.
+    row.pop('combinedDamage', None)
+
+
+def _damage_rating_hundredths(rating):
+    """Return the dossier form of a percentile: hundredths of a percent.
+
+    ``dossiers2.custom.records`` caps ``damageRating`` at 10000, and the stock
+    updater stores ``int(results['damageRating'] * 100)``.
+    """
+    try:
+        value = int(round(float(rating) * 100))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(value, 10000))
+
+
 def _compressed(value):
     return zlib.compress(_pickle.dumps(value, _pickle.HIGHEST_PROTOCOL))
 
@@ -287,6 +322,49 @@ def _vehicle_type_compact_descr(type_name):
     nation_id, vehicle_type_id = descriptor.type.id
     return int(vehicles.makeIntCompactDescrByID(
         'vehicle', nation_id, vehicle_type_id))
+
+
+def _badge_vehicle_id(type_name):
+    """Return the compact descriptor the retail badge tables are keyed by.
+
+    ``battle_mastery`` reads tier and class from its own baked copy of the
+    client roster, so this is the only lookup the badge transaction needs.  An
+    unresolvable vehicle type earns no badge; it must never fail the durable
+    transaction that credits Credits, XP and medals for the same battle.
+    """
+    try:
+        return _vehicle_type_compact_descr(type_name)
+    except Exception:
+        return 0
+
+
+def _premium_bonus(value, factor_100):
+    """Return the premium-vehicle bonus for one amount.
+
+    ``ValueReplay.__opAddCoeff`` computes ``round(value * factor100 / 100)``,
+    so the same rounding is used here and the packed total matches the total
+    the chain writes back.
+    """
+    return int(round(max(0, _int(value)) * max(0, _int(factor_100)) / 100.0))
+
+
+def _premium_vehicle_xp_factor_100(type_name):
+    """Return the vehicle's own premium XP bonus in hundredths, or zero.
+
+    ``premiumVehicleXPFactor`` is exact #1513 data on 200 of the shipped
+    vehicles and is the retail premium-vehicle XP bonus.  It is deliberately
+    *outside* the number the mastery badge reads: the badge ranks the bare
+    battle XP, and this bonus is added on top of what the account banks, which
+    is how retail orders the two.
+    """
+    try:
+        from items import vehicles
+        vehicle_type = vehicles.getVehicleType(
+            _vehicle_type_compact_descr(type_name))
+        factor = float(getattr(vehicle_type, 'premiumVehicleXPFactor', 0.0))
+    except Exception:
+        return 0
+    return max(0, int(round(factor * 100)))
 
 
 def _arena_type_id(geometry_name):
@@ -300,12 +378,24 @@ def _arena_type_id(geometry_name):
 
 
 def _add_value_replays(packers, vehicle, replay_types=None):
-    """Populate the non-empty replay chains consumed by the #1513 UI."""
+    """Populate the non-empty replay chains consumed by the #1513 UI.
+
+    The premium-vehicle bonus is one step in the XP and Free XP chains rather
+    than a bare difference between the original and the total:
+    ``ValueReplay.addMultipliedValue`` records
+    ``record += round(original * premiumVehicleXPFactor100 / 100)``, and
+    ``gui.battle_results.components.details`` renders its own
+    ``premiumVehicleXP`` row from exactly that step.  The chain also writes the
+    total back through the connector, so the packed ``xp`` stays consistent
+    with the breakdown the player sees.
+    """
     if replay_types is None:
         from ValueReplay import ValueReplay, ValueReplayConnector
     else:
         ValueReplay, ValueReplayConnector = replay_types
     connector = ValueReplayConnector(packers.VEH_FULL_RESULTS, vehicle)
+    premium_factor_100 = max(0, _int(vehicle.get(
+        'premiumVehicleXPFactor100')))
     for record_name, start_name, result_name in (
             ('credits', 'originalCredits', 'creditsReplay'),
             ('xp', 'originalXP', 'xpReplay'),
@@ -314,6 +404,9 @@ def _add_value_replays(packers, vehicle, replay_types=None):
             ('crystal', 'originalCrystal', 'crystalReplay')):
         replay = ValueReplay(
             connector, recordName=record_name, startRecordName=start_name)
+        if premium_factor_100 and record_name in ('xp', 'freeXP'):
+            replay.addMultipliedValue(
+                start_name, 'premiumVehicleXPFactor100')
         vehicle[result_name] = replay.pack()
 
 
@@ -380,15 +473,61 @@ def _achievement_db_ids(names, record_db_ids=None):
         names, record_db_ids=record_db_ids)]
 
 
+def _add_badge_results(vehicle, awards, record_db_ids=None):
+    """Publish the mastery badge and Marks of Excellence result fields.
+
+    #1513 renders the mastery badge straight from ``markOfMastery``
+    (``gui.battle_results.reusable.shared.makeMarkOfMasteryFromPersonal``) and
+    picks its record icon by comparing ``prevMarkOfMastery`` against it.  A new
+    gun mark instead rides the ``dossierPopUps`` list, because
+    ``dossiers2.ui.layouts.IGNORED_BY_BATTLE_RESULTS`` drops the mastery record
+    from that path but keeps ``marksOnGun``; ``damageRating`` next to it feeds
+    the badge tooltip.  ``VEH_FULL_RESULTS`` transports ``damageRating`` as an
+    ``int``, so the wire value is whole percent while the dossier keeps
+    hundredths, exactly as retail does.
+    """
+    if not awards:
+        return
+    mastery = max(0, min(_int(awards.get('markOfMastery')),
+                         battle_mastery.MAX_MARK_OF_MASTERY))
+    previous_mastery = max(0, min(_int(awards.get('prevMarkOfMastery')),
+                                  battle_mastery.MAX_MARK_OF_MASTERY))
+    marks = max(0, min(_int(awards.get('marksOnGun')),
+                       battle_mastery.MAX_MARKS_ON_GUN))
+    previous_marks = max(0, min(_int(awards.get('prevMarksOnGun')),
+                                battle_mastery.MAX_MARKS_ON_GUN))
+    vehicle['markOfMastery'] = mastery
+    vehicle['prevMarkOfMastery'] = previous_mastery
+    vehicle['marksOnGun'] = marks
+    vehicle['damageRating'] = int(max(0.0, min(
+        float(awards.get('damageRating') or 0.0),
+        battle_mastery.MAX_DAMAGE_RATING)))
+    vehicle['movingAvgDamage'] = max(0, min(
+        _int(awards.get('movingAvgDamage')),
+        battle_mastery.MAX_MOVING_AVG_DAMAGE))
+    vehicle['battleNum'] = max(0, _int(awards.get('battleNum')))
+    if marks <= previous_marks:
+        return
+    if record_db_ids is None:
+        from dossiers2.custom.records import RECORD_DB_IDS
+        record_db_ids = RECORD_DB_IDS
+    db_id = record_db_ids.get(('achievements', 'marksOnGun'))
+    if db_id is not None:
+        vehicle['dossierPopUps'] = list(vehicle['dossierPopUps']) + [
+            (int(db_id), marks)]
+
+
 def pack_battle_result(receipt, packers=None, replay_types=None,
                        interaction_details_type=None, record_db_ids=None,
-                       achievement_counts=None):
+                       achievement_counts=None, awards=None):
     """Build the four-tuple consumed by #1513 ``BattleResultsCache``.
 
     Every compact list comes from the stock packer.  Supplying ``packers`` is
     only a test seam for proving which packer receives which stock field names.
     ``achievement_counts`` carries the account's post-battle total for each
     medal, which #1513 renders as the counter on the results badge.
+    ``awards`` carries the mastery badge and Marks of Excellence outcome this
+    battle produced; see ``battle_mastery.battle_awards``.
     """
     receipt = _receipt(receipt)
     if packers is None:
@@ -399,6 +538,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
+    premium_factor_100 = _premium_vehicle_xp_factor_100(receipt['vehicle'])
+    premium_xp = _premium_bonus(rewards['xp'], premium_factor_100)
+    premium_free_xp = _premium_bonus(
+        rewards['free_xp'], premium_factor_100)
     vehicle = {
         'accountDBID': account_dbid,
         'typeCompDescr': vehicle_type_cd,
@@ -424,14 +567,19 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'originalCredits': rewards['credits'],
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
-        'xp': rewards['xp'],
+        # ``originalXP`` is the bare battle XP the mastery badge ranks; the
+        # premium-vehicle bonus is added on top of the totals below and by the
+        # replay chain, never inside the number the badge reads.
+        'xp': rewards['xp'] + premium_xp,
         'originalXP': rewards['xp'],
-        'factualXP': rewards['xp'],
-        'subtotalXP': rewards['xp'],
-        'freeXP': rewards['free_xp'],
+        'factualXP': rewards['xp'] + premium_xp,
+        'subtotalXP': rewards['xp'] + premium_xp,
+        'premiumVehicleXP': premium_xp,
+        'premiumVehicleXPFactor100': premium_factor_100,
+        'freeXP': rewards['free_xp'] + premium_free_xp,
         'originalFreeXP': rewards['free_xp'],
-        'factualFreeXP': rewards['free_xp'],
-        'subtotalFreeXP': rewards['free_xp'],
+        'factualFreeXP': rewards['free_xp'] + premium_free_xp,
+        'subtotalFreeXP': rewards['free_xp'] + premium_free_xp,
         'gold': 0,
         'originalGold': 0,
         'crystal': 0,
@@ -513,6 +661,7 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         (db_id, max(1, _int(counts.get(name, 1), 1)))
         for name, db_id in _achievement_records(
             personal_public['achievements'], record_db_ids=record_db_ids)]
+    _add_badge_results(vehicle, awards, record_db_ids=record_db_ids)
     vehicle_full_packed = packers.VEH_FULL_RESULTS.pack(vehicle)
 
     players = {}
@@ -601,6 +750,9 @@ class PostBattleStore(object):
         self._history = []
         self._progress = self._empty_progress()
         self._progress_applier = None
+        # Per-battle outcomes preserve new-record and gun-mark notifications.
+        # Pending results persist these alongside the receipt until claimed.
+        self._awards = {}
         self._load()
 
     def set_progress_applier(self, callback):
@@ -653,9 +805,14 @@ class PostBattleStore(object):
             policy = self._progress_applier(receipt) or {}
         previous = self._snapshot()
         self._pending[arena_key] = receipt
+        # The premium-vehicle bonus is banked with the battle XP; only the
+        # bare number stays the badge's input.
+        banked_xp = receipt['rewards']['xp'] + _premium_bonus(
+            receipt['rewards']['xp'],
+            _premium_vehicle_xp_factor_100(receipt['vehicle']))
         self._apply_progress(
             receipt, vehicle_xp=(0 if policy.get('accelerated') else
-                                 receipt['rewards']['xp']))
+                                 banked_xp))
         try:
             self._save()
         except Exception:
@@ -676,11 +833,15 @@ class PostBattleStore(object):
                     break
         if receipt is None:
             return None
+        awards = self._awards.get(str(arena_unique_id))
+        if awards is None:
+            awards = self._rebuilt_awards(receipt)
         return pack_battle_result(
             receipt, packers=packers, replay_types=replay_types,
             interaction_details_type=interaction_details_type,
             record_db_ids=record_db_ids,
-            achievement_counts=self._progress.get('achievements', {}))
+            achievement_counts=self._progress.get('achievements', {}),
+            awards=awards)
 
     def service_message_data(self, arena_unique_id):
         """Return the exact BattleResultsFormatter input summary."""
@@ -697,6 +858,9 @@ class PostBattleStore(object):
             return None
         rewards = receipt['rewards']
         vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
+        awards = self._awards.get(str(arena_unique_id))
+        if awards is None:
+            awards = self._rebuilt_awards(receipt)
         winner = receipt['winner']
         result_key = (0 if winner == 0 else
                       (1 if winner == receipt['team'] else -1))
@@ -704,8 +868,18 @@ class PostBattleStore(object):
             'arenaTypeID': _arena_type_id(receipt['map']),
             'arenaCreateTime': int(
                 receipt['arena_unique_id'] & 0xffffffff),
-            'playerVehicles': {vehicle_type_cd: {}},
-            'xp': rewards['xp'], 'credits': rewards['credits'],
+            # #1513's BattleResultsFormatter reads the earned mastery class
+            # straight off this per-vehicle entry
+            # (``__makeAchievementsAndBadgesStrings``) and names the badge in
+            # the hangar message.
+            'playerVehicles': {vehicle_type_cd: {
+                'markOfMastery': max(0, min(
+                    _int(awards.get('markOfMastery')),
+                    battle_mastery.MAX_MARK_OF_MASTERY))}},
+            'xp': rewards['xp'] + _premium_bonus(
+                rewards['xp'],
+                _premium_vehicle_xp_factor_100(receipt['vehicle'])),
+            'credits': rewards['credits'],
             'crystal': 0, 'creditsToDraw': 0,
             'isWinner': result_key, 'team': receipt['team'],
             'winnerIfDraw': 0, 'guiType': 1,
@@ -764,7 +938,9 @@ class PostBattleStore(object):
         stats = receipt['stats']
         progress = self._progress
         progress['credits'] += rewards['credits']
-        progress['freeXP'] += rewards['free_xp']
+        progress['freeXP'] += rewards['free_xp'] + _premium_bonus(
+            rewards['free_xp'],
+            _premium_vehicle_xp_factor_100(receipt['vehicle']))
         progress['battles'] += 1
         progress['wins'] += int(receipt['winner'] == receipt['team'])
         progress['losses'] = int(progress.get('losses', 0)) + int(
@@ -812,9 +988,65 @@ class PostBattleStore(object):
             'survivedBattles', 0)) + int(
                 receipt['death_reason'] < 0 and
                 not receipt['premature_leave'])
+        awards = self._award_badges(receipt, row)
+        awards['battleNum'] = row['battles']
+        self._awards[str(receipt['arena_unique_id'])] = awards
+        if len(self._awards) > MAX_HISTORY:
+            for key in sorted(
+                    (name for name in self._awards if name not in self._pending),
+                    key=lambda name: _int(name))[
+                    :len(self._awards) - MAX_HISTORY]:
+                del self._awards[key]
         # DossierCache asks for rows newer than its maxChangeTime.  The global
         # battle ordinal is stable across restarts and strictly increases.
         row['changeTime'] = progress['battles']
+
+    def _award_badges(self, receipt, row):
+        """Fold this battle into the vehicle's retail badge state.
+
+        The stored state is the one number retail keeps: the vehicle's average
+        combined damage, advanced by this battle through the same exponential
+        moving average.  Mastery and the mark count only ever rise, matching
+        ``marksOnGun_condition`` and the stock dossier updater, which keep the
+        best value.
+        """
+        awards = battle_mastery.battle_awards(
+            receipt['rewards']['xp'], receipt['stats'],
+            row.get('movingAvgDamage'), _badge_vehicle_id(receipt['vehicle']),
+            previous_mastery=row.get('markOfMastery'),
+            previous_marks=row.get('marksOnGun'))
+        row['markOfMastery'] = awards['bestMarkOfMastery']
+        row['marksOnGun'] = awards['marksOnGun']
+        row['movingAvgDamage'] = awards['movingAvgDamage']
+        row['damageRating'] = _damage_rating_hundredths(awards['damageRating'])
+        return awards
+
+    def _rebuilt_awards(self, receipt):
+        """Recover badge fields for legacy receipts without a saved outcome.
+
+        The class this battle earned is a pure function of its base XP and the
+        retail table, so it survives.  The previous best does not: the durable
+        row has already absorbed this battle, so a replayed old result shows
+        the badge without the new-record icon.
+        """
+        row = self._progress.get('vehicles', {}).get(receipt['vehicle'])
+        row = row if isinstance(row, dict) else {}
+        mastery = battle_mastery.mark_of_mastery(
+            receipt['rewards']['xp'],
+            battle_mastery.mastery_thresholds(
+                _badge_vehicle_id(receipt['vehicle'])))
+        best = max(mastery, _int(row.get('markOfMastery')))
+        marks = _int(row.get('marksOnGun'))
+        return {
+            'markOfMastery': mastery,
+            'prevMarkOfMastery': best,
+            'bestMarkOfMastery': best,
+            'marksOnGun': marks,
+            'prevMarksOnGun': marks,
+            'damageRating': _int(row.get('damageRating')) / 100.0,
+            'movingAvgDamage': _int(row.get('movingAvgDamage')),
+            'battleNum': _int(row.get('battles')),
+        }
 
     def _snapshot(self):
         """Capture enough state to undo one failed durable transaction.
@@ -826,18 +1058,24 @@ class PostBattleStore(object):
         milliseconds of visible freeze on a saturated profile -- while
         neither ``accept`` nor ``acknowledge`` mutates an archived or pending
         receipt in place.  Copy the two containers, not their rows, and deep
-        copy only the counters ``_apply_progress`` edits in place.
+        copy only the counters ``_apply_progress`` edits in place.  One badge
+        outcome is likewise replaced rather than edited, so its map copies
+        shallowly too.
         """
         return {
             'pending': dict(self._pending),
             'history': list(self._history),
             'progress': copy.deepcopy(self._progress),
+            'awards': dict(self._awards),
         }
 
     def _restore(self, value):
         self._pending = value['pending']
         self._history = value['history']
         self._progress = value['progress']
+        # A rolled-back receipt must not leave its badge outcome behind; the
+        # snapshot is taken before the transaction records one.
+        self._awards = value.get('awards', {})
 
     def _load(self):
         if self._path is None or not os.path.isfile(self._path):
@@ -879,6 +1117,26 @@ class PostBattleStore(object):
             self._history = history
             self._trim_history_bodies()
             self._progress = progress
+            saved_awards = value.get('pendingAwards', {})
+            if isinstance(saved_awards, dict):
+                for key in pending:
+                    raw_awards = saved_awards.get(key)
+                    if not isinstance(raw_awards, dict):
+                        continue
+                    awards = {}
+                    for name, maximum in (
+                            ('markOfMastery', 4), ('prevMarkOfMastery', 4),
+                            ('bestMarkOfMastery', 4), ('marksOnGun', 3),
+                            ('prevMarksOnGun', 3), ('movingAvgDamage', 60001),
+                            ('battleNum', 2147483647)):
+                        awards[name] = max(0, min(
+                            _int(raw_awards.get(name)), maximum))
+                    try:
+                        rating = float(raw_awards.get('damageRating', 0))
+                    except (TypeError, ValueError, OverflowError):
+                        rating = 0.0
+                    awards['damageRating'] = max(0.0, min(rating, 100.0))
+                    self._awards[key] = awards
             self._progress.setdefault(
                 'losses', max(0, int(self._progress.get('battles', 0)) -
                               int(self._progress.get('wins', 0))))
@@ -895,10 +1153,12 @@ class PostBattleStore(object):
                                       int(row.get('wins', 0))))
                     row['achievements'] = _achievement_counts(
                         row.get('achievements'))
+                    _sanitise_badges(row)
         except (IOError, OSError, TypeError, ValueError):
             # Keep a corrupt optional cache from preventing an offline login.
             self._pending = {}
             self._history = []
+            self._awards = {}
             self._progress = self._empty_progress()
 
     def _archived_identities(self):
@@ -919,6 +1179,9 @@ class PostBattleStore(object):
         value = {
             'schema': SCHEMA, 'accountKey': self._account_key,
             'pending': list(self._pending.values()),
+            'pendingAwards': dict((key, self._awards[key])
+                                  for key in self._pending
+                                  if key in self._awards),
             'history': self._archived_identities(),
             'progress': self._progress,
         }

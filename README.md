@@ -125,8 +125,30 @@ whose profile changed after it started must be restarted first.
   commemorative medals from the client's own achievement thresholds, and both
   the vehicle and the account dossier keep counting them. Medals the client
   itself retired, cancelled before release, or that need data this
-  reconstruction does not own, including Mark of Mastery, are listed with
-  their reason in `battle_achievements.py` rather than guessed.
+  reconstruction does not own are listed with their reason in
+  `battle_achievements.py` rather than guessed.
+- Battle payments follow the published structure: Credits are a base amount
+  per vehicle tier that alone carries the 1.85 victory multiplier, a
+  tier-independent amount per point of damage, double for detecting artillery,
+  and one capture payment split between the vehicles that completed it; XP
+  adds 50 percent on a win and returns five percent as Free XP. Damage XP
+  uses an offline tier curve derived from the captured tables, and kill XP
+  uses victim durability. These are balance approximations, not recovered
+  retail formulas: percentile ratios do not identify XP coefficients, and
+  durability does not uniquely determine tier.
+- A premium vehicle's own XP bonus and crew-training rate come from the
+  client's own `premiumVehicleXPFactor` and `crewXpFactor`. The XP bonus is
+  banked and shown in the results breakdown, but it never enters the number
+  the mastery badge ranks, which stays the bare battle XP.
+- Mastery badges and Marks of Excellence use the real bar. Wargaming computes
+  both from the live player population, so `tools/bake_mastery_thresholds_0922.py`
+  captures the published retail tables into `mastery_catalog.py`: base XP for
+  each mastery class, and average combined damage by percentile for the gun
+  marks. A battle's own base XP decides the class the results screen shows,
+  and the vehicle's own average combined damage decides its marks. That
+  average is retail's: an exponential moving average over 100 battles that
+  starts from zero on a fresh vehicle, so marks take most of a hundred good
+  battles rather than one.
 
 This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,

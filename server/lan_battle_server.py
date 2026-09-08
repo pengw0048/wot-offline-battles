@@ -9456,6 +9456,109 @@ class BattleState:
                     return max(1, min(10, int(entry.get("level", 1))))
         return 1
 
+    def _actor_vehicle_name(self, kind, vehicle_id):
+        """Return one actor's vehicle type name from authoritative state."""
+        try:
+            vehicle_id = int(vehicle_id)
+        except (TypeError, ValueError):
+            return ""
+        if str(kind) == "player":
+            player = self.players.get(vehicle_id)
+            if player is not None:
+                return str(player.vehicle)
+            participant = self._frozen_player_participant(vehicle_id)
+            return (str(participant.get("vehicle", ""))
+                    if participant is not None else "")
+        state = self.bot_states.get(vehicle_id)
+        name = state.get("vehicle") if isinstance(state, dict) else None
+        if not name:
+            for entry in self.bot_manifest:
+                if int(entry.get("id", 0)) == vehicle_id:
+                    name = entry.get("vehicle")
+                    break
+        return str(name or "")
+
+    def _vehicle_is_spg(self, vehicle):
+        """Whether a vehicle type name is artillery, per the donated tags.
+
+        Memoised because settlement asks this once per detected enemy per
+        actor and the donated catalog holds every vehicle the client ships.
+        """
+        if not vehicle:
+            return False
+        cached = self._spg_vehicle_names.get(vehicle)
+        if cached is not None:
+            return cached
+        answer = False
+        for player_id in sorted(self.vehicle_catalogs):
+            for entry in self.vehicle_catalogs.get(player_id, ()):
+                if entry.get("name") == vehicle:
+                    answer = "SPG" in tuple(entry.get("tags", ()))
+                    self._spg_vehicle_names[vehicle] = answer
+                    return answer
+        # An unknown name is not cached: a catalog can still arrive.
+        return answer
+
+    def _spotted_spg_count(self, kind, vehicle_id):
+        """Return how many of one actor's first detections were SPGs.
+
+        Retail pays double Credits for detecting artillery, so the reward
+        needs the class of each detected enemy rather than the plain count.
+        The per-target rows the detection ledger already writes carry that
+        identity, so this stays a reward-time question and never becomes a
+        persisted battle statistic.
+        """
+        interactions = self.vehicle_interactions.get(
+            (str(kind), int(vehicle_id)), {})
+        count = 0
+        for row in interactions.values():
+            if not int(row.get("spotted", 0) or 0):
+                continue
+            if self._vehicle_is_spg(self._actor_vehicle_name(
+                    row.get("target_kind"), row.get("target_id"))):
+                count += 1
+        return count
+
+    def _killed_durability(self, kind, vehicle_id):
+        """Return the total durability of the vehicles one actor destroyed.
+
+        The offline reward policy uses victim durability as a balance proxy,
+        not as an exact measurement of the retail tier-difference rule. The kill
+        ledger already writes ``target_kills`` on the per-target row, so this
+        stays a reward-time question and never becomes a persisted statistic.
+        """
+        interactions = self.vehicle_interactions.get(
+            (str(kind), int(vehicle_id)), {})
+        total = 0
+        for row in interactions.values():
+            killed = max(0, int(row.get("target_kills", 0) or 0))
+            if not killed:
+                continue
+            identity = (str(row.get("target_kind", "")),
+                        int(row.get("target_id", 0) or 0))
+            total += killed * self._vehicle_max_health(identity)
+        return total
+
+    def _capture_participants(self, kind, vehicle_id, team):
+        """Return the split for a completed capture, or zero.
+
+        Retail pays Credits only for a capture that actually completed, and
+        splits one payment equally between the vehicles that took part.
+        """
+        try:
+            team = int(team)
+        except (TypeError, ValueError):
+            return 0
+        if int(self.base_captured_team or 0) != team or not team:
+            return 0
+        own = self._statistics_row(kind, vehicle_id)
+        if int(own.get("capture_points", 0) or 0) <= 0:
+            return 0
+        return sum(
+            1 for row in self.vehicle_statistics.values()
+            if int(row.get("team", 0) or 0) == team and
+            int(row.get("capture_points", 0) or 0) > 0)
+
     def _public_result_roster(self, winner, participants):
         """Freeze complete human and bot team rows from authoritative state."""
         rows = []
@@ -9484,7 +9587,12 @@ class BattleState:
                         statistics["dropped_capture_points"],
                 },
                 int(winner) == int(participant["team"]),
-                participated=True, vehicle_tier=tier)["xp"]
+                participated=True, vehicle_tier=tier,
+                spotted_spgs=self._spotted_spg_count("player", player_id),
+                capture_participants=self._capture_participants(
+                    "player", player_id, participant["team"]),
+                killed_durability=self._killed_durability(
+                    "player", player_id))["xp"]
             rows.append({
                 "actor_kind": "player", "actor_id": player_id,
                 "name": participant["name"],
@@ -9527,6 +9635,10 @@ class BattleState:
                     "dropped_capture_points":
                         statistics["dropped_capture_points"],
                 }, int(winner) == int(identity["team"]), participated=True,
+                spotted_spgs=self._spotted_spg_count("bot", bot_id),
+                capture_participants=self._capture_participants(
+                    "bot", bot_id, identity["team"]),
+                killed_durability=self._killed_durability("bot", bot_id),
                 vehicle_tier=self._result_vehicle_tier(
                     identity["vehicle"]))["xp"]
             rows.append({
@@ -9610,7 +9722,13 @@ class BattleState:
                     winner == int(participant["team"]), participated=True,
                     vehicle_tier=participant.get(
                         "vehicle_tier", self._result_vehicle_tier(
-                            participant["vehicle"], player_id)))
+                            participant["vehicle"], player_id)),
+                    spotted_spgs=self._spotted_spg_count(
+                        "player", player_id),
+                    capture_participants=self._capture_participants(
+                        "player", player_id, participant["team"]),
+                    killed_durability=self._killed_durability(
+                        "player", player_id))
                 receipt = {
                     "type": "battle_receipt",
                     "protocol": PROTOCOL_VERSION,
@@ -11549,6 +11667,9 @@ class BattleState:
         # base team -> the actors currently inside that team's base circle.
         self.capture_invaders = {1: set(), 2: set()}
         self.base_captured_team = 0
+        # Vehicle type name -> is artillery, resolved from the donated
+        # catalogs when settlement asks and kept for the rest of the round.
+        self._spg_vehicle_names = {}
 
     def _commit_detections(self):
         """Credit a detection to every observer that revealed an enemy.
