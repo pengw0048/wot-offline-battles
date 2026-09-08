@@ -7916,6 +7916,74 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(snapshot, restored.snapshot(500.0))
         self.assertEqual(4, battle._equipment_revision)
 
+    def test_equipment_snapshots_preserve_expanded_selection_keys(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = types.SimpleNamespace(player_id=7)
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        clock = [100.0]
+        battle._clock = lambda: clock[0]
+        states = []
+        for index, name in enumerate(('smallRepairkit', 'smallMedkit')):
+            descriptor = types.SimpleNamespace(
+                id=(11, 41 + index), compactDescr=441 + index,
+                name=name, tags=(('repairkit', 'medkit')[index],),
+                reuseCount=-1, cooldownSeconds=90.0, repairAll=False)
+            states.append(equipment_mechanics.EquipmentState(
+                equipment_mechanics.project_equipment(descriptor)))
+        selection = {'key5': 'open medkit'}
+        updates = []
+
+        def stock_equipment_update(*args):
+            # Exact #1513 EquipmentsController.setEquipment always emits
+            # onEquipmentUpdated, whose panel callback calls onPopUpClosed
+            # and restores the ordinary consumable key map.
+            updates.append(args)
+            selection['key5'] = 'open medkit'
+
+        battle._avatar.updateVehicleAmmo = stock_equipment_update
+
+        def restore(revision=0):
+            return battle._restore_local_equipment_snapshot({
+                'players': [{
+                    'id': 7, 'equipment_revision': revision,
+                    'equipment_states': [state.snapshot(clock[0])
+                                         for state in states],
+                }],
+            }, present=True)
+
+        self.assertTrue(restore())
+        self.assertEqual(2, len(updates))
+        selection['key5'] = 'repair track'
+        clock[0] += 0.1
+        self.assertTrue(restore())
+        self.assertEqual('repair track', selection['key5'])
+        self.assertEqual(2, len(updates))
+        # Shell/ammo publication also invokes this presenter.
+        self.assertFalse(battle._present_equipments())
+        self.assertEqual('repair track', selection['key5'])
+
+        states[1].ready_at = 190.0
+        self.assertTrue(restore(1))
+        self.assertEqual(3, len(updates))
+        self.assertEqual(442, updates[-1][1])
+        self.assertEqual(runtime.constants.EQUIPMENT_STAGES.COOLDOWN,
+                         updates[-1][3])
+        selection['key5'] = 'repair track'
+        clock[0] = 101.0
+        self.assertTrue(restore(1))
+        self.assertFalse(battle._tick_equipment_cooldowns(clock[0]))
+        self.assertEqual('repair track', selection['key5'])
+        self.assertEqual(3, len(updates))
+        clock[0] = 190.0
+        self.assertTrue(battle._tick_equipment_cooldowns(clock[0]))
+        self.assertEqual(4, len(updates))
+        self.assertEqual((10, 442, 1,
+                          runtime.constants.EQUIPMENT_STAGES.READY, 0),
+                         updates[-1])
+        self.assertFalse(battle._tick_equipment_cooldowns(clock[0]))
+
     def test_critical_proposal_uses_target_equipment_snapshot_factors(self):
         extinguisher = types.SimpleNamespace(
             id=(11, 21), compactDescr=421,
