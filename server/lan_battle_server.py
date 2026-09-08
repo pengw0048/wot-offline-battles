@@ -8126,6 +8126,7 @@ class BattleState:
             "target_x", "target_y", "target_z",
             "damage_sticker",
             "structural_armor_hit",
+            "high_explosive",
         }
         required = {
             "target_kind", "target_id", "damage", "shot_result",
@@ -8147,6 +8148,13 @@ class BattleState:
         # Optional achievement metadata never owns projectile admission.
         # Unknown/malformed values are conservative external-module hits.
         structural_armor_hit = raw.get("structural_armor_hit") is True
+        # #1513 states its own armour-ledger rule in
+        # #battle_results:common/tooltip/armor/description: the counter takes
+        # ricochets and non-penetrations, and "HE and HESH shells are not
+        # included". Both are the one HIGH_EXPLOSIVE kind. The worker owns
+        # descriptors and reports the shell fact; an absent or malformed
+        # value stays a non-HE shell rather than discarding the terminal.
+        high_explosive = raw.get("high_explosive") is True
         shot_result = _exact_int(raw.get("shot_result"), 0, 2)
         pose = _bounded_vector(
             [raw.get("x"), raw.get("y"), raw.get("z")],
@@ -8247,6 +8255,7 @@ class BattleState:
             "target_alive": target_alive, "damage": damage,
             "potential_damage": potential_damage,
             "structural_armor_hit": structural_armor_hit,
+            "high_explosive": high_explosive,
             "shot_result": shot_result, "pose": pose,
             "critical": critical,
             "critical_delta": critical_delta,
@@ -8365,12 +8374,12 @@ class BattleState:
                     "target_kind", "target_id", "damage", "shot_result",
                     "x", "y", "z"}
                 # A bounce is the archetypal blocked-damage contact, so the
-                # harmless direct effect keeps the worker's potential-damage
-                # roll, decal identity and armour layer. Critical, stun and
-                # splash tokens stay forbidden on a continuing shell.
+                # harmless direct effect keeps the worker's potential damage,
+                # decal identity, armour layer and shell kind. Critical, stun
+                # and splash tokens stay forbidden on a continuing shell.
                 direct_optional = {
                     "damage_sticker", "potential_damage",
-                    "structural_armor_hit"}
+                    "structural_armor_hit", "high_explosive"}
                 if (not isinstance(raw_direct, dict) or
                         not direct_fields.issubset(raw_direct) or
                         set(raw_direct) - (direct_fields | direct_optional)):
@@ -8553,6 +8562,7 @@ class BattleState:
             attacker_key = "attacker_bot"
         blocked_damage = 0
         if (not proposal["splash"] and was_alive and
+                not proposal["high_explosive"] and
                 int(record["team"]) != int(proposal["target_team"]) and
                 proposal["shot_result"] != 2):
             blocked_damage = max(

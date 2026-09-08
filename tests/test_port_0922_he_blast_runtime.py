@@ -444,6 +444,50 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
                          _xyz(critical.call_args.args[3]))
         self.assertIs(True, critical.call_args.kwargs['allow_interior'])
 
+    def test_nonpenetrating_he_owes_the_published_damage_not_the_roll(self):
+        """A stopped HE shell owes its listed damage, never a live roll.
+
+        The blast that leaks through armour is derived from a roll, but the
+        shell never pierced, so the armour ledger reports the published 400
+        even when the roll came in high.  The blocked value the damage log
+        and the damage indicator show is ``potential - damage``, so this
+        also proves that a leaking HE hit cannot report zero or negative
+        blocked damage.
+        """
+        (battle, meta, unused_target, unused_collision,
+         terminal, state) = self._direct_fixture()
+        weak_hull = _collision(1.5, 25.0)
+        blast = {
+            'damage': 240, 'nominal_armor': 25.0, 'distance': 1.5,
+            'point': (6.5, 1.0, 0.0), 'direction': (1.0, 0.0, 0.0),
+            'collision': weak_hull, 'collisions': (weak_hull,),
+        }
+        contact = {
+            'result': 1, 'layer': 'structural', 'distance': 5.0,
+            'component': 'vehicleHull',
+        }
+
+        with mock.patch.object(
+                combat_rules, 'resolve_armor_contact', return_value=contact), \
+                mock.patch.object(random, 'gauss', return_value=480.0), \
+                mock.patch.object(
+                    battle, '_projectile_he_blast_contact',
+                    return_value=blast) as blast_contact, \
+                mock.patch.object(
+                    critical_damage, 'propose_explosion',
+                    return_value=(240, None, {})):
+            effect = battle._projectile_direct_effect(meta, state, terminal)
+
+        # The blast still consumed the +20 percent roll it drew.
+        self.assertEqual(480.0, blast_contact.call_args.args[5])
+        self.assertEqual(240, effect['damage'])
+        self.assertEqual(400, effect['potential_damage'])
+        self.assertGreater(
+            effect['potential_damage'] - effect['damage'], 0)
+        # The server holds no descriptors, so the shell kind travels with
+        # the terminal and keeps HE out of the armour ledger there.
+        self.assertIs(True, effect['high_explosive'])
+
     def test_penetrating_he_keeps_full_direct_damage_without_surface_search(self):
         battle, meta, unused_target, unused_collision, terminal, state = \
             self._direct_fixture()

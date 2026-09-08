@@ -961,10 +961,12 @@ def _strict_projectile_effect(value):
     damage_sticker_fields = frozenset(('damage_sticker',))
     potential_fields = frozenset(('potential_damage',))
     structural_fields = frozenset(('structural_armor_hit',))
+    high_explosive_fields = frozenset(('high_explosive',))
     keys = set(value)
     if not required.issubset(keys) or not keys.issubset(
             required | critical_fields | stun_fields | target_pose_fields |
-            damage_sticker_fields | potential_fields | structural_fields):
+            damage_sticker_fields | potential_fields | structural_fields |
+            high_explosive_fields):
         return None
     kind = value.get('target_kind')
     target_id = _projectile_int_range(
@@ -983,6 +985,7 @@ def _strict_projectile_effect(value):
     has_damage_sticker = 'damage_sticker' in value
     has_potential_damage = 'potential_damage' in value
     has_structural_armor_hit = 'structural_armor_hit' in value
+    has_high_explosive = 'high_explosive' in value
     expected = (required |
                 (critical_fields if has_critical else frozenset()) |
                 (stun_fields if has_stun else frozenset()) |
@@ -992,6 +995,7 @@ def _strict_projectile_effect(value):
                 (potential_fields if has_potential_damage else frozenset()))
     expected |= (structural_fields if has_structural_armor_hit else
                  frozenset())
+    expected |= (high_explosive_fields if has_high_explosive else frozenset())
     if (kind not in ('player', 'bot') or target_id is None or
             damage is None or shot_result is None or
             any(component is None for component in position) or
@@ -1042,7 +1046,7 @@ def _strict_projectile_effect(value):
             return None
         result['damage_sticker'] = damage_sticker
     if has_potential_damage:
-        # The armour ledger's un-reduced roll shares the damage bound the
+        # The armour ledger's un-reduced value shares the damage bound the
         # server enforces; a splash proposal never carries one.
         potential_damage = _projectile_int_range(
             value.get('potential_damage'), 0, 5000)
@@ -1054,6 +1058,11 @@ def _strict_projectile_effect(value):
         # or malformed value must not discard an otherwise valid terminal.
         result['structural_armor_hit'] = (
             value.get('structural_armor_hit') is True)
+    if has_high_explosive:
+        # #1513 keeps HE and HESH out of the armour ledger. This field only
+        # selects that rule, so a malformed value must not discard the
+        # terminal along with its reload and ammunition bookkeeping.
+        result['high_explosive'] = value.get('high_explosive') is True
     if has_target_pose:
         target_position = []
         for axis in ('x', 'y', 'z'):
@@ -2956,10 +2965,12 @@ class LANClient(object):
             'target_kind', 'target_id', 'damage', 'shot_result',
             'x', 'y', 'z'}
         # A bounce is the archetypal blocked-damage contact, so a continuing
-        # shell still publishes its potential-damage roll, decal identity and
-        # armour layer. Critical, stun and splash tokens stay forbidden here.
+        # shell still publishes its potential damage, decal identity, armour
+        # layer and shell kind. Critical, stun and splash tokens stay
+        # forbidden here.
         direct_optional = {
-            'damage_sticker', 'potential_damage', 'structural_armor_hit'}
+            'damage_sticker', 'potential_damage', 'structural_armor_hit',
+            'high_explosive'}
         if (parsed_epoch is None or parsed_epoch != _exact_int(
                 self.authority_epoch) or parsed_projectile_id is None or
                 parsed_base is None or parsed_time is None or

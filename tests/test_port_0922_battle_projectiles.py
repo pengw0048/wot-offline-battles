@@ -5541,7 +5541,7 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertGreater(cone.call_args.args[3].length, 0.0)
         self.assertTrue(cone.call_args.kwargs['deadeye'])
 
-    def test_direct_effect_publishes_the_exact_damage_roll(self):
+    def test_direct_effect_publishes_the_armour_ledger_potential(self):
         battle, unused_bigworld = _battle()
         source = battle._server_entity(41)
         target = types.SimpleNamespace(
@@ -5564,17 +5564,19 @@ class BattleProjectileTests(unittest.TestCase):
             'piercing_loss': 0.0, 'penetration_factor': 1.0,
         }
 
-        # The armour ledger needs the one roll the damage law consumed,
-        # truncated exactly as the law truncates it, for every verdict. A
-        # ricochet forces damage to zero afterwards and still owes the full
-        # roll, because that is the damage the armour actually stopped. A
-        # broad vehicle hit with no resolved armour contact remains terminal,
-        # but cannot claim that armour stopped its roll.
+        # A penetration spent the roll the damage law consumed, truncated
+        # exactly as the law truncates it, so that roll is its potential.
+        # Every verdict that stopped the shell -- a ricochet, a
+        # non-penetration, and a traversal that only found external plates
+        # and so resolved no armour contact -- never drew a roll at all, so
+        # the ledger owes the shell's published 390 instead of a sample
+        # nobody took.  This is the number the damage log's blocked rows and
+        # the #1513 damage indicator both report.
         for contact, result, damage, potential in (
-                ({'result': 0}, 0, 0, 312),
-                ({'result': 1}, 1, 0, 312),
+                ({'result': 0}, 0, 0, 390),
+                ({'result': 1}, 1, 0, 390),
                 ({'result': 2}, 2, 312, 312),
-                (None, 1, 0, None)):
+                (None, 1, 0, 390)):
             with self.subTest(contact=contact):
                 with mock.patch.object(
                         combat_rules, 'resolve_armor_contact',
@@ -5597,10 +5599,8 @@ class BattleProjectileTests(unittest.TestCase):
 
                 self.assertEqual(result, effect['shot_result'])
                 self.assertEqual(damage, effect['damage'])
-                if potential is None:
-                    self.assertNotIn('potential_damage', effect)
-                else:
-                    self.assertEqual(potential, effect['potential_damage'])
+                self.assertEqual(potential, effect['potential_damage'])
+                self.assertIs(False, effect['high_explosive'])
                 self.assertEqual(
                     (390.0, 32.5), gaussian.call_args.args)
 

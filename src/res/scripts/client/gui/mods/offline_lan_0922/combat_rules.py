@@ -717,6 +717,19 @@ def shell_damage_roll(shot, random_gauss=None):
     return sample_shell_value(average, random_gauss)
 
 
+def shell_nominal_damage(shot):
+    """Return the listed vehicle damage of a shell without the +/-25% roll.
+
+    A shell that never pierced armour never had its damage drawn, so the
+    armour ledger and the damage indicator report the shell's published
+    value rather than a sample nobody took.  Reuse ``shell_damage_roll``
+    with the identity sampler so the nominal and the roll cannot drift on
+    field lookup, missing-descriptor fallback or rounding.
+    """
+    return shell_damage_roll(
+        shot, random_gauss=lambda mean, unused_sigma: mean)
+
+
 def damage(shot, result, nominal_armor, random_gauss=None,
            spall_coefficient=1.0, rolled_damage=None):
     """Apply direct damage, optionally reusing the caller's exact frozen roll."""

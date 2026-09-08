@@ -2242,6 +2242,62 @@ the next intent can proceed. Messages that cannot establish the current
 identity, round, type or exact sequence still consume nothing. Extra fields
 remain rejected rather than extending the protocol.
 
+`PlayerAvatar.showOwnVehicleHitDirection(hitDirYaw, attackerID, damage, crits,
+isBlocked, isShellHE, damagedID)` is the only producer of the damage
+indicator, and `gui/battle_control/hit_data.pyc` keeps `damage`, `IS_BLOCKED`
+and `IS_HIGH_EXPLOSIVE` as independent fields. In
+`gui/Scaleform/daapi/view/battle/shared/indicators.pyc`,
+`_MarkerData.__getMarkerType` reads `HitData.isBlocked()` before anything
+else. Its blocked branch is numeric: `_ExtendedMarkerVOBuilder` prints
+`str(HitData.getDamage())` as the label and selects
+`DAMAGEINDICATOR.BLOCKED_SMALL`/`BLOCKED_MEDIUM`/`BLOCKED_BIG` from
+`damage / playerVehMaxHP`. Every other zero-damage hit falls through to
+`CRITICAL_DAMAGE`, whose three sizes all map to the single `CRIT` frame and
+whose `_getDamageLabel` is the empty string below two criticals. The exact
+client therefore draws either a blocked marker carrying a real value or an
+unlabelled critical marker; a blocked marker worth `0` is unreachable, so
+`isBlocked` must mean a shell this vehicle's armour stopped rather than
+merely a hit that removed no hit points. `HitData.__buildFlags` sets
+`HP_DAMAGE` from `damage > 0` alone, so once a blocked marker carries a value
+`HitDirectionController.__findHit` matches an earlier marker from the same
+attacker and `HitData.extend` sums the two -- retail's own aggregation, and
+also what makes a blocked hit visible under the `WITHOUT_CRITS` preset that
+`_isValidHit` uses to drop zero-damage criticals. `isShellHE` reaches
+`HitData` but no #1513 view reads it.
+
+The damage log panel's blocked rows and its running total come from one
+number, the `TANKING` battle event, whose totals
+`PersonalEfficiencyController._onPlayerFeedbackReceived` accumulates
+client-side from `Avatar.onBattleEvents`; `_BET.ARMOR` maps the same event to
+the `BATTLE_EVENTS.BLOCKED_DAMAGE` ribbon.
+
+`res/text/LC_MESSAGES/battle_results.mo` states the ledger rule the client
+itself shows. `EfficiencyTooltipData` binds `BATTLE_EFFICIENCY_TYPES.ARMOR` to
+`ArmorItemPacker` (`gui/shared/tooltips/efficiency.pyc`), whose header is
+`common/tooltip/armor/header` (装甲抵挡) and whose description is
+`common/tooltip/armor/description`: "计数: / • 跳弹 / • 未击穿 / HE与HESH炮弹不
+包含在内。" -- the counter takes ricochets and non-penetrations, and HE and
+HESH shells are not included. #1513 has a single `HIGH_EXPLOSIVE` kind for
+both, and `combat_rules.is_he` already reads exactly that kind, so `HEAT`
+(`HOLLOW_CHARGE`) and `APHE` (`ARMOR_PIERCING_HE`) keep their blocked credit
+even though `ingame_gui.mo` abbreviates `ARMOR_PIERCING_HE` and
+`HIGH_EXPLOSIVE` to the same `damageLog/shellType` label, `HE`. The battle
+server owns the ledger but holds no descriptors, so the worker publishes the
+shell fact beside `structural_armor_hit` and the server applies the rule.
+`IS_HIGH_EXPLOSIVE` does reach `HitData`, but no #1513 view reads it, so
+`isBlocked` is the only place the same rule can be expressed on the indicator.
+
+The remaining choice is the blocked value itself, which no reviewed file
+fixes: the cell app that packs retail's `damage` argument and blocked ledger
+is not in the package. This port reports the shell's published
+`shell.damage[0]`, because a shell that never pierced never drew a damage
+roll; a penetration keeps the roll it actually spent. Splash is excluded from
+both surfaces -- its damage falls off with distance before armour absorbs the
+rest -- so an absorbed near miss stays an unlabelled critical marker and
+credits nothing. The separate `potentialDamageReceived` column carries no such
+exclusion in any reviewed text, so it still accumulates every direct hit; that
+asymmetry is the client's rule, not a derived identity.
+
 ## AI, room and round boundaries
 
 Humans take real team slots first. The first waiting 0.9.22 player owns map

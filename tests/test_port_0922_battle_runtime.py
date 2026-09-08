@@ -12712,6 +12712,123 @@ class BattleRuntimeContractTests(unittest.TestCase):
             value['eventType']
             for value in battle._avatar.battle_events[0]])
 
+    def _blocked_hit_fixture(self, shell_kind='ARMOR_PIERCING'):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker_descriptor = _Descriptor()
+        attacker_descriptor.gun.shots[0].shell.kind = shell_kind
+        attacker = _Vehicle(11, attacker_descriptor, _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        battle._local_position = (0.0, 0.0, 0.0)
+        target_record = {
+            'engine_id': 10, 'state': {'team': 1, 'health': 500},
+            'kind': 'player', 'network_id': 1, 'local': True}
+        attacker_record = {
+            'engine_id': 11,
+            'spot_visible': False, 'spot_marker_visible': False,
+            'state': {'team': 2, 'health': 500,
+                      'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        return battle, target_record, attacker_record
+
+    def test_blocked_hit_indicator_reports_the_published_shell_damage(self):
+        """A bounce labels the marker with the shell, not the lost HP.
+
+        #1513's extended indicator prints ``str(HitData.getDamage())`` and
+        selects ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG`` from
+        ``damage / playerVehMaxHP``, so the removed hit points label every
+        blocked marker ``0`` and pin it to the smallest blocked art.  The
+        damage log's blocked row must read the same number.
+        """
+        for shot_result in (0, 1):
+            with self.subTest(shot_result=shot_result):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture())
+                event = {
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'shot_result': shot_result, 'damage': 0,
+                    'blocked_damage': 100, 'source': 'shot',
+                    'dead': False, 'attack_reason': 0, 'death_reason': 0}
+
+                self.assertTrue(battle._present_combat_hit(
+                    event, target_record, attacker_record, 11))
+                self.assertTrue(battle._present_combat_feedback(
+                    event, target_record, attacker_record))
+
+                direction = battle._avatar.hit_directions[-1]
+                # _Descriptor's shell is published at 100 armour damage.
+                self.assertEqual(100, direction[2])
+                self.assertIs(True, direction[4])
+                self.assertEqual(0, direction[3])
+                self.assertIs(False, direction[5])
+                events = battle._avatar.battle_events[-1]
+                self.assertEqual(
+                    [5], [value['eventType'] for value in events])
+                # Indicator and blocked log row report one number.
+                self.assertEqual(
+                    direction[2],
+                    _unpack_damage(events[0]['details'])[0])
+
+    def test_indicator_never_labels_a_marker_zero(self):
+        """Retail cannot draw a blocked marker worth zero damage.
+
+        ``_MarkerData.__getMarkerType`` reads ``HitData.isBlocked()``
+        first and the blocked branch is numeric, while every other
+        zero-damage hit falls to ``CRITICAL_DAMAGE``, whose label is empty
+        below two criticals.  So a stopped shell claims blocked with the
+        shell's published damage, and a hit that removed no hit points
+        without being stopped -- an absorbed splash, or a penetration that
+        only broke modules -- keeps retail's unlabelled critical marker
+        rather than a blocked ``0``.
+
+        ``HIGH_EXPLOSIVE`` never claims the blocked marker either:
+        ``#battle_results:common/tooltip/armor/description`` excludes HE and
+        HESH from the armour ledger, and #1513 has one shell kind for both.
+        HEAT and APHE are not excluded.
+        """
+        for label, kind, event, expected in (
+                ('ricochet', 'ARMOR_PIERCING', {
+                    'shot_result': 0, 'damage': 0}, (100, True)),
+                ('non-penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('HEAT non-penetration', 'HOLLOW_CHARGE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('APHE non-penetration', 'ARMOR_PIERCING_HE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('HE non-penetration', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 0}, (0, False)),
+                ('HE ricochet', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 0, 'damage': 0}, (0, False)),
+                ('absorbed splash', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 0, 'splash': True},
+                 (0, False)),
+                ('module-only penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 2, 'damage': 0}, (0, False)),
+                ('penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 2, 'damage': 144}, (144, False)),
+                ('leaking HE non-penetration', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 40}, (40, False))):
+            with self.subTest(label):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture(shell_kind=kind))
+                event = dict({
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'source': 'shot', 'dead': False,
+                    'attack_reason': 0, 'death_reason': 0}, **event)
+
+                battle._present_combat_hit(
+                    event, target_record, attacker_record, 11)
+
+                direction = battle._avatar.hit_directions[-1]
+                self.assertEqual(expected, (direction[2], direction[4]))
+                self.assertFalse(direction[2] == 0 and direction[4])
+
     def test_native_impact_effect_exception_keeps_nonvisual_feedback(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
