@@ -88,6 +88,52 @@ def _snapshot_with_members(members):
 
 
 class EffectiveParamsContractTests(unittest.TestCase):
+    def test_zero_id_manual_extinguisher_joins_and_extinguishes_once(self):
+        from gui.mods.offline_lan_0922 import equipment_mechanics
+        # Exact #1513 handExtinguishers: local ID 0, packed equipment ID 251.
+        equipment = equipment_mechanics.project_equipment(types.SimpleNamespace(
+            name='handExtinguishers', id=(15, 0), compactDescr=251,
+            cooldownSeconds=90.0, reuseCount=1))
+        params = effective_params()
+        params['equipment'] = [equipment]
+        self.assertIsNotNone(contract.canonical(params))
+        for changes in ({'id': -1}, {'id': False}, {'compactDescr': 0}):
+            invalid = copy.deepcopy(params)
+            invalid['equipment'][0].update(changes)
+            self.assertIsNone(contract.canonical(invalid))
+        duplicate = copy.deepcopy(params)
+        duplicate['equipment'].append(dict(equipment))
+        self.assertIsNone(contract.canonical(duplicate))
+
+        client = LANClient('127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
+                           max_health=90, effective_params=params,
+                           vehicle_compact_descr='dGVzdA==')
+        state = BattleState()
+        player, error = state.add_player(
+            _Connection(), ('127.0.0.1', 2000), _hello(params))
+        self.assertIsNone(error)
+        self.assertTrue(state._install_player_equipments(player))
+        state.phase = client.phase = 'battle'
+        state.tick = 10000
+        player.participating = True
+        player.critical['fire'] = True
+        client.ready = True
+        client.round_id = state.round_id
+        messages = []
+        client._send = lambda message: messages.append(message) or True
+        self.assertEqual(1, client.send_equipment_intent(0, activation_code=0))
+        self.assertTrue(state.submit_equipment_intent(player.player_id, messages[0]))
+        self.assertTrue(player.equipment_intent_result['accepted'])
+        self.assertFalse(player.critical['fire'])
+        revision = player.equipment_revision
+        self.assertTrue(state.submit_equipment_intent(player.player_id, messages[0]))
+        self.assertEqual(revision, player.equipment_revision)
+        for invalid in (-1, False, 65536):
+            self.assertIsNone(client.send_equipment_intent(
+                invalid, activation_code=0))
+            forged = dict(messages[0], equipment_id=invalid, intent_seq=2)
+            self.assertFalse(state.submit_equipment_intent(player.player_id, forged))
+
     def test_dynamic_spotting_ratios_use_native_factor_pairs(self):
         healthy = {
             'circularVisionRadius': 1.2,

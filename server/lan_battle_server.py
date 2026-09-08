@@ -11170,9 +11170,9 @@ class BattleState:
                 intent_seq = _exact_int(
                     message.get("intent_seq"), 1, PROJECTILE_MAX_ID)
                 equipment_id = _exact_int(
-                    message.get("equipment_id"), 1, 65535)
+                    message.get("equipment_id"), 0, 65535)
                 activation_code = _exact_int(
-                    message.get("activation_code"), 1,
+                    message.get("activation_code"), 0,
                     PROJECTILE_MAX_ID)
             except (TypeError, ValueError, OverflowError):
                 return False

@@ -2556,9 +2556,9 @@ class LANClient(object):
         if (not self.ready or self.phase != 'battle' or
                 self.is_bot_authority()):
             return None
-        parsed_id = _projectile_int_range(equipment_id, 1, 65535)
+        parsed_id = _projectile_int_range(equipment_id, 0, 65535)
         parsed_activation = _projectile_int_range(
-            activation_code, 1, MAX_PROJECTILE_ID)
+            activation_code, 0, MAX_PROJECTILE_ID)
         if (parsed_id is None or parsed_activation is None or
                 parsed_activation & 65535 != parsed_id):
             return None
