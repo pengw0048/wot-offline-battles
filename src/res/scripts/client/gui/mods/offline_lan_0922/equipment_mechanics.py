@@ -14,6 +14,14 @@ import math
 DEFAULT_BOT_CONSUMABLE_NAMES = (
     'autoExtinguishers', 'largeMedkit', 'largeRepairkit')
 
+# A Bot has one repair-kit charge, so a functional but damaged module only
+# earns it when losing that module costs the Bot the fight: its gun, its engine
+# and its ammo bay.  A yellow track, radio or observation device does not, and
+# waiting keeps the charge for the destroyed module that follows.  Any
+# destroyed module always earns it.
+BOT_YELLOW_REPAIR_DEVICES = frozenset(
+    ('ammoBayHealth', 'engineHealth', 'gunHealth'))
+
 EQUIPMENT_CONTRACT_FIELDS = (
     'name', 'kind', 'id', 'compactDescr', 'tags', 'reuseCount',
     'cooldownSeconds', 'autoactivate', 'fireStartingChanceFactor',
@@ -317,9 +325,38 @@ def restore_equipment_states(snapshots, contracts=None, now=0.0):
 
 
 def _projection(value):
+    """Return the immutable contract behind a state, a wire row or a contract."""
     if isinstance(value, EquipmentState):
         return value.contract
+    if isinstance(value, dict) and isinstance(value.get('equipment'), dict):
+        return value['equipment']
     return value
+
+
+def _remaining_uses(value):
+    """Charges left on one equipment, or None when the input cannot say."""
+    if isinstance(value, EquipmentState):
+        return value.uses_left
+    if isinstance(value, dict) and 'usesLeft' in value:
+        return _integer(value.get('usesLeft'), -1)
+    return None
+
+
+def _bot_repair_is_worthwhile(critical):
+    """True when this damage is worth one of a Bot's repair-kit charges."""
+    critical = critical if isinstance(critical, dict) else {}
+    if critical.get('destroyed'):
+        return True
+    for record in (critical.get('devices') or ()):
+        if not isinstance(record, dict):
+            continue
+        state = str(record.get('state') or '')
+        if state == 'destroyed':
+            return True
+        if (state == 'critical' and
+                str(record.get('name') or '') in BOT_YELLOW_REPAIR_DEVICES):
+            return True
+    return False
 
 
 def passive_effects(equipments):
@@ -337,16 +374,23 @@ def passive_effects(equipments):
         state = raw if isinstance(raw, EquipmentState) else None
         value = _projection(raw)
         kind = str(_value(value, 'kind', '') or '')
+        # An extinguisher's factor is a mounted one: #1513's
+        # Extinguisher.updateVehicleAttrFactors writes engine/fireStartingChance
+        # from the descriptor, so carrying it is enough.  A kit has no such
+        # hook, and its published passive holds only while the kit is unused.
+        spent = _remaining_uses(raw) == 0
         if kind == 'extinguisher':
             result['fireStartingChanceFactor'] *= max(
                 0.0, _number(_value(
                     value, 'fireStartingChanceFactor'), 1.0))
         elif kind == 'repairkit':
-            result['repairkitBonusValue'] += _number(
-                _value(value, 'bonusValue'), 0.0)
+            if not spent:
+                result['repairkitBonusValue'] += _number(
+                    _value(value, 'bonusValue'), 0.0)
         elif kind == 'medkit':
-            result['medkitBonusValue'] += _number(
-                _value(value, 'bonusValue'), 0.0)
+            if not spent:
+                result['medkitBonusValue'] += _number(
+                    _value(value, 'bonusValue'), 0.0)
         result['crewLevelIncrease'] += _number(
             _value(value, 'crewLevelIncrease'), 0.0)
         if kind == 'fuel' or (
@@ -561,7 +605,9 @@ class EquipmentState(object):
             return None
         now = _number(now, 0.0)
         candidate = effect_policy(self, critical, stunned=stunned)
-        if candidate is None or not self.ready(now):
+        if (candidate is None or not self.ready(now) or
+                (kind == 'repairkit' and
+                 not _bot_repair_is_worthwhile(critical))):
             self._ai_pending_since = None
             return None
         if self._ai_pending_since is None:

@@ -2267,6 +2267,8 @@ def _runtime():
             'overturn': 7},
         AMMOBAY_DESTRUCTION_MODE=types.SimpleNamespace(
             POWDER_BURN_OFF=0, POWDER_EXPLOSION=1, HE_DETONATION=2),
+        SPECIAL_VEHICLE_HEALTH=types.SimpleNamespace(
+            AMMO_BAY_DESTROYED=-5, TURRET_DETACHED=-13),
         DAMAGE_INFO_INDICES={
             'DEVICE_DESTROYED_AT_FIRE': 10,
             'DEVICE_CRITICAL_AT_WORLD_COLLISION': 11,
@@ -12341,12 +12343,16 @@ class BattleRuntimeContractTests(unittest.TestCase):
         entity._critical_devices = set()
         entity.appearance.addCrashedTrack = mock.Mock()
         entity.appearance.delCrashedTrack = mock.Mock()
-        loadout = {'has_big_kit': False, 'repair_factor': 0.5}
+        # The generated default crew has no Repair skill, so its client
+        # factor is CREW_FACTOR_BASE and the track takes exactly the untrained
+        # base time: half of it leaves the track destroyed.
+        device_damage = critical_damage._device_damage
+        half = device_damage.BASE_TRACK_REPAIR_SECONDS / 2.0
 
         partial = BattleRuntime._tick_local_track_repair(
-            entity, 5.0, loadout)
+            entity, half, device_damage.CREW_FACTOR_BASE)
         repaired = BattleRuntime._tick_local_track_repair(
-            entity, 5.0, loadout)
+            entity, half, device_damage.CREW_FACTOR_BASE)
 
         self.assertEqual('destroyed', partial['devices'][0]['state'])
         self.assertEqual('critical', repaired['devices'][0]['state'])
@@ -12705,6 +12711,123 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([10, 9], [
             value['eventType']
             for value in battle._avatar.battle_events[0]])
+
+    def _blocked_hit_fixture(self, shell_kind='ARMOR_PIERCING'):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker_descriptor = _Descriptor()
+        attacker_descriptor.gun.shots[0].shell.kind = shell_kind
+        attacker = _Vehicle(11, attacker_descriptor, _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        battle._local_position = (0.0, 0.0, 0.0)
+        target_record = {
+            'engine_id': 10, 'state': {'team': 1, 'health': 500},
+            'kind': 'player', 'network_id': 1, 'local': True}
+        attacker_record = {
+            'engine_id': 11,
+            'spot_visible': False, 'spot_marker_visible': False,
+            'state': {'team': 2, 'health': 500,
+                      'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        return battle, target_record, attacker_record
+
+    def test_blocked_hit_indicator_reports_the_published_shell_damage(self):
+        """A bounce labels the marker with the shell, not the lost HP.
+
+        #1513's extended indicator prints ``str(HitData.getDamage())`` and
+        selects ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG`` from
+        ``damage / playerVehMaxHP``, so the removed hit points label every
+        blocked marker ``0`` and pin it to the smallest blocked art.  The
+        damage log's blocked row must read the same number.
+        """
+        for shot_result in (0, 1):
+            with self.subTest(shot_result=shot_result):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture())
+                event = {
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'shot_result': shot_result, 'damage': 0,
+                    'blocked_damage': 100, 'source': 'shot',
+                    'dead': False, 'attack_reason': 0, 'death_reason': 0}
+
+                self.assertTrue(battle._present_combat_hit(
+                    event, target_record, attacker_record, 11))
+                self.assertTrue(battle._present_combat_feedback(
+                    event, target_record, attacker_record))
+
+                direction = battle._avatar.hit_directions[-1]
+                # _Descriptor's shell is published at 100 armour damage.
+                self.assertEqual(100, direction[2])
+                self.assertIs(True, direction[4])
+                self.assertEqual(0, direction[3])
+                self.assertIs(False, direction[5])
+                events = battle._avatar.battle_events[-1]
+                self.assertEqual(
+                    [5], [value['eventType'] for value in events])
+                # Indicator and blocked log row report one number.
+                self.assertEqual(
+                    direction[2],
+                    _unpack_damage(events[0]['details'])[0])
+
+    def test_indicator_never_labels_a_marker_zero(self):
+        """Retail cannot draw a blocked marker worth zero damage.
+
+        ``_MarkerData.__getMarkerType`` reads ``HitData.isBlocked()``
+        first and the blocked branch is numeric, while every other
+        zero-damage hit falls to ``CRITICAL_DAMAGE``, whose label is empty
+        below two criticals.  So a stopped shell claims blocked with the
+        shell's published damage, and a hit that removed no hit points
+        without being stopped -- an absorbed splash, or a penetration that
+        only broke modules -- keeps retail's unlabelled critical marker
+        rather than a blocked ``0``.
+
+        ``HIGH_EXPLOSIVE`` never claims the blocked marker either:
+        ``#battle_results:common/tooltip/armor/description`` excludes HE and
+        HESH from the armour ledger, and #1513 has one shell kind for both.
+        HEAT and APHE are not excluded.
+        """
+        for label, kind, event, expected in (
+                ('ricochet', 'ARMOR_PIERCING', {
+                    'shot_result': 0, 'damage': 0}, (100, True)),
+                ('non-penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('HEAT non-penetration', 'HOLLOW_CHARGE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('APHE non-penetration', 'ARMOR_PIERCING_HE', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
+                ('HE non-penetration', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 0}, (0, False)),
+                ('HE ricochet', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 0, 'damage': 0}, (0, False)),
+                ('absorbed splash', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 0, 'splash': True},
+                 (0, False)),
+                ('module-only penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 2, 'damage': 0}, (0, False)),
+                ('penetration', 'ARMOR_PIERCING', {
+                    'shot_result': 2, 'damage': 144}, (144, False)),
+                ('leaking HE non-penetration', 'HIGH_EXPLOSIVE', {
+                    'shot_result': 1, 'damage': 40}, (40, False))):
+            with self.subTest(label):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture(shell_kind=kind))
+                event = dict({
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'source': 'shot', 'dead': False,
+                    'attack_reason': 0, 'death_reason': 0}, **event)
+
+                battle._present_combat_hit(
+                    event, target_record, attacker_record, 11)
+
+                direction = battle._avatar.hit_directions[-1]
+                self.assertEqual(expected, (direction[2], direction[4]))
+                self.assertFalse(direction[2] == 0 and direction[4])
 
     def test_native_impact_effect_exception_keeps_nonvisual_feedback(self):
         runtime = _runtime()
@@ -27135,6 +27258,91 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._apply_health(record, {'health': 0})
 
         self.assertEqual((0, 0, 0), entity.health_change)
+
+    def test_ammo_rack_death_preserves_special_health_at_all_consumers(self):
+        for local in (False, True):
+            with self.subTest(local=local):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._binding = mock.Mock()
+                entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                                  {'health': 500})
+                runtime.bigworld.entities[10] = entity
+                record = {'engine_id': 10, 'local': local,
+                          'presentation': not local, 'native_remote': True}
+                state = {'health': 0, 'display_health': 0, 'alive': False,
+                         'critical': {'ammo_rack_death': True}}
+
+                def exact_avatar_update(vehicle_id, raw_health, *unused):
+                    # PlayerAvatar.updateVehicleHealth writes rawHealth back
+                    # into Vehicle after the first local death notification.
+                    entity.health = raw_health
+
+                battle._avatar.updateVehicleHealth = mock.Mock(
+                    side_effect=exact_avatar_update)
+                entity.onHealthChanged = mock.Mock(wraps=entity.onHealthChanged)
+                with mock.patch.object(critical_damage, 'apply_death',
+                                       return_value=None):
+                    battle._apply_health(record, state, attacker_id=11)
+                    battle._apply_health(record, state, attacker_id=11,
+                                         force_cause=True)
+
+                self.assertEqual(-5, entity.health)
+                entity.onHealthChanged.assert_called_once_with(-5, 11, 0)
+                self.assertEqual(0, state['health'])
+                self.assertEqual(0, state['display_health'])
+                battle._binding.arena_vehicle_killed.assert_called_once()
+                if local:
+                    battle._avatar.updateVehicleHealth.assert_called_once_with(
+                        10, -5, 0, False, False)
+                else:
+                    battle._avatar.guiSessionProvider.setVehicleHealth.\
+                        assert_called_once_with(False, 10, -5, 11, 0)
+
+    def test_late_ammo_rack_cause_corrects_marker_without_replaying_death(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._binding = mock.Mock()
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        record = {'engine_id': 10, 'local': False,
+                  'presentation': True, 'native_remote': True}
+        state = {'health': 0, 'alive': False}
+        entity.onHealthChanged = mock.Mock(wraps=entity.onHealthChanged)
+        with mock.patch.object(critical_damage, 'apply_death',
+                               return_value=None):
+            battle._apply_health(record, state, attacker_id=11)
+            state['critical'] = {'ammo_rack_death': True}
+            battle._apply_health(record, state, attacker_id=11)
+            battle._apply_health(record, state, attacker_id=11)
+        self.assertEqual(-5, entity.health)
+        entity.onHealthChanged.assert_called_once_with(0, 11, 0)
+        battle._binding.arena_vehicle_killed.assert_called_once()
+        self.assertEqual([
+            mock.call(False, 10, 0, 11, 0),
+            mock.call(False, 10, -5, 11, 0)],
+            battle._avatar.guiSessionProvider.setVehicleHealth.call_args_list)
+
+    def test_worker_keeps_numeric_health_when_ammo_rack_detonates(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._worker_mode = True
+        battle._avatar = runtime.bigworld.avatar
+        entity = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        record = {'engine_id': 10, 'local': False}
+        state = {'health': 0, 'alive': False,
+                 'critical': {'ammo_rack_death': True}}
+        with mock.patch.object(critical_damage, 'apply_death', return_value=None):
+            battle._apply_health(record, state)
+            battle._apply_health(record, state)
+        self.assertEqual(0, entity.health)
+        self.assertFalse(entity.isCrewActive)
+        battle._avatar.guiSessionProvider.setVehicleHealth.assert_not_called()
 
     def test_local_death_crosses_stock_postmortem_activation_boundary(self):
         runtime = _runtime()

@@ -2435,3 +2435,20 @@ class VehicleOverlayFetchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResetStateNameTests(unittest.TestCase):
+    """A confirmed reset removes copies of earned progress too."""
+
+    def test_the_clients_rotated_and_quarantined_copies_are_reset(self):
+        for name in ("garage_state.json", "garage_state.json.tmp",
+                     "garage_state.backup1.json",
+                     "garage_state.rejected-20260908-000000-000.json",
+                     "garage_state.shrunk-20260908-000000-000.json",
+                     "postbattle_state.backup2.json"):
+            self.assertTrue(core._reset_state_name(name), name)
+
+    def test_files_that_are_not_this_mods_state_are_left_alone(self):
+        for name in ("garage_state", "vehicle_profiles.json", "python.log",
+                     "garage_state.json.zip", "other_state.backup1.json"):
+            self.assertFalse(core._reset_state_name(name), name)

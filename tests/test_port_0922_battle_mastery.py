@@ -63,24 +63,46 @@ class _ReplayConnector(object):
 
 
 class _Replay(object):
+    """The #1513 chain, as far as ``_add_value_replays`` uses it.
+
+    ``ValueReplay`` writes the running total back through the connector on the
+    initial value and on every later step, and ``ReplayRecords`` keys each
+    record by the name of the value that step applied.  Both are the contract
+    the results tables read, so the double reproduces them.
+    """
+
     steps = []
 
     def __init__(self, connector, recordName=None, startRecordName=None):
         self.connector = connector
         self.record_name = recordName
         self.start_name = startRecordName
+        self.chain = ['SET:%s' % startRecordName]
+        self.connector.values[recordName] = self.connector.values[
+            startRecordName]
+        _Replay.steps.append((recordName, 'SET', startRecordName))
 
-    def addMultipliedValue(self, other, coeff):
-        # The stock chain writes the total back through the connector.
-        self.connector.values[self.record_name] = (
-            self.connector.values[other] +
-            int(round(self.connector.values[other] *
-                      self.connector.values[coeff] / 100.0)))
-        _Replay.steps.append((self.record_name, other, coeff))
+    def __mul__(self, other):
+        # ``__opMul`` is ``int(round(value * factor / 100.0))`` under the
+        # embedded CPython 2.7, which rounds a half away from zero.
+        self.connector.values[self.record_name] = int(
+            self.connector.values[self.record_name] *
+            self.connector.values[other] / 100.0 + 0.5)
+        self.chain.append('MUL:%s' % other)
+        _Replay.steps.append((self.record_name, 'MUL', other))
+        return self
+
+    def __add__(self, other):
+        self.connector.values[self.record_name] += self.connector.values[
+            other]
+        self.chain.append('ADD:%s' % other)
+        _Replay.steps.append((self.record_name, 'ADD', other))
         return self
 
     def pack(self):
-        return b'replay'
+        return ('%s=%s' % ('+'.join(self.chain),
+                           self.connector.values[self.record_name])).encode(
+                               'ascii')
 
 
 def _receipt(account_key='account-key-123456', index=1, xp=600, damage=900,
@@ -399,13 +421,18 @@ class MasteryResultTests(unittest.TestCase):
             bonus = int(round((third_class - 1) * 0.5))
             self.assertEqual(third_class - 1 + bonus, vehicle['xp'])
             self.assertEqual(bonus, vehicle['premiumVehicleXP'])
-            self.assertEqual(50, vehicle['premiumVehicleXPFactor100'])
-            # The #1513 breakdown renders that bonus from the chain step.
-            self.assertIn(('xp', 'originalXP', 'premiumVehicleXPFactor100'),
+            # #1513's premium-vehicle row reads a record named by the factor,
+            # which only a factor step writes, so the packed field is the
+            # total multiplier the chain applies.
+            self.assertEqual(150, vehicle['premiumVehicleXPFactor100'])
+            self.assertIn(('xp', 'SET', 'originalXP'), _Replay.steps)
+            self.assertIn(('xp', 'MUL', 'premiumVehicleXPFactor100'),
                           _Replay.steps)
-            self.assertIn(
-                ('freeXP', 'originalFreeXP', 'premiumVehicleXPFactor100'),
-                _Replay.steps)
+            self.assertIn(('freeXP', 'MUL', 'premiumVehicleXPFactor100'),
+                          _Replay.steps)
+            # Nothing multiplied this save, so there is no boosters row.
+            self.assertEqual(0, vehicle['boosterXP'])
+            self.assertNotIn(('xp', 'ADD', 'boosterXP'), _Replay.steps)
             message = store.service_message_data(receipt['arena_unique_id'])
             self.assertEqual(vehicle['xp'], message['xp'])
             # The account banks the bonus even though the badge ignored it.

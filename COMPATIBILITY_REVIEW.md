@@ -1364,19 +1364,49 @@ The premium-vehicle bonus sits outside the badge. `premiumVehicleXPFactor`,
 which 200 shipped vehicles carry, is applied to the banked XP and Free XP and
 never to the number the mastery badge ranks: `originalXP` stays the bare battle
 XP the badge reads, while `xp`, `factualXP` and `subtotalXP` carry the bonus.
-The results window learns it the way retail does rather than as an unexplained
-difference - `ValueReplay.addMultipliedValue` records
-`record += round(original * premiumVehicleXPFactor100 / 100)` in the XP and
-Free XP chains, which is exactly the step
-`gui.battle_results.components.details` renders its own `premiumVehicleXP` row
-from, and the chain writes the total back through the connector so the packed
-value and the breakdown agree. Crew training stays on the bare battle XP with
-only `crewXpFactor` applied after the save earnings multiplier. The garage
-settlement owns the final vehicle XP and Free XP bonus once; a durable
-`awarded` receipt is never multiplied again by the results cache. With custom
-save multipliers, ValueReplay starts from the factual total rather than
-resetting it to base XP or labelling the custom amount as a retail premium
-account bonus. Mastery continues to use unscaled battle XP.
+Crew training stays on the bare battle XP with only `crewXpFactor` applied
+after the save earnings multiplier. The garage settlement owns the final
+vehicle XP and Free XP bonus once; a durable `awarded` receipt is never
+multiplied again by the results cache. Mastery continues to use unscaled
+battle XP.
+
+Every row of the two detail tables is a `ValueReplay` record, keyed by the
+name of the value its step applied. `ValueReplay.__iter__` yields
+`(op, (param1, value), (recordName, runningTotal))` and
+`gui.battle_results.reusable.records.ReplayRecords` stores each step under
+`param1`, so the record names are the chain's first parameters and nothing
+else. `MoneyDetailsBlock.__getBaseCredits` reads `originalCredits`,
+`XPDetailsBlock.__getBaseXPs` reads `originalXP` and `originalFreeXP`, the
+boosters rows read `boosterCredits`, `boosterXP` and `boosterFreeXP`, and a
+name no step applied reads as zero. Three consequences are load-bearing for
+this port. A chain must start at `original*`, or the results screen draws the
+battle's own income as zero while the total row stays right.
+`addMultipliedValue(startName, factor)` records its step under `startName`,
+which *replaces* the base record with the bonus rather than adding a row -
+only `__mul__` and `applyFactorToTag`, whose first parameter is the factor,
+write a factor-named record, which is why the premium-vehicle row and
+`_XPReplayRecords`' `xpToShow = xp - premiumVehicleXPFactor100` both read one.
+And a factor step's packed field is therefore the *total* multiplier the chain
+applies, not the descriptor's bonus: `premiumVehicleXPFactor` defaults to
+`DEFAULT_PREMIUM_VEHICLE_XP_FACTOR = 0.0` and is a bonus fraction, so a 0.5
+vehicle packs 150.
+
+This port therefore presents its two account-side coefficients where retail
+keeps them. A premium vehicle's credit income has no retail row - vehicle
+profitability is inside the base credits the server pays - so
+`PREMIUM_VEHICLE_CREDITS_PERCENT` is folded into `originalCredits`. Its
+experience bonus has one, `details/calculations/premiumVehicleXP`, so it is a
+`__mul__` step by `premiumVehicleXPFactor100`; one visible consequence is that
+`xpToShow`, which the summary panel draws, then excludes it exactly as #1513
+computes. Whatever the save's earnings multiplier adds above those is packed
+as `boosterCredits`, `boosterXP` and `boosterFreeXP` and added with one `ADD`
+step, the single #1513 row for an account-owned multiplier on a finished
+battle. `__mul__` and `__add__` both write the running total back through the
+connector, so the packed total, the breakdown and the wallet agree; a sweep
+over 13,680 combinations of battle XP, save percentage and vehicle factor
+confirms the chain lands exactly on the banked amount. An award below the
+battle's own income has no #1513 row that honestly names the reduction, so
+`original*` reports the reduced amount instead.
 
 Kill XP uses victim durability as an offline balance proxy. This does not
 implement an exact tier-difference rule: equal-tier vehicles can have different
@@ -2014,7 +2044,7 @@ only exact Windows acceptance can prove that the native HULL output is visible
 and that its magnitude feels correct.
 
 Critical-hit calculation follows the same proposal/commit boundary. The
-firing client runs a device law derived from the retired predecessor against an
+hidden worker runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision
 components and critical state. That calculation cannot change the live target
 or invoke native kill
@@ -2029,6 +2059,73 @@ accepted revision exactly once.
 Repair reports remain pending until the server acknowledges their proposal
 revision, so a successful socket write or an older snapshot cannot rewind the
 HUD state.
+
+The internal-module model is a reconstruction, not the recovered #1513
+server collision model. Native component collision queries supply the armour
+and exposed-device contacts; `internal_layout_profiles.py` supplies interior
+boxes fitted to the selected component bounds and transformed by the current
+vehicle/turret/gun pose. `BattleRuntime._vehicle_trace` limits solid-shell
+travel to ten calibres from the first vehicle material. HE uses the separate
+finite interior cone. The active critical loop scores each reached device
+once, using the shell's independent `damage[1]` channel. The current device
+roll is uniform within +/-25%; the available client contracts do not establish
+that server-side distribution. The common ammo-bay material specifies device
+damage and 0.27 for both projectile and explosion hit chances. Deadeye adds
+three percentage points for AP/APCR/HEAT. A successful hit that reduces the
+rack to zero destroys the vehicle without a second detonation roll.
+
+The launcher editor writes `damage/devices`, and the mounted-shell snapshot
+and projectile launch preserve a value of 2000. Tests cover AP, APCR, HEAT,
+APHE and HE, player and Bot victims, the 27% saving-throw boundary and duplicate
+contacts with one rack. Even the low 1500 damage roll destroys a reached
+ordinary rack after its saving throw. This proves the numerical path once a
+module contact exists; it does not prove that a retail aiming point intersects
+the reconstructed box. A missing/invalid profile supplies no internal contact,
+so raising damage cannot fix missing geometry. Run the read-only inventory:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 tools/audit_internal_layouts.py \
+  "$WOT_0922_CLIENT/res/packages/scripts.pkg"
+```
+
+The reviewed resource catalog has 680 listed vehicle definitions: 248 match
+the retained profiles and their #1513 crew-role bindings, and 432 lack a
+profile. These totals include special/training variants and the one vehicle
+already excluded for missing client art. A profile match does not validate
+its geometry against the retail server. Filling the missing entries with
+generic boxes or enlarging existing boxes would change gameplay without
+establishing correctness; this audit does neither.
+
+Ammo-rack death also has a separate presentation contract. LAN health remains
+zero, but the stock Vehicle, marker feedback and local
+`PlayerAvatar.updateVehicleHealth` receive
+`SPECIAL_VEHICLE_HEALTH.AMMO_BAY_DESTROYED` (-5). The marker consumer preserves
+that special negative value, while it normalizes ordinary negative health to
+zero. The Avatar writes its raw argument back into the Vehicle at local death,
+so passing zero there would erase an earlier correction. A late critical cause
+corrects the marker without repeating the death/kill/postmortem callbacks.
+The ABI audit pins the negative constants and marker consumer; regression
+tests fail against the old zero-only presentation for local, remote and late
+ammo-rack deaths.
+
+Turret flight remains unimplemented. `Vehicle.showAmmoBayEffect` only forwards
+mode and fireball volume to `CompoundAppearance`; its projected-speed argument
+is unused. The separate `DetachedTurret` entity, `WGTurretFilter`, vehicle
+confirmation and motion inputs own detachment. The port creates no such entity
+and supplies no authoritative detached-turret motion. It therefore must not
+publish `TURRET_DETACHED` (-13) or claim flight was fixed by an explosion call.
+WG's [Update 9.0 notes](https://worldoftanks.com/en/content/docs/release_notes/90-update-notes/)
+establish the intended turret-detachment feature. Its later
+[Object 277 explanation](https://worldoftanks.com/en/news/general-news/3-soviet-tanks-get-adjustments/)
+also confirms that changing internal module geometry changes ammo-rack
+exposure; those later vehicle values are not imported into #1513.
+
+The resource inventory and CPython 2.7 bytecode audit can run on an isolated
+`scripts.pkg`. That is only resource/contract evidence. The investigation did
+not have a complete Chinese HD installation passing `inspect_client.py`, all
+vehicle collision assets, a retail server model, or Windows gameplay evidence.
+The repaired marker still needs exact #1513 rendering acceptance; the missing
+layouts and detached-turret implementation remain explicit product gaps.
 
 Track damage follows the detailed model Update 6.4 introduced. A track
 material's live `damageKind` selects the shell damage channel:
@@ -2174,6 +2271,62 @@ Exact retries fold to that result, changed same-sequence payloads conflict, and
 the next intent can proceed. Messages that cannot establish the current
 identity, round, type or exact sequence still consume nothing. Extra fields
 remain rejected rather than extending the protocol.
+
+`PlayerAvatar.showOwnVehicleHitDirection(hitDirYaw, attackerID, damage, crits,
+isBlocked, isShellHE, damagedID)` is the only producer of the damage
+indicator, and `gui/battle_control/hit_data.pyc` keeps `damage`, `IS_BLOCKED`
+and `IS_HIGH_EXPLOSIVE` as independent fields. In
+`gui/Scaleform/daapi/view/battle/shared/indicators.pyc`,
+`_MarkerData.__getMarkerType` reads `HitData.isBlocked()` before anything
+else. Its blocked branch is numeric: `_ExtendedMarkerVOBuilder` prints
+`str(HitData.getDamage())` as the label and selects
+`DAMAGEINDICATOR.BLOCKED_SMALL`/`BLOCKED_MEDIUM`/`BLOCKED_BIG` from
+`damage / playerVehMaxHP`. Every other zero-damage hit falls through to
+`CRITICAL_DAMAGE`, whose three sizes all map to the single `CRIT` frame and
+whose `_getDamageLabel` is the empty string below two criticals. The exact
+client therefore draws either a blocked marker carrying a real value or an
+unlabelled critical marker; a blocked marker worth `0` is unreachable, so
+`isBlocked` must mean a shell this vehicle's armour stopped rather than
+merely a hit that removed no hit points. `HitData.__buildFlags` sets
+`HP_DAMAGE` from `damage > 0` alone, so once a blocked marker carries a value
+`HitDirectionController.__findHit` matches an earlier marker from the same
+attacker and `HitData.extend` sums the two -- retail's own aggregation, and
+also what makes a blocked hit visible under the `WITHOUT_CRITS` preset that
+`_isValidHit` uses to drop zero-damage criticals. `isShellHE` reaches
+`HitData` but no #1513 view reads it.
+
+The damage log panel's blocked rows and its running total come from one
+number, the `TANKING` battle event, whose totals
+`PersonalEfficiencyController._onPlayerFeedbackReceived` accumulates
+client-side from `Avatar.onBattleEvents`; `_BET.ARMOR` maps the same event to
+the `BATTLE_EVENTS.BLOCKED_DAMAGE` ribbon.
+
+`res/text/LC_MESSAGES/battle_results.mo` states the ledger rule the client
+itself shows. `EfficiencyTooltipData` binds `BATTLE_EFFICIENCY_TYPES.ARMOR` to
+`ArmorItemPacker` (`gui/shared/tooltips/efficiency.pyc`), whose header is
+`common/tooltip/armor/header` (装甲抵挡) and whose description is
+`common/tooltip/armor/description`: "计数: / • 跳弹 / • 未击穿 / HE与HESH炮弹不
+包含在内。" -- the counter takes ricochets and non-penetrations, and HE and
+HESH shells are not included. #1513 has a single `HIGH_EXPLOSIVE` kind for
+both, and `combat_rules.is_he` already reads exactly that kind, so `HEAT`
+(`HOLLOW_CHARGE`) and `APHE` (`ARMOR_PIERCING_HE`) keep their blocked credit
+even though `ingame_gui.mo` abbreviates `ARMOR_PIERCING_HE` and
+`HIGH_EXPLOSIVE` to the same `damageLog/shellType` label, `HE`. The battle
+server owns the ledger but holds no descriptors, so the worker publishes the
+shell fact beside `structural_armor_hit` and the server applies the rule.
+`IS_HIGH_EXPLOSIVE` does reach `HitData`, but no #1513 view reads it, so
+`isBlocked` is the only place the same rule can be expressed on the indicator.
+
+The remaining choice is the blocked value itself, which no reviewed file
+fixes: the cell app that packs retail's `damage` argument and blocked ledger
+is not in the package. This port reports the shell's published
+`shell.damage[0]`, because a shell that never pierced never drew a damage
+roll; a penetration keeps the roll it actually spent. Splash is excluded from
+both surfaces -- its damage falls off with distance before armour absorbs the
+rest -- so an absorbed near miss stays an unlabelled critical marker and
+credits nothing. The separate `potentialDamageReceived` column carries no such
+exclusion in any reviewed text, so it still accumulates every direct hit; that
+asymmetry is the client's rule, not a derived identity.
 
 ## AI, room and round boundaries
 

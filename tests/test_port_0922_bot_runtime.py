@@ -12088,6 +12088,31 @@ class BotRuntimeTests(unittest.TestCase):
             restored.states[11]['equipment_states'][2][
                 'cooldownTimeLeft'])
 
+    def test_bot_repair_speed_takes_the_large_kit_bonus_once(self):
+        from gui.mods.offline_lan_0922 import device_damage
+        descriptor = _critical_descriptor()
+        contracts = _bot_equipment_contracts(self.module)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: descriptor,
+            adapter_factory=lambda *args, **kwargs: _Adapter(*args),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            bot_equipment_resolver=lambda: contracts)
+        runtime.battle_start(self.start)
+
+        factor = runtime._bot_repair_factor(11, descriptor)
+
+        # #1513 keeps the large repair kit's bonusValue out of every crew
+        # factor, so the Bot folds that 10% in itself, exactly once, on top of
+        # the default crew's untrained 0.57.
+        self.assertAlmostEqual(device_damage.CREW_FACTOR_BASE * 1.10, factor)
+        self.assertAlmostEqual(
+            device_damage.BASE_TRACK_REPAIR_SECONDS / 1.10,
+            device_damage.repair_seconds(
+                'leftTrackHealth', descriptor, repair_factor=factor))
+
     def test_destroyed_bot_track_repairs_to_regen_cap(self):
         descriptor = _critical_descriptor()
         runtime = self.module.BotRuntime(
@@ -12107,13 +12132,16 @@ class BotRuntimeTests(unittest.TestCase):
                 critical=broken, revision=1, base_revision=1)]})
 
         # A bot carries #1513's default crew, which has no repair skill, so
-        # factors['repairSpeed'] is 0.57 and the track takes 10 / (2 * 0.57)
-        # seconds rather than the five a fully trained crew would need.
+        # factors['repairSpeed'] is 0.57 and the track takes exactly the
+        # untrained BASE_TRACK_REPAIR_SECONDS, not the 0.57x of it a fully
+        # trained crew would need.
+        from gui.mods.offline_lan_0922 import device_damage
+        ticks = int(round(device_damage.BASE_TRACK_REPAIR_SECONDS / .20))
         outgoing = None
-        for index in range(25):
+        for index in range(ticks // 2):
             outgoing = bot_state_rows.bots(runtime.update(.20, 1.0 + index * .20)[0])[0]
         self.assertLess(outgoing['critical']['devices'][0]['hp'], 130.0)
-        for index in range(25, 45):
+        for index in range(ticks // 2, ticks):
             outgoing = bot_state_rows.bots(runtime.update(.20, 1.0 + index * .20)[0])[0]
 
         device = outgoing['critical']['devices'][0]

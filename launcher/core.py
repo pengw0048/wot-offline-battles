@@ -1480,6 +1480,14 @@ def _reset_state_name(name):
         prefix = base_name + ".invalid."
         if name.startswith(prefix) and name[len(prefix):].isdigit():
             return True
+        # The client keeps rotated and quarantined copies of a state file
+        # beside it (``garage_state.backup1.json``,
+        # ``garage_state.rejected-...json``).  A confirmed reset promises to
+        # remove what the player earned, and a copy of it is still that.
+        stem, extension = os.path.splitext(base_name)
+        if (name.startswith(stem + ".") and name.endswith(extension) and
+                name != base_name):
+            return True
     return False
 
 

@@ -7537,8 +7537,11 @@ class BattleRuntime(object):
             equipments = self._equipment_state
         else:
             snapshots = state.get('equipment_states') or ()
+            # Pass the whole ledger row, not just its contract: a spent kit
+            # no longer carries its passive, and the proposal has to agree
+            # with the owner about that.
             equipments = [
-                value.get('equipment') for value in snapshots
+                value for value in snapshots
                 if isinstance(value, dict) and
                 isinstance(value.get('equipment'), dict)]
         passives = equipment_mechanics.passive_effects(equipments)
@@ -9949,6 +9952,42 @@ class BattleRuntime(object):
             return False
         return True
 
+    @staticmethod
+    def _hit_indicator_marker(event, shot, damage):
+        """Return the (damage, isBlocked) pair #1513 can actually draw.
+
+        The exact client has no marker for zero blocked damage.
+        ``_MarkerData.__getMarkerType`` routes on ``HitData.isBlocked()``
+        first, and the blocked branch is numeric:
+        ``_ExtendedMarkerVOBuilder`` prints ``str(HitData.getDamage())`` as
+        the label and selects ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG``
+        from ``damage / playerVehMaxHP``.  Every other zero-damage hit falls
+        to ``CRITICAL_DAMAGE``, whose three sizes all map to the single
+        ``CRIT`` frame and whose label is the empty string below two
+        criticals.  So retail draws either a blocked marker carrying a real
+        value or an unlabelled critical marker -- never the ``0`` this port
+        published for every hit that removed no hit points.
+
+        A direct shell stopped by armour is the blocked case, and it never
+        drew a damage roll, so it carries the shell's published damage.
+        Three hits are not that case and keep retail's unlabelled critical
+        marker.  A splash is not a stopped shell: its damage falls off with
+        distance before armour absorbs the rest.  An ``HIGH_EXPLOSIVE``
+        shell is excluded by the client's own armour-ledger rule in
+        ``#battle_results:common/tooltip/armor/description`` -- "HE and HESH
+        shells are not included" -- and ``IS_HIGH_EXPLOSIVE`` reaches
+        ``HitData`` but no #1513 view reads it, so ``isBlocked`` is the only
+        place that rule can be expressed.  A penetration that removed no hit
+        points broke modules; armour stopped nothing.
+        """
+        blocked = bool(
+            damage <= 0 and not bool(event.get('splash', False)) and
+            max(0, min(int(event.get('shot_result', 2)), 2)) != 2 and
+            not combat_rules.is_he(shot))
+        if not blocked:
+            return damage, False
+        return max(0, int(combat_rules.shell_nominal_damage(shot))), True
+
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
         """Port the mature 0.8.2 hit feedback through exact #1513 APIs."""
@@ -9993,10 +10032,12 @@ class BattleRuntime(object):
             hit_yaw = math.atan2(
                 -(attacker_position[0] - target_position[0]),
                 -(attacker_position[2] - target_position[2]))
+            indicator_damage, indicator_blocked = (
+                self._hit_indicator_marker(event, shot, damage))
             self._avatar.showOwnVehicleHitDirection(
-                hit_yaw, int(attacker_id or 0), damage,
+                hit_yaw, int(attacker_id or 0), indicator_damage,
                 self._critical_hit_mask(event.get('critical')),
-                damage <= 0, combat_rules.is_he(shot),
+                indicator_blocked, combat_rules.is_he(shot),
                 int(target_record['engine_id']))
 
         # An armour effect belongs to the visible world model.  Team/radio
@@ -10888,8 +10929,22 @@ class BattleRuntime(object):
             return False
         return True
 
+    def _local_repair_factor(self, descriptor):
+        """This vehicle's live repair factor, unused large kit included.
+
+        #1513 gives Repairkit no updateVehicleAttrFactors hook, so its
+        bonusValue never reaches a mounted factor: the passive comes from the
+        live consumable ledger and ends when the kit is spent.
+        """
+        loadout = self._local_loadout(descriptor)
+        passives = equipment_mechanics.passive_effects(
+            self._equipment_state or ())
+        return max(0.0, _number(loadout['repair_factor'], 1.0)) * (
+            1.0 + max(0.0, _number(
+                passives.get('repairkitBonusValue'), 0.0)))
+
     @staticmethod
-    def _tick_local_track_repair(entity, dt, loadout):
+    def _tick_local_track_repair(entity, dt, repair_factor):
         """Advance only the existing owner-CAS track repair checkpoint."""
         before = critical_damage._state(entity)
         devices = getattr(entity, 'devices_hp', None) or {}
@@ -10905,8 +10960,7 @@ class BattleRuntime(object):
                 continue
             repaired = critical_damage._device_damage.repair_step_hp(
                 devices[name], name, entity.typeDescriptor, dt,
-                has_big_repairkit=bool(loadout['has_big_kit']),
-                repair_factor=loadout['repair_factor'])
+                repair_factor=repair_factor)
             if repaired <= devices[name]:
                 continue
             devices[name] = repaired
@@ -10943,9 +10997,8 @@ class BattleRuntime(object):
         if not hasattr(entity, 'maxHealth'):
             entity.maxHealth = int(entity.typeDescriptor.maxHealth)
         now = self._clock()
-        loadout = self._local_loadout(entity.typeDescriptor)
         payload = self._tick_local_track_repair(
-            entity, dt, loadout)
+            entity, dt, self._local_repair_factor(entity.typeDescriptor))
         if payload is not None:
             record['critical_state'] = self._critical_state(payload)
             state = dict(record.get('state') or {})
@@ -10977,7 +11030,7 @@ class BattleRuntime(object):
         if cache is None:
             cache = {}
             entity._offline_lan_repair_progress = cache
-        loadout = self._local_loadout(entity.typeDescriptor)
+        repair_factor = self._local_repair_factor(entity.typeDescriptor)
         for name in tuple(destroyed):
             if name in critical_damage._device_damage.NO_REPAIR_PROGRESS_DEVICES:
                 continue
@@ -10995,9 +11048,7 @@ class BattleRuntime(object):
             if extra_index <= 0:
                 continue
             seconds = critical_damage._device_damage.repair_seconds(
-                name, entity.typeDescriptor,
-                has_big_repairkit=bool(loadout['has_big_kit']),
-                repair_factor=loadout['repair_factor'])
+                name, entity.typeDescriptor, repair_factor=repair_factor)
             seconds_left = max(0.0, seconds * (1.0 - hp / cap))
             callback(entity.id, int(status),
                      int(extra_index) | (progress << 8),
@@ -13990,7 +14041,8 @@ class BattleRuntime(object):
                            critical, hull_damage, critical_delta,
                            target_position=None, damage_sticker=None,
                            potential_damage=None,
-                           structural_armor_hit=None):
+                           structural_armor_hit=None,
+                           high_explosive=None):
         target_kind = record.get('kind')
         if target_kind == 'human':
             target_kind = 'player'
@@ -14005,12 +14057,14 @@ class BattleRuntime(object):
             'z': float(impact[2]),
         }
         if potential_damage is not None:
-            # The armour ledger needs the roll the damage law already made,
-            # before armour and modules reduced it.  Splash carries no roll:
-            # the server excludes splash from blocked damage. An overlay-edited
-            # shell can roll past 5000, the ceiling the wire validator and battle
-            # server enforce, so saturate the statistic instead of letting
-            # the validator drop the whole terminal.
+            # The armour ledger needs the damage this shell could have
+            # delivered before armour and modules reduced it: the roll a
+            # penetration spent, and the shell's published damage when
+            # armour stopped it before any roll could apply.  Splash never
+            # carries one: the server excludes splash from blocked damage.
+            # An overlay-edited shell can exceed 5000, the ceiling the wire
+            # validator and battle server enforce, so saturate the statistic
+            # instead of letting the validator drop the whole terminal.
             effect['potential_damage'] = max(
                 0, min(5000, int(potential_damage)))
         if structural_armor_hit is not None:
@@ -14018,6 +14072,15 @@ class BattleRuntime(object):
             # Preserve the exact armour contact layer already chosen by the
             # worker instead of trying to reconstruct it on the server.
             effect['structural_armor_hit'] = bool(structural_armor_hit)
+        if high_explosive is not None:
+            # The exact client states its own armour-ledger rule in
+            # ``#battle_results:common/tooltip/armor/description``: the
+            # counter takes ricochets and non-penetrations, and "HE and
+            # HESH shells are not included".  #1513 has one shell kind for
+            # both, ``HIGH_EXPLOSIVE``, and the server owns the ledger but
+            # holds no descriptors, so the worker publishes the shell fact
+            # and the server applies the rule.
+            effect['high_explosive'] = bool(high_explosive)
         if target_position is not None:
             effect.update({
                 'target_x': float(target_position[0]),
@@ -14308,9 +14371,16 @@ class BattleRuntime(object):
                     collision_evidence))
         critical = self._critical_with_crew_roster(
             critical_target, critical)
-        potential_damage = None
-        if contact is not None:
-            potential_damage = int(damage_roll)
+        # A penetration spent the roll it drew, so that roll is the damage
+        # the target could have taken.  Every other verdict -- a ricochet, a
+        # non-penetration, and a traversal that only ever found external
+        # plates -- stopped the shell before any roll could apply, so the
+        # armour ledger owes the shell's published damage instead of a
+        # sample nobody took.  This is the value the damage log's blocked
+        # rows and the #1513 damage indicator both report.
+        potential_damage = int(
+            damage_roll if int(result) == 2
+            else combat_rules.shell_nominal_damage(shot))
         return self._projectile_effect(
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,
@@ -14318,7 +14388,8 @@ class BattleRuntime(object):
             potential_damage=potential_damage,
             structural_armor_hit=(
                 contact is not None and
-                contact.get('layer') == 'structural'))
+                contact.get('layer') == 'structural'),
+            high_explosive=is_he)
 
     def _projectile_ricochet_contact(
             self, meta, state, terminal_data, collisions, contact):
@@ -23413,6 +23484,16 @@ class BattleRuntime(object):
         crew_active = bool(state.get('alive', health > 0)) and health > 0
         dead = health <= 0 or not crew_active
         crew_knockout = health > 0 and not crew_active
+        critical = state.get('critical') or {}
+        ammo_rack_death = bool(
+            health <= 0 and critical.get('ammo_rack_death', False))
+        native_health = display_health if dead and display_health > 0 else health
+        if ammo_rack_death and not self._worker_mode:
+            # #1513's marker and damage-state consumers require raw special
+            # health. LAN HP stays nonnegative. Do not mark TURRET_DETACHED:
+            # that requires a real DetachedTurret entity and its handshake.
+            native_health = int(
+                self._runtime.constants.SPECIAL_VEHICLE_HEALTH.AMMO_BAY_DESTROYED)
         # Blind non-lethal hits stay private, but death is public authority:
         # native shutdown, the wreck, the kill and statistics form one edge.
         suppress_combat_presentation = bool(
@@ -23432,6 +23513,18 @@ class BattleRuntime(object):
             # Replayed combat events and late snapshots may repeat a terminal
             # state. Keep the durable signature current without replaying
             # native death callbacks, effects, markers or kill notifications.
+            if ammo_rack_death and not self._worker_mode:
+                entity = self._server_entity(engine_id)
+                if entity is None:
+                    return
+                if entity.health != native_health:
+                    entity.health = native_health
+                    # A terminal snapshot may arrive before the critical
+                    # cause. Correct the bar without replaying native death,
+                    # kill credit, postmortem activation or the explosion.
+                    self._avatar.guiSessionProvider.setVehicleHealth(
+                        bool(record.get('local')), engine_id, native_health,
+                        int(attacker_id), int(attack_reason_id))
             self._last_health[engine_id] = signature
             return
         if not durable_changed and not force_cause:
@@ -23492,8 +23585,6 @@ class BattleRuntime(object):
                         critical=death_payload,
                         attribute_attacker=death_cause not in (
                             'drowning', 'world_collision', 'overturn'))
-        preserve_inactive_hull = dead and display_health > 0
-        native_health = display_health if preserve_inactive_hull else health
         if self._worker_mode:
             entity.health = native_health
             notifier = getattr(entity, 'set_health', None)
@@ -23576,7 +23667,8 @@ class BattleRuntime(object):
                     self._sender.forward = 0.0
                     self._sender.turn = 0.0
             self._avatar.updateVehicleHealth(
-                engine_id, display_health, int(reason_id),
+                engine_id, native_health if ammo_rack_death else display_health,
+                int(reason_id),
                 crew_active, False)
         if not previous_dead and dead:
             if not suppress_combat_presentation:

@@ -245,3 +245,179 @@ class SaveSlotsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SaveBackupTests(unittest.TestCase):
+    """A player-owned copy of one save, and a restore that keeps evidence."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = directory.name
+        self.root = os.path.join(directory.name, "saves")
+
+    def _slot_with_state(self, name="Career", **files):
+        record = save_slots.create_slot(
+            name, save_slots.MODE_NEW_ACCOUNT, root=self.root)
+        payload = {
+            "garage_state.json": {"schema": 7, "vehicles": {"50001": {}}},
+            "postbattle_state.json": {"schema": 1, "progress": {"battles": 9}},
+        }
+        payload.update(files)
+        for file_name, value in payload.items():
+            with open(os.path.join(record["path"], file_name), "w",
+                      encoding="utf-8") as stream:
+                json.dump(value, stream)
+        return record
+
+    def _archive(self, name="backup.zip"):
+        return os.path.join(self.base, name)
+
+    def test_a_backup_holds_the_saves_own_files_and_names_its_origin(self):
+        record = self._slot_with_state()
+
+        result = save_slots.backup_slot(
+            record["id"], self._archive(), root=self.root)
+
+        self.assertEqual(
+            ["garage_state.json", "postbattle_state.json", "save.json"],
+            sorted(result["files"]))
+        described = save_slots.read_backup(result["path"])
+        self.assertEqual(record["id"], described["id"])
+        self.assertEqual("Career", described["name"])
+
+    def test_a_backup_keeps_the_copies_the_client_left_behind(self):
+        """The evidence is part of the save a player wants back.
+
+        The client keeps ``.backup1`` and ``.rejected-`` copies of a state
+        file beside the live one, and those are exactly what a player
+        recovering a broken career needs.
+        """
+        record = self._slot_with_state(**{
+            "garage_state.backup1.json": {"schema": 7, "vehicles": {}},
+            "garage_state.rejected-20260908-000000-000.json": {"schema": 7},
+        })
+
+        result = save_slots.backup_slot(
+            record["id"], self._archive(), root=self.root)
+
+        self.assertIn("garage_state.backup1.json", result["files"])
+        self.assertIn(
+            "garage_state.rejected-20260908-000000-000.json",
+            result["files"])
+
+    def test_an_empty_save_has_nothing_to_back_up(self):
+        record = save_slots.create_slot(
+            "Fresh", save_slots.MODE_NEW_ACCOUNT, root=self.root)
+        os.unlink(os.path.join(record["path"], save_slots.METADATA_NAME))
+
+        with self.assertRaises(save_slots.SaveSlotError):
+            save_slots.backup_slot(
+                record["id"], self._archive(), root=self.root)
+
+    def test_a_restore_replaces_the_state_and_keeps_what_it_replaced(self):
+        source = self._slot_with_state("Career")
+        save_slots.backup_slot(
+            source["id"], self._archive(), root=self.root)
+        target = self._slot_with_state("Renamed career", **{
+            "garage_state.json": {"schema": 7, "vehicles": {"50009": {}}},
+        })
+
+        result = save_slots.restore_slot(
+            target["id"], self._archive(), root=self.root,
+            is_running=lambda: False)
+
+        with open(os.path.join(target["path"], "garage_state.json"),
+                  encoding="utf-8") as stream:
+            self.assertEqual(["50001"], list(json.load(stream)["vehicles"]))
+        # The save keeps its own name and the replaced files stay recoverable.
+        self.assertEqual(
+            "Renamed career",
+            save_slots.read_slot(target["id"], root=self.root)["name"])
+        self.assertEqual("Career", result["from_name"])
+        with open(os.path.join(result["replaced"], "garage_state.json"),
+                  encoding="utf-8") as stream:
+            self.assertEqual(["50009"], list(json.load(stream)["vehicles"]))
+
+    def test_failed_rollback_keeps_the_original_files_for_recovery(self):
+        from unittest import mock
+        record = self._slot_with_state()
+        save_slots.backup_slot(record["id"], self._archive(), root=self.root)
+        real_replace = os.replace
+
+        def replace(source, destination):
+            if "pre-restore-" in source:
+                raise OSError("restore target is locked")
+            return real_replace(source, destination)
+
+        backup = save_slots.read_backup(self._archive())
+        with mock.patch.object(save_slots, "read_backup", return_value=backup), \
+                mock.patch.object(save_slots.os, "replace", side_effect=replace), \
+                mock.patch("zipfile.ZipFile.open", side_effect=OSError("read failed")):
+            with self.assertRaises(save_slots.SaveSlotError):
+                save_slots.restore_slot(
+                    record["id"], self._archive(), root=self.root,
+                    is_running=lambda: False)
+        kept = [name for name in os.listdir(record["path"])
+                if name.startswith("pre-restore-")]
+        self.assertEqual(1, len(kept))
+        with open(os.path.join(record["path"], kept[0], "garage_state.json")) as stream:
+            self.assertIn("50001", json.load(stream)["vehicles"])
+
+    def test_a_restore_refuses_while_the_game_may_be_writing_the_save(self):
+        record = self._slot_with_state()
+        save_slots.backup_slot(
+            record["id"], self._archive(), root=self.root)
+
+        with self.assertRaises(save_slots.SaveSlotError):
+            save_slots.restore_slot(
+                record["id"], self._archive(), root=self.root,
+                is_running=lambda: True)
+
+    def test_a_file_that_is_not_a_save_backup_is_refused_unchanged(self):
+        record = self._slot_with_state()
+        stranger = self._archive("stranger.zip")
+        import zipfile
+
+        with zipfile.ZipFile(stranger, "w") as archive:
+            archive.writestr("notes.txt", "hello")
+
+        with self.assertRaises(save_slots.SaveSlotError):
+            save_slots.restore_slot(
+                record["id"], stranger, root=self.root,
+                is_running=lambda: False)
+        with open(os.path.join(record["path"], "garage_state.json"),
+                  encoding="utf-8") as stream:
+            self.assertEqual(["50001"], list(json.load(stream)["vehicles"]))
+
+    def test_a_member_with_a_path_never_leaves_the_save_folder(self):
+        record = self._slot_with_state()
+        hostile = self._archive("hostile.zip")
+        import zipfile
+
+        with zipfile.ZipFile(hostile, "w") as archive:
+            archive.writestr(
+                "../garage_state.json", '{"schema": 7, "vehicles": {}}')
+            archive.writestr("garage_state.json", '{"schema": 7}')
+
+        result = save_slots.restore_slot(
+            record["id"], hostile, root=self.root, is_running=lambda: False)
+
+        self.assertEqual(["garage_state.json"], result["files"])
+        self.assertFalse(os.path.isfile(
+            os.path.join(os.path.dirname(record["path"]),
+                         "garage_state.json")))
+
+    def test_opening_a_save_folder_creates_it_and_asks_explorer_for_it(self):
+        record = save_slots.create_slot(
+            "Career", save_slots.MODE_NEW_ACCOUNT, root=self.root)
+        asked = []
+
+        directory = save_slots.open_slot_folder(
+            record["id"], root=self.root,
+            runner=lambda command, **unused: asked.append(command))
+
+        self.assertEqual(record["path"], directory)
+        self.assertEqual(1, len(asked))
+        self.assertEqual("explorer.exe", asked[0][0])
+        self.assertTrue(os.path.isdir(directory))

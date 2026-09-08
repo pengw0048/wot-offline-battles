@@ -220,9 +220,13 @@ def advance_critical(player, dt, now):
     params = getattr(player, 'effective_params', None) or {}
     loadout = params.get('loadout') or {}
     repair_factor = max(0.0, float(loadout.get('repair_factor', 1.0)))
-    has_big_kit = bool(loadout.get('has_big_kit', False))
     passives = equipment_mechanics.passive_effects(
         getattr(player, 'equipment_states', ()) or ())
+    # #1513 keeps Repairkit.bonusValue out of every mounted factor, so the
+    # live ledger is the only place the passive can come from, and it stops
+    # the moment the kit is spent.
+    repair_factor *= 1.0 + max(
+        0.0, float(passives.get('repairkitBonusValue', 0.0)))
     rpm_loss = max(
         0.0, float(passives.get('engineHpLossPerSecond', 0.0))) * float(dt)
     rpm_payload = (critical_damage.damage_device_over_time(
@@ -235,6 +239,13 @@ def advance_critical(player, dt, now):
     for name in list(devices):
         if name in TRACK_DEVICE_NAMES:
             continue
+        # Same law as critical_damage.tick_repair and the local track
+        # checkpoint: automatic repair starts only once a module is destroyed.
+        # A functional yellow module keeps its hidden HP loss until a repair
+        # kit clears it, and only a destroyed device is published to the stock
+        # DESTROYED_DEVICE_IS_REPAIRING panel.
+        if name not in destroyed:
+            continue
         cap = device_damage.device_regen_hp(descriptor, name)
         if cap is None or devices[name] >= cap:
             continue
@@ -243,7 +254,6 @@ def advance_critical(player, dt, now):
             continue
         devices[name] = device_damage.repair_step_hp(
             devices[name], name, descriptor, float(dt),
-            has_big_repairkit=has_big_kit,
             repair_factor=repair_factor)
         if name in destroyed and devices[name] >= cap:
             destroyed.discard(name)

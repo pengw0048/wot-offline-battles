@@ -20,6 +20,7 @@ from __future__ import print_function
 import copy
 import json
 import os
+import sys
 import time
 import uuid
 import zlib
@@ -436,50 +437,101 @@ def _arena_type_id(geometry_name):
     return 0
 
 
+def _multiplied(amount, factor_100):
+    """Return what ``ValueReplay.__mul__`` makes of one amount.
+
+    ``__opMul`` is ``int(round(value * factor / 100.0))`` under the embedded
+    CPython 2.7, which rounds a half away from zero.  Python 3 rounds it to
+    even, so the arithmetic is written out rather than delegated to ``round``.
+    """
+    amount = max(0, _int(amount))
+    factor_100 = max(0, _int(factor_100))
+    if factor_100 <= 100:
+        return amount
+    return int(amount * factor_100 / 100.0 + 0.5)
+
+
+def _premium_vehicle_credits(type_name, battle_credits):
+    """Return the battle's credit income on this vehicle.
+
+    Retail has no results row for a premium vehicle's higher credit income:
+    the vehicle's own profitability is inside the base credits the server
+    pays, which is where ``MoneyDetailsBlock`` draws it.  This port applies
+    that coefficient in the garage settlement instead, so the results screen
+    puts it back where retail keeps it.  A vehicle this client cannot resolve
+    earns the plain battle amount rather than a guess.
+    """
+    battle_credits = max(0, _int(battle_credits))
+    try:
+        from items import vehicles
+        premium = economy.is_premium_vehicle(
+            vehicles, _vehicle_type_compact_descr(type_name))
+    except Exception:
+        return battle_credits
+    if not premium:
+        return battle_credits
+    return (battle_credits *
+            max(0, _int(economy.PREMIUM_VEHICLE_CREDITS_PERCENT)) // 100)
+
+
+def _account_award_split(battle_amount, awarded_amount, factor_100=0):
+    """Split what the account banked across the rows #1513 can draw.
+
+    The first row of both detail tables is the record named
+    ``originalCredits``/``originalXP``/``originalFreeXP``, and every later row
+    is a record named by the value its step applied, so a difference between
+    what the battle produced and what the account banked has to be a real step
+    of the chain.  ``factor_100`` is the premium-vehicle experience step, which
+    #1513 draws as its own row; whatever the account's save multiplier adds on
+    top of it is the boosters row.  A save that multiplies earnings *down* has
+    no #1513 row that honestly names the reduction, so the reduced amount
+    becomes the battle's own income rather than an invented penalty row.
+    """
+    battle_amount = max(0, _int(battle_amount))
+    awarded_amount = max(0, _int(awarded_amount))
+    multiplied = _multiplied(battle_amount, factor_100)
+    if awarded_amount < multiplied:
+        return awarded_amount, 0
+    return battle_amount, awarded_amount - multiplied
+
+
 def _add_value_replays(packers, vehicle, replay_types=None):
     """Populate the non-empty replay chains consumed by the #1513 UI.
 
-    The premium-vehicle bonus is one step in the XP and Free XP chains rather
-    than a bare difference between the original and the total:
-    ``ValueReplay.addMultipliedValue`` records
-    ``record += round(original * premiumVehicleXPFactor100 / 100)``, and
-    ``gui.battle_results.components.details`` renders its own
-    ``premiumVehicleXP`` row from exactly that step.  The chain also writes the
-    total back through the connector, so the packed ``xp`` stays consistent
-    with the breakdown the player sees.
+    ``ValueReplay.__iter__`` yields the *first* parameter of each step, and
+    ``gui.battle_results.reusable.records.ReplayRecords`` stores that step
+    under exactly that name.  ``MoneyDetailsBlock``/``XPDetailsBlock``
+    therefore read their first row from ``originalCredits``/``originalXP``/
+    ``originalFreeXP``, the premium-vehicle row from
+    ``premiumVehicleXPFactor100`` -- a factor name, so only a factor step
+    writes it -- and the boosters row from ``boosterCredits``/``boosterXP``/
+    ``boosterFreeXP``.  Starting a chain anywhere else, or applying the factor
+    with ``addMultipliedValue``, leaves a row reading a record that does not
+    exist, which #1513 draws as zero.  ``ValueReplay.__mul__`` and
+    ``__add__`` write the running total back through the connector, so the
+    packed total stays consistent with the breakdown.
     """
     if replay_types is None:
         from ValueReplay import ValueReplay, ValueReplayConnector
     else:
         ValueReplay, ValueReplayConnector = replay_types
     connector = ValueReplayConnector(packers.VEH_FULL_RESULTS, vehicle)
-    premium_factor_100 = max(0, _int(vehicle.get(
-        'premiumVehicleXPFactor100')))
-    for record_name, start_name, result_name in (
-            ('credits', 'originalCredits', 'creditsReplay'),
-            ('xp', 'originalXP', 'xpReplay'),
-            ('freeXP', 'originalFreeXP', 'freeXPReplay'),
-            ('gold', 'originalGold', 'goldReplay'),
-            ('crystal', 'originalCrystal', 'crystalReplay')):
-        with_premium = (premium_factor_100 and
-                        record_name in ('xp', 'freeXP'))
-        expected = vehicle[start_name]
-        if with_premium:
-            expected += _premium_bonus(expected, premium_factor_100)
-        if vehicle[record_name] != expected:
-            # A save multiplier is not a retail premium-account bonus.
-            # Replay its durable total without relabelling it as one or
-            # letting the constructor reset it to the base battle amount.
-            start_name = {'credits': 'factualCredits', 'xp': 'factualXP',
-                          'freeXP': 'factualFreeXP'}[record_name]
-            with_premium = False
+    for record_name, start_name, factor_name, bonus_name, result_name in (
+            ('credits', 'originalCredits', None, 'boosterCredits',
+             'creditsReplay'),
+            ('xp', 'originalXP', 'premiumVehicleXPFactor100', 'boosterXP',
+             'xpReplay'),
+            ('freeXP', 'originalFreeXP', 'premiumVehicleXPFactor100',
+             'boosterFreeXP', 'freeXPReplay'),
+            ('gold', 'originalGold', None, None, 'goldReplay'),
+            ('crystal', 'originalCrystal', None, None, 'crystalReplay')):
         replay = ValueReplay(
             connector, recordName=record_name, startRecordName=start_name)
-        if with_premium:
-            replay.addMultipliedValue(
-                start_name, 'premiumVehicleXPFactor100')
+        if factor_name is not None and _int(vehicle.get(factor_name)) > 100:
+            replay = replay * factor_name
+        if bonus_name is not None and vehicle[bonus_name]:
+            replay = replay + bonus_name
         vehicle[result_name] = replay.pack()
-
 
 def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
                               interaction_details_type=None):
@@ -616,8 +668,29 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
+    # A premium vehicle earns more of both, and #1513 presents the two the
+    # way retail does: its credit profitability is inside the battle's own
+    # income, and its experience bonus is a factor step the results screen
+    # draws as the 'premium vehicle' row.  The packed factor is therefore the
+    # total multiplier the chain applies, not the descriptor's bare bonus.
     premium_factor_100 = _premium_vehicle_xp_factor_100(receipt['vehicle'])
-    premium_xp = _premium_bonus(original['xp'], premium_factor_100)
+    xp_factor_100 = 100 + premium_factor_100 if premium_factor_100 else 0
+    if (rewards['xp'] < _multiplied(original['xp'], xp_factor_100) or
+            rewards['free_xp'] < _multiplied(
+                original['free_xp'], xp_factor_100)):
+        # One packed factor drives both chains, so a save that banked less
+        # than the factor alone would produce drops it from both.
+        xp_factor_100 = 0
+    premium_xp = _multiplied(original['xp'], xp_factor_100) - original['xp']
+    # Whatever the account banked above that is its save multiplier, which is
+    # #1513's one row for an account-owned multiplier on a finished battle.
+    base_credits, booster_credits = _account_award_split(
+        _premium_vehicle_credits(receipt['vehicle'], original['credits']),
+        rewards['credits'])
+    base_xp, booster_xp = _account_award_split(
+        original['xp'], rewards['xp'], xp_factor_100)
+    base_free_xp, booster_free_xp = _account_award_split(
+        original['free_xp'], rewards['free_xp'], xp_factor_100)
     vehicle = {
         'accountDBID': account_dbid,
         'typeCompDescr': vehicle_type_cd,
@@ -640,20 +713,23 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'deathReason': receipt['death_reason'],
         'killerID': 0,
         'credits': rewards['credits'],
-        'originalCredits': original['credits'],
+        'originalCredits': base_credits,
+        'boosterCredits': booster_credits,
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
-        # ``originalXP`` is the bare battle XP the mastery badge ranks; the
-        # premium-vehicle bonus is added on top of the totals below and by the
-        # replay chain, never inside the number the badge reads.
+        # ``originalXP`` is the bare battle XP the mastery badge ranks; every
+        # account-side bonus rides in the totals below and in the chain's
+        # boosters step, never inside the number the badge reads.
         'xp': rewards['xp'],
-        'originalXP': original['xp'],
+        'originalXP': base_xp,
+        'boosterXP': booster_xp,
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
         'premiumVehicleXP': premium_xp,
-        'premiumVehicleXPFactor100': premium_factor_100,
+        'premiumVehicleXPFactor100': xp_factor_100,
         'freeXP': rewards['free_xp'],
-        'originalFreeXP': original['free_xp'],
+        'originalFreeXP': base_free_xp,
+        'boosterFreeXP': booster_free_xp,
         'factualFreeXP': rewards['free_xp'],
         'subtotalFreeXP': rewards['free_xp'],
         'xpByTmen': sorted((xp_by_tankman or {}).items()),
@@ -817,6 +893,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     )
 
 
+def _log(message):
+    sys.stdout.write('[Offline LAN 0.9.22] %s\n' % message)
+
+
 class PostBattleStore(object):
     """Apply each LAN receipt once and retain it until the native 1501 ack."""
 
@@ -835,6 +915,7 @@ class PostBattleStore(object):
         # Native progress cards use current tankman inventory ids. Old results
         # remain readable after restart without pointing at a different crew.
         self._session_crew_xp = {}
+        self._rotated = False
         self._load()
 
     def set_progress_applier(self, callback):
@@ -1203,21 +1284,55 @@ class PostBattleStore(object):
         self._session_crew_xp = value['session_crew_xp']
 
     def _load(self):
-        if self._path is None or not os.path.isfile(self._path):
+        """Read the saved results, or say why the totals start from zero.
+
+        This file carries the account's lifetime record: battles, wins,
+        damage, medals and every per-vehicle mastery mark.  Discarding it used
+        to be silent and total, and the next terminal barrier then wrote the
+        empty totals back over it, so a file this build could not read cost
+        the player their record with nothing in the log to say so.
+        """
+        if self._path is None:
             return
-        try:
-            with open(self._path, 'rb') as stream:
-                value = json.load(stream)
-            if not isinstance(value, dict) or value.get('schema') != SCHEMA:
+        for path in (self._path, self._path + '.bak'):
+            if not os.path.isfile(path):
+                continue
+            reason = self._load_from(path)
+            if reason is None:
                 return
+            _log('the saved battle results in %s were not read (%s)'
+                 % (path, reason))
+            self._reset_saved()
+            if path == self._path:
+                kept = port_config.quarantine_state_file(
+                    path, port_config.QUARANTINE_REJECTED)
+                _log('the account record starts from empty totals; the '
+                     'refused file was kept as %s'
+                     % (kept if kept is not None else '(no copy)'))
+
+    def _reset_saved(self):
+        self._pending = {}
+        self._history = []
+        self._awards = {}
+        self._progress = self._empty_progress()
+
+    def _load_from(self, path):
+        """Adopt one saved file, or return why it was refused."""
+        try:
+            with open(path, 'rb') as stream:
+                value = json.load(stream)
+            if not isinstance(value, dict):
+                return 'the file does not hold a JSON object'
+            if value.get('schema') != SCHEMA:
+                return 'schema %r is not %r' % (value.get('schema'), SCHEMA)
             account_key = _bounded_text(value.get('accountKey'), 64)
             if not account_key:
-                return
+                return 'the account key is missing'
             pending = {}
             for raw in value.get('pending', ()):
                 receipt = _receipt(raw)
                 if receipt['account_key'] != account_key:
-                    return
+                    return 'a pending receipt belongs to another account'
                 pending[str(receipt['arena_unique_id'])] = receipt
             history = []
             for raw in value.get('history', ()):
@@ -1232,11 +1347,11 @@ class PostBattleStore(object):
                     if 'account_key' in raw:
                         raw = _receipt(raw)
                         if raw['account_key'] != account_key:
-                            return
+                            return 'an archived receipt belongs to another account'
                     history.append(raw)
             progress = value.get('progress')
             if not isinstance(history, list) or not isinstance(progress, dict):
-                return
+                return 'the stored totals are not in the expected shape'
             self._account_key = account_key
             self._pending = pending
             self._history = history
@@ -1289,12 +1404,10 @@ class PostBattleStore(object):
                     if isinstance(row, dict):
                         self._update_record_extrema(row, receipt)
             self._trim_history_bodies()
-        except (IOError, OSError, TypeError, ValueError):
+        except (IOError, OSError, TypeError, ValueError) as error:
             # Keep a corrupt optional cache from preventing an offline login.
-            self._pending = {}
-            self._history = []
-            self._awards = {}
-            self._progress = self._empty_progress()
+            return 'unreadable: %s' % error
+        return None
 
     def _archived_identities(self):
         """Project the archive down to what a restart actually needs.
@@ -1320,6 +1433,11 @@ class PostBattleStore(object):
             'history': self._archived_identities(),
             'progress': self._progress,
         }
+        if not self._rotated:
+            # The lifetime record is not reconstructible by playing, so keep
+            # the previous file once per session before replacing it.
+            port_config.rotate_state_backup(self._path)
+            self._rotated = True
         # This file is a machine-owned cache rewritten on the terminal round
         # barrier.  Only ``_load`` reads it, so sorted and indented output
         # buys nothing and costs the embedded 2.7 runtime its C JSON encoder.

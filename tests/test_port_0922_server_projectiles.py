@@ -1048,9 +1048,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'target_team': 2, 'target_alive': True,
             'retired_target': False, 'damage': 100,
             'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
+            'structural_armor_hit': True, 'high_explosive': False,
             'stun_end_server_time_ms': 0,
         }
         record = {
@@ -1097,9 +1099,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'target_team': 2, 'target_alive': True,
             'retired_target': False, 'damage': 100,
             'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
             'pose': (10.0, 1.0, 0.0), 'critical': admitted,
             'critical_delta': None, 'critical_accepted': True,
             'hull_damage': 100, 'splash': False,
+            'structural_armor_hit': True, 'high_explosive': False,
             'stun_end_server_time_ms': 0,
         }
         record = {
@@ -1118,6 +1122,48 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(900, hit['damage'])
         self.assertTrue(hit['critical']['ammo_rack_death'])
         self.assertEqual([ammo_rack_event], hit['critical']['events'])
+
+    def test_fatal_player_ammo_rack_delta_drains_hull_and_publishes_cause(self):
+        state = _state()
+        target = state.players[2]
+        target.health = target.display_health = 900
+        target.effective_params['critical']['devices'] = [{
+            'name': 'ammoBayHealth', 'max_hp': 100.0, 'regen_hp': 50.0}]
+        critical = {
+            'devices': [{'name': 'ammoBayHealth', 'hp': 0.0,
+                         'max_hp': 100.0, 'state': 'destroyed'}],
+            'destroyed': ['ammoBayHealth'], 'crew_ko': [],
+            'crew_roster': ['commander'], 'fire': False,
+            'ammo_rack_death': True, 'events': [],
+        }
+        proposal = {
+            'target_kind': 'player', 'target_id': 2, 'target': target,
+            'target_team': 2, 'target_alive': True,
+            'retired_target': False, 'damage': 910,
+            'potential_damage': 100, 'shot_result': 2,
+            'high_explosive': False,
+            'pose': (10.0, 1.0, 0.0), 'critical': critical,
+            # The worker records HP actually lost, capped to the rack pool,
+            # even when the source shell's module damage was 2000.
+            'critical_delta': {'devices': [
+                {'name': 'ammoBayHealth', 'hp_loss': 100.0}],
+                'crew_ko': [], 'ignite': False},
+            'critical_accepted': True, 'hull_damage': 100,
+            'splash': False, 'stun_end_server_time_ms': 0,
+        }
+
+        state._apply_projectile_effect(self._critical_record(), proposal)
+
+        self.assertFalse(target.alive)
+        self.assertEqual(0, target.health)
+        self.assertEqual(0, target.display_health)
+        self.assertTrue(target.critical['ammo_rack_death'])
+        hit = [event for event in state.pending_events
+               if event.get('target') == 2][-1]
+        self.assertEqual(900, hit['damage'])
+        self.assertTrue(hit['critical']['ammo_rack_death'])
+        self.assertIn({'kind': 'ammo_rack', 'state': 'destroyed',
+                       'cause': 'shot'}, hit['critical']['events'])
 
     def test_bot_ram_commits_terminal_critical_for_both_wrecks(self):
         state = _state()
@@ -3040,7 +3086,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             SIMULATION_WORKER_AUTHORITY_ID, second))
         self.assertEqual(1, record['ricochet_count'])
 
-    def test_worker_roll_becomes_the_victim_blocked_damage_ledger(self):
+    def test_worker_potential_becomes_the_victim_blocked_damage_ledger(self):
         for shot_result, damage, blocked in (
                 (1, 0, 390), (1, 200, 190), (2, 300, 0)):
             with self.subTest(shot_result=shot_result, damage=damage):
@@ -3070,6 +3116,38 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     blocked, state.vehicle_interactions[
                         ('player', 2)]['player:1']['damage_blocked'])
 
+    def test_high_explosive_never_credits_blocked_damage(self):
+        """#1513 keeps HE and HESH out of its own armour ledger.
+
+        ``#battle_results:common/tooltip/armor/description`` states the rule
+        the ``ArmorItemPacker`` tooltip shows over the blocked total: the
+        counter takes ricochets and non-penetrations, and "HE and HESH
+        shells are not included".  #1513 has one shell kind for both.  The
+        potential damage the results screen reports is a separate column
+        with no such exclusion, so it still accumulates.
+        """
+        for shot_result, damage in ((0, 0), (1, 0), (1, 200)):
+            with self.subTest(shot_result=shot_result, damage=damage):
+                state = _state()
+                self.assertTrue(_launch_authority(state, _launch()))
+
+                self.assertTrue(state.resolve_projectile(
+                    SIMULATION_WORKER_AUTHORITY_ID,
+                    _resolve('1:p:1:1', direct=_effect(
+                        damage=damage, shot_result=shot_result,
+                        potential_damage=390, high_explosive=True))))
+
+                hit = [event for event in state.pending_events
+                       if event.get('kind') == 'hit'][-1]
+                self.assertEqual(0, hit['blocked_damage'])
+                victim_row = state._statistics_row('player', 2)
+                self.assertEqual(0, victim_row['damage_blocked'])
+                self.assertEqual(0, state.vehicle_interactions[
+                    ('player', 2)]['player:1']['damage_blocked'])
+                # The separate potential-damage column is untouched.
+                self.assertEqual(
+                    390, victim_row['potential_damage_received'])
+
     def test_first_ricochet_credits_one_bounce_and_no_penetration(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
@@ -3080,8 +3158,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             _ricochet('1:p:1:1', direct=_effect(
                 damage=0, shot_result=0, potential_damage=420))))
 
-        # A bounce is the archetypal blocked hit: the whole roll counts for
-        # the vehicle whose armour stopped it, and the shell keeps flying.
+        # A bounce is the archetypal blocked hit: the shell's whole
+        # potential counts for the vehicle whose armour stopped it, and the
+        # shell keeps flying.
         bounce = [event for event in state.pending_events
                   if event.get('kind') == 'hit'][-1]
         self.assertEqual(0, bounce['shot_result'])

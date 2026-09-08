@@ -54,6 +54,19 @@ _VEHICLE_INT_KEYS = (
     'eqs', 'eqsLayout', 'shells', 'shellsLayoutIdx', 'repair')
 _CUSTOMIZATION_SEASONS = (1, 2, 4, 8, 15)
 MAX_BATTLE_RECEIPTS = 512
+# How many individual vehicles a restore may drop before it stops trying.  A
+# handful of refused records is a stale save against a changed catalogue; a
+# long run of them means the file itself is wrong, and the ledger-only restore
+# below is the honest answer.
+MAX_CONTAINED_VEHICLES = 8
+
+
+# The relational validator owns this type. It is raised from both the native
+# descriptor checks in ``bootstrap`` and the snapshot checks in ``data``, and
+# what a restore acts on is the ``vehicle_key`` it carries rather than the
+# class: a validator loaded through a second module instance is a different
+# class object with the same contract.
+VehicleRestoreError = data.VehicleRestoreError
 
 
 def _log(message):
@@ -133,6 +146,26 @@ def _ledger_payload(snapshot):
         'barracks': sorted(barracks),
         'recycleBin': sorted(recycled),
     }
+
+
+def _contained(refused, name, operation, garage_error):
+    """Run one settlement step so a refusal costs that step and nothing else.
+
+    A battle is worth what it is worth.  Every step of the settlement below
+    the award touches one vehicle's own state -- its crew, its repair bill,
+    its rounds, its consumables -- and any of them can refuse for a reason
+    the player cannot see: a fitting this client will not rebuild, a crew
+    descriptor it rejects, a vehicle the garage no longer holds.  None of
+    that may cost the player the credits and experience the battle earned,
+    so each step is attempted on its own and its refusal recorded by name.
+    Every step raises before it mutates the staged snapshot, so a refusal
+    leaves nothing half applied.
+    """
+    try:
+        return operation()
+    except garage_error as error:
+        refused.append('%s (%s)' % (name, error))
+        return None
 
 
 def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
@@ -329,6 +362,21 @@ class GarageStore(object):
         # Inventory ids are rebuilt on startup. Preserve actual crew awards
         # for a same-session results retry, never as durable crew identity.
         self._session_crew_xp = {}
+        # What the file on disk holds, so a write that would destroy far more
+        # than the command behind it can be recognised before it replaces it.
+        self._saved_vehicle_keys = None
+        self._saved_unlock_count = 0
+        self._rotated = False
+        self._shrink_kept = False
+        # Set when a restore could not publish the save whole: this session
+        # plays a garage the file does not describe, so nothing but a real
+        # player change may rewrite it.
+        self._restore_degraded = False
+        # Set when no saved vehicle reached the garage at all.  Then every
+        # fitting and crew member in the file is one this session never had,
+        # so this session may not write the file back at any price.
+        self._vehicles_unrestored = False
+        self._refusals_logged = set()
 
     # ---- writing --------------------------------------------------------
 
@@ -343,14 +391,149 @@ class GarageStore(object):
         """
         if not self._dirty or self._path is None:
             return False
-        payload = self._payload(snapshot)
+        if not self._write_state(self._payload(snapshot), snapshot):
+            return False
+        self._dirty = False
+        return True
+
+    def _write_state(self, payload, snapshot=None):
+        """Replace the saved garage, keeping a copy of what it overwrites.
+
+        Every write here is the whole file, so a payload built from the wrong
+        snapshot replaces a career rather than editing it.  Three things stand
+        between that and a lost career: one rotated copy per session, a
+        quarantined copy the first time a write shrinks the save, and a
+        refusal for the shapes no accepted command can produce.
+        """
+        if self._path is None:
+            return False
+        if self._vehicles_unrestored:
+            # Not a judgement about this payload: no saved vehicle reached
+            # this session at all, so any payload it builds describes a
+            # garage this file never held.  Whether the vehicle count or the
+            # research happens to look smaller is beside the point.
+            self._refuse('no saved vehicle could be published this session, '
+                         'so this garage is not what the save holds')
+            return False
+        removed, lost_unlocks = self._destroyed_by(payload)
+        if removed or lost_unlocks:
+            reason = self._refusal(payload, removed, lost_unlocks, snapshot)
+            if reason is not None:
+                self._refuse(reason)
+                return False
+            if not self._shrink_kept:
+                kept = port_config.quarantine_state_file(
+                    self._path, port_config.QUARANTINE_SHRUNK)
+                self._shrink_kept = True
+                dropped = []
+                if removed:
+                    dropped.append('%d vehicle(s)' % len(removed))
+                if lost_unlocks:
+                    dropped.append(
+                        '%d researched item(s) this client no longer offers'
+                        % lost_unlocks)
+                _log('this save write drops %s; the previous file was kept '
+                     'as %s' % (
+                         ' and '.join(dropped),
+                         kept if kept is not None else '(no copy)'))
+        if not self._rotated:
+            port_config.rotate_state_backup(self._path)
+            self._rotated = True
         try:
             port_config.write_json(self._path, payload)
         except (IOError, OSError) as error:
             _log('the garage state could not be saved: %s' % error)
             return False
-        self._dirty = False
+        self._remember_saved(payload)
         return True
+
+    def _refuse(self, reason):
+        """Report one refused write, once per reason per session.
+
+        Fittings happen at click speed and a refused save stays refused, so
+        repeating the same line for every click would bury it.
+        """
+        if reason in self._refusals_logged:
+            return
+        self._refusals_logged.add(reason)
+        _log('the garage state was NOT saved: %s. The save on disk is kept as '
+             'it is, so nothing earned before this session is lost. Restart '
+             'the client to load it again, or restore a backup from the '
+             'Launcher' % reason)
+
+    def _destroyed_by(self, payload):
+        """Return what one payload would remove from the file on disk.
+
+        Both counts come from what the last read or write left in memory, so
+        an ordinary write costs no file access and no second copy of the
+        unlock set.
+        """
+        if self._saved_vehicle_keys is None:
+            return (frozenset(), 0)
+        removed = frozenset(self._saved_vehicle_keys) - frozenset(
+            payload.get('vehicles') or ())
+        ledger = payload.get('ledger')
+        unlocks = (ledger.get('unlocks') if isinstance(ledger, dict) else ())
+        lost = max(0, self._saved_unlock_count - len(unlocks or ()))
+        return (removed, lost)
+
+    def _refusal(self, payload, removed, lost_unlocks, snapshot):
+        """Return why a write must not happen, or None to let it through.
+
+        Selling a vehicle and spending credits legitimately shrink a save, and
+        so does playing against a vehicle catalogue that no longer offers
+        something the save named, so a shrinking write is kept rather than
+        refused.  Two shapes have no accepted command behind them:
+
+        - a garage that lost every vehicle at once, which is what an empty or
+          not-yet-populated snapshot writes; and
+        - research this client still sells that the payload no longer holds.
+          Nothing in this economy ever revokes research, so a payload missing
+          an item the current catalogue still offers was not built from the
+          saved account at all.  That is the write that turns a career into a
+          new account, and it is the one worth refusing.
+        """
+        if removed and not payload.get('vehicles'):
+            return ('a payload with no vehicles would replace %d saved '
+                    'vehicle(s)' % len(removed))
+        if not lost_unlocks:
+            return None
+        missing = self._missing_unlocks(payload)
+        if not missing:
+            return None
+        offered = set(int(compact_descr)
+                      for compact_descr in ((snapshot or {}).get(
+                          'shopItemPrices') or ()))
+        still_offered = missing & offered if offered else missing
+        if still_offered:
+            return ('%d researched item(s) this client still offers are '
+                    'missing from the payload, including %d' % (
+                        len(still_offered), min(still_offered)))
+        return None
+
+    def _missing_unlocks(self, payload):
+        """Return the saved research a payload does not carry.
+
+        The saved set is re-read here rather than held: it is the whole
+        catalogue in a fully unlocked save, and this only runs on the write
+        that already looks wrong.
+        """
+        stored = self._read_file(self._path)
+        ledger = (stored or {}).get('ledger')
+        saved = (ledger.get('unlocks') if isinstance(ledger, dict) else None)
+        if not isinstance(saved, (list, tuple)):
+            return set()
+        payload_ledger = payload.get('ledger')
+        published = (payload_ledger.get('unlocks')
+                     if isinstance(payload_ledger, dict) else ())
+        return set(_int_value(value) for value in saved) - set(
+            _int_value(value) for value in (published or ()))
+
+    def _remember_saved(self, payload):
+        self._saved_vehicle_keys = frozenset(payload.get('vehicles') or ())
+        ledger = payload.get('ledger')
+        unlocks = (ledger.get('unlocks') if isinstance(ledger, dict) else None)
+        self._saved_unlock_count = len(unlocks or ())
 
     def _payload(self, snapshot, battle_receipts=None):
         vehicles = {}
@@ -504,6 +687,7 @@ class GarageStore(object):
                     _int_value(vehicle_type_compact_descr)), 0)
                 result['xp_by_tankman'] = dict(
                     self._session_crew_xp.get(receipt_id, {}))
+                result.setdefault('refused', [])
                 result['applied'] = False
                 return result
 
@@ -529,8 +713,26 @@ class GarageStore(object):
             experience_percent=experience_percent)
         battle_xp = awarded.get('xp', battle_xp) if rewards else (
             max(0, int(battle_xp or 0)) * experience_percent // 100)
-        result = state.award_battle_crew_xp(
-            vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag)
+        # What the battle earned does not depend on the vehicle it was
+        # fought in beyond the multipliers above, so no per-vehicle step may
+        # take the award away.  Each of them is contained; the award is not.
+        refused = []
+        result = {
+            'accelerated': False,
+            'vehicle_id': next((
+                _int_value(record.get('id')) for record in _records(staged)
+                if _int_value(record.get('vehicleTypeCompactDescr')) ==
+                _int_value(vehicle_type_compact_descr)), 0),
+            'weakest_tankman_id': 0,
+            'xp_by_tankman': {},
+        }
+        crew = _contained(
+            refused, 'crew experience',
+            lambda: state.award_battle_crew_xp(
+                vehicle_type_compact_descr, battle_xp, xp_to_tankman_flag),
+            GarageError)
+        if crew is not None:
+            result.update(crew)
         # Crew training owns crewXpFactor; bank the separate vehicle XP
         # bonus exactly once without multiplying the crew award again.
         premium_factor = economy.premium_vehicle_xp_factor_100(
@@ -539,18 +741,25 @@ class GarageStore(object):
             awarded[name] += economy.premium_xp_bonus(
                 awarded[name], premium_factor)
         if health is not None:
-            result['repair'] = state.settle_battle_damage(
-                vehicle_type_compact_descr, health)
+            result['repair'] = _contained(
+                refused, 'repair bill',
+                lambda: state.settle_battle_damage(
+                    vehicle_type_compact_descr, health), GarageError)
         if shells_fired:
-            result['shells_spent'] = state.settle_battle_ammunition(
-                vehicle_type_compact_descr, shells_fired)
+            result['shells_spent'] = _contained(
+                refused, 'rounds fired',
+                lambda: state.settle_battle_ammunition(
+                    vehicle_type_compact_descr, shells_fired), GarageError)
         if equipment_used:
-            result['consumables_spent'] = state.settle_battle_consumables(
-                vehicle_type_compact_descr, equipment_used)
+            result['consumables_spent'] = _contained(
+                refused, 'consumables used',
+                lambda: state.settle_battle_consumables(
+                    vehicle_type_compact_descr, equipment_used), GarageError)
         if rewards is not None:
-            # The crew award and the credits it was earned beside share one
-            # JSON replacement, so a retried receipt can never bank one
-            # without the other.
+            # The award needs no vehicle record: the wallet and the vehicle's
+            # experience are both keyed by the type this battle was fought
+            # in.  It shares the crew award's one JSON replacement, so a
+            # retried receipt can never bank one without the other.
             result['earnings'] = state.award_battle_earnings(
                 vehicle_type_compact_descr, awarded,
                 accelerated=bool(result['accelerated']))
@@ -559,6 +768,10 @@ class GarageStore(object):
             result['awarded'] = dict(
                 (name, int(awarded.get(name, 0) or 0))
                 for name in ('credits', 'xp', 'free_xp'))
+        if refused:
+            _log('battle settlement refused %s for receipt %s; the award was '
+                 'banked anyway' % (', '.join(refused), receipt_id))
+        result['refused'] = list(refused)
         result['service_costs'] = _settle_automatically(
             state, int(result['vehicle_id']), auto_settings, GarageError)
         # Every other field of this result is plain JSON, and the store hands
@@ -578,9 +791,15 @@ class GarageStore(object):
         marker['service_costs'] = dict(result['service_costs'])
         next_receipts = (list(self._battle_receipts) + [marker])[
             -MAX_BATTLE_RECEIPTS:]
-        if self._path is not None:
-            port_config.write_json(
-                self._path, self._payload(staged, next_receipts))
+        if self._path is not None and not self._write_state(
+                self._payload(staged, next_receipts), staged):
+            # The award is not banked unless its marker reaches disk with it,
+            # or a retried receipt would award it twice.  The server keeps an
+            # unacknowledged receipt, so leaving it pending is recoverable and
+            # claiming it silently is not.
+            raise RuntimeError(
+                'the garage state could not be saved, so this battle receipt '
+                'is left pending')
         snapshot.clear()
         snapshot.update(staged)
         self._battle_receipts = next_receipts
@@ -605,22 +824,127 @@ class GarageStore(object):
         happen on a detached copy; any problem leaves the bootstrap snapshot
         byte-for-byte untouched.  ``validator`` may additionally exercise the
         exact client's native compact-descriptor parsers before commit.
+
+        A refusal is contained as narrowly as the validator can attribute it.
+        One vehicle this client cannot publish costs that vehicle's fittings
+        and crew, not the account's research, balances and every other tank:
+        the whole save used to be discarded over any single bad field, and the
+        first accepted change afterwards overwrote it with the stock garage.
         """
         stored = self._read()
         self._session_crew_xp = {}
         if stored is None:
+            if self._path is not None and any(os.path.isfile(path) for path in
+                    (self._path, self._path + '.bak')):
+                self._restore_degraded = True
+                self._vehicles_unrestored = True
+                for path in (self._path, self._path + '.bak'):
+                    port_config.quarantine_state_file(
+                        path, port_config.QUARANTINE_REJECTED)
             self._receipts_loaded = True
             return False
+        skipped = set()
+        while True:
+            staged, applied = self._staged(snapshot, stored, skipped)
+            try:
+                self._validate_staged(staged, validator)
+            except Exception as error:
+                key = getattr(error, 'vehicle_key', None)
+                if (key is None or key in skipped or
+                        len(skipped) >= MAX_CONTAINED_VEHICLES):
+                    _log('the saved garage state is inconsistent (%s)'
+                         % error)
+                    break
+                skipped.add(key)
+                _log('the saved garage for vehicle %s is inconsistent; that '
+                     'one vehicle is restored as stock (%s)' % (key, error))
+                continue
+            return self._commit(snapshot, stored, staged, applied, skipped)
+
+        # Nothing about the vehicles could be published.  The ledger is plain
+        # integers and crew the barracks owns, so it is restored on its own
+        # rather than lost with them: research and balances are what a career
+        # cannot rebuild by playing.
+        staged, applied = self._staged(
+            snapshot, stored, skipped=None, ledger_only=True)
+        try:
+            self._validate_staged(staged, validator)
+        except Exception as error:
+            kept = port_config.quarantine_state_file(
+                self._path, port_config.QUARANTINE_REJECTED)
+            _log('the saved garage state could not be published at all; using '
+                 'the stock garage (%s). The refused file was kept as %s'
+                 % (error, kept if kept is not None else '(no copy)'))
+            # Do not trust receipt markers whose matching crew descriptors
+            # could not be restored.  A pending server receipt may now safely
+            # rebuild the award on the fresh bootstrap garage.
+            self._battle_receipts = []
+            self._receipts_loaded = True
+            self._restore_degraded = True
+            self._vehicles_unrestored = True
+            return False
+        return self._commit(
+            snapshot, stored, staged, applied, skipped, ledger_only=True)
+
+    def _commit(self, snapshot, stored, staged, applied, skipped,
+                ledger_only=False):
+        """Publish one restored garage and report how complete it is."""
+        snapshot.clear()
+        snapshot.update(staged)
+        self._battle_receipts = self._validated_battle_receipts(
+            stored.get('battleCrewReceipts'))
+        self._receipts_loaded = True
+        if ledger_only or skipped:
+            self._restore_degraded = True
+            self._vehicles_unrestored = bool(ledger_only)
+            kept = port_config.quarantine_state_file(
+                self._path, port_config.QUARANTINE_REJECTED)
+            _log('the saved garage was restored without %s; the file as it '
+                 'was saved was kept as %s' % (
+                     'any vehicle fitting or crew' if ledger_only else
+                     '%d vehicle(s)' % len(skipped),
+                     kept if kept is not None else '(no copy)'))
+        if applied:
+            _log('restored the saved garage for %d vehicle(s)' % applied)
+        return True
+
+    def restore_degraded(self):
+        """Report whether this session plays a garage the save does not hold.
+
+        A caller that writes the save for its own convenience rather than for
+        something the player did must not do it while this is true: the file
+        still holds fittings and crew this client could not publish, and a
+        later build may well be able to.
+        """
+        return self._restore_degraded
+
+    def _validate_staged(self, staged, validator):
+        if validator is not None:
+            validator(staged)
+        _floor_account_stock(staged)
+        data._validate_selected_vehicle(staged)
+
+    def _staged(self, snapshot, stored, skipped, ledger_only=False):
+        """Build one candidate restore on a detached copy of the snapshot.
+
+        ``skipped`` names the saved vehicles to leave at their stock build;
+        ``ledger_only`` leaves every vehicle stock and restores just the
+        account.  Each attempt starts from the bootstrap snapshot again so a
+        refused overlay cannot leave half of itself behind.
+        """
         staged = copy.deepcopy(snapshot)
         vehicles = stored.get('vehicles')
-        if not isinstance(vehicles, dict):
+        if not isinstance(vehicles, dict) or ledger_only:
             vehicles = {}
         applied = 0
         for record in _records(staged):
             key = record.get('vehicleTypeCompactDescr')
             if key is None:
                 continue
-            saved = vehicles.get(str(int(key)))
+            key = str(int(key))
+            if skipped and key in skipped:
+                continue
+            saved = vehicles.get(key)
             if isinstance(saved, dict) and self._apply_vehicle(record, saved):
                 applied += 1
 
@@ -649,30 +973,7 @@ class GarageStore(object):
                         target[compact_descr] = int(count)
                 published[item_type] = target
         _apply_ledger(staged, stored)
-
-        try:
-            if validator is not None:
-                validator(staged)
-            _floor_account_stock(staged)
-            data._validate_selected_vehicle(staged)
-        except Exception as error:
-            _log('the saved garage state is inconsistent; using the stock '
-                 'garage (%s)' % error)
-            # Do not trust receipt markers whose matching crew descriptors
-            # could not be restored.  A pending server receipt may now safely
-            # rebuild the award on the fresh bootstrap garage.
-            self._battle_receipts = []
-            self._receipts_loaded = True
-            return False
-
-        snapshot.clear()
-        snapshot.update(staged)
-        self._battle_receipts = self._validated_battle_receipts(
-            stored.get('battleCrewReceipts'))
-        self._receipts_loaded = True
-        if applied:
-            _log('restored the saved garage for %d vehicle(s)' % applied)
-        return True
+        return (staged, applied)
 
     def _ensure_receipts_loaded(self):
         if self._receipts_loaded:
@@ -694,12 +995,16 @@ class GarageStore(object):
                 vehicle_id = int(raw.get('vehicle_id', 0))
             except (TypeError, ValueError):
                 continue
-            if not receipt_id or vehicle_id <= 0:
+            if not receipt_id:
                 continue
             row = {
                 'receipt_id': receipt_id,
                 'accelerated': bool(raw.get('accelerated', False)),
-                'vehicle_id': vehicle_id,
+                # The receipt id is what makes this marker idempotent.  A
+                # settlement whose per-vehicle steps all refused still banked
+                # the award and still names no vehicle, so dropping the row
+                # for that would pay the same battle twice.
+                'vehicle_id': max(0, vehicle_id),
             }
             awarded = raw.get('awarded')
             if isinstance(awarded, dict):
@@ -803,31 +1108,50 @@ class GarageStore(object):
         record.setdefault('inventoryItems', {})[11] = consumables
         return changed
 
+    @staticmethod
+    def _read_file(path):
+        """Parse one state file, or return None with the reason logged."""
+        if path is None or not os.path.isfile(path):
+            return None
+        try:
+            import json
+            with open(path, 'rb') as stream:
+                value = json.load(stream)
+        except (IOError, OSError, ValueError) as error:
+            _log('the saved garage state in %s is unreadable (%s)'
+                 % (path, error))
+            return None
+        if not isinstance(value, dict):
+            _log('the saved garage state in %s has an unexpected shape'
+                 % path)
+            return None
+        return value
+
     def _read(self):
         if self._path is None:
             return None
         for path in (self._path, self._path + '.bak'):
-            if not os.path.isfile(path):
-                continue
-            try:
-                import json
-                with open(path, 'rb') as stream:
-                    value = json.load(stream)
-            except (IOError, OSError, ValueError):
-                _log('the saved garage state is unreadable; using the '
-                     'stock garage')
-                continue
-            if not isinstance(value, dict):
-                _log('the saved garage state has an unexpected shape; using '
-                     'the stock garage')
+            value = self._read_file(path)
+            if value is None:
                 continue
             if value.get('schema') not in READABLE_SCHEMAS:
                 _log('the saved garage state uses schema %r, not one of %r; '
                      'using the stock garage' % (
                          value.get('schema'), READABLE_SCHEMAS))
                 return None
+            self._remember_read(value)
             return value
         return None
+
+    def _remember_read(self, stored):
+        """Record what the file holds, before this session can replace it."""
+        vehicles = stored.get('vehicles')
+        self._saved_vehicle_keys = frozenset(
+            vehicles if isinstance(vehicles, dict) else ())
+        ledger = stored.get('ledger')
+        unlocks = (ledger.get('unlocks') if isinstance(ledger, dict) else None)
+        self._saved_unlock_count = len(
+            unlocks if isinstance(unlocks, (list, tuple)) else ())
 
 
 def _records(snapshot):
