@@ -709,6 +709,81 @@ class PortConfigTests(unittest.TestCase):
             self.assertEqual(value, json.loads(compact_text))
             self.assertEqual(value, json.loads(readable_text))
 
+    def test_a_state_file_keeps_the_last_few_copies_of_itself(self):
+        """The only thing that makes an overwritten save recoverable.
+
+        One rotation per session is enough to survive the write that
+        destroyed a career, and the copies keep the ``.json`` extension so a
+        player can copy one back by hand with no tooling at all.
+        """
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'garage_state.json')
+            for generation in range(1, 5):
+                config_module.write_json(path, {'generation': generation})
+                config_module.rotate_state_backup(path)
+
+            first = str(Path(directory) / 'garage_state.backup1.json')
+            second = str(Path(directory) / 'garage_state.backup2.json')
+            third = str(Path(directory) / 'garage_state.backup3.json')
+            self.assertEqual(
+                {'generation': 4}, json.loads(Path(first).read_text()))
+            self.assertEqual(
+                {'generation': 3}, json.loads(Path(second).read_text()))
+            self.assertEqual(
+                {'generation': 2}, json.loads(Path(third).read_text()))
+            self.assertFalse(
+                (Path(directory) / 'garage_state.backup4.json').exists())
+
+    def test_rotating_a_state_file_that_does_not_exist_is_not_an_error(self):
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'garage_state.json')
+
+            self.assertFalse(config_module.rotate_state_backup(path))
+            self.assertEqual([], sorted(os.listdir(directory)))
+
+    def test_a_refused_state_file_is_copied_aside_rather_than_moved(self):
+        """This client carries on without the file, so it must stay put.
+
+        Moving it would turn a save this build refused into a save the next
+        build cannot find either.
+        """
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'garage_state.json')
+            config_module.write_json(path, {'career': True})
+
+            kept = config_module.quarantine_state_file(
+                path, config_module.QUARANTINE_REJECTED)
+
+            self.assertTrue(os.path.isfile(path))
+            self.assertEqual(
+                {'career': True}, json.loads(Path(kept).read_text()))
+            self.assertTrue(
+                os.path.basename(kept).startswith('garage_state.rejected-'))
+            self.assertTrue(kept.endswith('.json'))
+
+    def test_quarantined_copies_are_capped_and_drop_the_oldest(self):
+        config_module = _load_port_source('config')
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'garage_state.json')
+            config_module.write_json(path, {'career': True})
+
+            for unused in range(4):
+                kept = config_module.quarantine_state_file(
+                    path, config_module.QUARANTINE_REJECTED, copies=2)
+
+            surviving = sorted(
+                name for name in os.listdir(directory)
+                if '.rejected-' in name)
+            self.assertEqual(2, len(surviving))
+            self.assertIn(os.path.basename(kept), surviving)
+            self.assertEqual(
+                {'career': True},
+                json.loads(
+                    (Path(directory) / surviving[0]).read_text()))
+
     def test_waiting_room_choices_round_trip_in_player_owned_state(self):
         config_module = _load_port_source('config')
         with tempfile.TemporaryDirectory() as directory:

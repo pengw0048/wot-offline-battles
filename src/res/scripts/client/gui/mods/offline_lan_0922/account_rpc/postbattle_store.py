@@ -20,6 +20,7 @@ from __future__ import print_function
 import copy
 import json
 import os
+import sys
 import time
 import uuid
 import zlib
@@ -817,6 +818,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     )
 
 
+def _log(message):
+    sys.stdout.write('[Offline LAN 0.9.22] %s\n' % message)
+
+
 class PostBattleStore(object):
     """Apply each LAN receipt once and retain it until the native 1501 ack."""
 
@@ -835,6 +840,7 @@ class PostBattleStore(object):
         # Native progress cards use current tankman inventory ids. Old results
         # remain readable after restart without pointing at a different crew.
         self._session_crew_xp = {}
+        self._rotated = False
         self._load()
 
     def set_progress_applier(self, callback):
@@ -1203,21 +1209,55 @@ class PostBattleStore(object):
         self._session_crew_xp = value['session_crew_xp']
 
     def _load(self):
-        if self._path is None or not os.path.isfile(self._path):
+        """Read the saved results, or say why the totals start from zero.
+
+        This file carries the account's lifetime record: battles, wins,
+        damage, medals and every per-vehicle mastery mark.  Discarding it used
+        to be silent and total, and the next terminal barrier then wrote the
+        empty totals back over it, so a file this build could not read cost
+        the player their record with nothing in the log to say so.
+        """
+        if self._path is None:
             return
-        try:
-            with open(self._path, 'rb') as stream:
-                value = json.load(stream)
-            if not isinstance(value, dict) or value.get('schema') != SCHEMA:
+        for path in (self._path, self._path + '.bak'):
+            if not os.path.isfile(path):
+                continue
+            reason = self._load_from(path)
+            if reason is None:
                 return
+            _log('the saved battle results in %s were not read (%s)'
+                 % (path, reason))
+            self._reset_saved()
+            if path == self._path:
+                kept = port_config.quarantine_state_file(
+                    path, port_config.QUARANTINE_REJECTED)
+                _log('the account record starts from empty totals; the '
+                     'refused file was kept as %s'
+                     % (kept if kept is not None else '(no copy)'))
+
+    def _reset_saved(self):
+        self._pending = {}
+        self._history = []
+        self._awards = {}
+        self._progress = self._empty_progress()
+
+    def _load_from(self, path):
+        """Adopt one saved file, or return why it was refused."""
+        try:
+            with open(path, 'rb') as stream:
+                value = json.load(stream)
+            if not isinstance(value, dict):
+                return 'the file does not hold a JSON object'
+            if value.get('schema') != SCHEMA:
+                return 'schema %r is not %r' % (value.get('schema'), SCHEMA)
             account_key = _bounded_text(value.get('accountKey'), 64)
             if not account_key:
-                return
+                return 'the account key is missing'
             pending = {}
             for raw in value.get('pending', ()):
                 receipt = _receipt(raw)
                 if receipt['account_key'] != account_key:
-                    return
+                    return 'a pending receipt belongs to another account'
                 pending[str(receipt['arena_unique_id'])] = receipt
             history = []
             for raw in value.get('history', ()):
@@ -1232,11 +1272,11 @@ class PostBattleStore(object):
                     if 'account_key' in raw:
                         raw = _receipt(raw)
                         if raw['account_key'] != account_key:
-                            return
+                            return 'an archived receipt belongs to another account'
                     history.append(raw)
             progress = value.get('progress')
             if not isinstance(history, list) or not isinstance(progress, dict):
-                return
+                return 'the stored totals are not in the expected shape'
             self._account_key = account_key
             self._pending = pending
             self._history = history
@@ -1289,12 +1329,10 @@ class PostBattleStore(object):
                     if isinstance(row, dict):
                         self._update_record_extrema(row, receipt)
             self._trim_history_bodies()
-        except (IOError, OSError, TypeError, ValueError):
+        except (IOError, OSError, TypeError, ValueError) as error:
             # Keep a corrupt optional cache from preventing an offline login.
-            self._pending = {}
-            self._history = []
-            self._awards = {}
-            self._progress = self._empty_progress()
+            return 'unreadable: %s' % error
+        return None
 
     def _archived_identities(self):
         """Project the archive down to what a restart actually needs.
@@ -1320,6 +1358,11 @@ class PostBattleStore(object):
             'history': self._archived_identities(),
             'progress': self._progress,
         }
+        if not self._rotated:
+            # The lifetime record is not reconstructible by playing, so keep
+            # the previous file once per session before replacing it.
+            port_config.rotate_state_backup(self._path)
+            self._rotated = True
         # This file is a machine-owned cache rewritten on the terminal round
         # barrier.  Only ``_load`` reads it, so sorted and indented output
         # buys nothing and costs the embedded 2.7 runtime its C JSON encoder.

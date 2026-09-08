@@ -308,6 +308,14 @@ class GarageState(object):
                                 if value < 0)
         if len(values) % 2:
             raise GarageError('shells must be descriptor/count pairs')
+        if not values:
+            # A rack with no rows at all is a garage this port cannot
+            # publish: data._validate_selected_vehicle requires the flat pair
+            # list and the shell inventory to name what the vehicle carries,
+            # even when every count is zero.  Refusing the command keeps the
+            # live garage writable instead of producing a save the next start
+            # cannot read.
+            raise GarageError('a shell layout must name at least one round')
         record = self._record(vehicle_inventory_id, touch=False)
         # data._validate_selected_vehicle requires the shell inventory and the
         # flat pair list to agree, so both move together.
@@ -696,7 +704,10 @@ class GarageState(object):
                 for compact_descr, count in _layout_pairs(
                         shells_layout, preserve_currency=True):
                     flat.extend((compact_descr, count))
-                self.equip_shells(vehicle_inventory_id, flat)
+                # An empty layout in a combined request names no round to
+                # set, which is not the same as emptying the rack.
+                if flat:
+                    self.equip_shells(vehicle_inventory_id, flat)
             if (equipments_layout is not None and
                     _int(equipment_type) == EQUIPMENT_TYPE_REGULAR):
                 pairs = _layout_pairs(

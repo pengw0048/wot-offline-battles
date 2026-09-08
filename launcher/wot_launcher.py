@@ -126,6 +126,28 @@ _CHINESE = {
     "New save...": "新建存档…",
     "Rename save...": "重命名存档…",
     "Delete save...": "删除存档…",
+    "Open save folder": "打开存档文件夹",
+    "Back up save...": "备份存档…",
+    "Restore save...": "恢复存档…",
+    "Back up save": "备份存档",
+    "Restore save": "恢复存档",
+    "Save backup": "存档备份",
+    "Restore save?": "恢复存档？",
+    "Replace the contents of save '%s' with the backup of '%s'? The files "
+    "being replaced are kept in a pre-restore folder inside the save.":
+        "确定把存档“%s”的内容替换成“%s”的备份吗？被替换的文件会保留在存档内的 "
+        "pre-restore 文件夹里。",
+    "another save": "其他存档",
+    "The save folder could not be opened: %s": "无法打开存档文件夹：%s",
+    "Opened the save folder: %s": "已打开存档文件夹：%s",
+    "The save could not be backed up: %s": "存档备份失败：%s",
+    "Backed up save '%s' to %s (%d file(s)).":
+        "已把存档“%s”备份到 %s（%d 个文件）。",
+    "The backup could not be read: %s": "无法读取备份文件：%s",
+    "The save could not be restored: %s": "存档恢复失败：%s",
+    "Restored %d file(s) into save '%s'.": "已恢复 %d 个文件到存档“%s”。",
+    "The files that were replaced were kept in %s.":
+        "被覆盖的文件已保留在 %s。",
     "New save": "新建存档",
     "Rename save": "重命名存档",
     "Save name:": "存档名称：",
@@ -206,8 +228,10 @@ _CHINESE = {
     "results are removed permanently.":
         "确定删除存档“%s”吗？它的车库、乘员、账号设置和战斗记录将被永久删除。",
     "Each save keeps its own garage, crew, account settings and battle "
-    "results. The selected save is the one the game starts with.":
-        "每个存档有独立的车库、乘员、账号设置和战斗记录。启动游戏时使用当前选中的存档。",
+    "results. The selected save is the one the game starts with. Back up a "
+    "save to a ZIP file, or open its folder and copy the files out yourself.":
+        "每个存档有独立的车库、乘员、账号设置和战斗记录。启动游戏时使用当前选中的"
+        "存档。可以把存档备份成 ZIP 文件，也可以打开存档文件夹自行复制文件。",
     "Repair": "修复",
     "Repair startup (keep saved data)": "修复启动问题（保留存档）",
     "Normal client stuck loading? Clean preferences...":
@@ -695,11 +719,27 @@ class LauncherWindow(object):
             save_actions, text="", command=self._delete_save_slot)
         self.delete_save_slot_button.pack(
             side="left", fill="x", expand=True, padx=(6, 0))
+        # A save is a few small JSON files, so the recovery a player can
+        # always perform is copying them out and putting them back.
+        save_backup_actions = tk.Frame(self.save_panel)
+        save_backup_actions.grid(
+            row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.open_save_folder_button = tk.Button(
+            save_backup_actions, text="", command=self._open_save_folder)
+        self.open_save_folder_button.pack(side="left", fill="x", expand=True)
+        self.backup_save_button = tk.Button(
+            save_backup_actions, text="", command=self._backup_save_slot)
+        self.backup_save_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.restore_save_button = tk.Button(
+            save_backup_actions, text="", command=self._restore_save_slot)
+        self.restore_save_button.pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
         self.save_help_label = tk.Label(
             self.save_panel, text="", anchor="w", justify="left",
             wraplength=620)
         self.save_help_label.grid(
-            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.save_panel.grid_columnconfigure(1, weight=1)
 
         # Gold is the one currency an offline account can never earn, so the
@@ -930,10 +970,15 @@ class LauncherWindow(object):
         self.new_save_slot_button.config(text=self._t("New save..."))
         self.rename_save_slot_button.config(text=self._t("Rename save..."))
         self.delete_save_slot_button.config(text=self._t("Delete save..."))
+        self.open_save_folder_button.config(
+            text=self._t("Open save folder"))
+        self.backup_save_button.config(text=self._t("Back up save..."))
+        self.restore_save_button.config(text=self._t("Restore save..."))
         self.save_help_label.config(text=self._t(
             "Each save keeps its own garage, crew, account settings and "
             "battle results. The selected save is the one the game starts "
-            "with."))
+            "with. Back up a save to a ZIP file, or open its folder and copy "
+            "the files out yourself."))
         self.account_panel.config(text=self._t("Account"))
         for name, label in self.balance_labels.items():
             label.config(text=self._t(_BALANCE_LABELS[name]))
@@ -1569,6 +1614,96 @@ class LauncherWindow(object):
         self._save_settings()
         self._log("Deleted save '%s'." % record["name"])
         return True
+
+    def _open_save_folder(self):
+        record = self._selected_save_slot_record()
+        if record is None:
+            self._log("Select a save before opening its folder.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            directory = save_slots.open_slot_folder(
+                record["id"], game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log(self._t("The save folder could not be opened: %s")
+                      % error)
+            return False
+        self._log(self._t("Opened the save folder: %s") % directory)
+        return True
+
+    def _backup_save_slot(self):
+        record = self._selected_save_slot_record()
+        if record is None:
+            self._log("Select a save before backing it up.")
+            return False
+        game_root = self.game_root.get().strip()
+        suggested = "wot-offline-save-%s-%s.zip" % (
+            record["id"], time.strftime("%Y%m%d-%H%M%S"))
+        chosen = self._filedialog.asksaveasfilename(
+            title=self._t("Back up save"), initialfile=suggested,
+            defaultextension=".zip",
+            filetypes=((self._t("Save backup"), "*.zip"),))
+        if not chosen:
+            self._log("Save backup was cancelled.")
+            return False
+        try:
+            result = save_slots.backup_slot(
+                record["id"], chosen, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log(self._t("The save could not be backed up: %s") % error)
+            return False
+        self._log(self._t("Backed up save '%s' to %s (%d file(s)).") % (
+            record["name"], result["path"], len(result["files"])))
+        return True
+
+    def _restore_save_slot(self):
+        if self._busy or self._maintenance_busy:
+            self._log("Wait for the current launcher operation to finish.")
+            return False
+        record = self._selected_save_slot_record()
+        if record is None:
+            self._log("Select the save to restore into.")
+            return False
+        chosen = self._filedialog.askopenfilename(
+            title=self._t("Restore save"),
+            filetypes=((self._t("Save backup"), "*.zip"),))
+        if not chosen:
+            self._log("Save restore was cancelled.")
+            return False
+        game_root = self.game_root.get().strip()
+        try:
+            backup = save_slots.read_backup(chosen)
+        except save_slots.SaveSlotError as error:
+            self._log(self._t("The backup could not be read: %s") % error)
+            return False
+        if not self._confirm_restore_save_slot(record, backup):
+            self._log("Save restore was cancelled.")
+            return False
+        try:
+            result = save_slots.restore_slot(
+                record["id"], chosen, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._log(self._t("The save could not be restored: %s") % error)
+            return False
+        self._log(self._t("Restored %d file(s) into save '%s'.") % (
+            len(result["files"]), record["name"]))
+        if result["replaced"]:
+            self._log(self._t("The files that were replaced were kept in %s.")
+                      % result["replaced"])
+        self._refresh_save_slots()
+        return True
+
+    def _confirm_restore_save_slot(self, record, backup):
+        from tkinter import messagebox
+
+        origin = backup["name"] or backup["id"] or self._t("another save")
+        return messagebox.askyesno(
+            self._t("Restore save?"),
+            self._t("Replace the contents of save '%s' with the backup of "
+                    "'%s'? The files being replaced are kept in a "
+                    "pre-restore folder inside the save.")
+            % (record["name"], origin),
+            icon="warning")
 
     def _refresh_bot_lineup_profiles(self):
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
