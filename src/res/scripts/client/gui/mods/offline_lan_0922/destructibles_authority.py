@@ -121,6 +121,61 @@ def destroyed_keys(chunkID):
 	return c['keys'] if c is not None else ()
 
 
+def contact_collision_ready(chunkID, itemIndex, matKind=None):
+	c = _state.get('chunks', {}).get(chunkID)
+	return bool(c is not None and
+		(itemIndex, matKind) in c.get('contactCollisionReady', ()))
+
+
+def _finish_contact_collision(spaceID, chunkID, itemIndex, matKind, kind):
+	"""Complete only the stock hide callback for this physical crush.
+
+	#1513 has already played the module animation/fragile effect when it
+	queues this callback. Switching the native collision model now preserves
+	that effect and the authored destroyed collider without a 0.2 s hull hold.
+	Projectile-synchronized orders and falling-body animation stay stock.
+	"""
+	import AreaDestructibles
+	mgr = AreaDestructibles.g_destructiblesManager
+	if mgr is None or mgr.getSpaceID() != spaceID:
+		return False
+	callbacks = getattr(mgr, '_DestructiblesManager__destroyCallbacks', None)
+	method_name = ('_DestructiblesManager__setFragileDestroyed'
+		if kind == 'fragile' else '_DestructiblesManager__setModuleDestroyed')
+	method = getattr(mgr, method_name, None)
+	if not isinstance(callbacks, dict) or not callable(method):
+		return False
+	matches = []
+	for functor, callback_id in list(callbacks.items()):
+		args = getattr(functor, 'args', ())
+		if (getattr(functor, 'func', None) != method or len(args) != 7 or
+				tuple(args[:3]) != (spaceID, chunkID, itemIndex)):
+			continue
+		if kind == 'module':
+			if args[3] != matKind - AreaDestructibles.DESTRUCTIBLE_MATKIND.NORMAL_MIN:
+				continue
+			animation, shot, havok = args[4:7]
+		else:
+			animation, shot, havok = args[3:6]
+		if not animation or shot or havok:
+			continue
+		matches.append((functor, callback_id))
+	if len(matches) != 1:
+		return False
+	functor, callback_id = matches[0]
+	try:
+		functor(delCallback=False)
+	except Exception as error:
+		# Preserve the original scheduled owner if immediate application fails.
+		_log('DestrAuth: contact collision completion deferred', chunkID,
+			itemIndex, kind, error)
+		return False
+	if callbacks.get(functor) == callback_id:
+		BigWorld.cancelCallback(callback_id)
+		callbacks.pop(functor)
+	return True
+
+
 def accept_tree_without_presentation(spaceID, chunkID, itemIndex):
 	"""Record one canonical tree after its single native attempt was a no-op.
 
@@ -284,6 +339,10 @@ def _apply(spaceID, chunkID, pos, kind, destrData, dedupKey,
 	# raising.  Do not invent a second asynchronous receipt requirement here.
 	c[prop].append(destrData)
 	c['keys'].add(dedupKey)
+	if (kind in ('fragile', 'module') and not applyShotImmediately and
+			_finish_contact_collision(
+				spaceID, chunkID, dedupKey[0], dedupKey[1], kind)):
+		c.setdefault('contactCollisionReady', set()).add(dedupKey)
 	if ctrl is not None:
 		try:
 			values = getattr(ctrl, prop)

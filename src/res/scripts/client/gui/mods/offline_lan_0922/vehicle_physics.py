@@ -856,32 +856,37 @@ def derive_suspension_params(descriptor):
 	}
 
 
-def suspension_world_points(params, position, yaw):
-	'''Return one world x/z query point for each trial damper spring.'''
+def suspension_point_offset(point, pitch=0.0, roll=0.0):
+	'''Rotate one local suspension point by the same YPR law as the hull.'''
+	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
+	sp, cp = math.sin(float(pitch)), math.cos(float(pitch))
+	sr, cr = math.sin(float(roll)), math.cos(float(roll))
+	rolled_y = sr * x + cr * y
+	return (cr * x - sr * y, cp * rolled_y - sp * z,
+		sp * rolled_y + cp * z)
+
+
+def _suspension_world_points(points, position, yaw, pitch, roll):
 	x, unused_y, z = map(float, position)
 	sine, cosine = math.sin(float(yaw)), math.cos(float(yaw))
 	result = []
-	for spring in params['springs']:
-		local_x = float(spring['x'])
-		local_z = float(spring['z'])
-		result.append((
-			x + cosine * local_x + sine * local_z,
+	for point in points:
+		local_x, unused_y, local_z = suspension_point_offset(point, pitch, roll)
+		result.append((x + cosine * local_x + sine * local_z,
 			z - sine * local_x + cosine * local_z))
 	return tuple(result)
 
 
-def suspension_pseudo_world_points(params, position, yaw):
-	'''Return world x/z query points for the twelve trial pseudo contacts.'''
-	x, unused_y, z = map(float, position)
-	sine, cosine = math.sin(float(yaw)), math.cos(float(yaw))
-	result = []
-	for contact in params.get('pseudo_contacts', ()):
-		local_x = float(contact['x'])
-		local_z = float(contact['z'])
-		result.append((
-			x + cosine * local_x + sine * local_z,
-			z - sine * local_x + cosine * local_z))
-	return tuple(result)
+def suspension_world_points(params, position, yaw, pitch=0.0, roll=0.0):
+	'''Return the actual posed world x/z points of the damper springs.'''
+	return _suspension_world_points(
+		params['springs'], position, yaw, pitch, roll)
+
+
+def suspension_pseudo_world_points(params, position, yaw, pitch=0.0, roll=0.0):
+	'''Return the actual posed world x/z points of the track/belly contacts.'''
+	return _suspension_world_points(
+		params.get('pseudo_contacts', ()), position, yaw, pitch, roll)
 
 
 def ground_normal(gradient_x, gradient_z):
@@ -981,7 +986,7 @@ def sampled_ground_plane(front_y, rear_y, right_y, left_y, center_y,
 
 
 def suspension_ground_plane(params, ground_heights,
-		maximum_residual=None):
+		maximum_residual=None, sample_points=None):
 	'''Fit terrain gradients from contacted springs, not body attitude.
 
 	Suspension pitch and roll contain transient damper motion. Feeding that
@@ -999,8 +1004,10 @@ def suspension_ground_plane(params, ground_heights,
 		if ground is None:
 			continue
 		try:
-			x = float(spring['x'])
-			z = float(spring['z'])
+			x = float(spring['x'] if sample_points is None else
+				sample_points[index][0])
+			z = float(spring['z'] if sample_points is None else
+				sample_points[index][1])
 			y = float(ground)
 		except (KeyError, TypeError, ValueError):
 			return None
@@ -1050,10 +1057,13 @@ def suspension_ground_plane(params, ground_heights,
 
 
 def suspension_world_ground_plane(params, ground_heights, position, yaw,
-		maximum_residual=None):
+		maximum_residual=None, pitch=0.0, roll=0.0):
 	'''Fit one suspension plane in stable world-space coordinates.'''
+	points = tuple(suspension_point_offset(spring, pitch, roll)
+		for spring in params['springs'])
 	local_plane = suspension_ground_plane(
-		params, ground_heights, maximum_residual)
+		params, ground_heights, maximum_residual,
+		tuple((point[0], point[2]) for point in points))
 	if local_plane is None:
 		return None
 	try:
@@ -1315,22 +1325,30 @@ def retained_ground_contact(point, ground, memory, maximum_distance,
 	return None, None
 
 
+def suspension_vertical_sweep_drop(vertical_speed, dt):
+	'''Cover the full downward semi-implicit travel before sampling support.'''
+	step = max(0.0, float(dt))
+	return max(0.0, -float(vertical_speed) * step + GRAVITY * step * step)
+
+
 def _rigid_point_height(state, point):
-	pitch = float(state.get('pitch', 0.0))
-	roll = float(state.get('roll', 0.0))
-	return (float(state['height']) + float(point.get('y', 0.0)) -
-		float(point['z']) * math.sin(pitch) +
-		float(point['x']) * math.sin(roll))
+	return float(state['height']) + suspension_point_offset(
+		point, state.get('pitch', 0.0), state.get('roll', 0.0))[1]
+
+
+def _rigid_point_height_gradients(state, point):
+	pitch, roll = float(state.get('pitch', 0.0)), float(state.get('roll', 0.0))
+	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
+	sp, cp = math.sin(pitch), math.cos(pitch)
+	sr, cr = math.sin(roll), math.cos(roll)
+	return (-sp * (sr * x + cr * y) - cp * z, cp * (cr * x - sr * y))
 
 
 def _rigid_point_velocity(state, point):
-	pitch = float(state.get('pitch', 0.0))
-	roll = float(state.get('roll', 0.0))
-	return (float(state.get('vertical_velocity', 0.0)) -
-		float(point['z']) * math.cos(pitch) *
-		float(state.get('pitch_velocity', 0.0)) +
-		float(point['x']) * math.cos(roll) *
-		float(state.get('roll_velocity', 0.0)))
+	pitch_gradient, roll_gradient = _rigid_point_height_gradients(state, point)
+	return (float(state.get('vertical_velocity', 0.0)) +
+		pitch_gradient * float(state.get('pitch_velocity', 0.0)) +
+		roll_gradient * float(state.get('roll_velocity', 0.0)))
 
 
 def _spring_height(state, spring):
@@ -1427,8 +1445,8 @@ def _project_suspension_limits(params, state, ground_heights,
 			if excess <= 1.0e-5:
 				continue
 			touched.add(key)
-			pitch_grad = float(point['z']) * math.cos(state['pitch'])
-			roll_grad = -float(point['x']) * math.cos(state['roll'])
+			pitch_height, roll_height = _rigid_point_height_gradients(state, point)
+			pitch_grad, roll_grad = -pitch_height, -roll_height
 			denominator = (inv_mass + pitch_grad * pitch_grad * inv_pitch +
 				roll_grad * roll_grad * inv_roll)
 			if denominator <= 1.0e-12:
@@ -1578,10 +1596,10 @@ def damper_suspension_step(params, state, ground_heights, dt,
 					1.0 + excess / max(spring['max_compression'], 0.01))
 			force = max(0.0, min(spring['max_force'], force))
 			total_force += force
-			pitch_torque -= float(spring['z']) * math.cos(
-				result['pitch']) * force
-			roll_torque += float(spring['x']) * math.cos(
-				result['roll']) * force
+			pitch_gradient, roll_gradient = _rigid_point_height_gradients(
+				result, spring)
+			pitch_torque += pitch_gradient * force
+			roll_torque += roll_gradient * force
 		for index, contact in enumerate(pseudo_contacts):
 			ground = pseudo_ground_heights[index]
 			if ground is None:

@@ -217,7 +217,7 @@ class WindowTest(unittest.TestCase):
         return game_root
 
     def test_layout_separates_play_vehicle_and_repair_controls(self):
-        self.assertEqual("0.6.12", wot_launcher.LAUNCHER_VERSION)
+        self.assertEqual("0.6.14", wot_launcher.LAUNCHER_VERSION)
         self.assertEqual(
             "Single player",
             self.window.battle_tabs.tab(self.window.single_panel).get("text"))
@@ -280,22 +280,36 @@ class WindowTest(unittest.TestCase):
 
     def test_launcher_session_identity_is_visible_and_persisted(self):
         self.assertIn(
-            "Launcher session: version=0.6.12 build=unknown role=launcher",
+            "Launcher session: version=0.6.14 build=unknown role=launcher",
             self._log_text())
         with open(core.launcher_log_path(), encoding="utf-8") as stream:
             persisted = stream.read()
         self.assertIn(
-            "Launcher session: version=0.6.12 build=unknown role=launcher",
+            "Launcher session: version=0.6.14 build=unknown role=launcher",
             persisted)
 
     def test_first_run_prompts_once_when_the_launcher_starts(self):
+        notice = mock.Mock()
+        tkinter = mock.Mock(messagebox=mock.Mock(showinfo=notice))
         with mock.patch.object(
                 self.window, "_request_crash_collection",
-                return_value=False) as request:
+                return_value=False) as request, mock.patch.dict(
+                    "sys.modules", {"tkinter": tkinter}):
             self.window.run()
             self.window.run()
 
         request.assert_called_once_with()
+        notice.assert_called_once_with(
+            "免费声明",
+            "本离线mod免费提供，禁止转卖，如果你付费购买，请退款、举报卖给你的人。",
+            parent=self.window.root)
+        self.assertTrue(core.load_settings()["free_notice_seen"])
+        reopened = wot_launcher.LauncherWindow(_FakeTk, _FakeTtk, self.dialog)
+        notice.reset_mock()
+        with mock.patch.dict("sys.modules", {"tkinter": tkinter}):
+            reopened._prompt_initial_crash_collection = mock.Mock()
+            reopened.run()
+        notice.assert_not_called()
         self.assertTrue(self.window.root.mainloop_called)
 
     def test_crash_collection_defaults_off_and_persists_a_decline(self):
@@ -323,7 +337,8 @@ class WindowTest(unittest.TestCase):
         self.assertFalse(reopened.collect_crash_reports.get())
         self.assertFalse(reopened._initial_crash_prompt_pending)
         with mock.patch.object(
-                reopened, "_confirm_enable_crash_capture") as confirm:
+                reopened, "_confirm_enable_crash_capture") as confirm, \
+                mock.patch.dict("sys.modules", {"tkinter": mock.Mock()}):
             reopened.run()
         confirm.assert_not_called()
 

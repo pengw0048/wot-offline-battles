@@ -103,6 +103,11 @@ unexpectedly, the launcher creates a ZIP and asks whether you want to report
 the crash. Choosing Yes only selects that ZIP in Windows Explorer; the launcher
 never uploads it. Choosing No deletes that newly created ZIP.
 
+Before each game starts, launcher and participating client logs larger than
+16 MiB are trimmed to their newest complete lines within 4 MiB. Trimming
+happens before the new report boundary is recorded, never during gameplay.
+Server logs retain at most 1 MiB during each run.
+
 "Create error report" and automatic crash reports copy only the exact log
 slices from the latest launcher game session into a ZIP in
 %LOCALAPPDATA%\WoTOfflineBattles\reports. A confirmed crash report can also

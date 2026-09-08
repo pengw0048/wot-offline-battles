@@ -28,7 +28,7 @@ else:
         vehicle_editor_ui, vehicle_overlays)
 
 
-LAUNCHER_VERSION = "0.6.12"
+LAUNCHER_VERSION = "0.6.14"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
 
 _CHINESE = {
@@ -181,7 +181,7 @@ PROCDUMP_CONSENT_SETTING = "procdump_download_consent"
 PROCDUMP_PATH_ENV = "WOT_OFFLINE_PROCDUMP_PATH"
 CRASH_DUMP_PATH_ENV = "WOT_OFFLINE_CRASH_DUMP_PATH"
 CRASH_DUMP_MODE_ENV = "WOT_OFFLINE_CRASH_DUMP_MODE"
-_LAUNCHER_LOG_LOCK = threading.Lock()
+_LAUNCHER_LOG_LOCK = error_reports.LAUNCHER_LOG_LOCK
 
 
 def _no_console_flags():
@@ -378,6 +378,7 @@ class LauncherWindow(object):
     def _build(self):
         tk = self._tk
         settings = core.load_settings()
+        self._free_notice_seen = settings.get("free_notice_seen") is True
         preference = settings.get("language", i18n.LANGUAGE_AUTO)
         if preference not in i18n.LANGUAGES:
             preference = i18n.LANGUAGE_ENGLISH
@@ -1366,6 +1367,7 @@ class LauncherWindow(object):
             "bot_lineup_profile": self.bot_lineup_profile.get().strip(),
             "bot_lineup_profiles": self._bot_lineup_store,
             "language": self.language_preference,
+            "free_notice_seen": self._free_notice_seen,
             COLLECT_CRASH_REPORTS_SETTING:
                 bool(self.collect_crash_reports.get()),
             FULL_CRASH_DUMPS_SETTING:
@@ -2513,9 +2515,20 @@ class LauncherWindow(object):
         self.root.destroy()
         return True
 
+    def _show_startup_notices(self):
+        if not self._free_notice_seen:
+            from tkinter import messagebox
+
+            messagebox.showinfo(
+                "免费声明",
+                "本离线mod免费提供，禁止转卖，如果你付费购买，请退款、举报卖给你的人。",
+                parent=self.root)
+            self._free_notice_seen = True
+            self._save_settings()
+        self._prompt_initial_crash_collection()
+
     def run(self):
-        if self._initial_crash_prompt_pending:
-            self.root.after(0, self._prompt_initial_crash_collection)
+        self.root.after(0, self._show_startup_notices)
         self.root.mainloop()
 
 

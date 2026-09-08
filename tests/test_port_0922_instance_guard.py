@@ -21,11 +21,16 @@ def _load_module():
 
 class _NativeBridge(object):
     def __init__(self, release_status=0, hide_result=1, show_result=1,
-                 events=None):
+                 events=None, atmosphere_status=0):
         self.release_status = release_status
         self.hide_result = hide_result
         self.show_result = show_result
         self.events = [] if events is None else events
+        self.atmosphere_status = atmosphere_status
+
+    def install_atmosphere_owner_guard(self):
+        self.events.append('install_atmosphere_owner_guard')
+        return self.atmosphere_status
 
     def release_client_guard(self):
         self.events.append('release_client_guard')
@@ -116,8 +121,31 @@ class ClientInstanceGuardTests(unittest.TestCase):
                 self.assertIs(
                     bridge,
                     sys.modules[self.module.NATIVE_MODULE_NAME])
+                self.assertEqual(['install_atmosphere_owner_guard'],
+                                 bridge.events)
+                self.assertIs(bridge, self.module._load_native_bridge())
+                self.assertEqual(['install_atmosphere_owner_guard'],
+                                 bridge.events)
             finally:
                 sys.modules.pop(self.module.NATIVE_MODULE_NAME, None)
+
+    def test_failed_atmosphere_patch_is_not_published_or_cached(self):
+        bridge = _NativeBridge(atmosphere_status=201)
+
+        class ImpModule(object):
+            def load_dynamic(self, name, path):
+                sys.modules[name] = bridge
+                return bridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / self.module.NATIVE_FILENAME
+            path.write_bytes(b'PE sidecar')
+            with self.assertRaises(self.module.ClientInstanceGuardError):
+                self.module._load_native_bridge(
+                    path=str(path), imp_module=ImpModule())
+        self.assertIsNone(self.module._native_bridge)
+        self.assertNotIn(self.module.NATIVE_MODULE_NAME, sys.modules)
+        self.assertEqual(['install_atmosphere_owner_guard'], bridge.events)
 
     def test_missing_bridge_fails_before_wgc_is_touched(self):
         def fail_load():

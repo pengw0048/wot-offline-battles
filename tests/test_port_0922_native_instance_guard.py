@@ -87,6 +87,7 @@ class NativeInstanceGuardArtifactTests(unittest.TestCase):
         self.assertIn('user32.dll', imports)
         self.assertFalse(any(name.startswith('python') for name in imports))
         for method_name in (
+                b'install_atmosphere_owner_guard\0',
                 b'release_client_guard\0',
                 b'apply_standard_gameplay_mask\0',
                 b'restore_standard_gameplay_mask\0',
@@ -95,6 +96,12 @@ class NativeInstanceGuardArtifactTests(unittest.TestCase):
             self.assertIn(method_name, payload)
         self.assertIn('wgc_api.dll'.encode('utf-16le'), payload)
         self.assertIn('wot_client_mutex'.encode('utf-16le'), payload)
+
+    def test_atmosphere_thunk_rebinds_from_live_esi_before_tail_jump(self):
+        # Inspect the shipped x86 instructions, not a C-source approximation.
+        payload = BRIDGE_PATH.read_bytes()
+        thunk = bytes.fromhex('8b8610050000 894110 ff25')
+        self.assertEqual(1, payload.count(thunk))
 
     def test_source_and_build_are_exact_build_and_fail_closed(self):
         source = SOURCE_PATH.read_text(encoding='utf-8')

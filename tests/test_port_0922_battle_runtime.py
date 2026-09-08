@@ -19793,6 +19793,69 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 RuntimeError, 'native suspension ground hit is malformed'):
             battle._suspension_ground_y(0.0, 0.0, -0.5, 0.8)
 
+    def _legacy_support_battle(self, columns, floor):
+        """Return a legacy-vertical player over one sampled ground field."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_suspension_disabled = True
+        entity = _Vehicle(
+            10, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+        calls = []
+
+        def collide(space_id, start, end, flags, *rest):
+            calls.append((round(start.x, 1), round(start.z, 1)))
+            height = columns.get(
+                (round(start.x, 1), round(start.z, 1)), floor)
+            return (_Vector(start.x, height, start.z),
+                    _Vector(0.0, 1.0, 0.0), 2)
+
+        runtime.bigworld.wg_collideSegment = collide
+        return battle, entity, calls
+
+    def test_player_bridges_a_trench_narrower_than_its_chassis(self):
+        """The human hull must straddle a slot its centre column falls into."""
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(0.0, 3.5): 10.0, (0.0, -3.5): 10.0}, 7.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertFalse(battle._local_airborne)
+        self.assertEqual(0.0, battle._local_vertical_speed)
+
+    def test_player_bridges_a_slot_running_along_its_hull(self):
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(1.7, 0.0): 9.95, (-1.7, 0.0): 10.0}, 7.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertFalse(battle._local_airborne)
+
+    def test_player_still_falls_where_only_one_chassis_end_is_supported(self):
+        battle, entity, unused_calls = self._legacy_support_battle(
+            {(0.0, -3.5): 10.0}, 0.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertTrue(battle._local_airborne)
+        self.assertLess(position[1], 10.0)
+
+    def test_player_flat_ground_keeps_the_three_column_support_probe(self):
+        battle, entity, calls = self._legacy_support_battle({}, 10.0)
+
+        position = battle._update_vertical_motion(
+            entity, (0.0, 10.0, 0.0), 0.0, 0.1)
+
+        self.assertAlmostEqual(10.0, position[1], places=6)
+        self.assertEqual(
+            [(0.0, 3.5), (0.0, 0.0), (0.0, -3.5)], calls)
+
     def test_local_suspension_samples_twenty_two_columns_once_per_tick(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -20284,6 +20347,120 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 entity, (0.0, 0.0, 0.0), 0.0, 0.1)
 
         self.assertEqual([(5.0, True)], impacts)
+
+    def test_local_suspension_fast_fall_cannot_skip_ground(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_vertical_speed = -30.0
+        entity = _Vehicle(10, _suspension_descriptor(), _Vector(0, 2, 0),
+                          (0, 0, 0), {'health': 500})
+        battle._suspension_ground_y = lambda x, z, lo, hi, **kwargs: (
+            0.0 if lo <= 0.0 <= hi else None)
+        position = (0.0, 2.0, 0.0)
+        for unused in range(5):
+            battle._local_support_tick_pose = position
+            battle._local_support_motion_pose = position
+            position = battle._update_vertical_motion(
+                entity, position, 0.0, 0.1)
+            self.assertGreater(position[1], -0.02)
+        self.assertFalse(battle._local_airborne)
+        self.assertFalse(battle._local_support_rise_blocked)
+
+    def test_local_suspension_inclined_plane_does_not_invent_overturn(self):
+        for angle in (35.0, 45.0, 55.0):
+            with self.subTest(angle=angle):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._local_fall_armed = True
+                battle._local_pitch = -math.radians(angle)
+                entity = _Vehicle(10, _suspension_descriptor(), _Vector(),
+                                  (0, 0, 0), {'health': 500})
+                gradient = math.tan(math.radians(angle))
+                battle._suspension_ground_y = (
+                    lambda x, z, lo, hi, **kwargs:
+                    z * gradient if lo <= z * gradient <= hi else None)
+                position = (0.0, 0.0, 0.0)
+                for unused in range(100):
+                    battle._local_support_tick_pose = position
+                    battle._local_support_motion_pose = position
+                    position = battle._update_vertical_motion(
+                        entity, position, 0.0, 0.04)
+                    self.assertAlmostEqual(-math.radians(angle),
+                                           battle._local_pitch, places=4)
+                    self.assertGreater(battle._local_surface_up_cosine, 0.5)
+                self.assertAlmostEqual(gradient,
+                    battle._local_ground_plane['gradient_z'], places=4)
+
+    def test_local_steep_hull_keeps_falling_without_support(self):
+        for axis in ('pitch', 'roll'):
+            with self.subTest(axis=axis):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                battle._local_fall_armed = True
+                battle._local_airborne = True
+                battle._local_vertical_speed = -2.0
+                setattr(battle, '_local_' + axis, math.radians(85.0))
+                entity = _Vehicle(
+                    10, _suspension_descriptor(), _Vector(0, 10, 0),
+                    (0, 0, 0), {'health': 500})
+                battle._suspension_ground_y = mock.Mock(return_value=None)
+                position = (0.0, 10.0, 0.0)
+                for unused in range(5):
+                    before = position
+                    battle._local_support_tick_pose = before
+                    battle._local_support_motion_pose = before
+                    position = battle._update_vertical_motion(
+                        entity, position, 0.0, 0.04)
+                    self.assertLess(position[1], before[1])
+                    self.assertTrue(battle._local_airborne)
+                    self.assertFalse(battle._local_support_rise_blocked)
+                self.assertLess(battle._local_vertical_speed, -2.0)
+
+    def test_local_overturned_input_lock_preserves_passive_motion(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _suspension_descriptor()
+        entity = _Vehicle(
+            10, descriptor, _Vector(0, 10, 0), (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities[10] = entity
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._sender = types.SimpleNamespace(
+            forward=1.0, turn=1.0, handbrake=True)
+        battle._local_position = (0.0, 10.0, 0.0)
+        battle._local_descriptor = descriptor
+        battle._attach_local_presentation()
+        battle._overturn_level = 2
+        battle._local_pitch = math.radians(85.0)
+        battle._local_speed = 3.0
+        battle._local_fall_armed = True
+        battle._local_airborne = True
+        battle._local_vertical_speed = -2.0
+        battle._suspension_ground_y = mock.Mock(return_value=None)
+        battle._motion_is_clear = mock.Mock(return_value=True)
+        battle._resolve_local_tank_contacts = mock.Mock(
+            side_effect=lambda entity, position, yaw, dt: position)
+        with mock.patch.object(
+                vehicle_physics, 'longitudinal_step',
+                wraps=vehicle_physics.longitudinal_step) as drive:
+            for unused in range(3):
+                battle._drive_local_step(0.04)
+        self.assertLess(battle._local_position[1], 10.0)
+        self.assertGreater(battle._local_position[2], 0.0)
+        self.assertEqual(0.0, battle._local_yaw)
+        self.assertEqual((0.0, 0.0),
+                         (battle._sender.forward, battle._sender.turn))
+        self.assertEqual(3, drive.call_count)
+        for call in drive.call_args_list:
+            self.assertEqual(0.0, call.args[2])
+            self.assertFalse(call.args[3])
+            self.assertFalse(call.args[8])
 
     def test_local_suspension_keeps_main_support_rise_rollback(self):
         runtime = _runtime()

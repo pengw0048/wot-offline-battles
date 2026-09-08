@@ -5,7 +5,8 @@
  * Python C API.  This module resolves the two required C API functions from
  * validated RVAs in the main executable, then exposes a deliberately small
  * native surface.  The gameplay-mapping opcode is changed only between one
- * Python apply/restore pair; WGC handles are never closed directly.
+ * Python apply/restore pair; WGC handles are never closed directly.  The
+ * atmosphere owner repair lasts for the process, including lobby re-entry.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -47,6 +48,10 @@ typedef void (__attribute__((thiscall)) *WgcCleanupThunkFn)(void *);
 #define RVA_WGC_WRAPPER_VTABLE 0x010ef788U
 #define RVA_MAPPING_SIGNATURE 0x00254fb9U
 #define RVA_MAPPING_MASK_IMMEDIATE 0x00254fc2U
+#define RVA_ENVIRO_TICK 0x00636360U
+#define RVA_ATMOSPHERE_TICK_SIGNATURE 0x006363f8U
+#define RVA_ATMOSPHERE_UPDATE_CALL 0x00636419U
+#define RVA_ATMOSPHERE_UPDATE 0x006854f0U
 
 #define CLIENT_MUTEX_NAME L"wot_client_mutex"
 
@@ -74,6 +79,12 @@ typedef void (__attribute__((thiscall)) *WgcCleanupThunkFn)(void *);
 #define MAPPING_STATUS_VERIFY_FAILED 107L
 #define MAPPING_STATUS_ROLLBACK_FAILED 108L
 
+#define ATMOSPHERE_STATUS_SIGNATURE_CHANGED 201L
+#define ATMOSPHERE_STATUS_PROTECT_FAILED 202L
+#define ATMOSPHERE_STATUS_FLUSH_FAILED 203L
+#define ATMOSPHERE_STATUS_RESTORE_FAILED 204L
+#define ATMOSPHERE_STATUS_ROLLBACK_FAILED 205L
+
 #define MAX_HIDDEN_WINDOWS 16U
 
 
@@ -95,6 +106,41 @@ static HiddenWindow g_hidden_windows[MAX_HIDDEN_WINDOWS];
 static unsigned int g_hidden_window_count = 0;
 static int g_mapping_mask_active = 0;
 static DWORD g_mapping_original_protection = 0;
+static int g_atmosphere_owner_active = 0;
+static unsigned char g_atmosphere_call[5];
+/* Referenced by the x86 tail jump below, outside the compiler's C analysis. */
+static uintptr_t g_atmosphere_update_target __attribute__((used)) = 0;
+
+static const unsigned char ENVIRO_TICK_SIGNATURE[] = {
+	0x55, 0x8b, 0xec, 0x83, 0xec, 0x0c, 0x56, 0x8b,
+	0xf1, 0x8b, 0x86, 0x14, 0x05, 0x00, 0x00
+};
+
+/* ESI is the live EnviroMinder. Its settings dirty flag gates this call;
+ * ECX is DeferredPipeline::AtmosphereSupport[+0x24]. The suffix clears the
+ * same live settings flag only after the update returns.
+ */
+static const unsigned char ATMOSPHERE_TICK_SIGNATURE[] = {
+	0x8b, 0x86, 0x10, 0x05, 0x00, 0x00, 0x80, 0xb8,
+	0xf4, 0x00, 0x00, 0x00, 0x00, 0x74, 0x24, 0xe8,
+	0x04, 0xb6, 0xf0, 0xff, 0x8b, 0xc8, 0x8b, 0x10,
+	0xff, 0x92, 0x80, 0x00, 0x00, 0x00, 0x8b, 0x48,
+	0x24, 0xe8, 0xd2, 0xf0, 0x04, 0x00, 0x8b, 0x86,
+	0x10, 0x05, 0x00, 0x00, 0xc6, 0x80, 0xf4, 0x00,
+	0x00, 0x00, 0x00
+};
+
+/* The stock update takes only ECX, saves nonvolatile registers and reads
+ * its settings from [ECX+0x10]. No input value in EAX is consumed.
+ */
+static const unsigned char ATMOSPHERE_UPDATE_SIGNATURE[] = {
+	0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68, 0x48, 0x4f,
+	0x41, 0x01, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+	0x50, 0x83, 0xec, 0x14, 0x53, 0x56, 0x57, 0xa1,
+	0x70, 0x35, 0xce, 0x01, 0x33, 0xc5, 0x50, 0x8d,
+	0x45, 0xf4, 0x64, 0xa3, 0x00, 0x00, 0x00, 0x00,
+	0x8b, 0xf1, 0x89, 0x75, 0xf0, 0x8b, 0x5e, 0x10
+};
 
 static const unsigned char MAPPING_ORIGINAL_SIGNATURE[] = {
 	0xc6, 0x45, 0xfc, 0x06, 0x85, 0xf6, 0x74, 0x44,
@@ -493,6 +539,113 @@ static PyObject *restore_standard_gameplay_mask(PyObject *unused_self,
 }
 
 
+/* #1513 binds this borrowed pointer during EnviroMinder::load(), but a new
+ * environment can tick before load after the previous space was destroyed.
+ * Rebind at the consumer to the live owner already used by this exact tick.
+ * Never inspect or dereference the old pointer (it can be freed/reused).
+ *
+ * This replaces one CALL, not a function prologue. Tail-jumping preserves
+ * its return address, ECX thiscall argument, flags and nonvolatile registers.
+ * The extension stays loaded until process exit, so lobby rendering also
+ * retains the repair after Python battle teardown.
+ */
+static void __attribute__((naked, used)) atmosphere_owner_thunk(void)
+{
+	__asm__(
+		"movl 0x510(%esi), %eax\n\t"
+		"movl %eax, 0x10(%ecx)\n\t"
+		"jmp *_g_atmosphere_update_target\n\t"
+	);
+}
+
+
+static long install_atmosphere_owner_guard_internal(void)
+{
+	unsigned char expected[sizeof(ATMOSPHERE_TICK_SIGNATURE)];
+	unsigned char *site = g_image_base + RVA_ATMOSPHERE_UPDATE_CALL;
+	unsigned char *signature = g_image_base + RVA_ATMOSPHERE_TICK_SIGNATURE;
+	const unsigned int call_offset =
+		RVA_ATMOSPHERE_UPDATE_CALL - RVA_ATMOSPHERE_TICK_SIGNATURE;
+	DWORD original_protection = 0;
+	DWORD unused_protection = 0;
+	uint32_t displacement;
+	int flushed;
+	int restored;
+	long status;
+
+	CopyMemory(expected, ATMOSPHERE_TICK_SIGNATURE, sizeof(expected));
+	if (g_atmosphere_owner_active) {
+		CopyMemory(expected + call_offset, g_atmosphere_call, 5U);
+	}
+	if (!readable_region(signature, sizeof(expected)) ||
+			!bytes_equal(signature, expected, sizeof(expected)) ||
+			!readable_region(g_image_base + RVA_ENVIRO_TICK,
+				sizeof(ENVIRO_TICK_SIGNATURE)) ||
+			!bytes_equal(g_image_base + RVA_ENVIRO_TICK,
+				ENVIRO_TICK_SIGNATURE, sizeof(ENVIRO_TICK_SIGNATURE)) ||
+			!readable_region(g_image_base + RVA_ATMOSPHERE_UPDATE,
+				sizeof(ATMOSPHERE_UPDATE_SIGNATURE)) ||
+			!bytes_equal(g_image_base + RVA_ATMOSPHERE_UPDATE,
+				ATMOSPHERE_UPDATE_SIGNATURE,
+				sizeof(ATMOSPHERE_UPDATE_SIGNATURE))) {
+		return ATMOSPHERE_STATUS_SIGNATURE_CHANGED;
+	}
+	if (g_atmosphere_owner_active) {
+		return 0;
+	}
+	/* Installed by the client Python main thread before offline callbacks.
+	 * That thread also owns the native tick, so it cannot execute a partly
+	 * written CALL. No executable file on disk is modified.
+	 */
+	g_atmosphere_update_target =
+		(uintptr_t)(g_image_base + RVA_ATMOSPHERE_UPDATE);
+	g_atmosphere_call[0] = 0xe8U;
+	displacement = (uint32_t)((uintptr_t)atmosphere_owner_thunk -
+		(uintptr_t)(site + 5U));
+	CopyMemory(g_atmosphere_call + 1, &displacement, sizeof(displacement));
+	if (!VirtualProtect(site, 5U, PAGE_EXECUTE_READWRITE,
+			&original_protection)) {
+		return ATMOSPHERE_STATUS_PROTECT_FAILED;
+	}
+	CopyMemory(site, g_atmosphere_call, 5U);
+	g_atmosphere_owner_active = 1;
+	flushed = FlushInstructionCache(GetCurrentProcess(), site, 5U) != 0;
+	restored = VirtualProtect(site, 5U, original_protection,
+		&unused_protection) != 0;
+	if (flushed && restored) {
+		return 0;
+	}
+	status = flushed ? ATMOSPHERE_STATUS_RESTORE_FAILED :
+		ATMOSPHERE_STATUS_FLUSH_FAILED;
+	/* Roll back completely before reporting a recoverable installation error.
+	 * If Windows refuses rollback, leave the live thunk/target allocated and
+	 * report that distinct failure; never leave a CALL into released code.
+	 */
+	if (!VirtualProtect(site, 5U, PAGE_EXECUTE_READWRITE,
+			&unused_protection)) {
+		return ATMOSPHERE_STATUS_ROLLBACK_FAILED;
+	}
+	CopyMemory(site, ATMOSPHERE_TICK_SIGNATURE + call_offset, 5U);
+	flushed = FlushInstructionCache(GetCurrentProcess(), site, 5U) != 0;
+	restored = VirtualProtect(site, 5U, original_protection,
+		&unused_protection) != 0;
+	if (!flushed || !restored) {
+		return ATMOSPHERE_STATUS_ROLLBACK_FAILED;
+	}
+	g_atmosphere_owner_active = 0;
+	return status;
+}
+
+
+static PyObject *install_atmosphere_owner_guard(PyObject *unused_self,
+		PyObject *unused_args)
+{
+	(void)unused_self;
+	(void)unused_args;
+	return python_int(install_atmosphere_owner_guard_internal());
+}
+
+
 static int hidden_window_index(HWND handle)
 {
 	unsigned int index;
@@ -626,6 +779,11 @@ static PyObject *show_process_windows(PyObject *unused_self,
 
 
 static PyMethodDef MODULE_METHODS[] = {
+	{
+		"install_atmosphere_owner_guard", install_atmosphere_owner_guard,
+		METH_NOARGS,
+		"Bind each #1513 atmosphere update to its live environment owner."
+	},
 	{
 		"release_client_guard", release_client_guard, METH_NOARGS,
 		"Run #1513's complete WGC teardown for this client process."

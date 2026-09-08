@@ -47,7 +47,7 @@ _ZH = {
     'Same tier': u'同级',
     'Tier -1 / 0': u'低一级 / 同级',
     'Tier 0 / +1': u'同级 / 高一级',
-    'Tier -1 / +2': u'低一级 / 高两级',
+    'Tier -1 / +1': u'低一级 / 高一级',
     'Unknown': u'未知',
     'BOT TIER: %s%s': u'电脑等级：%s%s',
     'BOT SKILL: %s%s': u'电脑水平：%s%s',

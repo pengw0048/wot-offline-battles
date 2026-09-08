@@ -100,6 +100,28 @@ class VehiclePhysicsDescriptorTests(unittest.TestCase):
 
 class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
 
+    def test_suspension_contacts_share_the_collision_ypr_transform(self):
+        from gui.mods.offline_lan_0922 import tank_collision
+        point = {'x': 1.2, 'y': 0.4, 'z': -2.0}
+        for pitch, roll in ((0.5, 0.3), (1.2, -0.8), (-0.9, 2.0)):
+            axes = tank_collision.pose_axes(0.0, pitch, roll)
+            expected = tuple(sum(point[key] * axes[i][j]
+                                 for i, key in enumerate(('x', 'y', 'z')))
+                             for j in range(3))
+            actual = vehicle_physics.suspension_point_offset(point, pitch, roll)
+            for left, right in zip(expected, actual):
+                self.assertAlmostEqual(left, right, places=12)
+            state = {'height': 3.0, 'pitch': pitch, 'roll': roll}
+            gradients = vehicle_physics._rigid_point_height_gradients(state, point)
+            for index, key in enumerate(('pitch', 'roll')):
+                plus, minus = dict(state), dict(state)
+                plus[key] += 1.0e-6
+                minus[key] -= 1.0e-6
+                derivative = (vehicle_physics._rigid_point_height(plus, point) -
+                              vehicle_physics._rigid_point_height(minus, point)) / 2.0e-6
+                self.assertAlmostEqual(gradients[index], derivative, places=7)
+
+
     @staticmethod
     def _descriptor():
         chassis_name = 'trial-chassis'

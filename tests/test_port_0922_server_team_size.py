@@ -105,10 +105,10 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertIsNone(error)
 
         self.assertEqual((True, None), state.set_bot_tier_mode(
-            host.player_id, 'minus1_plus2'))
-        self.assertEqual('minus1_plus2', state.bot_tier_mode)
+            host.player_id, 'minus1_plus1'))
+        self.assertEqual('minus1_plus1', state.bot_tier_mode)
         self.assertEqual(
-            'minus1_plus2', state.lobby_message()['bot_tier_mode'])
+            'minus1_plus1', state.lobby_message()['bot_tier_mode'])
 
     def test_guest_cannot_select_a_bot_tier_preset(self):
         state = BattleState()

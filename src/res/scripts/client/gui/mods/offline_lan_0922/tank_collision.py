@@ -34,6 +34,8 @@ POSITION_SLOP = 0.01
 RAM_CONTACT_POINT_SLOP = 0.75
 POSITION_PERCENT = 0.95
 CONTACT_BROADPHASE_PADDING = 0.25
+# A chassis-end straddle may only stop a descent, never lift the hull.
+SUPPORT_STRADDLE_RISE = 0.12
 _SHAPE_CACHE = {}
 SPATIAL_CELL_SIZE = 24.0
 
@@ -252,6 +254,70 @@ def support_rise_is_obstacle(body_y, support_y, maximum_climb, slop=0.02,
         return rise > limit
     except (TypeError, ValueError):
         return False
+
+
+def chassis_span_offsets(yaw, half_width, half_length):
+    """Return the four chassis-end XZ offsets that can straddle a gap.
+
+    The pairs are ordered ``(front, rear)`` then ``(right, left)`` so a caller
+    can test each chassis axis independently.
+    """
+    sine = math.sin(float(yaw))
+    cosine = math.cos(float(yaw))
+    length = max(0.0, float(half_length))
+    width = max(0.0, float(half_width))
+    return (
+        ((sine * length, cosine * length),
+         (-sine * length, -cosine * length)),
+        ((cosine * width, -sine * width),
+         (-cosine * width, sine * width)),
+    )
+
+
+def straddled_support(body_y, follow_gap, axis_samples,
+                      maximum_rise=SUPPORT_STRADDLE_RISE):
+    """Return the support of a hull spanning a gap under its centre column.
+
+    A tracked hull rests on its chassis ends, not on one ray at its centre.
+    When the centre column drops out of the follow envelope but both ends of a
+    chassis axis are still inside it, the hull is bridging a trench, crater or
+    slot narrower than itself and must not descend into it.  One supported end
+    is a cliff edge, not a bridge, so it keeps the existing fall.
+
+    ``axis_samples`` is the sequence returned for
+    :func:`chassis_span_offsets`, each entry a ``(first, second)`` pair of
+    sampled ground heights or ``None``.  This law may only stop a descent, so
+    an end higher than ``maximum_rise`` above the body is not straddle
+    evidence: climbing a step stays the centre column's own gated decision and
+    must not become an unreviewable lift from a side ray on a wall top.
+    """
+    if body_y is None:
+        return None
+    try:
+        body_y = float(body_y)
+        gap = max(0.0, float(follow_gap))
+        rise = max(0.0, float(maximum_rise))
+    except (TypeError, ValueError):
+        return None
+    support = None
+    for pair in axis_samples:
+        heights = []
+        for value in pair:
+            if value is None:
+                break
+            try:
+                height = float(value)
+            except (TypeError, ValueError):
+                break
+            if not -gap <= height - body_y <= rise:
+                break
+            heights.append(height)
+        if len(heights) != 2:
+            continue
+        candidate = max(heights)
+        if support is None or candidate > support:
+            support = candidate
+    return support
 
 
 def _axes(yaw):

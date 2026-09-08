@@ -553,6 +553,12 @@ def _invalidate_chunk_native_names_1513(chunk_id):
 		for key in list(cache):
 			if key[1] == chunk_id:
 				cache.pop(key, None)
+	# Placement proof belongs to this streaming lifetime too: a reload can
+	# reuse the same native slot count with a different item matrix.
+	unresolved = globals().get('g_offh_destr_unresolved_obstacles', {})
+	for identity in list(unresolved):
+		if identity[0] == chunk_id:
+			unresolved.pop(identity, None)
 	_release_item_name_query_focus_1513_for_chunk(chunk_id)
 
 
@@ -1105,6 +1111,8 @@ def _clear_runtime_registry(preserve_spatial_batch=False):
 			'g_offh_destr_catalog_published',
 			'g_offh_destr_catalog_publish_pending',
 			'g_offh_destr_falling_active', 'g_offh_destr_ground_skips',
+			'g_offh_destr_unresolved_obstacles',
+			'g_offh_destr_unresolved_logs',
 			'g_offh_destr_broken_cache',
 			'g_offh_destr_item_names',
 			'g_offh_destr_native_name_lists',
@@ -1281,9 +1289,15 @@ def set_catalog(catalog):
 			raise ValueError('ambiguous catalog has no locators')
 		if (kind == 'structure' or len(boxes) == 1) and locators:
 			raise ValueError('destructible catalog has unexpected locators')
+		retained_boxes = raw.get('retained_collision_boxes', ())
+		if (not isinstance(retained_boxes, (list, tuple)) or
+				any(type(index) not in _INTEGER_TYPES or
+					index < 0 or index >= len(boxes) for index in retained_boxes)):
+			raise ValueError('destructible retained collision boxes are invalid')
 		prepared[normalized] = {
 			'filename': filename, 'kind': kind, 'boxes': tuple(boxes),
 			'locators': locators,
+			'retained_collision_boxes': frozenset(retained_boxes),
 		}
 	try:
 		catalog_version = int(catalog.get('version', 1))
@@ -2291,24 +2305,147 @@ def _catalog_shot_intersection(spaceID, start, end, maximum_distance=None):
 	}
 
 
+def _confirmed_unresolved_obstacle_1513(spaceID, identity, vehicle_box=None):
+	"""Return exact baked OBBs for a streamed but unidentified model.
+
+	Registration proves *identity*: which descriptor the item uses, whether it
+	may be destroyed and which native event names it.  Blocking a hull needs
+	only *placement*, and the pinned catalog already owns that.  When the chunk
+	is streamed and the live item matrix still reproduces the pinned locator
+	signature, the model is standing exactly where the catalog says, so it must
+	keep stopping a hull even while its identity stays unresolved.  Anything
+	else - a chunk that is not streamed, a live matrix that contradicts the
+	catalog, or a falling body that has left its authored pose - returns no box
+	rather than inventing a wall.
+	"""
+	chunk_id, item_index = identity
+	catalog = _destructible_catalog
+	if catalog is None:
+		return ()
+	baked = catalog.get('baked_instances', {}).get(identity)
+	if baked is None or baked['kind'] == 'falling' or not baked['boxes']:
+		return ()
+	def report_skip(reason):
+		key = (baked['descriptor_filename'], reason.split('_')[0])
+		logged = globals().get('g_offh_destr_unresolved_logs', ())
+		if key in logged or len(logged) >= _ISOLATION_LOG_TYPE_LIMIT:
+			return
+		if vehicle_box is not None and any(
+				_catalog_intersections(baked['boxes'], vehicle_box)):
+			_log_unresolved_obstacle_1513(
+				chunk_id, item_index, baked, reason=reason)
+	cache = globals().setdefault('g_offh_destr_unresolved_obstacles', {})
+	import AreaDestructibles
+	import BigWorld
+	import Math
+	mgr = getattr(AreaDestructibles, 'g_destructiblesManager', None)
+	try:
+		manager_space = None if mgr is None else mgr.getSpaceID()
+	except Exception:
+		return ()
+	if mgr is None or manager_space != spaceID:
+		report_skip('manager_space')
+		return ()
+	native_count = _native_chunk_destructible_count_1513(mgr, chunk_id)
+	if native_count is None or item_index >= native_count:
+		# The chunk is no longer streamed, so neither is its geometry.
+		cache.pop(identity, None)
+		report_skip('native_count_%r' % native_count)
+		return ()
+	entry = cache.get(identity)
+	if entry is not None and entry[0] == native_count:
+		if not entry[1]:
+			report_skip('cached_placement_unproved')
+		return entry[1]
+	try:
+		chunk_matrix = observed_call(
+			'native.destructible.chunk_matrix', BigWorld.wg_getChunkMatrix,
+			spaceID, chunk_id)
+		chunk_translation = getattr(chunk_matrix, 'translation', None)
+		if chunk_translation is None:
+			report_skip('chunk_translation_missing')
+			return ()
+		matrix = Math.Matrix(observed_call(
+			'native.destructible.item_matrix',
+			BigWorld.wg_getDestructibleMatrix, spaceID, chunk_id, item_index))
+		signature, unused_located = _catalog_instance_for_matrix_1513(
+			matrix, chunk_translation, Math)
+	except Exception:
+		# A placement query that cannot answer is not evidence of a wall.
+		report_skip('native_placement_query_failed')
+		return ()
+	boxes = baked['boxes'] if signature == baked['signature'] else ()
+	cache[identity] = (native_count, boxes)
+	if boxes:
+		_log_unresolved_obstacle_1513(chunk_id, item_index, baked)
+	else:
+		report_skip('matrix_mismatch_live_%r_baked_%r' % (
+			signature, baked['signature']))
+	return boxes
+
+
+def _log_unresolved_obstacle_1513(chunk_id, item_index, baked, reason=None):
+	"""Name the first unidentified blocking model of each map resource."""
+	logged = globals().setdefault('g_offh_destr_unresolved_logs', set())
+	filename = baked['descriptor_filename']
+	key = filename if reason is None else (filename, reason.split('_')[0])
+	if key in logged or len(logged) >= _ISOLATION_LOG_TYPE_LIMIT:
+		return
+	logged.add(key)
+	try:
+		import sys
+		sys.stdout.write(
+			'[Offline LAN 0.9.22] DESTR %s unidentified model '
+			'chunk=%s item=%s kind=%s name=%s map=%s '
+			'repeats=suppressed_for_battle detail=%s\n' % (
+				'blocking' if reason is None else 'unproved',
+				chunk_id, item_index, baked['kind'], filename,
+				(_destructible_catalog or {}).get('map') or 'unknown',
+				reason or 'live_placement_confirmed'))
+	except Exception:
+		# Runtime handling is authoritative; the log stream is observational.
+		pass
+
+
 @_batched_spatial_mutations_1513
 @observed('destructible.stream_motion')
 def _stream_baked_motion_instances_1513(spaceID, vehicle_box):
-	"""Live-validate catalog wires covering one exact vehicle sweep."""
+	"""Live-validate catalog wires covering one exact vehicle sweep.
+
+	Returns the world boxes of every streamed model the sweep reaches that
+	registration could not identify.  Those models are solid in the engine but
+	invisible to the registered-candidate path, and three hull lanes at three
+	fixed heights can pass straight through an open frame such as #1513's
+	girder flatcar, so the caller must still stop the hull on them.
+	"""
 	catalog = _destructible_catalog or {}
 	if not catalog.get('has_instance_index'):
-		return
+		return ()
 	identities = set()
 	for bin_key in _baked_bin_keys_for_bounds_1513(
 			*_box_xz_bounds(vehicle_box)):
 		identities.update(
 			catalog.get('baked_shot_bins', {}).get(bin_key, ()))
 	instances = globals().get('g_offh_destr_instances', {})
+	unresolved = []
+	cache = globals().get('g_offh_destr_unresolved_obstacles')
 	for identity in sorted(identities):
 		combat_count('destructible_stream_candidates')
-		if identity not in instances:
-			combat_count('destructible_stream_missing')
-			_stream_baked_shot_instance_1513(spaceID, identity)
+		if identity in instances:
+			if cache is not None:
+				cache.pop(identity, None)
+			continue
+		combat_count('destructible_stream_missing')
+		if _stream_baked_shot_instance_1513(spaceID, identity) is not None:
+			if cache is not None:
+				cache.pop(identity, None)
+			continue
+		boxes = _confirmed_unresolved_obstacle_1513(
+			spaceID, identity, vehicle_box=vehicle_box)
+		if boxes:
+			combat_count('destructible_stream_unidentified')
+			unresolved.append((identity, boxes))
+	return tuple(unresolved)
 
 
 def _vehicle_swept_box(pos, yaw, vel, bbox, travel_reach=None,
@@ -2947,6 +3084,20 @@ def _catalog_candidate_on_ray_1513(
 	return None
 
 
+def _catalog_retains_collision_1513(candidate):
+	"""Whether this exact module has a solid compiled destroyed replacement."""
+	record = (_destructible_catalog or {}).get('resources', {}).get(
+		_normalized_filename(candidate[3]))
+	if not record or not record.get('retained_collision_boxes'):
+		return False
+	if record['kind'] == 'structure':
+		return any(record['boxes'][index][6] == candidate[2]
+			for index in record['retained_collision_boxes'])
+	instance = globals().get('g_offh_destr_instances', {}).get(candidate[:2], {})
+	index = instance.get('box_index', 0 if len(record['boxes']) == 1 else None)
+	return index in record['retained_collision_boxes']
+
+
 def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 		collision, vel, td, recast_budget=None,
 		require_pending_first=False, allow_kinetic_first=False,
@@ -2990,6 +3141,10 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			prefer_destroyed=(require_pending_first and candidate_index == 0))
 		if candidate is None:
 			return 'pending_hard' if pending_contact else False
+		# Damage can replace a railway vehicle with a still-solid wreck.  Its
+		# native hit must never be skipped through the old whole-item OBB.
+		if _catalog_retains_collision_1513(candidate):
+			return 'pending_hard' if pending_contact else False
 		# #1513 ``Vehicle._isDestructibleMayBeBroken`` returns True as soon as the
 		# chunk controller reports the item broken, whatever the vehicle speed and
 		# whatever the hide callback still draws.  A broken skin therefore never
@@ -3030,9 +3185,18 @@ def _catalog_soft_static_path(spaceID, segment_start, segment_end,
 			current_start, segment_end, hit_point)
 		if exit_distance is None:
 			return 'pending_hard' if pending_contact else False
+		# The interval is clipped to this segment.  Decide whether any ray
+		# remains before adding the epsilon to a native float32 position:
+		# rounding can overshoot the endpoint by more than epsilon and turn
+		# a length-based check into a backwards recast through the same skin.
+		if float(exit_distance) >= (segment_end - current_start).length:
+			return 'kinetic' if kinetic_contact else True
 		next_start = current_start + direction.scale(
 			float(exit_distance) + _SHOT_RAY_EPSILON)
-		if (segment_end - next_start).length <= _SHOT_RAY_EPSILON:
+		if _vector_dot(
+				(segment_end.x - next_start.x, segment_end.y - next_start.y,
+				 segment_end.z - next_start.z),
+				(direction.x, direction.y, direction.z)) <= _SHOT_RAY_EPSILON:
 			return 'kinetic' if kinetic_contact else True
 		if recast_budget is not None:
 			if not recast_budget or int(recast_budget[0]) <= 0:
@@ -3095,6 +3259,11 @@ def _broken_collision_filter(members, accepted_trees=()):
 			identity = (int(hit[3]), int(hit[2]))
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			# #1513's destroyed-model materials are new geometry, not the
+			# delayed original skin covered by an item-wide destruction key.
+			return True
 		if identity not in accepted_trees and (
 				identity + (hit[0],)) not in broken and (
 				identity + (None,)) not in broken:
@@ -3138,15 +3307,30 @@ def _live_broken_collision_filter_1513(members, accepted_trees=()):
 	member_ids = frozenset((int(chunk_id), int(item_index))
 		for chunk_id, item_index in members)
 
+	def keep_native_surface(hit, identity):
+		if _DIAGNOSTICS_ENABLED:
+			now = _diagnostic_time_1513()
+			pending = tuple(sorted(key for key, deadline in
+				globals().get('g_offh_destr_pending', {}).items()
+				if key[:2] in member_ids and now < deadline))
+			if pending:
+				_diagnostic_contact_1513(
+					'native_motion_keep', identity[0], identity[1],
+					fields=(('hit', tuple(hit)), ('pending', pending[:8])), now=now)
+		return True
+
 	def reject_broken_skin(*hit):
 		try:
 			identity = (int(hit[3]), int(hit[2]))
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			return keep_native_surface(hit, identity)
 		if identity in accepted_trees:
 			accepted = True
 		elif identity not in member_ids or not callable(destroyed_keys):
-			return True
+			return keep_native_surface(hit, identity)
 		else:
 			mat_kind = hit[0]
 			predicted = globals().get('g_offh_destr_speculative', set())
@@ -3156,7 +3340,7 @@ def _live_broken_collision_filter_1513(members, accepted_trees=()):
 			if (not accepted and
 					identity + (mat_kind,) not in predicted and
 					identity + (None,) not in predicted):
-				return True
+				return keep_native_surface(hit, identity)
 		globals()['g_offh_destr_ground_skips'] = globals().get(
 			'g_offh_destr_ground_skips', 0) + 1
 		return False
@@ -3236,9 +3420,22 @@ def _catalog_pending_at_hull(pos, yaw, vel, td, now, dt=0.04,
 		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
 		motion_yaw=motion_yaw)
 	pending = globals().get('g_offh_destr_pending', {})
+	ready = getattr(_get_destr_authority(), 'contact_collision_ready', None)
 	for candidate in _catalog_contact_candidates(vehicle_box):
 		deadline = pending.get((candidate[0], candidate[1], candidate[2]))
-		if deadline is not None and float(now) < float(deadline):
+		if (deadline is not None and float(now) < float(deadline) and
+				not (callable(ready) and ready(*candidate[:3]))):
+			return True
+	return False
+
+
+def _unidentified_hull_contact_1513(unresolved, vehicle_box, authority):
+	"""Return whether an unidentified streamed model still fills the sweep."""
+	for identity, boxes in unresolved:
+		chunk_id, item_index = identity
+		for world_box in _catalog_intersections(boxes, vehicle_box):
+			if authority.is_destroyed(chunk_id, item_index, world_box[2]):
+				continue
 			return True
 	return False
 
@@ -3250,10 +3447,22 @@ def _catalog_hull_contact(pos, yaw, vel, td, dt=0.04,
 	bbox = _vehicle_hull_bbox(td)
 	if _destructible_catalog is None or bbox is None:
 		return False
-	return bool(_catalog_contact_candidates(
-		_vehicle_swept_box(
-			pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
-			motion_yaw=motion_yaw)))
+	vehicle_box = _vehicle_swept_box(
+		pos, yaw, vel, bbox, _motion_travel_reach(vel, dt),
+		motion_yaw=motion_yaw)
+	if _catalog_contact_candidates(vehicle_box):
+		return True
+	# A receipt-reuse caller must not step past a model the full sweep already
+	# proved solid but unidentified.  Read only the confirmed placements that
+	# sweep cached; this guard adds no native query of its own.
+	cache = globals().get('g_offh_destr_unresolved_obstacles')
+	if not cache:
+		return False
+	instances = globals().get('g_offh_destr_instances', {})
+	return _unidentified_hull_contact_1513(
+		[(identity, entry[1]) for identity, entry in cache.items()
+		 if identity not in instances],
+		vehicle_box, _get_destr_authority())
 
 
 def _catalog_motion_result(status, token=None, accepted_now=False,
@@ -3318,9 +3527,14 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	# The visible player does not run the authority Bot scan that normally
 	# populates the live item registry.  Admit only checksum-pinned wires in the
 	# current hull bins through the same read-only native validation as shells.
-	_stream_baked_motion_instances_1513(spaceID, vehicle_box)
+	unresolved = _stream_baked_motion_instances_1513(spaceID, vehicle_box)
 	candidates = _catalog_contact_candidates(vehicle_box)
-	if not candidates:
+	# An unidentified model is real geometry this sweep cannot name, destroy or
+	# publish.  #1513 keeps it solid, so the hull stops on it until a later tick
+	# resolves its identity and the ordinary crush law can decide.
+	unidentified = bool(unresolved) and _unidentified_hull_contact_1513(
+		unresolved, vehicle_box, auth)
+	if not candidates and not unidentified:
 		return _catalog_motion_result(
 			'pending' if publish_failures else 'clear', publish_failures,
 			return_status=return_status, return_detail=return_detail,
@@ -3335,13 +3549,15 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		pos, yaw, bbox, travel=float(vel) * max(0.0, float(dt)),
 		motion_yaw=motion_yaw)
 		if kinetic_speed is not None else None)
-	blocked = False
+	blocked = bool(unidentified)
 	crushed = False
 	kinetic = False
 	approach = False
 	publication_pending = bool(publish_failures)
 	exact_token = set(publish_failures)
 	contact_kinds = set(publish_kinds)
+	if unidentified:
+		contact_kinds.add('unidentified')
 	commit_candidates = []
 
 	for identity in sorted(grouped):
@@ -3370,6 +3586,13 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 					note_destroyed(
 						'module' if mat_kind is not None else 'fragile',
 						chunk_id, item_index, mat_kind, now)
+				if (_catalog_retains_collision_1513(candidate) and
+						float(now) < globals().get('g_offh_destr_pending', {}).get(key, 0.0) and
+						not (callable(getattr(auth, 'contact_collision_ready', None)) and
+							auth.contact_collision_ready(*key))):
+					# Keep outside the old body until the native replacement is
+					# installed. After that, its actual BSP owns motion/support.
+					blocked = True
 				crushed = True
 				if contact_candidate:
 					exact_token.add(key)
@@ -3385,6 +3608,10 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 			chunk_id, item_index, mat_kind, unused_filename, kind = (
 				candidate[:5])
 			key = (chunk_id, item_index, mat_kind)
+			if _catalog_retains_collision_1513(candidate):
+				# A legal cosmetic break does not admit translation through the
+				# replacement body during the native hiding callback window.
+				blocked = True
 			mat_info = _synthetic_mat_info(candidate, Math)
 			physical_crushable = _stock_crushable_1513(
 				mat_info, vel, td, candidate[5])
@@ -5968,6 +6195,9 @@ def _transparent_shot_surface_filter_1513(ignored_surfaces):
 			identity = int(hit[3]), int(hit[2])
 		except (IndexError, TypeError, ValueError, OverflowError):
 			return True
+		if (isinstance(hit[0], _INTEGER_TYPES) and
+				87 <= hit[0] <= 100):
+			return True
 		if identity + (None,) in ignored_surfaces:
 			return False
 		try:
@@ -6017,6 +6247,8 @@ def _broken_shot_surface_key_1513(chunk_id, item_index, mat_kind):
 	``None`` material.  A structure is accepted per module, so only the exact
 	broken module may be hidden while its siblings keep stopping the shell.
 	"""
+	if mat_kind is not None and 87 <= mat_kind <= 100:
+		return None
 	authority = _get_destr_authority()
 	identity = int(chunk_id), int(item_index)
 	if authority.is_destroyed(identity[0], identity[1], None):
@@ -6052,14 +6284,12 @@ def _native_item_scale_1513(measured, spaceID, chunk_id, item_index):
 def _tree_shoot_through_1513(measured, spaceID, decoded, shot):
 	"""Return ``(allowed, health)`` for one standing SpeedTree on a shell ray.
 
-	#1513 keeps trees under the same numeric destructible contract as every
-	other type.  ``destructibles.xml`` publishes one ``maxHpForShootingThrough``
-	and one ``projectilePiercingPowerReduction`` table for all of them, and
-	stock ``Vehicle._isDestructibleMayBeBroken`` runs a tree through the same
-	``scaledDestructibleHealth(itemScale, refHealth)`` branch it uses for
-	fragiles and falling atoms, including ``kineticDamageCorrection``, which
-	``DestructiblesCache.__readTree`` does supply.  The shell family is checked
-	first so HE and HEAT never pay for a native matrix query.
+	The local adapter applies the shared XML shooting-through threshold to
+	trees. Exact client data proves the numbers and health scaling, but the
+	stock Vehicle._isDestructibleMayBeBroken consumer is a vehicle-ram path,
+	not proof of the retail server's projectile policy for trees. This policy
+	still needs independent #1513 projectile evidence. HE/HEAT stop before
+	requesting a native item matrix.
 	"""
 	if _shot_kind_1513(shot) not in _SHOT_AP_KINDS_1513:
 		return False, None

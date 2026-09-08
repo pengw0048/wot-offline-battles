@@ -393,17 +393,26 @@ destructible, and HE explodes at that point. Stock
 ARMOR_PIERCING/ARMOR_PIERCING_HE/ARMOR_PIERCING_CR family, so the split is the
 client's own set rather than a guess.
 
-`DESTR_TYPE_TREE` now follows the same numeric law. `destructibles.xml`
-publishes one `maxHpForShootingThrough` and one
-`projectilePiercingPowerReduction` table for every destructible type, and stock
-`Vehicle._isDestructibleMayBeBroken` runs a tree through the same
-non-structure branch it uses for fragiles and falling atoms, including
-`kineticDamageCorrection` -- which `DestructiblesCache.__readTree` does supply
--- and the same `scaledDestructibleHealth(itemScale, refHealth)`. So a tree's
-reference health is scaled exactly like any other item's. The pinned tree table
-ranges from `3` for bushes and shrubs to `70` for large firs, and 303 of its
-498 entries exceed the cap, so most large trees now fell and then stop an AP
-shell while a small tree costs the flat 25 mm.
+The local `DESTR_TYPE_TREE` adapter currently applies the same numeric law.
+This is an implementation policy, not a proved retail tree-projectile contract.
+The shared XML proves the threshold and material values, and
+`DestructiblesCache.scaledDestructibleHealth` proves the scale calculation.
+However, `Vehicle._isDestructibleMayBeBroken` consumes vehicle speed and mass:
+it is a vehicle-ram path and cannot establish which tree health the original
+server uses for shell traversal. Large-tree AP behavior therefore still needs
+independent #1513 projectile evidence; the presence of a shared XML table does
+not prove that every tree must stop AP.
+
+The official [8.10 release notes](https://worldoftanks.eu/uk/content/docs/release_notes/release-notes-810/)
+establish AP/APCR traversal through some small objects with penetration loss.
+The [1.13 release notes](https://worldoftanks.com/en/content/docs/release_notes/update-1-13-list-of-changes/)
+introduce non-SPG HE traversal through destructible objects. Stopping an old HE
+shell does not preclude explosion damage to nearby scenery. The exact #1513
+`AreaDestructibles.DestructiblesManager.onProjectileExploded` receives an
+already selected destruction list; it does not implement the server's radius,
+occlusion or damage selection. The local projectile path currently destroys
+directly hit scenery but lacks authoritative HE area destruction of nearby
+scenery, so tree-root splash parity is not established.
 
 Trees own no catalog OBB, so neither their item scale nor their exit distance
 can come from the baked catalog. Both come from the native item:
@@ -594,6 +603,22 @@ budget alignment is retried after streaming rather than guessed. Direct
 material-hit and shell paths cannot bypass that admission with a globally
 known same-kind resource; a structure hit must also name a material module
 present in that exact admitted instance.
+
+Damage does not imply removal of collision. The compiled BSMO destroyed-model
+reference identifies modules with a solid replacement BSP; map catalogs retain
+that per-box fact. Such contacts cannot skip the original whole-item OBB, and
+destroyed-model materials 87–100 remain eligible for native motion, support and
+shell queries even after an item-wide destruction receipt. After replacement,
+the native BSP, rather than the original bounding box, owns collision.
+
+For physical fragile/module crushing, the exact stock manager starts effects
+before scheduling its collision replacement after 0.2 seconds. The adapter
+completes only the matching current-space bound callback immediately, then
+cancels its scheduled copy. Exact callback arguments, module identity and
+non-shot/non-Havok guards are required; failure preserves the scheduled owner.
+Projectile timing and falling-body animation retain their stock lifecycle.
+Pinned-bytecode ABI checks and focused tests cover these contracts; exact
+Windows playtesting remains necessary for effect continuity and contact feel.
 
 The matrix boundary is contained at the scope of its evidence. A thrown chunk-
 matrix query isolates that chunk, while a successfully returned matrix whose
@@ -1047,6 +1072,50 @@ OfflineMapCreator.destroy()
   -> wait for Lobby + HangarSpace + vehicle model
   -> if local player is room host, open the next TrainingSettingsWindow
 ```
+
+### Atmosphere ownership across space replacement
+
+The visible-client reports `20260906-024450-e765af0dd37c` and
+`20260906-154953-e243bc3cc617` contain the same native failure after lobby
+Account restoration, before the hangar geometry finishes loading. The latter
+full termination dump retains the original exception context and heap:
+`AtmosphereSupport[+0x24][+0x10]` still points to `0x453BE640`, while the
+environment being ticked owns settings at `0x44BCDA40`. The stale block is
+interpreted as a texture-name string with size `0x1F726428`, producing a
+527,246,376-byte `memcpy` and an access violation. This is a stale-owner
+failure, not evidence of an ordinary allocation failure.
+
+In the exact EXE (image base `0x00400000`), `0x00A35DC2` binds the atmosphere
+settings during environment load. The destructor frees its settings at
+`0x00A34B65`. A new environment has dirty settings before load completes;
+its tick at `0x00A363F8` tests `[ESI+0x510]+0xF4`, but the atmosphere update
+at `0x00A854F0` consumes the renderer's separate borrowed pointer. Deferring
+Account restoration by a callback does not establish this pointer's validity.
+Stock `OfflineMapCreator.destroy()` already resets the camera before clearing
+spaces; our retained-space cleanup also calls space APIs, so the absence of
+Python frames in this crash does not exclude the offline transition as a
+trigger.
+
+The existing exact-build bridge replaces only the call at `0x00A36419` with
+a process-lived x86 thunk. Before tail-jumping to the stock update, it copies
+the current tick's `[ESI+0x510]` into `[ECX+0x10]`. It never dereferences the
+old pointer, does not fabricate settings, and leaves the stock material update
+and subsequent dirty-flag clear in control. The caller prologue, complete
+dirty-test/call/clear sequence, and callee prologue are byte-validated in
+addition to the existing PE identity gate. The thunk preserves the thiscall
+stack, ECX, flags and nonvolatile registers; EAX is scratch at this seam.
+Repeated installation verifies the existing patch. Protection/cache failures
+roll back the call and report a distinct status. Installation precedes offline
+callbacks on the native tick's main thread. The patch and its extension remain
+alive through lobby transitions until process exit; the EXE on disk is unchanged.
+
+`tests/native_atmosphere_owner_guard.c` executes the production installer and
+thunk in a 32-bit Windows process: an inaccessible old owner faults without
+the patch and is untouched with it, including replacement and already-current
+owners. It also checks calling convention, dirty clearing, signature refusal,
+repeat installation and injected protection/cache failures. The native harness
+and package checks do not substitute for repeated battle-to-hangar acceptance
+on the exact Windows game client.
 
 ## Battle-result presentation
 

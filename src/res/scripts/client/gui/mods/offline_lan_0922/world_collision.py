@@ -6,7 +6,7 @@ from gui.mods.offline_lan_0922.worker_diagnostics import (
 
 from gui.mods.offline_lan_0922.destructibles_sensor import (
 	_catalog_soft_static_path, _diagnostic_static_recast_1513,
-	_try_destroy_solid_hit, _vehicle_hull_bbox,
+	_try_destroy_solid_hit, _vehicle_hull_bbox, _descriptor_value,
 	ground_collision_filter, horizontal_collision_filter,
 	prepare_horizontal_collision_filter)
 
@@ -145,6 +145,24 @@ def _hit_matches_exact_ground_top(spaceID, Math, pos, collision, look,
 		return False
 
 
+def _vehicle_motion_extents(descriptor):
+	"""Cover the chassis and mounted hull instead of only the narrow armour."""
+	hull_box = _vehicle_hull_bbox(descriptor)
+	if hull_box is None:
+		return None
+	chassis = _descriptor_value(descriptor, 'chassis')
+	tester = _descriptor_value(chassis, 'hitTester')
+	chassis_box = getattr(tester, 'bbox', None)
+	hull_position = _descriptor_value(chassis, 'hullPosition')
+	if chassis_box is None or hull_position is None:
+		raise RuntimeError('#1513 chassis collision descriptor is unavailable')
+	lower = tuple(min(float(chassis_box[0][i]),
+		float(hull_box[0][i]) + float(hull_position[i])) for i in (0, 2))
+	upper = tuple(max(float(chassis_box[1][i]),
+		float(hull_box[1][i]) + float(hull_position[i])) for i in (0, 2))
+	return max(abs(lower[0]), abs(upper[0])), -lower[1], upper[1]
+
+
 def _hull_pose_y(pitch, roll):
 	"""Return local right/up/forward contributions to world height."""
 	import math
@@ -230,15 +248,15 @@ def _ground_top(spaceID, Math, pos, x, z, look, ground_plane=None,
 @observed('motion.ground_ahead')
 def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		footprint_x, footprint_z, end_x, end_z, look, ground_plane=None,
-		collision_filter=_UNPREPARED_COLLISION_FILTER):
-	"""Conservatively extend the ground observed inside the hull footprint.
+		collision_filter=_UNPREPARED_COLLISION_FILTER, descending=False,
+		support_start_y=None):
+	"""Extend only support witnessed under the current hull footprint.
 
-	A downward ``wg_collideSegment`` returns the first surface, which can be a
-	wall or roof rather than terrain.  The look-ahead endpoint can also lie past
-	a cliff and return no hit.  Both shapes must not lift a pitched lane over the
-	obstacle.  The lane start and its footprint edge are still under the current
-	hull, so extend that witnessed ground trend and accept the endpoint top only
-	when it is lower.
+	A lower floor beyond a crest is not occupied by this horizontal sweep.
+	Pulling its endpoint down to that floor creates an artificial diagonal
+	through the cliff top and blocks departure in both travel directions.
+	The under-hull trend still caps a nose-up ray against real walls ahead;
+	vertical integration owns contact with a lower landing surface.
 	"""
 	import math
 	start_ground = _ground_top(
@@ -247,9 +265,25 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 	footprint_ground = _ground_top(
 		spaceID, Math, pos, footprint_x, footprint_z, look, ground_plane,
 		collision_filter)
-	end_ground = _ground_top(
-		spaceID, Math, pos, end_x, end_z, look, ground_plane,
-		collision_filter)
+	if descending and start_ground is not None and footprint_ground is not None:
+		if (support_start_y is not None and
+				float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
+			# The witness starts above its old support while leaving the crest.
+			# A floor below it cannot lower the occupied hull's collision ray.
+			return None
+		# A crest can already lie beneath the front of the footprint while
+		# the body is still supported behind it. A chord through that lower
+		# floor is outside the occupied hull. Confirm the middle of the
+		# support chord before allowing it to pull a descending ray down.
+		middle_ground = _ground_top(
+			spaceID, Math, pos, (start_x + footprint_x) * 0.5,
+			(start_z + footprint_z) * 0.5, look, ground_plane,
+			collision_filter)
+		if (middle_ground is None or
+				float(middle_ground) >
+				(float(start_ground) + float(footprint_ground)) * 0.5 +
+				_GROUND_HIT_EPSILON):
+			return None
 	try:
 		inside_length = math.sqrt(
 			(float(footprint_x) - float(start_x)) ** 2 +
@@ -262,15 +296,13 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 			extrapolated = (float(start_ground) +
 				(float(footprint_ground) - float(start_ground)) *
 				full_length / inside_length)
-			return (extrapolated if end_ground is None else
-				min(float(end_ground), extrapolated))
+			return extrapolated
 		inside_tops = [float(value) for value in (
 			start_ground, footprint_ground) if value is not None]
 		if inside_tops:
 			inside_top = min(inside_tops)
-			return (inside_top if end_ground is None else
-				min(float(end_ground), inside_top))
-		return None if end_ground is None else float(end_ground)
+			return inside_top
+		return None
 	except (TypeError, ValueError, OverflowError):
 		return None
 
@@ -287,7 +319,7 @@ def _posed_ray(Math, pos, x1, z1, x2, z2, local_start, local_end,
 	hull passed straight over a fully exposed 1.2 m wall.
 
 	``ground_ahead`` is a conservative continuation of the ground witnessed
-	inside the hull footprint, bounded by the native top under the endpoint.
+	inside the hull footprint.
 	The lane never ends higher than ``height`` above that estimate, and never
 	higher than the hull plane at its own leading edge, so the pose can only ever
 	lower this witness.
@@ -454,14 +486,9 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		hl_front = 3.5
 		hl_back = 3.5
 
-		bbox = _vehicle_hull_bbox(td)
-		if bbox is not None:
-			try:
-				hw = max(abs(bbox[0][0]), abs(bbox[1][0])) - 0.1
-				hl_back = abs(bbox[0][2])
-				hl_front = abs(bbox[1][2])
-			except (AttributeError, KeyError, TypeError, IndexError):
-				raise RuntimeError('#1513 hull hit tester bbox is invalid')
+		extents = _vehicle_motion_extents(td)
+		if extents is not None:
+			hw, hl_back, hl_front = extents
 
 		# Look-ahead beyond the hull. The old flat +2.0 m made an invisible
 		# wall 2 m before every obstacle, and DURING A FALL it saw the cliff
@@ -583,10 +610,13 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 				pose_y != (0.0, 1.0, 0.0) and
 				(abs(local_end[0] - ray_local_end[0]) > 1.0e-9 or
 				 abs(local_end[1] - ray_local_end[1]) > 1.0e-9))
-			# Only the pitch term lifts a lane along its own travel, so only
-			# a pitched lane samples the ground witnessed inside its footprint
-			# and at look-ahead.  A level or purely rolled hull keeps the
-			# shipped lane geometry and its exact ray count.
+			# Preserve continuous-slope wall coverage in either direction, but
+			# do not let a lower floor under the leading edge turn a crest
+			# departure into an artificial downward collision chord.
+			descending_lane = (
+				(local_end[0] - local_start[0]) * pose_y[0] +
+				(local_end[1] - local_start[1]) * pose_y[2] < -1.0e-9)
+
 			footprint_x = (pos.x + cos_y * local_end[0] +
 				sin_y * local_end[1])
 			footprint_z = (pos.z - sin_y * local_end[0] +
@@ -594,7 +624,10 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 			_ground_ahead = (
 				_lane_ground_ahead(spaceID, Math, pos,
 					x1, z1, footprint_x, footprint_z,
-					x2, z2, target_len, ground_plane, _sweep_filter)
+					x2, z2, target_len, ground_plane, _sweep_filter,
+					descending=descending_lane,
+					support_start_y=(pos.y + local_start[0] * pose_y[0] +
+						local_start[1] * pose_y[2]))
 				if pose_y[2] else None)
 			
 			# Spodní paprsek pro pevnou geometrii (0.6m nad zemí)
