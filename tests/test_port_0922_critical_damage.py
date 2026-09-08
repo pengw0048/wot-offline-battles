@@ -13,6 +13,7 @@ from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import internal_hit_layouts
 from gui.mods.offline_lan_0922 import internal_layout_profiles
+from gui.mods.offline_lan_0922 import player_critical_mechanics
 from gui.mods.offline_lan_0922 import track_damage
 
 
@@ -1323,7 +1324,8 @@ class CriticalDamageTests(unittest.TestCase):
             _crew_ko=set(), is_on_fire=False)
 
         payload = critical_damage.tick_repair(
-            vehicle, 10.0, repair_skill=0.0)
+            vehicle, device_damage.BASE_TRACK_REPAIR_SECONDS,
+            repair_skill=0.0)
 
         self.assertEqual(50.0, vehicle.devices_hp['leftTrackHealth'])
         self.assertNotIn('leftTrackHealth', vehicle._destroyed_devices)
@@ -1357,7 +1359,8 @@ class CriticalDamageTests(unittest.TestCase):
             position=object(), matrix=object(), getComponents=lambda: ())
 
         payload = critical_damage.tick_repair(
-            vehicle, 10.0, repair_skill=0.0)
+            vehicle, device_damage.BASE_TRACK_REPAIR_SECONDS,
+            repair_skill=0.0)
         shadow = critical_damage._CriticalProposalVehicle(vehicle)
 
         self.assertEqual(80.0, vehicle.devices_hp['leftTrackHealth'])
@@ -1429,7 +1432,8 @@ class CriticalDamageTests(unittest.TestCase):
         shell = {'damage': (100.0, 120.0)}
 
         repaired = critical_damage.tick_repair(
-            vehicle, 10.0, repair_skill=0.0)
+            vehicle, device_damage.BASE_TRACK_REPAIR_SECONDS,
+            repair_skill=0.0)
         with mock.patch.dict(
                 sys.modules, {'BigWorld': self.bigworld, 'Math': self.math}), \
                 mock.patch('random.uniform', return_value=120.0), \
@@ -1938,6 +1942,129 @@ class CrewInjuryLawTests(unittest.TestCase):
         for stat in ('reload', 'aim_time', 'dispersion', 'turret_speed',
                      'mobility', 'vision', 'signal'):
             self.assertEqual(1.0, device_damage.crew_stat_factor((), stat))
+
+
+class _RepairDescriptor(object):
+    """Only the descriptor surface the repair law reads."""
+
+    def __init__(self, repair_speed_factor=1.0):
+        self.engine = {'maxHealth': 170, 'maxRegenHealth': 130}
+        self.chassis = {'maxHealth': 260, 'maxRegenHealth': 130}
+        self.miscAttrs = {'repairSpeedFactor': repair_speed_factor}
+
+
+def _repair_player(hp, state, destroyed=()):
+    """One server-owned participant with a single damaged engine."""
+    return types.SimpleNamespace(
+        player_id=7, health=500, max_health=500, x=0.0, y=0.0, z=0.0,
+        alive=True, combat_fire_timer=0.0, equipment_states=(),
+        critical={
+            'devices': [{'name': 'engineHealth', 'hp': float(hp),
+                         'max_hp': 170.0, 'state': state}],
+            'destroyed': list(destroyed), 'crew_ko': [], 'fire': False},
+        effective_params={
+            'critical': {'devices': [
+                {'name': 'engineHealth', 'max_hp': 170.0,
+                 'regen_hp': 130.0}]},
+            'loadout': {'repair_factor': device_damage.CREW_FACTOR_BASE,
+                        'has_big_kit': False}})
+
+
+class ModuleRepairSpeedTests(unittest.TestCase):
+    """The one repair law shared by the player, the local track CAS and bots."""
+
+    def test_untrained_default_crew_takes_the_documented_base_time(self):
+        descriptor = _RepairDescriptor()
+        # #1513 gives a crew with no Repair skill factors['repairSpeed'] 0.57,
+        # and that crew is exactly what the base constants describe.
+        self.assertEqual(12.0, device_damage.BASE_TRACK_REPAIR_SECONDS)
+        self.assertAlmostEqual(
+            device_damage.BASE_TRACK_REPAIR_SECONDS,
+            device_damage.repair_seconds(
+                'leftTrackHealth', descriptor,
+                repair_factor=device_damage.CREW_FACTOR_BASE))
+        self.assertAlmostEqual(
+            device_damage.BASE_MODULE_REPAIR_SECONDS,
+            device_damage.repair_seconds(
+                'engineHealth', descriptor,
+                repair_factor=device_damage.CREW_FACTOR_BASE))
+
+    def test_full_repair_skill_divides_by_the_client_curve(self):
+        descriptor = _RepairDescriptor()
+        # 0.57 + 0.43 * 1.0 = 1.0, so a fully trained crew is 1/0.57 faster,
+        # not the flat 2x this port used before.
+        self.assertAlmostEqual(
+            device_damage.BASE_TRACK_REPAIR_SECONDS *
+            device_damage.CREW_FACTOR_BASE,
+            device_damage.repair_seconds(
+                'leftTrackHealth', descriptor, repair_factor=1.0))
+        self.assertAlmostEqual(
+            1.0 / device_damage.CREW_FACTOR_BASE,
+            device_damage.crew_repair_factor(100.0))
+
+    def test_percentage_and_client_factor_paths_agree(self):
+        descriptor = _RepairDescriptor()
+        for percentage in (0.0, 50.0, 100.0):
+            factor = device_damage.crew_repair_speed(percentage)
+            self.assertAlmostEqual(
+                device_damage.repair_seconds(
+                    'engineHealth', descriptor,
+                    repair_skill_pct=percentage),
+                device_damage.repair_seconds(
+                    'engineHealth', descriptor, repair_factor=factor))
+
+    def test_large_repair_kit_bonus_is_applied_once_on_either_route(self):
+        descriptor = _RepairDescriptor()
+        # The player folds the mounted kit in as a flag; a bot folds the same
+        # descriptor bonusValue into its client factor.  Both must land on one
+        # 10% gain, never two.
+        flag = device_damage.repair_seconds(
+            'engineHealth', descriptor,
+            repair_factor=device_damage.CREW_FACTOR_BASE,
+            has_big_repairkit=True)
+        bonus = device_damage.repair_seconds(
+            'engineHealth', descriptor,
+            repair_factor=device_damage.CREW_FACTOR_BASE * 1.10)
+        self.assertAlmostEqual(flag, bonus)
+        self.assertAlmostEqual(
+            device_damage.BASE_MODULE_REPAIR_SECONDS / 1.10, flag)
+
+    def test_toolbox_uses_the_exact_descriptor_factor(self):
+        # A StaticFactorDevice writes miscAttrs/repairSpeedFactor; the law only
+        # divides by whatever the descriptor carries.
+        self.assertAlmostEqual(
+            device_damage.BASE_TRACK_REPAIR_SECONDS / 1.25,
+            device_damage.repair_seconds(
+                'leftTrackHealth', _RepairDescriptor(1.25),
+                repair_factor=device_damage.CREW_FACTOR_BASE))
+
+    def test_player_repairs_a_destroyed_engine_at_the_bot_rate(self):
+        player = _repair_player(0.0, 'destroyed', destroyed=('engineHealth',))
+        bot = types.SimpleNamespace(
+            typeDescriptor=_RepairDescriptor(), health=500,
+            devices_hp={'engineHealth': 0.0},
+            _destroyed_devices=set(['engineHealth']),
+            _critical_devices=set(), _crew_ko=set(), is_on_fire=False)
+
+        player_payload = player_critical_mechanics.advance_critical(
+            player, 5.0, 5.0)
+        critical_damage.tick_repair(
+            bot, 5.0, repair_factor=device_damage.CREW_FACTOR_BASE)
+
+        self.assertAlmostEqual(
+            bot.devices_hp['engineHealth'],
+            player_payload['devices'][0]['hp'])
+        self.assertAlmostEqual(
+            130.0 * 5.0 / device_damage.BASE_MODULE_REPAIR_SECONDS,
+            bot.devices_hp['engineHealth'])
+
+    def test_player_yellow_module_does_not_auto_repair(self):
+        player = _repair_player(40.0, 'critical')
+
+        payload = player_critical_mechanics.advance_critical(
+            player, 100.0, 100.0)
+
+        self.assertIsNone(payload)
 
 
 if __name__ == '__main__':

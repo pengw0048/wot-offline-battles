@@ -235,6 +235,13 @@ def advance_critical(player, dt, now):
     for name in list(devices):
         if name in TRACK_DEVICE_NAMES:
             continue
+        # Same law as critical_damage.tick_repair and the local track
+        # checkpoint: automatic repair starts only once a module is destroyed.
+        # A functional yellow module keeps its hidden HP loss until a repair
+        # kit clears it, and only a destroyed device is published to the stock
+        # DESTROYED_DEVICE_IS_REPAIRING panel.
+        if name not in destroyed:
+            continue
         cap = device_damage.device_regen_hp(descriptor, name)
         if cap is None or devices[name] >= cap:
             continue

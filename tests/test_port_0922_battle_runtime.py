@@ -12341,12 +12341,18 @@ class BattleRuntimeContractTests(unittest.TestCase):
         entity._critical_devices = set()
         entity.appearance.addCrashedTrack = mock.Mock()
         entity.appearance.delCrashedTrack = mock.Mock()
-        loadout = {'has_big_kit': False, 'repair_factor': 0.5}
+        # The generated default crew has no Repair skill, so its client
+        # factor is CREW_FACTOR_BASE and the track takes exactly the untrained
+        # base time: half of it leaves the track destroyed.
+        device_damage = critical_damage._device_damage
+        loadout = {'has_big_kit': False,
+                   'repair_factor': device_damage.CREW_FACTOR_BASE}
+        half = device_damage.BASE_TRACK_REPAIR_SECONDS / 2.0
 
         partial = BattleRuntime._tick_local_track_repair(
-            entity, 5.0, loadout)
+            entity, half, loadout)
         repaired = BattleRuntime._tick_local_track_repair(
-            entity, 5.0, loadout)
+            entity, half, loadout)
 
         self.assertEqual('destroyed', partial['devices'][0]['state'])
         self.assertEqual('critical', repaired['devices'][0]['state'])
