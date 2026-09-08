@@ -11653,6 +11653,7 @@ class BotRuntime(object):
                 resolved_motion = False
                 contact_speed = state.get('destructible_contact_speed', speed)
                 contact_v0 = speed
+                realised_contact_yaw = None
                 if (path_clear and not pose_frozen and
                         abs(speed) > 0.0001 and
                         callable(self.motion_resolver)):
@@ -11698,8 +11699,11 @@ class BotRuntime(object):
                             speed = previous_speed
                             state.pop('destructible_contact_speed', None)
                         elif motion_status == 'hard':
+                            realised_contact_yaw = state['yaw']
+                            if contact_v0 < 0.0:
+                                realised_contact_yaw += math.pi
                             self._invalidate_realised_motion(
-                                state['id'], travel_yaw)
+                                state['id'], realised_contact_yaw)
                             hard_contact = True
                             state.pop('destructible_contact_speed', None)
                     else:
@@ -11715,19 +11719,22 @@ class BotRuntime(object):
                     contact_target = command.get('move_position')
                     if (contact_target is not None and
                             navigation_grid is not None):
-                        # The exact hull sweep used committed_travel_yaw, not
-                        # the strategic waypoint.  A tank may hit a wall while
-                        # turning toward that waypoint, so reporting the latter
-                        # can veto an unrelated route edge for this Bot.
+                        # A generic contact came from the pre-turn direction
+                        # probe.  A resolved one came from this exact hull yaw
+                        # and signed speed; a reversing command can still be
+                        # braking a forward-moving hull (or vice versa).
+                        contact_yaw = travel_yaw
+                        if realised_contact_yaw is not None:
+                            contact_yaw = realised_contact_yaw
                         edge_length = _number(
                             getattr(navigation_grid, 'cell_size', 0.0), 0.0)
                         if edge_length > 0.0:
                             contact_target = (
                                 position[0] + math.sin(
-                                    committed_travel_yaw) * edge_length,
+                                    contact_yaw) * edge_length,
                                 position[1],
                                 position[2] + math.cos(
-                                    committed_travel_yaw) * edge_length)
+                                    contact_yaw) * edge_length)
                     if (callable(report_contact) and
                             contact_target is not None):
                         report_contact(

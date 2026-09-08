@@ -3774,6 +3774,103 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertIn(11, runtime._decision_cache)
         self.assertIn(11, runtime._motion_probe_cache)
 
+    def test_realised_hard_contact_reports_resolver_direction_while_braking(self):
+        yaw = 0.25
+        aim = (math.sin(yaw + 0.75) * 200.0, 0.0,
+               math.cos(yaw + 0.75) * 200.0)
+        for throttle, initial_speed in ((-1.0, 6.0), (1.0, -6.0)):
+            with self.subTest(throttle=throttle, initial_speed=initial_speed):
+                command = {
+                    'target_yaw': yaw, 'throttle': throttle, 'turn': 0.0,
+                    'shell_index': 0, 'fire_allowed': False,
+                    'target_id': None, 'fire_range': 0.0,
+                    'combat_mode': 'route', 'aim_position': aim,
+                    'face_position': aim, 'move_position': aim,
+                    'recovery_mode': 'drive', 'movement_intent': True,
+                }
+                resolver_calls = []
+
+                class FailureDriver(object):
+                    def __init__(self):
+                        self.calls = []
+
+                    def remember_failure(self, *args):
+                        self.calls.append(args)
+
+                def resolver(*args, **unused_kwargs):
+                    resolver_calls.append(args)
+                    return 'hard'
+
+                adapter = _FixedAdapter(command)
+                adapter.driver = FailureDriver()
+                runtime = self.module.BotRuntime(
+                    1, descriptor_resolver=lambda unused: _combat_descriptor(),
+                    adapter_factory=lambda *unused, **kwargs: adapter,
+                    direction_probe=lambda *unused: {
+                        'clear': False, 'collision': True, 'water': False,
+                        'slope': 0.0},
+                    motion_resolver=resolver,
+                    ground_probe=lambda *unused: 0.0,
+                    physics_ground_probe=lambda *unused: 0.0,
+                    spawn_resolver=_spawn_resolver, baked_graph=_graph())
+                runtime.battle_start(self.start)
+                reports = []
+                runtime.navigator.report_blocked_step = (
+                    lambda *args: reports.append(args))
+                state = runtime.states[11]
+                state.update(x=0.0, y=0.0, z=0.0, yaw=yaw,
+                             speed=initial_speed, grounded_once=True)
+
+                runtime.update(.04, 1.0)
+
+                self.assertGreaterEqual(len(resolver_calls), 1)
+                resolver_yaw = resolver_calls[0][2]
+                resolver_speed = resolver_calls[0][3]
+                self.assertEqual(1 if initial_speed > 0.0 else -1,
+                                 1 if resolver_speed > 0.0 else -1)
+                report_yaw = (resolver_yaw if resolver_speed > 0.0 else
+                              resolver_yaw + math.pi)
+                expected = (math.sin(report_yaw) * 4.0, 0.0,
+                            math.cos(report_yaw) * 4.0)
+                self.assertEqual(expected, reports[0][2])
+                self.assertEqual([(11, report_yaw, 5.0)],
+                                 adapter.driver.calls)
+
+    def test_unresolved_hard_contact_reports_the_queried_travel_edge(self):
+        yaw = 0.25
+        aim = (math.sin(yaw + 0.75) * 200.0, 0.0,
+               math.cos(yaw + 0.75) * 200.0)
+        command = {
+            'target_yaw': yaw, 'throttle': -1.0, 'turn': 0.0,
+            'shell_index': 0, 'fire_allowed': False, 'target_id': None,
+            'fire_range': 0.0, 'combat_mode': 'route',
+            'aim_position': aim, 'face_position': aim,
+            'move_position': aim, 'recovery_mode': 'drive',
+            'movement_intent': True,
+        }
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
+            direction_probe=lambda *unused: {
+                'clear': False, 'collision': True, 'water': False,
+                'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start(self.start)
+        reports = []
+        runtime.navigator.report_blocked_step = (
+            lambda *args: reports.append(args))
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=yaw, speed=6.0,
+                     grounded_once=True)
+
+        runtime.update(.04, 1.0)
+
+        expected = (math.sin(yaw + math.pi) * 4.0, 0.0,
+                    math.cos(yaw + math.pi) * 4.0)
+        self.assertEqual(expected, reports[0][2])
+
     def test_nonhard_realised_contacts_keep_cached_command_and_probe(self):
         command = {
             'target_yaw': 0.0, 'throttle': 1.0, 'turn': 0.0,
