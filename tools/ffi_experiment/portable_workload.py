@@ -120,19 +120,27 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
-    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,contacts')
+    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,contacts,world')
+    parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
     args = parser.parse_args()
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
         parser.error('positive duration/cadence and a native module are required')
+    if args.world_trace_output and args.backend != 'python':
+        parser.error('--world-trace-output requires the unmodified Python backend')
     backend = None
     stage_recorder = None
     components = []
+    world_recorder = None
     messages, progress = [], []
     random.seed(17)
     with redirected():
         fixture = load_fixture(args.fixture)
         runtime, ground = fixture['make_runtime'](Path(ROOT), args.map, args.scenario)
         from gui.mods.offline_lan_0922.ai import navigation
+        if args.world_trace_output:
+            from world_trace import Recorder as WorldRecorder
+            world_recorder = WorldRecorder()
+            components.append(world_recorder)
         init_started = CLOCK()
         if args.backend != 'python':
             backend = Backend(args.module).install(navigation, batch=args.backend == 'native')
@@ -146,6 +154,9 @@ def main():
             if 'contacts' in args.components.split(','):
                 from perception_adapter import PerceptionBackend
                 components.append(PerceptionBackend(backend, runtime, fixture['fixtures']._load()))
+            if 'world' in args.components.split(','):
+                from world_adapter import WorldBackend
+                components.append(WorldBackend(backend))
         init_seconds = CLOCK() - init_started
         @contextlib.contextmanager
         def no_queries():
@@ -195,6 +206,9 @@ def main():
                   snapshot=snapshot)
     if stage_recorder is not None:
         report['stage_timings'] = stage_recorder.rows
+    if world_recorder is not None:
+        with open(args.world_trace_output, 'w') as stream:
+            json.dump(world_recorder.traces, stream)
     with open(args.output, 'w') as stream:
         json.dump(report, stream, sort_keys=True)
     print(json.dumps(dict((key, value) for key, value in report.items() if key != 'snapshot'), sort_keys=True))

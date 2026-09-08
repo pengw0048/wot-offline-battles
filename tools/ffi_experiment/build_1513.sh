@@ -14,6 +14,7 @@ i686-w64-mingw32-g++ -std=c++11 -O2 -Wall -Wextra -Werror \
     "$EXPERIMENT_ROOT/astar_core.cpp" "$EXPERIMENT_ROOT/combat_core.cpp" \
     "$EXPERIMENT_ROOT/driver_core.cpp" \
     "$EXPERIMENT_ROOT/perception_core.cpp" \
+    "$EXPERIMENT_ROOT/world_core.cpp" \
     "$EXPERIMENT_OUTPUT/astar_1513.o" \
     -o "$EXPERIMENT_OUTPUT/offline_astar_native.pyd"
 i686-w64-mingw32-objdump -p "$EXPERIMENT_OUTPUT/offline_astar_native.pyd" \
