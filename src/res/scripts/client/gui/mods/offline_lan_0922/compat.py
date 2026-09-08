@@ -1622,7 +1622,11 @@ class OfflineCompatibility(object):
         def undrawn_lan_remote(entity):
             """Whether one entity is a LAN remote the client must not draw."""
             read = compatibility._original_vehicle_getattribute
-            if read is None:
+            if (read is None or vehicle_type is None or
+                    not isinstance(entity, vehicle_type)):
+                # A detached turret is a client-created DetachedTurret, not a
+                # Vehicle: its ``__getattribute__`` was never replaced, so the
+                # captured Vehicle reader neither applies to it nor is needed.
                 read = getattr
             try:
                 if not bool(read(entity, '_offlineNativeRemote')):

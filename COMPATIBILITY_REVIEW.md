@@ -2168,12 +2168,82 @@ The ABI audit pins the negative constants and marker consumer; regression
 tests fail against the old zero-only presentation for local, remote and late
 ammo-rack deaths.
 
-Turret flight remains unimplemented. `Vehicle.showAmmoBayEffect` only forwards
-mode and fireball volume to `CompoundAppearance`; its projected-speed argument
-is unused. The separate `DetachedTurret` entity, `WGTurretFilter`, vehicle
-confirmation and motion inputs own detachment. The port creates no such entity
-and supplies no authoritative detached-turret motion. It therefore must not
-publish `TURRET_DETACHED` (-13) or claim flight was fixed by an explosion call.
+Turret detachment is now presented, with its flight authored locally. Every
+half of the presentation is stock. `SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED`
+(-13) is `AMMO_BAY_DESTROYED` (-5) with one further bit cleared, so a
+detached wreck is also ammo-bay destroyed; `vehicle_damage_state` maps -13 to
+the `ammoBayExplosion` state and the `exploded` model chain, and
+`CompoundAppearance.__requestModelsRefresh` drops the turret from the
+assembler once `Vehicle.isTurretDetached` is true. The flying half is the
+stock `DetachedTurret` client entity, whose `__prepareModelAssembler` builds
+`turret.models.exploded` plus `gun.models.exploded`, whose
+`_TurretDetachmentEffects` plays the shipped `turret_flying_*`,
+`turret_touchdown_*` and `flamingOnGround` chains from the turret's
+`turretDetachmentEffects` descriptor, and whose `VehicleStickers` reattach the
+vehicle's own marks. `Vehicle.showAmmoBayEffect` is unchanged: it still only
+forwards mode and fireball volume, and its projected-speed argument is still
+unused.
+
+Three deliberate divergences, each because the retail owner does not exist
+here:
+
+- **The arc is invented.** `DetachedTurret`'s `velocity`,
+  `angularVelocity` and `applyForceToCOM` are cell-side, and the client's
+  `WGTurretFilter` takes network input only -- the pinned executable's
+  `PyWGEntityFilter` table exposes `transferInput` and
+  `transferInputAsVehicle` and no script input at all. `turret_detachment`
+  therefore freezes one ballistic arc per detachment, walked against
+  `wg_collideSegment` to its landing, and the compound is driven from it the
+  same way every LAN remote compound is driven. The impulse is a **product
+  number**. Two shipped values bound it and the chosen speed lands inside
+  them: `_TurretDetachmentEffects._MAX_COLLISION_ENERGY` is 98.1 in
+  `0.5 * v ** 2` units, exactly a 10 m free fall, and `_MIN_COLLISION_SPEED`
+  is 3.5 m/s below which stock plays no impact at all. The reported landing
+  energy itself is exact: `__normalizeEnergy` requires `0.5 * speed ** 2`.
+  Real calibration needs a replay measurement. `wg_collideSegment` reports a
+  point and no surface normal, so a contact reached while the turret is still
+  rising is classified as a wall rather than the ground: the fall continues
+  and the sideways motion stops, which keeps a turret from resting inside a
+  building facade and from reporting a ground material for a vertical
+  surface. That is containment for a missing normal, not an invented
+  restitution coefficient, and it is bounded to three deflections.
+- **The seed, not a wire field, keeps clients agreed.** The decision is
+  already replicated -- `critical.ammo_rack_death` rides the combat event and
+  `F_AMMO_RACK_DEATH` rides the positional Bot row -- so the arc is derived
+  from `stable_seed(round_id, engine_id)` and no new message was added.
+- **The flying turret is presentation only.** The hidden worker owns
+  projectiles and knows nothing about it, so it is not shootable and blocks
+  nothing. It keeps its stock `ProjectileAwareEntities` membership, because
+  `onLeaveWorld` removes itself from that list and would raise on a missing
+  entry, and is excluded from dynamic collision through the same
+  `_offlineNativeRemote` draw gate an undrawn LAN remote uses.
+  `isCollidingWithWorld` stays false for its whole life: it is the only gate
+  that makes `__checkIsBeingPulled` read native `Entity.velocity` off the
+  never-fed filter, and it drives nothing but the drag effect this version
+  does not produce.
+
+The handshake order is load-bearing. `SynchronousDetachment._onDirectTick`
+runs synchronously inside `createEntity` and, while
+`isTurretDetachmentConfirmationNeeded` is true, calls `transferInputs` ->
+`turret.filter.transferInputAsVehicle(vehicle.filter, ...)` on the vehicle's
+own never-fed `WGVehicleFilter`. The runtime therefore writes -13 and
+pre-sets `_Vehicle__turretDetachmentConfirmed` -- whose only writer in #1513
+is `confirmTurretDetachment`, which is that flag plus a models refresh --
+before calling `onHealthChanged`. That collapses retail's two refreshes into
+the one `onHealthChanged` already performs, so a turretless assembler cannot
+lose a background-load race against a turreted one for the same `exploded`
+model state, and it keeps that native call from happening at all. An unseen
+target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle
+never spotted. A missing exploded model, a full turret budget or a failed
+`createEntity` leaves exactly the -5 burn-off wreck the port produced before.
+
+The ABI audit pins all of it against `scripts.pkg`: the 22 `DetachedTurret`
+signatures, `Vehicle.confirmTurretDetachment`, both special health constants,
+the three `AMMOBAY_DESTRUCTION_MODE` values and the effect's energy window.
+None of that proves the arc looks right, that the two compounds swap without
+a visible seam, or that the turret rests convincingly -- that is Windows
+acceptance.
+
 WG's [Update 9.0 notes](https://worldoftanks.com/en/content/docs/release_notes/90-update-notes/)
 establish the intended turret-detachment feature. Its later
 [Object 277 explanation](https://worldoftanks.com/en/news/general-news/3-soviet-tanks-get-adjustments/)
@@ -2185,7 +2255,8 @@ The resource inventory and CPython 2.7 bytecode audit can run on an isolated
 not have a complete Chinese HD installation passing `inspect_client.py`, all
 vehicle collision assets, a retail server model, or Windows gameplay evidence.
 The repaired marker still needs exact #1513 rendering acceptance; the missing
-layouts and detached-turret implementation remain explicit product gaps.
+layouts remain an explicit product gap, and the detached turret's launch
+impulse remains an uncalibrated product number.
 
 Track damage follows the detailed model Update 6.4 introduced. A track
 material's live `damageKind` selects the shell damage channel:

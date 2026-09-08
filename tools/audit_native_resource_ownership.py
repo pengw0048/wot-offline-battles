@@ -48,6 +48,11 @@ APPROVED_ACQUISITIONS = (
     ('destructibles_authority.py', '_ensure_chunk', 'createEntity', 1),
     ('entities/bigworld_binding.py', 'BigWorldVehicleBinding.create_vehicle',
      'createEntity', 1),
+    # One client-side DetachedTurret per ammo-bay death, bounded by
+    # MAX_ACTIVE_TURRETS, rolled back in the same call on any failure and
+    # retired by destroy_all() at the leaveArena boundary.
+    ('entities/detached_turret.py', 'DetachedTurretPresentation.launch',
+     'createEntity', 1),
     ('entities/remote_vehicle.py',
      '_RemoteShotPresenter._projectile_mover', 'ProjectileMover', 1),
     ('entities/remote_vehicle.py',

@@ -30,6 +30,8 @@ from gui.mods.offline_lan_0922.bot_runtime import (
 from gui.mods.offline_lan_0922.entities.avatar_server import AvatarServerBridge
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
+from gui.mods.offline_lan_0922.entities.detached_turret import \
+    DetachedTurretPresentation
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
@@ -1581,6 +1583,7 @@ class BattleRuntime(object):
         self._binding = None
         self._server = None
         self._remote_factory = None
+        self._detached_turrets = None
         self._descriptor_cache = {}
         self._prepared_vehicle_names = []
         self._unusable_vehicles_reported = set()
@@ -3057,6 +3060,15 @@ class BattleRuntime(object):
                 self._runtime.model_assembler, self._avatar.spaceID,
                 **factory_kwargs)
             self._remote_factory.prepare_descriptor(descriptor)
+            if not self._worker_mode:
+                # The hidden worker never draws a wreck and its address space
+                # is already the tightest resource in this port, so it never
+                # loads a detached turret compound.
+                self._detached_turrets = DetachedTurretPresentation(
+                    self._runtime.bigworld, self._runtime.math, self._avatar,
+                    self._collide_detached_turret,
+                    log=lambda what, error: self._warn_optional_failure(
+                        what, error, disable=False))
             builder = EntityPropertyBuilder(
                 BigWorldVehicleBinding.PROPERTY_NAMES)
             self._sender = _LANInputSender(self)
@@ -4820,6 +4832,21 @@ class BattleRuntime(object):
             self._vector((min(xs), 0.0, min(zs))),
             self._vector((max(xs), 0.0, max(zs))))
         return prepared if callable(prepared) else _EMPTY_GROUND_FILTER
+
+    def _collide_detached_turret(self, start, end):
+        """Segment query used to walk a detached turret's arc to the ground.
+
+        Flag 128 is the same terrain-and-static mask every motion probe in
+        this port uses.  No broken-skin filter is prepared here: a detached
+        turret is presentation only, so a fence it clips through is not a
+        physical result anyone else observes.
+        """
+        collision = self._runtime.bigworld.wg_collideSegment(
+            self._avatar.spaceID, self._vector(start), self._vector(end), 128)
+        if collision is None:
+            return None
+        point = collision[0]
+        return (float(point.x), float(point.y), float(point.z))
 
     def _collide_down(self, start, end, ground_filter):
         """Vertical probe that skips the skin of an already broken item."""
@@ -15819,6 +15846,13 @@ class BattleRuntime(object):
                     'Expert damaged-device presentation',
                     self._tick_expert_target, (now,),
                     self._disable_expert_presentation)
+                # A turret thrown just before the round ended keeps flying
+                # through AFTERBATTLE, so this is deliberately not gated on
+                # ``_battle_live``.  It is retried every frame: one bad pose
+                # write must not retire the whole presentation.
+                self._run_optional_feature(
+                    'detached turret presentation',
+                    self._advance_detached_turrets, (now,), disable=False)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['critical'] = max(0.0, next_boundary - boundary)
@@ -23463,6 +23497,45 @@ class BattleRuntime(object):
                 'dead wreck presentation', error, disable=False)
             return False
 
+    def _ammo_bay_special_health(self, entity):
+        """Return the exact #1513 special health this wreck already carries.
+
+        ``TURRET_DETACHED`` is ``AMMO_BAY_DESTROYED`` with one more bit
+        cleared, and only it selects the ``exploded`` model chain.  A replayed
+        terminal snapshot must not demote a wreck that has already thrown its
+        turret back to the burn-off value and refresh its compound again.
+        """
+        special = self._runtime.constants.SPECIAL_VEHICLE_HEALTH
+        if bool(getattr(entity, 'isTurretMarkedForDetachment', False)):
+            return int(special.TURRET_DETACHED)
+        return int(special.AMMO_BAY_DESTROYED)
+
+    def _turret_detachment_drawn(self, record):
+        """Whether this target is drawn, so retail would have a turret at all.
+
+        Retail's ``DetachedTurret`` is a cell entity, so an unspotted enemy
+        simply never has one in AOI.  Our replicas never leave AOI, so reuse
+        the same team-knowledge gate the retail dead marker uses: an unseen
+        death keeps exactly the wreck it has today.
+        """
+        if record.get('local'):
+            return True
+        if not record.get('presentation'):
+            return False
+        return bool(record.get(
+            'dead_marker_known', self._combat_target_is_spotted(record)))
+
+    def _turret_detachment_seed(self, engine_id):
+        """Derive the arc seed from state every client already replicates."""
+        return bot_planner.stable_seed(
+            'turret-detach-v1',
+            (self._start_message or {}).get('round_id'), int(engine_id))
+
+    def _advance_detached_turrets(self, now):
+        if self._detached_turrets is None:
+            return 0
+        return self._detached_turrets.advance(now)
+
     def _apply_health(self, record, state, attacker_id=0, reason_id=None,
                       force_cause=False, attack_reason_id=None,
                       suppress_combat_presentation=False):
@@ -23518,6 +23591,7 @@ class BattleRuntime(object):
                 entity = self._server_entity(engine_id)
                 if entity is None:
                     return
+                native_health = self._ammo_bay_special_health(entity)
                 if entity.health != native_health:
                     entity.health = native_health
                     # A terminal snapshot may arrive before the critical
@@ -23586,6 +23660,20 @@ class BattleRuntime(object):
                         critical=death_payload,
                         attribute_attacker=death_cause not in (
                             'drowning', 'world_collision', 'overturn'))
+        turret_plan = None
+        if (ammo_rack_death and dead and not previous_dead and
+                not crew_knockout and not self._worker_mode and
+                self._detached_turrets is not None and
+                self._turret_detachment_drawn(record)):
+            # Freeze the launch pose while the live compound is still the one
+            # drawn.  ``onHealthChanged`` below replaces it.
+            turret_plan = self._run_optional_feature(
+                'ammo-bay turret detachment',
+                self._detached_turrets.prepare, (entity,), disable=False)
+            if turret_plan:
+                native_health = int(
+                    self._runtime.constants.SPECIAL_VEHICLE_HEALTH
+                    .TURRET_DETACHED)
         if self._worker_mode:
             entity.health = native_health
             notifier = getattr(entity, 'set_health', None)
@@ -23606,6 +23694,17 @@ class BattleRuntime(object):
                 retain_wreck()
             return
         entity.health = native_health
+        if turret_plan:
+            # ``Vehicle.confirmTurretDetachment`` is exactly this flag plus a
+            # models refresh, and it is the only writer of it in #1513.
+            # Setting it before the health callback collapses retail's two
+            # refreshes into the one ``onHealthChanged`` already performs, so
+            # a turretless assembler cannot lose a race against a turreted
+            # one for the same 'exploded' model state.  It also makes
+            # ``SynchronousDetachment`` finish inside ``createEntity``
+            # without seeding the turret's filter from the vehicle's own,
+            # never-fed ``WGVehicleFilter``.
+            entity._Vehicle__turretDetachmentConfirmed = True
         health_changed = getattr(entity, 'onHealthChanged', None)
         if (not suppress_combat_presentation and
                 callable(health_changed)):
@@ -23618,6 +23717,13 @@ class BattleRuntime(object):
             notifier = getattr(entity, 'set_health', None)
             if callable(notifier):
                 notifier(previous)
+        if turret_plan:
+            self._run_optional_feature(
+                'ammo-bay turret detachment',
+                self._detached_turrets.launch,
+                (turret_plan, self._turret_detachment_seed(engine_id),
+                 self._clock()),
+                disable=False)
         previous_crew_active = getattr(entity, 'isCrewActive', crew_active)
         entity.isCrewActive = crew_active
         if (previous_crew_active != crew_active and
@@ -24253,6 +24359,17 @@ class BattleRuntime(object):
             except Exception as error:
                 if cleanup_error is None:
                     cleanup_error = error
+        if self._detached_turrets is not None:
+            # Detached turrets are separate client-created entities holding a
+            # compound each.  Retire them at the synchronous leaveArena
+            # boundary, before the Hangar app can replace the battle space.
+            # ``destroy_all`` is harmless after a partial start and safe to
+            # call twice.
+            try:
+                self._detached_turrets.destroy_all()
+            except Exception as error:
+                if cleanup_error is None:
+                    cleanup_error = error
         # Remote presentations are separate native Vehicle entities.  Their
         # filters, track controllers and marker adaptors become unsafe as soon
         # as the Hangar app starts replacing the battle app, so close them at
@@ -24446,6 +24563,7 @@ class BattleRuntime(object):
         self._binding = None
         self._server = None
         self._remote_factory = None
+        self._detached_turrets = None
         self._sender = None
         self._sync = None
         self._bots = None

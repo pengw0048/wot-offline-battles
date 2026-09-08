@@ -618,6 +618,35 @@ EXPECTED_ABI = {
         'Vehicle.removeEdge': ('self', 'forceSimpleEdge'),
         'Vehicle.onHealthChanged': (
             'self', 'newHealth', 'attackerID', 'attackReasonID'),
+        'Vehicle.confirmTurretDetachment': ('self',),
+    },
+    'scripts/client/DetachedTurret.pyc': {
+        'DetachedTurret.__init__': ('self',),
+        'DetachedTurret.prerequisites': ('self',),
+        'DetachedTurret.onEnterWorld': ('self', 'prereqs'),
+        'DetachedTurret.onLeaveWorld': ('self',),
+        'DetachedTurret.onStaticCollision': (
+            'self', 'energy', 'point', 'normal'),
+        'DetachedTurret.changeAppearanceVisibility': ('self', 'isVisible'),
+        'DetachedTurret.set_isUnderWater': ('self', 'prev'),
+        'DetachedTurret.set_isCollidingWithWorld': ('self', 'prev'),
+        'DetachedTurret.__checkIsBeingPulled': ('self',),
+        'DetachedTurret.__prepareModelAssembler': ('self',),
+        'SynchronousDetachment.__init__': ('self', 'turret'),
+        'SynchronousDetachment.onInit': ('self',),
+        'SynchronousDetachment.onEnterWorld': ('self',),
+        'SynchronousDetachment._onDirectTick': ('self', 'vehicle'),
+        'SynchronousDetachment._onCallbackTick': ('self', 'vehicle'),
+        'SynchronousDetachment._canAcceptVehicle': ('self', 'vehicle'),
+        'SynchronousDetachment.transferInputs': ('vehicle', 'turret'),
+        'VehicleEnterTimer.start': ('self',),
+        'VehicleEnterTimer.getVehicle': ('self',),
+        '_TurretDetachmentEffects.__init__': (
+            'self', 'turretModel', 'detachmentEffectsDesc', 'onGround'),
+        '_TurretDetachmentEffects.notifyAboutCollision': (
+            'self', 'energy', 'collisionPoint', 'effectMaterialIdx',
+            'groundEffect', 'underWater'),
+        '_TurretDetachmentEffects.__normalizeEnergy': ('self', 'energy'),
     },
     'scripts/client/VehicleGunRotator.pyc': {
         'VehicleGunRotator.start': ('self',),
@@ -2130,6 +2159,12 @@ EXPECTED_GLOBALS = {
         '_LOD_DISTANCE_TRAIL_PARTICLES': 100.0,
         'MAX_DISTANCE': 500,
     },
+    'scripts/client/DetachedTurret.pyc': {
+        # Below this impact speed stock plays no ground effect at all, and
+        # _MIN_COLLISION_ENERGY is derived from it, so it is the floor of the
+        # window the invented launch impulse has to land inside.
+        '_MIN_COLLISION_SPEED': 3.5,
+    },
     'scripts/common/AccountCommands.pyc': {
         'RES_FAILURE': -1,
         'RES_SUCCESS': 0,
@@ -2174,6 +2209,17 @@ EXPECTED_CLASS_CONSTANTS = {
         'ProjectileMover': {
             '_ProjectileMover__START_POINT_MAX_DIFF': 20,
             '_ProjectileMover__PROJECTILE_TIME_AFTER_DEATH': 2.0,
+        },
+    },
+    'scripts/client/DetachedTurret.pyc': {
+        # The touchdown effect's calibrated energy window.  98.1 is the
+        # specific energy of a 10 m free fall (0.5 * v ** 2 with
+        # v ** 2 = 2 * 9.81 * 10), and 3.5 m/s is the speed below which stock
+        # plays no ground impact.  The launch impulse in
+        # ``turret_detachment`` is chosen to land inside this window.
+        '_TurretDetachmentEffects': {
+            '_MAX_COLLISION_ENERGY': 98.10000000000001,
+            '_MIN_NORMALIZED_ENERGY': 0.1,
         },
     },
     'scripts/common/BattleFeedbackCommon.pyc': {
@@ -2264,6 +2310,9 @@ EXPECTED_CLASS_CONSTANTS = {
             'POWDER_EXPLOSION': 1,
             'HE_DETONATION': 2,
         },
+        # The ammo-bay wreck and the flying turret are selected purely by
+        # the vehicle's own health value; -13 is -5 with one further bit
+        # cleared, so a turret-detached wreck is also ammo-bay destroyed.
         'SPECIAL_VEHICLE_HEALTH': {
             'AMMO_BAY_DESTROYED': -5,
             'TURRET_DETACHED': -13,
