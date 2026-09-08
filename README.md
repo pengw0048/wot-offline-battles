@@ -131,12 +131,11 @@ whose profile changed after it started must be restarted first.
   per vehicle tier that alone carries the 1.85 victory multiplier, a
   tier-independent amount per point of damage, double for detecting artillery,
   and one capture payment split between the vehicles that completed it; XP
-  counts damage and kills with the tier difference taken into account - a
-  kill is worth the durability of the vehicle destroyed, not a flat amount
-  per frag - adds 50 percent on a win, and returns five percent as Free XP. Wargaming never
-  published the coefficients, so those stay this build's declared values, but
-  the tier relationship is measured from the captured retail tables rather
-  than guessed.
+  adds 50 percent on a win and returns five percent as Free XP. Damage XP
+  uses an offline tier curve derived from the captured tables, and kill XP
+  uses victim durability. These are balance approximations, not recovered
+  retail formulas: percentile ratios do not identify XP coefficients, and
+  durability does not uniquely determine tier.
 - A premium vehicle's own XP bonus and crew-training rate come from the
   client's own `premiumVehicleXPFactor` and `crewXpFactor`. The XP bonus is
   banked and shown in the results breakdown, but it never enters the number

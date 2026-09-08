@@ -9522,9 +9522,8 @@ class BattleState:
     def _killed_durability(self, kind, vehicle_id):
         """Return the total durability of the vehicles one actor destroyed.
 
-        Retail counts a kill with the difference in vehicle tiers taken into
-        account, and the victim's own maximum durability is that difference in
-        the unit both sides of this port already know exactly.  The kill
+        The offline reward policy uses victim durability as a balance proxy,
+        not as an exact measurement of the retail tier-difference rule. The kill
         ledger already writes ``target_kills`` on the per-target row, so this
         stays a reward-time question and never becomes a persisted statistic.
         """

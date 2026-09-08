@@ -25,10 +25,10 @@ destroyed rather than as a flat amount per frag; see
 
 ``X``, ``Y``, ``Z``, the capture payment and each vehicle's own profitability
 coefficient are not published, so the named values below remain an explicit
-offline policy.  The two relationships that *are* recoverable are how retail XP
-per point of damage falls with vehicle tier (``XP_TIER_PERMILLE``) and that a
-kill is worth what was killed.  Offline battles have zero ammunition and repair
-costs.
+offline policy. The tier curve (``XP_TIER_PERMILLE``) and durability-based
+kill payment are offline balance proxies. Percentile ratios do not identify retail XP
+coefficients, and durability does not uniquely determine vehicle tier. Offline
+battles have zero ammunition and repair costs.
 """
 
 
@@ -44,9 +44,9 @@ OFFLINE_SPG_SPOTTING_MULTIPLIER = 2
 OFFLINE_CAPTURE_CREDITS = 1000
 OFFLINE_PARTICIPATION_XP = 100
 # Wargaming's support material says a kill counts "with the difference in
-# vehicle tiers taken into account", and the durability of the vehicle
-# destroyed is that difference measured in the only unit both sides of this
-# port already own exactly.  The divisor is pinned the same way
+# vehicle tiers taken into account". This implementation uses victim
+# durability as a balance proxy, not an exact tier-difference calculation.
+# The divisor is pinned the same way
 # ``XP_TIER_PERMILLE`` is pinned: the median stock durability of the client's
 # Tier VIII vehicles is 1400, so dividing by 14 leaves a Tier VIII kill worth
 # the 100 XP it was worth under the previous flat rule, and every other tier
@@ -57,15 +57,13 @@ OFFLINE_WIN_CREDITS_FACTOR_100 = 185
 OFFLINE_WIN_XP_FACTOR_100 = 150
 OFFLINE_FREE_XP_PERCENT = 5
 
-# Retail pays less XP for the same damage as vehicle tier rises.  These are
-# that relationship measured from the two captured retail tables in
+# Offline tier scaling uses a ratio from the two captured retail tables in
 # ``mastery_catalog``: for every vehicle carrying both rows, the Ace base-XP
 # threshold divided by the three-mark average combined damage, then the median
 # per tier, normalised at Tier VIII so this changes the shape of the curve
 # rather than the magnitude of the reward.  The measurement mixes a
-# single-battle XP percentile with a 100-battle damage percentile, so the
-# relative trend across tiers is far more trustworthy than its absolute level
-# - which is why it is applied as a ratio against one pivot tier.
+# single-battle XP percentile with a 100-battle damage percentile. It cannot
+# identify retail XP coefficients; the pivot only anchors this offline curve.
 #
 # ``tests/test_port_0922_offline_rewards.py`` recomputes these from the baked
 # catalog, so a re-bake that moves them fails rather than drifting silently.

@@ -1340,12 +1340,12 @@ of the Combat XP as Free XP. `X`, `Y`, `Z`, the capture payment and every
 vehicle's own profitability coefficient stay this product's declared values,
 because no source publishes them.
 
-The one relationship that is recoverable is the tier one. Dividing each
+The offline tier curve is a balance approximation. Dividing each
 vehicle's captured Ace base-XP threshold by its captured three-mark combined
 damage and taking the median per tier gives 0.785 at Tier V falling smoothly
 to 0.295 at Tier X - a factor of 2.66 that the previous flat policy did not
 have at all. `XP_TIER_PERMILLE` is that curve normalised at Tier VIII, so the
-shape is retail's and the magnitude is unchanged at the pivot; a test
+shape follows this proxy and the magnitude is unchanged at the pivot; a test
 recomputes it from the baked tables so a re-bake cannot move it silently. Two
 caveats belong with it: the measurement pairs a single-battle XP percentile
 with a 100-battle damage percentile, which is why it is used as a ratio rather
@@ -1365,10 +1365,10 @@ from, and the chain writes the total back through the connector so the packed
 value and the breakdown agree. Crew training stays on the bare battle XP with
 only `crewXpFactor` applied.
 
-A kill is paid the same way, by what was killed. Wargaming's own wording is
-that a kill counts with the difference in vehicle tiers taken into account, and
-the victim's maximum durability is that difference in a unit both sides of this
-port already own exactly, so kill XP is `victim durability / 14` and the plain
+Kill XP uses victim durability as an offline balance proxy. This does not
+implement an exact tier-difference rule: equal-tier vehicles can have different
+durability, and these tables do not identify retail reward coefficients.
+Before applying the offline tier curve, kill XP is `victim durability / 14`; the plain
 frag count pays nothing by itself. The divisor is pinned by the same pivot rule:
 the median stock durability of the client's Tier VIII vehicles is 1400, so a
 Tier VIII kill still pays the 100 XP the previous flat rule paid, while a kill
@@ -1382,8 +1382,8 @@ a Tier VIII and 3950 on a Tier X, against captured three-mark averages of 1347,
 2659 and 3948. The old flat policy needed 1675, 2765 and 2060 for the same
 badge, so the whole tree now sits within a few percent of the retail bar
 instead of only the middle of it. That agreement is a consistency check on the
-two anchors rather than proof of the absolute level: it says the shape is right,
-and only Windows play can say how the resulting pace feels.
+two anchors, not evidence that the retail reward formula or curve was recovered.
+Only Windows play can say how the resulting pace feels.
 
 ## Stock map-selection lifecycle
 

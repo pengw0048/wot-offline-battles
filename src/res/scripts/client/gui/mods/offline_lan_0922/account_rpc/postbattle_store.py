@@ -750,11 +750,8 @@ class PostBattleStore(object):
         self._history = []
         self._progress = self._empty_progress()
         self._progress_applier = None
-        # This battle's badge outcome, keyed by arena.  The durable per-vehicle
-        # row already carries every value the garage needs; only the
-        # this-battle class and the previous best are specific to one result
-        # window, and they are cheap to rebuild, so they stay out of the file
-        # the round-end transaction writes.
+        # Per-battle outcomes preserve new-record and gun-mark notifications.
+        # Pending results persist these alongside the receipt until claimed.
         self._awards = {}
         self._load()
 
@@ -879,7 +876,10 @@ class PostBattleStore(object):
                 'markOfMastery': max(0, min(
                     _int(awards.get('markOfMastery')),
                     battle_mastery.MAX_MARK_OF_MASTERY))}},
-            'xp': rewards['xp'], 'credits': rewards['credits'],
+            'xp': rewards['xp'] + _premium_bonus(
+                rewards['xp'],
+                _premium_vehicle_xp_factor_100(receipt['vehicle'])),
+            'credits': rewards['credits'],
             'crystal': 0, 'creditsToDraw': 0,
             'isWinner': result_key, 'team': receipt['team'],
             'winnerIfDraw': 0, 'guiType': 1,
@@ -992,7 +992,9 @@ class PostBattleStore(object):
         awards['battleNum'] = row['battles']
         self._awards[str(receipt['arena_unique_id'])] = awards
         if len(self._awards) > MAX_HISTORY:
-            for key in sorted(self._awards, key=lambda name: _int(name))[
+            for key in sorted(
+                    (name for name in self._awards if name not in self._pending),
+                    key=lambda name: _int(name))[
                     :len(self._awards) - MAX_HISTORY]:
                 del self._awards[key]
         # DossierCache asks for rows newer than its maxChangeTime.  The global
@@ -1020,7 +1022,7 @@ class PostBattleStore(object):
         return awards
 
     def _rebuilt_awards(self, receipt):
-        """Rebuild a result window's badge fields after a process restart.
+        """Recover badge fields for legacy receipts without a saved outcome.
 
         The class this battle earned is a pure function of its base XP and the
         retail table, so it survives.  The previous best does not: the durable
@@ -1115,6 +1117,26 @@ class PostBattleStore(object):
             self._history = history
             self._trim_history_bodies()
             self._progress = progress
+            saved_awards = value.get('pendingAwards', {})
+            if isinstance(saved_awards, dict):
+                for key in pending:
+                    raw_awards = saved_awards.get(key)
+                    if not isinstance(raw_awards, dict):
+                        continue
+                    awards = {}
+                    for name, maximum in (
+                            ('markOfMastery', 4), ('prevMarkOfMastery', 4),
+                            ('bestMarkOfMastery', 4), ('marksOnGun', 3),
+                            ('prevMarksOnGun', 3), ('movingAvgDamage', 60001),
+                            ('battleNum', 2147483647)):
+                        awards[name] = max(0, min(
+                            _int(raw_awards.get(name)), maximum))
+                    try:
+                        rating = float(raw_awards.get('damageRating', 0))
+                    except (TypeError, ValueError, OverflowError):
+                        rating = 0.0
+                    awards['damageRating'] = max(0.0, min(rating, 100.0))
+                    self._awards[key] = awards
             self._progress.setdefault(
                 'losses', max(0, int(self._progress.get('battles', 0)) -
                               int(self._progress.get('wins', 0))))
@@ -1136,6 +1158,7 @@ class PostBattleStore(object):
             # Keep a corrupt optional cache from preventing an offline login.
             self._pending = {}
             self._history = []
+            self._awards = {}
             self._progress = self._empty_progress()
 
     def _archived_identities(self):
@@ -1156,6 +1179,9 @@ class PostBattleStore(object):
         value = {
             'schema': SCHEMA, 'accountKey': self._account_key,
             'pending': list(self._pending.values()),
+            'pendingAwards': dict((key, self._awards[key])
+                                  for key in self._pending
+                                  if key in self._awards),
             'history': self._archived_identities(),
             'progress': self._progress,
         }

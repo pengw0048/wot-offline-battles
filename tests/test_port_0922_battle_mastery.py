@@ -349,6 +349,8 @@ class MasteryResultTests(unittest.TestCase):
             self.assertLess(vehicle['damageRating'], 85)
             self.assertEqual(2, vehicle['battleNum'])
             self.assertIn((MARKS_DB_ID, 1), vehicle['dossierPopUps'])
+            restarted = postbattle_store.PostBattleStore(path=path)
+            self.assertEqual(vehicle, self._result(restarted, crossing))
             receipt = crossing
             # The hangar battle-results message names the badge from the same
             # outcome.
@@ -367,6 +369,13 @@ class MasteryResultTests(unittest.TestCase):
             self.assertEqual(1, vehicle['marksOnGun'])
             self.assertEqual(3, vehicle['battleNum'])
             self.assertNotIn((MARKS_DB_ID, 1), vehicle['dossierPopUps'])
+            restarted = postbattle_store.PostBattleStore(path=path)
+            self.assertEqual(self._result(store, crossing),
+                             self._result(restarted, crossing))
+            self.assertTrue(restarted.acknowledge(crossing['arena_unique_id']))
+            saved = json.loads(Path(path).read_text())
+            self.assertNotIn(str(crossing['arena_unique_id']),
+                             saved['pendingAwards'])
 
     def test_premium_vehicle_xp_rides_outside_the_badge_number(self):
         """Retail ranks the bare battle XP; the bonus is added on top."""
@@ -397,6 +406,8 @@ class MasteryResultTests(unittest.TestCase):
             self.assertIn(
                 ('freeXP', 'originalFreeXP', 'premiumVehicleXPFactor100'),
                 _Replay.steps)
+            message = store.service_message_data(receipt['arena_unique_id'])
+            self.assertEqual(vehicle['xp'], message['xp'])
             # The account banks the bonus even though the badge ignored it.
             progress = store.progress()
             row = progress['vehicles']['china:Ch01_Type59']
@@ -427,11 +438,10 @@ class MasteryResultTests(unittest.TestCase):
             self.assertEqual(row['markOfMastery'], reloaded['markOfMastery'])
             self.assertEqual(row['movingAvgDamage'],
                              reloaded['movingAvgDamage'])
-            # The class this battle earned is a pure function of its base XP,
-            # so a result window rebuilt after a restart still shows it.
+            # Pending results preserve the original new-record notification.
             vehicle = self._result(restarted, receipt)
             self.assertEqual(1, vehicle['markOfMastery'])
-            self.assertEqual(1, vehicle['prevMarkOfMastery'])
+            self.assertEqual(0, vehicle['prevMarkOfMastery'])
 
     def test_corrupt_persisted_badge_state_is_clamped_on_load(self):
         with tempfile.TemporaryDirectory() as folder:
