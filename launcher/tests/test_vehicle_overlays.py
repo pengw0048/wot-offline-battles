@@ -756,6 +756,7 @@ class VehicleOverlayTest(unittest.TestCase):
         rows = vehicle_overlays.list_gold_vehicles(self.game)
         self.assertEqual(["ussr:R12_Test"], [row["name"] for row in rows])
         self.assertEqual(12500, rows[0]["gold"])
+        self.assertEqual("lightTank", rows[0]["vehicleClass"])
         self.assertEqual(8, rows[0]["level"])
         self.assertTrue(rows[0]["notInShop"])
 
@@ -763,6 +764,7 @@ class VehicleOverlayTest(unittest.TestCase):
         def record(vehicle, credits, gold, not_in_shop, level):
             return dict(nation="germany", vehicle=vehicle,
                         tags=("heavyTank", "secret", "unrecoverable"),
+                        vehicleClass="heavyTank",
                         credits=credits, gold=gold, notInShop=not_in_shop,
                         level=level)
 

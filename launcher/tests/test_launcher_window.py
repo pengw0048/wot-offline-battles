@@ -1307,7 +1307,7 @@ class WindowTest(unittest.TestCase):
 
         self.window.earnings_entry.delete(0, "end")
         self.window.earnings_entry.insert(0, "3")
-        self.assertTrue(self.window._apply_earnings())
+        self.assertTrue(self.window._apply_account())
 
         self.assertEqual(
             300, wot_launcher.save_slots.read_slot(
@@ -1323,7 +1323,7 @@ class WindowTest(unittest.TestCase):
 
         self.window.earnings_entry.delete(0, "end")
         self.window.earnings_entry.insert(0, "plenty")
-        self.assertFalse(self.window._apply_earnings())
+        self.assertFalse(self.window._apply_account())
 
         self.assertEqual(
             150, wot_launcher.save_slots.read_slot(
@@ -1337,7 +1337,7 @@ class WindowTest(unittest.TestCase):
 
         self.window.earnings_entry.delete(0, "end")
         self.window.earnings_entry.insert(0, "0")
-        self.assertFalse(self.window._apply_earnings())
+        self.assertFalse(self.window._apply_account())
 
         self.assertEqual(
             100, wot_launcher.save_slots.read_slot(
@@ -1351,7 +1351,7 @@ class WindowTest(unittest.TestCase):
         self.assertTrue(self.window._refresh_balances())
 
         self.assertEqual(
-            "normal", self.window.apply_balances_button.cget("state"))
+            "normal", self.window.save_account_button.cget("state"))
         self.assertEqual(
             "normal", self.window.balance_entries["gold"].cget("state"))
 
@@ -1365,7 +1365,7 @@ class WindowTest(unittest.TestCase):
         self.window.balance_entries["gold"].insert(0, "12500")
 
         with mock.patch.object(core, "game_is_running", return_value=False):
-            self.assertTrue(self.window._apply_balances())
+            self.assertTrue(self.window._apply_account())
 
         with open(path, encoding="utf-8") as stream:
             wallet = json.load(stream)["ledger"]["wallet"]
@@ -1382,7 +1382,7 @@ class WindowTest(unittest.TestCase):
         self.window.balance_entries["gold"].insert(0, "999")
 
         with mock.patch.object(core, "game_is_running", return_value=True):
-            self.assertFalse(self.window._apply_balances())
+            self.assertFalse(self.window._apply_account())
 
         with open(path, encoding="utf-8") as stream:
             self.assertEqual(
@@ -1400,7 +1400,7 @@ class WindowTest(unittest.TestCase):
         self.window.balance_entries["gold"].insert(0, "lots")
 
         with mock.patch.object(core, "game_is_running", return_value=False):
-            self.assertFalse(self.window._apply_balances())
+            self.assertFalse(self.window._apply_account())
 
         with open(path, encoding="utf-8") as stream:
             self.assertEqual(
@@ -1425,13 +1425,55 @@ class WindowTest(unittest.TestCase):
 
         self.assertEqual("1", self.window.balance_entries["gold"].get())
 
+    def test_one_save_button_writes_balances_and_earnings(self):
+        self._saves_root()
+        self.window._refresh_save_slots()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "1234")
+        self.window.earnings_entry.delete(0, "end")
+        self.window.earnings_entry.insert(0, "2.5")
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window.save_account_button.cget("command")())
+        self.assertEqual(1234, wot_launcher.save_ledger.read_balances(
+            self.window._save_slot_id, root=self._saves_root())["gold"])
+        self.assertEqual(250, wot_launcher.save_slots.read_slot(
+            self.window._save_slot_id, root=self._saves_root())["earnings_percent"])
+
+    def test_all_inputs_are_validated_before_any_write(self):
+        self._saves_root()
+        for gold, earnings in (("1234", "bad"), ("bad", "2.5"),
+                               ("1234", "inf"), ("1234", "nan")):
+            with self.subTest(gold=gold, earnings=earnings):
+                self.window._refresh_save_slots()
+                for entry, value in ((self.window.balance_entries["gold"], gold),
+                                     (self.window.earnings_entry, earnings)):
+                    entry.delete(0, "end")
+                    entry.insert(0, value)
+                with mock.patch.object(wot_launcher.save_ledger, "write_balances") as balances, \
+                        mock.patch.object(wot_launcher.save_slots, "set_earnings_percent") as multiplier:
+                    self.assertFalse(self.window._apply_account())
+                    balances.assert_not_called()
+                    multiplier.assert_not_called()
+
+    def test_multiplier_write_failure_reports_saved_balances(self):
+        self._saves_root()
+        self.window._refresh_save_slots()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "1234")
+        with mock.patch.object(core, "game_is_running", return_value=False), \
+                mock.patch.object(wot_launcher.save_slots, "set_earnings_percent",
+                                  side_effect=wot_launcher.save_slots.SaveSlotError("disk error")):
+            self.assertFalse(self.window._apply_account())
+        self.assertIn("Balances saved, but", self._log_text())
+        self.assertEqual("1234", self.window.balance_entries["gold"].get())
+
     _GOLD_VEHICLES = [
         {"nation": "germany", "vehicle": "G51_Lowe",
          "name": "germany:G51_Lowe", "label": "Lowe", "level": 8,
-         "gold": 12500, "notInShop": False},
+         "gold": 12500, "notInShop": False, "vehicleClass": "heavyTank"},
         {"nation": "china", "vehicle": "Ch01_Type59",
          "name": "china:Ch01_Type59", "label": "Type 59", "level": 8,
-         "gold": 11500, "notInShop": True},
+         "gold": 11500, "notInShop": True, "vehicleClass": "mediumTank"},
     ]
 
     def _with_shop(self):
@@ -1441,6 +1483,38 @@ class WindowTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         self.window._gold_catalogue_cache = (None, None)
+
+    def test_gold_filters_intersect_and_empty_results_disable_add(self):
+        self._saves_root()
+        self._with_shop()
+        self.window._refresh_gold_shop()
+        self.window.gold_nation.set("germany")
+        self.window.gold_class.set("Heavy tank")
+        self.assertEqual(("Lowe - tier 8",), self.window._filter_gold_shop())
+        self.window.gold_class.set("Medium tank")
+        self.assertEqual((), self.window._filter_gold_shop())
+        self.assertEqual("", self.window.gold_vehicle.get())
+        self.assertEqual("disabled", self.window.buy_gold_vehicle_button.cget("state"))
+        self.window.gold_nation.set("All")
+        self.assertEqual(("Type 59 - tier 8",), self.window._filter_gold_shop())
+        self.window.gold_class.set("All")
+        self.assertEqual(2, len(self.window._filter_gold_shop()))
+        self.assertEqual("Type 59 - tier 8", self.window.gold_vehicle.get())
+
+    def test_add_preserves_filters_selection_and_unsaved_account_edits(self):
+        self._saves_root()
+        self._with_shop()
+        self.window._refresh_save_slots()
+        self.window.gold_nation.set("china")
+        self.window._filter_gold_shop()
+        self.window.balance_entries["gold"].delete(0, "end")
+        self.window.balance_entries["gold"].insert(0, "1234")
+        with mock.patch.object(core, "game_is_running", return_value=False):
+            self.assertTrue(self.window._buy_gold_vehicle())
+        self.assertEqual("china", self.window.gold_nation.get())
+        self.assertEqual("Type 59 - tier 8 (queued)", self.window.gold_vehicle.get())
+        self.assertEqual("disabled", self.window.buy_gold_vehicle_button.cget("state"))
+        self.assertEqual("1234", self.window.balance_entries["gold"].get())
 
     def test_the_garage_lists_vehicle_names_without_a_price(self):
         saves_root = self._saves_root()
@@ -1460,6 +1534,7 @@ class WindowTest(unittest.TestCase):
         saves_root = self._saves_root()
         self._write_ledger(
             wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=20000)
+        self.window._refresh_balances()
         self._with_shop()
         self.window._refresh_gold_shop()
         self.window.gold_vehicle.set("Lowe - tier 8")
@@ -1531,6 +1606,7 @@ class WindowTest(unittest.TestCase):
         self._write_ledger(
             wot_launcher.save_slots.DEFAULT_SLOT_ID, saves_root, gold=0,
             vehicles={"50001": {"compDescr": "AAA="}})
+        self.window._refresh_balances()
         self._with_shop()
         self.window._refresh_gold_shop()
         self.assertEqual("normal", self.window.buy_gold_vehicle_button.cget("state"))
