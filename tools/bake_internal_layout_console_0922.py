@@ -160,6 +160,20 @@ REQUEST_PAUSE = 0.25
 # permutation of one another before it will inherit.  A suffix is never
 # matched on its own; that is how an old profile gets attached to an
 # unrelated vehicle which happened to reuse a name.
+# Vehicles the archive files under an id our client's formula does not
+# produce, found by sweeping console4.13's whole id space and reading the
+# vehicle code out of each package's member paths.  So the computed id is a
+# first guess, not a guarantee: Console filed the Turan III prototype under
+# czech rather than germany, keeps the ISU-130 at two ids, and serves the
+# M48A1's model at the id computed for the M48A5.  Each candidate is still
+# verified against the member paths before it is used, so a wrong id cannot
+# slip through -- see _package_is_for.
+ALTERNATE_ARCHIVE_IDS = {
+    'france:F75_Char_de_25t': (62529,),
+    'germany:G116_Turan_III_prot': (61809,),
+    'ussr:R111_ISU130': (31745, 33537),
+    'usa:A120_M48A5': (14113,),
+}
 SAME_TANK_ALIASES = {
     # The premium Type 59, identical hull and identical crew roster.
     'china:Ch01_Type59_Gold': 'china:Ch01_Type59',
@@ -524,6 +538,39 @@ def crew_surface_names(roster):
     return names
 
 
+def _vehicle_slot(code):
+    """The item_defs per-vehicle prefix, e.g. Ch01_Type59_Gold -> ch01."""
+    match = re.match(r'^([A-Za-z]+[0-9]+)', code)
+    return match.group(1).lower() if match else None
+
+
+def _package_is_for(body, code, password=None):
+    """Whether this package's members really describe this vehicle.
+
+    The archive is keyed by an id computed from our client, and that id is
+    not always the one the archive used, so a fetch can succeed and hand back
+    a different tank.  Accept a package only when its member paths name the
+    vehicle's code or at least its item_defs slot: the archive's own Console
+    naming differs cosmetically from the client's in a dozen cases -- R43_T-70
+    against R43_T70, R71_IS_2B against R71_IS_2_Berlin -- but the slot is the
+    per-vehicle identity and it always agrees.  Without this the M48A5 decodes
+    the M48A1's interior.
+    """
+    try:
+        with _open_package(body, password) as archive:
+            names = [name.lower() for name in archive.namelist()]
+    except Exception:                                     # noqa: BLE001
+        return False
+    lowered = code.lower()
+    if any(lowered in name for name in names):
+        return True
+    slot = _vehicle_slot(code)
+    if slot is None:
+        return False
+    return any(('/%s_' % slot) in name or ('/%s/' % slot) in name
+               for name in names)
+
+
 def _remap_crew(crew_zones, donor_roster, target_roster):
     """The donor's crew zones in the target's roster order, or None.
 
@@ -830,8 +877,22 @@ def main():
         entry = {'reference_frame': pc_used}
         best = None
         attempts = {}
+        candidates = ((vehicle['archive_id'],)
+                      + ALTERNATE_ARCHIVE_IDS.get(key, ()))
         for package in CONSOLE_PACKAGES:
-            body = fetch(cache, package, vehicle['archive_id'], requests)
+            body = None
+            for candidate in candidates:
+                found = fetch(cache, package, candidate, requests)
+                if found is None:
+                    continue
+                if not _package_is_for(found, vehicle['code'], password):
+                    attempts[package] = 'id %d holds another vehicle' % (
+                        candidate,)
+                    continue
+                body = found
+                if candidate != vehicle['archive_id']:
+                    entry['archive_id_used'] = candidate
+                break
             if body is None:
                 continue
             try:
