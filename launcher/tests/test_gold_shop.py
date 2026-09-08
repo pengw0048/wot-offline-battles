@@ -76,6 +76,20 @@ class GoldShopTest(unittest.TestCase):
 
         self.assertEqual(["china:Ch01_Type59"], self._inbox()["vehicles"])
 
+    def test_zero_price_white_tiger_is_queued_without_charging_the_save(self):
+        self._write_state(gold=0)
+        reward = dict(nation="germany", vehicle="G04_PzVI_Tiger_IA",
+                      name="germany:G04_PzVI_Tiger_IA", label="White Tiger",
+                      level=7, gold=0, notInShop=True)
+        with mock.patch.object(gold_shop.vehicle_overlays, "list_gold_vehicles",
+                               return_value=[reward]):
+            self.assertTrue(gold_shop.list_offers(
+                self.slot, self.game, root=self.root)[0]["available"])
+            self._buy(reward["name"])
+        self.assertEqual([reward["name"]], self._inbox()["vehicles"])
+        self.assertEqual(0, save_ledger.read_balances(
+            self.slot, root=self.root)["gold"])
+
     def test_a_save_that_cannot_afford_the_vehicle_keeps_its_gold(self):
         path = self._write_state(gold=100)
 

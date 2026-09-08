@@ -759,6 +759,26 @@ class VehicleOverlayTest(unittest.TestCase):
         self.assertEqual(8, rows[0]["level"])
         self.assertTrue(rows[0]["notInShop"])
 
+    def test_the_gold_shop_includes_zero_price_rewards_but_not_starter_tanks(self):
+        def record(vehicle, credits, gold, not_in_shop, level):
+            return dict(nation="germany", vehicle=vehicle,
+                        tags=("heavyTank", "secret", "unrecoverable"),
+                        credits=credits, gold=gold, notInShop=not_in_shop,
+                        level=level)
+
+        records = [
+            record("G04_PzVI_Tiger_IA", 0, 0, True, 7),
+            record("Starter", 0, 0, False, 1),
+            record("CreditTank", 1000, 0, False, 3),
+            record("HiddenCreditTank", 1000, 0, True, 3),
+        ]
+        with mock.patch.object(vehicle_overlays, "_vehicle_roster_from_archive",
+                               return_value=records):
+            rows = vehicle_overlays.list_gold_vehicles(self.game)
+        self.assertEqual(["germany:G04_PzVI_Tiger_IA"],
+                         [row["name"] for row in rows])
+        self.assertEqual(0, rows[0]["gold"])
+
     def test_the_gold_shop_excludes_unavailable_save_vehicles(self):
         unavailable = [
             ("germany", "G138_VK168_02_Mauerbrecher", ("heavyTank",)),
@@ -772,7 +792,8 @@ class VehicleOverlayTest(unittest.TestCase):
             ("ussr", "Fallout", ("heavyTank", "fallout")),
             ("ussr", "Tank_bootcamp", ("lightTank", "secret")),
         ]
-        records = [dict(nation=nation, vehicle=vehicle, tags=tags, gold=1)
+        records = [dict(nation=nation, vehicle=vehicle, tags=tags, gold=1,
+                        credits=0, notInShop=False)
                    for nation, vehicle, tags in unavailable]
         with mock.patch.object(vehicle_overlays, "_vehicle_roster_from_archive",
                                return_value=records):

@@ -782,9 +782,10 @@ def list_vehicle_choices(game_root):
 
 
 def list_gold_vehicles(game_root):
-    """List gold-priced vehicles the client can add to a save.
+    """List gold and reward vehicles the client can add to a save.
 
-    Keep hidden reward vehicles, including ``notInShop`` entries, but apply
+    Include zero-credit ``notInShop`` rewards such as White Tiger without
+    adding the free starter tech-tree vehicles. Keep hidden rewards, but apply
     the same standard-battle and resource exclusions as vehicle_records.
     The launcher already mirrors those rules for Bot lineup choices.
     """
@@ -804,7 +805,8 @@ def list_gold_vehicles(game_root):
     translators = {}
     vehicles = []
     for record in roster:
-        if (record["gold"] <= 0 or
+        is_reward = record["credits"] == 0 and record["notInShop"]
+        if ((record["gold"] <= 0 and not is_reward) or
                 not bot_lineup_profiles.vehicle_choice_is_eligible(record)):
             continue
         nation = record["nation"]
