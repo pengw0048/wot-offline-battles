@@ -6,6 +6,10 @@
 #include "driver_core.h"
 #include "perception_core.h"
 #include "world_core.h"
+#include "navigation_graph.h"
+#include "navigation_flow.h"
+#include "navigation_search.h"
+#include "motion_core.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -39,24 +43,7 @@ Edge edge_key(int a, int b) {
     if (a > b) std::swap(a, b);
     return (static_cast<uint64_t>(a) << 32) | static_cast<uint32_t>(b);
 }
-struct Graph {
-    int width, height;
-    double cell, ox, oz, grade, heuristic, clearance, shallow, diagonal;
-    std::vector<double> heights;
-    std::vector<unsigned char> links, hazards;
-    std::unordered_map<Edge, std::pair<double, double> > failed;
-    std::unordered_map<Edge, double> hulls;
-    std::vector<Edge> expired;
-    bool valid(int i) const {
-        // The graph's links encode traversability. Match _baked_index exactly;
-        // do not invent a second hazard admission rule in the native adapter.
-        return i >= 0 && i < width * height && std::isfinite(heights[i]);
-    }
-    double distance(int a, int b) const {
-        double dx = a % width - b % width, dz = a / width - b / width;
-        return std::sqrt(dx * dx + dz * dz);
-    }
-};
+using Graph = OfflineNavGraph;
 struct Entry { double priority; uint64_t sequence; int cell; double cost; };
 struct Later {
     bool operator()(const Entry &a, const Entry &b) const {
@@ -282,13 +269,35 @@ int execute(double *b, int n) {
     throw Invalid();
 }
 }
+std::shared_ptr<OfflineNavGraph> offline_navigation_graph(int handle) {
+    return get_graph(handle);
+}
+struct OfflineNavigationSearch::Impl { Search search; };
+OfflineNavigationSearch::OfflineNavigationSearch(std::shared_ptr<OfflineNavGraph> graph,
+        int start,int goal,int maximum,double now,bool prefer):impl(new Impl()) {
+    Search &s=impl->search;s.graph=graph;s.start=start;s.goal=goal;s.maximum=maximum;
+    s.now=now;s.prefer=prefer;s.closest=start;s.closest_distance=graph->distance(start,goal);
+    if(start>=0){s.costs[start]=0.0;s.frontier.push({0.0,0,start,0.0});}
+}
+OfflineNavigationSearch::~OfflineNavigationSearch(){}
+void OfflineNavigationSearch::inputs(const std::vector<std::pair<double,double> > &avoid,
+        const std::unordered_map<uint64_t,double> &local,
+        const std::unordered_set<uint64_t> &hard,bool hard_present){
+    Search &s=impl->search;s.avoid=avoid;s.local=local;s.hard=hard;s.hard_present=hard_present;
+}
+void OfflineNavigationSearch::step(){impl->search.step();}
+bool OfflineNavigationSearch::done() const{return impl->search.done;}
+int OfflineNavigationSearch::expansions() const{return impl->search.expansions;}
+const std::vector<int> &OfflineNavigationSearch::path() const{return impl->search.path;}
 extern "C" int offline_astar_dispatch(double *buffer, int count) {
     if (!buffer || count < 1 || count > 12000012) return 1;
     try {
         if (!std::isfinite(buffer[0]) || buffer[0] != std::floor(buffer[0]) ||
             buffer[0] < 0 || buffer[0] > 1000000000) return 2;
         if (buffer[0] == 0 && count != 1) return 2;
-        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); offline_world_reset(); }
+        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); offline_world_reset(); offline_navigation_reset(); offline_motion_reset(); }
+        if (buffer[0] >= 600) return offline_motion_dispatch(buffer, count);
+        if (buffer[0] >= 500) return offline_navigation_dispatch(buffer, count);
         if (buffer[0] >= 400) return offline_world_dispatch(buffer, count);
         if (buffer[0] >= 300) return offline_perception_dispatch(buffer, count);
         if (buffer[0] >= 200) return offline_driver_dispatch(buffer, count);

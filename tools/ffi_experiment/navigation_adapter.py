@@ -24,6 +24,11 @@ class Backend(object):
             spec.loader.exec_module(self.module)
         if self.module.layout_self_test(11, 22, 33) != 112233:
             raise RuntimeError('native A* bridge layout self-test failed')
+        if hasattr(self.module, 'callback_self_test'):
+            def callback_probe(a, b, c):
+                return a * 10000 + b * 100 + c
+            if self.module.callback_self_test(callback_probe, (11, 22, 33)) != 112233:
+                raise RuntimeError('native callback bridge self-test failed')
         self.closed = False
         self.graphs = {}
         self.searches = weakref.WeakValueDictionary()
@@ -40,6 +45,19 @@ class Backend(object):
         self.calls += 1
         if status:
             raise RuntimeError('native A* command %s failed: status=%s' % (buffer[0], status))
+        return buffer
+
+    def call_sync(self, values, query_packet, callback):
+        buffer = values if isinstance(values, array) else array('d', values)
+        address, count = buffer.buffer_info()
+        query_address, query_count = query_packet.buffer_info()
+        status = self.module.dispatch_sync(
+            int(address & 0xffff), int(address >> 16), int(count),
+            int(query_address & 0xffff), int(query_address >> 16), int(query_count),
+            callback, ())
+        self.calls += 1
+        if status:
+            raise RuntimeError('native synchronous command %s failed: status=%s' % (buffer[0], status))
         return buffer
 
     def graph(self, grid, navigation):

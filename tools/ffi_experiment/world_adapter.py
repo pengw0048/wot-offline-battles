@@ -90,3 +90,54 @@ class WorldBackend(object):
             return ('hard', 'clear', 'kinetic')[status] if return_status else status != 1
         finally:
             self.backend.call([402, handle])
+
+
+class SyncWorldBackend(WorldBackend):
+    """Keep the entire sweep on the C++ stack across borrowed engine calls."""
+    def check(self, spaceID, pos, yaw, vel, td=None, airborne=False, dt=0.04,
+              return_status=False, allow_kinetic=False, kinetic_speed=None,
+              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0):
+        import BigWorld
+        import Math
+        world = self.world
+        header = inputs(world, pos, yaw, vel, td, airborne, dt, motion_yaw, pitch, roll)
+        packet = array('d', [0] * 16)
+        collision_filter, crush_state, hits = [None], [False], {}
+        sequence = [0]
+
+        def query():
+            kind = int(packet[0])
+            start = Math.Vector3(packet[1], packet[2], packet[3])
+            end = Math.Vector3(packet[4], packet[5], packet[6])
+            sequence[0] += 1
+            if kind == 1:
+                collision_filter[0] = world.prepare_horizontal_collision_filter(start, end)
+                answer = [0] * 8
+            elif kind == 2:
+                try:
+                    args = (spaceID, start, end, 128)
+                    if collision_filter[0] is not None:
+                        args += (collision_filter[0],)
+                    hit = world.observed_ray('native.motion.ground', BigWorld.wg_collideSegment, *args)
+                    answer = reply(kind, hit)
+                except (AttributeError, IndexError, TypeError, ValueError):
+                    answer = [0] * 8
+            elif kind == 3:
+                hit = world._collide_horizontal(spaceID, start, end, collision_filter[0])
+                answer = reply(kind, hit, sequence[0])
+                if hit is not None:
+                    hits[sequence[0]] = hit
+            elif kind == 4:
+                result = world._destroy_and_recast(
+                    spaceID, start, end, hits[int(packet[7])], yaw, vel, td,
+                    crush_state, allow_kinetic, kinetic_speed, commit_enabled,
+                    collision_filter[0])
+                answer = [2 if result == 'kinetic' else 1 if result is True else 0] + [0] * 7
+            else:
+                raise RuntimeError('unknown synchronous world request')
+            # Equal-length replacement keeps the borrowed buffer address stable.
+            packet[:8] = array('d', answer)
+
+        values = self.backend.call_sync([405] + header, packet, query)
+        status = int(values[0])
+        return ('hard', 'clear', 'kinetic')[status] if return_status else status != 1

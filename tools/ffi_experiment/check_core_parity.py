@@ -23,9 +23,9 @@ def equal(actual, expected, label):
         raise AssertionError('%s\nactual=%r\nexpected=%r' % (label, actual, expected))
 
 
-def check_boundaries(backend, rt):
+def check_boundaries(backend, rt, synchronous=False):
     original = rt.ai_driver.LocalDriver()
-    native = NativeDriver(backend, rt.ai_driver.LocalDriver())
+    native = NativeDriver(backend, rt.ai_driver.LocalDriver(), synchronous)
     neighbour = dict(position=(0.0, 0.0, -3.0), yaw=0.0,
                      half_length=3.5, half_width=1.7, alive=True)
     def clear(unused_yaw, maximum_distance=None):
@@ -150,9 +150,9 @@ def check_aim(backend, rt, rng, cases):
     owner.close()
 
 
-def check_driver(backend, rt, rng, ticks):
+def check_driver(backend, rt, rng, ticks, synchronous=False):
     original = rt.ai_driver.LocalDriver()
-    native = NativeDriver(backend, rt.ai_driver.LocalDriver())
+    native = NativeDriver(backend, rt.ai_driver.LocalDriver(), synchronous)
     modes = set()
     for index in range(ticks):
         bot = index % 15
@@ -214,16 +214,17 @@ def main():
     parser.add_argument('--module', required=True)
     parser.add_argument('--fixture', required=True)
     parser.add_argument('--cases', type=int, default=1200)
+    parser.add_argument('--sync-driver', action='store_true')
     args = parser.parse_args()
     fixtures = load_fixture(args.fixture)
     rt = fixtures['fixtures']._load()
     backend = Backend(args.module)
     try:
-        check_boundaries(backend, rt)
+        check_boundaries(backend, rt, args.sync_driver)
         rng = random.Random(7812)
         valid = check_intercepts(backend, rt, rng, args.cases)
         check_aim(backend, rt, rng, args.cases)
-        queries = check_driver(backend, rt, rng, args.cases * 3)
+        queries = check_driver(backend, rt, rng, args.cases * 3, args.sync_driver)
         print('Exact parity: %d intercepts (%d solutions), %d full gun updates plus low-arc/reach solves, %d driver steps / %d queries; all six drive modes and invalid-command/anonymous-blocker boundaries.' %
               (args.cases, valid, args.cases, args.cases * 3, queries))
     finally:

@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 #include "astar_core.h"
+#include "query_bridge.h"
 #include <string.h>
 
 #define OFFLINE_COMPUTE_OK 0
@@ -68,6 +69,9 @@ typedef PyObject *(__cdecl *PyIntFromLongFn)(long);
 #define RVA_PY_INIT_MODULE4 0x00be1940U
 #define RVA_PY_INT_FROM_LONG 0x00be1180U
 #define RVA_PY_INT_TYPE 0x01664bf0U
+#define RVA_PY_TUPLE_TYPE 0x0165c398U
+#define RVA_PY_FUNCTION_TYPE 0x01673218U
+#define RVA_FUNCTION_CALL 0x00c271c0U
 
 /* PyObject header, then PyIntObject.ob_ival; PyVarObject.ob_size, then items. */
 #define OFFSET_OB_TYPE 4U
@@ -87,6 +91,11 @@ static unsigned char *g_image_base = 0;
 static PyIntFromLongFn g_py_int_from_long = 0;
 static void *g_py_int_type = 0;
 static int g_layout_proven = 0;
+static int g_callback_proven = 0;
+static DWORD g_callback_thread = 0;
+typedef PyObject *(__cdecl *FunctionCallFn)(PyObject *, PyObject *, PyObject *);
+typedef void (__cdecl *DestructorFn)(PyObject *);
+static FunctionCallFn g_function_call = 0;
 
 
 static int readable_region(const void *address, SIZE_T bytes)
@@ -259,6 +268,7 @@ static PyObject *layout_self_test(PyObject *unused_self, PyObject *args)
 	long values[3];
 	int status;
 	(void)unused_self;
+	if (offline_query_active()) return python_int(-18);
 	status = read_int_arguments(args, values, 3);
 	if (status != OFFLINE_COMPUTE_OK) {
 		g_layout_proven = 0;
@@ -311,7 +321,135 @@ static PyObject *dispatch(PyObject *unused_self, PyObject *args)
 			!writable_region(buffer, (SIZE_T)count * sizeof(double))) {
 		return python_int(OFFLINE_COMPUTE_ADDRESS_UNREADABLE);
 	}
+	if (offline_query_active() && g_callback_thread != GetCurrentThreadId()) return python_int(18);
+	if (!offline_query_can_enter(buffer, (int)count)) return python_int(18);
 	return python_int(offline_astar_dispatch(buffer, (int)count));
+}
+
+/* Exact release-build CPython ownership: calls return a new reference even
+ * for None. Keep the GIL throughout, borrow callback/tuple only for this call,
+ * and release each result before the native computation continues. */
+static void release_result(PyObject *result)
+{
+    if (--result->ob_refcnt == 0) {
+        DestructorFn destroy = *(DestructorFn *)((unsigned char *)result->ob_type + 24);
+        destroy(result);
+    }
+}
+
+static PyObject **tuple_items(PyObject *args, long wanted)
+{
+    unsigned char *tuple = (unsigned char *)args;
+    if (!readable_region(tuple, 12 + (SIZE_T)wanted * 4) ||
+            args->ob_type != (void *)(g_image_base + RVA_PY_TUPLE_TYPE) ||
+            *(long *)(tuple + 8) != wanted) return 0;
+    return (PyObject **)(tuple + 12);
+}
+
+static int callback_arguments(PyObject *callback, PyObject *arguments)
+{
+    return readable_region(callback, 8) && readable_region(arguments, 12) &&
+        callback->ob_type == (void *)(g_image_base + RVA_PY_FUNCTION_TYPE) &&
+        arguments->ob_type == (void *)(g_image_base + RVA_PY_TUPLE_TYPE);
+}
+
+static int validate_callback_layout(void)
+{
+    unsigned char *type = g_image_base + RVA_PY_FUNCTION_TYPE;
+    unsigned char *tuple = g_image_base + RVA_PY_TUPLE_TYPE;
+    static const unsigned char signature[] = {
+        0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08, 0x83, 0xec,
+        0x18, 0x8b, 0x49, 0x10, 0x53, 0x56, 0x33, 0xf6
+    };
+    if (!readable_region(type, 68) || !readable_region(tuple, 24) ||
+            *(long *)(type + 16) != 44 || *(long *)(type + 20) != 0 ||
+            *(long *)(tuple + 16) != 12 || *(long *)(tuple + 20) != 4 ||
+            *(void **)(type + 64) != (void *)(g_image_base + RVA_FUNCTION_CALL) ||
+            !readable_region(g_image_base + RVA_FUNCTION_CALL, sizeof(signature)) ||
+            memcmp(g_image_base + RVA_FUNCTION_CALL, signature, sizeof(signature)))
+        return 0;
+    g_function_call = *(FunctionCallFn *)(type + 64);
+    return 1;
+}
+
+static PyObject *callback_self_test(PyObject *self, PyObject *args)
+{
+    PyObject **items, *result;
+    long value;
+    (void)self;
+    if (!g_layout_proven || offline_query_active()) return python_int(-17);
+    g_callback_proven = 0;
+    if (!validate_callback_layout()) return python_int(-17);
+    items = tuple_items(args, 2);
+    if (!items || !callback_arguments(items[0], items[1])) return python_int(-17);
+    result = g_function_call(items[0], items[1], 0);
+    if (!result) return 0; /* Preserve the callback's original Python exception. */
+    value = result->ob_type == g_py_int_type ? *(long *)((unsigned char *)result + 8) : -17;
+    release_result(result);
+    if (value != SELF_TEST_RESULT) return python_int(-17);
+    g_callback_proven = 1;
+    return python_int(value);
+}
+
+typedef struct {
+    double *packet;
+    int capacity, failed;
+    PyObject *callback, *arguments;
+} QueryOwner;
+
+static int invoke_query(void *opaque, double *packet, int count)
+{
+    QueryOwner *owner = (QueryOwner *)opaque;
+    PyObject *result;
+    if (count < 1 || count > owner->capacity) return 18;
+    memcpy(owner->packet, packet, (SIZE_T)count * sizeof(double));
+    result = g_function_call(owner->callback, owner->arguments, 0);
+    if (!result) { owner->failed = 1; return 18; }
+    release_result(result);
+    memcpy(packet, owner->packet, (SIZE_T)count * sizeof(double));
+    return 0;
+}
+
+static PyObject *dispatch_sync(PyObject *self, PyObject *args)
+{
+    PyObject **items;
+    long values[6];
+    uintptr_t address, query_address;
+    QueryOwner owner;
+    int index, status;
+    DWORD previous_thread;
+    (void)self;
+    if (!g_callback_proven) return python_int(18);
+    items = tuple_items(args, 8);
+    if (!items) return python_int(12);
+    for (index = 0; index < 6; ++index) {
+        if (!readable_region(items[index], 12) || items[index]->ob_type != g_py_int_type)
+            return python_int(13);
+        values[index] = *(long *)((unsigned char *)items[index] + 8);
+    }
+    if (values[0] < 0 || values[0] > 65535 || values[1] < 0 || values[1] > 65535 ||
+            values[3] < 0 || values[3] > 65535 || values[4] < 0 || values[4] > 65535 ||
+            values[2] < 1 || values[2] > 12000012 || values[5] < 16 || values[5] > 12000012 ||
+            !callback_arguments(items[6], items[7])) return python_int(18);
+    address = ((uintptr_t)values[1] << 16) | (uintptr_t)values[0];
+    query_address = ((uintptr_t)values[4] << 16) | (uintptr_t)values[3];
+    if (address % sizeof(double) || query_address % sizeof(double) ||
+            !writable_region((void *)address, (SIZE_T)values[2] * sizeof(double)) ||
+            !writable_region((void *)query_address, (SIZE_T)values[5] * sizeof(double)))
+        return python_int(14);
+    if (offline_query_active() && g_callback_thread != GetCurrentThreadId()) return python_int(18);
+    if (!offline_query_can_enter((double *)address, (int)values[2])) return python_int(18);
+    owner.packet = (double *)query_address;
+    owner.capacity = (int)values[5];
+    owner.failed = 0;
+    owner.callback = items[6];
+    owner.arguments = items[7];
+    previous_thread = g_callback_thread;
+    g_callback_thread = GetCurrentThreadId();
+    status = offline_query_dispatch((double *)address, (int)values[2], owner.packet, (int)values[5], invoke_query, &owner);
+    g_callback_thread = previous_thread;
+    if (owner.failed) return 0;
+    return python_int(status);
 }
 
 
@@ -324,6 +462,10 @@ static PyObject *buffer_values(PyObject *unused_self, PyObject *unused_args)
 
 
 static PyMethodDef MODULE_METHODS[] = {
+    {"callback_self_test", callback_self_test, METH_VARARGS,
+     "Validate this interpreter's exact function-call and result ownership ABI."},
+    {"dispatch_sync", dispatch_sync, METH_VARARGS,
+     "Run a complete computation with synchronous borrowed engine callbacks."},
 	{
 		"layout_self_test", layout_self_test, METH_VARARGS,
 		"Prove this interpreter's int and tuple layout before computing."

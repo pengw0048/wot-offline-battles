@@ -6,13 +6,14 @@ import unittest
 from pathlib import Path
 
 from navigation_adapter import Backend
-from world_adapter import WorldBackend
+from world_adapter import WorldBackend, SyncWorldBackend
 from world_trace import Recorder
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--module', required=True)
+    parser.add_argument('--sync', action='store_true')
     args = parser.parse_args()
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tests'))
     import test_port_0922_world_collision as tests
@@ -31,7 +32,7 @@ def main():
         shadow.close()
         source_result = unittest.TextTestRunner(verbosity=1).run(
             unittest.TestSuite([tests.WorldCollisionTests(replaced)]))
-        native = WorldBackend(backend)
+        native = (SyncWorldBackend if args.sync else WorldBackend)(backend)
         try:
             live_result = unittest.TextTestRunner(verbosity=1).run(
                 unittest.TestSuite(tests.WorldCollisionTests(name) for name in names if name != replaced))

@@ -120,7 +120,7 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
-    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,contacts,world')
+    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow')
     parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
     args = parser.parse_args()
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
@@ -130,6 +130,7 @@ def main():
     backend = None
     stage_recorder = None
     components = []
+    motion_component = None
     world_recorder = None
     messages, progress = [], []
     random.seed(17)
@@ -148,15 +149,25 @@ def main():
             if 'aiming' in args.components.split(','):
                 from combat_adapter import CombatBackend
                 components.append(CombatBackend(backend, fixture['fixtures']._load()).install())
-            if 'driver' in args.components.split(','):
+            if 'driver' in args.components.split(',') or 'driver-flow' in args.components.split(','):
                 from driver_adapter import DriverBackend
-                components.append(DriverBackend(backend, runtime))
+                components.append(DriverBackend(backend, runtime, 'driver-flow' in args.components.split(',')))
             if 'contacts' in args.components.split(','):
                 from perception_adapter import PerceptionBackend
                 components.append(PerceptionBackend(backend, runtime, fixture['fixtures']._load()))
             if 'world' in args.components.split(','):
                 from world_adapter import WorldBackend
                 components.append(WorldBackend(backend))
+            if 'world-sync' in args.components.split(','):
+                from world_adapter import SyncWorldBackend
+                components.append(SyncWorldBackend(backend))
+            if 'navigation-flow' in args.components.split(','):
+                from navigation_flow_adapter import NavigationFlowBackend
+                components.append(NavigationFlowBackend(backend, runtime, navigation))
+            if 'motion-flow' in args.components.split(','):
+                from motion_adapter import MotionFlowBackend
+                motion_component = MotionFlowBackend(backend, runtime, fixture['fixtures']._load())
+                components.append(motion_component)
         init_seconds = CLOCK() - init_started
         @contextlib.contextmanager
         def no_queries():
@@ -204,6 +215,8 @@ def main():
                   seconds=args.seconds, fps=args.fps,
                   real_native_timing=False, projectile_terminals_simulated=False,
                   snapshot=snapshot)
+    if motion_component is not None:
+        report['motion_vertical_coverage'] = motion_component.vertical_counts
     if stage_recorder is not None:
         report['stage_timings'] = stage_recorder.rows
     if world_recorder is not None:

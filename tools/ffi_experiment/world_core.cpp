@@ -1,6 +1,7 @@
 // Complete horizontal sweep calculations. Engine/destruction leaves yield
 // ordered numeric requests; recorded answers also support a bulk CPU estimate.
 #include "world_core.h"
+#include "query_bridge.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -29,10 +30,19 @@ struct Lane {double x1,z1,x2,z2,length,px,pz,ps,pc,direction,look;};
 struct Hit {double length;V a,b;Answer hit;};
 struct Job {
     Input in;std::vector<Answer> answers;std::vector<Query> expected;
-    size_t cursor;bool validate;
-    Job():cursor(0),validate(false){}
+    size_t cursor;bool validate,synchronous;
+    Job():cursor(0),validate(false),synchronous(false){}
     Answer query(int kind,V a,V b,int id=0){
         Query q={kind,id,a,b};
+        if(synchronous){
+            double packet[16]={static_cast<double>(kind),a.x,a.y,a.z,b.x,b.y,b.z,static_cast<double>(id)};
+            if(offline_query(packet,16))throw std::runtime_error("world engine query failed");
+            for(int i=0;i<8;++i)if(!std::isfinite(packet[i]))throw std::invalid_argument("world engine answer");
+            if(packet[0]!=std::floor(packet[0])||packet[0]<0||packet[0]>2||packet[7]!=std::floor(packet[7])||std::abs(packet[7])>1000000000)
+                throw std::invalid_argument("world engine answer type");
+            ++cursor;
+            return Answer{static_cast<int>(packet[0]),static_cast<int>(packet[7]),V(packet[1],packet[2],packet[3]),V(packet[4],packet[5],packet[6])};
+        }
         if(cursor==answers.size())throw q;
         if(validate){
             const Query &e=expected[cursor];
@@ -187,6 +197,7 @@ void run(Job &j,double *b,int out){
 void offline_world_reset(){jobs.clear();traces.clear();}
 int offline_world_dispatch(double *b,int n){
     Reader r(b,n);int op=static_cast<int>(b[0]);
+    if(op==405){Job j;j.in=input(r);r.end();j.synchronous=true;b[0]=sweep(j);b[1]=j.cursor;return 0;}
     if(op==400){Job j;j.in=input(r);int out=r.i;if(n!=out+WIDTH)throw std::invalid_argument("world start width");int id=next_job++;jobs[id]=j;run(jobs[id],b,out);b[out+15]=id;return 0;}
     if(op==401){int id=r.integer();auto it=jobs.find(id);if(it==jobs.end())throw std::invalid_argument("world owner");Answer a=answer(r);int out=r.i;if(n!=out+WIDTH)throw std::invalid_argument("world resume width");it->second.answers.push_back(a);run(it->second,b,out);return 0;}
     if(op==402){int id=r.integer();r.end();jobs.erase(id);return 0;}

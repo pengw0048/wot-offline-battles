@@ -1,6 +1,8 @@
 // Full LocalDriver state machine. Query answers resume the same operation;
 // replay is confined to native calculations and never repeats an engine call.
 #include "driver_core.h"
+#include "navigation_flow.h"
+#include "query_bridge.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -49,8 +51,20 @@ struct Result {
 // Modes: arrived, blocked, pivot_recovery, reverse_turn, avoid, drive.
 struct Pending {
     bool active;Input in;State initial;std::vector<bool> answers;size_t cursor;
+    bool synchronous=false,wet_escape=false,bake_admitted=false;int navigation=0;
     Pending():active(false),cursor(0){}
     bool query(int kind,double yaw,double distance=-1){
+        if(synchronous){
+            if(navigation){
+                int result=offline_navigation_local_query(navigation,in.bot,kind,in.pos.x,in.pos.y,in.pos.z,
+                    yaw,in.length,in.width,wet_escape,bake_admitted,distance>=0,distance);
+                if(result!=2)return result!=0;
+            }
+            double packet[16]={static_cast<double>(kind),yaw,distance};
+            if(offline_query(packet,16))throw std::runtime_error("driver engine callback");
+            if(packet[0]!=0&&packet[0]!=1)throw std::invalid_argument("driver callback verdict");
+            ++cursor;return packet[0]!=0;
+        }
         if(cursor==answers.size()) throw Query{kind,yaw,distance};
         return answers[cursor++];
     }
@@ -225,6 +239,16 @@ void resume(Driver &d,double *b,int out){
 void optional(double *b,int &i,Optional v){b[i++]=v.present;b[i++]=v.value;}
 }
 void offline_driver_reset(){drivers.clear();}
+void offline_driver_remember(int id,int bot,double yaw,bool has_ttl,double ttl){
+    auto found=drivers.find(id);if(found==drivers.end())throw std::invalid_argument("unknown driver");
+    Driver &d=found->second;if(d.pending.active)throw std::invalid_argument("driver mutation during query");
+    auto it=d.states.find(bot);if(it==d.states.end())return;
+    State &s=it->second;ttl=std::max(0.1,has_ttl?ttl:d.failure_ttl);
+    s.failed[yaw_key(yaw)]=s.clock+ttl;
+    double offset=s.desired.present?angle(yaw,s.desired.value):0.0;
+    s.escape=std::abs(offset)>=0.10?(offset>0?1.0:-1.0):fallback(s);
+    s.escape_until=s.clock+std::min(2.0,std::max(0.8,ttl));s.steering.clear();s.plan_age=999;
+}
 int offline_driver_dispatch(double *b,int n){
     Reader r(b,n);int op=static_cast<int>(b[0]);
     if(op==200){
@@ -232,7 +256,7 @@ int offline_driver_dispatch(double *b,int n){
         int id=next_driver++;drivers[id]=d;b[0]=id;return 0;
     }
     Driver &d=owner(r);
-    if(op==201){
+    if(op==201||op==208){
         if(d.pending.active)throw std::invalid_argument("reentrant driver start");
         Input in;in.bot=r.integer();in.slot=r.integer();if(in.slot<0 || in.slot>=15)throw std::invalid_argument("team slot");
         in.pos=vec(r);in.yaw=r.next();in.speed=r.next();in.dt=r.next();in.target=vec(r);
@@ -242,13 +266,17 @@ int offline_driver_dispatch(double *b,int n){
         for(int i=0;i<count;++i){
             Neighbour v;v.pos=vec(r);v.yaw=r.next();v.length=r.next();v.width=r.next();v.has_id=r.integer()!=0;v.id=r.next();v.alive=r.integer()!=0;in.neighbours.push_back(v);
         }
+        int navigation=0;bool wet=false,admitted=false;
+        if(op==208){navigation=r.integer();wet=r.integer()!=0;admitted=r.integer()!=0;}
         int out=r.i;if(n!=out+7)throw std::invalid_argument("driver result width");
         auto it=d.states.find(in.bot);
         if(it==d.states.end()){
             State s;s.slot=in.slot;s.last=Vec(in.pos.x,0,in.pos.z);s.phase=(((in.slot*7)%15)+0.5)/15.0;it=d.states.insert(std::make_pair(in.bot,s)).first;
         }else if(it->second.slot!=in.slot)throw std::invalid_argument("changed team slot");
         d.pending.in=in;d.pending.initial=it->second;d.pending.answers.clear();d.pending.active=true;
-        resume(d,b,out);return 0;
+        d.pending.synchronous=op==208;d.pending.navigation=navigation;d.pending.wet_escape=wet;d.pending.bake_admitted=admitted;
+        try{resume(d,b,out);}catch(...){d.pending.active=false;throw;}
+        return 0;
     }
     if(op==202){
         if(!d.pending.active)throw std::invalid_argument("driver is not pending");

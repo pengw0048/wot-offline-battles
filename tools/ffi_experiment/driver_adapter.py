@@ -1,14 +1,15 @@
 """One persistent native LocalDriver with synchronous engine-query yields."""
 from __future__ import print_function
+from array import array
 
 MODES = ('arrived', 'blocked', 'pivot_recovery', 'reverse_turn', 'avoid', 'drive')
 
 
 class DriverBackend(object):
-    def __init__(self, backend, runtime):
+    def __init__(self, backend, runtime, synchronous=False):
         self.backend, self.runtime = backend, runtime
         self.original = runtime.adapter.driver
-        self.driver = NativeDriver(backend, self.original)
+        self.driver = NativeDriver(backend, self.original, synchronous, runtime)
         runtime.adapter.driver = self.driver
 
     def close(self):
@@ -17,7 +18,7 @@ class DriverBackend(object):
 
 
 class NativeDriver(object):
-    def __init__(self, backend, original):
+    def __init__(self, backend, original, synchronous=False, runtime=None):
         self.backend, self.original = backend, original
         self.stuck_seconds = original.stuck_seconds
         self.recovery_seconds = original.recovery_seconds
@@ -28,6 +29,14 @@ class NativeDriver(object):
         # state lives in C++; dump_state is explicit diagnostic output.
         self.states = {}
         self.queries = 0
+        self.synchronous = synchronous
+        self.runtime = runtime
+        self.bake_admitted = False
+        if runtime is not None:
+            bake = (runtime.baked_graph or {}).get('bake') or {}
+            radii = bake.get('edge_clearance_radii') or ()
+            self.bake_admitted = (float(bake.get('vehicle_half_width', 0.0)) >= 2.15 and
+                                  max([float(value) for value in radii] or [0.0]) >= 3.0)
 
     def __getattr__(self, name):
         return getattr(self.original, name)
@@ -85,7 +94,30 @@ class NativeDriver(object):
                    horizon, int(pose_clear is not None), round(float(target[0]), 2),
                    round(float(target[2]), 2), len(rows) // 9] + rows + [0] * 7)
         try:
-            result = self.backend.call(packet)[-7:]
+            if self.synchronous:
+                navigator = getattr(self.runtime, 'navigator', None)
+                nav_handle = getattr(navigator, 'handle', None)
+                state = self.runtime.states.get(bot_id, {}) if self.runtime is not None else {}
+                packet[0] = 208
+                packet[-7:-7] = [nav_handle or 0, int(state.get('_water_depth', -1.0) > 0.90),
+                                 int(self.bake_admitted)]
+                query_packet = array('d', [0.0] * 16)
+
+                def query():
+                    kind, query_yaw, distance = int(query_packet[0]), query_packet[1], query_packet[2]
+                    self.queries += 1
+                    if kind == 1:
+                        answer = self.original._clear(direction_clear, query_yaw,
+                                                      None if distance < 0 else distance)
+                    elif kind == 2:
+                        answer = self.original._pose_fits(pose_clear, query_yaw)
+                    else:
+                        raise RuntimeError('unknown synchronous driver query')
+                    query_packet[0] = int(answer)
+
+                result = self.backend.call_sync(packet, query_packet, query)[-7:]
+            else:
+                result = self.backend.call(packet)[-7:]
             while result[0]:
                 kind, query_yaw, distance = int(result[0]), result[1], result[2]
                 self.queries += 1
