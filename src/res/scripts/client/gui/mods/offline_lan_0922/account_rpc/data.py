@@ -627,7 +627,7 @@ def _prune_empty(values):
 
 
 def _elite_vehicles(vehicle_types, unlocks):
-    """Return the owned vehicles whose whole research list is unlocked.
+    """Return the known vehicles whose whole research list is unlocked.
 
     #1513 marks a vehicle elite when nothing it leads to is left to research.
     Deriving it means a career's tech tree is honest and a sandbox stays fully
@@ -686,7 +686,8 @@ def stats(selected_vehicle=None, postbattle_progress=None):
                 vehicle_xp[int(compact_descr)] = max(0, int(experience or 0))
             except (TypeError, ValueError):
                 continue
-    elite = _elite_vehicles(vehicle_types, unlocks)
+    # Sold vehicles retain experience and remain conversion candidates.
+    elite = _elite_vehicles(vehicle_types | set(vehicle_xp), unlocks)
     return {
         'account': {
             'clanDBID': 0, 'attrs': 0, 'premiumExpiryTime': 0,

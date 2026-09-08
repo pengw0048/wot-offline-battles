@@ -170,6 +170,13 @@ class _Descriptor(object):
             elif field.startswith('gun='):
                 self._set_gun(int(field[4:]))
 
+    def getDevices(self):
+        defaults = [2002, 2005, 2006, 2007, 7001, 7002]
+        installed = [self.chassis.compactDescr, self.engine.compactDescr,
+                     self.fuelTank.compactDescr, self.radio.compactDescr,
+                     self.turret.compactDescr, self.gun.compactDescr]
+        return defaults, installed, list(self.devices.values())
+
     def _set_gun(self, compact_descr):
         self.gun = _Component(compact_descr)
         self.gun.maxAmmo = 45
@@ -373,6 +380,7 @@ def _modules():
 
     tankmen = types.SimpleNamespace(
         TankmanDescr=_TankmanDescriptor,
+        commanderTutorXpBonusFactorForCrew=lambda crew, ammo: 0.0,
         SKILL_NAMES=tuple(skill_names),
         ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
         getSkillsMask=lambda names: 0,
@@ -2861,15 +2869,15 @@ class GaragePersistenceTests(unittest.TestCase):
     def test_battle_crew_receipt_and_descriptors_commit_once_together(self):
         snapshot = copy.deepcopy(SNAPSHOT)
         snapshot['vehicles'][0]['settings'] = 1
-        unused_vehicles, tankmen = _modules()
+        vehicles, tankmen = _modules()
         store = self._store()
 
         first = store.apply_battle_crew_xp(
             snapshot, 'server:7:1', 50001, 100, 1,
-            tankmen_module=tankmen)
+            tankmen_module=tankmen, vehicles_module=vehicles)
         duplicate = store.apply_battle_crew_xp(
             snapshot, 'server:7:1', 50001, 100, 1,
-            tankmen_module=tankmen)
+            tankmen_module=tankmen, vehicles_module=vehicles)
 
         self.assertTrue(first['applied'])
         self.assertFalse(duplicate['applied'])
@@ -2881,7 +2889,7 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertTrue(restarted_store.apply(restarted))
         after_restart = restarted_store.apply_battle_crew_xp(
             restarted, 'server:7:1', 50001, 100, 1,
-            tankmen_module=tankmen)
+            tankmen_module=tankmen, vehicles_module=vehicles)
         self.assertFalse(after_restart['applied'])
         self.assertEqual(200, _TankmanDescriptor(
             restarted['vehicles'][0]['tankmen'][101]).totalXP())

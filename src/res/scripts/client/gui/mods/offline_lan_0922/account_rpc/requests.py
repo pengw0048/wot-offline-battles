@@ -105,6 +105,15 @@ def _fitting(context, mutate, extension=None):
             'credits', 'gold', 'freeXP', 'slots', 'berths',
             'vehTypeXP', 'unlocks', 'eliteVehicles')
             if current_stats[name] != previous_stats[name])
+        # #1513 merges these growing sets and treats each incremental entry
+        # as a new unlock/elite notification. Repeating the full set floods
+        # item-cache invalidation and replays old elite vehicle dialogs.
+        for name in ('unlocks', 'eliteVehicles'):
+            if name in changed_stats:
+                added = set(current_stats[name]) - set(previous_stats[name])
+                changed_stats.pop(name)
+                if added:
+                    changed_stats[name] = added
         if changed_stats:
             diff['stats'] = changed_stats
         if moved_recycled:
@@ -361,7 +370,8 @@ def _buy_and_equip_item(context, args):
         return Result(commands.RES_FAILURE, 'INVALID_PURCHASE_REQUEST')
     gun_compact_descr = values[5] if len(values) > 5 else 0
     return _fitting(context, lambda state: state.buy_and_equip_item(
-        values[2], values[1], values[3], gun_compact_descr))
+        values[2], values[1], values[3], gun_compact_descr,
+        paid_removal=bool(values[4]) if len(values) > 4 else False))
 
 
 def _unlock(context, args):

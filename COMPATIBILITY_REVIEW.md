@@ -2030,6 +2030,54 @@ donation and destructible-map donation paths have been removed. The remaining
 vehicle catalog is waiting-room metadata for vehicle tiers and does not provide
 combat descriptors.
 
+## Offline progression and account settlement
+
+The garage ledger owns spendable vehicle XP, free XP, credits, gold, research,
+crew descriptors and item stock. Battle receipt application persists these
+changes with an idempotence marker before publishing the Account update.
+
+- Ordinary battle XP goes both to the vehicle and independently to every
+  seated crew member. Accelerated training is opt-in and requires the current
+  vehicle research tree to be elite; only then does the vehicle award become
+  extra XP for the least experienced crew member. Empty seats earn nothing
+  and cannot prevent the remaining earnings from settling. Lifetime dossier
+  XP counts the battle award even when accelerated training spends it.
+- Crew advancement uses `TankmanDescr.addXP`. Mentor uses the pinned
+  `tankmen.commanderTutorXpBonusFactorForCrew(crew, ammo)` factor, evaluated
+  before XP advances skills or service consumes equipment, and applies only
+  to other crew members. Qualification percentages are integer levels: the
+  shipped level-cost function requires 500 XP for 50% to become 51%.
+- Selling and rebuying a vehicle preserves its XP, including across restart.
+  Elite vehicles with stored XP remain conversion candidates after sale.
+  Conversion counts each selected vehicle once. Researching a vehicle also
+  unlocks its `autounlockedItems` without requiring a purchase.
+- Selling follows `Shop.getSellPrice`: the published sell-for-gold set is
+  empty, so gold-priced vehicles and items refund credits. Each unit rounds
+  up before the stack count is applied. `Vehicle._calcSellPrice` replaces the
+  stock-module values with the installed-module values; those installed
+  copies leave with the hull. Keeping a complex device charges its published
+  dismantling price. The whole sale rolls back if any component fails.
+- Buy-and-install preserves `Shop.buyAndEquipItem`'s `isPaidRemoval` field.
+  A failed native install restores the old fitting, item stock and currencies.
+  Automatic repair and resupply use the saved layout currency and publish
+  their actual credit/gold debits in the native battle-results cost fields.
+  Those costs share the durable receipt marker so a retry neither charges
+  twice nor loses the original cost display.
+- Incremental Account updates publish current balances, changed inventory,
+  crew and XP before command completion; growing unlock/elite sets carry only
+  additions, matching `Stats.synchronize` and avoiding repeated notifications.
+
+This is a functional offline progression loop, not the proprietary retail
+server economy. Reward coefficients and premium-vehicle credit bonuses remain
+explicit offline policy. Premium-account time, first-win/calendar bonuses,
+personal reserves, missions, rentals and the retail restore-vehicle service
+are not implemented. Customization ownership and outfits persist, but their
+catalogue remains free; it is not a reconstruction of the retail cosmetic
+store. Crew-school and skill-reset costs/losses are the published offline
+policy, not evidence of the historical server tables. The fixes above have
+logic, persistence and exact-bytecode contract tests; native Windows UI and
+battle acceptance must still exercise the resulting package.
+
 ## Known deterministic parity gaps
 
 The source audit deliberately keeps the following differences visible:
@@ -2049,9 +2097,8 @@ The source audit deliberately keeps the following differences visible:
   `VehicleDescr.installOptionalDevice`/`removeOptionalDevice`/`installComponent`
   and `makeCompactDescr`, crew skills through `TankmanDescr.addSkill`, and each
   accepted mutation is pushed with `PlayerAccount.update`, which unpickles its
-  argument into the normal `_update` event path. A gun swap refills the default
-  ammunition, because the new gun's shells would otherwise disagree with the
-  shell inventory that `data._validate_selected_vehicle` cross-checks;
+  argument into the normal `_update` event path. A gun swap carries the new gun's default
+  layout with an empty rack; the player buys the rounds through resupply;
 - purchases are implemented: `CMD_BUY_ITEM` 302 carries
   `(cacheRev, intCompactDescr, count, goldForCredits)` and
   `CMD_BUY_AND_EQUIP_ITEM` 308 carries
@@ -2074,10 +2121,9 @@ The source audit deliberately keeps the following differences visible:
   `config.json` changes. The file is never shipped in the overlay, is written
   atomically after each accepted change, and any unreadable or wrong-schema
   content logs one line and falls back to the stock garage;
-- every module a vehicle type lists is published as owned and unlocked, so the
-  research tree can mount any gun, turret, engine, chassis or radio. The lists
-  come from the vehicle's own type, so a premium hull still offers only its own
-  modules;
+- the sandbox owns and unlocks its module catalogue. Career saves instead
+  research and purchase modules through the live vehicle tree; installed
+  copies and depot spares are counted separately;
 - the battle uses the garage loadout: the player's shells come from the mounted
   layout mapped onto the gun's shot order, and the consumables come from the
   mounted slots, so an empty slot carries nothing. Bots keep a synthetic

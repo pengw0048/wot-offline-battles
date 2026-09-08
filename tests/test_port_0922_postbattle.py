@@ -268,7 +268,7 @@ class PostBattleContractTests(unittest.TestCase):
         self.assertEqual(receipt['stats']['piercings'], vehicle['piercings'])
         self.assertEqual(1, vehicle['survivedBattles'])
 
-    def test_accelerated_training_diverts_vehicle_xp_once(self):
+    def test_accelerated_training_keeps_lifetime_dossier_xp_once(self):
         store = postbattle_store.PostBattleStore(path=None)
         calls = []
         store.set_progress_applier(
@@ -281,7 +281,8 @@ class PostBattleContractTests(unittest.TestCase):
 
         self.assertEqual([receipt['receipt_id']], calls)
         self.assertEqual(
-            0, store.progress()['vehicles'][receipt['vehicle']]['xp'])
+            receipt['rewards']['xp'],
+            store.progress()['vehicles'][receipt['vehicle']]['xp'])
         self.assertEqual(receipt['rewards']['credits'],
                          store.progress()['credits'])
 

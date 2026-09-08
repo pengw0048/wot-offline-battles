@@ -222,11 +222,12 @@ class AccountRpcTests(unittest.TestCase):
 
         update = pickle.loads(self.player.updates[-1])
         self.assertEqual(
-            {'credits', 'freeXP', 'vehTypeXP', 'dossier'},
+            {'credits', 'gold', 'freeXP', 'vehTypeXP', 'dossier'},
             set(update['stats']))
         self.assertNotIn('eliteVehicles', update['stats'])
         self.assertNotIn('unlocks', update['stats'])
         self.assertEqual(700, update['stats']['credits'])
+        self.assertEqual(5, update['stats']['gold'])
         self.assertEqual(30, update['stats']['freeXP'])
         self.assertEqual(600, update['stats']['vehTypeXP'][50001])
         self.assertEqual(1, self.player.dossier_resyncs)
@@ -1313,7 +1314,9 @@ class SaleDiffTests(unittest.TestCase):
         snapshot['wallet'] = {'credits': 1000, 'gold': 0, 'freeXP': 0}
         state = account_requests.garage.GarageState(
             snapshot, vehicles_module=types.SimpleNamespace(
-                getTypeOfCompactDescr=lambda compact_descr: 10))
+                getTypeOfCompactDescr=lambda compact_descr: 10,
+                VehicleDescr=lambda compactDescr: types.SimpleNamespace(
+                    getDevices=lambda: ([], [], []))))
         pushed = []
         context = {'garage': state, 'push_update': pushed.append}
         result = account_requests.dispatch(
@@ -1426,6 +1429,16 @@ class DepotTests(unittest.TestCase):
         result.before_response()
         self.assertEqual({'gold': 90}, pushed[0]['stats'])
         self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+
+    def test_research_update_publishes_only_the_new_unlock(self):
+        state = self._garage()
+        state.snapshot()['unlockItemCompactDescrs'] = {50001, 2002, 12300}
+        pushed = []
+        result = account_requests._fitting(
+            {'garage': state, 'push_update': pushed.append},
+            lambda garage: garage.snapshot()['unlockItemCompactDescrs'].add(4444))
+        result.before_response()
+        self.assertEqual({4444}, pushed[0]['stats']['unlocks'])
 
     def test_special_mode_item_cannot_be_bought_or_supplied(self):
         state = self._garage(item_type=11)

@@ -174,3 +174,218 @@ class EconomyRegressionTests(unittest.TestCase):
         self.assertEqual(10500, results.progress()['credits'])
         saved = results._pending[str(receipt['arena_unique_id'])]
         self.assertEqual(10500, postbattle._packed_vehicle(saved)['credits'])
+
+    def test_non_elite_vehicle_banks_xp_despite_an_old_acceleration_setting(self):
+        self.stock['vehicles'][0]['settings'] = 1
+        original = self.vehicles.getVehicleType
+        def vehicle_type(cd):
+            value = original(cd)
+            value.unlocksDescrs = [(500, 999999)]
+            return value
+        self.vehicles.getVehicleType = vehicle_type
+        state = self.state()
+        policy = state.award_battle_crew_xp(50001, 100, 1)
+        state.award_battle_earnings(50001, {'xp': 100}, policy['accelerated'])
+        restored = self.restart(state.snapshot())
+        self.assertFalse(policy['accelerated'])
+        self.assertEqual(100, restored['vehicleXP'][50001])
+        for compact_descr in restored['vehicles'][0]['tankmen'].values():
+            self.assertEqual(100, self.tankmen.TankmanDescr(compact_descr).totalXP())
+
+    def test_empty_crew_still_banks_vehicle_experience_and_credits(self):
+        self.stock['vehicles'][0].update(crew=[None, None], tankmen={}, settings=1)
+        state = self.state()
+        result = state.award_battle_crew_xp(50001, 100, 1)
+        self.assertFalse(result['accelerated'])
+        state.award_battle_earnings(50001, {'xp': 100, 'credits': 1000},
+                                  result['accelerated'])
+        self.assertEqual(100, state.snapshot()['vehicleXP'][50001])
+        self.assertEqual(101000, state.snapshot()['wallet']['credits'])
+
+    def test_duplicate_conversion_sources_cannot_mint_experience(self):
+        self.stock['vehicleXP'] = {50001: 100}
+        self.stock['wallet']['gold'] = 100
+        state = self.state()
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(self.garage.GarageError):
+            state.convert_to_free_xp([50001, 50001], 200)
+        self.assertEqual(before, state.snapshot())
+        state.convert_to_free_xp([50001, 50001], 100)
+        self.assertEqual(0, state.snapshot()['vehicleXP'][50001])
+        self.assertEqual(1100, state.snapshot()['wallet']['freeXP'])
+
+    def test_failed_paid_device_swap_preserves_gold_and_the_old_device(self):
+        self.stock['inventoryItems'][9] = {9001: 1, 9002: 1}
+        self.stock['wallet']['gold'] = 100
+        state = self.state()
+        state.equip_optional_device(9, 9002, 0)
+        state.touched_vehicles()
+        state.touched_items()
+        before = copy.deepcopy(state.snapshot())
+        with mock.patch.object(fixture._Descriptor, 'installOptionalDevice',
+                               side_effect=ValueError('native refusal')):
+            with self.assertRaises(self.garage.GarageError):
+                state.equip_optional_device(9, 9001, 0, paid_removal=True)
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual(set(), state.touched_vehicles())
+        self.assertEqual({}, state.touched_items())
+
+    def test_buy_and_swap_preserves_the_device_when_paid_removal_is_selected(self):
+        self.stock['inventoryItems'][9] = {9002: 1}
+        self.stock['shopItemPrices'][9001] = {'credits': 1000}
+        self.stock['wallet']['gold'] = 100
+        self.stock['deviceRemovalCost'] = {'gold': 10}
+        state = self.state()
+        state.equip_optional_device(9, 9002, 0)
+        state.buy_and_equip_item(9, 9001, paid_removal=True)
+        self.assertEqual(90, state.snapshot()['wallet']['gold'])
+        self.assertEqual(99000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(1, state.snapshot()['inventoryItems'][9][9002])
+
+    def test_sale_failure_after_a_valid_item_does_not_remove_stock(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, vehicleTypeCompactDescr=50002, tankmen={}, crew=[])
+        self.stock['vehicles'].append(second)
+        self.stock['shopItemPrices'][50002] = {'credits': 1000}
+        self.stock['inventoryItems'][4][4444] = 1
+        state = self.state()
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(self.garage.GarageError):
+            state.sell_vehicle(10, items_from_inventory=[4444, 999999])
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual({}, state.touched_items())
+
+    def test_unowned_vehicle_experience_survives_restart(self):
+        self.stock['shopItemPrices'][50002] = {'credits': 5000}
+        state = self.state()
+        state.snapshot()['vehicleXP'] = {50001: 10, 50002: 321}
+        restored = self.restart(state.snapshot())
+        self.assertEqual(321, restored['vehicleXP'][50002])
+        self.assertEqual([50001], [v['vehicleTypeCompactDescr']
+                                  for v in restored['vehicles']])
+
+    def test_sale_uses_the_upgraded_module_value_and_removes_its_copy(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002,
+                      tankmen={}, crew=[])
+        self.stock['vehicles'].append(second)
+        self.stock['shopItemPrices'][50002] = {'credits': 10000}
+        for item_type, items in self.garage.mounted_module_items(
+                self.vehicles.VehicleDescr(b'veh:10')).items():
+            for cd in items:
+                self.stock['inventoryItems'][item_type][cd] = 2
+        state = self.state()
+        state.install_component(10, 4444)
+        state.sell_vehicle(10)
+        # 5000 for the stock hull, minus 500 stock gun, plus 1000 new gun.
+        self.assertEqual(105500, state.snapshot()['wallet']['credits'])
+        self.assertEqual(0, state.snapshot()['inventoryItems'][4].get(4444, 0))
+        self.assertEqual(2, state.snapshot()['inventoryItems'][4][7002])
+        self.assertEqual(1, state.snapshot()['inventoryItems'][2][2002])
+
+    def test_stack_sale_rounds_each_unit_before_multiplying(self):
+        self.stock['shopItemPrices'][4444] = {'credits': 3}
+        state = self.state()
+        self.assertEqual({'credits': 6}, state._item_refund(4444, 3))
+
+    def test_selling_with_a_retained_complex_device_charges_dismantling(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002,
+                      tankmen={}, crew=[])
+        self.stock['vehicles'].append(second)
+        self.stock['shopItemPrices'][50002] = {'credits': 10000}
+        self.stock['inventoryItems'][9] = {9002: 1}
+        self.stock['wallet']['gold'] = 100
+        self.stock['deviceRemovalCost'] = {'gold': 10}
+        state = self.state()
+        state.equip_optional_device(10, 9002, 0)
+        state.sell_vehicle(10)
+        self.assertEqual(90, state.snapshot()['wallet']['gold'])
+        self.assertEqual(1, state.snapshot()['inventoryItems'][9][9002])
+
+    def test_duplicate_sale_entries_cannot_refund_a_carried_item_twice(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002,
+                      tankmen={}, crew=[])
+        self.stock['vehicles'].append(second)
+        state = self.state()
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(self.garage.GarageError):
+            state.sell_vehicle(10, items_from_vehicle=[20010, 20010])
+        self.assertEqual(before, state.snapshot())
+
+    def test_actual_service_costs_survive_settlement_retry_and_result_restart(self):
+        import test_port_0922_postbattle as postbattle
+        record = self.stock['vehicles'][0]
+        record['settings'] = 14
+        self.stock['wallet']['gold'] = 100
+        self.stock['inventoryItems'][10] = {20010: 30, 20011: 15}
+        record['eqs'] = [11001, 0, 0]
+        record['eqsLayout'] = [11001, 0, 0]
+        record['inventoryItems'][11] = {11001: 1}
+        self.stock['inventoryItems'][11] = {11001: 1}
+        self.stock['shopItemPrices'][11001] = {'gold': 50}
+        store = self.stores.GarageStore(self.path)
+        args = dict(tankmen_module=self.tankmen, vehicles_module=self.vehicles,
+                    health=400, shells_fired={0: 2}, equipment_used=[11001],
+                    auto_settings=(2, 4, 8),
+                    rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
+        applied = store.apply_battle_crew_xp(
+            self.stock, 'costs:1:1', 50001, 100, 1, **args)
+        expected = dict(repair_credits=1200, ammo_credits=200, ammo_gold=0,
+                        equipment_credits=0, equipment_gold=50)
+        self.assertEqual(expected, applied['service_costs'])
+        wallet = dict(self.stock['wallet'])
+        retry = self.stores.GarageStore(self.path).apply_battle_crew_xp(
+            self.stock, 'costs:1:1', 50001, 100, 1, **args)
+        self.assertEqual(expected, retry['service_costs'])
+        self.assertEqual(wallet, self.stock['wallet'])
+        results_path = os.path.join(os.path.dirname(self.path), 'results.json')
+        results = postbattle.postbattle_store.PostBattleStore(path=results_path)
+        receipt = postbattle._receipt(results.account_key)
+        results.set_progress_applier(lambda unused: retry)
+        self.assertTrue(results.accept(receipt))
+        restored = postbattle.postbattle_store.PostBattleStore(path=results_path)
+        saved = restored._pending[str(receipt['arena_unique_id'])]
+        packed = postbattle._packed_vehicle(saved)
+        self.assertEqual(1200, packed['autoRepairCost'])
+        self.assertEqual((200, 0), packed['autoLoadCost'])
+        self.assertEqual((0, 50, 0), packed['autoEquipCost'])
+
+    def test_mentor_uses_the_native_factor_for_other_crew_before_consumption(self):
+        self.stock['vehicles'][0]['eqs'] = [11001, 0, 0]
+        seen = []
+        def tutor(crew, ammo):
+            seen.append(([member.role for member in crew], ammo))
+            return 0.1
+        self.tankmen.commanderTutorXpBonusFactorForCrew = tutor
+        state = self.state()
+        state.award_battle_crew_xp(50001, 100, 1)
+        crew = state.snapshot()['vehicles'][0]['tankmen']
+        self.assertEqual(100, self.tankmen.TankmanDescr(crew[101]).totalXP())
+        self.assertEqual(110, self.tankmen.TankmanDescr(crew[102]).totalXP())
+        self.assertEqual([(['commander', 'driver'], [11001, 1])], seen)
+
+    def test_vehicle_sale_can_sell_a_spare_of_the_module_leaving_with_it(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002,
+                      tankmen={}, crew=[])
+        self.stock['vehicles'].append(second)
+        self.stock['shopItemPrices'][50002] = {'credits': 10000}
+        self.stock['inventoryItems'][4][7002] = 3
+        state = self.state()
+        state.sell_vehicle(10, items_from_inventory=[7002])
+        self.assertEqual(1, state.snapshot()['inventoryItems'][4][7002])
+        self.assertEqual(105500, state.snapshot()['wallet']['credits'])
+
+    def test_refused_native_dismantling_does_not_charge_or_report_success(self):
+        self.stock['inventoryItems'][9] = {9002: 1}
+        self.stock['wallet']['gold'] = 100
+        state = self.state()
+        state.equip_optional_device(9, 9002, 0)
+        before = copy.deepcopy(state.snapshot())
+        with mock.patch.object(fixture._Descriptor, 'removeOptionalDevice',
+                               side_effect=ValueError('native refusal')):
+            with self.assertRaises(self.garage.GarageError):
+                state.equip_optional_device(9, 0, 0, paid_removal=True)
+        self.assertEqual(before, state.snapshot())

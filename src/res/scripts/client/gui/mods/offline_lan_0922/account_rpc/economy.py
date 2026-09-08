@@ -14,6 +14,8 @@ reads it from the live cache so a tree change in the installed client cannot
 disagree with what the garage offers.
 """
 
+import math
+
 from gui.mods.offline_lan_0922 import price_catalogue
 
 
@@ -319,21 +321,14 @@ def cost(index, compact_descr, count=1):
 
 
 def refund(index, compact_descr, count=1):
-    """Return what selling ``count`` of one item pays back.
-
-    #1513 sets ``SELL_PRICE_FACTOR`` to 0.5 for clients.  A gold item refunds
-    credits at that fraction of its gold price the way retail does not; there
-    is no offline gold sink to return to, so gold purchases are refunded in
-    gold to keep the ledger reversible.
-    """
+    """Match #1513's credit refund and per-unit upward rounding."""
     price = index.get(_int(compact_descr))
     if price is None:
         return {CREDITS: 0}
     count = max(1, _int(count, 1))
-    factor = price_catalogue.SELL_PRICE_FACTOR
-    if price[price_catalogue.GOLD]:
-        return {GOLD: int(price[price_catalogue.GOLD] * count * factor)}
-    return {CREDITS: int(price[price_catalogue.CREDITS] * count * factor)}
+    credits = price[price_catalogue.CREDITS] + price[price_catalogue.GOLD] * 400
+    return {CREDITS: int(math.ceil(
+        credits * price_catalogue.SELL_PRICE_FACTOR)) * count}
 
 
 def can_afford(wallet, amount):
@@ -432,3 +427,15 @@ def spend_research(wallet, vehicle_xp, vehicle_type_compact_descr, xp_cost):
     vehicle_xp[key] = available - from_vehicle
     wallet[FREE_XP] = wallet[FREE_XP] - remainder
     return {'vehicleXP': from_vehicle, 'freeXP': remainder}
+
+
+SERVICE_COST_FIELDS = (
+    'repair_credits', 'ammo_credits', 'ammo_gold',
+    'equipment_credits', 'equipment_gold')
+
+
+def service_costs(value):
+    """Normalize local post-battle debits for persistence and result packing."""
+    value = value if isinstance(value, dict) else {}
+    return dict((name, max(0, _int(value.get(name))))
+                for name in SERVICE_COST_FIELDS)

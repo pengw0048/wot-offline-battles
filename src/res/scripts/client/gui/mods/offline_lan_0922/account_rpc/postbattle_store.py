@@ -24,6 +24,8 @@ import time
 import uuid
 import zlib
 
+from gui.mods.offline_lan_0922.account_rpc import economy
+
 try:
     import cPickle as _pickle
 except ImportError:
@@ -137,8 +139,8 @@ def _receipt(value):
                  for name in RECEIPT_STAT_NAMES)
     rewards = dict((name, max(0, _int(raw_rewards.get(name)))) for name in (
         'credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost'))
-    # Offline battles never debit service costs.  Rejecting a positive debit
-    # is safer than silently applying an untrusted server value.
+    # The client owns service prices and debits. A server receipt may not
+    # charge them again; local service_costs records the actual settlement.
     if rewards['repair_cost'] or rewards['ammo_cost']:
         raise ValueError('offline service costs must be zero')
     # What the account actually banked, after its own multipliers.  Only the
@@ -301,6 +303,7 @@ def _receipt(value):
         'premature_leave': bool(value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
+        'service_costs': economy.service_costs(value.get('service_costs')),
         # The personal row owns the medal list and the health the battle left;
         # mirroring both here keeps the durable progress transaction from
         # re-deriving the roster to find them.
@@ -445,6 +448,7 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     # exactly that difference, so the screen shows both.
     original = receipt['rewards']
     rewards = receipt.get('awarded') or original
+    service = economy.service_costs(receipt.get('service_costs'))
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
@@ -487,9 +491,10 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'originalCrystal': 0,
         'creditsToDraw': 0,
         'originalCreditsToDraw': 0,
-        'autoRepairCost': 0,
-        'autoLoadCost': (0, 0),
-        'autoEquipCost': (0, 0, 0),
+        'autoRepairCost': service['repair_credits'],
+        'autoLoadCost': (service['ammo_credits'], service['ammo_gold']),
+        'autoEquipCost': (service['equipment_credits'],
+                          service['equipment_gold'], 0),
         'isPrematureLeave': receipt['premature_leave'],
         'watchedBattleToTheEnd': not receipt['premature_leave'],
         'isTeamKiller': False,
@@ -701,17 +706,17 @@ class PostBattleStore(object):
         policy = {}
         if self._progress_applier is not None:
             policy = self._progress_applier(receipt) or {}
+        receipt['service_costs'] = economy.service_costs(policy.get('service_costs'))
         awarded = policy.get('awarded')
         if isinstance(awarded, dict):
             receipt['awarded'] = dict(
                 (name, max(0, _int(awarded.get(name))))
                 for name in ('credits', 'xp', 'free_xp'))
-        banked = receipt['awarded'] or receipt['rewards']
         previous = self._snapshot()
         self._pending[arena_key] = receipt
-        self._apply_progress(
-            receipt, vehicle_xp=(0 if policy.get('accelerated') else
-                                 banked['xp']))
+        # Lifetime dossier XP includes experience spent on crew training.
+        # The garage ledger independently owns the spendable vehicle balance.
+        self._apply_progress(receipt)
         try:
             self._save()
         except Exception:

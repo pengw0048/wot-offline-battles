@@ -6,7 +6,8 @@ participation Credits scale with vehicle tier and use 1.85X on a win, frags do
 not independently award Credits, wins add 50 percent XP, and Free XP is five
 percent of Combat XP. The private X/Y/Z and balance coefficients remain
 unavailable, so the named values below are an explicit offline policy. Offline
-battles have zero ammunition and repair costs.
+service costs are settled by the client using its actual garage prices.
+The server receipt leaves those cost fields at zero to avoid charging twice.
 """
 
 

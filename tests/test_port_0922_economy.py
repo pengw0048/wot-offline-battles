@@ -99,10 +99,28 @@ def _snapshot():
 
 
 def _state(snapshot=None, vehicles=None):
-    return GARAGE.GarageState(
+    state = GARAGE.GarageState(
         snapshot if snapshot is not None else _snapshot(),
         vehicles_module=vehicles or _vehicles(),
         tankmen_module=types.SimpleNamespace())
+    def descriptor(compactDescr):
+        record = next(row for row in state.snapshot()['vehicles']
+                      if row['compDescr'] == compactDescr)
+        components = [(2, 'chassis', 2002), (5, 'engine', 2005),
+                      (6, 'fuelTank', 2006), (7, 'radio', 2007),
+                      (3, 'turret', 2003), (4, 'gun', 2004)]
+        attrs = dict((name, types.SimpleNamespace(compactDescr=cd))
+                     for unused_type, name, cd in components)
+        devices = [cd for cd, count in record['inventoryItems'].get(9, {}).items()
+                   for unused in range(count)]
+        attrs['optionalDevices'] = [types.SimpleNamespace(compactDescr=cd)
+                                    for cd in devices]
+        attrs['getDevices'] = lambda: (
+            [cd for unused_type, unused_name, cd in components],
+            [cd for unused_type, unused_name, cd in components], devices)
+        return types.SimpleNamespace(**attrs)
+    state._vehicles.VehicleDescr = descriptor
+    return state
 
 
 def _vehicles(unlocks_descrs=(), autounlocked=()):
@@ -295,7 +313,7 @@ class GoldForCreditsTests(unittest.TestCase):
         self.assertEqual(950, snapshot['wallet']['gold'])
         self.assertEqual(100000, snapshot['wallet']['credits'])
 
-    def test_a_gold_vehicle_is_never_priced_in_credits(self):
+    def test_a_gold_vehicle_costs_gold_but_sells_for_credits(self):
         """Only the two item types the client's own flags cover convert."""
         state = _state()
 
@@ -303,11 +321,21 @@ class GoldForCreditsTests(unittest.TestCase):
             {'gold': 12500},
             state._item_cost(SECOND_VEHICLE_CD))
         self.assertEqual(
-            {'gold': 6250},
+            {'credits': 2500000},
             state._item_refund(SECOND_VEHICLE_CD))
 
 
 class ResearchTests(unittest.TestCase):
+    def test_researching_a_vehicle_unlocks_its_free_modules_without_buying_it(self):
+        vehicles = _vehicles(unlocks_descrs=((500, SECOND_VEHICLE_CD),),
+                             autounlocked=(2222,))
+        state = _state(vehicles=vehicles)
+        state.unlock(VEHICLE_CD, 0)
+        self.assertIn(SECOND_VEHICLE_CD, state.snapshot()['unlockItemCompactDescrs'])
+        self.assertIn(2222, state.snapshot()['unlockItemCompactDescrs'])
+        self.assertEqual(29500, state.snapshot()['vehicleXP'][VEHICLE_CD])
+        self.assertEqual(1, len(state.snapshot()['vehicles']))
+
     def test_research_spends_the_vehicle_experience_first(self):
         vehicles = _vehicles(unlocks_descrs=((20000, 2222),))
         state = _state(vehicles=vehicles)
@@ -631,12 +659,13 @@ class VehiclePurchaseTests(unittest.TestCase):
             with self.assertRaises(GARAGE.GarageError):
                 state.buy_vehicle(SECOND_VEHICLE_CD)
 
-    def test_selling_a_vehicle_returns_half_and_drops_its_experience(self):
+    def test_selling_a_vehicle_returns_half_and_keeps_its_experience(self):
         from unittest import mock
 
         snapshot = _snapshot()
         second = copy.deepcopy(snapshot['vehicles'][0])
         second['id'] = 10
+        second['compDescr'] = b'veh:10'
         second['vehicleTypeCompactDescr'] = SECOND_VEHICLE_CD
         snapshot['vehicles'].append(second)
         snapshot['vehicleTypeCompactDescrs'].add(SECOND_VEHICLE_CD)
@@ -647,8 +676,19 @@ class VehiclePurchaseTests(unittest.TestCase):
 
         result = state.snapshot()
         self.assertEqual(1, len(result['vehicles']))
-        self.assertNotIn(SECOND_VEHICLE_CD, result['vehicleXP'])
-        self.assertEqual(1000 + 6250, result['wallet']['gold'])
+        self.assertEqual(4000, result['vehicleXP'][SECOND_VEHICLE_CD])
+        self.assertEqual(1000, result['wallet']['gold'])
+        self.assertEqual(2600000, result['wallet']['credits'])
+
+    def test_rebuying_a_sold_vehicle_keeps_its_earned_experience(self):
+        snapshot = self._two_vehicles()
+        snapshot['vehicleXP'][SECOND_VEHICLE_CD] = 4321
+        snapshot['wallet']['gold'] = 20000
+        state = _state(snapshot)
+        state.sell_vehicle(10)
+        with self._built([]):
+            state.buy_vehicle(SECOND_VEHICLE_CD)
+        self.assertEqual(4321, state.snapshot()['vehicleXP'][SECOND_VEHICLE_CD])
 
     def test_the_last_vehicle_cannot_be_sold(self):
         state = _state()
@@ -660,6 +700,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         snapshot = _snapshot()
         second = copy.deepcopy(snapshot['vehicles'][0])
         second['id'] = 10
+        second['compDescr'] = b'veh:10'
         # A crew member belongs to one vehicle, so the second one has its own.
         second['crew'] = [103, 104]
         second['tankmen'] = {103: b'tman:103', 104: b'tman:104'}
@@ -682,7 +723,7 @@ class VehiclePurchaseTests(unittest.TestCase):
         self.assertEqual(
             {103: b'tman:103', 104: b'tman:104'},
             snapshot['barracksTankmen'])
-        self.assertEqual(1000 + 6250, snapshot['wallet']['gold'])
+        self.assertEqual(1000, snapshot['wallet']['gold'])
 
     def test_a_sale_that_keeps_the_crew_is_refused_by_a_full_barracks(self):
         """#1513's own sell dialog checks the same berths before asking."""
@@ -710,8 +751,8 @@ class VehiclePurchaseTests(unittest.TestCase):
 
         snapshot = state.snapshot()
         # 20 rounds at 100 credits, halved, on top of the vehicle's own gold.
-        self.assertEqual(100000 + 1000, snapshot['wallet']['credits'])
-        self.assertEqual(1000 + 6250, snapshot['wallet']['gold'])
+        self.assertEqual(2600000 + 1000, snapshot['wallet']['credits'])
+        self.assertEqual(1000, snapshot['wallet']['gold'])
         # The remaining vehicle still carries its own twenty.
         self.assertEqual(20, snapshot['inventoryItems'][10][10010])
 
@@ -722,9 +763,9 @@ class VehiclePurchaseTests(unittest.TestCase):
         state.sell_vehicle(10, items_from_vehicle=[11001])
 
         snapshot = state.snapshot()
-        self.assertEqual(1000 + 6250, snapshot['wallet']['gold'])
+        self.assertEqual(1000, snapshot['wallet']['gold'])
         self.assertEqual(
-            100000 + 50 * GARAGE.GOLD_EXCHANGE_RATE // 2,
+            2600000 + 50 * GARAGE.GOLD_EXCHANGE_RATE // 2,
             snapshot['wallet']['credits'])
         self.assertNotIn(11001, snapshot['inventoryItems'][11])
 
@@ -743,7 +784,7 @@ class VehiclePurchaseTests(unittest.TestCase):
 
         snapshot = state.snapshot()
         # Two stored devices at 50000 credits, halved.
-        self.assertEqual(100000 + 50000, snapshot['wallet']['credits'])
+        self.assertEqual(2600000 + 50000, snapshot['wallet']['credits'])
         self.assertNotIn(9001, snapshot['inventoryItems'][9])
 
     def test_a_module_a_remaining_vehicle_still_mounts_is_not_sold(self):
@@ -813,6 +854,7 @@ class CurrencyTests(unittest.TestCase):
         snapshot = _snapshot()
         second = copy.deepcopy(snapshot['vehicles'][0])
         second['id'] = 10
+        second['compDescr'] = b'veh:10'
         second['vehicleTypeCompactDescr'] = SECOND_VEHICLE_CD
         second['inventoryItems'][9] = {9001: 1}
         snapshot['vehicles'][0]['inventoryItems'][9] = {9001: 1}

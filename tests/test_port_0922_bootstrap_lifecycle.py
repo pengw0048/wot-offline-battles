@@ -1256,10 +1256,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, modules):
             selected = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
 
-        # XP_TO_TMAN | AUTO_REPAIR | AUTO_LOAD | AUTO_EQUIP
-        self.assertEqual(15, selected['settings'])
+        # AUTO_REPAIR | AUTO_LOAD | AUTO_EQUIP
+        self.assertEqual(14, selected['settings'])
         for record in selected['vehicles']:
-            self.assertEqual(15, record['settings'])
+            self.assertEqual(14, record['settings'])
 
     def test_every_crewman_starts_without_gifted_skill_experience(self):
         (bootstrap, unused_callbacks, unused_compatibility,

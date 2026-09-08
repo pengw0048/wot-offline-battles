@@ -30,6 +30,7 @@ rebuild the descriptor from a stale copy and silently drop the other's change.
 
 import contextlib
 import copy
+import math
 from gui.mods.offline_lan_0922.vehicle_records import (
     MODULE_ATTRIBUTES, mounted_module_items)
 
@@ -38,6 +39,7 @@ EQUIPMENT_SLOT_COUNT = 3
 # battle-booster slot that every equipment payload still carries.
 EQUIPMENT_PAYLOAD_SLOT_COUNT = 4
 EQUIPMENT_TYPE_REGULAR = 0
+VEHICLE_ITEM_TYPE = 1
 TURRET_ITEM_TYPE = 3
 GUN_ITEM_TYPE = 4
 OPTIONAL_DEVICE_ITEM_TYPE = 9
@@ -397,28 +399,20 @@ class GarageState(object):
         return {'credits': 0}
 
     def _item_refund(self, compact_descr, count=1):
-        """Return what selling ``count`` of one item pays back.
+        """Match Shop.getSellPrice with the published sell-for-gold set empty.
 
-        #1513 hard-codes ``SELL_PRICE_FACTOR`` to 0.5 for clients.  A gold
-        item refunds gold, because an offline account has no store to have
-        bought that gold from and returning credits would let a sale mint
-        currency the account can never spend back into the same item.  Premium
-        rounds and consumables are the exception the client itself makes: the
-        shop publishes them as buyable for credits, so they refund credits at
-        the same rate and a purchase cannot be turned round into gold.
+        #1513 converts gold to credits, rounds up each unit's sell price,
+        then the sale dialog multiplies that unit price by the stack count.
         """
         factor = self._snapshot.get('sellPriceFactor')
         try:
             factor = float(factor)
         except (TypeError, ValueError):
             factor = SELL_PRICE_FACTOR
-        cost = self._item_cost(compact_descr, count)
-        try:
-            cost = self._in_credits(cost, self._item_type(compact_descr))
-        except GarageError:
-            pass
-        return dict((currency, int(amount * factor))
-                    for currency, amount in cost.items())
+        cost = self._item_cost(compact_descr)
+        credits = (_int(cost.get('credits', 0)) +
+                   _int(cost.get('gold', 0)) * GOLD_EXCHANGE_RATE)
+        return {'credits': int(math.ceil(credits * factor)) * max(1, _int(count))}
 
     def _in_credits(self, cost, item_type):
         """Price a gold round or consumable in credits, as the shop does.
@@ -738,51 +732,50 @@ class GarageState(object):
         chose as the fifth value of the command, and the price is the shop
         value ``OptionalDevice.getRemovalPrice`` shows them.
         """
-        record = self._record(vehicle_inventory_id, touch=False)
-        device_compact_descr = _int(device_compact_descr)
-        slot_index = _int(slot_index)
-        # Whatever is in the slot now is what leaves it, whether the slot is
-        # being emptied or swapped.
-        outgoing = self._device_in_slot(record, slot_index)
-        # Mounting is not buying.  #1513 sells an optional device through the
-        # shop and offers a separate buy-and-install command for doing both,
-        # so a device the account does not own is refused here rather than
-        # handed over.
-        self._require_owned_device(record, device_compact_descr, slot_index)
-        destroyed = 0
-        if outgoing and not self._is_removable(outgoing):
-            if paid_removal:
-                self._charge(self._removal_cost())
-            else:
-                destroyed = outgoing
-        self._touched.add(_int(record.get('id', 0)))
+        with self._transaction():
+            record = self._record(vehicle_inventory_id, touch=False)
+            device_compact_descr = _int(device_compact_descr)
+            slot_index = _int(slot_index)
+            # Whatever is in the slot now is what leaves it, whether the slot is
+            # being emptied or swapped.
+            outgoing = self._device_in_slot(record, slot_index)
+            # Mounting is not buying.  #1513 sells an optional device through the
+            # shop and offers a separate buy-and-install command for doing both,
+            # so a device the account does not own is refused here rather than
+            # handed over.
+            self._require_owned_device(record, device_compact_descr, slot_index)
+            destroyed = 0
+            if outgoing and not self._is_removable(outgoing):
+                if paid_removal:
+                    self._charge(self._removal_cost())
+                else:
+                    destroyed = outgoing
+            self._touched.add(_int(record.get('id', 0)))
 
-        def mutate(descriptor):
-            # Removing first makes a slot swap idempotent; #1513 rejects an
-            # install into an occupied slot.
-            try:
-                descriptor.removeOptionalDevice(slot_index)
-            except Exception:
-                pass
+            def mutate(descriptor):
+                # Removing first makes a slot swap idempotent; #1513 rejects an
+                # install into an occupied slot.
+                if outgoing:
+                    descriptor.removeOptionalDevice(slot_index)
+                if device_compact_descr:
+                    descriptor.installOptionalDevice(
+                        device_compact_descr, slot_index)
+
+            self._rebuild_descriptor(record, mutate)
+            # The record states what the vehicle holds, which is what the
+            # descriptor now says rather than everything it has ever carried.
+            record.setdefault('inventoryItems', {})[
+                OPTIONAL_DEVICE_ITEM_TYPE] = self._mounted_devices(record)
             if device_compact_descr:
-                descriptor.installOptionalDevice(
-                    device_compact_descr, slot_index)
-
-        self._rebuild_descriptor(record, mutate)
-        # The record states what the vehicle holds, which is what the
-        # descriptor now says rather than everything it has ever carried.
-        record.setdefault('inventoryItems', {})[
-            OPTIONAL_DEVICE_ITEM_TYPE] = self._mounted_devices(record)
-        if device_compact_descr:
-            self._publish_owned(
-                device_compact_descr, OPTIONAL_DEVICE_ITEM_TYPE,
-                self._mounted(device_compact_descr,
-                              OPTIONAL_DEVICE_ITEM_TYPE, self._records()))
-            self._price(device_compact_descr)
-        if destroyed:
-            self._destroy_device(destroyed)
-        self.revision += 1
-        return record
+                self._publish_owned(
+                    device_compact_descr, OPTIONAL_DEVICE_ITEM_TYPE,
+                    self._mounted(device_compact_descr,
+                                  OPTIONAL_DEVICE_ITEM_TYPE, self._records()))
+                self._price(device_compact_descr)
+            if destroyed:
+                self._destroy_device(destroyed)
+            self.revision += 1
+            return record
 
     def _mounted_devices(self, record):
         """Return what one vehicle's descriptor currently has in its slots."""
@@ -1129,7 +1122,7 @@ class GarageState(object):
             raise GarageError('unknown item %d: %s' % (compact_descr, error))
 
     def buy_and_equip_item(self, vehicle_inventory_id, compact_descr,
-                           slot_index=0, gun_compact_descr=0):
+                           slot_index=0, gun_compact_descr=0, paid_removal=False):
         """Own one item and mount it on the vehicle in the same request."""
         compact_descr = _int(compact_descr)
         item_type, unused_cost = self._purchase_terms(compact_descr)
@@ -1140,7 +1133,8 @@ class GarageState(object):
             self.buy_item(compact_descr, 1)
             if item_type == OPTIONAL_DEVICE_ITEM_TYPE:
                 record = self.equip_optional_device(
-                    vehicle_inventory_id, compact_descr, slot_index)
+                    vehicle_inventory_id, compact_descr, slot_index,
+                    paid_removal=paid_removal)
             elif item_type == EQUIPMENT_ITEM_TYPE:
                 record = self._record(vehicle_inventory_id)
                 slots = list(record.get('eqs') or [0] * EQUIPMENT_SLOT_COUNT)
@@ -1403,9 +1397,8 @@ class GarageState(object):
 
         Every crew member receives the battle XP.  On an elite vehicle with
         accelerated training enabled, the vehicle XP is diverted to the least
-        experienced crew member as one additional equal award.  The offline
-        account publishes every vehicle as elite, so the persisted vehicle
-        setting is the remaining stock eligibility check.
+        experienced crew member as one additional equal award. Both the vehicle
+        setting and its current research completion are required.
         """
         amount = _int(battle_xp)
         if amount < 0:
@@ -1414,8 +1407,8 @@ class GarageState(object):
             vehicle_type_compact_descr, touch=False)
         crew_ids = list(record.get('crew') or ())
         tankman_rows = record.get('tankmen')
-        if not crew_ids or not isinstance(tankman_rows, dict):
-            raise GarageError('vehicle has no complete crew')
+        if not isinstance(tankman_rows, dict):
+            tankman_rows = {}
 
         tankmen = self._tankmen_module()
         descriptors = []
@@ -1437,16 +1430,34 @@ class GarageState(object):
                 setting_mask & max(0, _int(xp_to_tankman_flag)))
         except (TypeError, ValueError):
             accelerated = False
-        weakest = min(descriptors, key=lambda row: (row[2], row[0]))
+        accelerated = bool(descriptors and accelerated and self._is_elite(
+            vehicle_type_compact_descr))
+        weakest = (min(descriptors, key=lambda row: (row[2], row[0]))
+                   if descriptors else None)
         try:
+            # The shipped helper owns Mentor's factor, including Brothers in
+            # Arms and food. Evaluate the starting crew and carried equipment
+            # before XP can level a skill or settlement consumes that food.
+            crew = [row[3] for row in descriptors]
+            ammo = []
+            for compact_descr in record.get('eqs') or ():
+                if compact_descr:
+                    ammo.extend([abs(_int(compact_descr)), 1])
+            tutor_bonus = (tankmen.commanderTutorXpBonusFactorForCrew(crew, ammo)
+                           if any(tman.role == 'commander' for tman in crew)
+                           else 0.0)
             for unused_slot, unused_id, unused_total, descriptor in descriptors:
-                descriptor.addXP(amount)
-            if accelerated:
-                weakest[3].addXP(amount)
-            for unused_slot, tankman_id, unused_total, descriptor in descriptors:
-                tankman_rows[tankman_id] = descriptor.makeCompactDescr()
+                multiplier = (1.0 if descriptor.role == 'commander'
+                              else 1.0 + tutor_bonus)
+                earned = amount * (2 if accelerated and descriptor is weakest[3] else 1)
+                descriptor.addXP(int(earned * multiplier))
+            updated_rows = dict(
+                (tankman_id, descriptor.makeCompactDescr())
+                for unused_slot, tankman_id, unused_total, descriptor
+                in descriptors)
         except Exception as error:
             raise GarageError('the client refused battle crew XP: %s' % error)
+        tankman_rows.update(updated_rows)
 
         vehicle_id = _int(record.get('id', 0))
         self._touched.add(vehicle_id)
@@ -1734,7 +1745,7 @@ class GarageState(object):
                     self._stock_owned(item_compact_descr, item_type, count)
                     self._price(item_compact_descr)
                     unlocks.add(_int(item_compact_descr))
-            self._snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
+            self._snapshot.setdefault('vehicleXP', {}).setdefault(compact_descr, 0)
             self._touched.add(_int(record['id']))
             self.revision += 1
             return record
@@ -1749,49 +1760,76 @@ class GarageState(object):
         whole stored stack for each module sold out of the inventory, so this
         settles the same three cases from the same lists.
         """
-        record = self._record(vehicle_inventory_id, touch=False)
-        records = self._records()
-        if len(records) <= 1:
-            raise GarageError('the last garage vehicle cannot be sold')
-        crew_rows = dict(record.get('tankmen') or {})
-        if not dismiss_crew:
-            # #1513's VehicleSeller adds a BarracksSlotsValidator for exactly
-            # this count when the player keeps the crew, so refusing here is
-            # the refusal the client would already have made.
-            self._require_berths(len(crew_rows))
-        compact_descr = _int(record.get('vehicleTypeCompactDescr', 0))
-        refund = self._item_refund(compact_descr)
-        remaining = [row for row in records
-                     if _int(row.get('id', 0)) != _int(record.get('id', 0))]
-        for listed in (items_from_vehicle or ()):
-            self._add_money(
-                refund, self._sold_off_vehicle(record, listed, remaining))
-        for listed in (items_from_inventory or ()):
-            self._add_money(refund, self._sold_out_of_inventory(listed))
-        self._snapshot['vehicles'] = remaining
-        published = self._snapshot.get('vehicleTypeCompactDescrs')
-        if isinstance(published, set):
-            published.discard(compact_descr)
-        vehicle_xp = self._snapshot.get('vehicleXP')
-        if isinstance(vehicle_xp, dict):
-            # The experience earned on a sold vehicle is gone with it, which
-            # is what retail does outside a paid restore.
-            vehicle_xp.pop(compact_descr, None)
-        # The client only drops what the diff names, so a removal has to be
-        # announced as loudly as a change.
-        self._touched.add(_int(record.get('id', 0)))
-        for tankman_id, tankman_compact_descr in crew_rows.items():
-            if dismiss_crew:
-                # #1513's own RestoreController counts these separately as
-                # "deleted by selling", so they land in the same bin a
-                # dismissal fills and can be hired back from it.
-                self._to_recycle_bin(tankman_id, tankman_compact_descr)
-                self._touched_tankmen.add(_int(tankman_id))
-            else:
-                self._to_barracks(tankman_id, tankman_compact_descr)
-        self._pay_back(refund)
-        self.revision += 1
-        return compact_descr
+        with self._transaction():
+            record = self._record(vehicle_inventory_id, touch=False)
+            records = self._records()
+            if len(records) <= 1:
+                raise GarageError('the last garage vehicle cannot be sold')
+            crew_rows = dict(record.get('tankmen') or {})
+            if not dismiss_crew:
+                # #1513's VehicleSeller adds a BarracksSlotsValidator for exactly
+                # this count when the player keeps the crew, so refusing here is
+                # the refusal the client would already have made.
+                self._require_berths(len(crew_rows))
+            compact_descr = _int(record.get('vehicleTypeCompactDescr', 0))
+            refund = self._item_refund(compact_descr)
+            remaining = [row for row in records
+                         if _int(row.get('id', 0)) != _int(record.get('id', 0))]
+            items_from_vehicle = [_int(value) for value in (items_from_vehicle or ())]
+            items_from_inventory = [_int(value) for value in (items_from_inventory or ())]
+            if (len(set(items_from_vehicle)) != len(items_from_vehicle) or
+                    len(set(items_from_inventory)) != len(items_from_inventory)):
+                raise GarageError('a sale lists the same item more than once')
+            # Vehicle._calcSellPrice replaces each stock module's value with
+            # the installed module's value. Those installed copies leave with
+            # the hull; they must not also remain as free depot stock.
+            try:
+                default_modules, installed_modules, devices = (
+                    self._descriptor(record).getDevices())
+                if len(default_modules) != len(installed_modules):
+                    raise ValueError('inconsistent module list')
+            except Exception as error:
+                raise GarageError('the client refused the vehicle sale: %s' % error)
+            for default, installed in zip(default_modules, installed_modules):
+                if default != installed:
+                    refund['credits'] += (
+                        self._item_refund(installed)['credits'] -
+                        self._item_refund(default)['credits'])
+                item_type = self._item_type(installed)
+                owned = self._snapshot.get('inventoryItems', {}).get(item_type, {})
+                self._set_owned(installed, item_type, max(
+                    _int(owned.get(installed, 0)) - 1,
+                    self._mounted(installed, item_type, remaining)))
+            for device in devices:
+                if device not in items_from_vehicle and not self._is_removable(device):
+                    self._charge(self._removal_cost())
+            for listed in items_from_vehicle:
+                self._add_money(
+                    refund, self._sold_off_vehicle(record, listed, remaining))
+            # Installed copies have left; depot sale counts must now exclude
+            # this vehicle, or a legitimate spare of the same module appears
+            # to be mounted and the combined sale is incorrectly refused.
+            self._snapshot['vehicles'] = remaining
+            for listed in items_from_inventory:
+                self._add_money(refund, self._sold_out_of_inventory(listed))
+            published = self._snapshot.get('vehicleTypeCompactDescrs')
+            if isinstance(published, set):
+                published.discard(compact_descr)
+            # The client only drops what the diff names, so a removal has to be
+            # announced as loudly as a change.
+            self._touched.add(_int(record.get('id', 0)))
+            for tankman_id, tankman_compact_descr in crew_rows.items():
+                if dismiss_crew:
+                    # #1513's own RestoreController counts these separately as
+                    # "deleted by selling", so they land in the same bin a
+                    # dismissal fills and can be hired back from it.
+                    self._to_recycle_bin(tankman_id, tankman_compact_descr)
+                    self._touched_tankmen.add(_int(tankman_id))
+                else:
+                    self._to_barracks(tankman_id, tankman_compact_descr)
+            self._pay_back(refund)
+            self.revision += 1
+            return compact_descr
 
     # ---- crew placement -------------------------------------------------
 
@@ -2393,6 +2431,9 @@ class GarageState(object):
         """
         compact_descr = _int(compact_descr)
         item_type = self._item_type(compact_descr)
+        if item_type not in (OPTIONAL_DEVICE_ITEM_TYPE, SHELL_ITEM_TYPE,
+                             EQUIPMENT_ITEM_TYPE):
+            raise GarageError('installed modules are already included in the vehicle sale')
         carried = self._held(record, item_type, compact_descr)
         if item_type != SHELL_ITEM_TYPE:
             # Only rounds are carried by the dozen; #1513 pays one unit for
@@ -2498,6 +2539,13 @@ class GarageState(object):
         if target in unlocks:
             return {'compactDescr': target, 'vehicleXP': 0, 'freeXP': 0}
 
+        free_modules = []
+        if self._item_type(target) == VEHICLE_ITEM_TYPE:
+            try:
+                free_modules = [int(value) for value in
+                                vehicles.getVehicleType(target).autounlockedItems]
+            except Exception as error:
+                raise GarageError('the client refused the research target: %s' % error)
         wallet = self._wallet()
         vehicle_xp = self._snapshot.setdefault('vehicleXP', {})
         available = max(0, _int(vehicle_xp.get(compact_descr, 0)))
@@ -2510,6 +2558,7 @@ class GarageState(object):
         vehicle_xp[compact_descr] = available - from_vehicle
         wallet['freeXP'] = wallet['freeXP'] - remainder
         unlocks.add(target)
+        unlocks.update(free_modules)
         self._price(target)
         self.revision += 1
         return {'compactDescr': target, 'vehicleXP': from_vehicle,
@@ -2540,7 +2589,11 @@ class GarageState(object):
             raise GarageError('an experience conversion must be positive')
         rate, gold_cost = FREE_XP_CONVERSION
         vehicle_xp = self._snapshot.setdefault('vehicleXP', {})
-        sources = [_int(value) for value in (vehicle_type_compact_descrs or ())]
+        sources = []
+        for value in (vehicle_type_compact_descrs or ()):
+            compact_descr = _int(value)
+            if compact_descr not in sources:
+                sources.append(compact_descr)
         for compact_descr in sources:
             if not self._is_elite(compact_descr):
                 raise GarageError(

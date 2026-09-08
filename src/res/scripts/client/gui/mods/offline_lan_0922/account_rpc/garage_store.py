@@ -23,7 +23,7 @@ import os
 import sys
 
 from gui.mods.offline_lan_0922 import config as port_config
-from gui.mods.offline_lan_0922.account_rpc import data
+from gui.mods.offline_lan_0922.account_rpc import data, economy
 from gui.mods.offline_lan_0922.account_rpc.garage import (
     STOCKED_ITEM_TYPES, mirror_shells_layout)
 
@@ -136,16 +136,10 @@ def _ledger_payload(snapshot):
 
 
 def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
-    """Repair, reload and restock the vehicle its own settings ask for.
-
-    #1513 publishes the three switches per vehicle in ``settings`` and a fresh
-    garage vehicle starts with all of them on.  Retail settles all three when
-    the account can pay and silently leaves the vehicle as it is when it
-    cannot, which is what the player sees in the hangar either way, so each
-    one is attempted on its own and a refusal is not an error.
-    """
+    """Attempt each enabled service independently and record actual debits."""
+    costs = economy.service_costs(None)
     if not auto_settings:
-        return
+        return costs
     repair_flag, load_flag, equip_flag = auto_settings
     for record in state.snapshot().get('vehicles') or ():
         if int(record.get('id', 0)) != int(vehicle_id):
@@ -153,28 +147,32 @@ def _settle_automatically(state, vehicle_id, auto_settings, garage_error):
         try:
             settings = int(record.get('settings', 0) or 0)
         except (TypeError, ValueError):
-            return
-        if settings & int(repair_flag or 0):
+            return costs
+        shell_layout = (record.get('shellsLayout') or {}).get(
+            tuple(record.get('shellsLayoutIdx') or ()))
+        equipment_layout = list(record.get('eqsLayout') or ())
+        operations = (
+            (repair_flag, 'repair', lambda: state.repair_vehicle(vehicle_id)),
+            (load_flag, 'ammo', lambda: state.equip_shells(
+                vehicle_id, list(shell_layout)) if shell_layout else None),
+            (equip_flag, 'equipment', lambda: state.equip_equipments(
+                vehicle_id, equipment_layout) if any(equipment_layout) else None),
+        )
+        for flag, name, apply in operations:
+            if not settings & int(flag or 0):
+                continue
+            before = state._balances()
             try:
-                state.repair_vehicle(vehicle_id)
+                apply()
             except garage_error:
-                pass
-        if settings & int(load_flag or 0):
-            layout = (record.get('shellsLayout') or {}).get(
-                tuple(record.get('shellsLayoutIdx') or ()))
-            if layout:
-                try:
-                    state.equip_shells(vehicle_id, list(layout))
-                except garage_error:
-                    pass
-        if settings & int(equip_flag or 0):
-            layout = list(record.get('eqsLayout') or ())
-            if any(layout):
-                try:
-                    state.equip_equipments(vehicle_id, layout)
-                except garage_error:
-                    pass
-        return
+                continue
+            after = state._balances()
+            for currency in ('credits', 'gold'):
+                key = name + '_' + currency
+                if key in costs:
+                    costs[key] = max(0, before[currency] - after[currency])
+        return costs
+    return costs
 
 
 def _floor_account_stock(snapshot):
@@ -222,8 +220,9 @@ def _apply_ledger(staged, stored):
                 key = int(compact_descr)
             except (TypeError, ValueError):
                 continue
-            # Only vehicles this client still offers keep their experience.
-            if key in published:
+            # A sold vehicle is absent from the owned XP seed but remains
+            # in this exact client's shop catalogue. Keep its earned XP.
+            if key in published or key in staged.get('shopItemPrices', {}):
                 published[key] = max(0, _int_value(experience))
     unlocks = ledger.get('unlocks')
     if isinstance(unlocks, (list, tuple)):
@@ -544,7 +543,7 @@ class GarageStore(object):
             result['awarded'] = dict(
                 (name, int(awarded.get(name, 0) or 0))
                 for name in ('credits', 'xp', 'free_xp'))
-        _settle_automatically(
+        result['service_costs'] = _settle_automatically(
             state, int(result['vehicle_id']), auto_settings, GarageError)
         # Every other field of this result is plain JSON, and the store hands
         # it straight to a caller that may well write it down.
@@ -560,6 +559,7 @@ class GarageStore(object):
         if 'awarded' in result:
             marker['awarded'] = dict(result['awarded'])
         marker['touched_items'] = copy.deepcopy(result['touched_items'])
+        marker['service_costs'] = dict(result['service_costs'])
         next_receipts = (list(self._battle_receipts) + [marker])[
             -MAX_BATTLE_RECEIPTS:]
         if self._path is not None:
@@ -684,6 +684,7 @@ class GarageStore(object):
                 row['awarded'] = dict(
                     (name, max(0, _int_value(awarded.get(name))))
                     for name in ('credits', 'xp', 'free_xp'))
+            row['service_costs'] = economy.service_costs(raw.get('service_costs'))
             touched = raw.get('touched_items')
             if isinstance(touched, dict):
                 row['touched_items'] = dict(

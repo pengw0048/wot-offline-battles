@@ -31,12 +31,11 @@ def mounted_module_items(descriptor):
 def default_vehicle_settings():
     """Return the VEHICLE_SETTINGS_FLAG mask a fresh garage vehicle starts with.
 
-    Auto-repair, both auto-resupply switches and accelerated crew training are
-    on, so the player never has to tick them.
+    Auto-repair and both auto-resupply switches start enabled. Vehicle XP
+    stays on the vehicle unless the player selects accelerated crew training.
     """
     from AccountCommands import VEHICLE_SETTINGS_FLAG
-    return (VEHICLE_SETTINGS_FLAG.XP_TO_TMAN |
-            VEHICLE_SETTINGS_FLAG.AUTO_REPAIR |
+    return (VEHICLE_SETTINGS_FLAG.AUTO_REPAIR |
             VEHICLE_SETTINGS_FLAG.AUTO_LOAD |
             VEHICLE_SETTINGS_FLAG.AUTO_EQUIP)
 

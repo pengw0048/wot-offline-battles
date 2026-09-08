@@ -325,6 +325,12 @@ class EconomyPayloadTests(unittest.TestCase):
             self._refuse(commands.CMD_SELL_VEHICLE, args)
         self._refuse(commands.CMD_SELL_ITEM, (17, 9))
 
+    def test_buy_and_equip_preserves_the_paid_removal_choice(self):
+        self.assertEqual(
+            [('buy_and_equip_item', (10, 9001, 2, 0), {'paid_removal': True})],
+            self._dispatch(commands.CMD_BUY_AND_EQUIP_ITEM,
+                           ([17, 9001, 10, 2, 1, 0],)))
+
 
 if __name__ == '__main__':
     unittest.main()

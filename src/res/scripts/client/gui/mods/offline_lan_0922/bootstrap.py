@@ -500,7 +500,7 @@ def _build_purchased_vehicle(snapshot, vehicles, tankmen, item_type_indices,
             if isinstance(unlocks, set):
                 unlocks.add(int(item_compact_descr))
     prices.setdefault(compact_descr, {'credits': 0})
-    snapshot.setdefault('vehicleXP', {})[compact_descr] = 0
+    snapshot.setdefault('vehicleXP', {}).setdefault(compact_descr, 0)
     return compact_descr
 
 
