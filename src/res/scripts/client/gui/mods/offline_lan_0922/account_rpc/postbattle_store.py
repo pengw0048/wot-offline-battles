@@ -429,13 +429,14 @@ def _achievement_db_ids(names, record_db_ids=None):
 
 def pack_battle_result(receipt, packers=None, replay_types=None,
                        interaction_details_type=None, record_db_ids=None,
-                       achievement_counts=None):
+                       achievement_counts=None, xp_by_tankman=None):
     """Build the four-tuple consumed by #1513 ``BattleResultsCache``.
 
     Every compact list comes from the stock packer.  Supplying ``packers`` is
     only a test seam for proving which packer receives which stock field names.
     ``achievement_counts`` carries the account's post-battle total for each
     medal, which #1513 renders as the counter on the results badge.
+    ``xp_by_tankman`` is session-local because inventory ids change on restart.
     """
     receipt = _receipt(receipt)
     if packers is None:
@@ -481,6 +482,7 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'originalXP': original['xp'],
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
+        'xpByTmen': sorted((xp_by_tankman or {}).items()),
         'freeXP': rewards['free_xp'],
         'originalFreeXP': original['free_xp'],
         'factualFreeXP': rewards['free_xp'],
@@ -656,6 +658,9 @@ class PostBattleStore(object):
         self._history = []
         self._progress = self._empty_progress()
         self._progress_applier = None
+        # Native progress cards use current tankman inventory ids. Old results
+        # remain readable after restart without pointing at a different crew.
+        self._session_crew_xp = {}
         self._load()
 
     def set_progress_applier(self, callback):
@@ -714,6 +719,8 @@ class PostBattleStore(object):
                 for name in ('credits', 'xp', 'free_xp'))
         previous = self._snapshot()
         self._pending[arena_key] = receipt
+        self._session_crew_xp[receipt_id] = dict(
+            policy.get('xp_by_tankman') or {})
         # Lifetime dossier XP includes experience spent on crew training.
         # The garage ledger independently owns the spendable vehicle balance.
         self._apply_progress(receipt)
@@ -741,7 +748,8 @@ class PostBattleStore(object):
             receipt, packers=packers, replay_types=replay_types,
             interaction_details_type=interaction_details_type,
             record_db_ids=record_db_ids,
-            achievement_counts=self._progress.get('achievements', {}))
+            achievement_counts=self._progress.get('achievements', {}),
+            xp_by_tankman=self._session_crew_xp.get(receipt['receipt_id']))
 
     def service_message_data(self, arena_unique_id):
         """Return the exact BattleResultsFormatter input summary."""
@@ -756,7 +764,7 @@ class PostBattleStore(object):
                     break
         if receipt is None:
             return None
-        rewards = receipt['rewards']
+        rewards = receipt.get('awarded') or receipt['rewards']
         vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
         winner = receipt['winner']
         result_key = (0 if winner == 0 else
@@ -815,6 +823,7 @@ class PostBattleStore(object):
         for index in range(cutoff):
             row = self._history[index]
             if 'account_key' in row:
+                self._session_crew_xp.pop(row['receipt_id'], None)
                 self._history[index] = {
                     'receipt_id': row['receipt_id'],
                     'arena_unique_id': row['arena_unique_id'],
@@ -838,17 +847,25 @@ class PostBattleStore(object):
         progress['kills'] += stats['kills']
         vehicles = progress['vehicles']
         row = vehicles.setdefault(receipt['vehicle'], {
-            'xp': 0, 'battles': 0, 'wins': 0, 'losses': 0,
+            'xp': 0, 'battles': 0, 'wins': 0, 'losses': 0, 'draws': 0,
             'damage': 0, 'kills': 0, 'achievements': {},
         })
+        # Existing complete win/loss totals already determine every draw.
+        # Capture that value before adding this receipt's outcome.
+        row.setdefault('draws', max(0, int(row.get('battles', 0)) -
+                                   int(row.get('wins', 0)) -
+                                   int(row.get('losses', 0))))
         if vehicle_xp is None:
             vehicle_xp = rewards['xp']
         row['xp'] += max(0, _int(vehicle_xp))
+        row['originalXP'] = max(0, _int(row.get('originalXP'))) + max(
+            0, _int(receipt['rewards']['xp']))
         row['battles'] += 1
         row['wins'] += int(receipt['winner'] == receipt['team'])
         row['losses'] = int(row.get('losses', 0)) + int(
             receipt['winner'] in (1, 2) and
             receipt['winner'] != receipt['team'])
+        row['draws'] += int(receipt['winner'] == 0)
         row['damage'] += stats['damage']
         row['kills'] += stats['kills']
         # #1513 counts every medal in both the account and the vehicle
@@ -869,16 +886,45 @@ class PostBattleStore(object):
                 ('damageAssistedRadio', 'assist_radio'),
                 ('damageAssistedStun', 'assist_stun'),
                 ('capturePoints', 'capture_points'),
-                ('droppedCapturePoints', 'dropped_capture_points')):
+                ('droppedCapturePoints', 'dropped_capture_points'),
+                ('hitsReceived', 'hits_received'),
+                ('potentialDamageReceived', 'potential_damage_received'),
+                ('critsReceived', 'crits_received')):
             row[target_name] = int(row.get(target_name, 0)) + int(
                 stats[source_name])
+        survived = int(receipt['death_reason'] < 0 and
+                       not receipt['premature_leave'])
         row['survivedBattles'] = int(row.get(
-            'survivedBattles', 0)) + int(
-                receipt['death_reason'] < 0 and
-                not receipt['premature_leave'])
+            'survivedBattles', 0)) + survived
+        row['winAndSurvived'] = int(row.get('winAndSurvived', 0)) + int(
+            survived and receipt['winner'] == receipt['team'])
+        self._update_record_extrema(row, receipt)
         # DossierCache asks for rows newer than its maxChangeTime.  The global
         # battle ordinal is stable across restarts and strictly increases.
         row['changeTime'] = progress['battles']
+
+    @staticmethod
+    def _update_record_extrema(row, receipt):
+        """Keep single-battle bests and timestamps from observed receipts.
+
+        This is idempotent so an old pending receipt can restore its known
+        record after an upgrade without reapplying any reward or battle.
+        Archived identity-only rows cannot reconstruct discarded bests.
+        """
+        rewards = receipt.get('awarded') or receipt['rewards']
+        for name, value in (
+                ('maxXP', rewards['xp']),
+                ('maxDamage', receipt['stats']['damage']),
+                ('maxFrags', receipt['stats']['kills'])):
+            row[name] = max(0, _int(row.get(name)), _int(value))
+        # BattleState._finish_battle puts int(round_start_time) in the low
+        # 32 bits. Receipt arrival order can differ from battle order.
+        started = receipt['arena_unique_id'] & 0xffffffff
+        if started:
+            created = max(0, _int(row.get('creationTime')))
+            row['creationTime'] = min(created, started) if created else started
+            row['lastBattleTime'] = max(
+                _int(row.get('lastBattleTime')), started)
 
     def _snapshot(self):
         """Capture enough state to undo one failed durable transaction.
@@ -896,12 +942,14 @@ class PostBattleStore(object):
             'pending': dict(self._pending),
             'history': list(self._history),
             'progress': copy.deepcopy(self._progress),
+            'session_crew_xp': dict(self._session_crew_xp),
         }
 
     def _restore(self, value):
         self._pending = value['pending']
         self._history = value['history']
         self._progress = value['progress']
+        self._session_crew_xp = value['session_crew_xp']
 
     def _load(self):
         if self._path is None or not os.path.isfile(self._path):
@@ -941,7 +989,6 @@ class PostBattleStore(object):
             self._account_key = account_key
             self._pending = pending
             self._history = history
-            self._trim_history_bodies()
             self._progress = progress
             self._progress.setdefault(
                 'losses', max(0, int(self._progress.get('battles', 0)) -
@@ -954,11 +1001,22 @@ class PostBattleStore(object):
                 self._progress.get('achievements'))
             for row in self._progress.get('vehicles', {}).values():
                 if isinstance(row, dict):
+                    # Prior awarded totals cannot reconstruct base battle XP.
+                    row.setdefault('originalXP', 0)
                     row.setdefault(
                         'losses', max(0, int(row.get('battles', 0)) -
                                       int(row.get('wins', 0))))
                     row['achievements'] = _achievement_counts(
                         row.get('achievements'))
+            # Reuse only still-present facts. Lifetime sums stay untouched;
+            # a discarded result's totals are not its single-battle records.
+            for receipt in list(pending.values()) + history:
+                if 'account_key' in receipt:
+                    row = self._progress.get('vehicles', {}).get(
+                        receipt['vehicle'])
+                    if isinstance(row, dict):
+                        self._update_record_extrema(row, receipt)
+            self._trim_history_bodies()
         except (IOError, OSError, TypeError, ValueError):
             # Keep a corrupt optional cache from preventing an offline login.
             self._pending = {}

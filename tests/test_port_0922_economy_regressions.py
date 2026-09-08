@@ -389,3 +389,149 @@ class EconomyRegressionTests(unittest.TestCase):
             with self.assertRaises(self.garage.GarageError):
                 state.equip_optional_device(9, 0, 0, paid_removal=True)
         self.assertEqual(before, state.snapshot())
+
+    def test_unloaded_consumable_can_be_sold_without_restarting(self):
+        self.stock['inventoryItems'][11] = {11001: 1}
+        self.stock['shopItemPrices'][11001] = {'credits': 3000}
+        state = self.state()
+        state.equip_equipments(9, [11001, 0, 0])
+        state.equip_equipments(9, [0, 0, 0])
+        self.assertEqual({}, state.snapshot()['vehicles'][0]['inventoryItems'][11])
+        state.sell_item(11001)
+        restored = self.restart(state.snapshot())
+        self.assertEqual(101500, restored['wallet']['credits'])
+        self.assertEqual(0, restored['inventoryItems'][11].get(11001, 0))
+
+    def test_unloaded_consumable_moves_to_another_vehicle_without_repurchase(self):
+        self.stock['inventoryItems'][11] = {11001: 1}
+        self.stock['shopItemPrices'][11001] = {'credits': 3000}
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, vehicleTypeCompactDescr=50002)
+        self.stock['vehicles'].append(second)
+        state = self.state()
+        state.equip_equipments(9, [11001, 0, 0])
+        state.equip_equipments(9, [0, 0, 0])
+        state.equip_equipments(10, [11001, 0, 0])
+        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+        self.assertEqual(1, state.snapshot()['inventoryItems'][11][11001])
+
+    def test_device_changes_keep_the_unfilled_shell_layout_and_currency(self):
+        record = self.stock['vehicles'][0]
+        record['shellsLayout'] = {(7001, 7002): [-20010, 30, 20011, 15]}
+        state = self.state()
+        state.settle_battle_ammunition(50001, {0: 5})
+        expected_layout = copy.deepcopy(record['shellsLayout'])
+        expected_shells = [20010, 25, 20011, 15]
+        for compact_descr in (9001, 0):
+            state.equip_optional_device(9, compact_descr, 0)
+            current = state.snapshot()['vehicles'][0]
+            self.assertEqual(expected_layout, current['shellsLayout'])
+            self.assertEqual(expected_shells, current['shells'])
+        restored = self.restart(state.snapshot())
+        self.assertEqual(expected_layout, restored['vehicles'][0]['shellsLayout'])
+
+    def test_engine_upgrade_keeps_the_unfilled_shell_layout(self):
+        class EngineDescriptor(fixture._Descriptor):
+            def __init__(self, compact_descr):
+                super().__init__(compact_descr)
+                if self.components.get(0) == 5555:
+                    self.engine = fixture._Component(5555)
+
+            def installComponent(self, compact_descr, position_index):
+                self.components[position_index] = compact_descr
+                self.engine = fixture._Component(compact_descr)
+
+        self.vehicles.VehicleDescr = lambda compactDescr: EngineDescriptor(compactDescr)
+        self.types[5555] = 5
+        self.stock['inventoryItems'][5][5555] = 1
+        self.stock['shopItemPrices'][5555] = {'credits': 1000}
+        state = self.state()
+        state.settle_battle_ammunition(50001, {0: 5})
+        expected_layout = copy.deepcopy(state.snapshot()['vehicles'][0]['shellsLayout'])
+        state.install_component(9, 5555)
+        record = state.snapshot()['vehicles'][0]
+        self.assertEqual(5555, self.vehicles.VehicleDescr(record['compDescr']).engine.compactDescr)
+        self.assertEqual([20010, 25, 20011, 15], record['shells'])
+        self.assertEqual(expected_layout, record['shellsLayout'])
+
+    def _inventory_delta(self, state):
+        return fixture._load('data').inventory(
+            state.snapshot(), validate=False,
+            only_vehicles=state.touched_vehicles(),
+            only_items=state.touched_items())['inventory']
+
+    def test_inventory_publishes_only_spare_copies_and_unloaded_rounds(self):
+        self.stock['inventoryItems'][4][7002] = 3
+        self.stock['inventoryItems'][10][20010] = 35
+        state = self.state()
+        state.equip_equipments(9, [11001, 0, 0])
+        state.equip_optional_device(9, 9001, 0)
+        inventory = fixture._load('data').inventory(
+            state.snapshot(), validate=False)['inventory']
+        self.assertEqual(2, inventory[4][7002])
+        self.assertEqual(5, inventory[10][20010])
+        self.assertEqual(199, inventory[9][9001])
+        self.assertEqual(199, inventory[11][11001])
+        self.assertEqual(35, state.snapshot()['inventoryItems'][10][20010])
+
+    def test_equipment_delta_releases_the_old_copy_and_takes_the_new_one(self):
+        self.stock['inventoryItems'][11] = {11001: 1, 11002: 1}
+        self.stock['shopItemPrices'][11002] = {'credits': 3000}
+        state = self.state()
+        state.equip_equipments(9, [11001, 0, 0])
+        self.assertEqual({11001: None}, self._inventory_delta(state)[11])
+        state.equip_equipments(9, [11002, 0, 0])
+        self.assertEqual({11001: 1, 11002: None}, self._inventory_delta(state)[11])
+        state.equip_equipments(9, [0, 0, 0])
+        self.assertEqual({11002: 1}, self._inventory_delta(state)[11])
+
+    def test_device_delta_releases_a_dismantled_copy(self):
+        self.stock['inventoryItems'][9] = {9001: 1}
+        state = self.state()
+        state.equip_optional_device(9, 9001, 0)
+        self.assertEqual({9001: None}, self._inventory_delta(state)[9])
+        state.equip_optional_device(9, 0, 0)
+        self.assertEqual({9001: 1}, self._inventory_delta(state)[9])
+
+    def test_narrow_transfer_delta_counts_copies_on_both_vehicles(self):
+        self.stock['inventoryItems'][11] = {11001: 2}
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002)
+        self.stock['vehicles'].append(second)
+        state = self.state()
+        state.equip_equipments(9, [11001, 0, 0])
+        self.assertEqual({11001: 1}, self._inventory_delta(state)[11])
+        state.equip_equipments(10, [11001, 0, 0])
+        delta = self._inventory_delta(state)
+        self.assertEqual({11001: None}, delta[11])
+        self.assertEqual({10}, set(delta[1]['eqs']))
+        state.equip_equipments(9, [0, 0, 0])
+        self.assertEqual({11001: 1}, self._inventory_delta(state)[11])
+
+    def test_component_delta_releases_the_old_gun_and_its_loaded_rounds(self):
+        state = self.state()
+        state.install_component(9, 4444)
+        delta = self._inventory_delta(state)
+        self.assertEqual({7002: 1, 4444: None}, delta[4])
+        self.assertEqual({20010: 30, 20011: 15}, delta[10])
+
+    def test_unloading_an_omitted_shell_type_updates_its_depot_count(self):
+        state = self.state()
+        state.equip_shells(9, [20010, 30])
+        self.assertEqual({20010: None, 20011: 15}, self._inventory_delta(state)[10])
+
+    def test_vehicle_sale_releases_its_retained_supplies_in_the_delta(self):
+        second = copy.deepcopy(self.stock['vehicles'][0])
+        second.update(id=10, compDescr=b'veh:10', vehicleTypeCompactDescr=50002)
+        self.stock['vehicles'].append(second)
+        self.stock['shopItemPrices'][50002] = {'credits': 10000}
+        self.stock['inventoryItems'][10] = {20010: 60, 20011: 30}
+        state = self.state()
+        state.equip_optional_device(10, 9001, 0)
+        state.equip_equipments(10, [11001, 0, 0])
+        self._inventory_delta(state)
+        state.sell_vehicle(10)
+        delta = self._inventory_delta(state)
+        self.assertEqual({20010: 30, 20011: 15}, delta[10])
+        self.assertEqual({9001: 200}, delta[9])
+        self.assertEqual({11001: 200}, delta[11])

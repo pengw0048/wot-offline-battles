@@ -90,12 +90,12 @@ def _int(value):
 
 
 def mirror_shells_layout(record):
-    """Publish the loaded shells as the vehicle's own ammunition layout.
+    """Recover a legacy save's ammunition layout from its loaded shells.
 
     #1513 reads ``shellsLayout[(turretCompDescr, gunCompDescr)]`` and falls back
     to the gun's default ammo, then warns through ``Vehicle.isAutoLoadFull``
-    when a loaded count differs from that layout.  Offline resupply is instant,
-    so the layout is always exactly what is loaded.
+    when a loaded count differs from that layout. Current saves keep the target
+    separately so battle consumption must not overwrite it with the remainder.
     """
     key = record.get('shellsLayoutIdx')
     previous = (record.get('shellsLayout') or {}).get(tuple(key or ()), ())
@@ -208,6 +208,18 @@ class GarageState(object):
         self._touched_recycled = set()
         return touched
 
+    def _touch_item_changes(self, before, after):
+        """Publish depot changes caused by loading or unloading owned copies."""
+        for item_type in STOCKED_ITEM_TYPES:
+            previous = before.get(item_type, {})
+            current = after.get(item_type, {})
+            changed = set(compact_descr for compact_descr in
+                          set(previous) | set(current)
+                          if _int(previous.get(compact_descr, 0)) !=
+                          _int(current.get(compact_descr, 0)))
+            if changed:
+                self._touched_items.setdefault(item_type, set()).update(changed)
+
     def _tankman_record(self, tankman_inventory_id):
         """Return the mapping that holds one crew member's descriptor.
 
@@ -226,21 +238,6 @@ class GarageState(object):
             self._touched_tankmen.add(wanted)
             return barracks, wanted
         raise GarageError('unknown tankman inventory id %d' % wanted)
-
-    def _own(self, record, compact_descr, item_type, count=1):
-        """Own an item on the record and in the account-wide catalogue.
-
-        ``data._validate_selected_vehicle`` requires the top-level catalogue to
-        cover every per-record item at no less than the record's count, so both
-        levels always move together.
-        """
-        if not compact_descr:
-            return
-        count = max(1, int(count))
-        items = record.setdefault('inventoryItems', {})
-        owned = items.setdefault(int(item_type), {})
-        owned[compact_descr] = max(count, int(owned.get(compact_descr, 0)))
-        self._publish_owned(compact_descr, item_type, owned[compact_descr])
 
     def _publish_owned(self, compact_descr, item_type, count):
         published = self._snapshot.setdefault('inventoryItems', {})
@@ -333,6 +330,9 @@ class GarageState(object):
         # Every refusal happens before the first round is loaded, so a load
         # the account cannot pay for leaves the vehicle exactly as it was.
         self._charge(self._shells_cost(purchase, alternative_items))
+        self._touch_item_changes(
+            {SHELL_ITEM_TYPE: record.get('inventoryItems', {}).get(
+                SHELL_ITEM_TYPE, {})}, {SHELL_ITEM_TYPE: pairs})
         self._touched.add(_int(record.get('id', 0)))
         record['shells'] = values
         key = record.get('shellsLayoutIdx')
@@ -591,6 +591,14 @@ class GarageState(object):
         # differ, and a battle is what makes them differ.
         record['eqsLayout'] = (layout[:EQUIPMENT_SLOT_COUNT] +
                                [0] * EQUIPMENT_SLOT_COUNT)[:EQUIPMENT_SLOT_COUNT]
+        carried = {}
+        for compact_descr in values:
+            if compact_descr:
+                carried[compact_descr] = carried.get(compact_descr, 0) + 1
+        self._touch_item_changes(
+            {EQUIPMENT_ITEM_TYPE: record.get('inventoryItems', {}).get(
+                EQUIPMENT_ITEM_TYPE, {})}, {EQUIPMENT_ITEM_TYPE: carried})
+        record.setdefault('inventoryItems', {})[EQUIPMENT_ITEM_TYPE] = carried
         for compact_descr in values:
             if not compact_descr:
                 continue
@@ -598,7 +606,6 @@ class GarageState(object):
                 compact_descr, EQUIPMENT_ITEM_TYPE,
                 _int(owned.get(compact_descr, 0)) +
                 purchase.get(compact_descr, 0))
-            self._own(record, compact_descr, EQUIPMENT_ITEM_TYPE)
             self._price(compact_descr)
         self.revision += 1
         return record
@@ -718,7 +725,6 @@ class GarageState(object):
                 descriptor.turret.compactDescr, descriptor.gun.compactDescr)
         except Exception as error:
             raise GarageError('the client refused the fitting: %s' % error)
-        mirror_shells_layout(record)
         return record
 
     def equip_optional_device(self, vehicle_inventory_id, device_compact_descr,
@@ -766,6 +772,9 @@ class GarageState(object):
             # descriptor now says rather than everything it has ever carried.
             record.setdefault('inventoryItems', {})[
                 OPTIONAL_DEVICE_ITEM_TYPE] = self._mounted_devices(record)
+            if outgoing:
+                self._touched_items.setdefault(
+                    OPTIONAL_DEVICE_ITEM_TYPE, set()).add(outgoing)
             if device_compact_descr:
                 self._publish_owned(
                     device_compact_descr, OPTIONAL_DEVICE_ITEM_TYPE,
@@ -976,11 +985,13 @@ class GarageState(object):
                 for index, value in enumerate(shells)]
             staged.setdefault('inventoryItems', {})[SHELL_ITEM_TYPE] = dict(
                 (shells[index], 0) for index in range(0, len(shells), 2))
-        else:
-            mirror_shells_layout(staged)
+        # A fitting that keeps the gun and turret also keeps the requested
+        # loadout, including rounds still missing after a battle or purchase.
 
         # Everything above is validation-only.  Publish the descriptor,
         # layout and ammunition together once no native operation can fail.
+        self._touch_item_changes(
+            record.get('inventoryItems', {}), staged.get('inventoryItems', {}))
         record.clear()
         record.update(staged)
         self._touched.add(_int(vehicle_inventory_id))
@@ -1446,11 +1457,14 @@ class GarageState(object):
             tutor_bonus = (tankmen.commanderTutorXpBonusFactorForCrew(crew, ammo)
                            if any(tman.role == 'commander' for tman in crew)
                            else 0.0)
-            for unused_slot, unused_id, unused_total, descriptor in descriptors:
+            xp_by_tankman = {}
+            for unused_slot, tankman_id, unused_total, descriptor in descriptors:
                 multiplier = (1.0 if descriptor.role == 'commander'
                               else 1.0 + tutor_bonus)
                 earned = amount * (2 if accelerated and descriptor is weakest[3] else 1)
-                descriptor.addXP(int(earned * multiplier))
+                earned = int(earned * multiplier)
+                descriptor.addXP(earned)
+                xp_by_tankman[tankman_id] = earned
             updated_rows = dict(
                 (tankman_id, descriptor.makeCompactDescr())
                 for unused_slot, tankman_id, unused_total, descriptor
@@ -1466,6 +1480,7 @@ class GarageState(object):
             'accelerated': accelerated,
             'vehicle_id': vehicle_id,
             'weakest_tankman_id': weakest[1] if accelerated else 0,
+            'xp_by_tankman': xp_by_tankman,
         }
 
     def award_battle_earnings(self, vehicle_type_compact_descr, rewards,
@@ -1810,6 +1825,7 @@ class GarageState(object):
             # this vehicle, or a legitimate spare of the same module appears
             # to be mounted and the combined sale is incorrectly refused.
             self._snapshot['vehicles'] = remaining
+            self._touch_item_changes(record.get('inventoryItems', {}), {})
             for listed in items_from_inventory:
                 self._add_money(refund, self._sold_out_of_inventory(listed))
             published = self._snapshot.get('vehicleTypeCompactDescrs')

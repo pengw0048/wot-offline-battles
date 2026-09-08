@@ -233,6 +233,12 @@ def _validate_restored_garage(snapshot):
             compactDescr=record['compDescr'])
         record.setdefault('inventoryItems', {}).update(
             vehicle_records.mounted_module_items(descriptor))
+        devices = {}
+        for device in descriptor.optionalDevices:
+            if device is not None:
+                compact_descr = int(device.compactDescr)
+                devices[compact_descr] = devices.get(compact_descr, 0) + 1
+        record['inventoryItems'][9] = devices
         nation_id, vehicle_type_id = descriptor.type.id
         vehicle_type = vehicles.makeIntCompactDescrByID(
             'vehicle', nation_id, vehicle_type_id)

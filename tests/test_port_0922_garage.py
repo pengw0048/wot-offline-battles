@@ -1892,7 +1892,7 @@ class FittingRequestTests(unittest.TestCase):
             [10010, 7], self.pushed[0]['inventory'][1]['shells'][9])
         # Unloading rounds does not spend them: the account still owns the 20
         # it had, 7 of them now sitting in the tank.
-        self.assertEqual({10010: 20}, self.pushed[0]['inventory'][10])
+        self.assertEqual({10010: 13, 10011: 10}, self.pushed[0]['inventory'][10])
 
     def test_add_skill_uses_the_int3_payload(self):
         # #1513 sends tankmen.SKILL_INDICES[name]; 'repair' is 6.
@@ -3314,10 +3314,11 @@ class NarrowInventoryDiffTests(unittest.TestCase):
             9, full['inventory'][vehicle_type]['compDescr'])
         self.assertEqual(
             set([9]), set(narrow['inventory'][vehicle_type]['compDescr']))
-        # The account-wide artefact counts stay whole: they are small and a
-        # mount changes them.
+        # Both publications report an empty depot beside the loaded rounds;
+        # the delta uses the client's removal marker for a zero balance.
         self.assertEqual(
-            full['inventory'][10], narrow['inventory'][10])
+            {key: count or None for key, count in full['inventory'][10].items()},
+            narrow['inventory'][10])
 
     def test_a_mutation_records_the_vehicle_it_touched(self):
         state = self.garage.GarageState(

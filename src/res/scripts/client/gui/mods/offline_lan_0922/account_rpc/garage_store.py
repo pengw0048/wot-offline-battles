@@ -326,6 +326,9 @@ class GarageStore(object):
         self._dirty = False
         self._battle_receipts = []
         self._receipts_loaded = False
+        # Inventory ids are rebuilt on startup. Preserve actual crew awards
+        # for a same-session results retry, never as durable crew identity.
+        self._session_crew_xp = {}
 
     # ---- writing --------------------------------------------------------
 
@@ -495,6 +498,12 @@ class GarageStore(object):
         for row in self._battle_receipts:
             if row['receipt_id'] == receipt_id:
                 result = dict(row)
+                result['vehicle_id'] = next((
+                    _int_value(record.get('id')) for record in _records(snapshot)
+                    if _int_value(record.get('vehicleTypeCompactDescr')) ==
+                    _int_value(vehicle_type_compact_descr)), 0)
+                result['xp_by_tankman'] = dict(
+                    self._session_crew_xp.get(receipt_id, {}))
                 result['applied'] = False
                 return result
 
@@ -568,6 +577,11 @@ class GarageStore(object):
         snapshot.clear()
         snapshot.update(staged)
         self._battle_receipts = next_receipts
+        active_receipts = set(row['receipt_id'] for row in next_receipts)
+        self._session_crew_xp = dict(
+            (key, value) for key, value in self._session_crew_xp.items()
+            if key in active_receipts)
+        self._session_crew_xp[receipt_id] = dict(result['xp_by_tankman'])
         self._receipts_loaded = True
         self._dirty = False
         result['receipt_id'] = receipt_id
@@ -586,6 +600,7 @@ class GarageStore(object):
         exact client's native compact-descriptor parsers before commit.
         """
         stored = self._read()
+        self._session_crew_xp = {}
         if stored is None:
             self._receipts_loaded = True
             return False

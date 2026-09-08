@@ -894,8 +894,10 @@ class AccountRpcTests(unittest.TestCase):
 
         self.assertEqual({9001: 200, 9002: 200}, value['inventory'][9])
         self.assertEqual({11001: 200}, value['inventory'][11])
-        # The per-vehicle records stay untouched by the account catalogue.
-        self.assertEqual({10010: 20, 10011: 10}, value['inventory'][10])
+        # Loaded rounds are published on the vehicle, leaving no depot stock.
+        self.assertEqual({10010: 0, 10011: 0}, value['inventory'][10])
+        self.assertEqual([10010, 20, 10011, 10],
+                         value['inventory'][1]['shells'][9])
 
     def test_full_garage_expands_every_vehicle_and_tankman_foreign_key(self):
         garage = _full_garage_snapshot()
@@ -1149,7 +1151,7 @@ class AccountRpcTests(unittest.TestCase):
         for change in value[1]:
             self.assertEqual(
                 CONTRACT['dossiers']['changeTupleArity'], len(change))
-        self.assertEqual((1, []), value)
+        self.assertEqual((2, []), value)
 
     def test_old_chat_mailbox_does_not_echo_command_as_chat_action(self):
         events = []
@@ -1480,7 +1482,7 @@ class DepotTests(unittest.TestCase):
 
         diff = self._buy(state, (42, 11010, 10, 0))
 
-        self.assertEqual(40, diff[10][11010])
+        self.assertEqual(10, diff[10][11010])
         self.assertEqual(
             40, state.snapshot()['inventoryItems'][10][11010])
 
@@ -1501,26 +1503,25 @@ class DepotTests(unittest.TestCase):
         self.assertEqual(commands.RES_FAILURE, result.result_id)
         self.assertEqual(before, state.snapshot())
 
-    def test_a_startup_garage_publishes_what_its_vehicles_carry(self):
-        """The two views agree at startup, so nothing here may change."""
+    def test_a_startup_garage_separates_carried_items_from_depot_stock(self):
+        """The wire depot contains only copies not installed on any vehicle."""
         snapshot = _full_garage_snapshot()
         published = account_data.inventory(
             snapshot, validate=False)['inventory']
 
         for item_type in tuple(range(2, 8)) + (10,):
-            for record in snapshot['vehicles']:
-                for compact_descr, count in record.get(
-                        'inventoryItems', {}).get(item_type, {}).items():
-                    self.assertGreaterEqual(
-                        published[item_type][compact_descr], count)
+            for compact_descr, count in snapshot['inventoryItems'][item_type].items():
+                mounted = sum(record['inventoryItems'].get(item_type, {}).get(
+                    compact_descr, 0) for record in snapshot['vehicles'])
+                self.assertEqual(max(0, count - mounted),
+                                 published[item_type][compact_descr])
 
-    def test_ammunition_is_published_as_the_stock_the_account_owns(self):
-        """A battle spends rounds and a resupply is paid for, so the account
-        count is real stock rather than a high-water mark."""
+    def test_ammunition_is_published_as_the_stock_outside_vehicles(self):
+        """The player's 400 owned rounds include the 30 already loaded."""
         snapshot = _full_garage_snapshot()
         snapshot['inventoryItems'][10][11010] = 400
 
         published = account_data.inventory(
             snapshot, validate=False)['inventory']
 
-        self.assertEqual(400, published[10][11010])
+        self.assertEqual(370, published[10][11010])

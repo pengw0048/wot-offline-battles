@@ -166,7 +166,8 @@ class PostBattleContractTests(unittest.TestCase):
 
         class Dossier(object):
             def __init__(self):
-                self.blocks = {'a15x15': {}, 'a15x15_2': {}}
+                self.blocks = {'a15x15': {}, 'a15x15_2': {},
+                               'total': {}, 'max15x15': {}}
             def __getitem__(self, name):
                 return self.blocks[name]
             def makeCompDescr(self):
@@ -188,9 +189,9 @@ class PostBattleContractTests(unittest.TestCase):
             'capturePoints': 5, 'droppedCapturePoints': 2,
             'survivedBattles': 1, 'changeTime': 7}}}
         version, rows = data.dossiers(
-            1, 6, progress, dossier_factory=factory,
+            2, 6, progress, dossier_factory=factory,
             vehicle_type_resolver=lambda unused: 50001)
-        self.assertEqual(1, version)
+        self.assertEqual(2, version)
         self.assertEqual(50001, rows[0][0])
         self.assertEqual(7, rows[0][1])
         self.assertEqual({
@@ -198,13 +199,16 @@ class PostBattleContractTests(unittest.TestCase):
             'frags': 2, 'damageDealt': 900, 'shots': 8,
             'directHits': 6, 'spotted': 1, 'damageReceived': 300,
             'capturePoints': 5, 'droppedCapturePoints': 2,
-            'survivedBattles': 1}, rows[0][2]['a15x15'])
+            'survivedBattles': 1, 'winAndSurvived': 0},
+            rows[0][2]['a15x15'])
         self.assertEqual({
             'piercings': 4, 'damageBlockedByArmor': 100,
             'damageAssistedTrack': 80, 'damageAssistedRadio': 40,
-            'damageAssistedStun': 0}, rows[0][2]['a15x15_2'])
-        self.assertEqual((1, []), data.dossiers(
-            1, 7, progress, dossier_factory=factory,
+            'damageAssistedStun': 0, 'originalXP': 0,
+            'directHitsReceived': 0, 'potentialDamageReceived': 0},
+            rows[0][2]['a15x15_2'])
+        self.assertEqual((2, []), data.dossiers(
+            2, 7, progress, dossier_factory=factory,
             vehicle_type_resolver=lambda unused: 50001))
 
     def test_a_receipt_carries_the_health_and_the_rounds_it_fired(self):

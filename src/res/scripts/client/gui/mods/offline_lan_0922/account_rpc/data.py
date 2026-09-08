@@ -400,6 +400,28 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
     delta = only_vehicles is not None or only_items is not None
     records = _vehicle_records(vehicle)
     values = dict((item_type, {}) for item_type in ITEM_TYPE_INDICES)
+    carried_items = {}
+    for record in records:
+        # Module rows are normalized from the descriptor at build, restore
+        # and fitting boundaries. Device rows are local to nested records;
+        # the legacy single-record shape uses that row as account stock.
+        for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (
+                OPTIONAL_DEVICE_ITEM_TYPE,):
+            if item_type == OPTIONAL_DEVICE_ITEM_TYPE and record is vehicle:
+                continue
+            carried = carried_items.setdefault(item_type, {})
+            for compact_descr, count in record.get('inventoryItems', {}).get(
+                    item_type, {}).items():
+                carried[compact_descr] = carried.get(compact_descr, 0) + int(count)
+        carried = carried_items.setdefault(SHELL_ITEM_TYPE, {})
+        shells = record.get('shells') or ()
+        for index in range(0, len(shells) - 1, 2):
+            compact_descr, count = shells[index:index + 2]
+            carried[compact_descr] = carried.get(compact_descr, 0) + int(count)
+        carried = carried_items.setdefault(EQUIPMENT_ITEM_TYPE, {})
+        for compact_descr in record.get('eqs') or ():
+            if compact_descr:
+                carried[compact_descr] = carried.get(compact_descr, 0) + 1
     vehicle_values = {
         'repair': {}, 'lastCrew': {}, 'crew': {}, 'settings': {},
         'compDescr': {}, 'eqs': {}, 'eqsLayout': {}, 'shells': {},
@@ -459,20 +481,6 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
             if serialized:
                 customization_outfits[int(vehicle_type)] = serialized
 
-        for item_type, items in dict(
-                record.get('inventoryItems', {})).items():
-            item_type = int(item_type)
-            if item_type in values and item_type not in (
-                    VEHICLE_ITEM_TYPE, TANKMAN_ITEM_TYPE,
-                    CUSTOMIZATION_ITEM_TYPE):
-                wanted = _wanted_items(only_items, item_type)
-                target = values[item_type]
-                for compact_descr, count in items.items():
-                    if wanted is not None and compact_descr not in wanted:
-                        continue
-                    target[compact_descr] = max(
-                        int(target.get(compact_descr, 0)), int(count))
-
         all_tankmen.update(tankmen)
         # This foreign key is the vehicle inventory id, not its type id.
         tankman_vehicles.update(dict(
@@ -492,15 +500,11 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
         all_tankmen[tankman_id] = compact_descr
         tankman_vehicles[tankman_id] = BARRACKS_VEHICLE_ID
 
-    # The account owns items; a vehicle only carries some of them. The
-    # snapshot's top-level catalogue is that account view, and it is the only
-    # place a spare module or a bought consumable exists at all, because no
-    # vehicle carries one. Publishing it alongside the per-vehicle counts is
-    # what puts a purchase in the player's depot.
-    #
-    # Ammunition is part of that view: a battle spends rounds and a resupply
-    # is paid for, so a shell's account count is real stock rather than a
-    # high-water mark.
+    # FittingItem.inventoryCount reads the wire item count unchanged. #1513's
+    # VehicleLayoutProcessor subtracts both inventoryCount and the loaded
+    # vehicle count from its target, so this wire row is depot stock only.
+    # Keep total ownership in the ledger and subtract every vehicle's carried
+    # copies here, even when this delta publishes only one vehicle.
     for item_type, items in dict(
             vehicle.get('inventoryItems', {})).items():
         item_type = int(item_type)
@@ -514,7 +518,10 @@ def inventory(selected_vehicle=None, validate=True, only_vehicles=None,
             if wanted is not None and compact_descr not in wanted:
                 continue
             target[compact_descr] = max(
-                int(target.get(compact_descr, 0)), int(count))
+                0, int(count) - carried_items.get(item_type, {}).get(
+                    compact_descr, 0))
+            if delta and not target[compact_descr]:
+                target[compact_descr] = None
 
     values[TANKMAN_ITEM_TYPE] = {
         'compDescr': all_tankmen,
@@ -920,22 +927,99 @@ def _write_achievements(dossier, counts):
             pass
 
 
-def account_dossier(postbattle_progress=None, dossier_factory=None):
+def _dossier_battle_counts(stats):
+    battles = max(0, int(stats.get('battles', 0) or 0))
+    wins = min(battles, max(0, int(stats.get('wins', 0) or 0)))
+    # Old files did not distinguish draws from losses.
+    losses = min(battles - wins, max(0, int(stats.get(
+        'losses', battles - wins) or 0)))
+    return battles, wins, losses
+
+
+_DOSSIER_COUNTERS = (
+    ('xp', 'xp'), ('kills', 'frags'), ('damage', 'damageDealt'),
+    ('shots', 'shots'), ('directHits', 'directHits'), ('spotted', 'spotted'),
+    ('damageReceived', 'damageReceived'), ('capturePoints', 'capturePoints'),
+    ('droppedCapturePoints', 'droppedCapturePoints'),
+    ('survivedBattles', 'survivedBattles'),
+    ('winAndSurvived', 'winAndSurvived'))
+_DOSSIER_COUNTERS2 = (
+    ('originalXP', 'originalXP'), ('piercings', 'piercings'),
+    ('damageBlockedByArmor', 'damageBlockedByArmor'),
+    ('damageAssistedTrack', 'damageAssistedTrack'),
+    ('damageAssistedRadio', 'damageAssistedRadio'),
+    ('damageAssistedStun', 'damageAssistedStun'),
+    ('hitsReceived', 'directHitsReceived'),
+    ('potentialDamageReceived', 'potentialDamageReceived'))
+_VEHICLE_DOSSIER_VERSION = 2
+
+
+def _write_battle_statistics(dossier, stats):
+    """Fill the shared #1513 random-battle blocks used to derive averages."""
+    block = dossier['a15x15']
+    battles, wins, losses = _dossier_battle_counts(stats)
+    block['battlesCount'] = battles
+    block['wins'] = wins
+    block['losses'] = losses
+    for name, native_name in _DOSSIER_COUNTERS:
+        block[native_name] = max(0, int(stats.get(name, 0) or 0))
+    block2 = dossier['a15x15_2']
+    for name, native_name in _DOSSIER_COUNTERS2:
+        block2[native_name] = max(0, int(stats.get(name, 0) or 0))
+    for name in ('maxXP', 'maxDamage', 'maxFrags'):
+        dossier['max15x15'][name] = max(0, int(stats.get(name, 0) or 0))
+    for name in ('creationTime', 'lastBattleTime'):
+        dossier['total'][name] = max(0, int(stats.get(name, 0) or 0))
+
+
+def account_dossier(postbattle_progress=None, dossier_factory=None,
+                    vehicle_type_resolver=None):
     """Return the account dossier compact descriptor #1513 reads.
 
     ``StatsRequester.accountDossier`` of the pinned client reads the ``stats``
-    cache key ``dossier``; the lobby profile builds its achievements page from
-    it.  An account with no medals keeps the stock empty-string value.
+    cache key ``dossier``. Its statistics and vehicle list are derived from
+    lifetime vehicle records, including vehicles no longer in the garage.
     """
     progress = (postbattle_progress
                 if isinstance(postbattle_progress, dict) else {})
     counts = progress.get('achievements')
-    if not isinstance(counts, dict) or not counts:
+    vehicle_rows = progress.get('vehicles', {})
+    if not vehicle_rows and not counts:
         return ''
     if dossier_factory is None:
         from dossiers2.custom.builders import getAccountDossierDescr
         dossier_factory = getAccountDossierDescr
     dossier = dossier_factory('')
+    if vehicle_rows:
+        resolver = vehicle_type_resolver or _vehicle_type_compact_descr
+        totals = {}
+        maximum_vehicles = {}
+        for type_name, stats in sorted(vehicle_rows.items()):
+            type_cd = resolver(type_name)
+            battles, wins, losses = _dossier_battle_counts(stats)
+            dossier['a15x15Cut'][type_cd] = (
+                battles, wins, max(0, int(stats.get('xp', 0) or 0)))
+            for name, value in (('battles', battles), ('wins', wins),
+                                ('losses', losses)):
+                totals[name] = totals.get(name, 0) + value
+            for name, unused_native in _DOSSIER_COUNTERS + _DOSSIER_COUNTERS2:
+                totals[name] = totals.get(name, 0) + max(
+                    0, int(stats.get(name, 0) or 0))
+            for name in ('maxXP', 'maxDamage', 'maxFrags'):
+                value = max(0, int(stats.get(name, 0) or 0))
+                if value > totals.get(name, 0):
+                    totals[name] = value
+                    maximum_vehicles[name + 'Vehicle'] = type_cd
+            first = max(0, int(stats.get('creationTime', 0) or 0))
+            if first:
+                totals['creationTime'] = min(
+                    first, totals.get('creationTime', first))
+            totals['lastBattleTime'] = max(
+                totals.get('lastBattleTime', 0),
+                max(0, int(stats.get('lastBattleTime', 0) or 0)))
+        _write_battle_statistics(dossier, totals)
+        for name, type_cd in maximum_vehicles.items():
+            dossier['max15x15'][name] = type_cd
     _write_achievements(dossier, counts)
     return dossier.makeCompDescr()
 
@@ -947,7 +1031,11 @@ def dossiers(revision=0, max_change_time=0, postbattle_progress=None,
                 if isinstance(postbattle_progress, dict) else {})
     vehicle_rows = dict(progress.get('vehicles', {}))
     if not vehicle_rows:
-        return (1, [])
+        return (_VEHICLE_DOSSIER_VERSION, [])
+    # #1513 persists its cache between sessions. A schema change invalidates
+    # its old watermark even when no new battle has been played.
+    if int(revision or 0) != _VEHICLE_DOSSIER_VERSION:
+        max_change_time = 0
     if dossier_factory is None:
         from dossiers2.custom.builders import getVehicleDossierDescr
         dossier_factory = getVehicleDossierDescr
@@ -960,38 +1048,10 @@ def dossiers(revision=0, max_change_time=0, postbattle_progress=None,
         if change_time <= int(max_change_time or 0):
             continue
         dossier = dossier_factory('')
-        block = dossier['a15x15']
-        block2 = dossier['a15x15_2']
-        battles = max(0, int(stats.get('battles', 0) or 0))
-        wins = min(battles, max(0, int(stats.get('wins', 0) or 0)))
-        if 'losses' in stats:
-            losses = min(
-                battles - wins,
-                max(0, int(stats.get('losses', 0) or 0)))
-        else:
-            # Schema-1 files written before draws were preserved have no way
-            # to distinguish a draw from a loss. Keep their former behavior.
-            losses = battles - wins
-        block['xp'] = max(0, int(stats.get('xp', 0) or 0))
-        block['battlesCount'] = battles
-        block['wins'] = wins
-        block['losses'] = losses
-        block['frags'] = max(0, int(stats.get('kills', 0) or 0))
-        block['damageDealt'] = max(0, int(stats.get('damage', 0) or 0))
-        for field_name in (
-                'shots', 'directHits', 'spotted', 'damageReceived',
-                'capturePoints', 'droppedCapturePoints', 'survivedBattles'):
-            block[field_name] = max(
-                0, int(stats.get(field_name, 0) or 0))
-        for field_name in (
-                'piercings', 'damageBlockedByArmor',
-                'damageAssistedTrack', 'damageAssistedRadio',
-                'damageAssistedStun'):
-            block2[field_name] = max(
-                0, int(stats.get(field_name, 0) or 0))
+        _write_battle_statistics(dossier, stats)
         _write_achievements(dossier, stats.get('achievements'))
         rows.append((resolver(type_name), change_time,
                      dossier.makeCompDescr()))
     # This cache version describes our dossier row schema, not battle count.
     # Keeping it stable lets maxChangeTime request only changed vehicle rows.
-    return (1, rows)
+    return (_VEHICLE_DOSSIER_VERSION, rows)

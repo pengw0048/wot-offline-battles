@@ -368,6 +368,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 engine=vehicle_type.engines[0],
                 fuelTank=vehicle_type.fuelTanks[0],
                 radio=vehicle_type.radios[0],
+                optionalDevices=[None, None, None],
                 maxHealth=100 + vehicle_type_id,
                 makeCompactDescr=lambda: (
                     'vehicle-%d-%d' %
@@ -1179,6 +1180,22 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         with mock.patch.dict(sys.modules, modules):
             self.assertTrue(bootstrap._validate_restored_garage(snapshot))
+
+    def test_a_restored_device_is_removed_from_the_published_depot(self):
+        bootstrap, snapshot, modules = self._restorable(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+        record = snapshot['vehicles'][0]
+        vehicles = modules['items'].vehicles
+        descriptor = vehicles.VehicleDescr(compactDescr=record['compDescr'])
+        descriptor.optionalDevices[0] = types.SimpleNamespace(compactDescr=9001)
+        snapshot['inventoryItems'][9] = {9001: 1}
+        record['inventoryItems'].pop(9, None)
+
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(bootstrap._validate_restored_garage(snapshot))
+        self.assertEqual({9001: 1}, record['inventoryItems'][9])
+        self.assertEqual(0, ACCOUNT_DATA.inventory(
+            snapshot, validate=False)['inventory'][9][9001])
 
     def test_a_rack_the_mounted_gun_cannot_fire_is_still_refused(self):
         """The rule beside it still rejects a rack from another fitting."""

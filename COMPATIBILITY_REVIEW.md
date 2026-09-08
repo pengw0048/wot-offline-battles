@@ -2047,6 +2047,19 @@ changes with an idempotence marker before publishing the Account update.
   before XP advances skills or service consumes equipment, and applies only
   to other crew members. Qualification percentages are integer levels: the
   shipped level-cost function requires 500 XP for 50% to become 51%.
+  `VEH_FULL_RESULTS.xpByTmen` carries the actual award per current crew ID
+  for `VehicleProgressHelper` to detect a newly available skill. These IDs
+  stay in session memory because garage inventory IDs are rebuilt on restart.
+- Lifetime vehicle records persist battles, wins, losses, draws, survival,
+  damage, assistance, spotting, shots, hits, penetration, capture, XP and
+  single-battle maxima independently of vehicle ownership. Account statistics
+  sum those records. The native `a15x15Cut` maps each vehicle type to
+  `(battlesCount, wins, xp)`; `a15x15`, `a15x15_2` and `max15x15` supply the
+  stock averages and best-vehicle labels. Dossier cache schema changes request
+  a full refresh even when the old cache's battle watermark is unchanged.
+  Previously discarded results cannot reconstruct an unknown historical
+  maximum. The current receipt does not measure mileage, each vehicle's time
+  alive or stunning-vehicle eligibility; these values are not inferred.
 - Selling and rebuying a vehicle preserves its XP, including across restart.
   Elite vehicles with stored XP remain conversion candidates after sale.
   Conversion counts each selected vehicle once. Researching a vehicle also
@@ -2063,6 +2076,11 @@ changes with an idempotence marker before publishing the Account update.
   their actual credit/gold debits in the native battle-results cost fields.
   Those costs share the durable receipt marker so a retry neither charges
   twice nor loses the original cost display.
+- The durable item ledger counts all owned copies; the native inventory
+  snapshot and changes expose only unmounted copies. The exact
+  `VehicleLayoutProcessor` subtracts both warehouse stock and the current
+  vehicle load when calculating a purchase, so publishing the owned total
+  would underprice resupply and advertise an installed item as a spare.
 - Incremental Account updates publish current balances, changed inventory,
   crew and XP before command completion; growing unlock/elite sets carry only
   additions, matching `Stats.synchronize` and avoiding repeated notifications.
