@@ -2000,6 +2000,31 @@ across the window. Static inspection proves the property and owner contracts;
 only exact Windows acceptance can prove that the native HULL output is visible
 and that its magnitude feels correct.
 
+Sniper start/stop diagnosis distinguishes world aim from camera oscillation.
+The reviewed `SniperCamera.__cameraUpdate` updates its aiming system first,
+applies movement oscillation to the view transform, then projects the aiming
+matrix through `__calcAimOffset`. Movement oscillation is not included in the
+separate impulse transform passed to that projection. The available extracted
+scripts were inspected with CPython 2.7; a complete client installation was not
+available for `inspect_client.py`, so this inspection does not independently
+certify the installation or native stabilization behavior.
+
+The existing bounded `SWING_FRAME` observations now include companion
+`SNIPER_AIM` records when the active control is sniper. They record the aiming
+matrix, world-to-view rotation, copied stabilized rotation, last target sent
+by the gun rotator, current gun ray, dispersion and camera/gun update ages.
+They neither advance the stock camera/rotator nor issue a new targeting query.
+The existing limit is twelve movement edges per battle and nine sample times
+per edge; late frames produce one observation, not synthetic catch-up samples.
+For Windows reproduction, enter sniper before the first movement, keep the
+mouse still, and accelerate/brake against a fixed distant landmark. Preserve
+the vehicle, zoom and dynamic-camera setting with the report. Compare a time
+series, not a single frame: camera and gun callbacks have independent ages.
+On ordinary vehicles the port currently shares the physical body and
+stabilized matrix; suspension pitch reaching this provider is a hypothesis to
+test, not proof that the native camera loses world aim. These diagnostics do
+not constitute a stabilization fix or gameplay acceptance.
+
 Critical-hit calculation follows the same proposal/commit boundary. The
 firing client runs a device law derived from the retired predecessor against an
 explicit detached snapshot of the target descriptor, pose, collision

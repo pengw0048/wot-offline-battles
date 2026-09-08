@@ -29402,6 +29402,102 @@ class LocalBodySwingingTests(unittest.TestCase):
         self.assertIn('sample=1 elapsed=0.050 period=1.950', output)
         self.assertIn('delta_ypr_deg=(0.000, 0.500, 0.000)', output)
 
+    def _sniper_probe(self):
+        battle, entity = self._battle()
+        battle._attach_local_presentation()
+        entity.typeDescriptor.name = 'test:vehicle'
+        aim, view = _Matrix(), _Matrix()
+        aim.pitch = -0.1
+        view.pitch = 0.2
+        camera = types.SimpleNamespace(
+            aimingSystem=types.SimpleNamespace(matrix=aim),
+            camera=types.SimpleNamespace(matrix=view),
+            isCameraDynamic=lambda: True,
+            _SniperCamera__prevTime=9.98)
+        handler = battle._avatar.inputHandler
+        handler._AvatarInputHandler__ctrlModeName = 'sniper'
+        handler._AvatarInputHandler__curCtrl = types.SimpleNamespace(
+            camera=camera)
+        battle._runtime.bigworld.time = lambda: 10.0
+        rotator = battle._avatar.gunRotator
+        rotator._VehicleGunRotator__time = 9.96
+        rotator._VehicleGunRotator__prevSentShotPoint = _Vector(1, 2, 300)
+        rotator.getCurShotPosition = mock.Mock(return_value=(
+            _Vector(1, 2, 3), _Vector(0, 0, 900)))
+        rotator.dispersionAngle = 0.02
+        entity.appearance.compoundModel = types.SimpleNamespace(
+            node=lambda name: _Matrix())
+        return battle, entity, camera
+
+    def test_sniper_probe_separates_view_motion_from_aim_and_gun(self):
+        battle, entity, camera = self._sniper_probe()
+        stream = io.StringIO()
+        rotator = battle._avatar.gunRotator
+        native_ray = rotator.getCurShotPosition.return_value
+        with mock.patch('sys.stdout', stream):
+            battle._update_local_acceleration_swinging(
+                entity, _MOVEMENT_FORWARD)
+            camera.camera.matrix.pitch += 0.1
+            battle._local_matrix.pitch += 0.05
+            battle._sample_local_acceleration_swinging(entity, 0.05)
+        records = [json.loads(line.split('SNIPER_AIM ', 1)[1])
+                   for line in stream.getvalue().splitlines()
+                   if 'SNIPER_AIM ' in line]
+        self.assertEqual(2, len(records))
+        first, second = records
+        self.assertNotEqual(first['view_ypr_deg'], second['view_ypr_deg'])
+        self.assertNotEqual(first['stabilised_ypr_deg'],
+                            second['stabilised_ypr_deg'])
+        self.assertEqual(first['aim_ypr_deg'], second['aim_ypr_deg'])
+        self.assertEqual([1, 2, 300], second['last_sent_target'])
+        self.assertEqual([0, 0, 1], second['shot_direction'])
+        self.assertAlmostEqual(0.02, second['camera_age'])
+        self.assertAlmostEqual(0.04, second['gun_age'])
+        self.assertEqual(0.02, second['dispersion'])
+        self.assertEqual((0, 0, 900), tuple(native_ray[1]))
+        self.assertEqual(-0.1, camera.aimingSystem.matrix.pitch)
+
+    def test_sniper_probe_is_bounded_and_does_not_sample_other_modes(self):
+        battle, entity, camera = self._sniper_probe()
+        rotator = battle._avatar.gunRotator
+        with mock.patch('sys.stdout', io.StringIO()):
+            for unused in range(battle_runtime_module.
+                                LOCAL_ACCEL_SWING_REPORT_LIMIT + 2):
+                battle._local_swinging_move_flags = 0
+                battle._update_local_acceleration_swinging(
+                    entity, _MOVEMENT_FORWARD)
+                battle._sample_local_acceleration_swinging(entity, 3.0)
+                battle._sample_local_acceleration_swinging(entity, 3.0)
+        # An overdue callback observes once; it cannot fabricate missed frames.
+        self.assertEqual(2 * battle_runtime_module.LOCAL_ACCEL_SWING_REPORT_LIMIT,
+                         rotator.getCurShotPosition.call_count)
+        rotator.getCurShotPosition.reset_mock()
+        handler = battle._avatar.inputHandler
+        handler._AvatarInputHandler__ctrlModeName = 'arcade'
+        self.assertFalse(battle._sample_sniper_swing_aim(entity, 1, 0))
+        handler._AvatarInputHandler__ctrlModeName = 'sniper'
+        battle._worker_mode = True
+        self.assertFalse(battle._sample_sniper_swing_aim(entity, 1, 0))
+        battle._worker_mode = False
+        battle._runtime.bigworld.entities.pop(entity.id)
+        self.assertFalse(battle._sample_sniper_swing_aim(entity, 1, 0))
+        rotator.getCurShotPosition.assert_not_called()
+
+    def test_failed_sniper_read_does_not_retire_the_animator_or_hull_probe(self):
+        battle, entity, camera = self._sniper_probe()
+        camera.aimingSystem = None
+        stream = io.StringIO()
+        with mock.patch('sys.stdout', stream):
+            self.assertTrue(battle._update_local_acceleration_swinging(
+                entity, _MOVEMENT_FORWARD))
+            self.assertTrue(battle._sample_local_acceleration_swinging(
+                entity, 0.05))
+        self.assertEqual(2, stream.getvalue().count('SWING_FRAME'))
+        self.assertEqual(2, stream.getvalue().count('SNIPER_AIM'))
+        self.assertIsNotNone(battle._local_swinging_probe)
+        self.assertEqual(2.0,
+                         entity.appearance.swingingAnimator.accelSwingingPeriod)
+
     def test_second_bind_setter_failure_rolls_back_and_disables_feature(self):
         battle, entity = self._battle()
         native_compensation = _Matrix()

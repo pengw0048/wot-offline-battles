@@ -6451,6 +6451,67 @@ class BattleRuntime(object):
                           for index in range(3))
         return root_ypr, hull_ypr, delta_ypr
 
+    def _sample_sniper_swing_aim(self, entity, event, sample):
+        """Observe the stock aim/view split without casting a targeting ray.
+
+        #1513's camera applies movement oscillation to its view matrix, then
+        projects the independent aiming matrix back onto the screen. Reading
+        both, the last sent target and the current gun ray distinguishes view
+        motion from aim drift. Camera and gun timers are independent of this
+        presentation callback, so retain their ages rather than treating one
+        sample's disagreement as a stabilization failure.
+        """
+        if (self._worker_mode or self._server is None or
+                self._server_entity(self._server.vehicle_id) is not entity):
+            return False
+        handler = getattr(self._avatar, 'inputHandler', None)
+        if getattr(handler, '_AvatarInputHandler__ctrlModeName', None) != 'sniper':
+            return False
+        try:
+            control = handler._AvatarInputHandler__curCtrl
+            camera = control.camera
+            aim = self._runtime.math.Matrix(camera.aimingSystem.matrix)
+            view = self._runtime.math.Matrix(camera.camera.matrix)
+            stable = self._runtime.math.Matrix(self._local_stabilised_pose())
+            rotator = self._avatar.gunRotator
+            now = self._runtime.bigworld.time()
+            shot_origin, shot_direction = self._mutable_shot_ray()
+            target = rotator._VehicleGunRotator__prevSentShotPoint
+
+            def degrees(matrix):
+                return tuple(math.degrees(float(getattr(matrix, name)))
+                             for name in ('yaw', 'pitch', 'roll'))
+
+            observation = {
+                'event': event, 'sample': sample,
+                'round_id': (self._start_message or {}).get('round_id'),
+                'vehicle_id': self._server.vehicle_id,
+                'vehicle': entity.typeDescriptor.name,
+                'dynamic': bool(camera.isCameraDynamic()),
+                'speed': self._local_speed,
+                'aim_ypr_deg': degrees(aim),
+                # This is the world-to-view matrix, not world camera YPR.
+                'view_ypr_deg': degrees(view),
+                'stabilised_ypr_deg': degrees(stable),
+                'aim_origin': _xyz(aim.translation),
+                'last_sent_target': None if target is None else _xyz(target),
+                'shot_origin': _xyz(shot_origin),
+                'shot_direction': _xyz(shot_direction),
+                'dispersion': self._native_dispersion_angle(),
+                'camera_age': now - camera._SniperCamera__prevTime,
+                'gun_age': now - rotator._VehicleGunRotator__time,
+            }
+            sys.stdout.write('[Offline LAN 0.9.22] SNIPER_AIM %s\n' %
+                             json.dumps(observation, sort_keys=True))
+            return True
+        except Exception as error:
+            # An unavailable camera/gun must not retire the HULL probe or
+            # change aiming, firing, animator state or callback scheduling.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SNIPER_AIM event=%d sample=%d '
+                'error=%r\n' % (event, sample, str(error)))
+            return False
+
     def _sample_local_acceleration_swinging(self, entity, elapsed):
         """Log sparse cross-frame HULL output for one movement transition."""
         probe = self._local_swinging_probe
@@ -6473,6 +6534,7 @@ class BattleRuntime(object):
                             'swingingAnimator', None) is not animator):
                 self._local_swinging_probe = None
                 return False
+            self._sample_sniper_swing_aim(entity, probe['event'], index)
             root_ypr, hull_ypr, delta_ypr = \
                 self._local_hull_swing_snapshot(entity)
             period = _number(animator.accelSwingingPeriod)

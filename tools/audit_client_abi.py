@@ -300,6 +300,9 @@ EXPECTED_ABI = {
     'scripts/client/AvatarInputHandler/DynamicCameras/SniperCamera.pyc': {
         'SniperCamera.__calcCurOscillatorAcceleration': (
             'self', 'deltaTime'),
+        'SniperCamera.__cameraUpdate': ('self', 'allowModeChange'),
+        'SniperCamera.__calcAimOffset': ('self', 'aimLocalTransform'),
+        'SniperCamera.__updateOscillators': ('self', 'deltaTime'),
     },
     'scripts/client/AvatarInputHandler/AimingSystems/'
     'ArcadeAimingSystem.pyc': {
@@ -1628,6 +1631,18 @@ EXPECTED_CODE_NAMES = {
         'SniperCamera.__calcCurOscillatorAcceleration': (
             'BigWorld', 'player', 'vehicle', 'isAlive', 'filter', 'velocity',
             '_SniperCamera__accelerationSmoother', 'update'),
+        'SniperCamera.__cameraUpdate': (
+            '_SniperCamera__prevTime', '_SniperCamera__aimingSystem',
+            '_SniperCamera__updateOscillators', '_SniperCamera__cam',
+            '_SniperCamera__calcAimOffset', '_SniperCamera__aimOffset'),
+        'SniperCamera.__calcAimOffset': (
+            '_SniperCamera__aimingSystem', 'matrix', 'postMultiply',
+            'projectPoint', 'translation'),
+        'SniperCamera.__updateOscillators': (
+            'isCameraDynamic', '_SniperCamera__movementOscillator',
+            '_SniperCamera__impulseOscillator',
+            '_SniperCamera__noiseOscillator', 'deviation',
+            'createRotationMatrix'),
     },
     'scripts/client/AvatarInputHandler/AimingSystems/'
     'ArcadeAimingSystem.pyc': {
@@ -1849,7 +1864,10 @@ EXPECTED_CODE_NAMES = {
             'getServerGunAngles', 'LatencyInfo'),
         'VehicleGunRotator.__trackPointOnServer': (
             '_VehicleGunRotator__avatar', 'playerVehicleID',
-            'trackRelativePointWithGun'),
+            'trackRelativePointWithGun',
+            '_VehicleGunRotator__prevSentShotPoint'),
+        'VehicleGunRotator.__getTimeDiff': (
+            'BigWorld', 'time', '_VehicleGunRotator__time'),
         'VehicleGunRotator.getAvatarOwnVehicleStabilisedMatrix': (
             '_VehicleGunRotator__avatar',
             'getOwnVehicleStabilisedMatrix',
