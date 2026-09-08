@@ -11,6 +11,7 @@ sys.path.insert(0, str(CLIENT_SCRIPTS))
 
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
+from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import internal_hit_layouts
 from gui.mods.offline_lan_0922 import internal_layout_profiles
 from gui.mods.offline_lan_0922 import player_critical_mechanics
@@ -1953,6 +1954,14 @@ class _RepairDescriptor(object):
         self.miscAttrs = {'repairSpeedFactor': repair_speed_factor}
 
 
+def _kit_contract(name, tags, repair_all=True, bonus=0.10):
+    """One projected #1513 kit contract, as the item cache would give it."""
+    return equipment_mechanics.project_equipment(types.SimpleNamespace(
+        name=name, id=(11, 23), compactDescr=423, tags=tags,
+        reuseCount=0, cooldownSeconds=90.0, repairAll=repair_all,
+        bonusValue=bonus))
+
+
 def _repair_player(hp, state, destroyed=()):
     """One server-owned participant with a single damaged engine."""
     return types.SimpleNamespace(
@@ -2013,21 +2022,34 @@ class ModuleRepairSpeedTests(unittest.TestCase):
                 device_damage.repair_seconds(
                     'engineHealth', descriptor, repair_factor=factor))
 
-    def test_large_repair_kit_bonus_is_applied_once_on_either_route(self):
+    def test_only_an_unused_large_repair_kit_speeds_the_repair(self):
         descriptor = _RepairDescriptor()
-        # The player folds the mounted kit in as a flag; a bot folds the same
-        # descriptor bonusValue into its client factor.  Both must land on one
-        # 10% gain, never two.
-        flag = device_damage.repair_seconds(
-            'engineHealth', descriptor,
-            repair_factor=device_damage.CREW_FACTOR_BASE,
-            has_big_repairkit=True)
-        bonus = device_damage.repair_seconds(
-            'engineHealth', descriptor,
-            repair_factor=device_damage.CREW_FACTOR_BASE * 1.10)
-        self.assertAlmostEqual(flag, bonus)
+        contract = _kit_contract('largeRepairkit', ('repairkit',))
+        kit = equipment_mechanics.EquipmentState(contract)
+
+        unused = equipment_mechanics.passive_effects([kit])
+        kit.activate(0.0, {'destroyed': ['engineHealth'],
+                           'devices': [{'name': 'engineHealth',
+                                        'state': 'destroyed'}]})
+        spent = equipment_mechanics.passive_effects([kit])
+
+        self.assertEqual(0, kit.uses_left)
+        self.assertAlmostEqual(0.10, unused['repairkitBonusValue'])
+        self.assertEqual(0.0, spent['repairkitBonusValue'])
+        # Wargaming publishes the kit's 10% as an un-used bonus, and #1513
+        # gives Repairkit no factor hook, so it lives on the live ledger.
         self.assertAlmostEqual(
-            device_damage.BASE_MODULE_REPAIR_SECONDS / 1.10, flag)
+            device_damage.BASE_MODULE_REPAIR_SECONDS / 1.10,
+            device_damage.repair_seconds(
+                'engineHealth', descriptor,
+                repair_factor=device_damage.CREW_FACTOR_BASE *
+                (1.0 + unused['repairkitBonusValue'])))
+        self.assertAlmostEqual(
+            device_damage.BASE_MODULE_REPAIR_SECONDS,
+            device_damage.repair_seconds(
+                'engineHealth', descriptor,
+                repair_factor=device_damage.CREW_FACTOR_BASE *
+                (1.0 + spent['repairkitBonusValue'])))
 
     def test_toolbox_uses_the_exact_descriptor_factor(self):
         # A StaticFactorDevice writes miscAttrs/repairSpeedFactor; the law only

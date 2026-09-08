@@ -582,40 +582,40 @@ def crew_repair_factor(repair_skill_pct):
     return crew_repair_speed(repair_skill_pct) / CREW_FACTOR_BASE
 
 
-def repair_seconds(name, td, repair_skill_pct=0.0, has_big_repairkit=False,
-                   repair_factor=None):
+def repair_seconds(name, td, repair_skill_pct=0.0, repair_factor=None):
     """Seconds to auto-repair the named device from destroyed to functional,
     combining the reconstructed base (at 0% Repair skill) with the multipliers:
       crew Repair skill  (factors['repairSpeed'] = 0.57 + 0.43*efficiency)
       toolbox            (td.miscAttrs['repairSpeedFactor'], 1.25 when mounted)
-      large repair kit   (passive +10% while carried, bonusValue 0.1).
     A ``repair_factor`` from the client's own factor dictionary replaces the
     percentage.  Both forms are normalized by CREW_FACTOR_BASE, so the base
     above is exactly the time a crew without the Repair skill takes and a fully
-    trained one divides it by 1/0.57."""
+    trained one divides it by 1/0.57.
+
+    An unused large repair kit belongs in ``repair_factor``: #1513 gives
+    Repairkit no updateVehicleAttrFactors hook, so its bonusValue never reaches
+    a mounted factor and the caller folds it in from the live consumable
+    ledger, which is also what makes the bonus stop once the kit is spent."""
     base = BASE_TRACK_REPAIR_SECONDS if 'track' in name.lower() else BASE_MODULE_REPAIR_SECONDS
     if repair_factor is None:
         factor = crew_repair_factor(repair_skill_pct)
     else:
         factor = max(0.0, float(repair_factor)) / CREW_FACTOR_BASE
     factor *= _misc_factor(td, 'repairSpeedFactor')
-    if has_big_repairkit:
-        factor *= 1.10
     if factor <= 0.0:
         factor = 1.0
     return base / factor
 
 
 def repair_step_hp(current_hp, name, td, dt, repair_skill_pct=0.0,
-                   has_big_repairkit=False, repair_factor=None):
+                   repair_factor=None):
     """Advance a device's HP one tick toward its regen cap (~50%). Returns the new
     HP (unchanged if already at/above the cap). Repair kits set HP directly and
     should not go through here."""
     cap = device_regen_hp(td, name)
     if cap is None or current_hp >= cap:
         return current_hp
-    secs = repair_seconds(name, td, repair_skill_pct, has_big_repairkit,
-                          repair_factor)
+    secs = repair_seconds(name, td, repair_skill_pct, repair_factor)
     rate = cap / max(0.1, secs)          # HP per second
     new_hp = current_hp + rate * dt
     if new_hp > cap:
@@ -722,7 +722,10 @@ if __name__ == '__main__':
     td.miscAttrs['repairSpeedFactor'] = 1.25
     check('toolbox speeds repair', abs(repair_seconds('leftTrackHealth', td) - 9.6) < 1e-6)
     td.miscAttrs['repairSpeedFactor'] = 1.0
-    check('big kit speeds repair', repair_seconds('engineHealth', td, has_big_repairkit=True) < 21.6)
+    check('unused big kit speeds repair',
+          abs(repair_seconds('engineHealth', td,
+                             repair_factor=CREW_FACTOR_BASE * 1.10) -
+              21.6 / 1.10) < 1e-6)
     check('trained crew speeds repair', repair_seconds('engineHealth', td, repair_skill_pct=50.0) < 21.6)
 
     # Repair step reaches the regen cap (destroyed track -> ~130 over ~12s at 100% crew)

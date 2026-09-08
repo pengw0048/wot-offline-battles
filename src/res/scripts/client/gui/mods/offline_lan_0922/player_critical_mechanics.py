@@ -220,9 +220,13 @@ def advance_critical(player, dt, now):
     params = getattr(player, 'effective_params', None) or {}
     loadout = params.get('loadout') or {}
     repair_factor = max(0.0, float(loadout.get('repair_factor', 1.0)))
-    has_big_kit = bool(loadout.get('has_big_kit', False))
     passives = equipment_mechanics.passive_effects(
         getattr(player, 'equipment_states', ()) or ())
+    # #1513 keeps Repairkit.bonusValue out of every mounted factor, so the
+    # live ledger is the only place the passive can come from, and it stops
+    # the moment the kit is spent.
+    repair_factor *= 1.0 + max(
+        0.0, float(passives.get('repairkitBonusValue', 0.0)))
     rpm_loss = max(
         0.0, float(passives.get('engineHpLossPerSecond', 0.0))) * float(dt)
     rpm_payload = (critical_damage.damage_device_over_time(
@@ -250,7 +254,6 @@ def advance_critical(player, dt, now):
             continue
         devices[name] = device_damage.repair_step_hp(
             devices[name], name, descriptor, float(dt),
-            has_big_repairkit=has_big_kit,
             repair_factor=repair_factor)
         if name in destroyed and devices[name] >= cap:
             destroyed.discard(name)

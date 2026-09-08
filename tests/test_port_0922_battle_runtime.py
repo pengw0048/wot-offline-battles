@@ -12345,14 +12345,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # factor is CREW_FACTOR_BASE and the track takes exactly the untrained
         # base time: half of it leaves the track destroyed.
         device_damage = critical_damage._device_damage
-        loadout = {'has_big_kit': False,
-                   'repair_factor': device_damage.CREW_FACTOR_BASE}
         half = device_damage.BASE_TRACK_REPAIR_SECONDS / 2.0
 
         partial = BattleRuntime._tick_local_track_repair(
-            entity, half, loadout)
+            entity, half, device_damage.CREW_FACTOR_BASE)
         repaired = BattleRuntime._tick_local_track_repair(
-            entity, half, loadout)
+            entity, half, device_damage.CREW_FACTOR_BASE)
 
         self.assertEqual('destroyed', partial['devices'][0]['state'])
         self.assertEqual('critical', repaired['devices'][0]['state'])

@@ -7537,8 +7537,11 @@ class BattleRuntime(object):
             equipments = self._equipment_state
         else:
             snapshots = state.get('equipment_states') or ()
+            # Pass the whole ledger row, not just its contract: a spent kit
+            # no longer carries its passive, and the proposal has to agree
+            # with the owner about that.
             equipments = [
-                value.get('equipment') for value in snapshots
+                value for value in snapshots
                 if isinstance(value, dict) and
                 isinstance(value.get('equipment'), dict)]
         passives = equipment_mechanics.passive_effects(equipments)
@@ -10888,8 +10891,22 @@ class BattleRuntime(object):
             return False
         return True
 
+    def _local_repair_factor(self, descriptor):
+        """This vehicle's live repair factor, unused large kit included.
+
+        #1513 gives Repairkit no updateVehicleAttrFactors hook, so its
+        bonusValue never reaches a mounted factor: the passive comes from the
+        live consumable ledger and ends when the kit is spent.
+        """
+        loadout = self._local_loadout(descriptor)
+        passives = equipment_mechanics.passive_effects(
+            self._equipment_state or ())
+        return max(0.0, _number(loadout['repair_factor'], 1.0)) * (
+            1.0 + max(0.0, _number(
+                passives.get('repairkitBonusValue'), 0.0)))
+
     @staticmethod
-    def _tick_local_track_repair(entity, dt, loadout):
+    def _tick_local_track_repair(entity, dt, repair_factor):
         """Advance only the existing owner-CAS track repair checkpoint."""
         before = critical_damage._state(entity)
         devices = getattr(entity, 'devices_hp', None) or {}
@@ -10905,8 +10922,7 @@ class BattleRuntime(object):
                 continue
             repaired = critical_damage._device_damage.repair_step_hp(
                 devices[name], name, entity.typeDescriptor, dt,
-                has_big_repairkit=bool(loadout['has_big_kit']),
-                repair_factor=loadout['repair_factor'])
+                repair_factor=repair_factor)
             if repaired <= devices[name]:
                 continue
             devices[name] = repaired
@@ -10943,9 +10959,8 @@ class BattleRuntime(object):
         if not hasattr(entity, 'maxHealth'):
             entity.maxHealth = int(entity.typeDescriptor.maxHealth)
         now = self._clock()
-        loadout = self._local_loadout(entity.typeDescriptor)
         payload = self._tick_local_track_repair(
-            entity, dt, loadout)
+            entity, dt, self._local_repair_factor(entity.typeDescriptor))
         if payload is not None:
             record['critical_state'] = self._critical_state(payload)
             state = dict(record.get('state') or {})
@@ -10977,7 +10992,7 @@ class BattleRuntime(object):
         if cache is None:
             cache = {}
             entity._offline_lan_repair_progress = cache
-        loadout = self._local_loadout(entity.typeDescriptor)
+        repair_factor = self._local_repair_factor(entity.typeDescriptor)
         for name in tuple(destroyed):
             if name in critical_damage._device_damage.NO_REPAIR_PROGRESS_DEVICES:
                 continue
@@ -10995,9 +11010,7 @@ class BattleRuntime(object):
             if extra_index <= 0:
                 continue
             seconds = critical_damage._device_damage.repair_seconds(
-                name, entity.typeDescriptor,
-                has_big_repairkit=bool(loadout['has_big_kit']),
-                repair_factor=loadout['repair_factor'])
+                name, entity.typeDescriptor, repair_factor=repair_factor)
             seconds_left = max(0.0, seconds * (1.0 - hp / cap))
             callback(entity.id, int(status),
                      int(extra_index) | (progress << 8),
