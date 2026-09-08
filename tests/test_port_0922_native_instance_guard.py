@@ -161,14 +161,14 @@ class NativeInstanceGuardArtifactTests(unittest.TestCase):
         # The engine aborts on the fault that ends the process, so it is
         # always the last record: a repeating fault must not spend the budget.
         self.assertIn('++g_trail_repeats;', source)
-        self.assertIn('after_repeats=', source)
+        self.assertIn('repeats=', source)
         probe = (PORT_ROOT / 'tests' / 'native_exception_trail.c').read_text(
             encoding='utf-8')
         self.assertIn('#include "../native/offline_instance_guard_native.c"',
                       probe)
         self.assertIn('trail_module_is_local(L"SogouPY.ime")', probe)
         self.assertIn('probe_fill_records();', probe)
-        self.assertIn('after_repeats=5', probe)
+        self.assertIn('repeats=5', probe)
         self.assertIn('i686-w64-mingw32-gcc', build)
         self.assertIn('--no-insert-timestamp', build)
         self.assertIn('--kill-at', build)

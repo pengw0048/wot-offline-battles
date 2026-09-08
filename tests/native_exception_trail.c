@@ -229,6 +229,16 @@ int main(void)
 	assert(probe_count("EXC reg eip=0x") == 1);
 	assert(probe_count("EXC frame 00 ") == 1);
 
+	/* All C++ throws share RaiseException's address. Keep the latest
+	 * message even when the type/address match an earlier caught throw.
+	 */
+	object[1] = (uintptr_t)"late failure";
+	probe_raise(0xe06d7363UL, 3, parameters);
+	probe_read_trail(path);
+	assert(probe_count("what=\"late failure\"") == 1);
+	assert(probe_count("what=\"string too long\"") == 0);
+	assert(probe_count("EXC end seq=") == 1);
+
 	/* A rethrow carries no ThrowInfo and names no type; it must be ignored
 	 * rather than recorded as an unattributed fault.
 	 */
@@ -258,9 +268,8 @@ int main(void)
 	probe_read_trail(path);
 	assert(probe_count("EXC seq=3 ") == 0);
 
-	/* The same fault repeating says nothing new. It must not spend the
-	 * budget that has to survive for the distinct fault that ends the
-	 * process, and its count must reach the next record that is written.
+	/* Repeated addresses must retain the latest context, even when no
+	 * distinct exception follows before the engine aborts.
 	 */
 	for (index = 0; index < 5U; ++index) {
 		parameters[0] = 0;
@@ -269,19 +278,19 @@ int main(void)
 	}
 	probe_read_trail(path);
 	assert(probe_count("EXC seq=3 ") == 0);
-	assert(probe_count("after_repeats=") == 0);
+	assert(probe_count("repeats=5") == 1);
 
 	probe_handler_is_transparent();
 
 	probe_read_trail(path);
 	assert(probe_count("EXC seq=3 ") == 1);
-	assert(probe_count("after_repeats=5") == 1);
+	assert(probe_count("repeats=5") == 1);
 
 	/* The limit bounds a process that keeps producing distinct faults. */
 	probe_fill_records();
 	probe_read_trail(path);
 	assert(probe_count("EXC end seq=") == (unsigned int)TRAIL_MAX_RECORDS);
-	assert(probe_count("further records suppressed") == 1);
+	assert(probe_count("at=0x00502070") == 1);
 	assert(probe_trail_length < sizeof(probe_trail));
 
 	assert(RemoveVectoredExceptionHandler(resume) != 0);

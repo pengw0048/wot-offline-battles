@@ -142,7 +142,7 @@ static volatile LONG g_trail_writing = 0;
 static unsigned long g_trail_repeats = 0;
 static DWORD g_trail_last_code = 0;
 static uintptr_t g_trail_last_address = 0;
-static int g_trail_exhausted = 0;
+static LARGE_INTEGER g_trail_record_start;
 static char g_trail_buffer[TRAIL_BUFFER_BYTES];
 
 static const unsigned char ENVIRO_TICK_SIGNATURE[] = {
@@ -885,7 +885,10 @@ static int trail_exception_text(uintptr_t object, char *destination)
 	if (!readable_region((const void *)object, 8U)) {
 		return 0;
 	}
-	text = *(const char *const *)(object + 4U);
+	if (!ReadProcessMemory(GetCurrentProcess(), (const void *)(object + 4U),
+			&text, sizeof(text), 0)) {
+		return 0;
+	}
 	if (text == 0) {
 		return 0;
 	}
@@ -895,8 +898,11 @@ static int trail_exception_text(uintptr_t object, char *destination)
 	if (span <= 8U && !readable_region(text, span)) {
 		return 0;
 	}
+	if (!ReadProcessMemory(GetCurrentProcess(), text, destination, span, 0)) {
+		return 0;
+	}
 	for (index = 0; index + 1U < span; ++index) {
-		char value = text[index];
+		char value = destination[index];
 		if (value == '\0') {
 			destination[index] = '\0';
 			return index != 0U;
@@ -956,6 +962,8 @@ static LONG CALLBACK exception_trail_handler(PEXCEPTION_POINTERS pointers)
 	unsigned int frame;
 	uintptr_t cursor;
 	LONG sequence;
+	int replace_record;
+	LARGE_INTEGER zero;
 
 	if (pointers == 0 || g_trail_slot == TLS_OUT_OF_INDEXES) {
 		SetLastError(saved_error);
@@ -978,33 +986,35 @@ static LONG CALLBACK exception_trail_handler(PEXCEPTION_POINTERS pointers)
 	}
 	TlsSetValue(g_trail_slot, (LPVOID)(uintptr_t)1);
 
-	/* A fault that repeats identically says nothing new, and the budget has
-	 * to survive for the distinct fault that ends the process: the engine
-	 * aborts on it, so it is always the last record written.
+	/* RaiseException is shared by different C++ throws. Even a repeated
+	 * code/address must refresh the final record's message and context.
+	 * Keep the first 511 slots and overwrite the last slot after the budget
+	 * fills, so bounded storage never disables the recorder before a crash.
 	 */
-	if (g_trail_sequence != 0 &&
-			record->ExceptionCode == g_trail_last_code &&
-			(uintptr_t)record->ExceptionAddress == g_trail_last_address) {
+	replace_record = g_trail_sequence != 0 &&
+		record->ExceptionCode == g_trail_last_code &&
+		(uintptr_t)record->ExceptionAddress == g_trail_last_address;
+	if (replace_record) {
 		++g_trail_repeats;
-		TlsSetValue(g_trail_slot, 0);
-		InterlockedExchange(&g_trail_writing, 0);
-		SetLastError(saved_error);
-		return EXCEPTION_CONTINUE_SEARCH;
-	}
-	if (g_trail_sequence >= TRAIL_MAX_RECORDS) {
-		if (!g_trail_exhausted) {
-			g_trail_exhausted = 1;
-			used = trail_put(used,
-				"EXC note further records suppressed by the record limit"
-				"\r\n");
-			trail_flush(used);
+	} else {
+		g_trail_repeats = 0;
+		if (g_trail_sequence < TRAIL_MAX_RECORDS) {
+			++g_trail_sequence;
+		} else {
+			replace_record = 1;
 		}
+	}
+	zero.QuadPart = 0;
+	if (!(replace_record ?
+			SetFilePointerEx(g_trail_file, g_trail_record_start, 0, FILE_BEGIN) :
+			SetFilePointerEx(g_trail_file, zero, &g_trail_record_start,
+				FILE_CURRENT))) {
 		TlsSetValue(g_trail_slot, 0);
 		InterlockedExchange(&g_trail_writing, 0);
 		SetLastError(saved_error);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-	sequence = ++g_trail_sequence;
+	sequence = g_trail_sequence;
 	g_trail_last_code = record->ExceptionCode;
 	g_trail_last_address = (uintptr_t)record->ExceptionAddress;
 
@@ -1021,9 +1031,8 @@ static LONG CALLBACK exception_trail_handler(PEXCEPTION_POINTERS pointers)
 	used = trail_put(used, " at=");
 	used = trail_put_address(used, (uintptr_t)record->ExceptionAddress);
 	if (g_trail_repeats != 0UL) {
-		used = trail_put(used, " after_repeats=");
+		used = trail_put(used, " repeats=");
 		used = trail_put_uint(used, g_trail_repeats, 0U);
-		g_trail_repeats = 0UL;
 	}
 	used = trail_put(used, "\r\n");
 
@@ -1077,12 +1086,17 @@ static LONG CALLBACK exception_trail_handler(PEXCEPTION_POINTERS pointers)
 	for (frame = 0; frame < TRAIL_MAX_FRAMES; ++frame) {
 		uintptr_t next;
 		uintptr_t caller;
+		uintptr_t pair[2];
 		if ((cursor & 3U) != 0U ||
 				!readable_region((const void *)cursor, 8U)) {
 			break;
 		}
-		next = ((const uintptr_t *)cursor)[0];
-		caller = ((const uintptr_t *)cursor)[1];
+		if (!ReadProcessMemory(GetCurrentProcess(), (const void *)cursor,
+				pair, sizeof(pair), 0)) {
+			break;
+		}
+		next = pair[0];
+		caller = pair[1];
 		if (caller == 0) {
 			break;
 		}
@@ -1100,6 +1114,9 @@ static LONG CALLBACK exception_trail_handler(PEXCEPTION_POINTERS pointers)
 	used = trail_put_uint(used, (unsigned long)sequence, 0U);
 	used = trail_put(used, "\r\n");
 	trail_flush(used);
+	if (replace_record) {
+		SetEndOfFile(g_trail_file);
+	}
 
 	TlsSetValue(g_trail_slot, 0);
 	InterlockedExchange(&g_trail_writing, 0);
@@ -1139,6 +1156,7 @@ static long install_exception_trail_internal(void)
 {
 	WCHAR path[MAX_PATH];
 	DWORD length;
+	LARGE_INTEGER zero;
 
 	if (g_trail_handler != 0) {
 		return 0;
@@ -1164,19 +1182,25 @@ static long install_exception_trail_internal(void)
 	 * a worker that restarts inside one launcher session appends instead of
 	 * discarding the records that explain why it restarted.
 	 */
-	g_trail_file = CreateFileW(path, FILE_APPEND_DATA,
+	g_trail_file = CreateFileW(path, GENERIC_WRITE,
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0,
 		OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
 	if (g_trail_file == INVALID_HANDLE_VALUE) {
 		return TRAIL_STATUS_PATH_INVALID;
 	}
+	zero.QuadPart = 0;
+	if (!SetFilePointerEx(g_trail_file, zero, 0, FILE_END)) {
+		close_trail_file();
+		return TRAIL_STATUS_PATH_INVALID;
+	}
+	/* Finish using the shared buffer before another thread can enter. */
+	write_trail_header();
 	g_trail_handler =
 		AddVectoredExceptionHandler(1UL, exception_trail_handler);
 	if (g_trail_handler == 0) {
 		close_trail_file();
 		return TRAIL_STATUS_HANDLER_REFUSED;
 	}
-	write_trail_header();
 	return 0;
 }
 

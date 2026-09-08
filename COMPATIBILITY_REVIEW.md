@@ -1161,12 +1161,17 @@ terminator is printable — the `std::exception` message. A shared buffer and a
 try-lock keep the handler off a stack that a stack overflow has already
 exhausted.
 
-The engine aborts on the fault that ends the process, so that fault is always
-the last record. The budget therefore has to survive for it: a fault that
-repeats with the same code and address is counted rather than written, and its
-count reaches the next distinct record as `after_repeats=`. Distinct records
-are bounded at 512, and the launcher keeps the tail of an oversized trail
-rather than its head.
+The trail retains at most 512 record slots per process. A repeated code and
+address refreshes the last slot, including its latest context and message,
+with a `repeats=` count: different C++ throws can share RaiseException's
+address. Once all slots are used, later faults replace the final slot rather
+than being discarded. The launcher keeps the tail of an oversized trail.
+Arbitrary object and frame reads use `ReadProcessMemory` so a stale address
+can fail the read without raising another access violation in this handler.
+The session header is written before the handler is published, avoiding a
+race over its shared output buffer. This remains best-effort evidence:
+concurrent faults can lose the try-lock, writes can fail, and fast-fail paths
+may bypass vectored handlers entirely.
 
 The trail is diagnostics, so `instance_guard` never fails startup over it: an
 older sidecar without the method, an unconfigured path, and a refusing handler
