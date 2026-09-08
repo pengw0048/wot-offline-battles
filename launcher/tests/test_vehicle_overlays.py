@@ -752,33 +752,31 @@ class VehicleOverlayTest(unittest.TestCase):
         self.assertEqual(8, by_name["R12_Test"]["level"])
         self.assertTrue(by_name["R12_Test"]["notInShop"])
 
-    def test_the_gold_shop_lists_every_vehicle_priced_in_gold(self):
+    def test_the_gold_shop_keeps_hidden_rewards_and_excludes_observers(self):
         rows = vehicle_overlays.list_gold_vehicles(self.game)
-
-        # Highest tier first, which is the order a shop is read in.
-        self.assertEqual(
-            ["ussr:R12_Test", "ussr:Observer"],
-            [row["name"] for row in rows])
+        self.assertEqual(["ussr:R12_Test"], [row["name"] for row in rows])
         self.assertEqual(12500, rows[0]["gold"])
         self.assertEqual(8, rows[0]["level"])
         self.assertTrue(rows[0]["notInShop"])
-        self.assertFalse(rows[1]["notInShop"])
 
-    def test_the_gold_shop_offers_what_the_editor_refuses_to_touch(self):
-        """A vehicle the data editor will not rewrite is still ownable.
-
-        ``selectable`` keeps native construction hazards out of an editor that
-        changes a vehicle's data.  Buying one is a different question, and the
-        client answers it when it builds the record.
-        """
-        choices = vehicle_overlays.list_vehicle_choices(self.game)
-
-        self.assertNotIn(
-            "Observer", [choice["vehicle"] for choice in choices])
-        self.assertIn(
-            "Observer",
-            [row["vehicle"]
-             for row in vehicle_overlays.list_gold_vehicles(self.game)])
+    def test_the_gold_shop_excludes_unavailable_save_vehicles(self):
+        unavailable = [
+            ("germany", "G138_VK168_02_Mauerbrecher", ("heavyTank",)),
+            ("germany", "G65_JagdTiger_SdKfz_185_IGR", ("AT-SPG", "premiumIGR")),
+            ("usa", "A13_T34_hvy_IGR", ("heavyTank", "premiumIGR")),
+            ("ussr", "R54_KV-5_IGR", ("heavyTank", "premiumIGR")),
+            ("germany", "G48_E-25_IGR", ("AT-SPG", "premiumIGR")),
+            ("france", "F28_105_leFH18B2_IGR", ("SPG", "premiumIGR")),
+            ("ussr", "R31_Valentine_LL_IGR", ("lightTank", "premiumIGR")),
+            ("ussr", "Event", ("lightTank", "event_battles")),
+            ("ussr", "Fallout", ("heavyTank", "fallout")),
+            ("ussr", "Tank_bootcamp", ("lightTank", "secret")),
+        ]
+        records = [dict(nation=nation, vehicle=vehicle, tags=tags, gold=1)
+                   for nation, vehicle, tags in unavailable]
+        with mock.patch.object(vehicle_overlays, "_vehicle_roster_from_archive",
+                               return_value=records):
+            self.assertEqual([], vehicle_overlays.list_gold_vehicles(self.game))
 
     def test_vehicle_browser_resolves_shared_topology_and_impact(self):
         choices = vehicle_overlays.list_vehicle_choices(self.game)
