@@ -2036,6 +2036,14 @@ The garage ledger owns spendable vehicle XP, free XP, credits, gold, research,
 crew descriptors and item stock. Battle receipt application persists these
 changes with an idempotence marker before publishing the Account update.
 
+The native transaction validators also consume account availability fields.
+`vehicleSellsLeft` reflects the number of owned vehicles that may be sold while
+retaining the final garage vehicle, and changes with purchases and sales.
+`freeTMenLeft` and `freeVehiclesLeft` permit the existing free recruitment and
+zero-price vehicle purchases; neither has a daily quota offline. Native
+capacity and money validators still apply. Zero in these fields means an
+operation is forbidden, not unlimited.
+
 - Ordinary battle XP goes both to the vehicle and independently to every
   seated crew member. Accelerated training is opt-in and requires the current
   vehicle research tree to be elite; only then does the vehicle award become

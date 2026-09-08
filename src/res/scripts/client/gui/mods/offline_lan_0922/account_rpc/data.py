@@ -710,8 +710,14 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             'berths': max(0, int(
                 vehicle.get('accountBerths', OFFLINE_BARRACKS_BERTHS) or 0)),
             'accOnline': 0, 'accOffline': 0,
-            'freeTMenLeft': 0, 'freeVehiclesLeft': 0,
-            'vehicleSellsLeft': 0, 'captchaTriesLeft': 0,
+            # Offline recruitment and free vehicle purchases have no daily
+            # quota. Positive values permit the free choices; capacity and
+            # paid choices keep their independent slots and money validators.
+            'freeTMenLeft': 1, 'freeVehiclesLeft': 1,
+            # Offline sales have no daily quota, but the last garage vehicle
+            # must remain. Publish the same allowance the transaction uses.
+            'vehicleSellsLeft': max(0, len(_vehicle_records(vehicle)) - 1),
+            'captchaTriesLeft': 0,
             # Match the established offline-server account profile.  Zero
             # starts the stock lobby tutorial/hints lifecycle even though this
             # account cannot persist its tutorial actions on a retail server.

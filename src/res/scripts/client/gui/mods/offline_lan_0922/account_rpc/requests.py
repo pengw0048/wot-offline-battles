@@ -102,7 +102,7 @@ def _fitting(context, mutate, extension=None):
         # Publish the ledger with the inventory for every paid garage action.
         current_stats = data.stats(state.snapshot())['stats']
         changed_stats = dict((name, current_stats[name]) for name in (
-            'credits', 'gold', 'freeXP', 'slots', 'berths',
+            'credits', 'gold', 'freeXP', 'slots', 'berths', 'vehicleSellsLeft',
             'vehTypeXP', 'unlocks', 'eliteVehicles')
             if current_stats[name] != previous_stats[name])
         # #1513 merges these growing sets and treats each incremental entry
