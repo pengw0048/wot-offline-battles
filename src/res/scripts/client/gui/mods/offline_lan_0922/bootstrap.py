@@ -181,7 +181,8 @@ def _restore_garage(snapshot):
         1 for record in (snapshot.get('vehicles') or ())
         if isinstance(record, dict) and
         str(record.get('vehicleTypeName') or '') not in named)
-    if unnamed:
+    degraded = getattr(store, 'restore_degraded', None)
+    if unnamed and not (callable(degraded) and degraded()):
         store.mark_dirty()
         if store.flush(snapshot):
             sys.stdout.write(
@@ -224,80 +225,100 @@ def _validate_restored_garage(snapshot):
     validates the relational snapshot. A saved fitting can differ from the
     initial stock descriptor without invalidating the player's whole garage.
     """
+    from gui.mods.offline_lan_0922.account_rpc import data
     from items import customizations, tankmen, vehicles
     records = snapshot.get('vehicles')
     if not isinstance(records, (list, tuple)):
         records = [snapshot]
     for record in records:
-        descriptor = vehicles.VehicleDescr(
-            compactDescr=record['compDescr'])
-        record.setdefault('inventoryItems', {}).update(
-            vehicle_records.mounted_module_items(descriptor))
-        devices = {}
-        for device in descriptor.optionalDevices:
-            if device is not None:
-                compact_descr = int(device.compactDescr)
-                devices[compact_descr] = devices.get(compact_descr, 0) + 1
-        record['inventoryItems'][9] = devices
-        nation_id, vehicle_type_id = descriptor.type.id
-        vehicle_type = vehicles.makeIntCompactDescrByID(
-            'vehicle', nation_id, vehicle_type_id)
-        if int(record.get('vehicleTypeCompactDescr', 0)) != int(vehicle_type):
-            raise ValueError(
-                'saved vehicle descriptor does not match its garage type')
-
-        layout_key = (int(descriptor.turret.compactDescr),
-                      int(descriptor.gun.compactDescr))
-        if tuple(record.get('shellsLayoutIdx') or ()) != layout_key:
-            raise ValueError(
-                'saved ammunition layout does not match the mounted gun')
-        compatible_shells = set()
-        for shot in (getattr(descriptor.gun, 'shots', ()) or ()):
-            shell = getattr(shot, 'shell', None)
-            compact_descr = getattr(shell, 'compactDescr', 0)
-            if compact_descr:
-                compatible_shells.add(int(compact_descr))
-        shells = list(record.get('shells') or ())
-        loaded = 0
-        for index in range(0, len(shells), 2):
-            compact_descr = int(shells[index])
-            count = int(shells[index + 1])
-            if compact_descr not in compatible_shells or count < 0:
-                raise ValueError(
-                    'saved ammunition does not fit the mounted gun')
-            loaded += count
-        # An empty rack is a real save: a battle that fired every round leaves
-        # one, and the layout still names what to buy back.  Refusing it here
-        # would throw the whole career away over an ordinary last shot.
-        maximum = int(getattr(descriptor.gun, 'maxAmmo', 0) or 0)
-        if maximum > 0 and loaded > maximum:
-            raise ValueError('saved ammunition exceeds the gun capacity')
-
-        crew_ids = list(record.get('crew') or ())
-        crew = dict(record.get('tankmen') or {})
-        roles = tuple(descriptor.type.crewRoles)
-        if len(crew_ids) != len(roles):
-            raise ValueError('saved crew does not match the vehicle')
-        for slot, tankman_id in enumerate(crew_ids):
-            if tankman_id is None:
-                # An unloaded seat is empty, not damaged: #1513 reads it back
-                # as a vehicle whose crew is not full.
-                continue
-            tankman = tankmen.TankmanDescr(crew[tankman_id])
-            if (int(tankman.nationID) != int(nation_id) or
-                    int(tankman.vehicleTypeID) != int(vehicle_type_id) or
-                    tankman.role != roles[slot][0]):
-                raise ValueError(
-                    'saved crew member does not match the vehicle slot')
-
-        for outfit_data in dict(record.get('outfits') or {}).values():
-            outfit_descr, unused_enabled = outfit_data
-            customizations.parseOutfitDescr(outfit_descr)
+        try:
+            _validate_restored_vehicle(
+                record, vehicles, tankmen, customizations)
+        except data.VehicleRestoreError:
+            raise
+        except Exception as error:
+            # Name the vehicle so the store can contain one refused record
+            # instead of discarding the whole save.
+            raise data.VehicleRestoreError(
+                str(error), record.get('vehicleTypeCompactDescr'))
 
     # A crew member in the barracks is published too, so a descriptor this
     # client cannot parse has to be caught at the same boundary.
     for compact_descr in (snapshot.get('barracksTankmen') or {}).values():
         tankmen.TankmanDescr(compact_descr)
+    return True
+
+
+def _validate_restored_vehicle(record, vehicles, tankmen, customizations):
+    """Exercise one saved vehicle's native descriptors.
+
+    Extracted so a refusal can name the vehicle it refused: the store
+    drops that one record and keeps the rest of the career.
+    """
+    descriptor = vehicles.VehicleDescr(
+        compactDescr=record['compDescr'])
+    record.setdefault('inventoryItems', {}).update(
+        vehicle_records.mounted_module_items(descriptor))
+    devices = {}
+    for device in descriptor.optionalDevices:
+        if device is not None:
+            compact_descr = int(device.compactDescr)
+            devices[compact_descr] = devices.get(compact_descr, 0) + 1
+    record['inventoryItems'][9] = devices
+    nation_id, vehicle_type_id = descriptor.type.id
+    vehicle_type = vehicles.makeIntCompactDescrByID(
+        'vehicle', nation_id, vehicle_type_id)
+    if int(record.get('vehicleTypeCompactDescr', 0)) != int(vehicle_type):
+        raise ValueError(
+            'saved vehicle descriptor does not match its garage type')
+
+    layout_key = (int(descriptor.turret.compactDescr),
+                  int(descriptor.gun.compactDescr))
+    if tuple(record.get('shellsLayoutIdx') or ()) != layout_key:
+        raise ValueError(
+            'saved ammunition layout does not match the mounted gun')
+    compatible_shells = set()
+    for shot in (getattr(descriptor.gun, 'shots', ()) or ()):
+        shell = getattr(shot, 'shell', None)
+        compact_descr = getattr(shell, 'compactDescr', 0)
+        if compact_descr:
+            compatible_shells.add(int(compact_descr))
+    shells = list(record.get('shells') or ())
+    loaded = 0
+    for index in range(0, len(shells), 2):
+        compact_descr = int(shells[index])
+        count = int(shells[index + 1])
+        if compact_descr not in compatible_shells or count < 0:
+            raise ValueError(
+                'saved ammunition does not fit the mounted gun')
+        loaded += count
+    # An empty rack is a real save: a battle that fired every round leaves
+    # one, and the layout still names what to buy back.  Refusing it here
+    # would throw the whole career away over an ordinary last shot.
+    maximum = int(getattr(descriptor.gun, 'maxAmmo', 0) or 0)
+    if maximum > 0 and loaded > maximum:
+        raise ValueError('saved ammunition exceeds the gun capacity')
+
+    crew_ids = list(record.get('crew') or ())
+    crew = dict(record.get('tankmen') or {})
+    roles = tuple(descriptor.type.crewRoles)
+    if len(crew_ids) != len(roles):
+        raise ValueError('saved crew does not match the vehicle')
+    for slot, tankman_id in enumerate(crew_ids):
+        if tankman_id is None:
+            # An unloaded seat is empty, not damaged: #1513 reads it back
+            # as a vehicle whose crew is not full.
+            continue
+        tankman = tankmen.TankmanDescr(crew[tankman_id])
+        if (int(tankman.nationID) != int(nation_id) or
+                int(tankman.vehicleTypeID) != int(vehicle_type_id) or
+                tankman.role != roles[slot][0]):
+            raise ValueError(
+                'saved crew member does not match the vehicle slot')
+
+    for outfit_data in dict(record.get('outfits') or {}).values():
+        outfit_descr, unused_enabled = outfit_data
+        customizations.parseOutfitDescr(outfit_descr)
     return True
 
 

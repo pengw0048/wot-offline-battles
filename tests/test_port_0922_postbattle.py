@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import pickle
@@ -367,6 +368,51 @@ class PostBattleContractTests(unittest.TestCase):
         self.assertEqual(3000, tier_three_loss['credits'])
         self.assertEqual(3000 * 185 // 100,
                          tier_three_win['credits'])
+
+    def test_an_unreadable_record_says_why_and_is_kept_beside_the_new_one(self):
+        """This file is the account's lifetime record, not a scratch cache.
+
+        Discarding it used to be silent and total, and the next terminal
+        barrier wrote the empty totals back over it.  A player whose medals
+        and battle count reset had nothing in the log to report.
+        """
+        import contextlib
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            self.assertTrue(store.accept(_receipt(store.account_key)))
+            Path(path).write_text(
+                '{"schema": 1, "accountKey": "abcd", "pending": [], '
+                '"history": [], "progress": []}')
+
+            with contextlib.redirect_stdout(io.StringIO()) as log:
+                restarted = postbattle_store.PostBattleStore(path=path)
+
+            self.assertIn('were not read', log.getvalue())
+            self.assertIn('expected shape', log.getvalue())
+            self.assertEqual(0, restarted.progress()['battles'])
+            kept = sorted(
+                name for name in os.listdir(folder)
+                if name.startswith('postbattle_state.rejected-'))
+            self.assertEqual(1, len(kept))
+            self.assertIn('progress', Path(folder, kept[0]).read_text())
+
+    def test_a_record_left_behind_by_an_interrupted_replace_is_read(self):
+        """Windows keeps a ``.bak`` only when the atomic replace fell back.
+
+        A process killed inside that window leaves the record as the backup
+        alone, which is a complete file rather than a reason to start over.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            self.assertTrue(store.accept(_receipt(store.account_key)))
+            os.rename(path, path + '.bak')
+
+            recovered = postbattle_store.PostBattleStore(path=path)
+
+            self.assertEqual(1, recovered.progress()['battles'])
 
     def test_store_survives_restart_applies_once_and_clears_only_on_ack(self):
         with tempfile.TemporaryDirectory() as folder:

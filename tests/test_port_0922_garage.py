@@ -2438,6 +2438,302 @@ class StockRuleTests(unittest.TestCase):
             set(records.STOCKED_ITEM_TYPES))
 
 
+class GarageSaveDurabilityTests(unittest.TestCase):
+    """A career is never destroyed silently: contain it, keep it, or refuse.
+
+    Every write here replaces the whole file, so a payload built from the
+    wrong snapshot replaces a career rather than editing it.  These are the
+    boundaries that make such a write recoverable, or stop it happening.
+    """
+
+    def setUp(self):
+        unused_requests, unused_commands, self.garage = _request_modules()
+        self.store_module = _load('garage_store')
+        self.directory = tempfile.mkdtemp()
+        self.path = os.path.join(self.directory, 'garage_state.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def _state(self, snapshot=None):
+        vehicles, tankmen = _modules()
+        return self.garage.GarageState(
+            snapshot if snapshot is not None else SNAPSHOT,
+            vehicles_module=vehicles, tankmen_module=tankmen)
+
+    def _store(self):
+        return self.store_module.GarageStore(path=self.path)
+
+    def _saved(self):
+        with open(self.path, 'rb') as stream:
+            return json.load(stream)
+
+    def _variants(self, marker):
+        return sorted(
+            name for name in os.listdir(self.directory)
+            if name.startswith('garage_state.%s' % marker))
+
+    @staticmethod
+    def _career_snapshot():
+        """A save worth losing: two vehicles, money and researched items."""
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {'credits': 250000, 'gold': 700, 'freeXP': 4200}
+        # Everything installed has to be researched, exactly as bootstrap
+        # publishes it, or the relational validator refuses the snapshot for
+        # a reason that has nothing to do with what these tests exercise.
+        snapshot['unlockItemCompactDescrs'] = set(
+            (50001, 50002, 2002, 2003, 2004, 2005, 2006, 2007,
+             10010, 10011, 11001))
+        snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
+        second = copy.deepcopy(snapshot['vehicles'][0])
+        second['id'] = 10
+        second['compDescr'] = b'veh:10'
+        second['vehicleTypeCompactDescr'] = 50002
+        second['crew'] = [201, 202]
+        second['tankmen'] = {201: b'tman:201', 202: b'tman:202'}
+        snapshot['vehicles'].append(second)
+        snapshot['vehicleTypeCompactDescrs'] = set((50001, 50002))
+        return snapshot
+
+    def _save_career(self, equipped=False):
+        snapshot = self._career_snapshot()
+        if equipped:
+            # A real fitting on the second vehicle, so a restored record is
+            # distinguishable from the stock build the next start hands over.
+            # ``GarageState`` works on its own copy, so the mutated snapshot
+            # is the one it publishes back.
+            state = self._state(snapshot)
+            state.equip_equipments(10, [11001, 0, 0])
+            snapshot = state.snapshot()
+        store = self._store()
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(store.flush(snapshot))
+        return store, snapshot
+
+    def test_a_payload_with_no_vehicles_never_replaces_a_saved_garage(self):
+        """The shape a fresh or empty snapshot writes, and the reported bug.
+
+        No accepted command empties a garage: selling removes one vehicle at
+        a time.  A payload with none of them is a snapshot that never held
+        them, so the file it would replace is kept as it is.
+        """
+        store, unused_snapshot = self._save_career()
+
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(store.flush({}))
+
+        self.assertIn('was NOT saved', log.getvalue())
+        self.assertEqual(
+            ['50001', '50002'], sorted(self._saved()['vehicles']))
+        self.assertEqual(250000, self._saved()['ledger']['wallet']['credits'])
+
+    def test_a_stock_snapshot_never_replaces_a_researched_career(self):
+        """The reported loss: research, crew and fittings gone, tanks kept.
+
+        A save this client refuses to restore leaves the player in the garage
+        the bootstrap built -- the same vehicles, at their stock build, with
+        the seeded research.  Writing that over the file is what turned a
+        career into a new account, and nothing in this economy ever revokes
+        research, so the write is refused instead.
+        """
+        store, snapshot = self._save_career()
+        bootstrapped = self._career_snapshot()
+        bootstrapped['unlockItemCompactDescrs'] = set((50001, 50002))
+
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(store.flush(bootstrapped))
+
+        self.assertIn('was NOT saved', log.getvalue())
+        self.assertIn('this client still offers', log.getvalue())
+        self.assertEqual(
+            sorted(self._career_snapshot()['unlockItemCompactDescrs']),
+            self._saved()['ledger']['unlocks'])
+
+    def test_research_this_client_no_longer_offers_is_saved_without_it(self):
+        """A changed vehicle catalogue is not a broken save.
+
+        Only research the current catalogue still sells is evidence that the
+        payload was not built from the saved account, so a save that names an
+        item this client no longer offers still saves -- with a copy of the
+        file it replaced beside it.
+        """
+        store, snapshot = self._save_career()
+        retired = self._career_snapshot()
+        retired['unlockItemCompactDescrs'].remove(11001)
+        del retired['shopItemPrices'][11001]
+        del retired['inventoryItems'][11]
+
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertTrue(store.flush(retired))
+
+        self.assertIn('no longer offers', log.getvalue())
+        self.assertNotIn(11001, self._saved()['ledger']['unlocks'])
+        self.assertEqual(1, len(self._variants('shrunk-')))
+
+    def test_a_payload_with_no_research_never_replaces_researched_items(self):
+        """Research is only ever added, so losing all of it has no producer."""
+        store, snapshot = self._save_career()
+        snapshot['unlockItemCompactDescrs'] = set()
+
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(store.flush(snapshot))
+
+        self.assertIn('researched item(s) this client still offers',
+                      log.getvalue())
+        self.assertEqual(
+            sorted(self._career_snapshot()['unlockItemCompactDescrs']),
+            self._saved()['ledger']['unlocks'])
+
+    def test_one_sold_vehicle_is_saved_and_the_previous_file_kept(self):
+        """A real sale must still save; the shrink is only worth a copy.
+
+        Spending credits, selling a tank and playing against a changed
+        vehicle catalogue all legitimately shrink a save, so this write is
+        kept rather than refused -- with the file it replaced beside it.
+        """
+        store, snapshot = self._save_career()
+        snapshot['vehicles'].pop()
+
+        store.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertTrue(store.flush(snapshot))
+
+        self.assertIn('drops 1 vehicle', log.getvalue())
+        self.assertEqual(['50001'], sorted(self._saved()['vehicles']))
+        kept = self._variants('shrunk-')
+        self.assertEqual(1, len(kept))
+        with open(os.path.join(self.directory, kept[0]), 'rb') as stream:
+            self.assertEqual(
+                ['50001', '50002'], sorted(json.load(stream)['vehicles']))
+
+    def test_the_file_one_session_found_is_kept_for_the_next(self):
+        """One rotation per session, taken before the first write.
+
+        The write that destroys a save is the one right after the session
+        that broke it started, so the copy worth keeping is the file as this
+        session found it.
+        """
+        unused_store, snapshot = self._save_career()
+
+        second_session = self._store()
+        second_session.mark_dirty()
+        snapshot['wallet']['credits'] = 1
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(second_session.flush(snapshot))
+            second_session.mark_dirty()
+            self.assertTrue(second_session.flush(snapshot))
+
+        self.assertEqual(1, self._saved()['ledger']['wallet']['credits'])
+        self.assertEqual(
+            ['garage_state.backup1.json'], self._variants('backup'))
+        with open(os.path.join(
+                self.directory, 'garage_state.backup1.json'), 'rb') as stream:
+            self.assertEqual(
+                250000, json.load(stream)['ledger']['wallet']['credits'])
+
+    def test_one_refused_vehicle_leaves_the_rest_of_the_career(self):
+        store, snapshot = self._save_career(equipped=True)
+        fresh = self._career_snapshot()
+
+        def reject_second(staged):
+            for record in staged['vehicles']:
+                # Only the restored fitting is refused, which is what a
+                # native descriptor check actually rejects.
+                if (int(record['vehicleTypeCompactDescr']) == 50002 and
+                        list(record.get('eqs') or ()) != [0, 0, 0]):
+                    raise self.store_module.VehicleRestoreError(
+                        'saved crew member does not match the vehicle slot',
+                        50002)
+            return True
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertTrue(
+                self._store().apply(fresh, validator=reject_second))
+
+        self.assertIn('vehicle 50002', log.getvalue())
+        self.assertIn('without 1 vehicle', log.getvalue())
+        # The account survives the one vehicle it could not publish.
+        self.assertEqual(
+            {'credits': 250000, 'gold': 700, 'freeXP': 4200}, fresh['wallet'])
+        self.assertIn(50002, fresh['unlockItemCompactDescrs'])
+        self.assertEqual(1, len(self._variants('rejected-')))
+
+    def test_a_garage_no_vehicle_can_publish_still_restores_the_account(self):
+        """Research and balances are what playing cannot rebuild.
+
+        They are plain integers and cannot be the reason a native descriptor
+        was refused, so they are restored on their own rather than lost with
+        the fittings.
+        """
+        store, snapshot = self._save_career(equipped=True)
+        fresh = self._career_snapshot()
+        fresh['wallet'] = {'credits': 100000, 'gold': 0, 'freeXP': 0}
+        fresh['unlockItemCompactDescrs'] = set((50001,))
+
+        def reject_every_restored_vehicle(staged):
+            for record in staged['vehicles']:
+                if list(record.get('eqs') or ()) != [0, 0, 0]:
+                    raise ValueError('every saved fitting is unpublishable')
+            return True
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertTrue(self._store().apply(
+                fresh, validator=reject_every_restored_vehicle))
+
+        self.assertIn('without any vehicle fitting or crew', log.getvalue())
+        self.assertEqual(
+            {'credits': 250000, 'gold': 700, 'freeXP': 4200}, fresh['wallet'])
+        self.assertIn(50002, fresh['unlockItemCompactDescrs'])
+
+    def test_a_degraded_restore_is_not_rewritten_for_convenience(self):
+        """Only a real player change may replace a save this client refused.
+
+        The startup path that fills in vehicle names for the Launcher is a
+        convenience, and running it after a contained refusal would write the
+        stock build over fittings and crew a later build may still be able to
+        read.
+        """
+        store, snapshot = self._save_career(equipped=True)
+        fresh = self._career_snapshot()
+
+        def reject_second(staged):
+            for record in staged['vehicles']:
+                if (int(record['vehicleTypeCompactDescr']) == 50002 and
+                        list(record.get('eqs') or ()) != [0, 0, 0]):
+                    raise self.store_module.VehicleRestoreError(
+                        'unpublishable fitting', 50002)
+            return True
+
+        reloaded = self._store()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(reloaded.apply(fresh, validator=reject_second))
+
+        self.assertTrue(reloaded.restore_degraded())
+        # The refused vehicle's saved fitting is still on disk.
+        self.assertEqual(
+            [11001, 0, 0], self._saved()['vehicles']['50002']['eqs'])
+
+    def test_a_save_nothing_can_publish_is_kept_beside_the_stock_garage(self):
+        store, snapshot = self._save_career()
+        fresh = copy.deepcopy(SNAPSHOT)
+        before = copy.deepcopy(fresh)
+
+        def reject(unused_staged):
+            raise ValueError('native descriptor rejected')
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(self._store().apply(fresh, validator=reject))
+
+        self.assertIn('could not be published at all', log.getvalue())
+        self.assertEqual(before, fresh)
+        self.assertEqual(1, len(self._variants('rejected-')))
+
+
 class GaragePersistenceTests(unittest.TestCase):
     """Persist -> reload -> same state, across a simulated client restart."""
 
@@ -2827,7 +3123,13 @@ class GaragePersistenceTests(unittest.TestCase):
             restored['shellsLayout'][(7001, 4444)])
         _load('data')._validate_selected_vehicle(fresh)
 
-    def test_a_saved_shell_outside_the_current_catalogue_falls_back_atomically(self):
+    def test_a_saved_shell_outside_the_current_catalogue_costs_one_vehicle(self):
+        """One stale fitting is contained to the vehicle that carries it.
+
+        The whole save used to be refused here, and the next accepted change
+        then wrote the stock garage over it: a single unpriced round cost the
+        player their research, their balances and every other tank.
+        """
         state = self._state()
         state.install_component(9, 4444)
         store = self._store()
@@ -2835,12 +3137,15 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertTrue(store.flush(state.snapshot()))
 
         fresh = copy.deepcopy(SNAPSHOT)
-        before = copy.deepcopy(fresh)
+        stock = copy.deepcopy(fresh['vehicles'][0])
         with contextlib.redirect_stdout(io.StringIO()) as log:
-            self.assertFalse(self._store().apply(fresh))
+            self.assertTrue(self._store().apply(fresh))
 
-        self.assertIn('inconsistent', log.getvalue())
-        self.assertEqual(before, fresh)
+        self.assertIn('vehicle 50001', log.getvalue())
+        self.assertEqual(stock, fresh['vehicles'][0])
+        self.assertTrue(any(
+            name.startswith('garage_state.rejected-')
+            for name in os.listdir(self.directory)))
 
     def test_a_native_validation_failure_falls_back_atomically(self):
         state = self._state()

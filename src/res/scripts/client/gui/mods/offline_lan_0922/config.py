@@ -3,6 +3,7 @@ from __future__ import print_function
 import json
 import os
 import re
+import time
 
 
 try:
@@ -168,6 +169,128 @@ def _copy_defaults():
     return dict((key, (value[:] if isinstance(value, list) else
                        dict(value) if isinstance(value, dict) else value))
                 for key, value in DEFAULT_CONFIG.items())
+
+
+# How many rotated copies of one state file are kept beside it.  A save is a
+# few hundred kilobytes, so keeping a short history costs almost nothing and
+# is the only thing that makes an overwritten career recoverable at all.
+STATE_BACKUP_GENERATIONS = 3
+# How many quarantined copies of one state file are kept.  Each is evidence of
+# a save this client refused or shrank, so the oldest is dropped rather than
+# the newest.
+STATE_QUARANTINE_COPIES = 5
+BACKUP_SUFFIX = '.backup'
+QUARANTINE_REJECTED = 'rejected'
+QUARANTINE_SHRUNK = 'shrunk'
+
+
+def _state_variant_path(path, marker):
+    """Return ``<name>.<marker>.json`` beside one state file.
+
+    Keeping the ``.json`` extension means a player can open a backup in any
+    text editor and copy it back over the live file by hand, which is the
+    recovery path that needs no tooling at all.
+    """
+    base, extension = os.path.splitext(path)
+    return '%s.%s%s' % (base, marker, extension or '.json')
+
+
+def state_backup_path(path, generation):
+    return _state_variant_path(path, 'backup%d' % int(generation))
+
+
+def rotate_state_backup(path, generations=STATE_BACKUP_GENERATIONS):
+    """Keep the last few copies of one state file beside it.
+
+    Called once per store per session, before the first write, so a session
+    that destroys a save leaves the previous one intact.  A failure here is
+    never fatal: a missing backup is worse than no backup only if it stops the
+    player from playing, which it must not.
+    """
+    if not os.path.isfile(path):
+        return False
+    generations = max(1, int(generations))
+    try:
+        for generation in range(generations, 1, -1):
+            older = state_backup_path(path, generation)
+            newer = state_backup_path(path, generation - 1)
+            if not os.path.isfile(newer):
+                continue
+            if os.path.exists(older):
+                os.unlink(older)
+            os.rename(newer, older)
+        _copy_file(path, state_backup_path(path, 1))
+    except (IOError, OSError):
+        return False
+    return True
+
+
+def quarantine_state_file(path, tag, copies=STATE_QUARANTINE_COPIES):
+    """Copy one state file aside under a timestamped name.
+
+    The live file is copied rather than moved: this client has already decided
+    to carry on without it, and moving it would turn a refused save into a
+    missing one.  Returns the copy's path, or None when there was nothing to
+    keep.
+    """
+    if not os.path.isfile(path):
+        return None
+    # Every stamp has the same fixed width, so the names sort chronologically
+    # and trimming the oldest cannot delete the copy just written.  Two calls
+    # inside one millisecond would collide, so the millisecond field is walked
+    # forward rather than a shorter-sorting suffix appended.
+    now = time.time()
+    second = time.strftime('%Y%m%d-%H%M%S', time.gmtime(now))
+    candidate = None
+    for millisecond in range(int((now % 1) * 1000), 1000):
+        candidate = _state_variant_path(
+            path, '%s-%s-%03d' % (tag, second, millisecond))
+        if not os.path.exists(candidate):
+            break
+    else:
+        return None
+    try:
+        _copy_file(path, candidate)
+    except (IOError, OSError):
+        return None
+    _trim_quarantine(path, tag, copies)
+    return candidate
+
+
+def _trim_quarantine(path, tag, copies):
+    """Drop the oldest quarantined copies of one file beyond ``copies``."""
+    directory = os.path.dirname(path) or '.'
+    base, extension = os.path.splitext(os.path.basename(path))
+    prefix = '%s.%s-' % (base, tag)
+    try:
+        names = sorted(
+            name for name in os.listdir(directory)
+            if name.startswith(prefix) and name.endswith(extension or '.json'))
+    except (IOError, OSError):
+        return
+    for name in names[:max(0, len(names) - max(1, int(copies)))]:
+        try:
+            os.unlink(os.path.join(directory, name))
+        except (IOError, OSError):
+            pass
+
+
+def _copy_file(source_path, destination_path):
+    """Replace one file with a copy of another, contents first.
+
+    ``shutil`` is avoided on purpose: this runs inside the game's embedded
+    interpreter during startup and settlement, and a plain streamed copy has
+    no import cost and no metadata behaviour to reason about.
+    """
+    temporary_path = destination_path + '.tmp'
+    with open(source_path, 'rb') as source:
+        with open(temporary_path, 'wb') as destination:
+            while True:
+                block = source.read(262144)
+                if not block:
+                    break
+                destination.write(block)
+    _replace(temporary_path, destination_path, write_through=False)
 
 
 def _quarantine_invalid_config(path):

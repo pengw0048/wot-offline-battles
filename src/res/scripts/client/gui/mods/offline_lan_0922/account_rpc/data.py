@@ -204,6 +204,20 @@ def _vehicle_records(vehicle):
     return list(records)
 
 
+class VehicleRestoreError(ValueError):
+    """One vehicle record this client refused, named so the rest can survive.
+
+    Restoring a saved garage used to be all or nothing, so a single stale
+    fitting cost the player every vehicle, their crew, their research and
+    their balances.  Naming the record lets ``GarageStore`` leave that one
+    vehicle at its stock build and publish the rest of the account.
+    """
+
+    def __init__(self, message, vehicle_key=None):
+        ValueError.__init__(self, message)
+        self.vehicle_key = None if vehicle_key is None else str(vehicle_key)
+
+
 def _validate_selected_vehicle(vehicle):
     """Reject incomplete garage snapshots before native requesters consume them."""
     records = _vehicle_records(vehicle)
@@ -217,84 +231,92 @@ def _validate_selected_vehicle(vehicle):
     vehicle_type_compact_descrs = []
     installed_item_compact_descrs = set()
     for record in records:
-        if not record.get('compDescr'):
-            raise ValueError('vehicle compact descriptor must be non-empty')
-        vehicle_id = int(record.get('id', 0))
-        if vehicle_id <= 0:
-            raise ValueError('vehicle inventory ids must be positive')
-        vehicle_ids.append(vehicle_id)
-        comp_descrs.append(record['compDescr'])
-        crew = list(record.get('crew', ()))
-        tankmen = dict(record.get('tankmen', {}))
-        # #1513's ``Vehicle._buildCrew`` walks the crew list slot by slot and
-        # reads ``None`` as an empty seat, so an unloaded crew member leaves a
-        # hole rather than shortening the list.
-        manned = [tankman_id for tankman_id in crew if tankman_id is not None]
-        tankman_ids.extend(manned)
-        vehicle_type_compact_descr = record.get(
-            'vehicleTypeCompactDescr')
-        if vehicle_type_compact_descr is not None:
-            vehicle_type_compact_descrs.append(vehicle_type_compact_descr)
-
-        if not crew:
-            raise ValueError('selected vehicle crew must have one seat per role')
+        # A record this client cannot publish is named, so a restore can
+        # drop that one vehicle instead of the whole garage.
         try:
-            crew_ids_are_positive = all(
-                int(tankman_id) > 0 for tankman_id in manned)
-        except (TypeError, ValueError):
-            crew_ids_are_positive = False
-        if not crew_ids_are_positive:
-            raise ValueError('selected vehicle crew ids must be positive')
-        if len(manned) != len(tankmen) or set(manned) != set(tankmen):
-            raise ValueError(
-                'selected vehicle crew ids must resolve to tankmen')
+            if not record.get('compDescr'):
+                raise ValueError('vehicle compact descriptor must be non-empty')
+            vehicle_id = int(record.get('id', 0))
+            if vehicle_id <= 0:
+                raise ValueError('vehicle inventory ids must be positive')
+            vehicle_ids.append(vehicle_id)
+            comp_descrs.append(record['compDescr'])
+            crew = list(record.get('crew', ()))
+            tankmen = dict(record.get('tankmen', {}))
+            # #1513's ``Vehicle._buildCrew`` walks the crew list slot by slot and
+            # reads ``None`` as an empty seat, so an unloaded crew member leaves a
+            # hole rather than shortening the list.
+            manned = [tankman_id for tankman_id in crew if tankman_id is not None]
+            tankman_ids.extend(manned)
+            vehicle_type_compact_descr = record.get(
+                'vehicleTypeCompactDescr')
+            if vehicle_type_compact_descr is not None:
+                vehicle_type_compact_descrs.append(vehicle_type_compact_descr)
 
-        for key in ('repair', 'lock'):
-            value = record.get(key)
-            if not isinstance(value, (tuple, list)) or len(value) != 2:
+            if not crew:
+                raise ValueError('selected vehicle crew must have one seat per role')
+            try:
+                crew_ids_are_positive = all(
+                    int(tankman_id) > 0 for tankman_id in manned)
+            except (TypeError, ValueError):
+                crew_ids_are_positive = False
+            if not crew_ids_are_positive:
+                raise ValueError('selected vehicle crew ids must be positive')
+            if len(manned) != len(tankmen) or set(manned) != set(tankmen):
                 raise ValueError(
-                    'selected vehicle %s must contain two values' % key)
-        # ``repair`` is (outstanding cost, remaining health).  #1513's own
-        # ``Vehicle.modelState`` reads a health of 0 beside a bill as
-        # DESTROYED and a negative one as EXPLODED, so neither is a damaged
-        # snapshot -- both are a vehicle waiting to be repaired.
-        if int(record['repair'][0]) < 0:
-            raise ValueError('selected vehicle repair cost cannot be negative')
-        for key in ('eqs', 'eqsLayout'):
-            value = record.get(key)
-            if not isinstance(value, (tuple, list)) or len(value) != 3:
+                    'selected vehicle crew ids must resolve to tankmen')
+
+            for key in ('repair', 'lock'):
+                value = record.get(key)
+                if not isinstance(value, (tuple, list)) or len(value) != 2:
+                    raise ValueError(
+                        'selected vehicle %s must contain two values' % key)
+            # ``repair`` is (outstanding cost, remaining health).  #1513's own
+            # ``Vehicle.modelState`` reads a health of 0 beside a bill as
+            # DESTROYED and a negative one as EXPLODED, so neither is a damaged
+            # snapshot -- both are a vehicle waiting to be repaired.
+            if int(record['repair'][0]) < 0:
+                raise ValueError('selected vehicle repair cost cannot be negative')
+            for key in ('eqs', 'eqsLayout'):
+                value = record.get(key)
+                if not isinstance(value, (tuple, list)) or len(value) != 3:
+                    raise ValueError(
+                        'selected vehicle %s must contain three slots' % key)
+
+            shells = record.get('shells')
+            if (not isinstance(shells, (tuple, list)) or not shells or
+                    len(shells) % 2):
                 raise ValueError(
-                    'selected vehicle %s must contain three slots' % key)
+                    'selected vehicle shells must contain descriptor/count pairs')
+            if not isinstance(record.get('shellsLayout'), dict):
+                raise ValueError('selected vehicle shellsLayout must be a mapping')
 
-        shells = record.get('shells')
-        if (not isinstance(shells, (tuple, list)) or not shells or
-                len(shells) % 2):
-            raise ValueError(
-                'selected vehicle shells must contain descriptor/count pairs')
-        if not isinstance(record.get('shellsLayout'), dict):
-            raise ValueError('selected vehicle shellsLayout must be a mapping')
+            inventory_items = dict(record.get('inventoryItems', {}))
+            for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (10,):
+                items = inventory_items.get(item_type)
+                if not isinstance(items, dict) or not items:
+                    raise ValueError(
+                        'selected vehicle item type %d must be non-empty' %
+                        item_type)
 
-        inventory_items = dict(record.get('inventoryItems', {}))
-        for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (10,):
-            items = inventory_items.get(item_type)
-            if not isinstance(items, dict) or not items:
+            required_prices = set()
+            for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (10,):
+                required_prices.update(inventory_items[item_type])
+            installed_item_compact_descrs.update(required_prices)
+            if not required_prices.issubset(set(item_prices)):
                 raise ValueError(
-                    'selected vehicle item type %d must be non-empty' %
-                    item_type)
-
-        required_prices = set()
-        for item_type in REQUIRED_VEHICLE_COMPONENT_TYPES + (10,):
-            required_prices.update(inventory_items[item_type])
-        installed_item_compact_descrs.update(required_prices)
-        if not required_prices.issubset(set(item_prices)):
-            raise ValueError(
-                'selected vehicle modules and shells must have shop prices')
-        shell_pairs = dict(
-            (shells[index], shells[index + 1])
-            for index in range(0, len(shells), 2))
-        if shell_pairs != inventory_items[10]:
-            raise ValueError(
-                'selected vehicle shell layout and inventory must match')
+                    'selected vehicle modules and shells must have shop prices')
+            shell_pairs = dict(
+                (shells[index], shells[index + 1])
+                for index in range(0, len(shells), 2))
+            if shell_pairs != inventory_items[10]:
+                raise ValueError(
+                    'selected vehicle shell layout and inventory must match')
+        except VehicleRestoreError:
+            raise
+        except Exception as error:
+            raise VehicleRestoreError(
+                str(error), record.get('vehicleTypeCompactDescr'))
 
     if len(set(vehicle_ids)) != len(vehicle_ids):
         raise ValueError('vehicle inventory ids must be unique')

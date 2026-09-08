@@ -101,6 +101,16 @@ save is the one the game starts with. Saves live in
 made in an older build keeps working: its files move into the default save the
 first time this build starts.
 
+"Open save folder" opens that folder, "Back up save..." writes the whole save
+to one ZIP file, and "Restore save..." puts a backup back into the selected
+save. Close the game before restoring one. The files being replaced are kept in
+a pre-restore folder inside the save, so restoring the wrong backup is
+recoverable. The game also keeps its own copies beside each state file: a
+.backup1 to .backup3 copy of the file as an earlier session found it, and a
+.rejected- or .shrunk- copy of any file it refused to load or was about to
+shrink. Those copies are plain JSON files you can copy back over the live one
+while the game is closed.
+
 When you create a save the Launcher asks which account it starts from, and the
 answer cannot be changed later. "Fully unlocked" is the garage this mod always
 had: every vehicle, module and consumable already owned. "New account" starts

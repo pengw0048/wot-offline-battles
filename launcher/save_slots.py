@@ -55,6 +55,9 @@ STATE_FILE_NAMES = (
     "postbattle_state.json",
     "account_state.json",
 )
+# The client deletes what it has delivered from this one, so a restore that
+# left it behind would hand the player vehicles a different save paid for.
+LAUNCHER_INBOX_NAME = "launcher_inbox.json"
 APPDATA_PARTS = ("Wargaming.net", "WorldOfTanks", "offline_lan_0922")
 LEGACY_RELATIVE = "mods/configs/offline_lan_0922"
 
@@ -379,3 +382,263 @@ def delete_slot(slot_id, game_root=None, environment=None, root=None):
     except (IOError, OSError) as error:
         raise SaveSlotError("The save could not be deleted: %s" % error)
     return record
+
+
+# What a backup archive holds: exactly the files that describe one save, plus
+# the launcher's own record of it.  The rotated and quarantined copies the
+# client keeps are deliberately included: a player restoring a broken save
+# wants the evidence back too, and they are small.
+BACKUP_SCHEMA = 1
+BACKUP_MANIFEST_NAME = "wot-offline-save.json"
+# A save is a handful of JSON files.  Anything far larger is not one, and
+# unpacking it would be the archive deciding how much disk to use.
+MAX_BACKUP_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_BACKUP_MEMBERS = 256
+
+
+def _state_file_names(directory):
+    """Return the save's own files, live copies and kept evidence alike."""
+    try:
+        names = sorted(os.listdir(directory))
+    except (IOError, OSError) as error:
+        raise SaveSlotError("The save could not be read: %s" % error)
+    kept = []
+    for name in names:
+        if not os.path.isfile(os.path.join(directory, name)):
+            continue
+        if name == METADATA_NAME or _belongs_to_state(name):
+            kept.append(name)
+    return kept
+
+
+def _belongs_to_state(name):
+    """Say whether one file name is part of a save's own state.
+
+    The client writes ``garage_state.json`` and keeps ``.backup1``,
+    ``.rejected-...`` and ``.shrunk-...`` copies of it beside the live file,
+    all with the same stem.  Matching on the stem keeps this launcher from
+    having to know each suffix the client may add.
+    """
+    if name.endswith(".tmp"):
+        # A half-written replacement is not state; it is what the atomic
+        # write left behind when it was interrupted.
+        return False
+    for state_name in STATE_FILE_NAMES + (LAUNCHER_INBOX_NAME,):
+        stem = os.path.splitext(state_name)[0]
+        if name == state_name or name.startswith(stem + "."):
+            return True
+    return False
+
+
+def backup_slot(slot_id, archive_path, game_root=None, environment=None,
+                root=None):
+    """Write one save to a ZIP archive the player owns and can keep anywhere.
+
+    Copying the folder by hand works and is documented, but a single file a
+    player can put on another disk is what actually gets kept.  The archive
+    records which save it came from so a restore can say when it is being
+    put back into a different one.
+    """
+    import zipfile
+
+    record = read_slot(slot_id, game_root, environment, root)
+    directory = record["path"]
+    if not os.path.isdir(directory):
+        raise SaveSlotError("This save has nothing to back up yet.")
+    names = _state_file_names(directory)
+    if not names:
+        raise SaveSlotError("This save has nothing to back up yet.")
+    archive_path = os.path.abspath(archive_path)
+    manifest = {
+        "schema": BACKUP_SCHEMA,
+        "id": record["id"],
+        "name": record["name"],
+        "mode": record["mode"],
+        "files": names,
+        "created": int(time.time()),
+    }
+    temporary = archive_path + ".tmp"
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                BACKUP_MANIFEST_NAME,
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            for name in names:
+                archive.write(os.path.join(directory, name), name)
+        os.replace(temporary, archive_path)
+    except (IOError, OSError, zipfile.BadZipFile) as error:
+        try:
+            if os.path.isfile(temporary):
+                os.unlink(temporary)
+        except (IOError, OSError):
+            pass
+        raise SaveSlotError("The backup could not be written: %s" % error)
+    return {"path": archive_path, "files": names, "id": record["id"],
+            "name": record["name"]}
+
+
+def read_backup(archive_path):
+    """Describe one archive without unpacking it."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            names = [info.filename for info in archive.infolist()
+                     if not info.is_dir()]
+            if len(names) > MAX_BACKUP_MEMBERS:
+                raise SaveSlotError("This file holds too many members.")
+            for info in archive.infolist():
+                if info.file_size > MAX_BACKUP_MEMBER_BYTES:
+                    raise SaveSlotError(
+                        "This file holds a member that is too large.")
+            if BACKUP_MANIFEST_NAME in names:
+                manifest = json.loads(
+                    archive.read(BACKUP_MANIFEST_NAME).decode("utf-8"))
+            else:
+                manifest = {}
+    except SaveSlotError:
+        raise
+    except (IOError, OSError, ValueError, zipfile.BadZipFile) as error:
+        raise SaveSlotError("This is not a readable save backup: %s" % error)
+    if not isinstance(manifest, dict):
+        manifest = {}
+    state_names = [name for name in names
+                   if name != BACKUP_MANIFEST_NAME and _restorable_name(name)]
+    if not state_names:
+        raise SaveSlotError(
+            "This file holds no save data. Pick a backup this Launcher "
+            "wrote, or a folder copy of a save.")
+    return {
+        "path": os.path.abspath(archive_path),
+        "id": (manifest.get("id") if isinstance(manifest.get("id"), str)
+               else None),
+        "name": (manifest.get("name")
+                 if isinstance(manifest.get("name"), str) else None),
+        "files": sorted(state_names),
+    }
+
+
+def _restorable_name(name):
+    """Accept only a plain file name that belongs to a save.
+
+    A member with a path, a drive or a parent reference is refused rather
+    than sanitised: this Launcher wrote the archives it restores, and a
+    hand-made one that disagrees is not worth guessing about.
+    """
+    if not name or name != os.path.basename(name):
+        return False
+    if name in (os.curdir, os.pardir) or os.path.isabs(name):
+        return False
+    if "\\" in name or "/" in name or ":" in name:
+        return False
+    return name == METADATA_NAME or _belongs_to_state(name)
+
+
+def restore_slot(slot_id, archive_path, game_root=None, environment=None,
+                 root=None, is_running=None, keep_name=True):
+    """Replace one save's files with a backup's, keeping what it replaces.
+
+    The client owns these files while it runs, so a restore refuses to touch
+    a save the game may be writing.  The files being replaced are moved into
+    the same slot under a ``pre-restore`` stamp rather than deleted, because a
+    player who restores the wrong archive has then lost the save twice.
+    """
+    import zipfile
+
+    if is_running is None:
+        try:
+            from . import core
+        except ImportError:
+            import core
+
+        is_running = core.game_is_running
+    if callable(is_running) and is_running():
+        raise SaveSlotError(
+            "Close World of Tanks before restoring a save.")
+    backup = read_backup(archive_path)
+    record = read_slot(slot_id, game_root, environment, root)
+    directory = record["path"]
+    if not os.path.isdir(directory):
+        try:
+            os.makedirs(directory)
+        except (IOError, OSError) as error:
+            raise SaveSlotError("The save could not be restored: %s" % error)
+    stamp = time.strftime("pre-restore-%Y%m%d-%H%M%S", time.gmtime())
+    replaced = os.path.join(directory, stamp)
+    moved = []
+    written = []
+    try:
+        existing = _state_file_names(directory)
+        if existing:
+            os.makedirs(replaced)
+            for name in existing:
+                os.replace(os.path.join(directory, name),
+                           os.path.join(replaced, name))
+                moved.append(name)
+        with zipfile.ZipFile(archive_path) as archive:
+            for name in backup["files"]:
+                if keep_name and name == METADATA_NAME:
+                    # The archive's own name would rename the save it is put
+                    # into, which is not what restoring one file of it means.
+                    continue
+                target = _contained(
+                    directory, os.path.join(directory, name),
+                    "The restored file")
+                with archive.open(name) as source:
+                    payload = source.read(MAX_BACKUP_MEMBER_BYTES + 1)
+                if len(payload) > MAX_BACKUP_MEMBER_BYTES:
+                    raise SaveSlotError(
+                        "This file holds a member that is too large.")
+                with open(target, "wb") as destination:
+                    destination.write(payload)
+                written.append(name)
+    except Exception as error:
+        for name in written:
+            try:
+                os.unlink(os.path.join(directory, name))
+            except (IOError, OSError):
+                pass
+        for name in moved:
+            try:
+                os.replace(os.path.join(replaced, name),
+                           os.path.join(directory, name))
+            except (IOError, OSError):
+                pass
+        shutil.rmtree(replaced, ignore_errors=True)
+        if isinstance(error, SaveSlotError):
+            raise
+        raise SaveSlotError("The save could not be restored: %s" % error)
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "files": sorted(written),
+        "replaced": replaced if moved else None,
+        "from_id": backup["id"],
+        "from_name": backup["name"],
+    }
+
+
+def open_slot_folder(slot_id, game_root=None, environment=None, root=None,
+                     runner=None):
+    """Open one save's folder in Windows Explorer.
+
+    Copying a file out and putting it back is the recovery every player
+    already knows how to do, so the folder itself is the feature.  The
+    directory is created when it is missing: a save that has never been
+    started still has a folder the player can drop a backup into.
+    """
+    import subprocess
+
+    directory = slot_dir(slot_id, game_root, environment, root)
+    if not os.path.isdir(directory):
+        try:
+            os.makedirs(directory)
+        except (IOError, OSError) as error:
+            raise SaveSlotError("The save folder is unavailable: %s" % error)
+    runner = subprocess.Popen if runner is None else runner
+    try:
+        runner(["explorer.exe", os.path.normpath(directory)],
+               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (IOError, OSError) as error:
+        raise SaveSlotError("The save folder could not be opened: %s" % error)
+    return directory
