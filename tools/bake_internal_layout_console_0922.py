@@ -160,19 +160,146 @@ REQUEST_PAUSE = 0.25
 # permutation of one another before it will inherit.  A suffix is never
 # matched on its own; that is how an old profile gets attached to an
 # unrelated vehicle which happened to reuse a name.
-# Vehicles the archive files under an id our client's formula does not
-# produce, found by sweeping console4.13's whole id space and reading the
-# vehicle code out of each package's member paths.  So the computed id is a
-# first guess, not a guarantee: Console filed the Turan III prototype under
-# czech rather than germany, keeps the ISU-130 at two ids, and serves the
-# M48A1's model at the id computed for the M48A5.  Each candidate is still
-# verified against the member paths before it is used, so a wrong id cannot
-# slip through -- see _package_is_for.
+# Vehicles the archive also files under an id our client's formula does not
+# produce.  Console renumbered extensively, so the computed id is a first
+# guess and not a guarantee: 122 of the 680 catalogue entries appear in
+# console4.13 under some other id as well, and for a few -- the Char de 25t
+# and the Lorraine 40 t have theirs swapped, the M48A5's holds the M48A1's
+# model -- the computed id is simply the wrong file.
+#
+# Derived mechanically rather than hand-picked, by sweeping a package's whole
+# id space (255 list ids x 10 nations) and reading the vehicle code out of
+# each package's member paths, then recording every id whose code matches a
+# client entry's and differs from the computed one.  Exact code matches only:
+# pairing a vehicle with a *variant* of itself is what SAME_TANK_ALIASES is
+# for, and the two are kept separate on purpose.
+#
+# The computed id is still tried first, so this only ever rescues a vehicle
+# whose own id failed, and every candidate must still satisfy
+# _package_is_for, so a wrong id cannot slip through.
 ALTERNATE_ARCHIVE_IDS = {
+    'china:Ch01_Type59': (33073,),
+    'china:Ch01_Type59_Gold': (32817,),
+    'china:Ch02_Type62': (32049, 32305),
+    'china:Ch06_Renault_NC31': (31281,),
+    'china:Ch14_T34_3': (31537,),
+    'china:Ch21_T34': (34305,),
+    'china:Ch26_59_Patton': (31793,),
+    'china:Ch39_WZ120_1G_FT': (32561,),
+    'czech:Cz01_Skoda_T40': (61553,),
+    'czech:Cz05_T34_100': (34305, 62065),
+    'france:F01_RenaultFT': (31297,),
+    'france:F05_BDR_G1B': (31041, 31553),
+    'france:F16_AMX_13_75': (36177, 63809),
+    'france:F19_Lorraine40t': (5697,),
+    'france:F64_AMX_50Fosh_155': (27713, 61761),
+    'france:F65_FCM_50t': (25921,),
+    'france:F68_AMX_Chasseur_de_char_46': (26433,),
+    'france:F69_AMX13_57_100': (26177, 26945, 63297),
+    'france:F73_M4A1_Revalorise': (26689,),
+    'france:F74_AMX_M4_1949': (27201, 62017),
     'france:F75_Char_de_25t': (62529,),
+    'france:F84_Somua_SM': (27457,),
+    'france:F88_AMX_13_105': (27969,),
+    'france:F89_Canon_dassaut_de_105': (27713,),
+    'france:F97_ELC_EVEN_90': (28225,),
+    'germany:G03_PzV_Panther': (32865, 38417),
+    'germany:G04_PzVI_Tiger_I': (31761, 37121, 43585),
+    'germany:G05_StuG_40_AusfG': (33297,),
+    'germany:G109_Steyr_WT': (36881,),
+    'germany:G112_KanonenJagdPanzer_105': (64529,),
+    'germany:G114_Skorpian': (50193,),
+    'germany:G115_Typ_205_4_Jun': (19729,),
     'germany:G116_Turan_III_prot': (61809,),
+    'germany:G117_Toldi_III': (31617,),
+    'germany:G118_VK4503': (35089,),
+    'germany:G119_Panzer58': (36113, 36369),
+    'germany:G120_M41_90': (34577, 34833),
+    'germany:G12_Ltraktor': (31505,),
+    'germany:G15_VK3601H': (37649,),
+    'germany:G16_PzVIB_Tiger_II': (34321, 39201),
+    'germany:G18_JagdPanther': (37137,),
+    'germany:G36_PzII_J': (30993,),
+    'germany:G37_Ferdinand': (35601,),
+    'germany:G51_Lowe': (32529,),
+    'germany:G78_Panther_M10': (33553,),
+    'germany:G81_Pz_IV_AusfH': (31249, 35345),
+    'germany:G92_VK7201': (19473,),
+    'germany:G99_RhB_Waffentrager': (36625,),
+    'japan:J01_NC27': (31329,),
+    'japan:J02_Te_Ke': (32609,),
+    'japan:J18_STA_2_3': (31841, 32097),
+    'japan:J19_Tiger_I_Jpn': (33041, 35857),
+    'japan:J24_Mi_To_130_tons': (31585, 32353),
+    'poland:Pl03_PzV_Poland': (51345,),
+    'sweden:S15_L_60': (31361,),
+    'sweden:S22_Strv_S1': (31105,),
+    'sweden:S23_Strv_81': (32385,),
+    'uk:GB01_Medium_Mark_I': (31313,),
+    'uk:GB04_Valentine': (38225,),
+    'uk:GB07_Matilda': (34385,),
+    'uk:GB09_Churchill_VII': (33105,),
+    'uk:GB19_Sherman_Firefly': (32337,),
+    'uk:GB21_Cromwell': (31057, 31825, 37969),
+    'uk:GB22_Comet': (35409,),
+    'uk:GB23_Centurion': (34129, 35665, 37201),
+    'uk:GB24_Centurion_Mk3': (32385, 35665),
+    'uk:GB33_Sentinel_AC_I': (33873,),
+    'uk:GB35_Sentinel_AC_IV': (33361,),
+    'uk:GB52_A45': (32849,),
+    'uk:GB70_N_FV4202_105': (14929,),
+    'uk:GB76_Mk_VIC': (35921,),
+    'uk:GB77_FV304': (33617,),
+    'uk:GB78_Sexton_I': (54049,),
+    'uk:GB80_Charioteer': (34641,),
+    'uk:GB87_Chieftain_T95_turret': (32593,),
+    'uk:GB93_Caernarvon_AX': (38737, 40017),
+    'usa:A01_T1_Cunningham': (31777,),
+    'usa:A05_M4_Sherman': (35329, 35361),
+    'usa:A103_T71E1': (33825, 38945),
+    'usa:A111_T25_Pilot': (34849,),
+    'usa:A115_Chrysler_K': (39713,),
+    'usa:A11_T29': (39457,),
+    'usa:A12_T32': (40993,),
+    'usa:A13_T34_hvy': (34337,),
+    'usa:A21_T14': (31265,),
+    'usa:A33_MTLS-1G14': (34593,),
+    'usa:A34_M24_Chaffee': (41249, 63777, 63809),
+    'usa:A41_M18_Hellcat': (37153, 41761),
+    'usa:A43_M22_Locust': (31521,),
+    'usa:A45_M6A2E1': (40481, 40737),
+    'usa:A57_M8A1': (39969,),
+    'usa:A63_M46_Patton': (40225,),
+    'usa:A74_T1_E6': (31009, 34081),
+    'usa:A80_T26_E4_SuperPershing': (65057,),
+    'usa:A93_T7_Combat_Car': (32033, 32289, 32545, 32801, 33057, 33569),
+    'usa:A97_M41_Bulldog': (38177,),
+    'usa:A99_T92_LT': (41505,),
+    'ussr:R07_T-34-85': (31489, 58625),
+    'ussr:R105_BT_7A': (33025,),
+    'ussr:R108_T34_85M': (35585,),
     'ussr:R111_ISU130': (31745, 33537),
-    'usa:A120_M48A5': (14113,),
+    'ussr:R112_T54_45': (32001,),
+    'ussr:R113_Object_730': (34049,),
+    'ussr:R118_T28_F30': (33793,),
+    'ussr:R11_MS-1': (30977,),
+    'ussr:R123_Kirovets_1': (35841,),
+    'ussr:R125_T_45': (38401,),
+    'ussr:R128_KV4_Kreslavskiy': (35073,),
+    'ussr:R133_KV_122': (36609,),
+    'ussr:R135_T_103': (36353,),
+    'ussr:R143_T_29': (41217,),
+    'ussr:R18_SU-152': (36097,),
+    'ussr:R38_KV-220': (32769,),
+    'ussr:R52_Object_261': (63489,),
+    'ussr:R54_KV-5': (32257, 34561, 41473),
+    'ussr:R61_Object252': (32513, 41729),
+    'ussr:R77_KV2': (37633,),
+    'ussr:R80_KV1': (32273,),
+    'ussr:R86_LTP': (36865,),
+    'ussr:R93_Object263': (14337,),
+    'ussr:R96_Object_430': (17153,),
+    'ussr:R99_T44_122': (42241,),
 }
 SAME_TANK_ALIASES = {
     # The premium Type 59, identical hull and identical crew roster.
@@ -685,11 +812,15 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
             placed = (parent, 'crew_%02d' % slot_index, shaped[0], shaped[1])
             break
         if placed is None:
+            # Keep the crew list positional -- build_layout indexes it by the
+            # live descriptor's crew index -- and mark the station a hole.
             absent.append(surface)
+            crew_zones.append(None)
         else:
             crew_zones.append(placed)
 
-    if absent:
+    if len(absent) == len(crew_zones):
+        # No crew surface at all is not a hole, it is the wrong file.
         return None, 'crew_surfaces_absent:' + ','.join(absent), residuals
     # build_layout requires a geometry source for every module target it does
     # not get natively -- the tracks come from the collision extras and the
@@ -906,10 +1037,24 @@ def main():
             built, reason, residuals = build_vehicle(
                 key, vehicle, parts, pc, args.max_residual,
                 args.max_overshoot)
-            if built is not None:
-                best = (package, parts, built, residuals)
-                break
-            attempts[package] = reason
+            if built is None:
+                attempts[package] = reason
+                continue
+            # A layout may carry holes -- a module or a crew station the
+            # resources do not model.  Era-closeness decides between equally
+            # complete layouts, but a hole is a real loss, so keep looking and
+            # let a later package that models more win.  Without this the
+            # era-closest package is taken whatever it is missing, and the
+            # E 100 ships four of its six crew unhittable because console4.3
+            # does not model them while a later package does.
+            holes = len(built[2]) + sum(1 for zone in built[1]
+                                        if zone is None)
+            if best is None or holes < best[0]:
+                best = (holes, package, parts, built, residuals)
+                if holes == 0:
+                    break
+            attempts[package] = '%s (%d unmodelled)' % (
+                reason or 'usable', holes)
         if best is None:
             entry['attempts'] = attempts
             # Report why the era-closest package that had this vehicle at all
@@ -924,7 +1069,7 @@ def main():
             entry['reason'] = rejected[key]
             audit[key] = entry
             continue
-        package, parts, built, residuals = best
+        unused_holes, package, parts, built, residuals = best
         sources.add(package)
         entry.update({
             'package': package,

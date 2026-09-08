@@ -284,9 +284,29 @@ def _compiled_profile(vehicle_name):
 	if key is None:
 		return None, None
 	decoded = _decoded_layout(key)
+	authored_key, authored = _profile_for_key(key)
 	if decoded is not None:
-		return key, decoded
-	return _profile_for_key(key)
+		# A decoded record whose resources model no station for some of the
+		# crew leaves those crewmen unhittable.  That is the right answer when
+		# the alternative is no interior at all, but not when a retained
+		# archetype already seats every one of them: an approximate crew the
+		# player can hit is closer to retail than an exact one he cannot, and
+		# on the E 100 the resources miss four of six stations.  A module hole
+		# costs a single crit target and does not trigger this.
+		if authored is None or not _decoded_crew_incomplete(key):
+			return key, decoded
+		return authored_key, authored
+	return authored_key, authored
+
+
+def _decoded_crew_incomplete(key):
+	'''Whether the decoded record leaves a crew station without a zone.'''
+	if _layout_console is None:
+		return False
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None or len(record) < 6:
+		return False
+	return any(zone is None for zone in record[5])
 
 
 def _profile_for_key(key):
@@ -761,6 +781,11 @@ def build_layout(vehicle_descriptor, log_build=True):
 
 	official_geometry = _official_geometry_bindings(
 		vehicle_descriptor, crew)
+	# Targets the exact-era resources model no surface for.  The baked record
+	# names the modules; a crewman is added below when his station is a hole in
+	# the positional crew list.
+	unmodelled_entities = (frozenset(decoded_unmodelled_entities(vehicle_name))
+		if decoded_geometry else frozenset())
 	candidate_specs = []
 	if profile is not None:
 		for module_zone in profile['module_zones']:
@@ -799,6 +824,15 @@ def build_layout(vehicle_descriptor, log_build=True):
 			if role_data['entity'] in official_geometry:
 				continue
 			crew_zone = profile['crew_zones'][crew_index]
+			if crew_zone is None:
+				# The exact-era resources model no station for this crewman on
+				# this vehicle.  Publish him unavailable, the same way a module
+				# the resources do not model is published, rather than seating
+				# him at a guessed position or discarding the vehicle's whole
+				# decoded interior over one absent surface.
+				unmodelled_entities = unmodelled_entities.union(
+					(role_data['entity'],))
+				continue
 			parent, zone_id, center_fractions, half_fractions = crew_zone
 			candidate_specs.append({
 				'entity': role_data['entity'],
@@ -814,8 +848,6 @@ def build_layout(vehicle_descriptor, log_build=True):
 			})
 
 	candidate_entities = set(item['entity'] for item in candidate_specs)
-	unmodelled_entities = (frozenset(decoded_unmodelled_entities(vehicle_name))
-		if decoded_geometry else frozenset())
 	logical_entity_sources = {}
 	expected_entities = list(MODULE_TARGETS)
 	expected_entities.extend(item['entity'] for item in crew)

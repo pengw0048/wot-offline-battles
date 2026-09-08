@@ -59,12 +59,22 @@ class DecodedInteriorTableTests(unittest.TestCase):
                 # crew_zones by crew index and validates the roster against
                 # the live descriptor.
                 self.assertEqual(len(roster), len(crew))
+                # A crew station the resources do not model is a hole kept in
+                # place, so the list stays indexable by the live descriptor's
+                # crew index.  It must be exactly None -- never a placeholder
+                # box that would read as a real station.
+                self.assertTrue(any(zone is not None for zone in crew),
+                                'a record with no crew station at all is the '
+                                'wrong file, not a hole')
                 for entity, parent, zone_id, centre, half in modules:
                     self.assertIn(entity, MODULE_ENTITIES)
                     self.assertIn(parent, PARENTS)
                     self.assertTrue(zone_id)
                     self._check_box(centre, half)
-                for parent, zone_id, centre, half in crew:
+                for zone in crew:
+                    if zone is None:
+                        continue
+                    parent, zone_id, centre, half = zone
                     self.assertIn(parent, PARENTS)
                     self.assertTrue(zone_id)
                     self._check_box(centre, half)
@@ -82,7 +92,7 @@ class DecodedInteriorTableTests(unittest.TestCase):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
                 centres = [tuple(round(value, 4) for value in zone[2])
-                           for zone in record[5]]
+                           for zone in record[5] if zone is not None]
                 self.assertEqual(len(centres), len(set(centres)))
 
     def test_decoded_vehicles_cover_every_module_target(self):
@@ -137,24 +147,49 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
                 self.assertFalse(
                     internal_hit_layouts.decoded_layout_available(vehicle))
 
-    def test_no_decoded_record_borrows_from_a_reconstruction(self):
+    def test_a_resolved_decoded_record_never_borrows_from_a_reconstruction(self):
         # Every zone in a decoded record comes from one source: the decoded
         # collision surfaces, registered against the PC bounds.  The retained
-        # archetypes remain a whole-vehicle fallback for vehicles with no
-        # decoded geometry, and must never be mixed into a decoded record --
-        # otherwise a reader could only tell real geometry from a
-        # reconstruction by parsing the provenance string.
+        # archetypes are a whole-vehicle fallback and must never be mixed into
+        # a decoded record -- otherwise a reader could only tell real geometry
+        # from a reconstruction by parsing the provenance string.
         layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
+        checked = 0
         for key, record in layouts.items():
+            unused_key, profile = internal_hit_layouts._compiled_profile(
+                '%s:%s' % key)
+            self.assertIsNotNone(profile)
+            if not profile[0].startswith('decoded_collision_surfaces'):
+                continue
+            checked += 1
             with self.subTest(vehicle=key):
-                unused_key, profile = internal_hit_layouts._compiled_profile(
-                    '%s:%s' % key)
-                self.assertIsNotNone(profile)
                 self.assertNotIn('archetype', profile[0])
-                self.assertTrue(
-                    profile[0].startswith('decoded_collision_surfaces'))
-                # And the zones are the decoded ones, not an archetype's.
                 self.assertEqual(tuple(record[4]), profile[5])
+        self.assertTrue(checked, 'no decoded record resolved')
+
+    def test_an_incomplete_decoded_crew_yields_to_a_complete_archetype(self):
+        # A decoded record whose resources model no station for some crew
+        # leaves those crewmen unhittable.  That is right when the alternative
+        # is no interior, but not when an archetype already seats all of them:
+        # an approximate crew the player can hit is closer to retail than an
+        # exact one he cannot.  A module hole must not trigger this.
+        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
+        yielded = kept = 0
+        for key, record in layouts.items():
+            holed = any(zone is None for zone in record[5])
+            unused_key, authored = internal_hit_layouts._profile_for_key(key)
+            unused_key, profile = internal_hit_layouts._compiled_profile(
+                '%s:%s' % key)
+            decoded = profile[0].startswith('decoded_collision_surfaces')
+            with self.subTest(vehicle=key):
+                if holed and authored is not None:
+                    self.assertFalse(decoded)
+                    yielded += 1
+                else:
+                    self.assertTrue(decoded)
+                    kept += 1
+        self.assertTrue(yielded, 'expected a vehicle to yield')
+        self.assertTrue(kept, 'expected decoded records to be kept')
 
     def test_an_archetype_only_vehicle_is_labelled_as_reconstructed(self):
         # The fallback tier must still exist and must still say what it is.
