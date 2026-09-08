@@ -27,12 +27,14 @@ symlink target. Read this file before investigating or changing the repository.
   ambiguous; inspect the exact map, client data, logs, and lifecycle.
 - Fix an in-scope bug directly rather than handing it to an imaginary future
   owner. Preserve unrelated user changes in a dirty worktree.
-- Peng has explicitly permitted in-scope changes to be committed and pushed
-  directly to `main`. Never force-push. Create a tag or publish a release only
-  when Peng explicitly requests it. Keep validation proportional to his
-  instruction: report missing Windows evidence honestly, but do not invent an
-  extra review, full-CI, or native-acceptance gate after he explicitly asks to
-  commit, package, or release without it.
+- Land a change on a branch and open a pull request. That is the default even
+  for a fix Peng asked for directly, because he reads the change there before
+  it reaches `main`. Push `main` directly only when he asks for it in that
+  task; then say so in the handoff. Never force-push. Create a tag or publish
+  a release only when Peng explicitly requests it. Keep validation
+  proportional to his instruction: report missing Windows evidence honestly,
+  but do not invent an extra review, full-CI, or native-acceptance gate after
+  he explicitly asks to commit, package, or release without it.
 
 ## Start every task from the exact current state
 
@@ -309,9 +311,9 @@ source hash in this instruction file.
   not use a small fixed sleep as proof that a handler or worker consumed a
   message.
 - Unless Peng explicitly asks to skip them, inspect the staged diff, run the
-  proportional checks, commit one coherent change, push `main` when requested,
-  and verify the exact pushed commit's relevant CI for runtime, packaging, CI,
-  or release behavior.
+  proportional checks, commit one coherent change, open its pull request, and
+  verify the exact pushed commit's relevant CI for runtime, packaging, CI, or
+  release behavior.
 
 A useful final handoff records:
 
@@ -320,7 +322,8 @@ A useful final handoff records:
 - exact commands run and their results;
 - package or runtime identity when relevant;
 - what remains unproved, especially native Windows behavior;
-- whether work was committed, pushed, tagged, or released.
+- whether work was committed, opened as a pull request, merged, tagged,
+  or released.
 
 Never describe a task as complete merely because the static tree is green when
 the stated acceptance requires native Windows evidence.
