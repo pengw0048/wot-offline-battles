@@ -1204,6 +1204,178 @@ class BotAiPortTests(unittest.TestCase):
         self.assertEqual(ford, peer['controlled_shallow_target'])
         self.assertFalse(navigator.grid._failed_edges)
 
+    def test_pending_search_does_not_reuse_this_bots_vetoed_target(self):
+        """A blocked-step replan must not drive the old edge while queued."""
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        current = (10.0, 0.0, 20.0)
+        vetoed = (26.0, 0.0, 20.0)
+        state = {'last_target': vetoed}
+        navigator.bot_states[7] = state
+        edge = navigator.grid._edge_cells_for_segment(current, vetoed)
+        navigator.bot_failed_edges[7] = {edge: (60.0, 240.0)}
+        navigator.grid.safe_local_target = lambda *unused: None
+
+        selected = navigator._pending_target(
+            7, current, vetoed, 1.0, state)
+
+        self.assertEqual(current, selected)
+        self.assertEqual('pending', state['navigation_status'])
+        # The failed edge remains private: an unaffected peer may still use it.
+        peer = {'last_target': vetoed}
+        navigator.bot_states[8] = peer
+        self.assertEqual(vetoed, navigator._pending_target(
+            8, current, vetoed, 1.0, peer))
+
+    def test_blocked_step_veto_covers_pending_and_failed_search_fallbacks(self):
+        """A real blocked-step veto fences every direct progress fallback."""
+        current = (10.0, 0.0, 20.0)
+        goal = (26.0, 0.0, 20.0)
+        route_key = ('route', 1, 'vetoed-corridor')
+
+        def escalate(navigator, bot_id):
+            target = navigator.next_target(
+                bot_id, current, goal, route_key, 1.0)
+            verdicts = [navigator.report_blocked_step(
+                bot_id, current, target, now)
+                for now in (1.0, 1.34, 1.68, 2.02)]
+            self.assertEqual([False, False, False, True], verdicts)
+
+        # Keep the actual replan queued past its normal local-progress grace.
+        # This exercises both the direct shortcut while pending and the bounded
+        # safe-local candidate selected after that grace.
+        pending = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        escalate(pending, 11)
+        pending._path = lambda key, *unused: (key, None)
+        self.assertEqual(current, pending.next_target(
+            11, current, goal, route_key, 2.03))
+        now = 2.03 + navigation.PENDING_PROGRESS_SECONDS + 0.01
+        selected = pending.next_target(11, current, goal, route_key, now)
+        self.assertNotEqual(goal, selected)
+        self.assertFalse(pending.bot_segment_penalized(
+            11, current, selected, now))
+
+        # A conclusively failed search uses the same safe-local admission.
+        failed = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        escalate(failed, 12)
+        failed._path = lambda key, *unused: (key, ())
+        selected = failed.next_target(12, current, goal, route_key, 2.03)
+        self.assertNotEqual(goal, selected)
+        self.assertFalse(failed.bot_segment_penalized(
+            12, current, selected, 2.03))
+
+        # A long reactive goal would otherwise reach LocalDriver unchanged.
+        # With no fully probed local candidate, the vetoed Bot must hold.
+        no_local = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        escalate(no_local, 13)
+        no_local._path = lambda key, *unused: (key, ())
+        no_local.grid.safe_local_target = lambda *unused: None
+        selected = no_local.next_target(13, current, goal, route_key, 2.03)
+        self.assertEqual(current, selected)
+        self.assertEqual(
+            'blocked', no_local.bot_states[13]['navigation_status'])
+
+    def test_blocked_step_replan_detours_then_expires_per_bot(self):
+        """A real replan avoids its reported edge without changing a peer."""
+        current = (10.0, 0.0, 24.0)
+        goal = (26.0, 0.0, 24.0)
+        route_key = ('route', 1, 'replan-detour')
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 3))
+        target = navigator.next_target(11, current, goal, route_key, 1.0)
+        peer = navigator.next_target(12, current, goal, route_key, 1.0)
+        self.assertEqual(goal, target)
+        self.assertEqual(goal, peer)
+        self.assertEqual(
+            [False, False, False, True],
+            [navigator.report_blocked_step(11, current, target, now)
+             for now in (1.0, 1.34, 1.68, 2.02)])
+
+        selected = None
+        now = 2.02
+        for unused_step in range(32):
+            now += 0.05
+            candidate = navigator.next_target(
+                11, current, goal, route_key, now)
+            if (navigator.bot_states[11].get('path_key') is not None and
+                    candidate != current):
+                selected = candidate
+                break
+        self.assertIsNotNone(selected)
+        self.assertNotEqual(goal, selected)
+        self.assertFalse(navigator.bot_segment_penalized(
+            11, current, selected, now))
+        self.assertEqual(goal, navigator.next_target(
+            12, current, goal, route_key, now))
+
+        restored_at = 2.02 + navigation.BLOCKED_STEP_EDGE_TTL + 0.10
+        self.assertEqual(goal, navigator.next_target(
+            11, current, goal, route_key, restored_at))
+        self.assertFalse(navigator.bot_segment_penalized(
+            11, current, goal, restored_at))
+
+    def test_blocked_step_replan_holds_the_only_vetoed_corridor(self):
+        """No detour never permits the rejected edge as a soft-cost route."""
+        current = (10.0, 0.0, 20.0)
+        goal = (26.0, 0.0, 20.0)
+        route_key = ('route', 1, 'only-corridor')
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        target = navigator.next_target(11, current, goal, route_key, 1.0)
+        self.assertEqual(
+            [False, False, False, True],
+            [navigator.report_blocked_step(11, current, target, now)
+             for now in (1.0, 1.34, 1.68, 2.02)])
+
+        selected = None
+        now = 2.02
+        for unused_step in range(32):
+            now += 0.05
+            candidate = navigator.next_target(
+                11, current, goal, route_key, now)
+            if candidate != current:
+                selected = candidate
+                break
+        self.assertIsNotNone(selected)
+        self.assertNotEqual(goal, selected)
+        self.assertFalse(navigator.bot_segment_penalized(
+            11, current, selected, now))
+
+    def test_macro_escape_rechecks_a_live_blocked_step_veto(self):
+        """A macro escape cannot bypass a later per-Bot edge rejection."""
+        current = (10.0, 0.0, 20.0)
+        goal = (26.0, 0.0, 20.0)
+        route_key = ('route', 1, 'macro-veto')
+        navigator = TerrainNavigator(
+            lambda *unused: None, baked_graph=self._baked_graph(5, 1))
+        target = navigator.next_target(11, current, goal, route_key, 1.0)
+        self.assertEqual(
+            [False, False, False, True],
+            [navigator.report_blocked_step(11, current, target, now)
+             for now in (1.0, 1.34, 1.68, 2.02)])
+
+        penalties = []
+
+        def unsafe_escape(*args):
+            penalties.append(args[5])
+            return goal
+
+        navigator.grid.safe_local_target = unsafe_escape
+        state = navigator.bot_states[11]
+        self.assertTrue(navigator._start_macro_replan(
+            11, state, current, goal, 2.03))
+        self.assertTrue(penalties[0])
+        self.assertTrue(navigator.bot_segment_penalized(
+            11, current, goal, 2.03))
+        navigator._path = lambda key, *unused: (key, None)
+        navigator.grid.safe_local_target = lambda *unused: None
+        self.assertEqual(current, navigator.next_target(
+            11, current, goal, route_key, 2.04))
+        self.assertNotIn('macro_escape_target', state)
+
     def test_blocked_step_escalation_reroutes_only_the_reporting_bot(self):
         graph = self._baked_graph(5, 3, blocked=((2, 1),))
         navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)

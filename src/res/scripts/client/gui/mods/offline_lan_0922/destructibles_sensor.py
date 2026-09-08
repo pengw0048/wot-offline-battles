@@ -3496,27 +3496,19 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		raise ValueError(
 			'catalog motion proposals require detail and kinetic classification')
 	_diagnostic_flush_1513(now)
-	publish_failures, publish_kinds = _retry_catalog_publications_1513()
-	if publish_failures:
-		# Backpressure is an operation-local pending result.  Do not admit more
-		# irreversible native mutations until the already committed event is
-		# observable, and retain its exact identity for the worker retry.
-		return _catalog_motion_result(
-			'pending', publish_failures, return_status=return_status,
-			return_detail=return_detail, kinds=publish_kinds,
-			requires_commit=False if proposal_only else None)
+	# Native acceptance already decided collision. Keep transport retries in
+	# their frozen ledger; a delayed event must not hold this or another hull.
+	_retry_catalog_publications_1513(spaceID)
 	if _destructible_catalog is None:
 		return _catalog_motion_result(
-			'pending' if publish_failures else 'clear', publish_failures,
+			'clear',
 			return_status=return_status, return_detail=return_detail,
-			kinds=publish_kinds,
 			requires_commit=False if proposal_only else None)
 	bbox = _vehicle_hull_bbox(td)
 	if bbox is None:
 		return _catalog_motion_result(
-			'pending' if publish_failures else 'clear', publish_failures,
+			'clear',
 			return_status=return_status, return_detail=return_detail,
-			kinds=publish_kinds,
 			requires_commit=False if proposal_only else None)
 	import Math
 	auth = _get_destr_authority()
@@ -3536,9 +3528,8 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		unresolved, vehicle_box, auth)
 	if not candidates and not unidentified:
 		return _catalog_motion_result(
-			'pending' if publish_failures else 'clear', publish_failures,
+			'clear',
 			return_status=return_status, return_detail=return_detail,
-			kinds=publish_kinds,
 			requires_commit=False if proposal_only else None)
 
 	grouped = {}
@@ -3553,9 +3544,8 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 	crushed = False
 	kinetic = False
 	approach = False
-	publication_pending = bool(publish_failures)
-	exact_token = set(publish_failures)
-	contact_kinds = set(publish_kinds)
+	exact_token = set()
+	contact_kinds = set()
 	if unidentified:
 		contact_kinds.add('unidentified')
 	commit_candidates = []
@@ -3696,10 +3686,9 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 		exact_token.add((chunk_id, item_index, mat_kind))
 		note_destroyed(
 			event_kind, chunk_id, item_index, mat_kind, now)
-		if not _publish_catalog_once_1513(
+		_publish_catalog_once_1513(
 				event_kind, chunk_id, item_index, point, yaw, vel,
-				mat_kind if event_kind == 'module' else None):
-			publication_pending = True
+				mat_kind if event_kind == 'module' else None)
 		accepted_now = True
 		used_kinetic_speed = used_kinetic_speed or used_cap
 		_diagnostic_contact_1513(
@@ -3708,8 +3697,7 @@ def _catalog_motion_blocked(spaceID, pos, yaw, vel, td, now,
 				('speed', '%.3f' % float(gate_speed))), now=now)
 		crushed = True
 
-	status = ('pending' if publication_pending else
-		'hard' if blocked else
+	status = ('hard' if blocked else
 		'kinetic' if kinetic else
 		'crushed' if crushed else
 		'approach' if approach else 'clear')
@@ -4204,8 +4192,13 @@ def _publish_catalog_once_1513(
 	return True
 
 
-def _retry_catalog_publications_1513():
-	"""Retry native-committed catalog events before geometry can move away."""
+def _retry_catalog_publications_1513(spaceID):
+	"""Retry native-committed events independently of their current geometry."""
+	owner = globals().get('g_offh_destr_runtime_space')
+	if owner is not None and int(owner) != int(spaceID):
+		# Motion may run before the new space's scanner clears old state, or a
+		# stale caller may arrive after teardown. Neither may replay this ledger.
+		return set(), set()
 	pending = globals().get('g_offh_destr_catalog_publish_pending', {})
 	failed = set()
 	kinds = set()
@@ -4429,11 +4422,18 @@ def _try_destroy_destructible(spaceID, matInfo, yaw, vel,
 			_event_kind, chunkID, itemIndex,
 			matKind if _event_kind == 'module' else None,
 			_now)
-	_publish_destroyed(
-		_event_kind,
-		chunkID, itemIndex, hitPt, yaw, vel,
-		matKind if typ == AreaDestructibles.DESTR_TYPE_STRUCTURE else None,
-		isShotDamage)
+	_event_mat = matKind if typ == AreaDestructibles.DESTR_TYPE_STRUCTURE else None
+	if isShotDamage:
+		# Shot receipts belong to the current projectile transaction. They must
+		# never be retried later as independent physical-contact LAN events.
+		_publish_destroyed(
+			_event_kind, chunkID, itemIndex, hitPt, yaw, vel, _event_mat, True)
+	else:
+		# Native destruction cannot be rolled back if transport rejects this
+		# report. Freeze it for the existing per-space retry owner before
+		# returning the accepted physical result.
+		_publish_catalog_once_1513(
+			_event_kind, chunkID, itemIndex, hitPt, yaw, vel, _event_mat)
 	return True
 
 
@@ -5024,10 +5024,6 @@ def _fell_trees_near(
 	import AreaDestructibles
 	import BigWorld
 	import Math
-	# An event whose LAN admission was refused stays frozen and pending. Drain
-	# that backlog before proving more native destruction, so a publication the
-	# transport could not take is retried instead of lost.
-	_retry_catalog_publications_1513()
 	try:
 		mgr = getattr(AreaDestructibles, 'g_destructiblesManager', None)
 		if not mgr:
@@ -5044,6 +5040,9 @@ def _fell_trees_near(
 			# empty/deferred transaction shell while clearing every prior battle.
 			_clear_runtime_registry(preserve_spatial_batch=True)
 			globals()['g_offh_destr_runtime_space'] = int(spaceID)
+		# Retire prior-space events before retrying this battle's frozen
+		# publications. Native item IDs can name different objects in a new map.
+		_retry_catalog_publications_1513(spaceID)
 		_st = globals().setdefault('g_offh_tree_state', {'chunks': {}, 'felled': set(), 'spaceID': None})
 		if _st.get('spaceID') != spaceID:
 			# New battle/space: chunk IDs collide between maps and the

@@ -11510,8 +11510,21 @@ class BotRuntime(object):
                         not (isinstance(motion_probe, dict) and
                              motion_probe.get('collision', False)) and
                         command.get('move_position') is not None):
-                    report_blocked(state['id'], position,
-                                   command.get('move_position'), now)
+                    blocked_target = command.get('move_position')
+                    if navigation_grid is not None:
+                        # The generic probe just rejected travel_yaw before
+                        # this slice turns the hull.  Mark that local edge,
+                        # rather than the strategic waypoint it was pursuing.
+                        edge_length = _number(
+                            getattr(navigation_grid, 'cell_size', 0.0), 0.0)
+                        if edge_length > 0.0:
+                            blocked_target = (
+                                position[0] + math.sin(travel_yaw) *
+                                edge_length,
+                                position[1],
+                                position[2] + math.cos(travel_yaw) *
+                                edge_length)
+                    report_blocked(state['id'], position, blocked_target, now)
             steer_dir = 0
             if abs(turn) > 0.01:
                 # LocalDriver already inverts reverse recovery steering for the
@@ -11640,6 +11653,7 @@ class BotRuntime(object):
                 resolved_motion = False
                 contact_speed = state.get('destructible_contact_speed', speed)
                 contact_v0 = speed
+                realised_contact_yaw = None
                 if (path_clear and not pose_frozen and
                         abs(speed) > 0.0001 and
                         callable(self.motion_resolver)):
@@ -11685,8 +11699,11 @@ class BotRuntime(object):
                             speed = previous_speed
                             state.pop('destructible_contact_speed', None)
                         elif motion_status == 'hard':
+                            realised_contact_yaw = state['yaw']
+                            if contact_v0 < 0.0:
+                                realised_contact_yaw += math.pi
                             self._invalidate_realised_motion(
-                                state['id'], travel_yaw)
+                                state['id'], realised_contact_yaw)
                             hard_contact = True
                             state.pop('destructible_contact_speed', None)
                     else:
@@ -11699,11 +11716,30 @@ class BotRuntime(object):
                             descriptor, step, now)
                     report_contact = getattr(
                         self.navigator, 'report_blocked_step', None)
+                    contact_target = command.get('move_position')
+                    if (contact_target is not None and
+                            navigation_grid is not None):
+                        # A generic contact came from the pre-turn direction
+                        # probe.  A resolved one came from this exact hull yaw
+                        # and signed speed; a reversing command can still be
+                        # braking a forward-moving hull (or vice versa).
+                        contact_yaw = travel_yaw
+                        if realised_contact_yaw is not None:
+                            contact_yaw = realised_contact_yaw
+                        edge_length = _number(
+                            getattr(navigation_grid, 'cell_size', 0.0), 0.0)
+                        if edge_length > 0.0:
+                            contact_target = (
+                                position[0] + math.sin(
+                                    contact_yaw) * edge_length,
+                                position[1],
+                                position[2] + math.cos(
+                                    contact_yaw) * edge_length)
                     if (callable(report_contact) and
-                            command.get('move_position') is not None):
+                            contact_target is not None):
                         report_contact(
                             state['id'], position,
-                            command.get('move_position'), now)
+                            contact_target, now)
                 elif motion_status in ('soft', 'cap_crushed'):
                     self._hard_contact_grinds[state['id']] = 1
                 if resolved_motion and callable(self.motion_report):

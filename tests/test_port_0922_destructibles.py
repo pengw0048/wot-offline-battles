@@ -2243,6 +2243,130 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertIs(hit_point, calls[0][3])
         self.assertTrue(calls[0][4])
 
+    def test_material_contact_retries_frozen_event_after_native_acceptance(self):
+        for kind, method_name, event_kind, mat_kind in (
+                (1, 'destroy_tree', 'tree', None),
+                (2, 'destroy_column', 'column', None),
+                (3, 'destroy_fragile', 'fragile', None),
+                (4, 'destroy_module', 'module', 75)):
+            with self.subTest(kind=kind):
+                destructibles_sensor._clear_runtime_registry()
+                area = types.ModuleType('AreaDestructibles')
+                area.g_destructiblesManager = types.SimpleNamespace(
+                    isChunkLoaded=lambda unused: False)
+                area.DESTR_TYPE_TREE = 1
+                area.DESTR_TYPE_FALLING_ATOM = 2
+                area.DESTR_TYPE_FRAGILE = 3
+                area.DESTR_TYPE_STRUCTURE = 4
+                area.g_cache = types.SimpleNamespace(
+                    getDescByFilename=lambda unused: {
+                        'type': kind, 'health': 10,
+                        'modules': {75: {'health': 1}}})
+                destroyed = set()
+                native = mock.Mock(side_effect=lambda *unused:
+                                   destroyed.add((22, 37)) or True)
+                authority = types.SimpleNamespace(
+                    is_destroyed=lambda chunk, item, mat=None:
+                    (chunk, item) in destroyed)
+                setattr(authority, method_name, native)
+                sink = mock.Mock(side_effect=(
+                    False, RuntimeError('transport unavailable'), True))
+                destructibles_sensor.set_event_sink(sink)
+                hit = _mat_info_1513(
+                    True, _Vector(10, 2, 20), _Vector(0, 1, 0),
+                    75, 'fence', 22, 37)
+                with mock.patch.dict(sys.modules, {'AreaDestructibles': area}), \
+                        mock.patch.object(destructibles_sensor,
+                                          '_get_destr_authority',
+                                          return_value=authority), \
+                        mock.patch.object(destructibles_sensor,
+                                          'validate_tree_identity_1513',
+                                          return_value=True):
+                    self.assertTrue(destructibles_sensor._try_destroy_destructible(
+                        1, hit, 0.25, 6.0, False))
+                    self.assertFalse(destructibles_sensor._try_destroy_destructible(
+                        1, hit, 0.75, 8.0, True))
+                    destructibles_sensor._retry_catalog_publications_1513(1)
+                    self.assertIn((22, 37, mat_kind),
+                        destructibles_sensor.g_offh_destr_catalog_publish_pending)
+                    destructibles_sensor._retry_catalog_publications_1513(1)
+                native.assert_called_once()
+                self.assertEqual(3, sink.call_count)
+                events = [call.args[0] for call in sink.call_args_list]
+                self.assertTrue(all(event == events[0] for event in events))
+                self.assertEqual({
+                    'destructible_kind': event_kind, 'chunk_id': 22,
+                    'item_index': 37, 'x': 10.0, 'y': 2.0, 'z': 20.0,
+                    'fall_yaw': 0.25, 'speed': 6.0, 'is_shot': False,
+                    **({'mat_kind': mat_kind} if mat_kind is not None else {}),
+                }, events[0])
+                self.assertEqual({},
+                    destructibles_sensor.g_offh_destr_catalog_publish_pending)
+
+    def test_failed_destruction_publication_does_not_block_unrelated_hull(self):
+        (bigworld, math_module, area, cache, authority,
+         descriptor) = self._direction_catalog_fixture()
+        sink = mock.Mock(return_value=False)
+        destructibles_sensor.set_event_sink(sink)
+        self.assertFalse(destructibles_sensor._publish_catalog_once_1513(
+            'fragile', 22, 37, _Vector(), 0.25, 6.0))
+        with mock.patch.dict(sys.modules, {
+                'BigWorld': bigworld, 'Math': math_module,
+                'AreaDestructibles': area, 'DestructiblesCache': cache,
+                }), mock.patch.object(destructibles_sensor,
+                    '_get_destr_authority', return_value=authority):
+            result = destructibles_sensor._catalog_motion_proposal(
+                1, _Vector(100, 0, 100), 0.0, 20.0, descriptor, 10.0,
+                dt=0.04, kinetic_speed=20.0)
+        self.assertEqual('clear', result['status'])
+        self.assertIsNone(result['token'])
+        self.assertFalse(result['requires_commit'])
+        self.assertIn((22, 37, None),
+            destructibles_sensor.g_offh_destr_catalog_publish_pending)
+        self.assertEqual(2, sink.call_count)
+        authority.destroy_fragile.assert_not_called()
+
+    def test_new_space_discards_pending_publication_before_scanner_retry(self):
+        area, bigworld, math_module, descriptor = self._scanner_tree_fixture()
+        destructibles_sensor.g_offh_destr_runtime_space = 2
+        sink = mock.Mock(return_value=False)
+        destructibles_sensor.set_event_sink(sink)
+        self.assertFalse(destructibles_sensor._publish_catalog_once_1513(
+            'fragile', 12, 3, _Vector(10, 2, 20), 0.25, 6.0))
+        sink.reset_mock()
+        sink.return_value = True
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 6.0, descriptor)
+        sink.assert_not_called()
+        self.assertEqual(1, destructibles_sensor.g_offh_destr_runtime_space)
+        self.assertFalse(getattr(destructibles_sensor,
+                                'g_offh_destr_catalog_publish_pending', {}))
+
+    def test_foreign_space_motion_does_not_replay_contact_backlog(self):
+        (bigworld, math_module, area, cache, authority,
+         descriptor) = self._direction_catalog_fixture()
+        destructibles_sensor.g_offh_destr_runtime_space = 2
+        sink = mock.Mock(return_value=False)
+        destructibles_sensor.set_event_sink(sink)
+        self.assertFalse(destructibles_sensor._publish_catalog_once_1513(
+            'fragile', 12, 3, _Vector(), 0.25, 6.0))
+        sink.reset_mock()
+        sink.return_value = True
+        with mock.patch.dict(sys.modules, {
+                'BigWorld': bigworld, 'Math': math_module,
+                'AreaDestructibles': area, 'DestructiblesCache': cache,
+                }), mock.patch.object(destructibles_sensor,
+                    '_get_destr_authority', return_value=authority):
+            destructibles_sensor._catalog_motion_proposal(
+                1, _Vector(100, 0, 100), 0.0, 20.0, descriptor, 10.0,
+                dt=0.04, kinetic_speed=20.0)
+        sink.assert_not_called()
+        self.assertIn((12, 3, None),
+            destructibles_sensor.g_offh_destr_catalog_publish_pending)
+
     def test_named_material_without_descriptor_isolates_exact_wire(self):
         filename = 'content/test/missing-destructible.model'
         area = types.ModuleType('AreaDestructibles')
@@ -7610,11 +7734,14 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                         1, _Vector(), 0.2, 20.0, descriptor, 10.0,
                         dt=0.04, kinetic_speed=20.0)
 
-                self.assertEqual('pending', committed['status'])
+                self.assertEqual('crushed', committed['status'])
                 self.assertEqual((key,), committed['token'])
                 self.assertTrue(committed['accepted_now'])
-                self.assertEqual('pending', retry['status'])
-                self.assertEqual((key,), retry['token'])
+                self.assertEqual(
+                    'clear' if kind == 'falling' else 'crushed',
+                    retry['status'])
+                self.assertEqual(
+                    None if kind == 'falling' else (key,), retry['token'])
                 self.assertFalse(retry['requires_commit'])
                 self.assertEqual(
                     'clear' if kind == 'falling' else 'crushed',

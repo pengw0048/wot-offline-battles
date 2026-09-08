@@ -620,6 +620,14 @@ Projectile timing and falling-body animation retain their stock lifecycle.
 Pinned-bytecode ABI checks and focused tests cover these contracts; exact
 Windows playtesting remains necessary for effect continuity and contact feel.
 
+Physical-contact destruction reports retain their original identity, position,
+yaw and speed until transport accepts them. A refused report does not repeat
+native destruction or turn an already accepted crush into a motion hold for
+that vehicle or unrelated vehicles. Space changes retire the old backlog
+before the scanner retries it. Shot destruction receipts remain inside their
+projectile transaction and never enter the standalone contact retry ledger.
+Focused tests prove publication and motion-result isolation, not native feel.
+
 The matrix boundary is contained at the scope of its evidence. A thrown chunk-
 matrix query isolates that chunk, while a successfully returned matrix whose
 translation is temporarily `None` remains solid and retries after streaming.
