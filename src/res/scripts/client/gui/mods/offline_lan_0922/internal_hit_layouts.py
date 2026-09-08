@@ -19,6 +19,22 @@ except Exception:
 		_layout_store = None
 
 try:
+	from gui.mods.offline_lan_0922 import internal_layout_twins as _layout_twins
+except Exception:
+	try:
+		import internal_layout_twins as _layout_twins
+	except Exception:
+		_layout_twins = None
+
+try:
+	from gui.mods.offline_lan_0922 import internal_layout_derived as _layout_derived
+except Exception:
+	try:
+		import internal_layout_derived as _layout_derived
+	except Exception:
+		_layout_derived = None
+
+try:
 	from gui.mods.offline_lan_0922 import internal_layout_profiles as _layout_profiles
 except Exception:
 	try:
@@ -63,7 +79,7 @@ except Exception:
 		return _decorate
 
 
-LAYOUT_KEY = 14
+LAYOUT_KEY = 15
 _LAYOUT_MODE = 'profile'
 
 
@@ -211,12 +227,7 @@ def _profile_key(vehicle_name):
 	return nation, _normal_name(parts[1])
 
 
-def _compiled_profile(vehicle_name):
-	if _layout_profiles is None:
-		return None, None
-	key = _profile_key(vehicle_name)
-	if key is None:
-		return None, None
+def _profile_for_key(key):
 	profile = _layout_profiles.PROFILES.get(key)
 	if profile is not None:
 		return key, profile
@@ -229,6 +240,147 @@ def _compiled_profile(vehicle_name):
 		if profile is not None:
 			return alias, profile
 	return key, None
+
+
+def _compiled_profile(vehicle_name):
+	if _layout_profiles is None:
+		return None, None
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return None, None
+	resolved_key, profile = _profile_for_key(key)
+	if profile is not None:
+		return resolved_key, profile
+	# A second catalogue identity for one physical tank -- an _IGR, _bot,
+	# _bootcamp, _training, _fallout or _CN entry, or a rename -- references
+	# the same collision models and the same crew roster as a profiled
+	# vehicle, so that vehicle's interior applies unchanged.  The table is
+	# baked from the exact client by tools/bake_internal_layout_twins_0922.py;
+	# most donors are themselves only reachable through the alias table, so
+	# the donor key goes back through the same resolution.
+	if _layout_twins is not None:
+		donor = getattr(_layout_twins, 'PROFILE_TWINS_0922', {}).get(key)
+		if donor is not None:
+			donor_key, profile = _profile_for_key(donor)
+			if profile is not None:
+				return donor_key, profile
+	# No World of Tanks PC client ships interior module geometry, so a vehicle
+	# with no authored archetype and no identical twin takes the archetype of
+	# the #1513 vehicle it most resembles, derived by
+	# tools/bake_internal_layout_derived_0922.py from exact client
+	# discriminators.  The composed record reports 'derived-low' confidence and
+	# carries this vehicle's own crew roster, not the donor's.
+	profile = _derived_profile(key)
+	if profile is not None:
+		return key, profile
+	return key, None
+
+
+_REUSED_CREW_MIN_LATERAL = 0.18
+# Lateral offsets, as a fraction of the donor seat's own distance from the
+# hull centreline, for a crewman whose donor seat another slot already took.
+# The first reuse crosses to the opposite side; later ones step inboard,
+# alternating sides.  Every entry is distinct from the unreused seat at +1.0,
+# so no two crewmen can occupy one box.
+_REUSED_CREW_OFFSETS = (-1.0, 0.5, -0.5, 0.25, -0.25, 0.75, -0.75)
+
+
+def _reused_crew_center(center, reuse_ordinal, taken):
+	'''Place a reused crew seat laterally, clear of every seat already placed.
+
+	The offset ladder starts at the reuse ordinal so the choice is stable, and
+	steps on when a candidate would land on another crewman -- mirroring one
+	donor seat can otherwise reproduce a different seat exactly.'''
+	donor_x = float(center[0])
+	lateral = abs(donor_x - 0.5)
+	if lateral < _REUSED_CREW_MIN_LATERAL:
+		lateral = _REUSED_CREW_MIN_LATERAL
+	side = 1.0 if donor_x >= 0.5 else -1.0
+	start = (int(reuse_ordinal) - 1) % len(_REUSED_CREW_OFFSETS)
+	for step in range(len(_REUSED_CREW_OFFSETS)):
+		offset = _REUSED_CREW_OFFSETS[
+			(start + step) % len(_REUSED_CREW_OFFSETS)]
+		candidate = (_clamp_fraction(0.5 + side * lateral * offset),
+			center[1], center[2])
+		if _crew_center_identity(candidate) not in taken:
+			return candidate
+	return (_clamp_fraction(0.5 + side * lateral * _REUSED_CREW_OFFSETS[start]),
+		center[1], center[2])
+
+
+def _crew_center_identity(center):
+	return tuple(round(float(value), 4) for value in center)
+
+
+def _clamp_fraction(value):
+	return max(0.05, min(0.95, float(value)))
+
+
+def _derived_profile(key):
+	if _layout_derived is None:
+		return None
+	record = getattr(_layout_derived, 'DERIVED_LAYOUTS_0922', {}).get(key)
+	if record is None:
+		return None
+	try:
+		donor_key, vehicle_class, tier, crew_roles, crew_slot_sources = record
+		donor = _layout_profiles.PROFILES.get(donor_key)
+		if donor is None:
+			return None
+		donor_crew_zones = donor[6]
+		crew_zones = []
+		# Seed with every seat that keeps its donor position, so a reused seat
+		# avoids the ones placed after it as well as before it.
+		taken = set(_crew_center_identity(donor_crew_zones[index][2])
+			for index, ordinal in crew_slot_sources if not ordinal)
+		for zone_index, reuse_ordinal in crew_slot_sources:
+			parent, zone_id, center, half = donor_crew_zones[zone_index]
+			if reuse_ordinal:
+				center = _reused_crew_center(center, reuse_ordinal, taken)
+				zone_id = '%s_seat_%d' % (zone_id, reuse_ordinal)
+			taken.add(_crew_center_identity(center))
+			crew_zones.append((parent, zone_id, center, half))
+		confidence = getattr(_layout_derived, 'DERIVED_CONFIDENCE',
+			'derived-low')
+		return (str(donor[0]) + '+derived', vehicle_class, tier, confidence,
+			tuple(crew_roles), donor[5], tuple(crew_zones))
+	except Exception:
+		LOG_EXCEPTION('modules', 'derived_profile_compose_failed')
+		return None
+
+
+def twin_donor_key(vehicle_name):
+	'''The profiled vehicle whose interior this vehicle borrows, or None.
+
+	Only reports a donor when this vehicle has no layout of its own, so a
+	vehicle that gains a profile later stops being reported as a twin.'''
+	if _layout_profiles is None or _layout_twins is None:
+		return None
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return None
+	if _profile_for_key(key)[1] is not None:
+		return None
+	donor = getattr(_layout_twins, 'PROFILE_TWINS_0922', {}).get(key)
+	if donor is None:
+		return None
+	return donor if _profile_for_key(donor)[1] is not None else None
+
+
+def derived_donor_key(vehicle_name):
+	'''The profiled vehicle whose archetype this vehicle's layout is derived
+	from, or None when the layout is authored or an identical twin's.'''
+	if _layout_profiles is None or _layout_derived is None:
+		return None
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return None
+	if _profile_for_key(key)[1] is not None:
+		return None
+	if twin_donor_key(vehicle_name) is not None:
+		return None
+	record = getattr(_layout_derived, 'DERIVED_LAYOUTS_0922', {}).get(key)
+	return None if record is None else record[0]
 
 
 def _profile_record(profile):
@@ -663,6 +815,8 @@ def build_layout(vehicle_descriptor, log_build=True):
 		vehicle_descriptor)
 	profile_key, compiled_profile = _compiled_profile(vehicle_name)
 	profile = _profile_record(compiled_profile)
+	twin_donor = twin_donor_key(vehicle_name)
+	derived_donor = derived_donor_key(vehicle_name)
 	if _layout_profiles is None:
 		errors.append('compiled_profile_module_unavailable')
 	elif (getattr(_layout_profiles, 'PROFILE_COUNT', 0) != 251 or
@@ -670,6 +824,16 @@ def build_layout(vehicle_descriptor, log_build=True):
 		errors.append('compiled_profile_count_invalid')
 	elif getattr(_layout_profiles, 'LAYOUT_PROFILE_KEY', 0) not in (1, 2, 3, 4):
 		errors.append('compiled_profile_invalid')
+	if _layout_twins is not None:
+		twins = getattr(_layout_twins, 'PROFILE_TWINS_0922', None)
+		if (not isinstance(twins, dict) or
+				getattr(_layout_twins, 'TWIN_COUNT', -1) != len(twins)):
+			errors.append('compiled_profile_twins_invalid')
+	if _layout_derived is not None:
+		derived = getattr(_layout_derived, 'DERIVED_LAYOUTS_0922', None)
+		if (not isinstance(derived, dict) or
+				getattr(_layout_derived, 'DERIVED_COUNT', -1) != len(derived)):
+			errors.append('compiled_profile_derived_invalid')
 	if profile is None:
 		errors.append('compiled_vehicle_profile_missing:%s' % (
 			str(profile_key or vehicle_name)))
@@ -839,6 +1003,11 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'layout_key': LAYOUT_KEY,
 		'layout_mode': _LAYOUT_MODE,
 		'profile_key': profile_key,
+		'profile_twin_donor': twin_donor,
+		'profile_derived_donor': derived_donor,
+		'profile_geometry_provenance': ('authored' if
+			(twin_donor is None and derived_donor is None) else
+			('identical_twin' if twin_donor is not None else 'derived')),
 		'profile_source_id': (profile['source_id']
 			if profile is not None else None),
 		'profile_confidence': (profile['confidence']

@@ -12,7 +12,9 @@ sys.path.insert(0, str(CLIENT_SCRIPTS))
 from gui.mods.offline_lan_0922 import critical_damage
 from gui.mods.offline_lan_0922 import device_damage
 from gui.mods.offline_lan_0922 import internal_hit_layouts
+from gui.mods.offline_lan_0922 import internal_layout_derived
 from gui.mods.offline_lan_0922 import internal_layout_profiles
+from gui.mods.offline_lan_0922 import internal_layout_twins
 from gui.mods.offline_lan_0922 import track_damage
 
 
@@ -329,6 +331,13 @@ class CriticalDamageTests(unittest.TestCase):
                 self.assertIs(
                     internal_layout_profiles.PROFILES[profile_key], profile)
 
+        # These reused an old display name.  None of them may pick up the
+        # legacy interior through the authored table or the alias table: that
+        # is the suffix-guess this guards against.  Three of them are real
+        # #1513 vehicles and so do receive a derived archetype, chosen from
+        # class, architecture and turret-ring position rather than from the
+        # name, and reported as derived.  The other four are absent from the
+        # #1513 catalogue and stay unresolved.
         for vehicle_name in (
                 'germany:G102_Pz_III',
                 'germany:G101_StuG_III',
@@ -338,9 +347,140 @@ class CriticalDamageTests(unittest.TestCase):
                 'usa:A91_T71',
                 'ussr:R999_MS-1'):
             with self.subTest(unmapped=vehicle_name):
+                unused_key, authored = internal_hit_layouts._profile_for_key(
+                    internal_hit_layouts._profile_key(vehicle_name))
+                self.assertIsNone(authored)
+                self.assertIsNone(
+                    internal_hit_layouts.twin_donor_key(vehicle_name))
+
+        for vehicle_name in ('germany:G102_Pz_III',
+                             'germany:G101_StuG_III',
+                             'usa:A100_T49'):
+            with self.subTest(derived=vehicle_name):
+                unused_key, profile = internal_hit_layouts._compiled_profile(
+                    vehicle_name)
+                self.assertIsNotNone(profile)
+                self.assertEqual('derived-low', profile[3])
+                self.assertIsNotNone(
+                    internal_hit_layouts.derived_donor_key(vehicle_name))
+
+        for vehicle_name in ('germany:G14_PzIII_A',
+                             'usa:A84_M48A1',
+                             'usa:A91_T71',
+                             'ussr:R999_MS-1'):
+            with self.subTest(absent=vehicle_name):
                 unused_key, profile = internal_hit_layouts._compiled_profile(
                     vehicle_name)
                 self.assertIsNone(profile)
+
+    def test_internal_layout_twin_reuses_the_same_physical_tank(self):
+        twins = internal_layout_twins.PROFILE_TWINS_0922
+        self.assertEqual(internal_layout_twins.TWIN_COUNT, len(twins))
+        self.assertEqual('0.9.22.0.1', internal_layout_twins.CLIENT_VERSION)
+        self.assertEqual('1513', internal_layout_twins.CLIENT_BUILD)
+        # A twin must never shadow an authored layout, and its donor must
+        # resolve through the authored or alias table -- most donors are only
+        # reachable by alias, so this exercises the whole chain.
+        self.assertTrue(set(twins).isdisjoint(internal_layout_profiles.PROFILES))
+        for key, donor in twins.items():
+            with self.subTest(twin=key):
+                self.assertIsNone(
+                    internal_hit_layouts._profile_for_key(key)[1])
+                unused_key, profile = internal_hit_layouts._profile_for_key(
+                    donor)
+                self.assertIsNotNone(profile)
+
+        # A resolved twin is the donor's record verbatim, including
+        # confidence.  IS-7's own #1513 name is itself only reachable through
+        # the alias table, so resolving its _IGR twin runs donor lookup ->
+        # alias -> authored profile.
+        self.assertEqual(('ussr', 'r45is7'), twins[('ussr', 'r45is7igr')])
+        self.assertEqual(('ussr', 'r45is7'),
+                         internal_hit_layouts.twin_donor_key(
+                             'ussr:R45_IS-7_IGR'))
+        self.assertNotIn(('ussr', 'r45is7'), internal_layout_profiles.PROFILES)
+        resolved_key, profile = internal_hit_layouts._compiled_profile(
+            'ussr:R45_IS-7_IGR')
+        self.assertEqual(('ussr', 'is7'), resolved_key)
+        self.assertIs(internal_layout_profiles.PROFILES[resolved_key], profile)
+        self.assertIs(profile, internal_hit_layouts._compiled_profile(
+            'ussr:R45_IS-7')[1])
+        self.assertIsNone(
+            internal_hit_layouts.derived_donor_key('ussr:R45_IS-7_IGR'))
+        # The donor itself is authored, not a twin of anything.
+        self.assertIsNone(internal_hit_layouts.twin_donor_key('ussr:R45_IS-7'))
+
+    def test_internal_layout_derived_records_stay_marked_derived(self):
+        derived = internal_layout_derived.DERIVED_LAYOUTS_0922
+        self.assertEqual(internal_layout_derived.DERIVED_COUNT, len(derived))
+        self.assertEqual('0.9.22.0.1', internal_layout_derived.CLIENT_VERSION)
+        self.assertEqual('1513', internal_layout_derived.CLIENT_BUILD)
+        self.assertEqual('derived-low',
+                         internal_layout_derived.DERIVED_CONFIDENCE)
+        # Derivation is the last resort: it may not shadow an authored layout
+        # or a twin, and every donor must be an authored archetype.
+        self.assertTrue(
+            set(derived).isdisjoint(internal_layout_profiles.PROFILES))
+        self.assertTrue(
+            set(derived).isdisjoint(internal_layout_twins.PROFILE_TWINS_0922))
+        for key, record in derived.items():
+            with self.subTest(derived=key):
+                self.assertIn(record[0], internal_layout_profiles.PROFILES)
+                self.assertEqual(len(record[3]), len(record[4]))
+
+        vehicle = 'czech:Cz05_T34_100'
+        resolved_key, profile = internal_hit_layouts._compiled_profile(vehicle)
+        record = derived[internal_hit_layouts._profile_key(vehicle)]
+        donor = internal_layout_profiles.PROFILES[record[0]]
+        self.assertEqual(internal_hit_layouts._profile_key(vehicle),
+                         resolved_key)
+        self.assertEqual('derived-low', profile[3])
+        self.assertTrue(profile[0].endswith('+derived'))
+        self.assertEqual(record[0],
+                         internal_hit_layouts.derived_donor_key(vehicle))
+        self.assertIsNone(internal_hit_layouts.twin_donor_key(vehicle))
+        # The module archetype transfers unchanged; the crew roster is this
+        # vehicle's own, never the donor's.
+        self.assertEqual(donor[5], profile[5])
+        self.assertEqual(record[3], profile[4])
+        self.assertEqual(len(record[3]), len(profile[6]))
+
+    def test_internal_layout_derived_crew_seats_never_coincide(self):
+        # A recipient with more crew than the donor reuses donor seats, and a
+        # reused seat mirrored about the centreline can otherwise land exactly
+        # on another crewman's seat.
+        for vehicle in ('germany:G43_Sturer_Emil', 'germany:G40_Nashorn',
+                        'uk:GB72_AT15', 'uk:GB72_AT15_IGR',
+                        'germany:G121_Grille_15_L63', 'uk:GB27_Sexton'):
+            with self.subTest(vehicle=vehicle):
+                unused_key, profile = internal_hit_layouts._compiled_profile(
+                    vehicle)
+                self.assertIsNotNone(profile)
+                centers = [tuple(round(float(value), 4) for value in zone[2])
+                           for zone in profile[6]]
+                self.assertEqual(len(centers), len(set(centers)))
+                for center in centers:
+                    for value in center:
+                        self.assertGreaterEqual(value, 0.0)
+                        self.assertLessEqual(value, 1.0)
+
+        # Reuse is stable and side-crossing, and a centreline seat still
+        # separates by the minimum lateral offset.
+        self.assertAlmostEqual(
+            0.18, internal_hit_layouts._reused_crew_center(
+                (0.82, 0.5, 0.5), 1, set())[0])
+        self.assertAlmostEqual(
+            0.32, internal_hit_layouts._reused_crew_center(
+                (0.5, 0.5, 0.5), 1, set())[0])
+        self.assertAlmostEqual(
+            0.66, internal_hit_layouts._reused_crew_center(
+                (0.82, 0.5, 0.5), 2, set())[0])
+        # An occupied candidate steps on rather than colliding.
+        taken = set([internal_hit_layouts._crew_center_identity(
+            (0.18, 0.5, 0.5))])
+        self.assertNotAlmostEqual(
+            0.18, internal_hit_layouts._reused_crew_center(
+                (0.82, 0.5, 0.5), 1, taken)[0])
 
     def test_internal_layout_0922_crew_drift_bindings(self):
         cases = (
