@@ -2718,6 +2718,50 @@ class GarageSaveDurabilityTests(unittest.TestCase):
         self.assertEqual(
             [11001, 0, 0], self._saved()['vehicles']['50002']['eqs'])
 
+    def test_a_session_that_restored_no_vehicle_may_not_write_the_save(self):
+        """The reported loss, refused on the fact rather than on arithmetic.
+
+        A save this client refuses outright leaves the player in the garage
+        the bootstrap built from the file's own vehicle list: the same tanks,
+        stock, with the seeded research.  Whether that payload happens to look
+        smaller than the file decides nothing -- no saved vehicle reached this
+        session, so this session cannot describe the save.
+        """
+        store, snapshot = self._save_career(equipped=True)
+        fresh = self._career_snapshot()
+
+        def reject(unused_staged):
+            raise ValueError('native descriptor rejected')
+
+        reloaded = self._store()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(reloaded.apply(fresh, validator=reject))
+
+        # The same research the save holds, so no shrink rule can fire.
+        reloaded.mark_dirty()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(reloaded.flush(snapshot))
+            reloaded.mark_dirty()
+            self.assertFalse(reloaded.flush(snapshot))
+
+        self.assertIn('no saved vehicle could be published', log.getvalue())
+        # One line per reason, not one per click.
+        self.assertEqual(1, log.getvalue().count('was NOT saved'))
+        self.assertEqual(
+            [11001, 0, 0], self._saved()['vehicles']['50002']['eqs'])
+
+    def test_a_first_save_is_written_even_though_nothing_was_restored(self):
+        """A save that does not exist yet has nothing to protect."""
+        store = self._store()
+        fresh = self._career_snapshot()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(store.apply(fresh))
+            store.mark_dirty()
+            self.assertTrue(store.flush(fresh))
+
+        self.assertEqual(
+            ['50001', '50002'], sorted(self._saved()['vehicles']))
+
     def test_a_save_nothing_can_publish_is_kept_beside_the_stock_garage(self):
         store, snapshot = self._save_career()
         fresh = copy.deepcopy(SNAPSHOT)

@@ -352,6 +352,11 @@ class GarageStore(object):
         # plays a garage the file does not describe, so nothing but a real
         # player change may rewrite it.
         self._restore_degraded = False
+        # Set when no saved vehicle reached the garage at all.  Then every
+        # fitting and crew member in the file is one this session never had,
+        # so this session may not write the file back at any price.
+        self._vehicles_unrestored = False
+        self._refusals_logged = set()
 
     # ---- writing --------------------------------------------------------
 
@@ -382,13 +387,19 @@ class GarageStore(object):
         """
         if self._path is None:
             return False
+        if self._vehicles_unrestored and os.path.isfile(self._path):
+            # Not a judgement about this payload: no saved vehicle reached
+            # this session at all, so any payload it builds describes a
+            # garage this file never held.  Whether the vehicle count or the
+            # research happens to look smaller is beside the point.
+            self._refuse('no saved vehicle could be published this session, '
+                         'so this garage is not what the save holds')
+            return False
         removed, lost_unlocks = self._destroyed_by(payload)
         if removed or lost_unlocks:
             reason = self._refusal(payload, removed, lost_unlocks, snapshot)
             if reason is not None:
-                _log('the garage state was NOT saved: %s. The save on disk is '
-                     'kept as it is, so nothing earned before this session is '
-                     'lost; restart the client to load it again' % reason)
+                self._refuse(reason)
                 return False
             if not self._shrink_kept:
                 kept = port_config.quarantine_state_file(
@@ -415,6 +426,20 @@ class GarageStore(object):
             return False
         self._remember_saved(payload)
         return True
+
+    def _refuse(self, reason):
+        """Report one refused write, once per reason per session.
+
+        Fittings happen at click speed and a refused save stays refused, so
+        repeating the same line for every click would bury it.
+        """
+        if reason in self._refusals_logged:
+            return
+        self._refusals_logged.add(reason)
+        _log('the garage state was NOT saved: %s. The save on disk is kept as '
+             'it is, so nothing earned before this session is lost. Restart '
+             'the client to load it again, or restore a backup from the '
+             'Launcher' % reason)
 
     def _destroyed_by(self, payload):
         """Return what one payload would remove from the file on disk.
@@ -799,6 +824,7 @@ class GarageStore(object):
             self._battle_receipts = []
             self._receipts_loaded = True
             self._restore_degraded = True
+            self._vehicles_unrestored = True
             return False
         return self._commit(
             snapshot, stored, staged, applied, skipped, ledger_only=True)
@@ -813,6 +839,7 @@ class GarageStore(object):
         self._receipts_loaded = True
         if ledger_only or skipped:
             self._restore_degraded = True
+            self._vehicles_unrestored = bool(ledger_only)
             kept = port_config.quarantine_state_file(
                 self._path, port_config.QUARANTINE_REJECTED)
             _log('the saved garage was restored without %s; the file as it '

@@ -563,7 +563,12 @@ def restore_slot(slot_id, archive_path, game_root=None, environment=None,
             os.makedirs(directory)
         except (IOError, OSError) as error:
             raise SaveSlotError("The save could not be restored: %s" % error)
-    stamp = time.strftime("pre-restore-%Y%m%d-%H%M%S", time.gmtime())
+    # Fixed width, milliseconds included, so two restores in one second do
+    # not collide on the folder that holds what they replaced.
+    now = time.time()
+    stamp = "pre-restore-%s-%03d" % (
+        time.strftime("%Y%m%d-%H%M%S", time.gmtime(now)),
+        int((now % 1) * 1000))
     replaced = os.path.join(directory, stamp)
     moved = []
     written = []
