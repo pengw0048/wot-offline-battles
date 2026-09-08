@@ -246,12 +246,27 @@ def fetch(cache, package, archive_id, log):
     return body
 
 
-def console_parts(body):
+def _open_package(body, password):
+    """A reader for one archive package, AES-aware when a password is set.
+
+    Packages released from 2018-07 (``console4.5``) onward encrypt their
+    members with WinZip AES; earlier ones are plain.  The password is supplied
+    at run time and never stored in this repository -- see ``read_password``.
+    """
+    if password is None:
+        return zipfile.ZipFile(io.BytesIO(body))
+    import pyzipper
+    archive = pyzipper.AESZipFile(io.BytesIO(body))
+    archive.setpassword(password.encode('utf-8'))
+    return archive
+
+
+def console_parts(body, password=None):
     """{port parent: decoded surfaces} for one Console collision package."""
     parts = {}
-    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+    with _open_package(body, password) as archive:
         for info in archive.infolist():
-            if info.flag_bits & 0x1:
+            if info.flag_bits & 0x1 and password is None:
                 raise UnsupportedPackfile('encrypted member: '
                                           + info.filename)
             leaf = info.filename.rsplit('/', 1)[-1].lower()
@@ -262,8 +277,25 @@ def console_parts(body):
                         parts[parent] = module_surfaces(archive.read(info))
                     except UnsupportedPackfile:
                         pass
+                    except RuntimeError as error:
+                        raise UnsupportedPackfile('member unreadable: %s'
+                                                  % error)
                     break
     return parts
+
+
+def read_password(args):
+    """The archive password, from a file or the environment, or None.
+
+    Deliberately never a literal in this file and never written to the
+    generated module or the report: it is a credential, supplied by whoever
+    runs the tool.  Without it the tool behaves exactly as before and reports
+    an encrypted package as an unusable source.
+    """
+    if getattr(args, 'password_file', None):
+        return Path(args.password_file).read_text(
+            encoding='utf-8').rstrip('\r\n')
+    return os.environ.get('WOT_AI_ARCHIVE_PASSWORD') or None
 
 
 def pc_bounds(body):
@@ -451,17 +483,6 @@ def crew_surface_names(roster):
     return names
 
 
-def archetype_zones(key, entity):
-    """The retained archetype's zones for one entity, or ()."""
-    unused_key, profile = internal_hit_layouts._profile_for_key(
-        internal_hit_layouts._profile_key(key))
-    record = internal_hit_layouts._profile_record(profile)
-    if record is None:
-        return ()
-    return tuple(zone for zone in record['module_zones']
-                 if zone[0] == entity)
-
-
 def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
     """Real module and crew zones for one vehicle, or a rejection reason."""
     module_zones = []
@@ -562,16 +583,24 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
     # one from the retained archetype, so each entity keeps its own
     # provenance and the record says which were not decoded.
     located = set(zone[0] for zone in module_zones)
-    from_archetype = []
     unmodelled = []
     for entity in REQUIRED_ENTITIES:
         if entity in located:
             continue
-        borrowed = archetype_zones(key, entity)
-        if borrowed:
-            module_zones.extend(borrowed)
-            from_archetype.append(entity)
-            continue
+        # Deliberately no archetype fill.  Console models no traverse
+        # mechanism for a fixed superstructure and often no separate optic, in
+        # every package it ships -- opening the encrypted 2018-2020 packages
+        # raised the fill from 96 records to 101 rather than removing it, so
+        # it is a property of Console's modelling, not of which package is
+        # read.  Borrowing those two zones from the hand-authored archetypes
+        # would put a second, reconstructed kind of source inside a record
+        # whose every other number is decoded, and the reader could only tell
+        # them apart by the provenance string.  So a decoded record now takes
+        # every zone from one source, and a module that source does not model
+        # is a named hole.  The retained archetypes stay as a whole-vehicle
+        # fallback for vehicles with no decoded geometry at all, where they
+        # are labelled reconstructed_archetype and mix with nothing.
+        #
         # No decoded surface and no archetype either.  Declare the entity
         # explicitly unavailable rather than discarding the vehicle: the port
         # already has that contract for the tracks it scores natively, and
@@ -586,8 +615,7 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
     if not module_zones:
         return None, 'no_module_surfaces', residuals
     return ((tuple(module_zones), tuple(crew_zones),
-             tuple(sorted(from_archetype)), tuple(sorted(unmodelled))),
-            None, residuals)
+             tuple(sorted(unmodelled))), None, residuals)
 
 
 HEADER = '''# -*- coding: utf-8 -*-
@@ -636,10 +664,9 @@ CATALOGUE_SIZE = %(catalogue)d
 DECODED_COUNT = %(decoded)d
 CONFIDENCE = 'decoded'
 
-# vehicle key -> (vehicle class, tier, crew roster, entities taken from the
-# retained archetype because the resources do not model them, entities the
-# resources do not model and no archetype covers -- explicitly unavailable,
-# never invented -- module zones, crew zones)
+# vehicle key -> (vehicle class, tier, crew roster, module targets the source
+# resources do not model at all -- explicitly unavailable, never invented and
+# never borrowed from a reconstruction -- module zones, crew zones)
 CONSOLE_LAYOUTS_0922 = {
 '''
 
@@ -654,13 +681,13 @@ def render(version, build, catalogue, decoded, max_residual, sources):
                      'sources': tuple(sources), 'pc_package': PC_PACKAGE}
     for key in sorted(decoded):
         (vehicle_class, tier, roster, module_zones, crew_zones,
-         from_archetype, unmodelled) = decoded[key]
+         unmodelled) = decoded[key]
         # Key on the same normalized (nation, name) the runtime derives from
         # a descriptor, so the lookup needs no translation.
         text += ('    %r: (\n        %r,\n        %d,\n        %r,\n'
-                 '        %r,\n        %r,\n        (\n'
+                 '        %r,\n        (\n'
                  % (internal_hit_layouts._profile_key(key), vehicle_class,
-                    tier, roster, from_archetype, unmodelled))
+                    tier, roster, unmodelled))
         for zone in module_zones:
             text += '            %r,\n' % (zone,)
         text += '        ),\n        (\n'
@@ -685,11 +712,18 @@ def main():
                         help='reject a component whose decoded surfaces reach '
                              'more than this many metres outside the PC '
                              'bounding box')
+    parser.add_argument('--password-file', default=None,
+                        help='file holding the archive password; packages '
+                             'released from 2018-07 encrypt their members. '
+                             'Falls back to WOT_AI_ARCHIVE_PASSWORD. Without '
+                             'either, an encrypted package is reported as an '
+                             'unusable source, as before.')
     parser.add_argument('--limit', type=int, default=0,
                         help='stop after this many vehicles, for a probe')
     args = parser.parse_args()
 
     client_root = Path(args.client_root).resolve()
+    password = read_password(args)
     version, build = _client_identity(client_root)
     cache = Path(args.cache).resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -727,7 +761,7 @@ def main():
             if body is None:
                 continue
             try:
-                parts = console_parts(body)
+                parts = console_parts(body, password)
             except UnsupportedPackfile as error:
                 attempts[package] = str(error)
                 continue
@@ -764,8 +798,7 @@ def main():
                              for parent, surfaces in parts.items()),
             'module_zones': len(built[0]),
             'crew_zones': len(built[1]),
-            'entities_from_archetype': list(built[2]),
-            'entities_unmodelled': list(built[3]),
+            'entities_unmodelled': list(built[2]),
         })
         if attempts:
             entry['earlier_attempts'] = attempts

@@ -43,15 +43,12 @@ class DecodedInteriorTableTests(unittest.TestCase):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
                 self.assertEqual(2, len(key))
-                (vehicle_class, tier, roster, from_archetype, unmodelled,
-                 modules, crew) = record
-                for entity in from_archetype:
-                    self.assertIn(entity, MODULE_ENTITIES)
+                (vehicle_class, tier, roster, unmodelled, modules,
+                 crew) = record
                 for entity in unmodelled:
                     self.assertIn(entity, MODULE_ENTITIES)
                     # An entity is either placed or declared unavailable,
                     # never both.
-                    self.assertNotIn(entity, from_archetype)
                     self.assertNotIn(entity,
                                      set(zone[0] for zone in modules))
                 self.assertTrue(vehicle_class)
@@ -85,7 +82,7 @@ class DecodedInteriorTableTests(unittest.TestCase):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
                 centres = [tuple(round(value, 4) for value in zone[2])
-                           for zone in record[6]]
+                           for zone in record[5]]
                 self.assertEqual(len(centres), len(set(centres)))
 
     def test_decoded_vehicles_cover_every_module_target(self):
@@ -96,11 +93,11 @@ class DecodedInteriorTableTests(unittest.TestCase):
                     'surveyingDevice', 'turretRotator')
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
-                entities = set(zone[0] for zone in record[5])
+                entities = set(zone[0] for zone in record[4])
                 # A target is accounted for either by a zone or by being
                 # declared unavailable; validate_layout accepts both and
                 # nothing else.
-                accounted = entities | set(record[4])
+                accounted = entities | set(record[3])
                 for entity in required:
                     self.assertIn(entity, accounted)
 
@@ -119,8 +116,8 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
         self.assertEqual('decoded', profile[3])
         self.assertTrue(profile[0].startswith('decoded_collision_surfaces'))
         self.assertIsNot(internal_layout_profiles.PROFILES[key], profile)
-        self.assertEqual(layouts[key][5], profile[5])
-        self.assertEqual(layouts[key][6], profile[6])
+        self.assertEqual(layouts[key][4], profile[5])
+        self.assertEqual(layouts[key][5], profile[6])
 
     def test_decoded_layout_available_matches_the_table(self):
         layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
@@ -140,28 +137,38 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
                 self.assertFalse(
                     internal_hit_layouts.decoded_layout_available(vehicle))
 
-    def test_an_archetype_filled_entity_is_named_in_the_source(self):
-        # A casemate has no traverse mechanism in the resources, so that one
-        # entity keeps the retained archetype.  The record must say so rather
-        # than presenting the whole layout as decoded.
+    def test_no_decoded_record_borrows_from_a_reconstruction(self):
+        # Every zone in a decoded record comes from one source: the decoded
+        # collision surfaces, registered against the PC bounds.  The retained
+        # archetypes remain a whole-vehicle fallback for vehicles with no
+        # decoded geometry, and must never be mixed into a decoded record --
+        # otherwise a reader could only tell real geometry from a
+        # reconstruction by parsing the provenance string.
         layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        mixed = sorted(key for key, record in layouts.items() if record[3])
-        if not mixed:
-            self.skipTest('no vehicle needed an archetype-filled entity')
-        key = mixed[0]
-        vehicle = '%s:%s' % key
+        for key, record in layouts.items():
+            with self.subTest(vehicle=key):
+                unused_key, profile = internal_hit_layouts._compiled_profile(
+                    '%s:%s' % key)
+                self.assertIsNotNone(profile)
+                self.assertNotIn('archetype', profile[0])
+                self.assertTrue(
+                    profile[0].startswith('decoded_collision_surfaces'))
+                # And the zones are the decoded ones, not an archetype's.
+                self.assertEqual(tuple(record[4]), profile[5])
+
+    def test_an_archetype_only_vehicle_is_labelled_as_reconstructed(self):
+        # The fallback tier must still exist and must still say what it is.
+        decoded = internal_layout_console.CONSOLE_LAYOUTS_0922
+        fallback = sorted(key for key in internal_layout_profiles.PROFILES
+                          if key not in decoded)
+        if not fallback:
+            self.skipTest('every authored profile is now decoded')
+        vehicle = '%s:%s' % fallback[0]
+        self.assertFalse(
+            internal_hit_layouts.decoded_layout_available(vehicle))
         unused_key, profile = internal_hit_layouts._compiled_profile(vehicle)
-        self.assertTrue(profile[0].startswith('decoded_collision_surfaces+'))
-        for entity in layouts[key][3]:
-            self.assertIn(entity, profile[0])
-        self.assertEqual(tuple(layouts[key][3]),
-                         internal_hit_layouts.decoded_archetype_entities(
-                             vehicle))
-        # A purely decoded vehicle reports no borrowed entity.
-        pure = sorted(k for k, record in layouts.items() if not record[3])
-        self.assertTrue(pure)
-        self.assertEqual((), internal_hit_layouts.decoded_archetype_entities(
-            '%s:%s' % pure[0]))
+        self.assertIsNotNone(profile)
+        self.assertNotIn('decoded_collision_surfaces', profile[0])
 
     def test_rear_engined_tanks_place_the_engine_at_the_rear(self):
         # A frame or sign error in registration would not survive this: the
@@ -177,7 +184,7 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
             if record is None:
                 continue
             with self.subTest(vehicle=vehicle):
-                engines = [zone for zone in record[5]
+                engines = [zone for zone in record[4]
                            if zone[0] == 'engine' and zone[1] == 'hull']
                 self.assertTrue(engines)
                 self.assertLess(min(zone[3][2] for zone in engines), 0.5)
@@ -199,7 +206,7 @@ class UnmodelledModuleTests(unittest.TestCase):
     def setUp(self):
         self.layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
         self.records = sorted(key for key, record in self.layouts.items()
-                              if record[4])
+                              if record[3])
 
     def test_some_vehicle_declares_an_unmodelled_module(self):
         self.assertTrue(self.records,
@@ -211,16 +218,16 @@ class UnmodelledModuleTests(unittest.TestCase):
             '%s:%s' % key)
         self.assertIsNotNone(profile)
         self.assertIn('+unmodelled:', profile[0])
-        for entity in self.layouts[key][4]:
+        for entity in self.layouts[key][3]:
             self.assertIn(entity, profile[0])
 
     def test_the_helper_reports_exactly_the_recorded_entities(self):
         key = self.records[0]
         self.assertEqual(
-            tuple(self.layouts[key][4]),
+            tuple(self.layouts[key][3]),
             internal_hit_layouts.decoded_unmodelled_entities('%s:%s' % key))
         pure = sorted(k for k, record in self.layouts.items()
-                      if not record[4])
+                      if not record[3])
         self.assertTrue(pure)
         self.assertEqual((),
                          internal_hit_layouts.decoded_unmodelled_entities(

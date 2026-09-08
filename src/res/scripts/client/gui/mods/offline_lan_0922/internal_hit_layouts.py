@@ -234,18 +234,14 @@ def _decoded_layout(key):
 	if record is None:
 		return None
 	try:
-		(vehicle_class, tier, crew_roles, from_archetype, unmodelled,
-			module_zones, crew_zones) = record
+		(vehicle_class, tier, crew_roles, unmodelled, module_zones,
+			crew_zones) = record
 		confidence = getattr(_layout_console, 'CONFIDENCE', 'decoded')
 		source = 'decoded_collision_surfaces'
-		if from_archetype:
-			# The resources model no traverse mechanism for a casemate and
-			# sometimes no separate optic, so those entities keep the retained
-			# archetype and the source says which.
-			source = '%s+archetype:%s' % (source, ','.join(from_archetype))
 		if unmodelled:
-			# Neither the resources nor an archetype cover these, so they are
-			# published as explicitly unavailable rather than invented.
+			# Every zone in a decoded record comes from one source, so a module
+			# that source does not model is published as explicitly
+			# unavailable rather than borrowed from a reconstruction.
 			source = '%s+unmodelled:%s' % (source, ','.join(unmodelled))
 		return (source, vehicle_class, tier, confidence, tuple(crew_roles),
 			tuple(module_zones), tuple(crew_zones))
@@ -270,20 +266,9 @@ def decoded_unmodelled_entities(vehicle_name):
 	if key is None:
 		return ()
 	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
-	if record is None or len(record) < 5:
+	if record is None or len(record) < 4:
 		return ()
-	return tuple(record[4])
-
-
-def decoded_archetype_entities(vehicle_name):
-	'''Entities in a decoded layout that the resources do not model.'''
-	if _layout_console is None:
-		return ()
-	key = _profile_key(vehicle_name)
-	if key is None:
-		return ()
-	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
-	return tuple(record[3]) if record is not None else ()
+	return tuple(record[3])
 
 
 def decoded_layout_available(vehicle_name):
@@ -948,7 +933,6 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'profile_key': profile_key,
 		'profile_geometry_provenance': ('decoded_collision_surfaces'
 			if decoded_geometry else 'reconstructed_archetype'),
-		'profile_archetype_entities': decoded_archetype_entities(vehicle_name),
 		'profile_unmodelled_entities': tuple(sorted(unmodelled_entities)),
 		'profile_source_id': (profile['source_id']
 			if profile is not None else None),

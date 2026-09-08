@@ -37,23 +37,21 @@ bounds the frame, not the interior.
 
 CLIENT_VERSION = '0.9.22.0.1'
 CLIENT_BUILD = '1513'
-GEOMETRY_SOURCES = ('console3.6', 'console3.9', 'console4.3', 'console4.4')
+GEOMETRY_SOURCES = ('console3.9', 'console4.3', 'console4.4', 'console4.5', 'console4.6', 'console4.7', 'console4.8', 'console4.9')
 REFERENCE_FRAME_SOURCE = 'pc9.22.0'
 MAX_HULL_REGISTRATION_M = 0.35
 CATALOGUE_SIZE = 680
-DECODED_COUNT = 553
+DECODED_COUNT = 603
 CONFIDENCE = 'decoded'
 
-# vehicle key -> (vehicle class, tier, crew roster, entities taken from the
-# retained archetype because the resources do not model them, entities the
-# resources do not model and no archetype covers -- explicitly unavailable,
-# never invented -- module zones, crew zones)
+# vehicle key -> (vehicle class, tier, crew roster, module targets the source
+# resources do not model at all -- explicitly unavailable, never invented and
+# never borrowed from a reconstruction -- module zones, crew zones)
 CONSOLE_LAYOUTS_0922 = {
     ('china', 'ch01type59'): (
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6796, 0.3966, 0.5865), (0.1954, 0.3519, 0.1844)),
@@ -78,7 +76,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5014, 0.3967, 0.6065), (0.4068, 0.3683, 0.2006)),
             ('engine', 'hull', 'engine', (0.4009, 0.4174, 0.2367), (0.2758, 0.3728, 0.0712)),
@@ -102,6 +99,28 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4939, 0.4714, 0.6308), (0.2631, 0.4002, 0.154)),
+            ('engine', 'hull', 'engine', (0.4927, 0.4784, 0.2606), (0.2234, 0.449, 0.1607)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4948, 0.5195, 0.2946), (0.4269, 0.4071, 0.1205)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9004, 0.8462), (0.025, 0.0258, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4927, 0.3014, 0.0582), (0.2655, 0.2048, 0.0418)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4927, 0.9782, 0.6), (0.2052, 0.0218, 0.0828)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5095, 0.4147, 0.3127), (0.4619, 0.2195, 0.2806)),
+            ('radio', 'turret', 'radio', (0.1133, 0.381, 0.4906), (0.0519, 0.1757, 0.0686)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3025, 0.8585, 0.4378), (0.1028, 0.1415, 0.1253)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3188, 0.5435, 0.4099), (0.0652, 0.3911, 0.0755)),
+            ('turret', 'crew_01', (0.3335, 0.3231, 0.58), (0.0538, 0.3231, 0.0542)),
+            ('hull', 'crew_02', (0.49, 0.48, 0.8502), (0.0685, 0.4477, 0.0635)),
+            ('turret', 'crew_03', (0.7074, 0.466, 0.4236), (0.0669, 0.4023, 0.1027)),
+        ),
+    ),
+    ('china', 'ch03wz111a'): (
+        'heavyTank',
+        8,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4939, 0.4714, 0.6308), (0.2631, 0.4002, 0.154)),
@@ -126,7 +145,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4847, 0.3812, 0.6405), (0.3264, 0.3599, 0.1785)),
             ('engine', 'hull', 'engine', (0.4844, 0.4774, 0.3256), (0.213, 0.4561, 0.1308)),
@@ -149,7 +167,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4847, 0.3812, 0.6405), (0.3264, 0.3599, 0.1785)),
@@ -174,7 +191,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6775, 0.4302, 0.601), (0.2188, 0.4269, 0.1809)),
             ('engine', 'hull', 'engine', (0.4904, 0.4591, 0.1864), (0.3694, 0.4285, 0.1606)),
@@ -196,7 +212,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7131, 0.3317, 0.4787), (0.2562, 0.1613, 0.1137)),
@@ -216,7 +231,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4822, 0.2133, 0.5232), (0.2885, 0.1769, 0.0918)),
@@ -241,7 +255,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4822, 0.2133, 0.5232), (0.2885, 0.1769, 0.0918)),
             ('engine', 'hull', 'engine', (0.4864, 0.3862, 0.2351), (0.1603, 0.3548, 0.1386)),
@@ -265,7 +278,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4969, 0.1696, 0.5431), (0.2843, 0.1041, 0.1515)),
             ('engine', 'hull', 'engine', (0.4981, 0.4794, 0.5726), (0.2917, 0.4111, 0.4157)),
@@ -286,7 +298,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5005, 0.3183, 0.6521), (0.2471, 0.3024, 0.1882)),
@@ -310,7 +321,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5007, 0.7685, 0.5783), (0.4077, 0.1339, 0.1167)),
             ('engine', 'hull', 'engine', (0.5007, 0.4945, 0.2344), (0.3316, 0.4021, 0.1803)),
@@ -333,7 +343,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5007, 0.7685, 0.5783), (0.4077, 0.1339, 0.1167)),
             ('engine', 'hull', 'engine', (0.5007, 0.4945, 0.2344), (0.3316, 0.4021, 0.1803)),
@@ -355,7 +364,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4939, 0.4714, 0.6308), (0.2631, 0.4002, 0.154)),
@@ -380,7 +388,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6861, 0.6105, 0.6072), (0.1761, 0.3714, 0.1774)),
             ('engine', 'hull', 'engine', (0.5043, 0.6114, 0.1862), (0.3653, 0.3441, 0.143)),
@@ -402,7 +409,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5047, 0.4703, 0.5855), (0.4611, 0.4587, 0.1959)),
@@ -427,7 +433,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5014, 0.3967, 0.6065), (0.4068, 0.3683, 0.2006)),
             ('engine', 'hull', 'engine', (0.4009, 0.4174, 0.2367), (0.2758, 0.3728, 0.0712)),
@@ -451,7 +456,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5036, 0.324, 0.6067), (0.4055, 0.3588, 0.2004)),
             ('engine', 'hull', 'engine', (0.5024, 0.4405, 0.1761), (0.3787, 0.3632, 0.126)),
@@ -473,7 +477,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5036, 0.324, 0.6067), (0.4055, 0.3588, 0.2004)),
@@ -497,7 +500,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6556, 0.4116, 0.5802), (0.1784, 0.3204, 0.2026)),
             ('engine', 'hull', 'engine', (0.503, 0.5133, 0.1922), (0.3013, 0.3956, 0.1443)),
@@ -519,7 +521,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6834, 0.3766, 0.6177), (0.1677, 0.3391, 0.1911)),
@@ -544,7 +545,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6834, 0.3766, 0.6177), (0.1677, 0.3391, 0.1911)),
             ('engine', 'hull', 'engine', (0.4307, 0.4793, 0.2224), (0.2138, 0.4059, 0.0716)),
@@ -567,7 +567,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5099, 0.3091, 0.5748), (0.2996, 0.194, 0.1308)),
@@ -593,7 +592,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'gunner'), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4968, 0.4715, 0.5726), (0.2478, 0.3758, 0.1369)),
             ('engine', 'hull', 'engine', (0.4985, 0.499, 0.2837), (0.2469, 0.403, 0.1475)),
@@ -615,7 +613,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4989, 0.5955), (0.4519, 0.4464, 0.2382)),
@@ -640,30 +637,28 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
-            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4989, 0.5955), (0.4519, 0.4464, 0.2382)),
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5028, 0.4962), (0.4519, 0.4425, 0.139)),
             ('engine', 'hull', 'engine', (0.4501, 0.4836, 0.2013), (0.1513, 0.4472, 0.0715)),
             ('fuelTank', 'hull', 'fuelTank', (0.4987, 0.4987, 0.2678), (0.4554, 0.4426, 0.0847)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3558, 0.9723, 0.7847), (0.0539, 0.0277, 0.01)),
             ('engine', 'hull', 'transmission', (0.4991, 0.223, 0.1116), (0.2004, 0.1865, 0.0847)),
             ('turretRotator', 'hull', 'turretRotator', (0.5032, 0.9488, 0.4692), (0.2627, 0.0274, 0.1018)),
-            ('ammoBay', 'turret', 'ammoBay', (0.8195, 0.5328, 0.6815), (0.1524, 0.1628, 0.1788)),
-            ('radio', 'turret', 'radio', (0.3665, 0.5674, 0.1524), (0.1237, 0.1998, 0.0577)),
-            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3116, 0.9381, 0.3516), (0.1071, 0.0701, 0.111)),
+            ('ammoBay', 'turret', 'ammoBay', (0.8198, 0.5328, 0.6816), (0.1524, 0.1628, 0.1788)),
+            ('radio', 'turret', 'radio', (0.3667, 0.5674, 0.1524), (0.1237, 0.1998, 0.0577)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3018, 0.967, 0.2968), (0.0956, 0.033, 0.0562)),
         ),
         (
-            ('turret', 'crew_00', (0.2996, 0.5474, 0.316), (0.0884, 0.4167, 0.094)),
-            ('turret', 'crew_01', (0.3814, 0.4021, 0.5221), (0.0743, 0.4021, 0.108)),
+            ('turret', 'crew_00', (0.2999, 0.5474, 0.316), (0.0884, 0.4167, 0.094)),
+            ('turret', 'crew_01', (0.3816, 0.4021, 0.5221), (0.0743, 0.4021, 0.108)),
             ('hull', 'crew_02', (0.3502, 0.4866, 0.8091), (0.0701, 0.4436, 0.0916)),
-            ('turret', 'crew_03', (0.7158, 0.4932, 0.3173), (0.0884, 0.4167, 0.108)),
+            ('turret', 'crew_03', (0.716, 0.4932, 0.3174), (0.0884, 0.4167, 0.108)),
         ),
     ),
     ('china', 'ch23112'): (
         'heavyTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5011, 0.5531, 0.6144), (0.2693, 0.3478, 0.1048)),
@@ -687,7 +682,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5037, 0.3925, 0.5709), (0.411, 0.3815, 0.1317)),
@@ -709,7 +703,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7145, 0.406, 0.7349), (0.1223, 0.3003, 0.0875)),
@@ -734,7 +727,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5012, 0.4114, 0.5923), (0.4058, 0.368, 0.2079)),
             ('engine', 'hull', 'engine', (0.4009, 0.4243, 0.2378), (0.2751, 0.3809, 0.0738)),
@@ -758,7 +750,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.4674, 0.577), (0.3119, 0.3261, 0.1954)),
             ('engine', 'hull', 'engine', (0.4243, 0.4789, 0.2438), (0.2114, 0.3375, 0.0694)),
@@ -781,7 +772,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5024, 0.4594, 0.4371), (0.48, 0.4212, 0.0933)),
@@ -802,7 +792,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1303, 0.5716), (0.2908, 0.1028, 0.1791)),
@@ -822,7 +811,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4993, 0.1131, 0.2298), (0.48, 0.0803, 0.1334)),
@@ -844,7 +832,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4075, 0.4512, 0.178), (0.356, 0.421, 0.1304)),
@@ -864,7 +851,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6284, 0.2572, 0.5949), (0.2466, 0.2327, 0.2018)),
@@ -885,7 +871,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6363, 0.2448, 0.5751), (0.2674, 0.2264, 0.1966)),
@@ -906,7 +891,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5628, 0.4774, 0.541), (0.333, 0.4357, 0.1136)),
@@ -927,7 +911,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         9,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4306, 0.418, 0.5413), (0.3253, 0.3867, 0.1137)),
@@ -947,7 +930,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4304, 0.4237, 0.5515), (0.3263, 0.3885, 0.1144)),
@@ -967,7 +949,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5786, 0.4476, 0.6148), (0.3967, 0.4226, 0.2403)),
@@ -983,11 +964,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.7306, 0.5402, 0.4804), (0.0738, 0.33, 0.0688)),
         ),
     ),
+    ('china', 'ch41wz1115a'): (
+        'heavyTank',
+        10,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4928, 0.4698, 0.6308), (0.263, 0.3989, 0.154)),
+            ('engine', 'hull', 'engine', (0.4916, 0.4768, 0.2606), (0.2233, 0.4475, 0.1606)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4936, 0.5178, 0.2946), (0.4267, 0.4057, 0.1205)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.905, 0.8453), (0.025, 0.0263, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4916, 0.3004, 0.0582), (0.2654, 0.2041, 0.0418)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4985, 0.9772, 0.5953), (0.301, 0.0228, 0.1402)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5095, 0.6437, 0.3122), (0.4619, 0.1256, 0.2801)),
+            ('radio', 'turret', 'radio', (0.1334, 0.61, 0.503), (0.0476, 0.1084, 0.1036)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3115, 0.9091, 0.4328), (0.1117, 0.0909, 0.1293)),
+        ),
+        (
+            ('turret', 'crew_00', (0.311, 0.5276, 0.3595), (0.0828, 0.406, 0.0538)),
+            ('turret', 'crew_01', (0.2687, 0.406, 0.521), (0.0828, 0.406, 0.0538)),
+            ('hull', 'crew_02', (0.5, 0.5114, 0.8569), (0.0685, 0.409, 0.0846)),
+            ('turret', 'crew_03', (0.6964, 0.624, 0.4182), (0.0828, 0.302, 0.1297)),
+        ),
+    ),
     ('czech', 'cz01skodat40'): (
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.7664, 0.6196), (0.48, 0.1984, 0.1351)),
@@ -1013,7 +1016,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5474, 0.6254), (0.445, 0.4067, 0.1954)),
             ('engine', 'hull', 'engine', (0.5, 0.535, 0.3068), (0.2188, 0.3682, 0.0879)),
@@ -1037,7 +1039,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3916, 0.6842), (0.3709, 0.2889, 0.1044)),
             ('engine', 'hull', 'engine', (0.5785, 0.4631, 0.29), (0.2255, 0.4267, 0.1136)),
@@ -1058,7 +1059,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4559, 0.4062, 0.6564), (0.4143, 0.2843, 0.1674)),
@@ -1082,7 +1082,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5098, 0.2552, 0.5836), (0.2976, 0.2086, 0.1312)),
@@ -1108,7 +1107,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5488, 0.6138), (0.48, 0.423, 0.1397)),
             ('engine', 'hull', 'engine', (0.5, 0.5211, 0.3692), (0.2148, 0.3953, 0.0982)),
@@ -1131,7 +1129,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4995, 0.5588, 0.6086), (0.2785, 0.3766, 0.1128)),
@@ -1156,7 +1153,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.5561, 0.6099), (0.2787, 0.3748, 0.1124)),
             ('engine', 'hull', 'engine', (0.4999, 0.5503, 0.3035), (0.2275, 0.3806, 0.1046)),
@@ -1179,7 +1175,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5074, 0.368, 0.6555), (0.4157, 0.3008, 0.1123)),
@@ -1204,7 +1199,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3516, 0.6633), (0.3062, 0.294, 0.1017)),
             ('engine', 'hull', 'engine', (0.5, 0.4565, 0.2675), (0.1554, 0.4342, 0.1224)),
@@ -1223,11 +1217,30 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.3562, 0.5878, 0.8153), (0.0816, 0.3396, 0.0809)),
         ),
     ),
+    ('france', 'f02d1'): (
+        'lightTank',
+        2,
+        (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.244, 0.5564, 0.5885), (0.0578, 0.314, 0.0915)),
+            ('engine', 'hull', 'engine', (0.5, 0.5581, 0.2159), (0.3185, 0.354, 0.1232)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7125, 0.4157), (0.3019, 0.1968, 0.0554)),
+            ('radio', 'hull', 'radio', (0.6064, 0.3214, 0.5466), (0.1397, 0.1171, 0.0544)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4048, 0.7773, 0.7782), (0.0232, 0.01, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.4582, 0.0519), (0.3185, 0.2541, 0.0408)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9694, 0.5789), (0.1406, 0.0306, 0.0569)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3761, 0.4541, 0.5465), (0.1508, 0.4541, 0.2536)),
+            ('hull', 'crew_01', (0.4038, 0.5792, 0.7839), (0.1089, 0.3575, 0.1084)),
+            ('hull', 'crew_02', (0.6571, 0.5792, 0.7094), (0.1089, 0.3575, 0.1084)),
+        ),
+    ),
     ('france', 'f04b1'): (
         'heavyTank',
         4,
         (('commander', 'gunner', 'loader'), ('gunner',), ('driver', 'loader'), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.4843, 0.5561), (0.4723, 0.1999, 0.0971)),
@@ -1251,7 +1264,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'gunner', 'loader'), ('gunner',), ('driver', 'loader'), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.4843, 0.5561), (0.4723, 0.1999, 0.0971)),
             ('engine', 'hull', 'engine', (0.4931, 0.5228, 0.3147), (0.2055, 0.2975, 0.1298)),
@@ -1269,11 +1281,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.3372, 0.5196, 0.5326), (0.0937, 0.3351, 0.0615)),
         ),
     ),
+    ('france', 'f05bdrg1b'): (
+        'heavyTank',
+        5,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4864, 0.4767), (0.2795, 0.2832, 0.04)),
+            ('engine', 'hull', 'engine', (0.5, 0.5703, 0.2823), (0.4738, 0.3384, 0.0954)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5009, 0.4082, 0.4551), (0.4769, 0.1769, 0.0688)),
+            ('radio', 'hull', 'radio', (0.893, 0.391, 0.7276), (0.0684, 0.1515, 0.0654)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.382, 0.8579, 0.7744), (0.0224, 0.01, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.4699, 0.1361), (0.2693, 0.2381, 0.0463)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.98, 0.5073), (0.1493, 0.016, 0.0635)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.7595, 0.9688, 0.4957), (0.0274, 0.0312, 0.0257)),
+        ),
+        (
+            ('turret', 'crew_00', (0.7267, 0.5365, 0.5549), (0.1368, 0.3788, 0.163)),
+            ('turret', 'crew_01', (0.7316, 0.4729, 0.5013), (0.01, 0.01, 0.01)),
+            ('hull', 'crew_02', (0.358, 0.629, 0.7735), (0.0873, 0.3335, 0.0773)),
+            ('hull', 'crew_03', (0.6604, 0.629, 0.7389), (0.0873, 0.3335, 0.0773)),
+            ('turret', 'crew_04', (0.2861, 0.3788, 0.45), (0.1368, 0.3788, 0.163)),
+        ),
+    ),
     ('france', 'f06arl44'): (
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4942, 0.4522, 0.6593), (0.48, 0.1886, 0.094)),
@@ -1299,7 +1333,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.4671, 0.6375), (0.4249, 0.3841, 0.2042)),
             ('engine', 'hull', 'engine', (0.5, 0.5251, 0.3078), (0.1829, 0.4486, 0.1143)),
@@ -1324,7 +1357,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5003, 0.6498, 0.0782), (0.2531, 0.1294, 0.062)),
             ('radio', 'gun', 'radio', (0.2179, 0.3128, 0.3289), (0.0549, 0.1082, 0.0358)),
@@ -1347,7 +1379,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5003, 0.6498, 0.0782), (0.2531, 0.1294, 0.062)),
@@ -1372,7 +1403,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5123, 0.6369, 0.076), (0.2978, 0.1641, 0.0482)),
             ('radio', 'gun', 'radio', (0.5043, 0.4163, 0.1574), (0.1194, 0.1005, 0.0137)),
@@ -1396,7 +1426,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5083, 0.6265, 0.0844), (0.3428, 0.1516, 0.0614)),
             ('radio', 'gun', 'radio', (0.4979, 0.152, 0.2086), (0.2007, 0.1202, 0.0229)),
@@ -1418,7 +1447,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander', 'loader'), ('gunner', 'loader'), ('driver',), ('radioman', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5083, 0.6265, 0.0844), (0.3428, 0.1516, 0.0614)),
@@ -1442,7 +1470,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'gunner'), ('loader',), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.494, 0.4076, 0.5083), (0.2832, 0.3703, 0.1509)),
             ('engine', 'hull', 'engine', (0.5, 0.3977, 0.2124), (0.1848, 0.3048, 0.1298)),
@@ -1465,7 +1492,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4911, 0.5136, 0.453), (0.4672, 0.4068, 0.0679)),
             ('engine', 'hull', 'engine', (0.3774, 0.409, 0.1908), (0.1854, 0.293, 0.1201)),
@@ -1485,7 +1511,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman', 'gunner', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4437, 0.5805, 0.532), (0.3441, 0.3682, 0.1108)),
@@ -1507,7 +1532,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4987, 0.5431, 0.4922), (0.2781, 0.3484, 0.1417)),
             ('engine', 'hull', 'engine', (0.5009, 0.463, 0.1825), (0.2787, 0.257, 0.1595)),
@@ -1527,7 +1551,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         7,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5187, 0.596, 0.0836), (0.4246, 0.1807, 0.0824)),
@@ -1552,7 +1575,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5187, 0.596, 0.0684), (0.4246, 0.1807, 0.0674)),
             ('surveyingDevice', 'gun', 'surveyingDevice', (0.4815, 0.8442, 0.2183), (0.4636, 0.0522, 0.0497)),
@@ -1576,7 +1598,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5187, 0.596, 0.0684), (0.4246, 0.1807, 0.0674)),
             ('surveyingDevice', 'gun', 'surveyingDevice', (0.4815, 0.8442, 0.2183), (0.4636, 0.0522, 0.0497)),
@@ -1595,20 +1616,80 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_02', (0.1586, 0.4744, 0.733), (0.137, 0.4561, 0.077)),
         ),
     ),
+    ('france', 'f18batchatillon25t'): (
+        'mediumTank',
+        10,
+        (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
+        (),
+        (
+            ('ammoBay', 'gun', 'ammoBay', (0.4804, 0.606, 0.1021), (0.3377, 0.1, 0.0424)),
+            ('radio', 'gun', 'radio', (0.3463, 0.3458, 0.3496), (0.1004, 0.1484, 0.0339)),
+            ('surveyingDevice', 'gun', 'surveyingDevice', (0.4958, 0.88, 0.2004), (0.389, 0.12, 0.0894)),
+            ('ammoBay', 'hull', 'ammoBay', (0.3557, 0.4455, 0.1831), (0.1184, 0.4051, 0.1413)),
+            ('engine', 'hull', 'engine', (0.5876, 0.3068, 0.6689), (0.165, 0.2891, 0.1237)),
+            ('fuelTank', 'hull', 'fuelTank', (0.636, 0.4455, 0.1533), (0.1372, 0.4051, 0.1116)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.3339, 0.9685, 0.74), (0.0972, 0.0315, 0.0108)),
+            ('engine', 'hull', 'transmission', (0.5885, 0.3068, 0.8618), (0.1739, 0.1546, 0.0692)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.8303, 0.3928), (0.2286, 0.087, 0.1213)),
+            ('turretRotator', 'turret', 'turretRotator', (0.4992, 0.3643, 0.4985), (0.4027, 0.2671, 0.0631)),
+        ),
+        (
+            ('gun', 'crew_00', (0.2839, 0.5001, 0.2406), (0.1043, 0.3524, 0.0599)),
+            ('gun', 'crew_01', (0.6397, 0.3524, 0.2375), (0.1043, 0.3524, 0.0599)),
+            ('hull', 'crew_02', (0.309, 0.4668, 0.7635), (0.0728, 0.4245, 0.0894)),
+        ),
+    ),
+    ('france', 'f18batchatillon25tigr'): (
+        'mediumTank',
+        10,
+        (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
+        (),
+        (
+            ('ammoBay', 'gun', 'ammoBay', (0.4804, 0.606, 0.1021), (0.3377, 0.1, 0.0424)),
+            ('radio', 'gun', 'radio', (0.3463, 0.3458, 0.3496), (0.1004, 0.1484, 0.0339)),
+            ('surveyingDevice', 'gun', 'surveyingDevice', (0.4958, 0.88, 0.2004), (0.389, 0.12, 0.0894)),
+            ('ammoBay', 'hull', 'ammoBay', (0.3557, 0.4455, 0.1831), (0.1184, 0.4051, 0.1413)),
+            ('engine', 'hull', 'engine', (0.5876, 0.3068, 0.6689), (0.165, 0.2891, 0.1237)),
+            ('fuelTank', 'hull', 'fuelTank', (0.636, 0.4455, 0.1533), (0.1372, 0.4051, 0.1116)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.3339, 0.9685, 0.74), (0.0972, 0.0315, 0.0108)),
+            ('engine', 'hull', 'transmission', (0.5885, 0.3068, 0.8618), (0.1739, 0.1546, 0.0692)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.8303, 0.3928), (0.2286, 0.087, 0.1213)),
+            ('turretRotator', 'turret', 'turretRotator', (0.4992, 0.3643, 0.4985), (0.4027, 0.2671, 0.0631)),
+        ),
+        (
+            ('gun', 'crew_00', (0.2839, 0.5001, 0.2406), (0.1043, 0.3524, 0.0599)),
+            ('gun', 'crew_01', (0.6397, 0.3524, 0.2375), (0.1043, 0.3524, 0.0599)),
+            ('hull', 'crew_02', (0.309, 0.4668, 0.7635), (0.0728, 0.4245, 0.0894)),
+        ),
+    ),
+    ('france', 'f20renaultbs'): (
+        'SPG',
+        2,
+        (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4886, 0.2753, 0.5631), (0.4139, 0.2338, 0.096)),
+            ('engine', 'hull', 'engine', (0.4915, 0.2417, 0.1793), (0.4207, 0.1766, 0.0995)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4915, 0.4423, 0.3664), (0.4088, 0.1175, 0.0773)),
+            ('radio', 'hull', 'radio', (0.4915, 0.153, 0.3664), (0.2461, 0.1175, 0.0773)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.489, 0.4817, 0.7842), (0.0437, 0.01, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4915, 0.2417, 0.0502), (0.2182, 0.1766, 0.0284)),
+        ),
+        (
+            ('hull', 'crew_00', (0.3377, 0.6947, 0.6083), (0.1759, 0.2713, 0.0736)),
+            ('hull', 'crew_01', (0.4915, 0.2894, 0.7995), (0.1819, 0.2736, 0.1183)),
+        ),
+    ),
     ('france', 'f21lorraine39lam'): (
         'SPG',
         3,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4979, 0.4972, 0.1071), (0.4574, 0.0673, 0.067)),
             ('engine', 'hull', 'engine', (0.5039, 0.402, 0.7284), (0.3097, 0.3296, 0.1933)),
             ('fuelTank', 'hull', 'fuelTank', (0.4982, 0.3325, 0.4661), (0.3041, 0.2601, 0.0428)),
             ('radio', 'hull', 'radio', (0.1059, 0.4978, 0.4665), (0.0737, 0.0934, 0.0426)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.8387, 0.7453, 0.3206), (0.0895, 0.2924, 0.071)),
@@ -1622,14 +1703,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4804, 0.6301, 0.1888), (0.4598, 0.1117, 0.0699)),
             ('engine', 'hull', 'engine', (0.485, 0.1697, 0.7489), (0.2863, 0.1809, 0.1923)),
             ('fuelTank', 'hull', 'fuelTank', (0.5874, 0.1762, 0.5185), (0.1812, 0.1827, 0.032)),
             ('radio', 'hull', 'radio', (0.1036, 0.5226, 0.3925), (0.0644, 0.0996, 0.0622)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.8416, 0.9396, 0.3643), (0.1415, 0.0139, 0.0763)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.8397, 0.7224, 0.4108), (0.0886, 0.2634, 0.0744)),
@@ -1643,15 +1722,11 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.501, 0.5094, 0.3643), (0.4676, 0.0754, 0.0859)),
             ('engine', 'hull', 'engine', (0.5, 0.3385, 0.4852), (0.3452, 0.2462, 0.4742)),
             ('fuelTank', 'hull', 'fuelTank', (0.4971, 0.2608, 0.13), (0.3554, 0.1862, 0.1145)),
             ('radio', 'hull', 'radio', (0.8473, 0.6501, 0.3223), (0.1144, 0.0428, 0.053)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7458, 0.7465, 0.5188), (0.0773, 0.2486, 0.0726)),
@@ -1661,21 +1736,37 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_04', (0.4869, 0.7465, 0.346), (0.0773, 0.2486, 0.0726)),
         ),
     ),
+    ('france', 'f25lorraine15551'): (
+        'SPG',
+        8,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
+        ('surveyingDevice', 'turretRotator'),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.6288, 0.5081), (0.4583, 0.1782, 0.0809)),
+            ('engine', 'hull', 'engine', (0.5, 0.2941, 0.248), (0.2564, 0.2471, 0.1121)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.4179, 0.0661), (0.2673, 0.1417, 0.0607)),
+            ('radio', 'hull', 'radio', (0.1237, 0.5551, 0.7881), (0.0869, 0.1045, 0.0399)),
+            ('engine', 'hull', 'transmission', (0.5, 0.1501, 0.0855), (0.2759, 0.1031, 0.0504)),
+        ),
+        (
+            ('hull', 'crew_00', (0.8278, 0.6683, 0.6605), (0.0773, 0.2448, 0.0722)),
+            ('hull', 'crew_01', (0.2574, 0.6683, 0.6722), (0.0773, 0.2448, 0.0722)),
+            ('hull', 'crew_02', (0.8278, 0.6683, 0.7634), (0.0773, 0.2448, 0.0722)),
+            ('hull', 'crew_03', (0.6753, 0.552, 0.4657), (0.1047, 0.2403, 0.036)),
+            ('hull', 'crew_04', (0.3071, 0.5476, 0.4657), (0.0873, 0.2448, 0.036)),
+        ),
+    ),
     ('france', 'f27fcm36pak40'): (
         'AT-SPG',
         3,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.7196, 0.6327), (0.3937, 0.2572, 0.0987)),
             ('engine', 'hull', 'engine', (0.5002, 0.3483, 0.1856), (0.2117, 0.2257, 0.083)),
             ('fuelTank', 'hull', 'fuelTank', (0.5024, 0.5175, 0.2185), (0.3644, 0.0636, 0.043)),
             ('radio', 'hull', 'radio', (0.0842, 0.7032, 0.4663), (0.0344, 0.068, 0.0405)),
             ('engine', 'hull', 'transmission', (0.5002, 0.2487, 0.0711), (0.2117, 0.126, 0.0275)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6515, 0.7334, 0.6095), (0.0806, 0.2631, 0.0915)),
@@ -1689,16 +1780,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4961, 0.4213, 0.6164), (0.2725, 0.1968, 0.0873)),
             ('engine', 'hull', 'engine', (0.353, 0.3321, 0.3116), (0.3031, 0.1768, 0.1386)),
             ('fuelTank', 'hull', 'fuelTank', (0.8288, 0.2866, 0.3192), (0.1264, 0.1263, 0.1287)),
             ('radio', 'hull', 'radio', (0.7675, 0.8176, 0.6197), (0.0811, 0.0468, 0.064)),
             ('engine', 'hull', 'transmission', (0.5129, 0.3321, 0.0891), (0.2504, 0.1768, 0.0837)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6604, 0.7085, 0.7349), (0.1333, 0.2225, 0.0667)),
@@ -1712,16 +1799,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4961, 0.4213, 0.6164), (0.2725, 0.1968, 0.0873)),
             ('engine', 'hull', 'engine', (0.353, 0.3321, 0.3116), (0.3031, 0.1768, 0.1386)),
             ('fuelTank', 'hull', 'fuelTank', (0.8288, 0.2866, 0.3192), (0.1264, 0.1263, 0.1287)),
             ('radio', 'hull', 'radio', (0.7675, 0.8176, 0.6197), (0.0811, 0.0468, 0.064)),
             ('engine', 'hull', 'transmission', (0.5129, 0.3321, 0.0891), (0.2504, 0.1768, 0.0837)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6604, 0.7085, 0.7349), (0.1333, 0.2225, 0.0667)),
@@ -1730,20 +1813,34 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.6039, 0.673, 0.5945), (0.0822, 0.1694, 0.0499)),
         ),
     ),
+    ('france', 'f30renaultftac'): (
+        'AT-SPG',
+        2,
+        (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
+        ('surveyingDevice', 'turretRotator'),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.6009, 0.3766, 0.5733), (0.3716, 0.291, 0.1129)),
+            ('engine', 'hull', 'engine', (0.5093, 0.2549, 0.1682), (0.2914, 0.1208, 0.1065)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.3249, 0.3489), (0.2799, 0.1353, 0.0646)),
+            ('radio', 'hull', 'radio', (0.5, 0.0931, 0.3489), (0.2799, 0.0789, 0.0646)),
+            ('engine', 'hull', 'transmission', (0.5093, 0.0737, 0.1682), (0.2914, 0.0604, 0.1065)),
+        ),
+        (
+            ('hull', 'crew_00', (0.7631, 0.7744, 0.4949), (0.165, 0.2256, 0.0979)),
+            ('hull', 'crew_01', (0.2372, 0.7744, 0.495), (0.1714, 0.2256, 0.0984)),
+            ('hull', 'crew_02', (0.5, 0.2456, 0.7858), (0.1339, 0.2025, 0.0909)),
+        ),
+    ),
     ('france', 'f33s35ca'): (
         'AT-SPG',
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.8461, 0.4204), (0.4186, 0.1019, 0.067)),
             ('engine', 'hull', 'engine', (0.4833, 0.351, 0.2882), (0.2929, 0.2585, 0.2022)),
             ('fuelTank', 'hull', 'fuelTank', (0.4926, 0.2286, 0.3315), (0.2823, 0.1348, 0.1598)),
             ('radio', 'hull', 'radio', (0.3405, 0.2409, 0.6033), (0.1124, 0.116, 0.0751)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2181, 0.6726, 0.5737), (0.1136, 0.2828, 0.0679)),
@@ -1757,15 +1854,11 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.8461, 0.4204), (0.4186, 0.1019, 0.067)),
             ('engine', 'hull', 'engine', (0.4833, 0.351, 0.2882), (0.2929, 0.2585, 0.2022)),
             ('fuelTank', 'hull', 'fuelTank', (0.4926, 0.2286, 0.3315), (0.2823, 0.1348, 0.1598)),
             ('radio', 'hull', 'radio', (0.3405, 0.2409, 0.6033), (0.1124, 0.116, 0.0751)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2181, 0.6726, 0.5737), (0.1136, 0.2828, 0.0679)),
@@ -1779,7 +1872,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.2912, 0.4845), (0.2779, 0.1731, 0.0411)),
             ('engine', 'hull', 'engine', (0.5, 0.3753, 0.3024), (0.4759, 0.2567, 0.1254)),
@@ -1787,7 +1879,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8963, 0.3026, 0.5882), (0.0677, 0.0586, 0.0488)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5131, 0.7303, 0.7023), (0.2602, 0.1552, 0.1581)),
             ('engine', 'hull', 'transmission', (0.5, 0.3324, 0.0971), (0.2834, 0.1993, 0.0799)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.5593, 0.6849, 0.4743), (0.0976, 0.248, 0.073)),
@@ -1802,7 +1893,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5124, 0.5432, 0.5384), (0.4693, 0.1541, 0.0898)),
             ('engine', 'hull', 'engine', (0.4986, 0.2569, 0.3), (0.2502, 0.2513, 0.0879)),
@@ -1810,7 +1900,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.1417, 0.4534, 0.7498), (0.0606, 0.0718, 0.0474)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3964, 0.7466, 0.7477), (0.3922, 0.2325, 0.1111)),
             ('engine', 'hull', 'transmission', (0.5087, 0.1772, 0.1346), (0.2637, 0.11, 0.0791)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2813, 0.7468, 0.6789), (0.0701, 0.2199, 0.0713)),
@@ -1825,16 +1914,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5149, 0.3772, 0.3968), (0.4482, 0.3349, 0.1589)),
             ('engine', 'hull', 'engine', (0.5188, 0.3192, 0.2552), (0.2497, 0.2845, 0.1252)),
             ('fuelTank', 'hull', 'fuelTank', (0.5176, 0.5572, 0.2776), (0.4666, 0.1489, 0.0976)),
             ('radio', 'hull', 'radio', (0.1523, 0.5232, 0.6554), (0.0529, 0.1489, 0.061)),
             ('engine', 'hull', 'transmission', (0.5188, 0.2678, 0.089), (0.2497, 0.2331, 0.0333)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2924, 0.6625, 0.6163), (0.0672, 0.2222, 0.064)),
@@ -1849,16 +1934,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5149, 0.3772, 0.3968), (0.4482, 0.3349, 0.1589)),
             ('engine', 'hull', 'engine', (0.5188, 0.3192, 0.2552), (0.2497, 0.2845, 0.1252)),
             ('fuelTank', 'hull', 'fuelTank', (0.5176, 0.5572, 0.2776), (0.4666, 0.1489, 0.0976)),
             ('radio', 'hull', 'radio', (0.1523, 0.5232, 0.6554), (0.0529, 0.1489, 0.061)),
             ('engine', 'hull', 'transmission', (0.5188, 0.2678, 0.089), (0.2497, 0.2331, 0.0333)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2924, 0.6625, 0.6163), (0.0672, 0.2222, 0.064)),
@@ -1873,16 +1954,12 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5096, 0.4068, 0.396), (0.4466, 0.3682, 0.1584)),
             ('engine', 'hull', 'engine', (0.5118, 0.3172, 0.2484), (0.2497, 0.2806, 0.1278)),
             ('fuelTank', 'hull', 'fuelTank', (0.5106, 0.5914, 0.259), (0.4666, 0.1643, 0.1268)),
             ('radio', 'hull', 'radio', (0.1382, 0.5914, 0.622), (0.0942, 0.1643, 0.0623)),
             ('engine', 'hull', 'transmission', (0.5118, 0.2938, 0.0807), (0.2497, 0.2573, 0.0339)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2967, 0.7286, 0.62), (0.0586, 0.255, 0.0679)),
@@ -1891,11 +1968,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.7263, 0.6811, 0.6295), (0.0699, 0.255, 0.0543)),
         ),
     ),
+    ('france', 'f38batchatillon15558'): (
+        'SPG',
+        10,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1824, 0.52), (0.3056, 0.1632, 0.1441)),
+            ('engine', 'hull', 'engine', (0.5, 0.4722, 0.2578), (0.2324, 0.453, 0.0878)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.4722, 0.2578), (0.48, 0.453, 0.0878)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9013, 0.8245), (0.1017, 0.0221, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4977, 0.3737, 0.0978), (0.2586, 0.2063, 0.0721)),
+            ('ammoBay', 'turret', 'ammoBay', (0.1833, 0.3763, 0.4339), (0.1736, 0.3475, 0.2442)),
+            ('radio', 'turret', 'radio', (0.8891, 0.3387, 0.429), (0.0549, 0.097, 0.0789)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.8403, 0.9706, 0.6604), (0.1129, 0.0294, 0.0474)),
+        ),
+        (
+            ('turret', 'crew_00', (0.8468, 0.4893, 0.6606), (0.0766, 0.452, 0.0453)),
+            ('turret', 'crew_01', (0.2803, 0.3875, 0.8252), (0.0766, 0.3362, 0.1092)),
+            ('hull', 'crew_02', (0.5, 0.5171, 0.8393), (0.0742, 0.4298, 0.0885)),
+            ('turret', 'crew_03', (0.2803, 0.3875, 0.6595), (0.0766, 0.3362, 0.1092)),
+            ('turret', 'crew_04', (0.2803, 0.3568, 0.4814), (0.0766, 0.3362, 0.1092)),
+        ),
+    ),
     ('france', 'f44somuas35'): (
         'mediumTank',
         3,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.496, 0.7106, 0.6049), (0.4323, 0.2117, 0.0915)),
@@ -1918,7 +2017,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4929, 0.4759, 0.4606), (0.3639, 0.4412, 0.1381)),
             ('engine', 'hull', 'engine', (0.6697, 0.4235, 0.1697), (0.2017, 0.3254, 0.1245)),
@@ -1938,7 +2036,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.6584, 0.6107), (0.27, 0.1559, 0.1045)),
@@ -1960,14 +2057,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5002, 0.4467, 0.24), (0.4588, 0.0698, 0.1062)),
             ('engine', 'hull', 'engine', (0.4997, 0.3486, 0.714), (0.3334, 0.2944, 0.2579)),
             ('fuelTank', 'hull', 'fuelTank', (0.5014, 0.2946, 0.4076), (0.3532, 0.2184, 0.0324)),
             ('radio', 'hull', 'radio', (0.4997, 0.5813, 0.4059), (0.0985, 0.1063, 0.0308)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4585, 0.7581, 0.5688), (0.2891, 0.01, 0.0272)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7284, 0.456, 0.645), (0.1054, 0.3636, 0.1702)),
@@ -1981,7 +2076,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.4541, 0.2187), (0.4478, 0.3915, 0.022)),
             ('engine', 'hull', 'engine', (0.5654, 0.4176, 0.7753), (0.3392, 0.3679, 0.1193)),
@@ -1989,8 +2083,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('engine', 'hull', 'transmission', (0.501, 0.3622, 0.8569), (0.48, 0.1584, 0.0918)),
             ('turretRotator', 'hull', 'turretRotator', (0.4994, 0.9206, 0.3761), (0.3908, 0.0794, 0.1371)),
             ('radio', 'turret', 'radio', (0.6957, 0.6375, 0.1926), (0.149, 0.0953, 0.0705)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.072, 0.0432, 0.0648)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.0504, 0.036, 0.0432)),
         ),
         (
             ('turret', 'crew_00', (0.7305, 0.4917, 0.5455), (0.1281, 0.45, 0.123)),
@@ -2002,7 +2094,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.4541, 0.2187), (0.4478, 0.3915, 0.022)),
             ('engine', 'hull', 'engine', (0.5654, 0.4176, 0.7753), (0.3392, 0.3679, 0.1193)),
@@ -2010,8 +2101,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('engine', 'hull', 'transmission', (0.501, 0.3622, 0.8569), (0.48, 0.1584, 0.0918)),
             ('turretRotator', 'hull', 'turretRotator', (0.4994, 0.9206, 0.3761), (0.3908, 0.0794, 0.1371)),
             ('radio', 'turret', 'radio', (0.6957, 0.6375, 0.1926), (0.149, 0.0953, 0.0705)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.072, 0.0432, 0.0648)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.0504, 0.036, 0.0432)),
         ),
         (
             ('turret', 'crew_00', (0.7305, 0.4917, 0.5455), (0.1281, 0.45, 0.123)),
@@ -2023,16 +2112,12 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5069, 0.42, 0.4184), (0.4482, 0.3736, 0.1622)),
             ('engine', 'hull', 'engine', (0.5107, 0.3286, 0.2408), (0.2497, 0.3147, 0.1278)),
             ('fuelTank', 'hull', 'fuelTank', (0.5095, 0.5986, 0.2657), (0.4666, 0.1647, 0.1268)),
             ('radio', 'hull', 'radio', (0.1523, 0.5919, 0.6502), (0.0529, 0.1647, 0.0623)),
             ('engine', 'hull', 'transmission', (0.5107, 0.2718, 0.0753), (0.2497, 0.2579, 0.0339)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.284, 0.715, 0.6295), (0.0699, 0.2555, 0.0679)),
@@ -2046,16 +2131,12 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5069, 0.42, 0.4184), (0.4482, 0.3736, 0.1622)),
             ('engine', 'hull', 'engine', (0.5107, 0.3286, 0.2408), (0.2497, 0.3147, 0.1278)),
             ('fuelTank', 'hull', 'fuelTank', (0.5095, 0.5986, 0.2657), (0.4666, 0.1647, 0.1268)),
             ('radio', 'hull', 'radio', (0.1523, 0.5919, 0.6502), (0.0529, 0.1647, 0.0623)),
             ('engine', 'hull', 'transmission', (0.5107, 0.2718, 0.0753), (0.2497, 0.2579, 0.0339)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.284, 0.715, 0.6295), (0.0699, 0.2555, 0.0679)),
@@ -2068,7 +2149,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4958, 0.4793, 0.6868), (0.4787, 0.4128, 0.1753)),
@@ -2093,7 +2173,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         4,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5028, 0.1691, 0.4576), (0.3195, 0.1463, 0.0887)),
@@ -2109,11 +2188,32 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_04', (0.6896, 0.4734, 0.1958), (0.1482, 0.2932, 0.0494)),
         ),
     ),
+    ('france', 'f67batchatillon15555'): (
+        'SPG',
+        9,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
+        ('surveyingDevice', 'turretRotator'),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1824, 0.52), (0.3056, 0.1632, 0.1441)),
+            ('engine', 'hull', 'engine', (0.5, 0.4722, 0.2578), (0.2324, 0.453, 0.0878)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.4722, 0.2578), (0.48, 0.453, 0.0878)),
+            ('engine', 'hull', 'transmission', (0.4977, 0.3737, 0.0978), (0.2586, 0.2063, 0.0721)),
+            ('ammoBay', 'turret', 'ammoBay', (0.1898, 0.3882, 0.3011), (0.1754, 0.3603, 0.2878)),
+            ('radio', 'turret', 'radio', (0.903, 0.3492, 0.2953), (0.0554, 0.1005, 0.093)),
+        ),
+        (
+            ('turret', 'crew_00', (0.8602, 0.4874, 0.5839), (0.0774, 0.4687, 0.0534)),
+            ('turret', 'crew_01', (0.2878, 0.368, 0.7624), (0.0774, 0.3486, 0.1286)),
+            ('hull', 'crew_02', (0.5, 0.5171, 0.8393), (0.0742, 0.4298, 0.0885)),
+            ('turret', 'crew_03', (0.7585, 0.3999, 0.3143), (0.0774, 0.3486, 0.1286)),
+            ('turret', 'crew_04', (0.2878, 0.3999, 0.567), (0.0774, 0.3486, 0.1286)),
+            ('turret', 'crew_05', (0.2878, 0.3999, 0.3143), (0.0774, 0.3486, 0.1286)),
+        ),
+    ),
     ('france', 'f68amxchasseurdechar46'): (
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7456, 0.4781, 0.8504), (0.2187, 0.3844, 0.0942)),
@@ -2138,7 +2238,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4987, 0.6742, 0.0609), (0.3696, 0.132, 0.0468)),
             ('surveyingDevice', 'gun', 'surveyingDevice', (0.5736, 0.945, 0.2006), (0.4101, 0.0389, 0.0445)),
@@ -2161,7 +2260,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         7,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4987, 0.6742, 0.0609), (0.3696, 0.132, 0.0468)),
@@ -2186,7 +2284,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.8641, 0.7743, 0.6108), (0.0663, 0.1474, 0.1292)),
             ('engine', 'hull', 'engine', (0.4687, 0.5929, 0.3599), (0.2376, 0.285, 0.0842)),
@@ -2210,7 +2307,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5887, 0.4888, 0.7427), (0.2231, 0.2741, 0.1032)),
             ('engine', 'hull', 'engine', (0.4998, 0.4415, 0.2434), (0.2369, 0.3464, 0.1319)),
@@ -2233,7 +2329,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         ('fuelTank',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5529, 0.4458, 0.7278), (0.1344, 0.2571, 0.1023)),
@@ -2257,7 +2352,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4905, 0.4404, 0.6112), (0.4516, 0.3726, 0.2482)),
             ('engine', 'hull', 'engine', (0.4906, 0.3893, 0.1994), (0.2827, 0.3081, 0.1084)),
@@ -2280,7 +2374,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4395, 0.594), (0.4316, 0.4274, 0.1856)),
@@ -2306,7 +2399,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4395, 0.594), (0.4316, 0.4274, 0.1856)),
             ('engine', 'hull', 'engine', (0.5047, 0.4777, 0.285), (0.1837, 0.4724, 0.1039)),
@@ -2326,11 +2418,82 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.3205, 0.3947, 0.6264), (0.0989, 0.3947, 0.1085)),
         ),
     ),
+    ('france', 'f81charde65t'): (
+        'heavyTank',
+        8,
+        (('commander',), ('driver',), ('gunner',), ('loader',), ('radioman',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4736, 0.5764), (0.48, 0.4392, 0.1481)),
+            ('engine', 'hull', 'engine', (0.5, 0.4736, 0.2928), (0.2124, 0.4392, 0.0979)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.4736, 0.197), (0.48, 0.4392, 0.1937)),
+            ('radio', 'hull', 'radio', (0.8794, 0.7763, 0.4744), (0.1028, 0.1364, 0.0461)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4995, 0.8868, 0.8169), (0.0136, 0.0285, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.2625, 0.1165), (0.2709, 0.2281, 0.0783)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4301, 0.5265, 0.2287), (0.3955, 0.2848, 0.2109)),
+            ('radio', 'turret', 'radio', (0.7797, 0.4108, 0.2738), (0.0988, 0.1478, 0.0747)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.5312, 0.7182, 0.7485), (0.2756, 0.2708, 0.2173)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6872, 0.5442, 0.6307), (0.0988, 0.3852, 0.0999)),
+            ('hull', 'crew_01', (0.5, 0.5084, 0.8024), (0.0687, 0.3897, 0.0571)),
+            ('turret', 'crew_02', (0.3377, 0.3852, 0.7256), (0.0988, 0.3852, 0.088)),
+            ('turret', 'crew_03', (0.3206, 0.4087, 0.6178), (0.0988, 0.3852, 0.0999)),
+            ('hull', 'crew_04', (0.7025, 0.5084, 0.4635), (0.0687, 0.3897, 0.0571)),
+        ),
+    ),
+    ('france', 'f82amxm4mle1949ter'): (
+        'heavyTank',
+        10,
+        (('commander',), ('driver',), ('gunner',), ('loader',), ('radioman',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4475, 0.5733), (0.4345, 0.4165, 0.1767)),
+            ('engine', 'hull', 'engine', (0.5048, 0.4687, 0.2877), (0.185, 0.4252, 0.104)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5222, 0.4813, 0.2002), (0.2542, 0.4377, 0.1914)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.3293, 0.9353, 0.7942), (0.0105, 0.0172, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5004, 0.2413, 0.1381), (0.276, 0.1978, 0.0456)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9181, 0.5853), (0.3778, 0.0335, 0.1694)),
+            ('ammoBay', 'turret', 'ammoBay', (0.534, 0.268, 0.56), (0.1012, 0.268, 0.0489)),
+            ('radio', 'turret', 'radio', (0.3518, 0.6686, 0.1194), (0.1046, 0.1025, 0.0398)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3451, 0.9075, 0.5545), (0.067, 0.0837, 0.1821)),
+        ),
+        (
+            ('turret', 'crew_00', (0.656, 0.6917, 0.2153), (0.084, 0.2714, 0.0935)),
+            ('hull', 'crew_01', (0.3328, 0.4946, 0.8467), (0.0713, 0.3977, 0.062)),
+            ('turret', 'crew_02', (0.3488, 0.6543, 0.4595), (0.084, 0.2714, 0.0935)),
+            ('turret', 'crew_03', (0.7192, 0.5499, 0.7023), (0.084, 0.2714, 0.0935)),
+            ('hull', 'crew_04', (0.6672, 0.4946, 0.8467), (0.0713, 0.3977, 0.062)),
+        ),
+    ),
+    ('france', 'f83amxm4mle1949bis'): (
+        'heavyTank',
+        9,
+        (('commander',), ('driver',), ('gunner',), ('loader',), ('radioman',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4542, 0.562), (0.4345, 0.42, 0.1617)),
+            ('engine', 'hull', 'engine', (0.5048, 0.4755, 0.2905), (0.185, 0.4288, 0.1049)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5222, 0.4882, 0.2023), (0.2542, 0.4414, 0.1931)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.328, 0.8864, 0.8325), (0.0299, 0.0685, 0.0357)),
+            ('engine', 'hull', 'transmission', (0.5004, 0.2462, 0.1396), (0.276, 0.1995, 0.046)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9259, 0.5851), (0.3503, 0.0416, 0.1584)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4995, 0.3983, 0.1802), (0.444, 0.2722, 0.1234)),
+            ('radio', 'turret', 'radio', (0.1731, 0.3479, 0.5495), (0.0707, 0.1327, 0.0839)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3416, 0.8984, 0.5813), (0.1608, 0.0218, 0.01)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3413, 0.6217, 0.5166), (0.0707, 0.346, 0.1122)),
+            ('hull', 'crew_01', (0.3328, 0.5017, 0.8543), (0.0713, 0.401, 0.0625)),
+            ('turret', 'crew_02', (0.6836, 0.4396, 0.5912), (0.0707, 0.346, 0.0988)),
+            ('turret', 'crew_03', (0.3488, 0.346, 0.4159), (0.0707, 0.346, 0.1122)),
+            ('hull', 'crew_04', (0.6672, 0.5017, 0.8543), (0.0713, 0.401, 0.0625)),
+        ),
+    ),
     ('france', 'f84somuasm'): (
         'heavyTank',
         8,
         (('commander', 'loader'), ('driver',), ('gunner', 'loader'), ('radioman', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.6291, 0.3846, 0.1411), (0.2501, 0.38, 0.1072)),
@@ -2355,7 +2518,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5187, 0.596, 0.0605), (0.4246, 0.1807, 0.0596)),
             ('surveyingDevice', 'gun', 'surveyingDevice', (0.4815, 0.8442, 0.1929), (0.4636, 0.0522, 0.0439)),
@@ -2374,21 +2536,57 @@ CONSOLE_LAYOUTS_0922 = {
             ('gun', 'crew_02', (0.792, 0.3972, 0.2099), (0.1412, 0.3972, 0.0436)),
         ),
     ),
+    ('france', 'f89canondassautde105'): (
+        'AT-SPG',
+        8,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
+        ('ammoBay', 'surveyingDevice', 'turretRotator'),
+        (
+            ('engine', 'hull', 'engine', (0.5, 0.2648, 0.2926), (0.1887, 0.2453, 0.1053)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.2648, 0.547), (0.2841, 0.2453, 0.3597)),
+            ('radio', 'hull', 'radio', (0.8776, 0.4916, 0.5594), (0.1044, 0.1027, 0.079)),
+            ('engine', 'hull', 'transmission', (0.5, 0.1874, 0.101), (0.2906, 0.168, 0.0864)),
+        ),
+        (
+            ('hull', 'crew_00', (0.723, 0.4595, 0.4726), (0.0746, 0.4083, 0.0347)),
+            ('hull', 'crew_01', (0.313, 0.416, 0.7152), (0.0746, 0.2688, 0.0953)),
+            ('hull', 'crew_02', (0.6499, 0.416, 0.7356), (0.0746, 0.2688, 0.0953)),
+            ('hull', 'crew_03', (0.2786, 0.4048, 0.5135), (0.0667, 0.3765, 0.0388)),
+        ),
+    ),
+    ('france', 'f97elceven90'): (
+        'lightTank',
+        8,
+        (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
+        (),
+        (
+            ('ammoBay', 'gun', 'ammoBay', (0.4275, 0.7588, 0.1586), (0.299, 0.1205, 0.0923)),
+            ('radio', 'gun', 'radio', (0.2127, 0.7673, 0.3127), (0.1104, 0.0848, 0.0358)),
+            ('surveyingDevice', 'gun', 'surveyingDevice', (0.5011, 0.9145, 0.3036), (0.213, 0.0154, 0.0774)),
+            ('ammoBay', 'hull', 'ammoBay', (0.1015, 0.4489, 0.5479), (0.0898, 0.3635, 0.173)),
+            ('engine', 'hull', 'engine', (0.3234, 0.4489, 0.2558), (0.3117, 0.3635, 0.1191)),
+            ('fuelTank', 'hull', 'fuelTank', (0.8113, 0.4489, 0.2558), (0.1763, 0.3635, 0.1191)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.7807, 0.9218, 0.6829), (0.1385, 0.0431, 0.018)),
+            ('engine', 'hull', 'transmission', (0.4996, 0.3446, 0.0929), (0.48, 0.2592, 0.0437)),
+            ('turretRotator', 'hull', 'turretRotator', (0.3513, 0.8674, 0.5362), (0.3315, 0.0303, 0.1473)),
+        ),
+        (
+            ('gun', 'crew_00', (0.412, 0.4406, 0.2997), (0.0889, 0.4406, 0.0488)),
+            ('hull', 'crew_01', (0.796, 0.4793, 0.7168), (0.1609, 0.4716, 0.2106)),
+            ('gun', 'crew_02', (0.5898, 0.4406, 0.2997), (0.0889, 0.4406, 0.0488)),
+        ),
+    ),
     ('germany', 'envartillery'): (
         'SPG',
         6,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5696, 0.448, 0.1338), (0.3666, 0.2469, 0.1146)),
             ('engine', 'hull', 'engine', (0.5054, 0.3025, 0.6238), (0.1974, 0.2537, 0.1103)),
             ('fuelTank', 'hull', 'fuelTank', (0.5006, 0.1013, 0.2441), (0.3115, 0.0967, 0.0916)),
             ('radio', 'hull', 'radio', (0.5038, 0.4382, 0.8055), (0.04, 0.0784, 0.0411)),
             ('engine', 'hull', 'transmission', (0.4985, 0.2056, 0.8581), (0.3194, 0.1131, 0.1241)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7257, 0.5506, 0.2965), (0.0786, 0.3403, 0.0288)),
@@ -2404,16 +2602,12 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5696, 0.448, 0.1338), (0.3666, 0.2469, 0.1146)),
             ('engine', 'hull', 'engine', (0.5054, 0.3025, 0.6238), (0.1974, 0.2537, 0.1103)),
             ('fuelTank', 'hull', 'fuelTank', (0.5006, 0.1013, 0.2441), (0.3115, 0.0967, 0.0916)),
             ('radio', 'hull', 'radio', (0.5038, 0.4382, 0.8055), (0.04, 0.0784, 0.0411)),
             ('engine', 'hull', 'transmission', (0.4985, 0.2056, 0.8581), (0.3194, 0.1131, 0.1241)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7257, 0.5506, 0.2965), (0.0786, 0.3403, 0.0288)),
@@ -2428,7 +2622,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5094, 0.7338, 0.5872), (0.4323, 0.1546, 0.2213)),
@@ -2453,7 +2646,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5094, 0.7338, 0.5872), (0.4323, 0.1546, 0.2213)),
             ('engine', 'hull', 'engine', (0.4986, 0.4691, 0.2449), (0.1712, 0.4181, 0.1128)),
@@ -2476,7 +2668,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5094, 0.7338, 0.5872), (0.4323, 0.1546, 0.2213)),
@@ -2501,7 +2692,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4943, 0.3458, 0.5407), (0.4782, 0.4271, 0.2343)),
             ('engine', 'hull', 'engine', (0.5049, 0.3475, 0.1583), (0.2229, 0.4301, 0.1162)),
@@ -2524,7 +2714,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4943, 0.3458, 0.5407), (0.4782, 0.4271, 0.2343)),
@@ -2549,7 +2738,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4943, 0.3458, 0.5407), (0.4782, 0.4271, 0.2343)),
             ('engine', 'hull', 'engine', (0.5049, 0.3475, 0.1583), (0.2229, 0.4301, 0.1162)),
@@ -2573,7 +2761,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5503, 0.426, 0.5932), (0.4226, 0.4132, 0.2057)),
             ('engine', 'hull', 'engine', (0.3811, 0.3227, 0.2421), (0.2338, 0.3029, 0.1283)),
@@ -2581,7 +2768,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.0721, 0.6386, 0.6404), (0.0618, 0.0712, 0.0548)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.2561, 0.7708, 0.6202), (0.1314, 0.2292, 0.2004)),
             ('engine', 'hull', 'transmission', (0.5001, 0.2485, 0.8151), (0.3762, 0.2031, 0.1583)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.261, 0.6442, 0.5333), (0.0942, 0.3213, 0.0809)),
@@ -2595,7 +2781,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5503, 0.426, 0.5932), (0.4226, 0.4132, 0.2057)),
             ('engine', 'hull', 'engine', (0.3811, 0.3227, 0.2421), (0.2338, 0.3029, 0.1283)),
@@ -2603,7 +2788,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.0721, 0.6386, 0.6404), (0.0618, 0.0712, 0.0548)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.2561, 0.7708, 0.6202), (0.1314, 0.2292, 0.2004)),
             ('engine', 'hull', 'transmission', (0.5001, 0.2485, 0.8151), (0.3762, 0.2031, 0.1583)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.261, 0.6442, 0.5333), (0.0942, 0.3213, 0.0809)),
@@ -2616,7 +2800,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5667, 0.7393, 0.5711), (0.2838, 0.1899, 0.1406)),
@@ -2639,7 +2822,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5667, 0.7393, 0.5711), (0.2838, 0.1899, 0.1406)),
             ('engine', 'hull', 'engine', (0.7769, 0.5123, 0.1736), (0.1884, 0.4157, 0.1691)),
@@ -2661,7 +2843,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.3789, 0.686), (0.3751, 0.2859, 0.1052)),
             ('engine', 'hull', 'engine', (0.5792, 0.4496, 0.2887), (0.228, 0.4223, 0.1145)),
@@ -2682,7 +2863,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5074, 0.368, 0.6555), (0.4157, 0.3008, 0.1123)),
@@ -2707,7 +2887,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5074, 0.368, 0.6555), (0.4157, 0.3008, 0.1123)),
             ('engine', 'hull', 'engine', (0.5025, 0.4228, 0.1927), (0.2074, 0.4054, 0.1222)),
@@ -2731,7 +2910,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4948, 0.6644, 0.4957), (0.4343, 0.1626, 0.1202)),
             ('engine', 'hull', 'engine', (0.5823, 0.2682, 0.2044), (0.1501, 0.2402, 0.1747)),
@@ -2739,7 +2917,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8172, 0.6199, 0.7085), (0.0334, 0.1113, 0.0628)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3362, 0.876, 0.6779), (0.0924, 0.124, 0.0898)),
             ('engine', 'hull', 'transmission', (0.6377, 0.1943, 0.8241), (0.0791, 0.1559, 0.1625)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6485, 0.5089, 0.5415), (0.0932, 0.3468, 0.1072)),
@@ -2752,7 +2929,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5003, 0.3718, 0.6147), (0.3068, 0.282, 0.1119)),
@@ -2777,7 +2953,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         4,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.3598, 0.616), (0.3863, 0.3633, 0.2196)),
@@ -2798,7 +2973,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4905, 0.3471, 0.5948), (0.4458, 0.2693, 0.1043)),
@@ -2823,7 +2997,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4905, 0.3471, 0.5948), (0.4458, 0.2693, 0.1043)),
             ('engine', 'hull', 'engine', (0.5112, 0.466, 0.2434), (0.2093, 0.4115, 0.1637)),
@@ -2847,7 +3020,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6063, 0.4495, 0.6895), (0.3512, 0.3848, 0.1883)),
             ('engine', 'hull', 'engine', (0.3939, 0.5049, 0.2144), (0.2155, 0.447, 0.106)),
@@ -2869,7 +3041,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5901, 0.1485, 0.5102), (0.1849, 0.1281, 0.1912)),
@@ -2889,7 +3060,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.7608, 0.5923), (0.447, 0.1546, 0.2177)),
@@ -2914,7 +3084,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5064, 0.4984, 0.6037), (0.4739, 0.4633, 0.1449)),
             ('engine', 'hull', 'engine', (0.3652, 0.4604, 0.2727), (0.3513, 0.3999, 0.1796)),
@@ -2938,7 +3107,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5003, 0.2473, 0.6449), (0.403, 0.1734, 0.1951)),
             ('engine', 'hull', 'engine', (0.5, 0.3082, 0.5332), (0.4119, 0.2777, 0.4381)),
@@ -2955,11 +3123,30 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_02', (0.6586, 0.4992, 0.7643), (0.1309, 0.4443, 0.0472)),
         ),
     ),
+    ('germany', 'g109steyrwt'): (
+        'AT-SPG',
+        7,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        ('surveyingDevice',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4989, 0.606, 0.1882), (0.4512, 0.2338, 0.162)),
+            ('engine', 'hull', 'engine', (0.5022, 0.3062, 0.8421), (0.164, 0.2754, 0.0764)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7172, 0.5082), (0.48, 0.1054, 0.1511)),
+            ('radio', 'hull', 'radio', (0.3398, 0.5946, 0.5659), (0.0331, 0.0938, 0.0319)),
+            ('engine', 'hull', 'transmission', (0.5019, 0.2923, 0.9547), (0.3289, 0.1581, 0.0362)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.7496, 0.3071), (0.344, 0.0756, 0.1921)),
+        ),
+        (
+            ('hull', 'crew_00', (0.746, 0.4734, 0.7767), (0.0767, 0.4572, 0.0815)),
+            ('turret', 'crew_01', (0.2963, 0.5945, 0.5061), (0.094, 0.3646, 0.1588)),
+            ('hull', 'crew_02', (0.2526, 0.4718, 0.7821), (0.0767, 0.4555, 0.0815)),
+            ('turret', 'crew_03', (0.6363, 0.5945, 0.3566), (0.094, 0.3646, 0.1588)),
+        ),
+    ),
     ('germany', 'g10pziiiausfj'): (
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4915, 0.3563, 0.5881), (0.4665, 0.2915, 0.1412)),
@@ -2984,7 +3171,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('engine', 'hull', 'engine', (0.5021, 0.4644, 0.6095), (0.4156, 0.3767, 0.1232)),
             ('fuelTank', 'hull', 'fuelTank', (0.4969, 0.775, 0.8599), (0.452, 0.1015, 0.0859)),
@@ -3008,7 +3194,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.444, 0.4145, 0.5757), (0.2817, 0.3673, 0.1412)),
@@ -3028,7 +3213,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         7,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2977, 0.7493, 0.0731), (0.2803, 0.1878, 0.0594)),
@@ -3051,7 +3235,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'loader'), ('radioman',), ('driver',), ('gunner',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.4666, 0.4891), (0.255, 0.4377, 0.1972)),
@@ -3072,7 +3255,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'loader'), ('radioman',), ('driver',), ('gunner',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.4666, 0.4891), (0.255, 0.4377, 0.1972)),
@@ -3093,7 +3275,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.672, 0.5389), (0.48, 0.2716, 0.2148)),
@@ -3120,7 +3301,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.672, 0.5389), (0.48, 0.2716, 0.2148)),
             ('engine', 'hull', 'engine', (0.5008, 0.3873, 0.2207), (0.1641, 0.3391, 0.0983)),
@@ -3145,7 +3325,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.501, 0.3354, 0.5739), (0.3809, 0.3196, 0.1205)),
@@ -3166,7 +3345,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.501, 0.3354, 0.5739), (0.3809, 0.3196, 0.1205)),
@@ -3187,7 +3365,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5002, 0.6946, 0.5543), (0.4498, 0.1625, 0.2439)),
@@ -3213,7 +3390,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3404, 0.8309), (0.2873, 0.1605, 0.0803)),
             ('engine', 'hull', 'engine', (0.3829, 0.4792, 0.2699), (0.1529, 0.3574, 0.1065)),
@@ -3236,7 +3412,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3404, 0.8309), (0.2873, 0.1605, 0.0803)),
@@ -3261,7 +3436,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3404, 0.8309), (0.2873, 0.1605, 0.0803)),
             ('engine', 'hull', 'engine', (0.3829, 0.4792, 0.2699), (0.1529, 0.3574, 0.1065)),
@@ -3285,16 +3459,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4664, 0.5075, 0.4392), (0.4276, 0.2107, 0.0583)),
             ('engine', 'hull', 'engine', (0.4874, 0.155, 0.2225), (0.1367, 0.1072, 0.1151)),
             ('fuelTank', 'hull', 'fuelTank', (0.6808, 0.1554, 0.2225), (0.05, 0.103, 0.1151)),
             ('radio', 'hull', 'radio', (0.7061, 0.5048, 0.4299), (0.0649, 0.061, 0.0522)),
             ('engine', 'hull', 'transmission', (0.4767, 0.0937, 0.8044), (0.2939, 0.0482, 0.1016)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0765, 0.051, 0.068)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0595, 0.0425, 0.0595)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.119, 0.085, 0.102)),
         ),
         (
             ('hull', 'crew_00', (0.7008, 0.6647, 0.5069), (0.0955, 0.2192, 0.0934)),
@@ -3308,7 +3478,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5132, 0.4411, 0.5592), (0.454, 0.4035, 0.2175)),
@@ -3332,7 +3501,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5132, 0.4411, 0.5592), (0.454, 0.4035, 0.2175)),
             ('engine', 'hull', 'engine', (0.4978, 0.5007, 0.2768), (0.2023, 0.3813, 0.1014)),
@@ -3354,7 +3522,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1166, 0.2587), (0.3308, 0.1125, 0.1628)),
@@ -3373,11 +3540,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_05', (0.2806, 0.6663, 0.0289), (0.0964, 0.3337, 0.0289)),
         ),
     ),
+    ('germany', 'g122vk6501h'): (
+        'heavyTank',
+        5,
+        (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4989, 0.3865, 0.4993), (0.4705, 0.2399, 0.117)),
+            ('engine', 'hull', 'engine', (0.4989, 0.4691, 0.2483), (0.2963, 0.3907, 0.1272)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4989, 0.3524, 0.2483), (0.4705, 0.274, 0.1272)),
+            ('radio', 'hull', 'radio', (0.9206, 0.794, 0.6749), (0.06, 0.1495, 0.0492)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.7479, 0.8145, 0.8185), (0.0772, 0.0255, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4994, 0.2934, 0.8864), (0.48, 0.1906, 0.1043)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4912, 0.971, 0.5467), (0.3624, 0.029, 0.0944)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4564, 0.9361, 0.3728), (0.21, 0.0639, 0.2743)),
+        ),
+        (
+            ('turret', 'crew_00', (0.4932, 0.5028, 0.3265), (0.1204, 0.4282, 0.192)),
+            ('hull', 'crew_01', (0.7426, 0.5614, 0.795), (0.118, 0.3605, 0.0617)),
+            ('turret', 'crew_02', (0.2799, 0.4282, 0.6172), (0.1204, 0.4282, 0.192)),
+            ('hull', 'crew_03', (0.2428, 0.5614, 0.795), (0.118, 0.3605, 0.0617)),
+            ('turret', 'crew_04', (0.7092, 0.4282, 0.6172), (0.1204, 0.4282, 0.192)),
+        ),
+    ),
     ('germany', 'g125spz57rh'): (
         'lightTank',
         10,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         ('fuelTank',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5006, 0.2099, 0.576), (0.3394, 0.1498, 0.1495)),
@@ -3398,7 +3587,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         8,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5014, 0.7612, 0.1407), (0.2479, 0.191, 0.0526)),
@@ -3421,7 +3609,6 @@ CONSOLE_LAYOUTS_0922 = {
         1,
         (('commander', 'radioman', 'gunner'), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.4344, 0.2501), (0.3319, 0.3277, 0.2411)),
             ('engine', 'hull', 'engine', (0.5, 0.3998, 0.7423), (0.1222, 0.2939, 0.1009)),
@@ -3443,7 +3630,6 @@ CONSOLE_LAYOUTS_0922 = {
         1,
         (('commander', 'radioman', 'gunner'), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.4344, 0.2501), (0.3319, 0.3277, 0.2411)),
             ('engine', 'hull', 'engine', (0.5, 0.3998, 0.7423), (0.1222, 0.2939, 0.1009)),
@@ -3460,11 +3646,103 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_02', (0.6564, 0.4047, 0.508), (0.1391, 0.4047, 0.193)),
         ),
     ),
+    ('germany', 'g134pzkpfwvii'): (
+        'heavyTank',
+        10,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.6615, 0.2287), (0.457, 0.161, 0.2035)),
+            ('engine', 'hull', 'engine', (0.5, 0.4358, 0.6677), (0.2502, 0.4093, 0.1268)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4985, 0.4105, 0.4562), (0.3058, 0.3608, 0.069)),
+            ('radio', 'hull', 'radio', (0.7845, 0.6474, 0.7454), (0.0289, 0.1678, 0.042)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.2881, 0.7953, 0.8938), (0.0468, 0.1354, 0.0529)),
+            ('engine', 'hull', 'transmission', (0.5001, 0.3167, 0.8965), (0.2974, 0.2034, 0.0957)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.8382, 0.2221), (0.3966, 0.036, 0.1529)),
+            ('ammoBay', 'turret', 'ammoBay', (0.6822, 0.4606, 0.2243), (0.1755, 0.2739, 0.1616)),
+        ),
+        (
+            ('turret', 'crew_00', (0.4988, 0.566, 0.3987), (0.0764, 0.4116, 0.1123)),
+            ('turret', 'crew_01', (0.2894, 0.4197, 0.5615), (0.0764, 0.4116, 0.1123)),
+            ('hull', 'crew_02', (0.282, 0.4654, 0.8533), (0.0767, 0.3617, 0.0517)),
+            ('hull', 'crew_03', (0.7138, 0.4654, 0.8533), (0.0767, 0.3617, 0.0517)),
+            ('turret', 'crew_04', (0.7031, 0.4167, 0.5311), (0.1269, 0.4152, 0.1273)),
+        ),
+    ),
+    ('germany', 'g137pzvitiger217'): (
+        'heavyTank',
+        6,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        ('ammoBay',),
+        (
+            ('engine', 'hull', 'engine', (0.5033, 0.4875, 0.1627), (0.1854, 0.4162, 0.1108)),
+            ('fuelTank', 'hull', 'fuelTank', (0.497, 0.521, 0.2009), (0.4782, 0.3336, 0.0726)),
+            ('radio', 'hull', 'radio', (0.4929, 0.7544, 0.7701), (0.0733, 0.1453, 0.0789)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.2912, 0.8705, 0.8182), (0.0759, 0.1295, 0.0469)),
+            ('engine', 'hull', 'transmission', (0.4929, 0.3141, 0.8286), (0.2845, 0.2642, 0.1377)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4988, 0.9296, 0.4775), (0.2273, 0.0229, 0.1106)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2738, 0.9744, 0.305), (0.1585, 0.0219, 0.146)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3001, 0.5622, 0.3968), (0.0722, 0.3932, 0.1777)),
+            ('turret', 'crew_01', (0.2931, 0.3928, 0.6745), (0.0893, 0.3928, 0.1455)),
+            ('hull', 'crew_02', (0.3026, 0.4866, 0.8134), (0.0724, 0.3944, 0.0908)),
+            ('hull', 'crew_03', (0.7016, 0.4866, 0.8134), (0.0724, 0.3944, 0.0908)),
+            ('turret', 'crew_04', (0.7079, 0.4031, 0.4788), (0.0893, 0.3928, 0.1449)),
+        ),
+    ),
+    ('germany', 'g138vk16802'): (
+        'heavyTank',
+        8,
+        (('commander',), ('driver',), ('radioman',), ('gunner',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.7463, 0.5503), (0.4649, 0.1879, 0.1252)),
+            ('engine', 'hull', 'engine', (0.5002, 0.4922, 0.2873), (0.151, 0.3864, 0.1378)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7079, 0.2871), (0.4649, 0.2264, 0.1102)),
+            ('radio', 'hull', 'radio', (0.7033, 0.6734, 0.8436), (0.0351, 0.0859, 0.0376)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4526, 0.9773, 0.8445), (0.0187, 0.0137, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.519, 0.2866), (0.4649, 0.4153, 0.2666)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4978, 0.4137, 0.4397), (0.4217, 0.4137, 0.3705)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3049, 0.8954, 0.6341), (0.0185, 0.0336, 0.0139)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6322, 0.7358, 0.6735), (0.0752, 0.2311, 0.0872)),
+            ('hull', 'crew_01', (0.4236, 0.5704, 0.8836), (0.0627, 0.2863, 0.0612)),
+            ('hull', 'crew_02', (0.5821, 0.5704, 0.8836), (0.0627, 0.2863, 0.0612)),
+            ('turret', 'crew_03', (0.3204, 0.6177, 0.6772), (0.0752, 0.2311, 0.0872)),
+            ('turret', 'crew_04', (0.3647, 0.6177, 0.5407), (0.0752, 0.2311, 0.0872)),
+            ('turret', 'crew_05', (0.4638, 0.6177, 0.2878), (0.0752, 0.2311, 0.0872)),
+        ),
+    ),
+    ('germany', 'g138vk16802mauerbrecher'): (
+        'heavyTank',
+        8,
+        (('commander',), ('driver',), ('radioman',), ('gunner',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.7463, 0.5503), (0.4649, 0.1879, 0.1252)),
+            ('engine', 'hull', 'engine', (0.5002, 0.4922, 0.2873), (0.151, 0.3864, 0.1378)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7079, 0.2871), (0.4649, 0.2264, 0.1102)),
+            ('radio', 'hull', 'radio', (0.7033, 0.6734, 0.8436), (0.0351, 0.0859, 0.0376)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4526, 0.9773, 0.8445), (0.0187, 0.0137, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.519, 0.2866), (0.4649, 0.4153, 0.2666)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4978, 0.4137, 0.4397), (0.4217, 0.4137, 0.3705)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3049, 0.8954, 0.6341), (0.0185, 0.0336, 0.0139)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6322, 0.7358, 0.6735), (0.0752, 0.2311, 0.0872)),
+            ('hull', 'crew_01', (0.4236, 0.5704, 0.8836), (0.0627, 0.2863, 0.0612)),
+            ('hull', 'crew_02', (0.5821, 0.5704, 0.8836), (0.0627, 0.2863, 0.0612)),
+            ('turret', 'crew_03', (0.3204, 0.6177, 0.6772), (0.0752, 0.2311, 0.0872)),
+            ('turret', 'crew_04', (0.3647, 0.6177, 0.5407), (0.0752, 0.2311, 0.0872)),
+            ('turret', 'crew_05', (0.4638, 0.6177, 0.2878), (0.0752, 0.2311, 0.0872)),
+        ),
+    ),
     ('germany', 'g13vk3001h'): (
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3013, 0.4712), (0.4743, 0.2694, 0.1444)),
@@ -3489,7 +3767,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.3603, 0.5074), (0.4643, 0.2954, 0.1977)),
             ('engine', 'hull', 'engine', (0.4922, 0.4408, 0.2446), (0.2555, 0.4016, 0.1361)),
@@ -3512,7 +3789,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5029, 0.7622, 0.5576), (0.4094, 0.149, 0.24)),
@@ -3538,7 +3814,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5029, 0.7622, 0.5576), (0.4094, 0.149, 0.24)),
             ('engine', 'hull', 'engine', (0.5046, 0.4262, 0.2818), (0.1586, 0.3849, 0.1105)),
@@ -3562,7 +3837,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5029, 0.7622, 0.5576), (0.4094, 0.149, 0.24)),
@@ -3588,7 +3862,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4928, 0.5875, 0.5843), (0.4091, 0.2791, 0.2766)),
             ('engine', 'hull', 'engine', (0.5608, 0.3079, 0.1541), (0.1135, 0.2853, 0.1123)),
@@ -3596,7 +3869,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.4983, 0.8027, 0.3352), (0.1217, 0.1012, 0.0275)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.349, 0.7888, 0.5625), (0.0548, 0.2112, 0.2077)),
             ('engine', 'hull', 'transmission', (0.497, 0.2355, 0.8875), (0.2806, 0.1995, 0.0948)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.3034, 0.5682, 0.4112), (0.0667, 0.3126, 0.0838)),
@@ -3610,7 +3882,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.6385, 0.4974), (0.4586, 0.2677, 0.2105)),
             ('engine', 'hull', 'engine', (0.5022, 0.3155, 0.1898), (0.2003, 0.278, 0.1777)),
@@ -3618,7 +3889,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8592, 0.4953, 0.7944), (0.0729, 0.0583, 0.0767)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5074, 0.8283, 0.5955), (0.2609, 0.1717, 0.2094)),
             ('engine', 'hull', 'transmission', (0.5, 0.2462, 0.8643), (0.2762, 0.1175, 0.1037)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.389, 0.6451, 0.4392), (0.0705, 0.2603, 0.0855)),
@@ -3633,16 +3903,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4929, 0.3447, 0.1994), (0.4745, 0.2329, 0.1695)),
             ('engine', 'hull', 'engine', (0.6391, 0.2669, 0.5809), (0.1804, 0.1894, 0.1439)),
             ('fuelTank', 'hull', 'fuelTank', (0.3122, 0.2411, 0.5796), (0.1119, 0.2154, 0.1425)),
             ('radio', 'hull', 'radio', (0.1329, 0.7194, 0.1491), (0.0526, 0.0959, 0.0401)),
             ('engine', 'hull', 'transmission', (0.4995, 0.1406, 0.8545), (0.32, 0.0631, 0.1215)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6873, 0.668, 0.2114), (0.1089, 0.3082, 0.087)),
@@ -3657,16 +3923,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4791, 0.5575, 0.1724), (0.4613, 0.1035, 0.0813)),
             ('engine', 'hull', 'engine', (0.6294, 0.2363, 0.1674), (0.1727, 0.1874, 0.1196)),
             ('fuelTank', 'hull', 'fuelTank', (0.3219, 0.2363, 0.1399), (0.1043, 0.1869, 0.1191)),
             ('radio', 'hull', 'radio', (0.8999, 0.7196, 0.6376), (0.0783, 0.2427, 0.0595)),
             ('engine', 'hull', 'transmission', (0.6423, 0.1551, 0.76), (0.1173, 0.136, 0.1644)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2913, 0.6455, 0.44), (0.1022, 0.2813, 0.1209)),
@@ -3679,16 +3941,12 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6, 0.2571, 0.5124), (0.3909, 0.2181, 0.1434)),
             ('engine', 'hull', 'engine', (0.514, 0.2513, 0.1774), (0.1648, 0.2225, 0.151)),
             ('fuelTank', 'hull', 'fuelTank', (0.5144, 0.2531, 0.1456), (0.3241, 0.2075, 0.1109)),
             ('radio', 'hull', 'radio', (0.7122, 0.1343, 0.6912), (0.1326, 0.0948, 0.028)),
             ('engine', 'hull', 'transmission', (0.4985, 0.1301, 0.7946), (0.3418, 0.0877, 0.1681)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0765, 0.051, 0.068)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0595, 0.0425, 0.0595)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.119, 0.085, 0.102)),
         ),
         (
             ('hull', 'crew_00', (0.3421, 0.6855, 0.4808), (0.1053, 0.2517, 0.0978)),
@@ -3701,16 +3959,12 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6, 0.2571, 0.5124), (0.3909, 0.2181, 0.1434)),
             ('engine', 'hull', 'engine', (0.514, 0.2513, 0.1774), (0.1648, 0.2225, 0.151)),
             ('fuelTank', 'hull', 'fuelTank', (0.5144, 0.2531, 0.1456), (0.3241, 0.2075, 0.1109)),
             ('radio', 'hull', 'radio', (0.7122, 0.1343, 0.6912), (0.1326, 0.0948, 0.028)),
             ('engine', 'hull', 'transmission', (0.4985, 0.1301, 0.7946), (0.3418, 0.0877, 0.1681)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0765, 0.051, 0.068)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0595, 0.0425, 0.0595)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.119, 0.085, 0.102)),
         ),
         (
             ('hull', 'crew_00', (0.3421, 0.6855, 0.4808), (0.1053, 0.2517, 0.0978)),
@@ -3723,16 +3977,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4844, 0.5748, 0.2669), (0.1631, 0.1274, 0.0583)),
             ('engine', 'hull', 'engine', (0.4995, 0.3719, 0.0962), (0.2085, 0.3135, 0.0748)),
             ('fuelTank', 'hull', 'fuelTank', (0.7772, 0.2303, 0.4884), (0.0402, 0.1714, 0.1497)),
             ('radio', 'hull', 'radio', (0.2349, 0.541, 0.3453), (0.0814, 0.1068, 0.019)),
             ('engine', 'hull', 'transmission', (0.6158, 0.2107, 0.8456), (0.1881, 0.1937, 0.1446)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2663, 0.7048, 0.4451), (0.0903, 0.2952, 0.0965)),
@@ -3747,15 +3997,11 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.8101, 0.6421, 0.2541), (0.1602, 0.2643, 0.2049)),
             ('engine', 'hull', 'engine', (0.3575, 0.2577, 0.724), (0.1403, 0.2347, 0.2031)),
             ('fuelTank', 'hull', 'fuelTank', (0.6479, 0.2577, 0.5896), (0.1207, 0.2347, 0.0687)),
             ('radio', 'hull', 'radio', (0.1083, 0.5122, 0.0642), (0.0647, 0.1516, 0.0384)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2968, 0.4819, 0.1229), (0.1021, 0.2883, 0.0642)),
@@ -3768,7 +4014,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4973, 0.7431, 0.5515), (0.4756, 0.2006, 0.1167)),
@@ -3794,7 +4039,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'gunner'), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.8507, 0.5622), (0.476, 0.0788, 0.1438)),
             ('engine', 'hull', 'engine', (0.5002, 0.3941, 0.2913), (0.2752, 0.3224, 0.092)),
@@ -3816,7 +4060,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         5,
         (('commander', 'gunner'), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4979, 0.4539, 0.5143), (0.4308, 0.445, 0.1602)),
@@ -3841,7 +4084,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5239, 0.5299, 0.5002), (0.4444, 0.447, 0.0943)),
             ('engine', 'hull', 'engine', (0.4937, 0.5081, 0.2177), (0.1952, 0.4178, 0.1198)),
@@ -3864,7 +4106,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5019, 0.5611, 0.4585), (0.4332, 0.3966, 0.0952)),
@@ -3889,7 +4130,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5056, 0.8017, 0.5835), (0.4405, 0.142, 0.1964)),
             ('engine', 'hull', 'engine', (0.5, 0.4841, 0.2593), (0.1714, 0.4109, 0.1127)),
@@ -3912,7 +4152,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5056, 0.8017, 0.5835), (0.4405, 0.142, 0.1964)),
@@ -3937,7 +4176,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5056, 0.8657, 0.6049), (0.4405, 0.1592, 0.2178)),
             ('engine', 'hull', 'engine', (0.5, 0.5818, 0.5663), (0.2572, 0.4245, 0.4197)),
@@ -3959,7 +4197,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5056, 0.8657, 0.6049), (0.4405, 0.1592, 0.2178)),
@@ -3983,7 +4220,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4956, 0.4971, 0.5337), (0.4712, 0.4379, 0.0515)),
             ('engine', 'hull', 'engine', (0.5083, 0.4681, 0.6023), (0.334, 0.4163, 0.3424)),
@@ -4002,7 +4238,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4661, 0.7115, 0.6623), (0.3909, 0.2319, 0.1272)),
@@ -4024,7 +4259,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         4,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.4843, 0.5561), (0.4723, 0.1999, 0.0971)),
@@ -4048,7 +4282,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5015, 0.2034, 0.6401), (0.4316, 0.1518, 0.2007)),
             ('engine', 'hull', 'engine', (0.3451, 0.4778, 0.239), (0.3059, 0.3416, 0.1324)),
@@ -4070,7 +4303,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5094, 0.2824), (0.4664, 0.2683, 0.2117)),
             ('engine', 'hull', 'engine', (0.5027, 0.2041, 0.5023), (0.2852, 0.196, 0.0949)),
@@ -4078,7 +4310,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.884, 0.3931, 0.7367), (0.0839, 0.0988, 0.022)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3241, 0.7584, 0.5993), (0.0808, 0.2416, 0.2322)),
             ('engine', 'hull', 'transmission', (0.5, 0.1636, 0.3898), (0.2808, 0.1497, 0.3167)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6281, 0.714, 0.415), (0.0746, 0.1994, 0.0834)),
@@ -4094,7 +4325,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5094, 0.2824), (0.4664, 0.2683, 0.2117)),
             ('engine', 'hull', 'engine', (0.5027, 0.2041, 0.5023), (0.2852, 0.196, 0.0949)),
@@ -4102,7 +4332,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.884, 0.3931, 0.7367), (0.0839, 0.0988, 0.022)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3241, 0.7584, 0.5993), (0.0808, 0.2416, 0.2322)),
             ('engine', 'hull', 'transmission', (0.5, 0.1636, 0.3898), (0.2808, 0.1497, 0.3167)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6281, 0.714, 0.415), (0.0746, 0.1994, 0.0834)),
@@ -4117,7 +4346,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         4,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.494, 0.431, 0.585), (0.48, 0.3686, 0.2317)),
@@ -4137,7 +4365,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4696, 0.1679), (0.4566, 0.3152, 0.1628)),
@@ -4159,16 +4386,12 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4977, 0.5585, 0.1654), (0.48, 0.1335, 0.1417)),
             ('engine', 'hull', 'engine', (0.5006, 0.1848, 0.6709), (0.12, 0.1682, 0.1592)),
             ('fuelTank', 'hull', 'fuelTank', (0.5038, 0.1034, 0.5363), (0.378, 0.0897, 0.1167)),
             ('radio', 'hull', 'radio', (0.8243, 0.8068, 0.4745), (0.0374, 0.0392, 0.0255)),
             ('engine', 'hull', 'transmission', (0.4974, 0.1912, 0.9186), (0.3367, 0.1552, 0.0574)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7592, 0.618, 0.4627), (0.0548, 0.1746, 0.0546)),
@@ -4182,7 +4405,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4963, 0.7069, 0.3239), (0.4062, 0.1248, 0.1496)),
@@ -4209,7 +4431,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4963, 0.7069, 0.3239), (0.4062, 0.1248, 0.1496)),
             ('engine', 'hull', 'engine', (0.502, 0.4769, 0.5257), (0.4011, 0.3491, 0.1176)),
@@ -4234,7 +4455,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5011, 0.671, 0.1813), (0.4575, 0.1425, 0.0723)),
@@ -4256,7 +4476,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4887, 0.5003), (0.4664, 0.343, 0.203)),
             ('engine', 'hull', 'engine', (0.5017, 0.2727, 0.2091), (0.1583, 0.2218, 0.104)),
@@ -4264,7 +4483,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7963, 0.6073, 0.6296), (0.0474, 0.0646, 0.0572)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4965, 0.7665, 0.7182), (0.1734, 0.2335, 0.1373)),
             ('engine', 'hull', 'transmission', (0.5023, 0.192, 0.8506), (0.2634, 0.1215, 0.1125)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6544, 0.6733, 0.6315), (0.0708, 0.2164, 0.0682)),
@@ -4280,7 +4498,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4887, 0.5003), (0.4664, 0.343, 0.203)),
             ('engine', 'hull', 'engine', (0.5017, 0.2727, 0.2091), (0.1583, 0.2218, 0.104)),
@@ -4288,7 +4505,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7963, 0.6073, 0.6296), (0.0474, 0.0646, 0.0572)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4965, 0.7665, 0.7182), (0.1734, 0.2335, 0.1373)),
             ('engine', 'hull', 'transmission', (0.5023, 0.192, 0.8506), (0.2634, 0.1215, 0.1125)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6544, 0.6733, 0.6315), (0.0708, 0.2164, 0.0682)),
@@ -4304,16 +4520,12 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4985, 0.3924, 0.267), (0.48, 0.1128, 0.0442)),
             ('engine', 'hull', 'engine', (0.5003, 0.231, 0.7386), (0.2793, 0.2067, 0.0739)),
             ('fuelTank', 'hull', 'fuelTank', (0.5003, 0.391, 0.7249), (0.48, 0.061, 0.066)),
             ('radio', 'hull', 'radio', (0.0307, 0.5156, 0.5478), (0.0246, 0.0593, 0.0286)),
             ('engine', 'hull', 'transmission', (0.5029, 0.1901, 0.8926), (0.2726, 0.0816, 0.075)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.1134, 0.4907, 0.5174), (0.0408, 0.1778, 0.034)),
@@ -4328,7 +4540,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.559, 0.6099), (0.2787, 0.3769, 0.1124)),
@@ -4353,7 +4564,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3921, 0.4318, 0.6204), (0.3548, 0.4017, 0.2358)),
@@ -4374,7 +4584,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3921, 0.4318, 0.6204), (0.3548, 0.4017, 0.2358)),
@@ -4396,7 +4605,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.5721, 0.3323), (0.396, 0.0689, 0.1696)),
             ('engine', 'hull', 'engine', (0.4526, 0.3416, 0.6289), (0.1839, 0.2711, 0.1016)),
@@ -4404,8 +4612,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.718, 0.5481, 0.5666), (0.055, 0.0697, 0.0387)),
             ('engine', 'hull', 'transmission', (0.5, 0.1832, 0.9206), (0.2811, 0.0961, 0.014)),
             ('turretRotator', 'hull', 'turretRotator', (0.4995, 0.5794, 0.3715), (0.1776, 0.0144, 0.0586)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
         ),
         (
             ('turret', 'crew_00', (0.7619, 0.5117, 0.6788), (0.0943, 0.2396, 0.1627)),
@@ -4419,7 +4625,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.2897, 0.5429), (0.48, 0.2422, 0.1218)),
@@ -4442,7 +4647,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5174, 0.7177, 0.5463), (0.4529, 0.154, 0.1533)),
@@ -4468,7 +4672,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4982, 0.3971, 0.4261), (0.48, 0.3781, 0.1055)),
             ('engine', 'hull', 'engine', (0.4982, 0.4364, 0.1928), (0.2846, 0.3816, 0.0995)),
@@ -4492,7 +4695,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6956, 0.653, 0.4326), (0.2424, 0.1359, 0.1508)),
             ('engine', 'hull', 'engine', (0.5, 0.2615, 0.4952), (0.3091, 0.4109, 0.4724)),
@@ -4512,7 +4714,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4978, 0.7132, 0.5845), (0.3845, 0.1691, 0.2073)),
@@ -4536,7 +4737,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4975, 0.7023, 0.5844), (0.3835, 0.1716, 0.2072)),
@@ -4562,7 +4762,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5032, 0.4757, 0.598), (0.4708, 0.4485, 0.1214)),
             ('engine', 'hull', 'engine', (0.5, 0.4087, 0.2663), (0.2987, 0.3575, 0.0811)),
@@ -4585,7 +4784,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.7471, 0.246), (0.4521, 0.2028, 0.202)),
@@ -4611,16 +4809,12 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4255, 0.1517), (0.3422, 0.1018, 0.0859)),
             ('engine', 'hull', 'engine', (0.5, 0.2546, 0.6706), (0.1946, 0.2261, 0.1295)),
             ('fuelTank', 'hull', 'fuelTank', (0.4984, 0.428, 0.6442), (0.3464, 0.0606, 0.103)),
             ('radio', 'hull', 'radio', (0.6759, 0.405, 0.8615), (0.0211, 0.0704, 0.0239)),
             ('engine', 'hull', 'transmission', (0.5, 0.2511, 0.9453), (0.2122, 0.1123, 0.0364)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7464, 0.6019, 0.4154), (0.0517, 0.2046, 0.0568)),
@@ -4635,7 +4829,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6994, 0.5881, 0.4888), (0.2315, 0.3228, 0.1214)),
@@ -4657,7 +4850,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4997, 0.6024), (0.4471, 0.4315, 0.2435)),
@@ -4682,7 +4874,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4997, 0.6024), (0.4471, 0.4315, 0.2435)),
             ('engine', 'hull', 'engine', (0.5076, 0.5058, 0.2064), (0.4391, 0.4159, 0.1485)),
@@ -4706,7 +4897,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4887, 0.5003), (0.4664, 0.343, 0.203)),
             ('engine', 'hull', 'engine', (0.5017, 0.2727, 0.2091), (0.1583, 0.2218, 0.104)),
@@ -4714,7 +4904,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7963, 0.6073, 0.6296), (0.0474, 0.0646, 0.0572)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4965, 0.7665, 0.7182), (0.1734, 0.2335, 0.1373)),
             ('engine', 'hull', 'transmission', (0.5023, 0.192, 0.8506), (0.2634, 0.1215, 0.1125)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6544, 0.6733, 0.6315), (0.0708, 0.2164, 0.0682)),
@@ -4730,7 +4919,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4887, 0.5003), (0.4664, 0.343, 0.203)),
             ('engine', 'hull', 'engine', (0.5017, 0.2727, 0.2091), (0.1583, 0.2218, 0.104)),
@@ -4738,7 +4926,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7963, 0.6073, 0.6296), (0.0474, 0.0646, 0.0572)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4965, 0.7665, 0.7182), (0.1734, 0.2335, 0.1373)),
             ('engine', 'hull', 'transmission', (0.5023, 0.192, 0.8506), (0.2634, 0.1215, 0.1125)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6544, 0.6733, 0.6315), (0.0708, 0.2164, 0.0682)),
@@ -4753,7 +4940,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5011, 0.7517, 0.5367), (0.4423, 0.1895, 0.196)),
@@ -4778,7 +4964,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.2898, 0.6107), (0.2734, 0.2459, 0.1481)),
             ('engine', 'hull', 'engine', (0.5001, 0.4489, 0.3361), (0.2707, 0.4191, 0.0965)),
@@ -4802,7 +4987,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5044, 0.4039, 0.6336), (0.3585, 0.2893, 0.1409)),
             ('engine', 'hull', 'engine', (0.4998, 0.4528, 0.1924), (0.3633, 0.33, 0.1689)),
@@ -4825,7 +5009,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.5896, 0.3708), (0.4421, 0.2563, 0.2644)),
             ('engine', 'hull', 'engine', (0.5005, 0.2247, 0.5287), (0.1686, 0.2073, 0.1039)),
@@ -4833,7 +5016,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.5751, 0.6062, 0.1003), (0.1118, 0.118, 0.0416)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3453, 0.7728, 0.5264), (0.0301, 0.2272, 0.2917)),
             ('engine', 'hull', 'transmission', (0.5005, 0.1534, 0.7992), (0.2612, 0.1304, 0.1424)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.6589, 0.6893, 0.2635), (0.0699, 0.2255, 0.0694)),
@@ -4848,7 +5030,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.227, 0.4042), (0.1938, 0.2086, 0.1199)),
             ('engine', 'hull', 'engine', (0.4966, 0.2179, 0.6411), (0.1634, 0.1995, 0.1119)),
@@ -4856,7 +5037,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7875, 0.3806, 0.7225), (0.0576, 0.0583, 0.0364)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.498, 0.7028, 0.5984), (0.1785, 0.2488, 0.2438)),
             ('engine', 'hull', 'transmission', (0.4966, 0.1724, 0.8522), (0.2029, 0.095, 0.0948)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.609, 0.6823, 0.405), (0.0518, 0.1862, 0.0529)),
@@ -4871,7 +5051,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4977, 0.7622, 0.5954), (0.3761, 0.1281, 0.2086)),
@@ -4896,7 +5075,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5007, 0.3913, 0.1421), (0.4726, 0.0829, 0.06)),
@@ -4918,7 +5096,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3287, 0.5094), (0.279, 0.3039, 0.1822)),
@@ -4942,7 +5119,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5057, 0.7505, 0.6152), (0.4427, 0.1576, 0.2049)),
             ('engine', 'hull', 'engine', (0.5, 0.4806, 0.2901), (0.1733, 0.4263, 0.106)),
@@ -4964,7 +5140,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('radio',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4935, 0.3386, 0.4833), (0.3703, 0.2709, 0.1896)),
@@ -4986,7 +5161,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('radio',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4935, 0.3386, 0.4833), (0.3703, 0.2709, 0.1896)),
@@ -5008,7 +5182,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5038, 0.499, 0.4975), (0.2724, 0.3767, 0.1971)),
@@ -5033,7 +5206,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.8228, 0.5032), (0.48, 0.1085, 0.1863)),
             ('engine', 'hull', 'engine', (0.5, 0.4831, 0.2271), (0.3339, 0.4177, 0.0724)),
@@ -5054,7 +5226,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5002, 0.4364, 0.4999), (0.48, 0.4384, 0.2041)),
@@ -5077,7 +5248,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.6483, 0.565), (0.4793, 0.2758, 0.1214)),
@@ -5102,7 +5272,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4995, 0.7665, 0.5467), (0.4778, 0.1928, 0.1167)),
             ('engine', 'hull', 'engine', (0.4988, 0.476, 0.2422), (0.312, 0.4226, 0.1865)),
@@ -5124,7 +5293,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5016, 0.3539, 0.6924), (0.3352, 0.2904, 0.2079)),
@@ -5148,7 +5316,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3887, 0.4423, 0.8203), (0.1796, 0.3711, 0.0849)),
             ('engine', 'hull', 'engine', (0.5, 0.4371, 0.2693), (0.1815, 0.4122, 0.1212)),
@@ -5170,7 +5337,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.5153, 0.5359), (0.4785, 0.3346, 0.1405)),
@@ -5195,7 +5361,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3926, 0.435, 0.8194), (0.1801, 0.3727, 0.0853)),
             ('engine', 'hull', 'engine', (0.5, 0.4298, 0.2308), (0.1821, 0.414, 0.1218)),
@@ -5219,7 +5384,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.6615, 0.2287), (0.457, 0.161, 0.2035)),
             ('engine', 'hull', 'engine', (0.5, 0.4358, 0.6677), (0.2502, 0.4093, 0.1268)),
@@ -5242,7 +5406,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4997, 0.4103, 0.2756), (0.4502, 0.242, 0.0852)),
@@ -5262,7 +5425,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.6569, 0.2917), (0.48, 0.205, 0.1028)),
@@ -5284,7 +5446,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.5541, 0.4732), (0.4323, 0.3027, 0.1925)),
@@ -5305,7 +5466,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5059, 0.8032, 0.6015), (0.4607, 0.1394, 0.2192)),
@@ -5329,7 +5489,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         9,
         (('commander',), ('radioman',), ('driver',), ('gunner',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5014, 0.2597, 0.0692), (0.4041, 0.2312, 0.0542)),
@@ -5352,7 +5511,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5024, 0.4193, 0.1514), (0.3037, 0.2548, 0.0662)),
@@ -5375,7 +5533,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5024, 0.4193, 0.1514), (0.3037, 0.2548, 0.0662)),
@@ -5398,7 +5555,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3509, 0.4209), (0.3517, 0.2994, 0.2138)),
@@ -5420,7 +5576,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2529, 0.4694, 0.4846), (0.093, 0.2371, 0.112)),
             ('engine', 'hull', 'engine', (0.8042, 0.4767, 0.2246), (0.1518, 0.3063, 0.1255)),
@@ -5440,7 +5595,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5023, 0.4862, 0.5586), (0.441, 0.4606, 0.1331)),
@@ -5464,7 +5618,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.492, 0.3395), (0.3139, 0.4366, 0.0398)),
             ('engine', 'hull', 'engine', (0.497, 0.48, 0.1998), (0.2668, 0.4338, 0.0948)),
@@ -5486,7 +5639,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.492, 0.3395), (0.3139, 0.4366, 0.0398)),
@@ -5510,7 +5662,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4149, 0.3454), (0.3139, 0.4382, 0.0397)),
             ('engine', 'hull', 'engine', (0.5001, 0.4011, 0.1597), (0.3586, 0.4372, 0.1409)),
@@ -5531,7 +5682,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         4,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5036, 0.2427, 0.5343), (0.3504, 0.2081, 0.1547)),
@@ -5556,7 +5706,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4822, 0.2133, 0.5232), (0.2885, 0.1769, 0.0918)),
             ('engine', 'hull', 'engine', (0.4864, 0.3862, 0.2351), (0.1603, 0.3548, 0.1386)),
@@ -5579,7 +5728,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.8738, 0.8373, 0.5712), (0.083, 0.1238, 0.1525)),
@@ -5605,7 +5753,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.8825, 0.8576, 0.5721), (0.086, 0.1178, 0.1525)),
             ('engine', 'hull', 'engine', (0.5026, 0.4246, 0.1705), (0.1887, 0.3674, 0.144)),
@@ -5628,7 +5775,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4972, 0.8151, 0.5449), (0.4772, 0.1543, 0.1248)),
@@ -5654,7 +5800,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.606, 0.5093, 0.5279), (0.3724, 0.4472, 0.1213)),
             ('engine', 'hull', 'engine', (0.5019, 0.5093, 0.1457), (0.1403, 0.4472, 0.1367)),
@@ -5678,7 +5823,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.606, 0.5093, 0.5279), (0.3724, 0.4472, 0.1213)),
@@ -5704,7 +5848,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.9121, 0.8444, 0.5666), (0.0832, 0.1251, 0.1525)),
             ('engine', 'hull', 'engine', (0.5031, 0.4156, 0.165), (0.1825, 0.3638, 0.144)),
@@ -5729,7 +5872,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2599, 0.2945, 0.6169), (0.0557, 0.3516, 0.1124)),
             ('engine', 'hull', 'engine', (0.4993, 0.3603, 0.1901), (0.1717, 0.4199, 0.1765)),
@@ -5752,7 +5894,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2599, 0.2945, 0.6169), (0.0557, 0.3516, 0.1124)),
@@ -5777,7 +5918,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5072, 0.1216, 0.5178), (0.2947, 0.138, 0.1432)),
             ('engine', 'hull', 'engine', (0.4998, 0.3468, 0.2281), (0.3087, 0.4533, 0.1422)),
@@ -5801,7 +5941,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5005, 0.3683, 0.5471), (0.3572, 0.322, 0.1182)),
             ('engine', 'hull', 'engine', (0.4979, 0.4017, 0.2825), (0.1694, 0.3254, 0.1333)),
@@ -5822,7 +5961,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6334, 0.3796, 0.682), (0.1549, 0.2296, 0.2196)),
@@ -5846,7 +5984,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6334, 0.3796, 0.682), (0.1549, 0.2296, 0.2196)),
             ('engine', 'hull', 'engine', (0.5, 0.425, 0.2226), (0.2865, 0.4289, 0.159)),
@@ -5868,7 +6005,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2902, 0.3321, 0.6105), (0.0389, 0.3065, 0.133)),
@@ -5892,7 +6028,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('ammoBay',),
         (
             ('engine', 'hull', 'engine', (0.5031, 0.4796, 0.1619), (0.1853, 0.4226, 0.1108)),
@@ -5915,7 +6050,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5173, 0.6482), (0.48, 0.4646, 0.1096)),
@@ -5942,7 +6076,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'loader'), ('driver',), ('gunner',), ('radioman',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.7163, 0.5811), (0.48, 0.2222, 0.1173)),
             ('engine', 'hull', 'engine', (0.5983, 0.4226, 0.3604), (0.2002, 0.3736, 0.1004)),
@@ -5965,7 +6098,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'loader'), ('driver',), ('gunner',), ('radioman',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.7163, 0.5811), (0.48, 0.2222, 0.1173)),
             ('engine', 'hull', 'engine', (0.5983, 0.4226, 0.3604), (0.2002, 0.3736, 0.1004)),
@@ -5987,7 +6119,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.495, 0.6154), (0.48, 0.4621, 0.075)),
@@ -6013,7 +6144,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4997, 0.4685, 0.6152), (0.48, 0.4341, 0.0749)),
             ('engine', 'hull', 'engine', (0.4997, 0.3035, 0.2804), (0.26, 0.2673, 0.12)),
@@ -6037,7 +6167,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5141, 0.6552), (0.4793, 0.4614, 0.1331)),
@@ -6064,7 +6193,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3984, 0.6645), (0.48, 0.3791, 0.1436)),
             ('engine', 'hull', 'engine', (0.5, 0.2558, 0.2703), (0.2818, 0.235, 0.1117)),
@@ -6089,7 +6217,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4611, 0.5985), (0.48, 0.4453, 0.0886)),
             ('engine', 'hull', 'engine', (0.5, 0.2524, 0.2583), (0.2821, 0.235, 0.1097)),
@@ -6110,11 +6237,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_05', (0.5118, 0.3953, 0.3458), (0.0847, 0.3953, 0.1287)),
         ),
     ),
+    ('poland', 'pl03pzvpoland'): (
+        'mediumTank',
+        6,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5122, 0.7338, 0.5872), (0.4362, 0.1546, 0.2213)),
+            ('engine', 'hull', 'engine', (0.5013, 0.4691, 0.2449), (0.1728, 0.4181, 0.1128)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5013, 0.4658, 0.1835), (0.2597, 0.4142, 0.1721)),
+            ('radio', 'hull', 'radio', (0.8293, 0.7794, 0.7313), (0.0503, 0.1309, 0.067)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.3296, 0.9743, 0.7949), (0.0194, 0.0257, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5013, 0.2853, 0.834), (0.2538, 0.219, 0.1449)),
+            ('turretRotator', 'hull', 'turretRotator', (0.503, 0.9625, 0.4813), (0.213, 0.0276, 0.1058)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3436, 0.9796, 0.3216), (0.1305, 0.0145, 0.1343)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3597, 0.5658, 0.3605), (0.0906, 0.3503, 0.1422)),
+            ('turret', 'crew_01', (0.3826, 0.3558, 0.6323), (0.0906, 0.3558, 0.1418)),
+            ('hull', 'crew_02', (0.3072, 0.4244, 0.8074), (0.0679, 0.3788, 0.07)),
+            ('hull', 'crew_03', (0.6972, 0.4244, 0.8074), (0.0679, 0.3788, 0.07)),
+            ('turret', 'crew_04', (0.6479, 0.4541, 0.3914), (0.1892, 0.3503, 0.1901)),
+        ),
+    ),
     ('sweden', 's01strv74a2'): (
         'mediumTank',
         6,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5187, 0.596, 0.0739), (0.4246, 0.1807, 0.0728)),
@@ -6138,7 +6287,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5058, 0.4222, 0.6096), (0.2961, 0.3591, 0.2111)),
@@ -6160,7 +6308,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.501, 0.3354, 0.5739), (0.3809, 0.3196, 0.1205)),
@@ -6181,7 +6328,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5002, 0.4499, 0.6014), (0.3137, 0.3779, 0.2128)),
@@ -6204,7 +6350,6 @@ CONSOLE_LAYOUTS_0922 = {
         1,
         (('commander', 'gunner'), ('driver',), ('loader',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.527, 0.2354), (0.3024, 0.1475, 0.0697)),
             ('engine', 'hull', 'engine', (0.5, 0.3817, 0.7536), (0.3024, 0.2059, 0.1405)),
@@ -6226,7 +6371,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3108, 0.3242, 0.1907), (0.3037, 0.2694, 0.1879)),
@@ -6246,7 +6390,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.4512, 0.6055), (0.2945, 0.3596, 0.211)),
@@ -6270,7 +6413,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.1096, 0.4589), (0.3392, 0.1054, 0.2003)),
@@ -6290,7 +6432,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5, 0.6658, 0.1427), (0.1021, 0.2064, 0.0612)),
@@ -6310,7 +6451,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         9,
         (('commander', 'gunner'), ('driver', 'gunner'), ('radioman', 'loader')),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4356, 0.1975), (0.2835, 0.2701, 0.0856)),
@@ -6329,7 +6469,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'gunner'), ('driver', 'gunner'), ('radioman', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4336, 0.2013), (0.2832, 0.2688, 0.0852)),
@@ -6349,7 +6488,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4996, 0.3684, 0.5816), (0.3541, 0.3107, 0.1207)),
@@ -6369,7 +6507,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.3603, 0.5511), (0.3149, 0.3252, 0.1336)),
@@ -6393,7 +6530,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.2665, 0.4488), (0.2697, 0.2085, 0.1221)),
@@ -6414,7 +6550,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4988, 0.3294, 0.5589), (0.3626, 0.3239, 0.1267)),
@@ -6434,7 +6569,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5006, 0.7383, 0.0766), (0.3073, 0.149, 0.0631)),
@@ -6458,7 +6592,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5024, 0.6753, 0.0771), (0.3698, 0.1975, 0.0757)),
@@ -6479,7 +6612,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         4,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4156, 0.398, 0.633), (0.3999, 0.3393, 0.2235)),
@@ -6499,7 +6631,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.3473, 0.4303), (0.2709, 0.2383, 0.1198)),
@@ -6519,7 +6650,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'gunner'), ('driver', 'gunner'), ('radioman', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6419, 0.207, 0.1881), (0.1978, 0.1823, 0.1073)),
@@ -6539,7 +6669,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander', 'gunner'), ('driver', 'gunner'), ('radioman', 'loader')),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.499, 0.4278, 0.1789), (0.2697, 0.2823, 0.0922)),
@@ -6558,7 +6687,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4983, 0.4889, 0.711), (0.2351, 0.3986, 0.1995)),
@@ -6579,7 +6707,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('driver',), ('gunner',), ('loader',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4983, 0.4889, 0.711), (0.2351, 0.3986, 0.1995)),
@@ -6603,7 +6730,6 @@ CONSOLE_LAYOUTS_0922 = {
         1,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3177, 0.5968, 0.1482), (0.2746, 0.4433, 0.023)),
             ('engine', 'hull', 'engine', (0.4859, 0.4041, 0.7783), (0.4505, 0.2604, 0.1956)),
@@ -6611,7 +6737,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.1882, 0.3003, 0.453), (0.1159, 0.1389, 0.1182)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.7799, 0.9744, 0.6984), (0.173, 0.01, 0.0334)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.5002, 0.7751, 0.5976), (0.415, 0.1398, 0.3637)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.5092, 0.5094, 0.2884), (0.1231, 0.4485, 0.2236)),
@@ -6626,7 +6751,6 @@ CONSOLE_LAYOUTS_0922 = {
         1,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3177, 0.5968, 0.1482), (0.2746, 0.4433, 0.023)),
             ('engine', 'hull', 'engine', (0.4859, 0.4041, 0.7783), (0.4505, 0.2604, 0.1956)),
@@ -6634,7 +6758,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.1882, 0.3003, 0.453), (0.1159, 0.1389, 0.1182)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.7799, 0.9744, 0.6984), (0.173, 0.01, 0.0334)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.5002, 0.7751, 0.5976), (0.415, 0.1398, 0.3637)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.5092, 0.5094, 0.2884), (0.1231, 0.4485, 0.2236)),
@@ -6648,7 +6771,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander',), ('gunner',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4965, 0.361, 0.536), (0.4291, 0.2367, 0.123)),
@@ -6669,11 +6791,31 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_05', (0.6656, 0.4188, 0.5466), (0.1348, 0.3869, 0.1502)),
         ),
     ),
+    ('uk', 'gb04valentine'): (
+        'lightTank',
+        4,
+        (('commander', 'gunner', 'radioman'), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5227, 0.4509, 0.6114), (0.4751, 0.2685, 0.1373)),
+            ('engine', 'hull', 'engine', (0.5055, 0.4258, 0.3532), (0.3553, 0.3092, 0.101)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5015, 0.4449, 0.159), (0.4346, 0.2786, 0.0868)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9389, 0.8378), (0.1543, 0.0256, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5055, 0.2763, 0.1318), (0.4657, 0.1233, 0.1137)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5176, 0.943, 0.6114), (0.3504, 0.0113, 0.0905)),
+            ('radio', 'turret', 'radio', (0.5327, 0.6879, 0.1623), (0.23, 0.1196, 0.1073)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.1664, 0.9771, 0.7024), (0.031, 0.0229, 0.0182)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3206, 0.4662, 0.666), (0.1566, 0.4662, 0.1723)),
+            ('hull', 'crew_01', (0.5038, 0.4426, 0.8699), (0.1576, 0.3938, 0.0949)),
+            ('turret', 'crew_02', (0.7002, 0.529, 0.4641), (0.1786, 0.4229, 0.1936)),
+        ),
+    ),
     ('uk', 'gb05vickersmediummkii'): (
         'mediumTank',
         2,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5061, 0.4576, 0.4263), (0.3159, 0.1867, 0.1791)),
@@ -6697,7 +6839,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5061, 0.4576, 0.4263), (0.3159, 0.1867, 0.1791)),
             ('engine', 'hull', 'engine', (0.3644, 0.4945, 0.7822), (0.1965, 0.22, 0.1687)),
@@ -6719,7 +6860,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4992, 0.4088, 0.6022), (0.3216, 0.2247, 0.1216)),
@@ -6744,7 +6884,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.486, 0.4295, 0.5198), (0.2371, 0.2192, 0.0892)),
             ('engine', 'hull', 'engine', (0.4996, 0.4783, 0.2554), (0.1855, 0.359, 0.114)),
@@ -6762,11 +6901,56 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_03', (0.662, 0.3889, 0.4561), (0.199, 0.3885, 0.1701)),
         ),
     ),
+    ('uk', 'gb08churchilli'): (
+        'heavyTank',
+        5,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('gunner',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5019, 0.3913, 0.5245), (0.4754, 0.3555, 0.0767)),
+            ('engine', 'hull', 'engine', (0.4989, 0.4923, 0.2773), (0.2341, 0.4079, 0.1272)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5035, 0.3377, 0.3219), (0.4775, 0.1308, 0.1184)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5025, 0.9684, 0.7942), (0.2339, 0.0316, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5019, 0.6965, 0.0883), (0.2558, 0.2073, 0.0578)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5001, 0.9369, 0.5431), (0.1734, 0.0162, 0.0873)),
+            ('radio', 'turret', 'radio', (0.4472, 0.4942, 0.1033), (0.1516, 0.1824, 0.0702)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4566, 0.9606, 0.6134), (0.2549, 0.0394, 0.0523)),
+        ),
+        (
+            ('turret', 'crew_00', (0.341, 0.5054, 0.3652), (0.1039, 0.4232, 0.1261)),
+            ('hull', 'crew_01', (0.6543, 0.4703, 0.7969), (0.083, 0.4418, 0.0696)),
+            ('turret', 'crew_02', (0.3341, 0.4519, 0.5961), (0.1222, 0.4232, 0.1261)),
+            ('hull', 'crew_03', (0.324, 0.4703, 0.7531), (0.083, 0.4418, 0.0696)),
+            ('turret', 'crew_04', (0.6566, 0.4307, 0.4708), (0.1735, 0.4307, 0.1769)),
+        ),
+    ),
+    ('uk', 'gb08churchilliigr'): (
+        'heavyTank',
+        5,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('gunner',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5019, 0.3913, 0.5245), (0.4754, 0.3555, 0.0767)),
+            ('engine', 'hull', 'engine', (0.4989, 0.4923, 0.2773), (0.2341, 0.4079, 0.1272)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5035, 0.3377, 0.3219), (0.4775, 0.1308, 0.1184)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5025, 0.9684, 0.7942), (0.2339, 0.0316, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5019, 0.6965, 0.0883), (0.2558, 0.2073, 0.0578)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5001, 0.9369, 0.5431), (0.1734, 0.0162, 0.0873)),
+            ('radio', 'turret', 'radio', (0.4472, 0.4942, 0.1033), (0.1516, 0.1824, 0.0702)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4566, 0.9606, 0.6134), (0.2549, 0.0394, 0.0523)),
+        ),
+        (
+            ('turret', 'crew_00', (0.341, 0.5054, 0.3652), (0.1039, 0.4232, 0.1261)),
+            ('hull', 'crew_01', (0.6543, 0.4703, 0.7969), (0.083, 0.4418, 0.0696)),
+            ('turret', 'crew_02', (0.3341, 0.4519, 0.5961), (0.1222, 0.4232, 0.1261)),
+            ('hull', 'crew_03', (0.324, 0.4703, 0.7531), (0.083, 0.4418, 0.0696)),
+            ('turret', 'crew_04', (0.6566, 0.4307, 0.4708), (0.1735, 0.4307, 0.1769)),
+        ),
+    ),
     ('uk', 'gb09churchillvii'): (
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.414, 0.5528), (0.4746, 0.2643, 0.0797)),
@@ -6792,7 +6976,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('driver',), ('radioman',), ('gunner',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.3998, 0.6085), (0.48, 0.2658, 0.1942)),
             ('engine', 'hull', 'engine', (0.5023, 0.4778, 0.313), (0.2144, 0.4183, 0.1114)),
@@ -6816,7 +6999,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.507, 0.408, 0.629), (0.245, 0.3274, 0.257)),
             ('engine', 'hull', 'engine', (0.5027, 0.473, 0.26), (0.1296, 0.4351, 0.1042)),
@@ -6839,7 +7021,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.507, 0.408, 0.629), (0.245, 0.3274, 0.257)),
             ('engine', 'hull', 'engine', (0.5027, 0.473, 0.26), (0.1296, 0.4351, 0.1042)),
@@ -6861,7 +7042,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5034, 0.4089, 0.628), (0.245, 0.3274, 0.2634)),
@@ -6886,7 +7066,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5037, 0.622, 0.2925), (0.2459, 0.3862, 0.1559)),
             ('engine', 'hull', 'engine', (0.5, 0.6667, 0.3741), (0.234, 0.4003, 0.347)),
@@ -6894,7 +7073,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.6232, 0.98, 0.8501), (0.0325, 0.0176, 0.01)),
             ('radio', 'turret', 'radio', (0.2651, 0.7658, 0.2481), (0.1017, 0.0717, 0.1109)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.6415, 0.9116, 0.4031), (0.227, 0.1242, 0.2134)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.5398, 0.7139, 0.1855), (0.0836, 0.2464, 0.0723)),
@@ -6908,7 +7086,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5037, 0.622, 0.2925), (0.2459, 0.3862, 0.1559)),
             ('engine', 'hull', 'engine', (0.5, 0.6667, 0.3741), (0.234, 0.4003, 0.347)),
@@ -6916,7 +7093,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.6232, 0.98, 0.8501), (0.0325, 0.0176, 0.01)),
             ('radio', 'turret', 'radio', (0.2651, 0.7658, 0.2481), (0.1017, 0.0717, 0.1109)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.6415, 0.9116, 0.4031), (0.227, 0.1242, 0.2134)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.5398, 0.7139, 0.1855), (0.0836, 0.2464, 0.0723)),
@@ -6929,7 +7105,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4965, 0.5233, 0.3667), (0.48, 0.3829, 0.1784)),
@@ -6953,7 +7128,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.4438, 0.525), (0.3103, 0.1316, 0.0914)),
             ('engine', 'hull', 'engine', (0.5, 0.4609, 0.2352), (0.2444, 0.3878, 0.0818)),
@@ -6975,7 +7149,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('gunner',), ('driver',), ('loader', 'radioman'), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7012, 0.2452, 0.4436), (0.2694, 0.1985, 0.1631)),
@@ -6999,7 +7172,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5322, 0.4821, 0.5982), (0.3276, 0.4238, 0.2637)),
             ('engine', 'hull', 'engine', (0.4905, 0.3855, 0.2145), (0.2854, 0.3118, 0.1067)),
@@ -7022,7 +7194,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4969, 0.2906, 0.66), (0.3781, 0.2532, 0.2295)),
             ('engine', 'hull', 'engine', (0.4981, 0.4571, 0.3107), (0.1921, 0.4205, 0.1066)),
@@ -7043,7 +7214,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.4526, 0.5801), (0.4046, 0.3374, 0.1786)),
@@ -7068,7 +7238,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.4526, 0.5801), (0.4046, 0.3374, 0.1786)),
             ('engine', 'hull', 'engine', (0.5006, 0.4513, 0.2512), (0.2295, 0.3801, 0.1262)),
@@ -7091,7 +7260,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.502, 0.4388, 0.5879), (0.4093, 0.3289, 0.1479)),
@@ -7116,7 +7284,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.4122, 0.6947), (0.236, 0.3919, 0.2011)),
             ('engine', 'hull', 'engine', (0.4904, 0.3978, 0.2923), (0.1117, 0.3961, 0.1041)),
@@ -7138,7 +7305,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.4122, 0.6947), (0.236, 0.3919, 0.2011)),
@@ -7162,7 +7328,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4342, 0.694), (0.231, 0.4085, 0.2105)),
             ('engine', 'hull', 'engine', (0.4912, 0.4191, 0.2965), (0.1093, 0.4129, 0.0967)),
@@ -7184,7 +7349,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         2,
         (('commander', 'gunner', 'radioman'), ('loader',), ('driver',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5032, 0.5233, 0.4607), (0.465, 0.1793, 0.104)),
@@ -7203,7 +7367,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         4,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5007, 0.4726, 0.4692), (0.3238, 0.0732, 0.1125)),
@@ -7225,7 +7388,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.765, 0.5711, 0.3745), (0.227, 0.2676, 0.0373)),
@@ -7247,7 +7409,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5019, 0.5315, 0.5535), (0.4519, 0.4137, 0.1144)),
@@ -7268,7 +7429,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1668, 0.3993), (0.4556, 0.1213, 0.0941)),
@@ -7289,7 +7449,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.6638, 0.2303), (0.4504, 0.1601, 0.1126)),
@@ -7310,7 +7469,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         10,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4961, 0.5581, 0.2715), (0.4236, 0.177, 0.1279)),
@@ -7334,7 +7492,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5021, 0.3681, 0.445), (0.2372, 0.34, 0.1125)),
@@ -7356,7 +7513,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4706, 0.6059), (0.374, 0.2689, 0.0788)),
@@ -7381,7 +7537,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4706, 0.6059), (0.374, 0.2689, 0.0788)),
             ('engine', 'hull', 'engine', (0.5064, 0.3791, 0.3444), (0.3125, 0.3604, 0.1713)),
@@ -7404,7 +7559,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         2,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5074, 0.3584, 0.2352), (0.4696, 0.0837, 0.0731)),
@@ -7419,11 +7573,30 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.7452, 0.5029, 0.4411), (0.1176, 0.3752, 0.1166)),
         ),
     ),
+    ('uk', 'gb40guncarrierchurchill'): (
+        'AT-SPG',
+        6,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4974, 0.2276, 0.5538), (0.4486, 0.1844, 0.1043)),
+            ('engine', 'hull', 'engine', (0.5, 0.2309, 0.3206), (0.2435, 0.1899, 0.1094)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5025, 0.2503, 0.3339), (0.48, 0.1205, 0.1103)),
+            ('radio', 'hull', 'radio', (0.3777, 0.5445, 0.4781), (0.1267, 0.0921, 0.027)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.6232, 0.7409, 0.7492), (0.0467, 0.2591, 0.0935)),
+            ('engine', 'hull', 'transmission', (0.5, 0.2733, 0.14), (0.2456, 0.1056, 0.0711)),
+        ),
+        (
+            ('hull', 'crew_00', (0.5987, 0.4193, 0.6398), (0.0838, 0.3142, 0.0304)),
+            ('hull', 'crew_01', (0.6542, 0.4046, 0.7388), (0.0838, 0.3136, 0.0376)),
+            ('hull', 'crew_02', (0.6258, 0.2638, 0.8357), (0.0838, 0.1892, 0.0697)),
+            ('hull', 'crew_03', (0.3549, 0.4193, 0.5946), (0.0838, 0.3142, 0.0304)),
+        ),
+    ),
     ('uk', 'gb41challenger'): (
         'AT-SPG',
         7,
         (('commander',), ('gunner',), ('driver',), ('loader',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3506, 0.358, 0.7048), (0.2506, 0.3232, 0.2665)),
@@ -7447,7 +7620,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander', 'gunner', 'radioman'), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4971, 0.8129, 0.5684), (0.48, 0.1899, 0.1126)),
@@ -7465,7 +7637,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.54, 0.4141, 0.2613), (0.3696, 0.2602, 0.2387)),
@@ -7485,7 +7656,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         ('surveyingDevice',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4991, 0.714, 0.503), (0.4105, 0.1655, 0.1446)),
@@ -7508,7 +7678,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('engine', 'hull', 'engine', (0.5, 0.4769, 0.6292), (0.1793, 0.4447, 0.1351)),
@@ -7532,7 +7701,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5012, 0.4654, 0.5305), (0.4508, 0.3993, 0.2002)),
             ('engine', 'hull', 'engine', (0.5, 0.4129, 0.2257), (0.2949, 0.3302, 0.1021)),
@@ -7551,11 +7719,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.2536, 0.4225, 0.5728), (0.1114, 0.3959, 0.1354)),
         ),
     ),
+    ('uk', 'gb51excelsior'): (
+        'heavyTank',
+        5,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4507, 0.5914), (0.1622, 0.4125, 0.1768)),
+            ('engine', 'hull', 'engine', (0.5, 0.4356, 0.2552), (0.2602, 0.4111, 0.1238)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5023, 0.2346, 0.2466), (0.2604, 0.1872, 0.1278)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.6154, 0.9565, 0.8374), (0.069, 0.0435, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.3172, 0.0809), (0.2602, 0.2282, 0.0505)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9129, 0.6005), (0.1072, 0.0163, 0.0676)),
+            ('radio', 'turret', 'radio', (0.4336, 0.5351, 0.1138), (0.2283, 0.1517, 0.0986)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2898, 0.9584, 0.7334), (0.0294, 0.0313, 0.0154)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3375, 0.511, 0.4271), (0.1192, 0.4572, 0.1283)),
+            ('turret', 'crew_01', (0.3973, 0.4577, 0.6335), (0.1192, 0.4577, 0.117)),
+            ('hull', 'crew_02', (0.6618, 0.4659, 0.8331), (0.0696, 0.4259, 0.0611)),
+            ('hull', 'crew_03', (0.3286, 0.4659, 0.8331), (0.0696, 0.4259, 0.0611)),
+            ('turret', 'crew_04', (0.6831, 0.4704, 0.4214), (0.1836, 0.4625, 0.1618)),
+        ),
+    ),
     ('uk', 'gb52a45'): (
         'heavyTank',
         7,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4988, 0.3558, 0.6474), (0.2608, 0.3223, 0.2433)),
@@ -7576,11 +7766,29 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.3255, 0.601, 0.4068), (0.0991, 0.2838, 0.0845)),
         ),
     ),
+    ('uk', 'gb57alecto'): (
+        'AT-SPG',
+        4,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        ('surveyingDevice', 'turretRotator'),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.6175, 0.6923), (0.3816, 0.0705, 0.1984)),
+            ('engine', 'hull', 'engine', (0.5, 0.3592, 0.2148), (0.2052, 0.3208, 0.1106)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4967, 0.2844, 0.4195), (0.3801, 0.257, 0.0577)),
+            ('radio', 'hull', 'radio', (0.8882, 0.8901, 0.5703), (0.0538, 0.0835, 0.0761)),
+            ('engine', 'hull', 'transmission', (0.4944, 0.2104, 0.2274), (0.2233, 0.1399, 0.0505)),
+        ),
+        (
+            ('hull', 'crew_00', (0.7035, 0.5577, 0.5919), (0.1125, 0.4388, 0.1014)),
+            ('hull', 'crew_01', (0.3419, 0.451, 0.8046), (0.124, 0.4182, 0.0958)),
+            ('hull', 'crew_02', (0.5, 0.5205, 0.4659), (0.0908, 0.4182, 0.0958)),
+            ('hull', 'crew_03', (0.2844, 0.5642, 0.5887), (0.0986, 0.423, 0.1014)),
+        ),
+    ),
     ('uk', 'gb58cruisermkiii'): (
         'lightTank',
         2,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4919, 0.3728, 0.5576), (0.4178, 0.3131, 0.1258)),
@@ -7604,7 +7812,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.496, 0.3713, 0.6056), (0.4312, 0.3272, 0.1227)),
             ('engine', 'hull', 'engine', (0.5001, 0.469, 0.3216), (0.2204, 0.4215, 0.1066)),
@@ -7627,7 +7834,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.4435, 0.57), (0.4441, 0.3842, 0.1274)),
             ('engine', 'hull', 'engine', (0.5, 0.3698, 0.3054), (0.2437, 0.3066, 0.1107)),
@@ -7649,7 +7855,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4961, 0.5713, 0.5815), (0.48, 0.318, 0.0544)),
@@ -7675,7 +7880,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5016, 0.3639, 0.5563), (0.3019, 0.2346, 0.1763)),
             ('engine', 'hull', 'engine', (0.5001, 0.4501, 0.2255), (0.2817, 0.3318, 0.1494)),
@@ -7696,7 +7900,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4966, 0.3714, 0.5611), (0.4169, 0.2329, 0.1255)),
@@ -7721,7 +7924,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4975, 0.2976, 0.6628), (0.2366, 0.1497, 0.2463)),
             ('engine', 'hull', 'engine', (0.4935, 0.574, 0.2527), (0.1637, 0.4095, 0.0946)),
@@ -7744,7 +7946,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5014, 0.4864, 0.5055), (0.2478, 0.3858, 0.1605)),
             ('engine', 'hull', 'engine', (0.5012, 0.2426, 0.1945), (0.0986, 0.2133, 0.1448)),
@@ -7753,7 +7954,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5006, 0.8715, 0.4826), (0.441, 0.0496, 0.1468)),
             ('engine', 'hull', 'transmission', (0.5012, 0.1747, 0.9339), (0.2193, 0.1494, 0.0497)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.2347, 0.9355, 0.2666), (0.0945, 0.0645, 0.0888)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.1701, 0.6567, 0.4317), (0.0651, 0.2481, 0.0571)),
@@ -7768,7 +7968,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5022, 0.4324, 0.5813), (0.2453, 0.351, 0.172)),
@@ -7791,7 +7990,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5022, 0.4324, 0.5813), (0.2453, 0.351, 0.172)),
@@ -7814,7 +8012,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         5,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5005, 0.4226, 0.4696), (0.2471, 0.3886, 0.0885)),
@@ -7835,7 +8032,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.502, 0.2826, 0.5502), (0.2713, 0.234, 0.1487)),
@@ -7857,7 +8053,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4968, 0.2707, 0.5577), (0.2692, 0.2228, 0.1485)),
@@ -7881,7 +8076,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4676, 0.4909, 0.3826), (0.4209, 0.3157, 0.1178)),
             ('engine', 'hull', 'engine', (0.4569, 0.5236, 0.7593), (0.4237, 0.3603, 0.1864)),
@@ -7901,7 +8095,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7547, 0.5828, 0.378), (0.2179, 0.2749, 0.0432)),
@@ -7922,7 +8115,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         8,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5019, 0.6151, 0.2231), (0.4326, 0.1665, 0.1213)),
@@ -7946,7 +8138,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'gunner'), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4962, 0.3646, 0.6096), (0.4079, 0.3185, 0.1326)),
             ('engine', 'hull', 'engine', (0.5002, 0.4488, 0.2322), (0.431, 0.4163, 0.2037)),
@@ -7969,7 +8160,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('engine', 'hull', 'engine', (0.5, 0.46, 0.2487), (0.1715, 0.4168, 0.1235)),
             ('fuelTank', 'hull', 'fuelTank', (0.4852, 0.4273, 0.2534), (0.2746, 0.4065, 0.1179)),
@@ -7991,7 +8181,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('engine', 'hull', 'engine', (0.5, 0.478, 0.3219), (0.1754, 0.4376, 0.0997)),
@@ -8016,7 +8205,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4238, 0.6463), (0.2357, 0.3038, 0.2629)),
             ('engine', 'hull', 'engine', (0.5034, 0.4808, 0.2385), (0.2759, 0.3992, 0.1024)),
@@ -8039,7 +8227,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.4526, 0.5801), (0.4046, 0.3374, 0.1786)),
             ('engine', 'hull', 'engine', (0.5006, 0.4513, 0.2178), (0.4617, 0.3801, 0.1596)),
@@ -8061,7 +8248,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4457, 0.694), (0.231, 0.4003, 0.2105)),
@@ -8086,7 +8272,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4238, 0.6463), (0.2357, 0.3038, 0.2629)),
             ('engine', 'hull', 'engine', (0.5034, 0.4808, 0.2385), (0.2759, 0.3992, 0.1024)),
@@ -8105,11 +8290,55 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_03', (0.3522, 0.4162, 0.4653), (0.082, 0.2696, 0.1077)),
         ),
     ),
+    ('uk', 'gb91superconqueror'): (
+        'heavyTank',
+        10,
+        (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.507, 0.3921, 0.6212), (0.2444, 0.3274, 0.2536)),
+            ('engine', 'hull', 'engine', (0.5028, 0.4571, 0.2567), (0.1293, 0.4351, 0.1029)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5038, 0.4571, 0.2443), (0.2476, 0.4351, 0.1153)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.646, 0.8702, 0.8339), (0.033, 0.0133, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5037, 0.3051, 0.0896), (0.2375, 0.1708, 0.0642)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9653, 0.5617), (0.277, 0.0347, 0.1528)),
+            ('ammoBay', 'turret', 'ammoBay', (0.2985, 0.201, 0.6102), (0.1153, 0.201, 0.092)),
+            ('radio', 'turret', 'radio', (0.3295, 0.6965, 0.2167), (0.0904, 0.0736, 0.1036)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4995, 0.9611, 0.2406), (0.0911, 0.0161, 0.01)),
+        ),
+        (
+            ('turret', 'crew_00', (0.4974, 0.7163, 0.1754), (0.0743, 0.2344, 0.0784)),
+            ('hull', 'crew_01', (0.6538, 0.4228, 0.8323), (0.0581, 0.3641, 0.0656)),
+            ('turret', 'crew_02', (0.5717, 0.5922, 0.3627), (0.1173, 0.2525, 0.1137)),
+            ('turret', 'crew_03', (0.3132, 0.5922, 0.4508), (0.1408, 0.2525, 0.1133)),
+        ),
+    ),
+    ('uk', 'gb92fv217'): (
+        'AT-SPG',
+        10,
+        (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.501, 0.5013, 0.4978), (0.4474, 0.48, 0.1312)),
+            ('engine', 'hull', 'engine', (0.5038, 0.3089, 0.26), (0.1299, 0.294, 0.1042)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5048, 0.3089, 0.2474), (0.2488, 0.294, 0.1168)),
+            ('radio', 'hull', 'radio', (0.4281, 0.8314, 0.3913), (0.0638, 0.1562, 0.0247)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.501, 0.8203, 0.7978), (0.3029, 0.013, 0.0147)),
+            ('engine', 'hull', 'transmission', (0.5048, 0.2062, 0.0907), (0.2386, 0.1154, 0.0651)),
+        ),
+        (
+            ('hull', 'crew_00', (0.2967, 0.7102, 0.4626), (0.0583, 0.2774, 0.0579)),
+            ('hull', 'crew_01', (0.7051, 0.5134, 0.8164), (0.0583, 0.2774, 0.0579)),
+            ('hull', 'crew_02', (0.2967, 0.7102, 0.6002), (0.0583, 0.2774, 0.0579)),
+            ('hull', 'crew_03', (0.2967, 0.5134, 0.8164), (0.0583, 0.2774, 0.0579)),
+            ('hull', 'crew_04', (0.7051, 0.7102, 0.6002), (0.0583, 0.2774, 0.0579)),
+            ('hull', 'crew_05', (0.7051, 0.7102, 0.4626), (0.0583, 0.2774, 0.0579)),
+        ),
+    ),
     ('usa', 'a02m2lt'): (
         'lightTank',
         2,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5188, 0.3661), (0.48, 0.3827, 0.1778)),
@@ -8133,7 +8362,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.4505, 0.5317), (0.3103, 0.1353, 0.0902)),
             ('engine', 'hull', 'engine', (0.5, 0.468, 0.2457), (0.2444, 0.3988, 0.0807)),
@@ -8155,7 +8383,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.4505, 0.5317), (0.3103, 0.1353, 0.0902)),
@@ -8179,7 +8406,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4996, 0.1316, 0.6792), (0.3031, 0.1231, 0.2423)),
             ('engine', 'hull', 'engine', (0.5, 0.2469, 0.1851), (0.218, 0.1749, 0.0683)),
@@ -8187,7 +8413,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.3115, 0.1678, 0.6334), (0.096, 0.1311, 0.0436)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.7355, 0.5271), (0.48, 0.222, 0.2289)),
             ('engine', 'hull', 'transmission', (0.499, 0.1309, 0.8291), (0.2914, 0.1035, 0.1216)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.17, 0.07, 0.17)),
         ),
         (
             ('hull', 'crew_00', (0.2355, 0.7263, 0.4264), (0.0888, 0.2155, 0.0538)),
@@ -8202,7 +8427,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4969, 0.4651, 0.5302), (0.4547, 0.4518, 0.1927)),
@@ -8227,7 +8451,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4969, 0.4651, 0.5302), (0.4547, 0.4518, 0.1927)),
             ('engine', 'hull', 'engine', (0.4984, 0.3747, 0.2037), (0.2184, 0.3401, 0.071)),
@@ -8250,7 +8473,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4985, 0.7696, 0.4992), (0.454, 0.1661, 0.0648)),
@@ -8275,7 +8497,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4985, 0.7696, 0.4992), (0.454, 0.1661, 0.0648)),
             ('engine', 'hull', 'engine', (0.5, 0.5205, 0.2321), (0.2181, 0.3534, 0.0687)),
@@ -8299,7 +8520,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4997, 0.3395, 0.6398), (0.48, 0.3116, 0.166)),
             ('engine', 'hull', 'engine', (0.4997, 0.3736, 0.2735), (0.1905, 0.3457, 0.133)),
@@ -8322,7 +8542,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7529, 0.5159, 0.6057), (0.16, 0.3965, 0.1427)),
@@ -8348,7 +8567,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7113, 0.4147, 0.893), (0.211, 0.3537, 0.0875)),
             ('engine', 'hull', 'engine', (0.498, 0.5056, 0.2759), (0.1898, 0.382, 0.1014)),
@@ -8371,7 +8589,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.2227, 0.2452), (0.2874, 0.1348, 0.1123)),
@@ -8391,7 +8608,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4985, 0.327, 0.5624), (0.283, 0.2286, 0.1224)),
@@ -8414,7 +8630,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4964, 0.3946, 0.1081), (0.0702, 0.2418, 0.0912)),
             ('radio', 'gun', 'radio', (0.684, 0.4306, 0.2452), (0.1075, 0.0801, 0.0259)),
@@ -8436,7 +8651,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4964, 0.3946, 0.1081), (0.0702, 0.2418, 0.0912)),
             ('radio', 'gun', 'radio', (0.684, 0.4306, 0.2452), (0.1075, 0.0801, 0.0259)),
@@ -8457,7 +8671,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         2,
         (('commander', 'gunner', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6276, 0.3506, 0.4846), (0.3583, 0.3452, 0.0913)),
@@ -8476,7 +8689,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         3,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4102, 0.448, 0.5121), (0.4028, 0.4316, 0.1257)),
@@ -8497,7 +8709,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander', 'gunner'), ('gunner',), ('driver',), ('loader',), ('radioman',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.2391, 0.3276), (0.2526, 0.1678, 0.055)),
@@ -8518,7 +8729,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7529, 0.4849, 0.5632), (0.16, 0.3804, 0.1553)),
@@ -8543,7 +8753,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.449, 0.6396), (0.3913, 0.3807, 0.1721)),
             ('engine', 'hull', 'engine', (0.5, 0.4264, 0.2866), (0.2447, 0.407, 0.1398)),
@@ -8567,7 +8776,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4075, 0.5777), (0.4412, 0.348, 0.2157)),
             ('engine', 'hull', 'engine', (0.3719, 0.3946, 0.1486), (0.2364, 0.3313, 0.1071)),
@@ -8589,7 +8797,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4075, 0.5777), (0.4412, 0.348, 0.2157)),
             ('engine', 'hull', 'engine', (0.3719, 0.3946, 0.1486), (0.2364, 0.3313, 0.1071)),
@@ -8610,7 +8817,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4794, 0.0526), (0.2721, 0.4418, 0.0503)),
@@ -8632,7 +8838,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.3478, 0.6512), (0.4268, 0.278, 0.0973)),
@@ -8658,7 +8863,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4994, 0.3478, 0.6512), (0.4268, 0.278, 0.0973)),
             ('engine', 'hull', 'engine', (0.4994, 0.4929, 0.2998), (0.1632, 0.3849, 0.1473)),
@@ -8678,11 +8882,32 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.3731, 0.4875, 0.4654), (0.1011, 0.3508, 0.135)),
         ),
     ),
+    ('usa', 'a118m4thunderbolt'): (
+        'mediumTank',
+        6,
+        (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4987, 0.4958, 0.508), (0.4329, 0.3163, 0.139)),
+            ('engine', 'hull', 'engine', (0.5001, 0.4039, 0.2028), (0.2463, 0.3637, 0.0671)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5001, 0.4488, 0.221), (0.4432, 0.4094, 0.1831)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.2901, 0.9646, 0.7199), (0.0329, 0.0282, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5001, 0.3123, 0.8331), (0.1881, 0.2782, 0.1288)),
+            ('radio', 'turret', 'radio', (0.5073, 0.706, 0.1777), (0.1882, 0.1053, 0.0769)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.6971, 0.9311, 0.4965), (0.1819, 0.0688, 0.2376)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6945, 0.4774, 0.4206), (0.1036, 0.4287, 0.0704)),
+            ('hull', 'crew_01', (0.3279, 0.516, 0.7456), (0.0815, 0.361, 0.0699)),
+            ('turret', 'crew_02', (0.7352, 0.4287, 0.6383), (0.1036, 0.4287, 0.0704)),
+            ('hull', 'crew_03', (0.6725, 0.516, 0.7456), (0.0815, 0.361, 0.0699)),
+            ('turret', 'crew_04', (0.2811, 0.5736, 0.5199), (0.1036, 0.3189, 0.1698)),
+        ),
+    ),
     ('usa', 'a120m48a5'): (
         'mediumTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4424, 0.3383, 0.7997), (0.2516, 0.136, 0.0781)),
@@ -8707,7 +8932,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4424, 0.3383, 0.7997), (0.2516, 0.136, 0.0781)),
             ('engine', 'hull', 'engine', (0.5, 0.4031, 0.2514), (0.1397, 0.3617, 0.1259)),
@@ -8730,7 +8954,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4998, 0.2057, 0.6071), (0.4209, 0.1933, 0.0984)),
@@ -8757,7 +8980,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4955, 0.2274, 0.6441), (0.4414, 0.1872, 0.1292)),
             ('engine', 'hull', 'engine', (0.4961, 0.4859, 0.3117), (0.2604, 0.4451, 0.0933)),
@@ -8782,7 +9004,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4955, 0.2274, 0.6441), (0.4414, 0.1872, 0.1292)),
@@ -8809,7 +9030,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4955, 0.2274, 0.6441), (0.4414, 0.1872, 0.1292)),
             ('engine', 'hull', 'engine', (0.4961, 0.4859, 0.3117), (0.2604, 0.4451, 0.0933)),
@@ -8834,7 +9054,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4955, 0.2274, 0.6441), (0.4414, 0.1872, 0.1292)),
@@ -8861,16 +9080,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4716, 0.6117, 0.4257), (0.4584, 0.2082, 0.1454)),
             ('engine', 'hull', 'engine', (0.4619, 0.329, 0.149), (0.2298, 0.2809, 0.0781)),
             ('fuelTank', 'hull', 'fuelTank', (0.4705, 0.369, 0.2058), (0.4148, 0.3402, 0.0722)),
             ('radio', 'hull', 'radio', (0.636, 0.2255, 0.8309), (0.0849, 0.1297, 0.0547)),
             ('engine', 'hull', 'transmission', (0.4718, 0.1549, 0.9041), (0.2562, 0.0826, 0.0211)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.3165, 0.5572, 0.4849), (0.1833, 0.2648, 0.086)),
@@ -8886,16 +9101,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4951, 0.5131, 0.2761), (0.48, 0.0968, 0.2555)),
             ('engine', 'hull', 'engine', (0.4914, 0.2555, 0.1821), (0.1926, 0.2132, 0.1439)),
             ('fuelTank', 'hull', 'fuelTank', (0.4891, 0.2555, 0.1821), (0.2725, 0.2132, 0.1439)),
             ('radio', 'hull', 'radio', (0.1227, 0.6512, 0.6605), (0.0395, 0.0487, 0.0161)),
             ('engine', 'hull', 'transmission', (0.4889, 0.2006, 0.8722), (0.2901, 0.1053, 0.0446)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2937, 0.4887, 0.4956), (0.0802, 0.2891, 0.0413)),
@@ -8911,16 +9122,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4988, 0.3621, 0.4036), (0.3284, 0.2177, 0.0346)),
             ('engine', 'hull', 'engine', (0.4973, 0.3207, 0.6443), (0.1699, 0.2954, 0.1492)),
             ('fuelTank', 'hull', 'fuelTank', (0.4989, 0.2825, 0.6442), (0.3233, 0.264, 0.1492)),
             ('radio', 'hull', 'radio', (0.8468, 0.9094, 0.3939), (0.1513, 0.0805, 0.0311)),
             ('engine', 'hull', 'transmission', (0.4991, 0.1793, 0.9526), (0.3292, 0.0927, 0.0256)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.8059, 0.6559, 0.3109), (0.1769, 0.3207, 0.0382)),
@@ -8934,7 +9141,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'gunner', 'loader'), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5718, 0.4822, 0.4915), (0.4109, 0.4349, 0.1429)),
@@ -8955,7 +9161,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.497, 0.7847, 0.4738), (0.4682, 0.1556, 0.1946)),
@@ -8980,7 +9185,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5907, 0.5299, 0.5224), (0.384, 0.3439, 0.1671)),
             ('engine', 'hull', 'engine', (0.5012, 0.4679, 0.5465), (0.2972, 0.4282, 0.4207)),
@@ -9002,7 +9206,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         4,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5907, 0.5299, 0.5224), (0.384, 0.3439, 0.1671)),
@@ -9026,7 +9229,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5162, 0.3094, 0.2672), (0.2864, 0.2472, 0.2178)),
             ('engine', 'hull', 'engine', (0.6582, 0.2288, 0.7134), (0.0971, 0.2037, 0.0968)),
@@ -9048,7 +9250,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5162, 0.3094, 0.2672), (0.2864, 0.2472, 0.2178)),
             ('engine', 'hull', 'engine', (0.6582, 0.2288, 0.7134), (0.0971, 0.2037, 0.0968)),
@@ -9069,7 +9270,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.511, 0.234, 0.4324), (0.2875, 0.1999, 0.1488)),
@@ -9095,7 +9295,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.511, 0.234, 0.4324), (0.2875, 0.1999, 0.1488)),
             ('engine', 'hull', 'engine', (0.507, 0.3499, 0.1399), (0.2624, 0.34, 0.0707)),
@@ -9120,16 +9319,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'gunner', 'radioman'), ('driver',), ('gunner',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5066, 0.4311, 0.5294), (0.48, 0.3832, 0.3472)),
             ('engine', 'hull', 'engine', (0.4958, 0.3304, 0.2002), (0.2982, 0.3176, 0.0813)),
             ('fuelTank', 'hull', 'fuelTank', (0.4989, 0.5189, 0.1856), (0.48, 0.1291, 0.0959)),
             ('radio', 'hull', 'radio', (0.1166, 0.4654, 0.6377), (0.0832, 0.0693, 0.0303)),
             ('engine', 'hull', 'transmission', (0.4975, 0.1442, 0.8682), (0.2939, 0.1225, 0.1259)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.3835, 0.5272, 0.5824), (0.0722, 0.2548, 0.0701)),
@@ -9143,16 +9338,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5071, 0.5118, 0.6187), (0.48, 0.1, 0.1728)),
             ('engine', 'hull', 'engine', (0.5043, 0.3377, 0.201), (0.2613, 0.3073, 0.08)),
             ('fuelTank', 'hull', 'fuelTank', (0.4979, 0.3226, 0.2579), (0.48, 0.3019, 0.0491)),
             ('radio', 'hull', 'radio', (0.6704, 0.4779, 0.7962), (0.1202, 0.0701, 0.0346)),
             ('engine', 'hull', 'transmission', (0.5009, 0.1893, 0.9364), (0.2883, 0.0909, 0.0245)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2018, 0.7168, 0.513), (0.1659, 0.2824, 0.057)),
@@ -9167,7 +9358,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5016, 0.714, 0.5027), (0.4105, 0.1655, 0.1445)),
             ('engine', 'hull', 'engine', (0.5023, 0.4489, 0.2319), (0.2454, 0.4175, 0.1126)),
@@ -9176,8 +9366,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('engine', 'hull', 'transmission', (0.5014, 0.2618, 0.83), (0.2446, 0.1703, 0.1509)),
             ('turretRotator', 'hull', 'turretRotator', (0.5025, 0.9446, 0.5233), (0.2215, 0.0554, 0.1316)),
             ('ammoBay', 'turret', 'ammoBay', (0.5023, 0.616, 0.1699), (0.3844, 0.1289, 0.1155)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.1, 0.06, 0.09)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.07, 0.05, 0.06)),
         ),
         (
             ('turret', 'crew_00', (0.7234, 0.4934, 0.6297), (0.0757, 0.4, 0.1346)),
@@ -9191,7 +9379,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.7187, 0.526), (0.351, 0.1149, 0.1304)),
@@ -9215,15 +9402,11 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4993, 0.4611, 0.3213), (0.48, 0.0947, 0.1023)),
             ('engine', 'hull', 'engine', (0.5001, 0.2626, 0.793), (0.2775, 0.2498, 0.2175)),
             ('fuelTank', 'hull', 'fuelTank', (0.4993, 0.4611, 0.5674), (0.48, 0.0947, 0.1362)),
             ('radio', 'hull', 'radio', (0.901, 0.4611, 0.7588), (0.0918, 0.0947, 0.0443)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.1715, 0.6691, 0.3662), (0.1585, 0.2886, 0.0355)),
@@ -9238,7 +9421,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'loader'), ('gunner',), ('driver',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5016, 0.646, 0.4796), (0.472, 0.401, 0.1063)),
@@ -9260,7 +9442,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4975, 0.12, 0.5152), (0.3902, 0.0919, 0.1434)),
@@ -9285,7 +9466,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4978, 0.3469, 0.6479), (0.4275, 0.2773, 0.0965)),
             ('engine', 'hull', 'engine', (0.4978, 0.4916, 0.2993), (0.1635, 0.3838, 0.1461)),
@@ -9308,7 +9488,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4978, 0.3469, 0.6479), (0.4275, 0.2773, 0.0965)),
@@ -9333,7 +9512,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('fuelTank',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4935, 0.5321, 0.5378), (0.4585, 0.3116, 0.1403)),
             ('engine', 'hull', 'engine', (0.4967, 0.3949, 0.2099), (0.258, 0.3583, 0.0678)),
@@ -9342,8 +9520,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('turretRotator', 'hull', 'turretRotator', (0.5198, 0.9558, 0.5089), (0.2262, 0.0442, 0.1101)),
             ('radio', 'turret', 'radio', (0.5558, 0.6423, 0.1525), (0.1928, 0.1265, 0.0617)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.6888, 0.921, 0.5316), (0.1806, 0.079, 0.2225)),
-            ('fuelTank', 'hull', 'fuel_rear_left', (0.27, 0.4, 0.2), (0.1, 0.12, 0.14)),
-            ('fuelTank', 'hull', 'fuel_rear_right', (0.73, 0.4, 0.2), (0.1, 0.12, 0.14)),
         ),
         (
             ('turret', 'crew_00', (0.6839, 0.5059, 0.4973), (0.0948, 0.3923, 0.1082)),
@@ -9358,7 +9534,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('fuelTank',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4935, 0.5321, 0.5378), (0.4585, 0.3116, 0.1403)),
             ('engine', 'hull', 'engine', (0.4967, 0.3949, 0.2099), (0.258, 0.3583, 0.0678)),
@@ -9367,8 +9542,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('turretRotator', 'hull', 'turretRotator', (0.5198, 0.9558, 0.5089), (0.2262, 0.0442, 0.1101)),
             ('radio', 'turret', 'radio', (0.5558, 0.6423, 0.1525), (0.1928, 0.1265, 0.0617)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.6888, 0.921, 0.5316), (0.1806, 0.079, 0.2225)),
-            ('fuelTank', 'hull', 'fuel_rear_left', (0.27, 0.4, 0.2), (0.1, 0.12, 0.14)),
-            ('fuelTank', 'hull', 'fuel_rear_right', (0.73, 0.4, 0.2), (0.1, 0.12, 0.14)),
         ),
         (
             ('turret', 'crew_00', (0.6839, 0.5059, 0.4973), (0.0948, 0.3923, 0.1082)),
@@ -9383,7 +9556,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('fuelTank',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4935, 0.5321, 0.5378), (0.4585, 0.3116, 0.1403)),
             ('engine', 'hull', 'engine', (0.4967, 0.3949, 0.2099), (0.258, 0.3583, 0.0678)),
@@ -9392,8 +9564,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('turretRotator', 'hull', 'turretRotator', (0.5198, 0.9558, 0.5089), (0.2262, 0.0442, 0.1101)),
             ('radio', 'turret', 'radio', (0.5558, 0.6423, 0.1525), (0.1928, 0.1265, 0.0617)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.6888, 0.921, 0.5316), (0.1806, 0.079, 0.2225)),
-            ('fuelTank', 'hull', 'fuel_rear_left', (0.27, 0.4, 0.2), (0.1, 0.12, 0.14)),
-            ('fuelTank', 'hull', 'fuel_rear_right', (0.73, 0.4, 0.2), (0.1, 0.12, 0.14)),
         ),
         (
             ('turret', 'crew_00', (0.6839, 0.5059, 0.4973), (0.0948, 0.3923, 0.1082)),
@@ -9408,15 +9578,11 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5035, 0.5733, 0.4126), (0.4171, 0.1897, 0.0494)),
             ('engine', 'hull', 'engine', (0.5, 0.3159, 0.7548), (0.312, 0.2835, 0.2341)),
             ('fuelTank', 'hull', 'fuelTank', (0.5, 0.4846, 0.6136), (0.48, 0.1075, 0.0965)),
             ('radio', 'hull', 'radio', (0.98, 0.7903, 0.2084), (0.026, 0.0601, 0.0206)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.8031, 0.6257, 0.3122), (0.121, 0.2759, 0.034)),
@@ -9432,15 +9598,11 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5028, 0.8641, 0.472), (0.48, 0.1844, 0.0675)),
             ('engine', 'hull', 'engine', (0.5, 0.274, 0.8035), (0.301, 0.2254, 0.1975)),
             ('fuelTank', 'hull', 'fuelTank', (0.5007, 0.274, 0.7), (0.3088, 0.2254, 0.094)),
             ('radio', 'hull', 'radio', (0.0701, 0.7658, 0.512), (0.0595, 0.0911, 0.0108)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.245, 0.5263, 0.2948), (0.1209, 0.2208, 0.0253)),
@@ -9456,7 +9618,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5022, 0.3857, 0.5614), (0.3411, 0.3284, 0.1939)),
             ('engine', 'hull', 'engine', (0.496, 0.4313, 0.2853), (0.0853, 0.3473, 0.0792)),
@@ -9464,7 +9625,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.4954, 0.6383, 0.4053), (0.0859, 0.1255, 0.0346)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5085, 0.9219, 0.5385), (0.2185, 0.0781, 0.1593)),
             ('engine', 'hull', 'transmission', (0.496, 0.2168, 0.1184), (0.2031, 0.1011, 0.0824)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.6521, 0.6352, 0.479), (0.0533, 0.2714, 0.0623)),
@@ -9478,7 +9638,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5033, 0.7455, 0.5073), (0.48, 0.1244, 0.169)),
             ('engine', 'hull', 'engine', (0.495, 0.5294, 0.2194), (0.2174, 0.4508, 0.1012)),
@@ -9488,8 +9647,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('turretRotator', 'hull', 'turretRotator', (0.5005, 0.8699, 0.514), (0.3037, 0.0709, 0.1648)),
             ('ammoBay', 'turret', 'ammoBay', (0.7312, 0.7085, 0.6919), (0.0974, 0.2771, 0.1225)),
             ('radio', 'turret', 'radio', (0.5041, 0.8154, 0.213), (0.0913, 0.1316, 0.057)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.072, 0.0432, 0.0648)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.0504, 0.036, 0.0432)),
         ),
         (
             ('turret', 'crew_00', (0.2876, 0.4793, 0.5313), (0.1109, 0.4784, 0.1465)),
@@ -9503,7 +9660,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5005, 0.3788, 0.4522), (0.3322, 0.3309, 0.1139)),
@@ -9525,7 +9681,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4972, 0.4484, 0.5164), (0.4786, 0.3768, 0.1366)),
@@ -9550,7 +9705,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7763, 0.5079, 0.6068), (0.1731, 0.39, 0.1534)),
             ('engine', 'hull', 'engine', (0.5078, 0.4578, 0.2677), (0.2073, 0.3002, 0.1767)),
@@ -9574,7 +9728,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.408, 0.3523, 0.5919), (0.4052, 0.3466, 0.274)),
@@ -9593,16 +9746,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5054, 0.5615, 0.5253), (0.314, 0.2343, 0.1859)),
             ('engine', 'hull', 'engine', (0.4988, 0.4376, 0.2229), (0.3196, 0.4158, 0.1165)),
             ('fuelTank', 'hull', 'fuelTank', (0.5017, 0.8035, 0.2258), (0.48, 0.1793, 0.1328)),
             ('radio', 'hull', 'radio', (0.91, 0.765, 0.6304), (0.0876, 0.1406, 0.0477)),
             ('engine', 'hull', 'transmission', (0.4988, 0.1896, 0.8146), (0.3196, 0.1616, 0.134)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.1, 0.06, 0.09)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.07, 0.05, 0.06)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.17, 0.07, 0.17)),
         ),
         (
             ('turret', 'crew_00', (0.2994, 0.4682, 0.5893), (0.1369, 0.4682, 0.2019)),
@@ -9616,16 +9765,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4751, 0.6155), (0.48, 0.4503, 0.1728)),
             ('engine', 'hull', 'engine', (0.501, 0.3328, 0.3155), (0.2956, 0.308, 0.1067)),
             ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7924, 0.2268), (0.48, 0.133, 0.1954)),
             ('radio', 'hull', 'radio', (0.8705, 0.7598, 0.8121), (0.082, 0.0799, 0.0456)),
             ('engine', 'hull', 'transmission', (0.501, 0.1953, 0.1485), (0.2956, 0.1705, 0.0603)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.1, 0.06, 0.09)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.07, 0.05, 0.06)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.17, 0.07, 0.17)),
         ),
         (
             ('turret', 'crew_00', (0.3451, 0.4928, 0.4314), (0.1311, 0.48, 0.1849)),
@@ -9640,16 +9785,12 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4751, 0.6155), (0.48, 0.4503, 0.1728)),
             ('engine', 'hull', 'engine', (0.501, 0.3328, 0.3155), (0.2956, 0.308, 0.1067)),
             ('fuelTank', 'hull', 'fuelTank', (0.5, 0.7924, 0.2268), (0.48, 0.133, 0.1954)),
             ('radio', 'hull', 'radio', (0.8705, 0.7598, 0.8121), (0.082, 0.0799, 0.0456)),
             ('engine', 'hull', 'transmission', (0.501, 0.1953, 0.1485), (0.2956, 0.1705, 0.0603)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.1, 0.06, 0.09)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.07, 0.05, 0.06)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.17, 0.07, 0.17)),
         ),
         (
             ('turret', 'crew_00', (0.3451, 0.4928, 0.4314), (0.1311, 0.48, 0.1849)),
@@ -9663,7 +9804,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.499, 0.4181), (0.4667, 0.3802, 0.0796)),
@@ -9686,7 +9826,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4986, 0.2983, 0.6544), (0.4136, 0.2742, 0.0975)),
@@ -9712,7 +9851,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4986, 0.2983, 0.6544), (0.4136, 0.2742, 0.0975)),
             ('engine', 'hull', 'engine', (0.5, 0.5275, 0.3013), (0.2743, 0.3805, 0.1563)),
@@ -9737,14 +9875,12 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5072, 0.496, 0.5294), (0.3519, 0.4084, 0.0806)),
             ('engine', 'hull', 'engine', (0.5019, 0.3442, 0.2261), (0.3592, 0.2264, 0.18)),
             ('fuelTank', 'hull', 'fuelTank', (0.4982, 0.3416, 0.2981), (0.3541, 0.2098, 0.1262)),
             ('radio', 'hull', 'radio', (0.3182, 0.7354, 0.491), (0.1628, 0.1187, 0.0386)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4792, 0.8831, 0.6933), (0.3749, 0.1822, 0.1345)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.2346, 0.7534, 0.6786), (0.0846, 0.2747, 0.076)),
@@ -9757,7 +9893,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4244, 0.6551), (0.3645, 0.2998, 0.2393)),
@@ -9783,7 +9918,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.5083, 0.4772, 0.2208), (0.0973, 0.3494, 0.0762)),
             ('radio', 'gun', 'radio', (0.7041, 0.6979, 0.0794), (0.0665, 0.0993, 0.0296)),
@@ -9806,7 +9940,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5084, 0.4123, 0.5993), (0.48, 0.3717, 0.1332)),
@@ -9832,7 +9965,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.516, 0.4346, 0.6375), (0.3211, 0.3431, 0.2286)),
             ('engine', 'hull', 'engine', (0.5152, 0.4922, 0.2522), (0.2295, 0.2835, 0.0672)),
@@ -9855,7 +9987,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1792, 0.6264), (0.48, 0.1672, 0.1618)),
@@ -9880,7 +10011,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         ('surveyingDevice',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5072, 0.3061, 0.6029), (0.4715, 0.1738, 0.1745)),
             ('engine', 'hull', 'engine', (0.5005, 0.4929, 0.212), (0.3337, 0.374, 0.1907)),
@@ -9888,8 +10018,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8735, 0.765, 0.706), (0.103, 0.1224, 0.055)),
             ('turretRotator', 'hull', 'turretRotator', (0.5005, 0.98, 0.6162), (0.4251, 0.095, 0.137)),
             ('ammoBay', 'turret', 'ammoBay', (0.5, 0.9012, 0.1881), (0.2457, 0.2058, 0.1555)),
-            ('surveyingDevice', 'turret', 'optics_turret', (0.5, 0.77, 0.52), (0.072, 0.0432, 0.0648)),
-            ('surveyingDevice', 'hull', 'optics_driver', (0.33, 0.7, 0.72), (0.0504, 0.036, 0.0432)),
         ),
         (
             ('turret', 'crew_00', (0.4169, 0.6267, 0.5213), (0.0996, 0.4496, 0.1037)),
@@ -9903,7 +10031,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'gunner', 'radioman'), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4996, 0.5498, 0.4571), (0.299, 0.4293, 0.1149)),
@@ -9924,7 +10051,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         5,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4974, 0.4773, 0.5364), (0.3755, 0.441, 0.1759)),
@@ -9949,7 +10075,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4245, 0.4428, 0.591), (0.3415, 0.4284, 0.1341)),
             ('engine', 'hull', 'engine', (0.4992, 0.4391, 0.2838), (0.1637, 0.4052, 0.1365)),
@@ -9972,7 +10097,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4983, 0.2539, 0.8066), (0.3609, 0.2086, 0.1039)),
@@ -9997,7 +10121,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4988, 0.2865, 0.6507), (0.3248, 0.2269, 0.2252)),
             ('engine', 'hull', 'engine', (0.5021, 0.353, 0.2594), (0.2185, 0.328, 0.0774)),
@@ -10020,7 +10143,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4981, 0.1905, 0.6304), (0.3318, 0.166, 0.2351)),
             ('engine', 'hull', 'engine', (0.4971, 0.2105, 0.2944), (0.2064, 0.1902, 0.0906)),
@@ -10028,7 +10150,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.7162, 0.5887, 0.3283), (0.1355, 0.108, 0.046)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5822, 0.8369, 0.5195), (0.2891, 0.0679, 0.208)),
             ('engine', 'hull', 'transmission', (0.4977, 0.2375, 0.1211), (0.292, 0.1381, 0.0772)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.5019, 0.7291, 0.4247), (0.0779, 0.2253, 0.0582)),
@@ -10042,7 +10163,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         6,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5752, 0.1751), (0.48, 0.2214, 0.0477)),
@@ -10063,7 +10183,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         9,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('gunner',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('engine', 'hull', 'engine', (0.4999, 0.5046, 0.7968), (0.1868, 0.3288, 0.1251)),
@@ -10088,7 +10207,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4991, 0.2971, 0.2706), (0.1054, 0.2492, 0.0687)),
             ('radio', 'gun', 'radio', (0.7583, 0.6447, 0.0692), (0.0749, 0.0894, 0.0282)),
@@ -10111,7 +10229,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4739, 0.4274, 0.237), (0.0901, 0.2844, 0.085)),
@@ -10136,7 +10253,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'gun', 'ammoBay', (0.4739, 0.4274, 0.237), (0.0901, 0.2844, 0.085)),
             ('radio', 'gun', 'radio', (0.7103, 0.7998, 0.0463), (0.083, 0.1019, 0.0324)),
@@ -10160,7 +10276,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner'), ('driver',), ('radioman',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.0992, 0.8004, 0.4184), (0.075, 0.1379, 0.1898)),
             ('engine', 'hull', 'engine', (0.5, 0.4946, 0.5041), (0.3065, 0.4173, 0.48)),
@@ -10181,7 +10296,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.499, 0.4517, 0.6845), (0.4544, 0.3313, 0.296)),
@@ -10205,7 +10319,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5132, 0.4411, 0.5592), (0.454, 0.4035, 0.2175)),
             ('engine', 'hull', 'engine', (0.4978, 0.5007, 0.2768), (0.2023, 0.3813, 0.1014)),
@@ -10227,7 +10340,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4987, 0.5103, 0.6274), (0.4772, 0.4047, 0.1493)),
@@ -10252,7 +10364,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4256, 0.3847, 0.5834), (0.3546, 0.3023, 0.0994)),
             ('engine', 'hull', 'engine', (0.4927, 0.325, 0.3159), (0.2293, 0.2645, 0.1266)),
@@ -10260,7 +10371,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.9201, 0.5192, 0.6961), (0.0538, 0.1156, 0.042)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4775, 0.7931, 0.7637), (0.3483, 0.2069, 0.0786)),
             ('engine', 'hull', 'transmission', (0.4927, 0.2332, 0.1148), (0.2944, 0.1728, 0.0688)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7557, 0.6043, 0.7235), (0.0904, 0.2919, 0.0807)),
@@ -10273,7 +10383,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5172, 0.4889, 0.6549), (0.4547, 0.3906, 0.1782)),
@@ -10297,7 +10406,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5172, 0.4889, 0.6549), (0.4547, 0.3906, 0.1782)),
             ('engine', 'hull', 'engine', (0.4874, 0.5258, 0.3357), (0.2671, 0.428, 0.0986)),
@@ -10320,7 +10428,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'gunner'), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4968, 0.4653, 0.5726), (0.2478, 0.3801, 0.1369)),
             ('engine', 'hull', 'engine', (0.4985, 0.5046, 0.2837), (0.2469, 0.4191, 0.1475)),
@@ -10342,7 +10449,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         4,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('radioman',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4261, 0.5631), (0.3141, 0.1864, 0.1028)),
@@ -10369,7 +10475,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4261, 0.5631), (0.3141, 0.1864, 0.1028)),
             ('engine', 'hull', 'engine', (0.4879, 0.4883, 0.3251), (0.1496, 0.3392, 0.1309)),
@@ -10395,7 +10500,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5098, 0.2561, 0.5754), (0.2996, 0.2089, 0.1312)),
             ('engine', 'hull', 'engine', (0.497, 0.5048, 0.3134), (0.2655, 0.457, 0.1261)),
@@ -10419,7 +10523,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5098, 0.2561, 0.5754), (0.2996, 0.2089, 0.1312)),
@@ -10445,7 +10548,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5098, 0.2561, 0.5754), (0.2996, 0.2089, 0.1312)),
             ('engine', 'hull', 'engine', (0.497, 0.5048, 0.3134), (0.2655, 0.457, 0.1261)),
@@ -10470,7 +10572,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5064, 0.3222, 0.5881), (0.4795, 0.2435, 0.1257)),
             ('engine', 'hull', 'engine', (0.5043, 0.3244, 0.2598), (0.3935, 0.4338, 0.2357)),
@@ -10492,7 +10593,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5064, 0.3222, 0.5881), (0.4795, 0.2435, 0.1257)),
             ('engine', 'hull', 'engine', (0.5043, 0.3244, 0.2598), (0.3935, 0.4338, 0.2357)),
@@ -10513,7 +10613,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3169, 0.1772, 0.476), (0.3113, 0.1314, 0.1107)),
@@ -10537,7 +10636,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3169, 0.1772, 0.476), (0.3113, 0.1314, 0.1107)),
             ('engine', 'hull', 'engine', (0.29, 0.262, 0.1988), (0.2843, 0.2162, 0.1537)),
@@ -10559,7 +10657,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4496, 0.3191, 0.2536), (0.3667, 0.2716, 0.2438)),
@@ -10579,7 +10676,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5098, 0.2944, 0.6684), (0.2679, 0.2126, 0.1031)),
@@ -10604,7 +10700,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.497, 0.3206, 0.063), (0.3354, 0.4521, 0.0542)),
             ('engine', 'hull', 'engine', (0.4978, 0.2127, 0.7611), (0.34, 0.3344, 0.2154)),
@@ -10625,7 +10720,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman'), ('driver',), ('gunner', 'loader')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5172, 0.4722, 0.6458), (0.4518, 0.3994, 0.1809)),
             ('engine', 'hull', 'engine', (0.4876, 0.5098, 0.3218), (0.2654, 0.4376, 0.1001)),
@@ -10645,7 +10739,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         6,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5097, 0.1332, 0.6009), (0.2286, 0.1257, 0.1039)),
@@ -10670,7 +10763,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5097, 0.1332, 0.6009), (0.2286, 0.1257, 0.1039)),
             ('engine', 'hull', 'engine', (0.5037, 0.4285, 0.2504), (0.3042, 0.4153, 0.1211)),
@@ -10693,7 +10785,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5086, 0.5778), (0.4552, 0.437, 0.1258)),
@@ -10718,7 +10809,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5009, 0.4955, 0.6084), (0.4722, 0.3872, 0.1463)),
             ('engine', 'hull', 'engine', (0.4971, 0.4862, 0.2534), (0.257, 0.3744, 0.2043)),
@@ -10737,12 +10827,34 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.6832, 0.377, 0.6255), (0.1142, 0.377, 0.0958)),
         ),
     ),
+    ('ussr', 'r109t54s'): (
+        'lightTank',
+        9,
+        (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5033, 0.427, 0.5745), (0.3632, 0.3496, 0.1868)),
+            ('engine', 'hull', 'engine', (0.4135, 0.5256, 0.2033), (0.2462, 0.3619, 0.0663)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5165, 0.4656, 0.5995), (0.3215, 0.4218, 0.3298)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.2935, 0.9678, 0.8056), (0.0706, 0.0275, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5109, 0.3317, 0.1301), (0.3381, 0.168, 0.0955)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9563, 0.5152), (0.3746, 0.0437, 0.1525)),
+            ('ammoBay', 'turret', 'ammoBay', (0.8499, 0.6673, 0.363), (0.1209, 0.1327, 0.2075)),
+            ('radio', 'turret', 'radio', (0.3133, 0.6825, 0.1663), (0.1072, 0.0952, 0.0817)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2874, 0.9348, 0.3836), (0.1308, 0.0652, 0.1617)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6875, 0.4829, 0.3409), (0.0926, 0.4278, 0.0618)),
+            ('turret', 'crew_01', (0.3774, 0.4278, 0.543), (0.0926, 0.4278, 0.0618)),
+            ('hull', 'crew_02', (0.2636, 0.4923, 0.8283), (0.0951, 0.4343, 0.1054)),
+            ('turret', 'crew_03', (0.3187, 0.4639, 0.3508), (0.1151, 0.4278, 0.0975)),
+        ),
+    ),
     ('ussr', 'r10at1'): (
         'AT-SPG',
         2,
         (('commander', 'loader', 'radioman'), ('driver',), ('gunner',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.1827, 0.3432, 0.6302), (0.1767, 0.3294, 0.2592)),
             ('engine', 'hull', 'engine', (0.3404, 0.1914, 0.1878), (0.2215, 0.1566, 0.1631)),
@@ -10750,7 +10862,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.952, 0.5698, 0.6046), (0.042, 0.1028, 0.0433)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4536, 0.7764, 0.6537), (0.3209, 0.2236, 0.0569)),
             ('engine', 'hull', 'transmission', (0.5021, 0.1913, 0.8901), (0.4034, 0.1775, 0.1051)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.119, 0.085, 0.102)),
         ),
         (
             ('hull', 'crew_00', (0.7684, 0.5014, 0.5295), (0.1109, 0.3342, 0.0863)),
@@ -10762,7 +10873,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7148, 0.5027, 0.5407), (0.1682, 0.3721, 0.2225)),
@@ -10785,7 +10895,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.5549, 0.6649), (0.4187, 0.334, 0.1717)),
@@ -10810,7 +10919,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman', 'loader'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('engine', 'hull', 'engine', (0.4978, 0.4504, 0.2542), (0.1424, 0.3763, 0.1122)),
             ('fuelTank', 'hull', 'fuelTank', (0.5, 0.6546, 0.2528), (0.3647, 0.2648, 0.1046)),
@@ -10831,7 +10939,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5037, 0.57, 0.6589), (0.4725, 0.3179, 0.1848)),
@@ -10852,7 +10959,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5127, 0.3073, 0.5856), (0.2979, 0.194, 0.1305)),
@@ -10877,7 +10983,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4261, 0.564), (0.3141, 0.1864, 0.1026)),
             ('engine', 'hull', 'engine', (0.4879, 0.4883, 0.3266), (0.1496, 0.3392, 0.1306)),
@@ -10898,11 +11003,56 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_05', (0.2628, 0.6191, 0.8147), (0.082, 0.3677, 0.0705)),
         ),
     ),
+    ('ussr', 'r122t44100'): (
+        'mediumTank',
+        8,
+        (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4075, 0.6357), (0.2549, 0.3292, 0.1867)),
+            ('engine', 'hull', 'engine', (0.4274, 0.4476, 0.2682), (0.229, 0.3798, 0.0749)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5581, 0.4612, 0.6286), (0.2137, 0.3706, 0.3226)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.344, 0.9671, 0.768), (0.1415, 0.0329, 0.0268)),
+            ('engine', 'hull', 'transmission', (0.5007, 0.3769, 0.1102), (0.3022, 0.2404, 0.0824)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5004, 0.9528, 0.5034), (0.2043, 0.1057, 0.1051)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5, 0.6338, 0.1265), (0.2216, 0.2057, 0.0743)),
+            ('radio', 'turret', 'radio', (0.1, 0.5787, 0.524), (0.0941, 0.1527, 0.0801)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2895, 0.9314, 0.499), (0.0442, 0.0686, 0.0787)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3105, 0.4663, 0.4338), (0.1045, 0.4188, 0.1704)),
+            ('turret', 'crew_01', (0.3105, 0.4188, 0.6199), (0.1045, 0.4188, 0.1415)),
+            ('hull', 'crew_02', (0.3511, 0.4601, 0.8487), (0.0717, 0.453, 0.1075)),
+            ('turret', 'crew_03', (0.7143, 0.446, 0.4594), (0.1045, 0.4188, 0.1704)),
+        ),
+    ),
+    ('ussr', 'r122t44100b'): (
+        'mediumTank',
+        8,
+        (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4075, 0.6357), (0.2549, 0.3292, 0.1867)),
+            ('engine', 'hull', 'engine', (0.4274, 0.4476, 0.2682), (0.229, 0.3798, 0.0749)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5581, 0.4612, 0.6286), (0.2137, 0.3706, 0.3226)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.344, 0.9671, 0.768), (0.1415, 0.0329, 0.0268)),
+            ('engine', 'hull', 'transmission', (0.5007, 0.3769, 0.1102), (0.3022, 0.2404, 0.0824)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5004, 0.9528, 0.5034), (0.2043, 0.1057, 0.1051)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5, 0.6338, 0.1265), (0.2216, 0.2057, 0.0743)),
+            ('radio', 'turret', 'radio', (0.1, 0.5787, 0.524), (0.0941, 0.1527, 0.0801)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2895, 0.9314, 0.499), (0.0442, 0.0686, 0.0787)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3105, 0.4663, 0.4338), (0.1045, 0.4188, 0.1704)),
+            ('turret', 'crew_01', (0.3105, 0.4188, 0.6199), (0.1045, 0.4188, 0.1415)),
+            ('hull', 'crew_02', (0.3511, 0.4601, 0.8487), (0.0717, 0.453, 0.1075)),
+            ('turret', 'crew_03', (0.7143, 0.446, 0.4594), (0.1045, 0.4188, 0.1704)),
+        ),
+    ),
     ('ussr', 'r123kirovets1'): (
         'heavyTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.4833, 0.674), (0.4331, 0.3726, 0.1594)),
@@ -10926,7 +11076,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('driver',), ('gunner',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5006, 0.469, 0.3993), (0.48, 0.3735, 0.1654)),
@@ -10952,7 +11101,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'loader'), ('radioman',), ('driver',), ('gunner',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5092, 0.1668, 0.6314), (0.2825, 0.1084, 0.1545)),
             ('engine', 'hull', 'engine', (0.5058, 0.5143, 0.2937), (0.2814, 0.4355, 0.1592)),
@@ -10974,7 +11122,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         7,
         (('commander',), ('driver',), ('gunner',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.2605, 0.4848, 0.8477), (0.2395, 0.2605, 0.0855)),
@@ -10996,7 +11143,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         10,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner', 'loader')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.722, 0.4522, 0.751), (0.222, 0.3462, 0.0764)),
@@ -11014,11 +11160,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_02', (0.2562, 0.409, 0.6056), (0.1101, 0.409, 0.1239)),
         ),
     ),
+    ('ussr', 'r133kv122'): (
+        'heavyTank',
+        7,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5097, 0.1332, 0.6009), (0.2286, 0.1257, 0.1039)),
+            ('engine', 'hull', 'engine', (0.5037, 0.4285, 0.2504), (0.3042, 0.4153, 0.1211)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5084, 0.43, 0.615), (0.3703, 0.409, 0.2404)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4991, 0.8769, 0.8433), (0.1162, 0.1231, 0.0276)),
+            ('engine', 'hull', 'transmission', (0.5076, 0.1555, 0.081), (0.279, 0.146, 0.0466)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4951, 0.9561, 0.5976), (0.2445, 0.0419, 0.0881)),
+            ('ammoBay', 'turret', 'ammoBay', (0.7129, 0.6329, 0.2903), (0.2133, 0.1323, 0.1893)),
+            ('radio', 'turret', 'radio', (0.1698, 0.5329, 0.3711), (0.0724, 0.2051, 0.1336)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4356, 0.8766, 0.4396), (0.2865, 0.1234, 0.2696)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3546, 0.5687, 0.3656), (0.1026, 0.354, 0.1157)),
+            ('turret', 'crew_01', (0.333, 0.4096, 0.6142), (0.1029, 0.3141, 0.1515)),
+            ('hull', 'crew_02', (0.4933, 0.4277, 0.8704), (0.099, 0.4187, 0.0752)),
+            ('turret', 'crew_03', (0.6784, 0.3559, 0.4042), (0.1082, 0.3559, 0.1663)),
+        ),
+    ),
     ('ussr', 'r134object252k'): (
         'heavyTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5487, 0.5836), (0.4442, 0.3995, 0.1569)),
@@ -11041,7 +11209,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.5487, 0.5836), (0.4442, 0.3995, 0.1569)),
@@ -11060,11 +11227,56 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_03', (0.6789, 0.6069, 0.4392), (0.0867, 0.322, 0.1315)),
         ),
     ),
+    ('ussr', 'r135t103'): (
+        'AT-SPG',
+        8,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4999, 0.4955, 0.4958), (0.48, 0.4368, 0.1561)),
+            ('engine', 'hull', 'engine', (0.5018, 0.4152, 0.2021), (0.2423, 0.3565, 0.1013)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5008, 0.3083, 0.4999), (0.2932, 0.2495, 0.1519)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4992, 0.6079, 0.8843), (0.0301, 0.0271, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5008, 0.2242, 0.0634), (0.2932, 0.1655, 0.0375)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5, 0.5266, 0.1458), (0.3421, 0.2684, 0.1164)),
+            ('radio', 'turret', 'radio', (0.8443, 0.4391, 0.7308), (0.0765, 0.1056, 0.0729)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.6634, 0.9057, 0.768), (0.1038, 0.0943, 0.0452)),
+        ),
+        (
+            ('turret', 'crew_00', (0.6905, 0.3975, 0.7674), (0.0739, 0.3975, 0.0394)),
+            ('hull', 'crew_01', (0.4999, 0.3497, 0.8667), (0.0743, 0.3266, 0.0494)),
+            ('turret', 'crew_02', (0.311, 0.3975, 0.7674), (0.0739, 0.3975, 0.0394)),
+            ('turret', 'crew_03', (0.6905, 0.3975, 0.5293), (0.0739, 0.3975, 0.0394)),
+            ('turret', 'crew_04', (0.311, 0.3975, 0.5293), (0.0739, 0.3975, 0.0394)),
+        ),
+    ),
+    ('ussr', 'r139is2sh'): (
+        'heavyTank',
+        8,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.2048, 0.33), (0.2475, 0.1843, 0.1519)),
+            ('engine', 'hull', 'engine', (0.4999, 0.3395, 0.6288), (0.1073, 0.319, 0.1027)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.3395, 0.6288), (0.2475, 0.319, 0.1027)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4999, 0.8673, 0.8513), (0.1073, 0.1327, 0.0455)),
+            ('engine', 'hull', 'transmission', (0.5, 0.271, 0.0914), (0.2475, 0.2505, 0.0867)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9489, 0.33), (0.3701, 0.0363, 0.1519)),
+            ('ammoBay', 'turret', 'ammoBay', (0.6544, 0.5463, 0.2296), (0.2893, 0.1843, 0.176)),
+            ('radio', 'turret', 'radio', (0.1472, 0.4523, 0.3131), (0.0979, 0.1002, 0.142)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2862, 0.8909, 0.4227), (0.187, 0.1091, 0.2578)),
+        ),
+        (
+            ('turret', 'crew_00', (0.2757, 0.4714, 0.3189), (0.1038, 0.4711, 0.0551)),
+            ('hull', 'crew_01', (0.5, 0.4743, 0.8432), (0.0838, 0.4538, 0.0745)),
+            ('turret', 'crew_02', (0.3169, 0.3505, 0.6397), (0.1038, 0.3505, 0.1329)),
+            ('turret', 'crew_03', (0.6238, 0.4308, 0.4146), (0.1038, 0.3505, 0.1329)),
+        ),
+    ),
     ('ussr', 'r13kv1s'): (
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5422, 0.1542, 0.6319), (0.3043, 0.095, 0.153)),
@@ -11089,7 +11301,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         3,
         (('commander',), ('driver',), ('gunner', 'loader'), ('radioman',), ('radioman',)),
-        (),
         ('ammoBay', 'turretRotator'),
         (
             ('engine', 'hull', 'engine', (0.5021, 0.448, 0.3939), (0.1909, 0.416, 0.1199)),
@@ -11107,11 +11318,32 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_04', (0.1925, 0.576, 0.8001), (0.0953, 0.38, 0.0656)),
         ),
     ),
+    ('ussr', 'r145object705a'): (
+        'heavyTank',
+        10,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.4414, 0.4199), (0.4127, 0.3822, 0.1378)),
+            ('engine', 'hull', 'engine', (0.4984, 0.4414, 0.6503), (0.1707, 0.3822, 0.0927)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4984, 0.4414, 0.6503), (0.3744, 0.3822, 0.0927)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5002, 0.9743, 0.8081), (0.0434, 0.0257, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4984, 0.295, 0.1145), (0.2588, 0.2696, 0.1066)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4997, 0.5985, 0.2209), (0.2357, 0.1943, 0.107)),
+            ('radio', 'turret', 'radio', (0.2511, 0.6076, 0.4268), (0.0333, 0.1248, 0.0989)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3248, 0.9209, 0.524), (0.0451, 0.0791, 0.1176)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3594, 0.5321, 0.4268), (0.0655, 0.3882, 0.0989)),
+            ('hull', 'crew_01', (0.4984, 0.4759, 0.8098), (0.0631, 0.4544, 0.057)),
+            ('turret', 'crew_02', (0.2929, 0.3882, 0.635), (0.0655, 0.3882, 0.0989)),
+            ('turret', 'crew_03', (0.6372, 0.5321, 0.4268), (0.0655, 0.3882, 0.0989)),
+        ),
+    ),
     ('ussr', 'r146stg'): (
         'mediumTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('ammoBay',),
         (
             ('engine', 'hull', 'engine', (0.5, 0.4655, 0.6873), (0.2263, 0.4281, 0.1184)),
@@ -11132,7 +11364,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
-        (),
         ('ammoBay',),
         (
             ('engine', 'hull', 'engine', (0.5, 0.4655, 0.6873), (0.2263, 0.4281, 0.1184)),
@@ -11149,20 +11380,58 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_03', (0.6567, 0.4056, 0.422), (0.1263, 0.4056, 0.0703)),
         ),
     ),
+    ('ussr', 'r148object430u'): (
+        'mediumTank',
+        10,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5713, 0.4803, 0.5214), (0.2578, 0.4311, 0.2946)),
+            ('engine', 'hull', 'engine', (0.5, 0.5125, 0.1227), (0.1312, 0.3734, 0.0884)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5, 0.5238, 0.5788), (0.3222, 0.4165, 0.352)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.3243, 0.9681, 0.8534), (0.0656, 0.0228, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.2558, 0.0916), (0.2995, 0.2227, 0.0417)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5, 0.9547, 0.5012), (0.3852, 0.0453, 0.1956)),
+            ('radio', 'turret', 'radio', (0.2731, 0.5488, 0.1848), (0.0732, 0.0945, 0.0882)),
+        ),
+        (
+            ('turret', 'crew_00', (0.2846, 0.4823, 0.3914), (0.0841, 0.4122, 0.1128)),
+            ('turret', 'crew_01', (0.3497, 0.4122, 0.5797), (0.0841, 0.4122, 0.0906)),
+            ('hull', 'crew_02', (0.313, 0.4805, 0.8074), (0.0749, 0.4413, 0.089)),
+            ('turret', 'crew_03', (0.6791, 0.5277, 0.3914), (0.0841, 0.4122, 0.1128)),
+        ),
+    ),
+    ('ussr', 'r149object2684'): (
+        'AT-SPG',
+        10,
+        (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.3736, 0.4273, 0.1002), (0.2816, 0.388, 0.0712)),
+            ('engine', 'hull', 'engine', (0.5, 0.2367, 0.6266), (0.1233, 0.2085, 0.1161)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4892, 0.2405, 0.5728), (0.412, 0.2099, 0.2212)),
+            ('radio', 'hull', 'radio', (0.8688, 0.5597, 0.2306), (0.0446, 0.0712, 0.045)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.6976, 0.8741, 0.2968), (0.1427, 0.0497, 0.1291)),
+            ('engine', 'hull', 'transmission', (0.5014, 0.1808, 0.8419), (0.2523, 0.1557, 0.1006)),
+        ),
+        (
+            ('hull', 'crew_00', (0.7517, 0.6368, 0.2508), (0.0676, 0.2512, 0.0599)),
+            ('hull', 'crew_01', (0.3416, 0.4835, 0.3742), (0.0676, 0.2512, 0.0599)),
+            ('hull', 'crew_02', (0.6655, 0.5406, 0.403), (0.0676, 0.2512, 0.0599)),
+            ('hull', 'crew_03', (0.2839, 0.5586, 0.2173), (0.1207, 0.2512, 0.0336)),
+            ('hull', 'crew_04', (0.7635, 0.5541, 0.1394), (0.105, 0.2512, 0.0336)),
+        ),
+    ),
     ('ussr', 'r14su5'): (
         'SPG',
         4,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5001, 0.1164, 0.2196), (0.3476, 0.0512, 0.17)),
             ('engine', 'hull', 'engine', (0.4995, 0.2874, 0.6906), (0.3402, 0.2062, 0.3055)),
             ('fuelTank', 'hull', 'fuelTank', (0.7523, 0.3235, 0.4994), (0.0908, 0.2264, 0.097)),
             ('radio', 'hull', 'radio', (0.2323, 0.4862, 0.3192), (0.0871, 0.0855, 0.0488)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2678, 0.5036, 0.2083), (0.0992, 0.2936, 0.0816)),
@@ -11172,21 +11441,62 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_04', (0.2914, 0.2975, 0.071), (0.1527, 0.254, 0.0602)),
         ),
     ),
+    ('ussr', 'r151object2572'): (
+        'heavyTank',
+        9,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5026, 0.6326, 0.5393), (0.4206, 0.2772, 0.1582)),
+            ('engine', 'hull', 'engine', (0.5069, 0.519, 0.2733), (0.1366, 0.4208, 0.1079)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5026, 0.5657, 0.2188), (0.4206, 0.344, 0.1623)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.502, 0.9335, 0.8244), (0.0163, 0.0309, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5069, 0.3609, 0.107), (0.1366, 0.2627, 0.0584)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5001, 0.9725, 0.5562), (0.2713, 0.0275, 0.15)),
+            ('ammoBay', 'turret', 'ammoBay', (0.4948, 0.6434, 0.1613), (0.2537, 0.1628, 0.098)),
+            ('radio', 'turret', 'radio', (0.1748, 0.5672, 0.4714), (0.0512, 0.1153, 0.1204)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.3233, 0.98, 0.3849), (0.0173, 0.0159, 0.0921)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3174, 0.5175, 0.4702), (0.0914, 0.3958, 0.144)),
+            ('hull', 'crew_01', (0.4975, 0.4996, 0.8126), (0.0658, 0.4081, 0.0874)),
+            ('turret', 'crew_02', (0.3174, 0.3958, 0.7533), (0.0914, 0.3958, 0.144)),
+            ('turret', 'crew_03', (0.672, 0.5175, 0.4702), (0.0914, 0.3958, 0.144)),
+        ),
+    ),
+    ('ussr', 'r153object705'): (
+        'heavyTank',
+        9,
+        (('commander', 'radioman'), ('driver',), ('gunner',), ('loader',)),
+        ('turretRotator',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.4385, 0.4199), (0.4127, 0.3796, 0.1378)),
+            ('engine', 'hull', 'engine', (0.4984, 0.4385, 0.6503), (0.1707, 0.3796, 0.0927)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4984, 0.4385, 0.6503), (0.3744, 0.3796, 0.0927)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.4979, 0.9712, 0.7979), (0.0143, 0.0288, 0.01)),
+            ('engine', 'hull', 'transmission', (0.4984, 0.293, 0.1145), (0.2588, 0.2678, 0.1066)),
+            ('ammoBay', 'turret', 'ammoBay', (0.5007, 0.4846, 0.2446), (0.2528, 0.1897, 0.1314)),
+            ('radio', 'turret', 'radio', (0.1601, 0.4324, 0.5083), (0.0357, 0.1218, 0.1214)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2822, 0.8634, 0.6071), (0.019, 0.1366, 0.1324)),
+        ),
+        (
+            ('turret', 'crew_00', (0.2805, 0.5153, 0.5021), (0.0703, 0.3968, 0.0931)),
+            ('hull', 'crew_01', (0.4984, 0.4727, 0.8098), (0.0631, 0.4514, 0.057)),
+            ('turret', 'crew_02', (0.3356, 0.379, 0.6873), (0.0703, 0.379, 0.1094)),
+            ('turret', 'crew_03', (0.7306, 0.4976, 0.6073), (0.0703, 0.379, 0.0999)),
+        ),
+    ),
     ('ussr', 'r15s51'): (
         'SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4965, 0.2085, 0.5933), (0.2684, 0.1957, 0.1623)),
             ('engine', 'hull', 'engine', (0.5108, 0.1926, 0.2068), (0.1994, 0.1887, 0.0991)),
             ('fuelTank', 'hull', 'fuelTank', (0.5063, 0.197, 0.2454), (0.2683, 0.1842, 0.1545)),
             ('radio', 'hull', 'radio', (0.8562, 0.6744, 0.7939), (0.0655, 0.1489, 0.0458)),
             ('engine', 'hull', 'transmission', (0.5026, 0.1368, 0.0702), (0.2523, 0.0616, 0.0356)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2828, 0.6617, 0.4717), (0.0638, 0.2101, 0.0547)),
@@ -11202,7 +11512,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4916, 0.2285, 0.3897), (0.2923, 0.2169, 0.1508)),
             ('engine', 'hull', 'engine', (0.5056, 0.3067, 0.1557), (0.2311, 0.1605, 0.074)),
@@ -11210,7 +11519,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.5237, 0.0825, 0.5876), (0.1756, 0.0621, 0.0442)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4506, 0.4232, 0.6863), (0.0317, 0.01, 0.01)),
             ('engine', 'hull', 'transmission', (0.5056, 0.0745, 0.1274), (0.3024, 0.0689, 0.1013)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.4958, 0.7011, 0.5068), (0.1403, 0.2825, 0.1055)),
@@ -11222,7 +11530,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4136, 0.4437, 0.712), (0.3801, 0.3936, 0.216)),
             ('engine', 'hull', 'engine', (0.5059, 0.3398, 0.3195), (0.2114, 0.3143, 0.1384)),
@@ -11230,7 +11537,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8986, 0.4971, 0.5466), (0.0811, 0.0908, 0.0492)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5161, 0.7887, 0.7584), (0.3098, 0.2113, 0.0954)),
             ('engine', 'hull', 'transmission', (0.5059, 0.2948, 0.1014), (0.3366, 0.2584, 0.0785)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.8075, 0.6739, 0.6873), (0.0899, 0.2594, 0.06)),
@@ -11244,7 +11550,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4717, 0.6887, 0.6283), (0.4314, 0.192, 0.1762)),
             ('engine', 'hull', 'engine', (0.5068, 0.2995, 0.2735), (0.1735, 0.2513, 0.147)),
@@ -11252,7 +11557,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.6017, 0.2816, 0.4959), (0.0808, 0.1902, 0.0443)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.508, 0.7413, 0.7781), (0.2188, 0.2587, 0.0838)),
             ('engine', 'hull', 'transmission', (0.5068, 0.155, 0.0781), (0.2783, 0.0911, 0.0461)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7035, 0.5809, 0.7902), (0.0765, 0.2172, 0.0756)),
@@ -11267,7 +11571,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4717, 0.6887, 0.6283), (0.4314, 0.192, 0.1762)),
             ('engine', 'hull', 'engine', (0.5068, 0.2995, 0.2735), (0.1735, 0.2513, 0.147)),
@@ -11275,7 +11578,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.6017, 0.2816, 0.4959), (0.0808, 0.1902, 0.0443)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.508, 0.7413, 0.7781), (0.2188, 0.2587, 0.0838)),
             ('engine', 'hull', 'transmission', (0.5068, 0.155, 0.0781), (0.2783, 0.0911, 0.0461)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7035, 0.5809, 0.7902), (0.0765, 0.2172, 0.0756)),
@@ -11289,7 +11591,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.604, 0.4962), (0.2973, 0.3189, 0.1183)),
@@ -11314,7 +11615,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.604, 0.4962), (0.2973, 0.3189, 0.1183)),
             ('engine', 'hull', 'engine', (0.4978, 0.4504, 0.2542), (0.1424, 0.3763, 0.1122)),
@@ -11338,7 +11638,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7905, 0.3641, 0.6304), (0.2059, 0.3507, 0.1867)),
             ('engine', 'hull', 'engine', (0.4995, 0.4447, 0.1909), (0.4289, 0.3563, 0.1216)),
@@ -11360,7 +11659,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.7905, 0.3641, 0.6304), (0.2059, 0.3507, 0.1867)),
@@ -11384,7 +11682,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4909, 0.3783), (0.2394, 0.4242, 0.024)),
             ('engine', 'hull', 'engine', (0.5039, 0.3987, 0.4873), (0.3029, 0.3844, 0.4703)),
@@ -11406,7 +11703,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'radioman', 'loader'), ('driver',), ('gunner',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.4909, 0.3783), (0.2394, 0.4242, 0.024)),
@@ -11430,7 +11726,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4958, 0.2246, 0.6365), (0.387, 0.154, 0.1577)),
             ('engine', 'hull', 'engine', (0.5, 0.4514, 0.3004), (0.3606, 0.4045, 0.1667)),
@@ -11452,16 +11747,12 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4431, 0.2989, 0.2322), (0.3609, 0.2411, 0.2289)),
             ('engine', 'hull', 'engine', (0.8071, 0.2918, 0.5544), (0.1586, 0.2704, 0.1507)),
             ('fuelTank', 'hull', 'fuelTank', (0.2672, 0.2965, 0.6152), (0.1525, 0.2104, 0.1094)),
             ('radio', 'hull', 'radio', (0.8982, 0.6965, 0.266), (0.0755, 0.0965, 0.0691)),
             ('engine', 'hull', 'transmission', (0.5314, 0.2172, 0.8407), (0.4343, 0.1959, 0.1308)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.5593, 0.6362, 0.0881), (0.1066, 0.3513, 0.0579)),
@@ -11475,16 +11766,12 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.441, 0.4666, 0.1357), (0.3613, 0.2355, 0.1328)),
             ('engine', 'hull', 'engine', (0.828, 0.1857, 0.557), (0.1402, 0.1742, 0.1803)),
             ('fuelTank', 'hull', 'fuelTank', (0.2392, 0.2253, 0.6254), (0.1132, 0.1779, 0.1288)),
             ('radio', 'hull', 'radio', (0.8981, 0.6965, 0.3018), (0.0755, 0.0965, 0.0746)),
             ('engine', 'hull', 'transmission', (0.537, 0.1228, 0.8446), (0.4396, 0.1174, 0.1019)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7065, 0.6429, 0.2788), (0.0982, 0.3082, 0.066)),
@@ -11498,15 +11785,11 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.507, 0.2688, 0.1864), (0.2957, 0.1597, 0.073)),
             ('engine', 'hull', 'engine', (0.5039, 0.3473, 0.7565), (0.108, 0.2334, 0.225)),
             ('fuelTank', 'hull', 'fuelTank', (0.5057, 0.3533, 0.6723), (0.2868, 0.2139, 0.1407)),
             ('radio', 'hull', 'radio', (0.1402, 0.5536, 0.4276), (0.0497, 0.0874, 0.0592)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2335, 0.738, 0.1989), (0.0759, 0.2122, 0.0676)),
@@ -11522,14 +11805,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5054, 0.4865, 0.2022), (0.4252, 0.0803, 0.1247)),
             ('engine', 'hull', 'engine', (0.5058, 0.226, 0.8054), (0.3133, 0.2214, 0.1946)),
             ('fuelTank', 'hull', 'fuelTank', (0.5004, 0.1329, 0.7019), (0.3092, 0.1121, 0.112)),
             ('radio', 'hull', 'radio', (0.8211, 0.8045, 0.1896), (0.0592, 0.1053, 0.059)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5007, 0.6673, 0.7211), (0.2874, 0.1429, 0.1419)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7624, 0.6653, 0.4018), (0.0688, 0.1898, 0.0504)),
@@ -11540,11 +11821,52 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_05', (0.424, 0.525, 0.2356), (0.0688, 0.1887, 0.0351)),
         ),
     ),
+    ('ussr', 'r31valentinell'): (
+        'lightTank',
+        4,
+        (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5227, 0.4509, 0.6114), (0.4751, 0.2685, 0.1373)),
+            ('engine', 'hull', 'engine', (0.5055, 0.4258, 0.3532), (0.3553, 0.3092, 0.101)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5015, 0.4449, 0.159), (0.4346, 0.2786, 0.0868)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9389, 0.8378), (0.1543, 0.0256, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5055, 0.2763, 0.1318), (0.4657, 0.1233, 0.1137)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5176, 0.943, 0.6114), (0.3504, 0.0113, 0.0905)),
+            ('radio', 'turret', 'radio', (0.5336, 0.6879, 0.153), (0.2303, 0.1196, 0.1012)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.1667, 0.9771, 0.6621), (0.0311, 0.0229, 0.0172)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3211, 0.4662, 0.6278), (0.1569, 0.4662, 0.1624)),
+            ('hull', 'crew_01', (0.5038, 0.4426, 0.8699), (0.1576, 0.3938, 0.0949)),
+            ('turret', 'crew_02', (0.7013, 0.529, 0.4374), (0.1789, 0.4229, 0.1825)),
+        ),
+    ),
+    ('ussr', 'r31valentinelligr'): (
+        'lightTank',
+        4,
+        (('commander', 'gunner'), ('driver',), ('loader', 'radioman')),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5227, 0.4509, 0.6114), (0.4751, 0.2685, 0.1373)),
+            ('engine', 'hull', 'engine', (0.5055, 0.4258, 0.3532), (0.3553, 0.3092, 0.101)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5015, 0.4449, 0.159), (0.4346, 0.2786, 0.0868)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9389, 0.8378), (0.1543, 0.0256, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5055, 0.2763, 0.1318), (0.4657, 0.1233, 0.1137)),
+            ('turretRotator', 'hull', 'turretRotator', (0.5176, 0.943, 0.6114), (0.3504, 0.0113, 0.0905)),
+            ('radio', 'turret', 'radio', (0.5336, 0.6879, 0.153), (0.2303, 0.1196, 0.1012)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.1667, 0.9771, 0.6621), (0.0311, 0.0229, 0.0172)),
+        ),
+        (
+            ('turret', 'crew_00', (0.3211, 0.4662, 0.6278), (0.1569, 0.4662, 0.1624)),
+            ('hull', 'crew_01', (0.5038, 0.4426, 0.8699), (0.1576, 0.3938, 0.0949)),
+            ('turret', 'crew_02', (0.7013, 0.529, 0.4374), (0.1789, 0.4229, 0.1825)),
+        ),
+    ),
     ('ussr', 'r32matildaiill'): (
         'mediumTank',
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5025, 0.4562, 0.4561), (0.3058, 0.335, 0.0752)),
@@ -11563,11 +11885,33 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_03', (0.7153, 0.3534, 0.457), (0.1784, 0.3534, 0.121)),
         ),
     ),
+    ('ussr', 'r33churchillll'): (
+        'heavyTank',
+        5,
+        (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.3393, 0.517), (0.4667, 0.2848, 0.0841)),
+            ('engine', 'hull', 'engine', (0.5, 0.5382, 0.2917), (0.2238, 0.319, 0.1242)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5012, 0.4869, 0.2973), (0.4771, 0.1113, 0.1083)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.7229, 0.9701, 0.7954), (0.0184, 0.0299, 0.01)),
+            ('engine', 'hull', 'transmission', (0.5, 0.6484, 0.1131), (0.2588, 0.1543, 0.0459)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4977, 0.9222, 0.5541), (0.2103, 0.0419, 0.0748)),
+            ('radio', 'turret', 'radio', (0.3981, 0.5492, 0.2065), (0.1328, 0.1265, 0.0755)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.1963, 0.9564, 0.7373), (0.027, 0.0436, 0.0198)),
+        ),
+        (
+            ('turret', 'crew_00', (0.387, 0.4339, 0.4877), (0.0916, 0.4338, 0.1809)),
+            ('turret', 'crew_01', (0.3968, 0.4339, 0.7323), (0.1185, 0.4338, 0.133)),
+            ('hull', 'crew_02', (0.3674, 0.5466, 0.7885), (0.0846, 0.3476, 0.0866)),
+            ('hull', 'crew_03', (0.6219, 0.5466, 0.7885), (0.0846, 0.3476, 0.0866)),
+            ('turret', 'crew_04', (0.7123, 0.4642, 0.4172), (0.2158, 0.4035, 0.1782)),
+        ),
+    ),
     ('ussr', 'r34btsv'): (
         'lightTank',
         3,
         (('commander', 'loader'), ('radioman',), ('driver',), ('gunner',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5032, 0.4561, 0.6167), (0.2887, 0.3876, 0.1141)),
@@ -11589,7 +11933,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.54, 0.2387, 0.6349), (0.2622, 0.1286, 0.1569)),
@@ -11614,7 +11957,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.54, 0.2344, 0.6325), (0.2622, 0.1286, 0.1569)),
             ('engine', 'hull', 'engine', (0.5071, 0.4368, 0.3037), (0.2829, 0.3851, 0.1302)),
@@ -11637,7 +11979,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5008, 0.2252, 0.6228), (0.2601, 0.1412, 0.1397)),
@@ -11663,7 +12004,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6636, 0.4009, 0.5943), (0.1828, 0.3277, 0.1841)),
             ('engine', 'hull', 'engine', (0.5009, 0.4785, 0.2509), (0.3503, 0.3532, 0.0793)),
@@ -11687,7 +12027,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.496, 0.3153, 0.5533), (0.2891, 0.2334, 0.1605)),
             ('engine', 'hull', 'engine', (0.4993, 0.509, 0.2114), (0.301, 0.3611, 0.1656)),
@@ -11709,7 +12048,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3221, 0.3783, 0.4311), (0.3068, 0.3308, 0.1322)),
             ('engine', 'hull', 'engine', (0.4961, 0.4672, 0.5076), (0.4778, 0.4043, 0.437)),
@@ -11728,7 +12066,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         3,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.0975, 0.2516, 0.6431), (0.0683, 0.2883, 0.0747)),
@@ -11750,7 +12087,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander', 'gunner', 'radioman', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.0975, 0.2516, 0.6431), (0.0683, 0.2883, 0.0747)),
             ('engine', 'hull', 'engine', (0.4587, 0.2109, 0.559), (0.4369, 0.3561, 0.3906)),
@@ -11770,7 +12106,6 @@ CONSOLE_LAYOUTS_0922 = {
         'lightTank',
         4,
         (('commander', 'radioman', 'loader'), ('gunner',), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.1902, 0.4548, 0.6426), (0.069, 0.3002, 0.0763)),
@@ -11793,7 +12128,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4959, 0.564, 0.6022), (0.4362, 0.3218, 0.1991)),
@@ -11819,7 +12153,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander',), ('gunner',), ('driver',), ('loader',), ('loader', 'radioman')),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4959, 0.564, 0.6022), (0.4362, 0.3218, 0.1991)),
             ('engine', 'hull', 'engine', (0.4994, 0.4517, 0.2767), (0.3013, 0.4148, 0.1144)),
@@ -11843,7 +12176,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander',), ('gunner',), ('driver',), ('loader',), ('loader', 'radioman')),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4959, 0.564, 0.6022), (0.4362, 0.3218, 0.1991)),
@@ -11869,7 +12201,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5002, 0.1797, 0.6395), (0.2771, 0.1243, 0.1356)),
             ('engine', 'hull', 'engine', (0.5002, 0.5339, 0.2682), (0.3772, 0.4788, 0.2117)),
@@ -11892,14 +12223,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5033, 0.561, 0.6674), (0.4725, 0.3179, 0.185)),
             ('engine', 'hull', 'engine', (0.5, 0.2843, 0.2504), (0.1838, 0.2602, 0.2047)),
             ('fuelTank', 'hull', 'fuelTank', (0.4702, 0.4676, 0.5554), (0.437, 0.4523, 0.389)),
             ('radio', 'hull', 'radio', (0.8952, 0.5232, 0.7876), (0.0611, 0.0921, 0.0342)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5322, 0.7522, 0.7094), (0.2315, 0.2483, 0.195)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7509, 0.6676, 0.7757), (0.0802, 0.2315, 0.0827)),
@@ -11914,14 +12243,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5033, 0.561, 0.6674), (0.4725, 0.3179, 0.185)),
             ('engine', 'hull', 'engine', (0.5, 0.2843, 0.2504), (0.1838, 0.2602, 0.2047)),
             ('fuelTank', 'hull', 'fuelTank', (0.4702, 0.4676, 0.5554), (0.437, 0.4523, 0.389)),
             ('radio', 'hull', 'radio', (0.8952, 0.5232, 0.7876), (0.0611, 0.0921, 0.0342)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5322, 0.7522, 0.7094), (0.2315, 0.2483, 0.195)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.7509, 0.6676, 0.7757), (0.0802, 0.2315, 0.0827)),
@@ -11936,7 +12263,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.503, 0.4332, 0.4997), (0.3988, 0.41, 0.1305)),
             ('engine', 'hull', 'engine', (0.5019, 0.2456, 0.2026), (0.2605, 0.2428, 0.1015)),
@@ -11945,7 +12271,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4994, 0.3831, 0.8863), (0.0323, 0.0156, 0.01)),
             ('engine', 'hull', 'transmission', (0.5019, 0.1419, 0.0623), (0.3095, 0.1047, 0.0363)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.5, 0.9479, 0.051), (0.48, 0.0521, 0.051)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.6842, 0.7472, 0.5184), (0.0799, 0.2064, 0.0552)),
@@ -11960,7 +12285,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.2623, 0.55), (0.4512, 0.2291, 0.0939)),
@@ -11981,7 +12305,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         3,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
-        (),
         ('turretRotator',),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.2623, 0.55), (0.4512, 0.2291, 0.0939)),
@@ -12003,17 +12326,12 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('ammoBay', 'turretRotator'),
-        (),
         (
             ('engine', 'hull', 'engine', (0.4998, 0.2489, 0.6616), (0.2821, 0.2248, 0.0877)),
             ('fuelTank', 'hull', 'fuelTank', (0.508, 0.1782, 0.4212), (0.3108, 0.1573, 0.1038)),
             ('radio', 'hull', 'radio', (0.8856, 0.4886, 0.3162), (0.0683, 0.1135, 0.0479)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5119, 0.7006, 0.6028), (0.2932, 0.2994, 0.2171)),
             ('engine', 'hull', 'transmission', (0.4998, 0.168, 0.8625), (0.3179, 0.0838, 0.1038)),
-            ('ammoBay', 'hull', 'ammo_open_left', (0.27, 0.39, 0.53), (0.072, 0.0864, 0.108)),
-            ('ammoBay', 'hull', 'ammo_open_right', (0.73, 0.39, 0.53), (0.072, 0.0864, 0.108)),
-            ('ammoBay', 'hull', 'ammo_open_floor', (0.5, 0.23, 0.46), (0.1008, 0.0576, 0.0936)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7637, 0.6766, 0.4202), (0.0786, 0.1888, 0.0532)),
@@ -12029,15 +12347,11 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4932, 0.4258, 0.2339), (0.4671, 0.1751, 0.1186)),
             ('engine', 'hull', 'engine', (0.5, 0.2244, 0.7423), (0.1757, 0.1771, 0.1397)),
             ('fuelTank', 'hull', 'fuelTank', (0.4953, 0.1223, 0.3243), (0.2447, 0.0917, 0.1948)),
             ('radio', 'hull', 'radio', (0.9183, 0.4236, 0.4531), (0.042, 0.1401, 0.0378)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.0648, 0.0432, 0.0576)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.0504, 0.036, 0.0504)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2583, 0.6757, 0.4209), (0.0643, 0.2348, 0.036)),
@@ -12052,14 +12366,12 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4963, 0.6999, 0.569), (0.4545, 0.2326, 0.1101)),
             ('engine', 'hull', 'engine', (0.5001, 0.2905, 0.1874), (0.2477, 0.2684, 0.1674)),
             ('fuelTank', 'hull', 'fuelTank', (0.4973, 0.307, 0.235), (0.3313, 0.264, 0.1206)),
             ('radio', 'hull', 'radio', (0.8059, 0.6499, 0.7794), (0.0455, 0.0748, 0.0359)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5, 0.9792, 0.6962), (0.2518, 0.0208, 0.0373)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7123, 0.6623, 0.7272), (0.0635, 0.2516, 0.0571)),
@@ -12073,7 +12385,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5112, 0.1989, 0.6166), (0.3481, 0.159, 0.1277)),
@@ -12100,7 +12411,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5112, 0.1989, 0.6166), (0.3481, 0.159, 0.1277)),
             ('engine', 'hull', 'engine', (0.5132, 0.4095, 0.2604), (0.1882, 0.3471, 0.1603)),
@@ -12126,7 +12436,6 @@ CONSOLE_LAYOUTS_0922 = {
         3,
         (('commander',), ('gunner', 'loader'), ('driver',), ('radioman',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5004, 0.3538, 0.5502), (0.3429, 0.3013, 0.0888)),
             ('engine', 'hull', 'engine', (0.3774, 0.354, 0.292), (0.2205, 0.2915, 0.1411)),
@@ -12147,7 +12456,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5133, 0.4538, 0.6133), (0.3613, 0.4379, 0.1621)),
@@ -12173,14 +12481,12 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.6055, 0.5278, 0.24), (0.1904, 0.4162, 0.2071)),
             ('engine', 'hull', 'engine', (0.5007, 0.3372, 0.7017), (0.3155, 0.2362, 0.2025)),
             ('fuelTank', 'hull', 'fuelTank', (0.5814, 0.2502, 0.562), (0.2439, 0.1293, 0.0814)),
             ('radio', 'hull', 'radio', (0.1749, 0.6212, 0.3154), (0.0547, 0.0897, 0.0567)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.4722, 0.8674, 0.4285), (0.221, 0.1975, 0.2974)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2473, 0.7185, 0.1639), (0.082, 0.2752, 0.0718)),
@@ -12189,11 +12495,34 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_03', (0.6562, 0.7185, 0.1639), (0.082, 0.2752, 0.0718)),
         ),
     ),
+    ('ussr', 'r59a44'): (
+        'mediumTank',
+        7,
+        (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5063, 0.315, 0.2921), (0.4025, 0.2932, 0.1421)),
+            ('engine', 'hull', 'engine', (0.6416, 0.3659, 0.6726), (0.2512, 0.3467, 0.1684)),
+            ('fuelTank', 'hull', 'fuelTank', (0.5059, 0.4137, 0.0674), (0.4009, 0.3957, 0.0649)),
+            ('radio', 'hull', 'radio', (0.2561, 0.2706, 0.5559), (0.1133, 0.1787, 0.0755)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.2926, 0.7212, 0.8565), (0.0746, 0.0146, 0.01)),
+            ('engine', 'hull', 'transmission', (0.501, 0.2726, 0.9084), (0.407, 0.1196, 0.0674)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4991, 0.8607, 0.2533), (0.2536, 0.0556, 0.0824)),
+            ('ammoBay', 'turret', 'ammoBay', (0.773, 0.5303, 0.3077), (0.1656, 0.1728, 0.1498)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.4665, 0.7678, 0.5347), (0.2541, 0.0573, 0.1951)),
+        ),
+        (
+            ('turret', 'crew_00', (0.341, 0.6117, 0.379), (0.1103, 0.3345, 0.1134)),
+            ('turret', 'crew_01', (0.3529, 0.3455, 0.6004), (0.1103, 0.3354, 0.1007)),
+            ('hull', 'crew_02', (0.2344, 0.3851, 0.8639), (0.1015, 0.3742, 0.0741)),
+            ('hull', 'crew_03', (0.2344, 0.5428, 0.7122), (0.1015, 0.4184, 0.0741)),
+            ('turret', 'crew_04', (0.6606, 0.3347, 0.603), (0.1103, 0.3347, 0.0974)),
+        ),
+    ),
     ('ussr', 'r60object416'): (
         'mediumTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4964, 0.5174, 0.0679), (0.4237, 0.3376, 0.0742)),
@@ -12215,7 +12544,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.4001, 0.5848), (0.2447, 0.1931, 0.158)),
@@ -12240,7 +12568,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5018, 0.4001, 0.5848), (0.2447, 0.1931, 0.158)),
             ('engine', 'hull', 'engine', (0.5037, 0.4357, 0.2613), (0.1957, 0.4034, 0.1407)),
@@ -12264,7 +12591,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5, 0.1567, 0.5926), (0.2186, 0.1126, 0.1516)),
             ('engine', 'hull', 'engine', (0.4963, 0.4504, 0.2199), (0.2565, 0.4247, 0.1875)),
@@ -12283,11 +12609,31 @@ CONSOLE_LAYOUTS_0922 = {
             ('turret', 'crew_04', (0.742, 0.6263, 0.4013), (0.0133, 0.018, 0.01)),
         ),
     ),
+    ('ussr', 'r66su26'): (
+        'SPG',
+        3,
+        (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
+        ('surveyingDevice',),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.3289, 0.3083, 0.5134), (0.2733, 0.114, 0.1367)),
+            ('engine', 'hull', 'engine', (0.3289, 0.2237, 0.1991), (0.2733, 0.2093, 0.1471)),
+            ('fuelTank', 'hull', 'fuelTank', (0.8059, 0.1817, 0.1861), (0.1704, 0.1673, 0.1303)),
+            ('radio', 'hull', 'radio', (0.8002, 0.1674, 0.4326), (0.1776, 0.1309, 0.0784)),
+            ('engine', 'hull', 'transmission', (0.5122, 0.1452, 0.8417), (0.48, 0.1263, 0.1496)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4974, 0.5692, 0.2848), (0.0834, 0.1067, 0.0163)),
+        ),
+        (
+            ('hull', 'crew_00', (0.2497, 0.6716, 0.0515), (0.1191, 0.3284, 0.0399)),
+            ('turret', 'crew_01', (0.2242, 0.4266, 0.3958), (0.1286, 0.389, 0.3295)),
+            ('hull', 'crew_02', (0.7474, 0.6716, 0.0515), (0.1191, 0.3284, 0.0399)),
+            ('hull', 'crew_03', (0.8082, 0.3071, 0.6847), (0.138, 0.2927, 0.1067)),
+            ('turret', 'crew_04', (0.7776, 0.4266, 0.3958), (0.131, 0.389, 0.3295)),
+        ),
+    ),
     ('ussr', 'r67m3ll'): (
         'lightTank',
         3,
         (('commander', 'loader'), ('gunner',), ('radioman',), ('driver',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.499, 0.4276, 0.5239), (0.3201, 0.2804, 0.0997)),
@@ -12310,7 +12656,6 @@ CONSOLE_LAYOUTS_0922 = {
         4,
         (('commander', 'gunner'), ('radioman',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5139, 0.1959, 0.6391), (0.2534, 0.1639, 0.1503)),
             ('engine', 'hull', 'engine', (0.5122, 0.4438, 0.2646), (0.3143, 0.4284, 0.2154)),
@@ -12332,7 +12677,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4987, 0.51, 0.628), (0.4772, 0.4049, 0.148)),
@@ -12357,7 +12701,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5133, 0.233, 0.5704), (0.2934, 0.1274, 0.1556)),
             ('engine', 'hull', 'engine', (0.5, 0.5423, 0.2206), (0.479, 0.4433, 0.1765)),
@@ -12366,7 +12709,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5586, 0.98, 0.8512), (0.117, 0.1334, 0.0305)),
             ('ammoBay', 'turret', 'ammoBay', (0.4999, 0.4155, 0.2092), (0.34, 0.1106, 0.1404)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.4675, 0.7828, 0.4444), (0.3379, 0.1257, 0.3332)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.6623, 0.4008, 0.6794), (0.1181, 0.3415, 0.0974)),
@@ -12381,7 +12723,6 @@ CONSOLE_LAYOUTS_0922 = {
         8,
         (('commander',), ('gunner',), ('driver',), ('radioman',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5057, 0.4189, 0.584), (0.2644, 0.0968, 0.1613)),
             ('engine', 'hull', 'engine', (0.5057, 0.6491, 0.2281), (0.4568, 0.3771, 0.181)),
@@ -12389,7 +12730,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.1313, 0.5132, 0.747), (0.0709, 0.2187, 0.0385)),
             ('ammoBay', 'turret', 'ammoBay', (0.5039, 0.4594, 0.1149), (0.3605, 0.2196, 0.0896)),
             ('surveyingDevice', 'turret', 'surveyingDevice', (0.5401, 0.8397, 0.3673), (0.3854, 0.1377, 0.3376)),
-            ('turretRotator', 'turret', 'turret_ring', (0.5, 0.18, 0.5), (0.1224, 0.0504, 0.1224)),
         ),
         (
             ('turret', 'crew_00', (0.3106, 0.5222, 0.3912), (0.0989, 0.3623, 0.0993)),
@@ -12405,16 +12745,12 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('surveyingDevice', 'turretRotator'),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.3993, 0.4265, 0.1536), (0.3954, 0.4174, 0.1265)),
             ('engine', 'hull', 'engine', (0.5009, 0.2599, 0.6007), (0.1547, 0.2508, 0.1228)),
             ('fuelTank', 'hull', 'fuelTank', (0.5009, 0.2599, 0.6007), (0.2938, 0.2508, 0.1228)),
             ('radio', 'hull', 'radio', (0.8231, 0.5088, 0.2064), (0.0451, 0.101, 0.0541)),
             ('engine', 'hull', 'transmission', (0.5009, 0.1296, 0.0764), (0.2938, 0.1205, 0.0738)),
-            ('surveyingDevice', 'hull', 'optics_sight', (0.45, 0.7, 0.7), (0.09, 0.06, 0.08)),
-            ('surveyingDevice', 'hull', 'optics_roof', (0.68, 0.76, 0.54), (0.07, 0.05, 0.07)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.14, 0.1, 0.12)),
         ),
         (
             ('hull', 'crew_00', (0.6757, 0.626, 0.1743), (0.082, 0.2657, 0.0699)),
@@ -12428,7 +12764,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.495, 0.4412, 0.6486), (0.4616, 0.3821, 0.2557)),
             ('engine', 'hull', 'engine', (0.4207, 0.247, 0.2702), (0.2487, 0.2229, 0.0738)),
@@ -12436,7 +12771,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8886, 0.5473, 0.617), (0.0444, 0.1017, 0.0523)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5566, 0.8803, 0.638), (0.3022, 0.0605, 0.1374)),
             ('engine', 'hull', 'transmission', (0.5003, 0.2055, 0.1146), (0.3283, 0.1411, 0.0812)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.7043, 0.5942, 0.6235), (0.0779, 0.3082, 0.077)),
@@ -12450,7 +12784,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.493, 0.138, 0.5871), (0.2607, 0.1014, 0.1782)),
@@ -12477,7 +12810,6 @@ CONSOLE_LAYOUTS_0922 = {
         6,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.493, 0.138, 0.5871), (0.2607, 0.1014, 0.1782)),
             ('engine', 'hull', 'engine', (0.493, 0.441, 0.261), (0.3064, 0.416, 0.131)),
@@ -12503,7 +12835,6 @@ CONSOLE_LAYOUTS_0922 = {
         5,
         (('commander',), ('gunner',), ('driver',), ('loader', 'radioman')),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4964, 0.2465, 0.5342), (0.4773, 0.2233, 0.0988)),
             ('engine', 'hull', 'engine', (0.3685, 0.2586, 0.3007), (0.3125, 0.2302, 0.123)),
@@ -12511,7 +12842,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.8369, 0.1316, 0.6516), (0.1414, 0.1002, 0.0809)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.5169, 0.6768, 0.6964), (0.4442, 0.2546, 0.1247)),
             ('engine', 'hull', 'transmission', (0.4932, 0.1414, 0.9341), (0.4385, 0.0653, 0.0532)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.8079, 0.7211, 0.671), (0.1192, 0.2463, 0.0597)),
@@ -12524,7 +12854,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         5,
         (('commander',), ('gunner',), ('radioman',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.493, 0.1341, 0.5864), (0.2607, 0.0979, 0.1779)),
@@ -12549,7 +12878,6 @@ CONSOLE_LAYOUTS_0922 = {
         9,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4989, 0.5721, 0.6461), (0.4179, 0.3436, 0.1719)),
             ('engine', 'hull', 'engine', (0.4988, 0.4667, 0.3055), (0.1539, 0.3458, 0.1085)),
@@ -12573,7 +12901,6 @@ CONSOLE_LAYOUTS_0922 = {
         2,
         (('commander', 'radioman'), ('gunner', 'loader'), ('driver',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5058, 0.7283, 0.4534), (0.48, 0.246, 0.0393)),
             ('engine', 'hull', 'engine', (0.5, 0.446, 0.2777), (0.2679, 0.3674, 0.1175)),
@@ -12590,11 +12917,54 @@ CONSOLE_LAYOUTS_0922 = {
             ('hull', 'crew_02', (0.5, 0.5035, 0.8412), (0.1472, 0.48, 0.1005)),
         ),
     ),
+    ('ussr', 'r86ltp'): (
+        'lightTank',
+        3,
+        (('commander', 'gunner', 'radioman'), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.226, 0.6135), (0.33, 0.2047, 0.1384)),
+            ('engine', 'hull', 'engine', (0.5045, 0.3628, 0.3184), (0.2295, 0.329, 0.1331)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4984, 0.4866, 0.2428), (0.4672, 0.4671, 0.2088)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5017, 0.8253, 0.8483), (0.0855, 0.0537, 0.0132)),
+            ('engine', 'hull', 'transmission', (0.5, 0.1801, 0.1095), (0.3298, 0.1462, 0.0731)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4919, 0.9751, 0.6034), (0.1542, 0.0249, 0.0787)),
+            ('ammoBay', 'turret', 'ammoBay', (0.6871, 0.6718, 0.2283), (0.2598, 0.1811, 0.1943)),
+            ('radio', 'turret', 'radio', (0.2223, 0.6464, 0.3254), (0.1778, 0.1325, 0.1586)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2673, 0.9334, 0.6509), (0.0599, 0.0666, 0.0428)),
+        ),
+        (
+            ('turret', 'crew_00', (0.2961, 0.4287, 0.6159), (0.1518, 0.4287, 0.1419)),
+            ('hull', 'crew_01', (0.498, 0.4431, 0.814), (0.1152, 0.4335, 0.0928)),
+            ('turret', 'crew_02', (0.6862, 0.4287, 0.6159), (0.1518, 0.4287, 0.1419)),
+        ),
+    ),
+    ('ussr', 'r86ltpbootcamp'): (
+        'lightTank',
+        3,
+        (('commander', 'gunner', 'radioman'), ('driver',), ('loader',)),
+        (),
+        (
+            ('ammoBay', 'hull', 'ammoBay', (0.5, 0.226, 0.6135), (0.33, 0.2047, 0.1384)),
+            ('engine', 'hull', 'engine', (0.5045, 0.3628, 0.3184), (0.2295, 0.329, 0.1331)),
+            ('fuelTank', 'hull', 'fuelTank', (0.4984, 0.4866, 0.2428), (0.4672, 0.4671, 0.2088)),
+            ('surveyingDevice', 'hull', 'surveyingDevice', (0.5017, 0.8253, 0.8483), (0.0855, 0.0537, 0.0132)),
+            ('engine', 'hull', 'transmission', (0.5, 0.1801, 0.1095), (0.3298, 0.1462, 0.0731)),
+            ('turretRotator', 'hull', 'turretRotator', (0.4919, 0.9751, 0.6034), (0.1542, 0.0249, 0.0787)),
+            ('ammoBay', 'turret', 'ammoBay', (0.6871, 0.6718, 0.2283), (0.2598, 0.1811, 0.1943)),
+            ('radio', 'turret', 'radio', (0.2223, 0.6464, 0.3254), (0.1778, 0.1325, 0.1586)),
+            ('surveyingDevice', 'turret', 'surveyingDevice', (0.2673, 0.9334, 0.6509), (0.0599, 0.0666, 0.0428)),
+        ),
+        (
+            ('turret', 'crew_00', (0.2961, 0.4287, 0.6159), (0.1518, 0.4287, 0.1419)),
+            ('hull', 'crew_01', (0.498, 0.4431, 0.814), (0.1152, 0.4335, 0.0928)),
+            ('turret', 'crew_02', (0.6862, 0.4287, 0.6159), (0.1518, 0.4287, 0.1419)),
+        ),
+    ),
     ('ussr', 'r87t62a'): (
         'mediumTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.56, 0.4749, 0.509), (0.2965, 0.4364, 0.2277)),
@@ -12618,7 +12988,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.56, 0.4749, 0.509), (0.2965, 0.4364, 0.2277)),
             ('engine', 'hull', 'engine', (0.4457, 0.4962, 0.1906), (0.2656, 0.3975, 0.0934)),
@@ -12641,7 +13010,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4886, 0.2724, 0.5868), (0.3976, 0.2298, 0.1237)),
             ('engine', 'hull', 'engine', (0.5, 0.1954, 0.2731), (0.1735, 0.1671, 0.0955)),
@@ -12649,7 +13017,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.2527, 0.5678, 0.4231), (0.1187, 0.1097, 0.0454)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.3675, 0.6624, 0.6698), (0.1589, 0.2518, 0.2032)),
             ('engine', 'hull', 'transmission', (0.5, 0.1059, 0.1157), (0.2317, 0.0837, 0.0619)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2815, 0.4757, 0.5745), (0.0686, 0.2543, 0.0667)),
@@ -12664,7 +13031,6 @@ CONSOLE_LAYOUTS_0922 = {
         7,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         ('turretRotator',),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4984, 0.3137, 0.4113), (0.4659, 0.2344, 0.0869)),
             ('engine', 'hull', 'engine', (0.5006, 0.3088, 0.2001), (0.2748, 0.2177, 0.0889)),
@@ -12672,7 +13038,6 @@ CONSOLE_LAYOUTS_0922 = {
             ('radio', 'hull', 'radio', (0.0985, 0.5509, 0.585), (0.074, 0.1054, 0.0536)),
             ('surveyingDevice', 'hull', 'surveyingDevice', (0.2936, 0.8084, 0.6442), (0.0395, 0.1916, 0.1698)),
             ('engine', 'hull', 'transmission', (0.5031, 0.1946, 0.0989), (0.2723, 0.1035, 0.0594)),
-            ('turretRotator', 'hull', 'horizontal_traverse', (0.5, 0.48, 0.68), (0.1008, 0.072, 0.0864)),
         ),
         (
             ('hull', 'crew_00', (0.2726, 0.5972, 0.4824), (0.0745, 0.3193, 0.0788)),
@@ -12685,7 +13050,6 @@ CONSOLE_LAYOUTS_0922 = {
         'heavyTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5003, 0.47, 0.6583), (0.4694, 0.4269, 0.1397)),
@@ -12709,7 +13073,6 @@ CONSOLE_LAYOUTS_0922 = {
         'SPG',
         7,
         (('commander', 'radioman'), ('gunner',), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5047, 0.5849, 0.1357), (0.4112, 0.1249, 0.0432)),
@@ -12730,7 +13093,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.5224, 0.2408), (0.4767, 0.1631, 0.1196)),
@@ -12751,7 +13113,6 @@ CONSOLE_LAYOUTS_0922 = {
         'AT-SPG',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',), ('loader',)),
-        (),
         ('surveyingDevice', 'turretRotator'),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5013, 0.5224, 0.2408), (0.4767, 0.1631, 0.1196)),
@@ -12772,7 +13133,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5645, 0.4558, 0.5132), (0.2835, 0.4248, 0.2816)),
@@ -12796,7 +13156,6 @@ CONSOLE_LAYOUTS_0922 = {
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
         (),
-        (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.5645, 0.4558, 0.5132), (0.2835, 0.4248, 0.2816)),
             ('engine', 'hull', 'engine', (0.4993, 0.4401, 0.1582), (0.2519, 0.3895, 0.0583)),
@@ -12818,7 +13177,6 @@ CONSOLE_LAYOUTS_0922 = {
         'mediumTank',
         10,
         (('commander', 'radioman'), ('gunner',), ('driver',), ('loader',)),
-        (),
         (),
         (
             ('ammoBay', 'hull', 'ammoBay', (0.4953, 0.4803, 0.4805), (0.4272, 0.45, 0.1807)),
