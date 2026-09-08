@@ -801,7 +801,7 @@ class ProjectileWireTests(unittest.TestCase):
                 self.assertIs(
                     False, message['direct']['structural_armor_hit'])
 
-    def test_first_ricochet_wire_keeps_the_blocked_damage_roll(self):
+    def test_first_ricochet_wire_keeps_the_blocked_damage_potential(self):
         client = self.active_worker_client()
         direct = self.effect('bot', 17, 11.0)
         direct['damage'] = 0

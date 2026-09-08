@@ -9949,6 +9949,25 @@ class BattleRuntime(object):
             return False
         return True
 
+    @staticmethod
+    def _hit_indicator_damage(event, shot, damage):
+        """Report the damage a stopped shell carried, not the HP it removed.
+
+        #1513's damage indicator prints ``str(HitData.getDamage())`` as the
+        marker label and picks ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG``
+        from ``damage / playerVehMaxHP``, so a blocked marker is built to
+        carry a real value; passing the removed hit points labels every
+        bounce ``0`` and pins it to the smallest blocked art.  A direct hit
+        that did not pierce never drew a damage roll, so the shell's
+        published damage is what its armour stopped.  A splash keeps the
+        applied value: its damage falls off with distance and absorption,
+        and the armour ledger excludes splash for the same reason.
+        """
+        if (damage > 0 or bool(event.get('splash', False)) or
+                max(0, min(int(event.get('shot_result', 2)), 2)) == 2):
+            return damage
+        return max(0, int(combat_rules.shell_nominal_damage(shot)))
+
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
         """Port the mature 0.8.2 hit feedback through exact #1513 APIs."""
@@ -9994,7 +10013,8 @@ class BattleRuntime(object):
                 -(attacker_position[0] - target_position[0]),
                 -(attacker_position[2] - target_position[2]))
             self._avatar.showOwnVehicleHitDirection(
-                hit_yaw, int(attacker_id or 0), damage,
+                hit_yaw, int(attacker_id or 0),
+                self._hit_indicator_damage(event, shot, damage),
                 self._critical_hit_mask(event.get('critical')),
                 damage <= 0, combat_rules.is_he(shot),
                 int(target_record['engine_id']))
@@ -14005,12 +14025,14 @@ class BattleRuntime(object):
             'z': float(impact[2]),
         }
         if potential_damage is not None:
-            # The armour ledger needs the roll the damage law already made,
-            # before armour and modules reduced it.  Splash carries no roll:
-            # the server excludes splash from blocked damage. An overlay-edited
-            # shell can roll past 5000, the ceiling the wire validator and battle
-            # server enforce, so saturate the statistic instead of letting
-            # the validator drop the whole terminal.
+            # The armour ledger needs the damage this shell could have
+            # delivered before armour and modules reduced it: the roll a
+            # penetration spent, and the shell's published damage when
+            # armour stopped it before any roll could apply.  Splash never
+            # carries one: the server excludes splash from blocked damage.
+            # An overlay-edited shell can exceed 5000, the ceiling the wire
+            # validator and battle server enforce, so saturate the statistic
+            # instead of letting the validator drop the whole terminal.
             effect['potential_damage'] = max(
                 0, min(5000, int(potential_damage)))
         if structural_armor_hit is not None:
@@ -14308,9 +14330,16 @@ class BattleRuntime(object):
                     collision_evidence))
         critical = self._critical_with_crew_roster(
             critical_target, critical)
-        potential_damage = None
-        if contact is not None:
-            potential_damage = int(damage_roll)
+        # A penetration spent the roll it drew, so that roll is the damage
+        # the target could have taken.  Every other verdict -- a ricochet, a
+        # non-penetration, and a traversal that only ever found external
+        # plates -- stopped the shell before any roll could apply, so the
+        # armour ledger owes the shell's published damage instead of a
+        # sample nobody took.  This is the value the damage log's blocked
+        # rows and the #1513 damage indicator both report.
+        potential_damage = int(
+            damage_roll if int(result) == 2
+            else combat_rules.shell_nominal_damage(shot))
         return self._projectile_effect(
             record, damage, result, terminal_data['impact'],
             critical, hull_damage, critical_delta,

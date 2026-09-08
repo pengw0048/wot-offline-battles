@@ -1042,7 +1042,7 @@ def _strict_projectile_effect(value):
             return None
         result['damage_sticker'] = damage_sticker
     if has_potential_damage:
-        # The armour ledger's un-reduced roll shares the damage bound the
+        # The armour ledger's un-reduced value shares the damage bound the
         # server enforces; a splash proposal never carries one.
         potential_damage = _projectile_int_range(
             value.get('potential_damage'), 0, 5000)
@@ -2956,7 +2956,7 @@ class LANClient(object):
             'target_kind', 'target_id', 'damage', 'shot_result',
             'x', 'y', 'z'}
         # A bounce is the archetypal blocked-damage contact, so a continuing
-        # shell still publishes its potential-damage roll, decal identity and
+        # shell still publishes its potential damage, decal identity and
         # armour layer. Critical, stun and splash tokens stay forbidden here.
         direct_optional = {
             'damage_sticker', 'potential_damage', 'structural_armor_hit'}

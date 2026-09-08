@@ -12706,6 +12706,92 @@ class BattleRuntimeContractTests(unittest.TestCase):
             value['eventType']
             for value in battle._avatar.battle_events[0]])
 
+    def _blocked_hit_fixture(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        target = _Vehicle(10, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        attacker = _Vehicle(11, _Descriptor(), _Vector(10, 0, 0),
+                            (0, 0, 0), {'health': 500})
+        runtime.bigworld.entities.update({10: target, 11: attacker})
+        battle._local_position = (0.0, 0.0, 0.0)
+        target_record = {
+            'engine_id': 10, 'state': {'team': 1, 'health': 500},
+            'kind': 'player', 'network_id': 1, 'local': True}
+        attacker_record = {
+            'engine_id': 11,
+            'spot_visible': False, 'spot_marker_visible': False,
+            'state': {'team': 2, 'health': 500,
+                      'x': 10.0, 'y': 0.0, 'z': 0.0},
+            'kind': 'bot', 'network_id': 2, 'local': False}
+        return battle, target_record, attacker_record
+
+    def test_blocked_hit_indicator_reports_the_published_shell_damage(self):
+        """A bounce labels the marker with the shell, not the lost HP.
+
+        #1513's extended indicator prints ``str(HitData.getDamage())`` and
+        selects ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG`` from
+        ``damage / playerVehMaxHP``, so the removed hit points label every
+        blocked marker ``0`` and pin it to the smallest blocked art.  The
+        damage log's blocked row must read the same number.
+        """
+        for shot_result in (0, 1):
+            with self.subTest(shot_result=shot_result):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture())
+                event = {
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'shot_result': shot_result, 'damage': 0,
+                    'blocked_damage': 100, 'source': 'shot',
+                    'dead': False, 'attack_reason': 0, 'death_reason': 0}
+
+                self.assertTrue(battle._present_combat_hit(
+                    event, target_record, attacker_record, 11))
+                self.assertTrue(battle._present_combat_feedback(
+                    event, target_record, attacker_record))
+
+                direction = battle._avatar.hit_directions[-1]
+                # _Descriptor's shell is published at 100 armour damage.
+                self.assertEqual(100, direction[2])
+                self.assertIs(True, direction[4])
+                self.assertEqual(0, direction[3])
+                events = battle._avatar.battle_events[-1]
+                self.assertEqual(
+                    [5], [value['eventType'] for value in events])
+                # Indicator and blocked log row report one number.
+                self.assertEqual(
+                    direction[2],
+                    _unpack_damage(events[0]['details'])[0])
+
+    def test_absorbed_splash_and_penetration_keep_the_applied_damage(self):
+        """Only a stopped direct shell owes its published damage.
+
+        A splash falls off with distance and absorption, and the armour
+        ledger excludes it, so a fully absorbed near miss stays at zero.  A
+        penetration already spent its roll, so it reports what it removed.
+        """
+        for label, event, expected in (
+                ('absorbed splash', {
+                    'shot_result': 1, 'damage': 0, 'splash': True}, 0),
+                ('penetration', {
+                    'shot_result': 2, 'damage': 144}, 144)):
+            with self.subTest(label):
+                battle, target_record, attacker_record = (
+                    self._blocked_hit_fixture())
+                event = dict({
+                    'kind': 'bot_human_hit', 'world_pose': True,
+                    'x': 0.5, 'y': 1.0, 'z': 0.0, 'shell_index': 0,
+                    'source': 'shot', 'dead': False,
+                    'attack_reason': 0, 'death_reason': 0}, **event)
+
+                battle._present_combat_hit(
+                    event, target_record, attacker_record, 11)
+
+                self.assertEqual(
+                    expected, battle._avatar.hit_directions[-1][2])
+
     def test_native_impact_effect_exception_keeps_nonvisual_feedback(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

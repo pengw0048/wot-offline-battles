@@ -3040,7 +3040,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             SIMULATION_WORKER_AUTHORITY_ID, second))
         self.assertEqual(1, record['ricochet_count'])
 
-    def test_worker_roll_becomes_the_victim_blocked_damage_ledger(self):
+    def test_worker_potential_becomes_the_victim_blocked_damage_ledger(self):
         for shot_result, damage, blocked in (
                 (1, 0, 390), (1, 200, 190), (2, 300, 0)):
             with self.subTest(shot_result=shot_result, damage=damage):
@@ -3080,8 +3080,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             _ricochet('1:p:1:1', direct=_effect(
                 damage=0, shot_result=0, potential_damage=420))))
 
-        # A bounce is the archetypal blocked hit: the whole roll counts for
-        # the vehicle whose armour stopped it, and the shell keeps flying.
+        # A bounce is the archetypal blocked hit: the shell's whole
+        # potential counts for the vehicle whose armour stopped it, and the
+        # shell keeps flying.
         bounce = [event for event in state.pending_events
                   if event.get('kind') == 'hit'][-1]
         self.assertEqual(0, bounce['shot_result'])

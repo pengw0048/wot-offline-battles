@@ -2175,6 +2175,24 @@ the next intent can proceed. Messages that cannot establish the current
 identity, round, type or exact sequence still consume nothing. Extra fields
 remain rejected rather than extending the protocol.
 
+`PlayerAvatar.showOwnVehicleHitDirection(hitDirYaw, attackerID, damage, crits,
+isBlocked, isShellHE, damagedID)` is the only producer of the damage
+indicator. `gui/battle_control/hit_data.pyc` keeps `damage` and an
+`IS_BLOCKED` flag, and
+`gui/Scaleform/daapi/view/battle/shared/indicators.pyc` prints
+`str(HitData.getDamage())` as the extended marker's label while selecting
+`DAMAGEINDICATOR.BLOCKED_SMALL`/`BLOCKED_MEDIUM`/`BLOCKED_BIG` from
+`damage / playerVehMaxHP`. Those three blocked art frames are unreachable
+unless a blocked hit carries a real value, so a stopped shell reports what
+its armour absorbed rather than the hit points it removed. The damage log
+panel's blocked rows and its running total come from the same number: the
+`TANKING` battle event, whose totals `PersonalEfficiencyController`
+accumulates client-side from `Avatar.onBattleEvents`. The value itself is a
+product choice, not a recovered contract -- the cell app that packs retail's
+`damage` and blocked ledger is not in the reviewed package. This port reports
+the shell's published `shell.damage[0]`, because a shell that never pierced
+never drew a damage roll; a penetration keeps the roll it actually spent.
+
 ## AI, room and round boundaries
 
 Humans take real team slots first. The first waiting 0.9.22 player owns map
