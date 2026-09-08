@@ -1090,6 +1090,138 @@ python3 tools/ffi_experiment/check_world_parity.py \
   --module /tmp/ffi-world-host3/offline_astar_native.so
 ```
 
+A subsequent opt-in motion/navigation experiment (2026-09-08) replaces the
+persistent route controller and the copied-physics motion flow, retaining the
+same production source baseline (`900744ce`) and fixture as the core/world
+experiments. An earlier instrumented, exclusive-time attribution assigned
+49.4% of this fixture's loop CPU to motion, navigation and their safety checks.
+That is the affected workflow's original cost, not a promised saving or a claim
+that all its code has now become native.
+
+C++ now owns the baked grid geometry, navigation paths and search jobs, fair
+expansion credits, expiry and cancellation, direct-route progress leases,
+lookahead and smoothing, shallow-water recovery and blocked-edge memory.
+Driving, the horizontal motion preparation/integration block and its probe-cache
+decisions execute on uninterrupted native stacks. Driver and motion safety
+checks share the native navigator directly. Descriptor-derived physics profiles
+are registered once per numeric profile. The copied vertical-motion controller,
+slope calculation, complete coast-to-stop integration, final pose hazard guard
+and contact impulse/push response also run in C++. Each Bot still commits its
+pose before the next Bot observes it; batching all Bot poses at the end would
+change this source contract.
+
+A synchronous borrowed callback bridge replaces prefix replay in driving and
+world sweeps. It holds the GIL, returns to the same C++ stack after each engine
+query, and releases every Python callback result. It retains no Python pointer
+across dispatches. Only reviewed geometry/expiry queries and stack-owned world
+queries may nest, on the original caller thread, using non-overlapping borrowed
+buffers. Reset/reentrant mutation and buffer aliasing are rejected before
+mutation; callback exceptions retain their Python identity and unwind the owner.
+The x86 experiment adds an exact function/tuple layout and function-call
+signature preflight, with a callback self-test before this new ABI is enabled.
+Static inspection and a successful cross-build do not establish that this ABI
+loads or behaves correctly inside Windows #1513.
+
+Opaque motion probes and receipts stay Python-owned, referenced by bounded
+numeric identities in C++. Callback-visible yaw, speed, diagnostic and cache
+updates follow source order, including a failed engine query. A blocked motion
+step can cancel a pending navigation search on the same C++ stack; its identity
+retirement is routed to the navigation owner. Retired cache identities are
+removed once no path, search or fairness cursor owns them.
+
+Python still produces tactical/macro route goals and radio/lane adjustments,
+projects descriptor and critical-device state, owns the fair native-receipt
+queue, and performs the actual engine/destruction queries. The outer
+`BattleRuntime._resolve_bot_motion` catalog adapter, tank-pair SAT/ram solver and
+destructible catalog remain source-owned. Weapon/perception orchestration and
+publication also remain Python. The optional ten-spring suspension trial is
+explicitly counted as `suspension_source`; this fixture exercises the migrated
+copied vertical controller. The experiment neither ports every branch included
+in the 49.4% attribution nor changes the product's physical authority path.
+
+The final uninstrumented comparison runs nine fresh CPython 2.7.18 processes
+in rotating order on the same shared Linux aarch64 host: Great Wall combat,
+29 Bots, 30 simulated seconds, 15 frame callbacks/second. It includes adapter
+marshalling and normal snapshot capture, excludes process/fixture startup and
+JSON serialization, and reports native initialization separately.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.046064 s | 10.999241–11.174757 s | 0.00% |
+| Previous A* + contacts + driving + aiming | 9.866947 s | 9.781824–9.931816 s | 10.67% |
+| Persistent navigation + motion + synchronous driver/world, with aiming/contacts | 8.859842 s | 8.820707–8.943107 s | 19.79% |
+
+The new variant saves another 10.21% against the preceding best integrated
+variant. Median initialization is 0.098311 s and the median loop-plus-native-init
+total is 8.958153 s. All nine snapshots match exactly across messages, ordered
+native queries, probe counters, decision counters, navigation progress and
+diagnostics. The fixture acknowledges launches without simulating projectile
+terminals, and uses deterministic engine-query fakes; these are complete
+snapshots of this bounded fixture, not complete real-battle acceptance.
+The measured whole-loop gain is 19.79%, far below a 90% reduction. Neither the
+49.4% original workflow attribution nor isolated native kernel throughput
+predicts the gain after retained Python state and engine boundaries.
+
+A separate instrumented pair also preserves the complete snapshots. Inclusive
+route/driving time falls from 1.6982 s to 0.5463 s, while the world sweep with
+its retained query leaves falls only from 1.3802 s to 1.2382 s. Motion preparation
+with its callback/state conversion grows from 0.3626 s to 0.6317 s. These scoped
+measurements include observer overhead and are explanatory, not replacements
+for the nine uninstrumented samples. They show why migrating controller logic
+does not remove the Python callback and shared-state boundary cost. Each native
+sample records 6,166 migrated vertical updates and zero suspension-source updates.
+
+Focused differential validation covers 150,000 copied-physics results; 3,000
+horizontal-motion cases with ordered callback-visible state, injected query
+failures and bounded opaque caches; 21,000 vertical/slope/coast/final-guard/contact
+checks; and 115,200 navigation operations with 3,600 complete frame-state
+comparisons. The horizontal suite also exercises 37 pending-search retirements
+from within motion and compares final navigation state. The shared dispatcher
+passes 86 exact A* cases and 1,200 aiming/driver cases (3,600 driver steps).
+World validation retains 145 exact query/result traces and 75 physical scenarios
+through both shadow and synchronous adapters; its internal-helper mock remains
+source-only. The bridge suite checks exception identity, result release,
+reset, nested queries, overlapping buffers and cross-thread rejection.
+
+AddressSanitizer and UndefinedBehaviorSanitizer pass the bridge, horizontal and
+vertical motion, navigation and world suites on the Python 3 host, with leak
+detection disabled and halt-on-error enabled. CPython 2.7 compiles all 97 client
+modules and 20 portable experiment modules. Both host ABIs and the unshipped
+x86 bridge build; the PE inspection reports only `KERNEL32.dll` and `msvcrt.dll`
+imports. No production entry point, launcher or shipping package installs the
+experiment. Exact Windows loading, x86 floating-point parity, native query
+latency, frame pacing and gameplay remain unproved.
+
+Reproduce the flow comparison and focused contracts using the fixture creation
+command from the preceding experiment:
+
+```bash
+tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-flow-host
+"$FFI_PY27" tools/ffi_experiment/check_query_bridge.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so
+"$FFI_PY27" tools/ffi_experiment/check_motion_physics.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_navigation_grid.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so
+"$FFI_PY27" tools/ffi_experiment/check_navigation_flow.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --cases 12 --frames 200
+"$FFI_PY27" tools/ffi_experiment/check_motion_flow.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --cases 3000
+"$FFI_PY27" tools/ffi_experiment/check_motion_vertical.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --cases 3000
+"$FFI_PY27" tools/ffi_experiment/check_core_parity.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --sync-driver
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json \
+  --components aiming,driver-flow,contacts,world-sync,navigation-flow,motion-flow \
+  --control-components aiming,driver,contacts --seconds 30 --rounds 3 \
+  --output /tmp/ffi-flow-comparison
+tools/ffi_experiment/build_1513.sh /tmp/ffi-flow-1513
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
