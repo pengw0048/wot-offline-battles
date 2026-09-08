@@ -394,20 +394,26 @@ class EconomyRegressionTests(unittest.TestCase):
 
     def test_one_refused_step_does_not_stop_the_others(self):
         """Containment is per step, not per settlement."""
+        record = self.stock['vehicles'][0]
+        # A seat naming a crew member the barracks does not hold is what the
+        # crew award refuses on; the vehicle itself is still there, so its
+        # repair bill settles normally.
+        record['crew'] = [999999] + list(record.get('crew') or ())[1:]
+        before = int(self.stock['wallet']['credits'])
         store = self.stores.GarageStore(self.path)
-        with mock.patch.object(self.garage.GarageState, 'settle_battle_damage',
-                               side_effect=self.garage.GarageError('refused')):
-            applied = store.apply_battle_crew_xp(
-                self.stock, 'partial:1:1', 50001, 100, 1,
-                tankmen_module=self.tankmen, vehicles_module=self.vehicles,
-                health=400,
-                rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
+
+        applied = store.apply_battle_crew_xp(
+            self.stock, 'partial:1:1', 50001, 100, 1,
+            tankmen_module=self.tankmen, vehicles_module=self.vehicles,
+            health=400, rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
 
         self.assertEqual(1, len(applied['refused']))
-        self.assertIn('repair bill', applied['refused'][0])
-        # The crew still trained and the wallet still moved.
-        self.assertTrue(applied['xp_by_tankman'])
+        self.assertIn('crew experience', applied['refused'][0])
+        self.assertEqual({}, applied['xp_by_tankman'])
+        # The repair bill was still settled and the wallet still moved.
+        self.assertIsNotNone(applied['repair'])
         self.assertEqual(1000, applied['awarded']['credits'])
+        self.assertEqual(before + 1000, self.stock['wallet']['credits'])
 
     def test_mentor_uses_the_native_factor_for_other_crew_before_consumption(self):
         self.stock['vehicles'][0]['eqs'] = [11001, 0, 0]
