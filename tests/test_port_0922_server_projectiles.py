@@ -1119,6 +1119,47 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(hit['critical']['ammo_rack_death'])
         self.assertEqual([ammo_rack_event], hit['critical']['events'])
 
+    def test_fatal_player_ammo_rack_delta_drains_hull_and_publishes_cause(self):
+        state = _state()
+        target = state.players[2]
+        target.health = target.display_health = 900
+        target.effective_params['critical']['devices'] = [{
+            'name': 'ammoBayHealth', 'max_hp': 100.0, 'regen_hp': 50.0}]
+        critical = {
+            'devices': [{'name': 'ammoBayHealth', 'hp': 0.0,
+                         'max_hp': 100.0, 'state': 'destroyed'}],
+            'destroyed': ['ammoBayHealth'], 'crew_ko': [],
+            'crew_roster': ['commander'], 'fire': False,
+            'ammo_rack_death': True, 'events': [],
+        }
+        proposal = {
+            'target_kind': 'player', 'target_id': 2, 'target': target,
+            'target_team': 2, 'target_alive': True,
+            'retired_target': False, 'damage': 910,
+            'potential_damage': 100, 'shot_result': 2,
+            'pose': (10.0, 1.0, 0.0), 'critical': critical,
+            # The worker records HP actually lost, capped to the rack pool,
+            # even when the source shell's module damage was 2000.
+            'critical_delta': {'devices': [
+                {'name': 'ammoBayHealth', 'hp_loss': 100.0}],
+                'crew_ko': [], 'ignite': False},
+            'critical_accepted': True, 'hull_damage': 100,
+            'splash': False, 'stun_end_server_time_ms': 0,
+        }
+
+        state._apply_projectile_effect(self._critical_record(), proposal)
+
+        self.assertFalse(target.alive)
+        self.assertEqual(0, target.health)
+        self.assertEqual(0, target.display_health)
+        self.assertTrue(target.critical['ammo_rack_death'])
+        hit = [event for event in state.pending_events
+               if event.get('target') == 2][-1]
+        self.assertEqual(900, hit['damage'])
+        self.assertTrue(hit['critical']['ammo_rack_death'])
+        self.assertIn({'kind': 'ammo_rack', 'state': 'destroyed',
+                       'cause': 'shot'}, hit['critical']['events'])
+
     def test_bot_ram_commits_terminal_critical_for_both_wrecks(self):
         state = _state()
         state.bot_manifest_authority_id = SIMULATION_WORKER_AUTHORITY_ID

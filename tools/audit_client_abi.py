@@ -1565,7 +1565,8 @@ EXPECTED_CODE_NAMES = {
             '_VehicleMarkerPlugin__updateVehicleHealth'),
         'VehicleMarkerPlugin.__updateVehicleHealth': (
             '_invokeMarker', '_VehicleMarkerPlugin__getVehicleDamageType',
-            'ATTACK_REASONS'),
+            'ATTACK_REASONS', 'SPECIAL_VEHICLE_HEALTH',
+            'IS_AMMO_BAY_DESTROYED'),
         'VehicleMarkerPlugin.__getVehicleDamageType': (
             'vehicleID', '_VehicleMarkerPlugin__playerVehicleID',
             'DAMAGE_TYPE', 'FROM_PLAYER', 'FROM_ALLY'),
@@ -2028,6 +2029,12 @@ EXPECTED_RESOURCE_STRINGS = {
 
 
 EXPECTED_PACKED_XML_PATH_VALUES = {
+    'scripts/item_defs/vehicles/common/vehicle.xml': {
+        ('materials', 'ammoBay', 'extra'): ((1, 'ammoBayHealth'),),
+        ('materials', 'ammoBay', 'damageKind'): ((1, 'device'),),
+        ('materials', 'ammoBay', 'chanceToHitByProjectile'): ((1, '0.27'),),
+        ('materials', 'ammoBay', 'chanceToHitByExplosion'): ((1, '0.27'),),
+    },
     'scripts/entity_defs/Avatar.def': {
         ('BaseMethods', 'vehicle_changeSetting', 'Exposed'): (
             (1, ''),),
@@ -2257,6 +2264,10 @@ EXPECTED_CLASS_CONSTANTS = {
             'POWDER_EXPLOSION': 1,
             'HE_DETONATION': 2,
         },
+        'SPECIAL_VEHICLE_HEALTH': {
+            'AMMO_BAY_DESTROYED': -5,
+            'TURRET_DETACHED': -13,
+        },
         'ARENA_UPDATE': {
             'VEHICLE_ADDED': 2,
             'PERIOD': 3,
@@ -2361,6 +2372,17 @@ EXPECTED_ORDERED_INSTRUCTION_PATTERNS = {
             )),
     },
     'scripts/client/Avatar.pyc': {
+        'PlayerAvatar.updateVehicleHealth': (
+            'local death restores raw special health into Vehicle', 0, (
+                ('STORE_FAST', 'value', 'prevHealth'),
+                ('LOAD_FAST', 'value', 'rawHealth'),
+                ('LOAD_FAST', 'value', 'vehicle'),
+                ('STORE_ATTR', 'value', 'health'),
+                ('LOAD_FAST', 'value', 'vehicle'),
+                ('LOAD_ATTR', 'value', 'set_health'),
+                ('LOAD_FAST', 'value', 'prevHealth'),
+                ('CALL_FUNCTION', 'argument', 1),
+            )),
         'PlayerAvatar.showTracer': (
             'visible non-ricochet uses the current on-screen muzzle', 10, (
                 ('LOAD_FAST', 'value', 'refStartPoint'),
