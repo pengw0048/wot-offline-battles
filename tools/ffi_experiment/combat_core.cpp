@@ -265,5 +265,9 @@ int offline_combat_dispatch(double *b,int n) {
         b[out+4]=s.gun;b[out+5]=desired;b[out+6]=s.aim;b[out+7]=aligned;
         return 0;
     }
+    if(op==104) {
+        Profile &p=profile(r);Pose s=pose(r);double yaw=r.next(),pitch=r.next();r.end();
+        b[0]=reachable(p,s,yaw,pitch);return 0;
+    }
     throw std::invalid_argument("combat opcode");
 }

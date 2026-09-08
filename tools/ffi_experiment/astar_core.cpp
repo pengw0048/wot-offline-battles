@@ -10,6 +10,7 @@
 #include "navigation_flow.h"
 #include "navigation_search.h"
 #include "motion_core.h"
+#include "kernel_core.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -295,7 +296,8 @@ extern "C" int offline_astar_dispatch(double *buffer, int count) {
         if (!std::isfinite(buffer[0]) || buffer[0] != std::floor(buffer[0]) ||
             buffer[0] < 0 || buffer[0] > 1000000000) return 2;
         if (buffer[0] == 0 && count != 1) return 2;
-        if (buffer[0] == 0) { offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); offline_world_reset(); offline_navigation_reset(); offline_motion_reset(); }
+        if (buffer[0] == 0) { offline_kernel_reset(); offline_combat_reset(); offline_driver_reset(); offline_perception_reset(); offline_world_reset(); offline_navigation_reset(); offline_motion_reset(); }
+        if (buffer[0] >= 700) return offline_kernel_dispatch(buffer, count);
         if (buffer[0] >= 600) return offline_motion_dispatch(buffer, count);
         if (buffer[0] >= 500) return offline_navigation_dispatch(buffer, count);
         if (buffer[0] >= 400) return offline_world_dispatch(buffer, count);

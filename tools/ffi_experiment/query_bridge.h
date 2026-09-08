@@ -16,5 +16,18 @@ int offline_query_can_enter(const double *buffer, int count);
 int offline_query(double *packet, int count);
 #ifdef __cplusplus
 }
+// Native owners may compose already-reviewed cores on one stack without
+// crossing Python for internal state-publication events. Engine leaves are
+// forwarded to the borrowed outer callback; nesting restores it on unwind.
+class OfflineQueryRoute {
+    OfflineQueryCallback previous;
+    void *previous_owner;
+public:
+    OfflineQueryRoute(OfflineQueryCallback callback,void *owner);
+    ~OfflineQueryRoute();
+    int forward(double *packet,int count)const;
+    OfflineQueryRoute(const OfflineQueryRoute &)=delete;
+    OfflineQueryRoute &operator=(const OfflineQueryRoute &)=delete;
+};
 #endif
 #endif

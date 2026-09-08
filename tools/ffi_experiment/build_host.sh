@@ -17,4 +17,5 @@ c++ -std=c++11 -O2 -fPIC -Wall -Wextra -Werror -ffp-contract=off \
     "$EXPERIMENT_ROOT/query_bridge.cpp" \
     "$EXPERIMENT_ROOT/navigation_flow.cpp" \
     "$EXPERIMENT_ROOT/motion_core.cpp" \
+    "$EXPERIMENT_ROOT/kernel_core.cpp" \
     "$EXPERIMENT_OUTPUT/astar_host.o" -o "$EXPERIMENT_OUTPUT/offline_astar_native.so"

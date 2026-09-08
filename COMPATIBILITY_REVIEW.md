@@ -1222,6 +1222,112 @@ python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
 tools/ffi_experiment/build_1513.sh /tmp/ffi-flow-1513
 ```
 
+A subsequent owned-Bot-kernel experiment replaces `BotRuntime.update` itself,
+using the same production baseline (`900744ce`) and the unchanged 29-Bot fixture.
+The `kernel,world-sync` runner initializes descriptor coefficients once, then
+C++ owns the mutable Bot roster, decision and perception caches, route/lane
+assignment, traffic leases, fair motion-receipt queue, horizontal and vertical
+motion, tank contact episodes, weapon/ammunition/burst clocks, health/equipment,
+Siege descriptor transitions, and wire publication. Server-order revisions
+invalidate the same decision, motion and route-binding state as Python. Late
+callbacks consume their banked elapsed time in the source's bounded slice order;
+shots remain in the ordered launch outbox until acknowledged.
+
+The native update composes the existing navigation, driver, motion and combat
+cores directly. Numeric borrowed callbacks carry the current actor pose and
+slice clocks to Python only for engine/catalog queries. State-dependent native
+callbacks observe each Bot's committed pose before the next Bot advances. The
+Python adapter does not execute a per-Bot simulation or publication loop.
+MT19937 integer seeding, Gaussian pair caching, dispersion and the Python 2
+rounding contract have independent differential checks. Optional aim/cover
+receipts keep opaque Python values behind numeric tokens, reclaimed when no
+native cache, intent, pending launch or current output references them. Packed
+JSON output is copied into a capacity-checked caller-owned buffer; native code
+retains neither that buffer nor a Python callback result.
+
+This remains a bounded, unshipped experiment. It requires complete server Bot
+orders and the copied vertical controller; native-motion and the optional
+ten-spring trial are explicitly rejected at construction. Local tactical
+fallback, `BattleRuntime` damage/reconciliation ingress, authority takeover,
+real native-query implementations, destructible catalog ownership and
+projectile terminal processing are not replaced by this adapter. It is created
+at fixture startup and destroyed at teardown, not installed into a running
+battle. The mutable native state still uses dynamic field maps alongside typed
+weapon/physics records; C++ ownership does not eliminate field lookup,
+allocation, marshalling or retained Python engine-query cost.
+
+The final comparison runs nine independent CPython 2.7.18 processes in
+rotating order on the shared Linux aarch64 host, after all validation/build
+processes finish. Each variant uses Great Wall combat, 29 Bots, 30 simulated
+seconds and 15 frame callbacks/second. Loop CPU includes marshalling and
+per-frame snapshot/navigation capture; process/fixture startup and final JSON
+file serialization are excluded, and native initialization is reported
+separately.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 10.993966 s | 10.935670–11.028345 s | 0.00% |
+| Previous persistent motion/navigation with aiming, contacts and synchronous world queries | 8.848982 s | 8.783967–8.865380 s | 19.51% |
+| Owned Bot kernel with synchronous world queries | 7.637579 s | 7.601436–7.659896 s | 30.53% |
+
+The owned kernel saves another 13.69% against the previous variant. Its median
+initialization is 0.162707 s and median loop-plus-initialization CPU is
+7.800404 s. Recorded Python-to-FFI dispatches fall from 91,697 to 7,600; these
+include owner setup and diagnostic readbacks, not only update calls. All nine
+complete snapshots match across messages, ordered engine queries, probe and
+decision counters, navigation progress and diagnostics. The 77,172 recorded
+engine queries remain identical: reducing FFI entry count does not remove the
+retained Python query leaves. The fixture acknowledges launches without
+simulating projectile terminals and uses deterministic native-query fakes.
+This 30.53% host-workload reduction remains far below 90% (about 1.10 s in this
+comparison); it is neither a Windows FPS measurement nor a whole-game saving.
+
+Focused CPython 2.7.18 checks compare 13,632 weapon transitions, 2,097 launch
+transactions, 3,165 gunner actions, 2,320 aim transitions, 6,488 perception/lane
+actions, 2,480 motion transitions, 1,956 route/driver/traffic transitions across
+three maps, 612 contact/ram lifecycle transitions, 2,015 health/publication
+transitions, equipment and wire rows. Whole-update comparisons cover ordinary
+combat, Siege, human targets, queued cover work, order revisions and delayed
+callbacks, both separately and together. A second whole-update scene checks
+Himmelsdorf navigation. All compared messages, complete owned state, ordered
+engine leaves, control slices, probes and diagnostic counters match the
+unchanged Python 2 source. The deliberately opaque Python descriptor cache is
+excluded from state equality; its consumed aim results are compared.
+
+Both host ABIs and the x86 prototype build with warnings treated as errors.
+PE inspection reports only `KERNEL32.dll` and `msvcrt.dll` imports. CPython 2.7
+compiles all 97 client and 34 experiment modules without writing adjacent
+bytecode. Python 3.12 passes the weapon/health/wire and buffer-ownership checks,
+but additional whole-loop comparisons expose last-bit floating-point differences
+in aim and navigation; it is not used as the exact-client numerical oracle.
+AddressSanitizer and UndefinedBehaviorSanitizer pass the packed-buffer and
+owner-lifecycle guards, weapon/health/wire suite, callback bridge, and bounded
+motion, aim, perception, route/traffic, contact, gunner/launch and combined
+whole-update suites on the CPython 2.7 host. Both halt on error; leak detection
+is disabled. The harness preloads both the sanitizer and C++ runtimes before
+loading the instrumented extension, so C++ exception interception is active.
+No production entry point, launcher or package imports the kernel. Exact
+Windows loading, x86 floating-point parity, callback/native memory ownership,
+real frame pacing and gameplay remain unproved.
+
+Reproduce the owned-kernel comparison:
+
+```bash
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-kernel-host
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-kernel-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_state.py \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --frames 80 --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --components kernel,world-sync \
+  --control-components aiming,driver-flow,contacts,world-sync,navigation-flow,motion-flow \
+  --seconds 30 --rounds 3 --output /tmp/ffi-kernel-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-kernel-1513
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
