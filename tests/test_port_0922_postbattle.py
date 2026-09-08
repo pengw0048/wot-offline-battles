@@ -68,27 +68,36 @@ class _ReplayConnector(object):
 
 
 class _Replay(object):
+    """The #1513 chain, as far as ``_add_value_replays`` uses it.
+
+    ``ValueReplay`` writes the running total back through the connector on the
+    initial value and on every later step, and ``ReplayRecords`` keys each
+    record by the name of the value that step applied.  Both are the contract
+    the results tables read, so the double reproduces them.
+    """
+
     steps = []
 
     def __init__(self, connector, recordName=None, startRecordName=None):
         self.connector = connector
         self.record_name = recordName
         self.start_name = startRecordName
-        self.connector.values[recordName] = self.connector.values[startRecordName]
+        self.chain = ['SET:%s' % startRecordName]
+        self.connector.values[recordName] = self.connector.values[
+            startRecordName]
+        _Replay.steps.append((recordName, 'SET', startRecordName))
 
-    def addMultipliedValue(self, other, coeff):
-        # The stock chain writes the total back through the connector.
-        self.connector.values[self.record_name] = (
-            self.connector.values[other] +
-            int(round(self.connector.values[other] *
-                      self.connector.values[coeff] / 100.0)))
-        _Replay.steps.append((self.record_name, other, coeff))
+    def __add__(self, other):
+        self.connector.values[self.record_name] += self.connector.values[
+            other]
+        self.chain.append('ADD:%s' % other)
+        _Replay.steps.append((self.record_name, 'ADD', other))
         return self
 
     def pack(self):
-        return ('SET:%s:%s' % (
-            self.record_name, self.connector.values[self.start_name]
-        )).encode('ascii')
+        return ('%s=%s' % ('+'.join(self.chain),
+                           self.connector.values[self.record_name])).encode(
+                               'ascii')
 
 
 class _InteractionDetails(object):
@@ -779,13 +788,67 @@ class PostBattleContractTests(unittest.TestCase):
         self.assertEqual(90, fields['freeXP'])
         self.assertEqual(30, fields['originalFreeXP'])
 
+    def test_a_scaled_award_keeps_the_battle_income_row(self):
+        """#1513 draws the first detail row from ``originalCredits``.
+
+        ``gui.battle_results.reusable.records.ReplayRecords`` keys every
+        record by the name of the value its step applied, so a chain that
+        starts anywhere else leaves ``MoneyDetailsBlock`` and
+        ``XPDetailsBlock`` drawing zero for the battle's own income while the
+        total row stays right.  The account's bonus is one further step, named
+        by the record the boosters row reads.
+        """
+        _Replay.steps = []
+        receipt = _receipt()
+        receipt['awarded'] = {'credits': 6300, 'xp': 900, 'free_xp': 45}
+
+        fields = _packed_vehicle(receipt)
+
+        self.assertEqual(6300, fields['credits'])
+        self.assertEqual(4200, fields['originalCredits'])
+        self.assertEqual(2100, fields['boosterCredits'])
+        self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(300, fields['boosterXP'])
+        self.assertEqual(30, fields['originalFreeXP'])
+        self.assertEqual(15, fields['boosterFreeXP'])
+        self.assertEqual([
+            ('credits', 'SET', 'originalCredits'),
+            ('credits', 'ADD', 'boosterCredits'),
+            ('xp', 'SET', 'originalXP'),
+            ('xp', 'ADD', 'boosterXP'),
+            ('freeXP', 'SET', 'originalFreeXP'),
+            ('freeXP', 'ADD', 'boosterFreeXP'),
+            ('gold', 'SET', 'originalGold'),
+            ('crystal', 'SET', 'originalCrystal')], _Replay.steps)
+
+    def test_an_award_below_the_battle_reports_what_was_banked(self):
+        """A reduced award has no #1513 row that honestly names it."""
+        _Replay.steps = []
+        receipt = _receipt()
+        receipt['awarded'] = {'credits': 2100, 'xp': 300, 'free_xp': 15}
+
+        fields = _packed_vehicle(receipt)
+
+        self.assertEqual(2100, fields['credits'])
+        self.assertEqual(2100, fields['originalCredits'])
+        self.assertEqual(0, fields['boosterCredits'])
+        self.assertEqual(300, fields['xp'])
+        self.assertEqual(300, fields['originalXP'])
+        self.assertEqual(0, fields['boosterXP'])
+        self.assertNotIn(('credits', 'ADD', 'boosterCredits'), _Replay.steps)
+
     def test_a_receipt_with_no_multiplier_shows_one_number_twice(self):
+        _Replay.steps = []
+
         fields = _packed_vehicle(_receipt())
 
         self.assertEqual(4200, fields['credits'])
         self.assertEqual(4200, fields['originalCredits'])
         self.assertEqual(600, fields['xp'])
         self.assertEqual(600, fields['originalXP'])
+        self.assertEqual(0, fields['boosterCredits'])
+        self.assertEqual(0, fields['boosterXP'])
+        self.assertNotIn(('credits', 'ADD', 'boosterCredits'), _Replay.steps)
 
     def test_the_lifetime_counters_count_what_was_banked(self):
         directory = tempfile.mkdtemp()

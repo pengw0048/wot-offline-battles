@@ -1364,19 +1364,33 @@ The premium-vehicle bonus sits outside the badge. `premiumVehicleXPFactor`,
 which 200 shipped vehicles carry, is applied to the banked XP and Free XP and
 never to the number the mastery badge ranks: `originalXP` stays the bare battle
 XP the badge reads, while `xp`, `factualXP` and `subtotalXP` carry the bonus.
-The results window learns it the way retail does rather than as an unexplained
-difference - `ValueReplay.addMultipliedValue` records
-`record += round(original * premiumVehicleXPFactor100 / 100)` in the XP and
-Free XP chains, which is exactly the step
-`gui.battle_results.components.details` renders its own `premiumVehicleXP` row
-from, and the chain writes the total back through the connector so the packed
-value and the breakdown agree. Crew training stays on the bare battle XP with
-only `crewXpFactor` applied after the save earnings multiplier. The garage
-settlement owns the final vehicle XP and Free XP bonus once; a durable
-`awarded` receipt is never multiplied again by the results cache. With custom
-save multipliers, ValueReplay starts from the factual total rather than
-resetting it to base XP or labelling the custom amount as a retail premium
-account bonus. Mastery continues to use unscaled battle XP.
+Crew training stays on the bare battle XP with only `crewXpFactor` applied
+after the save earnings multiplier. The garage settlement owns the final
+vehicle XP and Free XP bonus once; a durable `awarded` receipt is never
+multiplied again by the results cache. Mastery continues to use unscaled
+battle XP.
+
+Every row of the two detail tables is a `ValueReplay` record, keyed by the
+name of the value its step applied. `ValueReplay.__iter__` yields
+`(op, (param1, value), (recordName, runningTotal))` and
+`gui.battle_results.reusable.records.ReplayRecords` stores each step under
+`param1`, so the record names are the chain's first parameters and nothing
+else. `MoneyDetailsBlock.__getBaseCredits` reads `originalCredits`,
+`XPDetailsBlock.__getBaseXPs` reads `originalXP` and `originalFreeXP`, the
+boosters rows read `boosterCredits`, `boosterXP` and `boosterFreeXP`, and a
+name no step applied reads as zero. Two consequences are load-bearing for
+this port: a chain must start at `original*`, or the results screen draws the
+battle's own income as zero while the total row stays right; and
+`addMultipliedValue(startName, factor)` records the step under `startName`,
+which *replaces* the base record with the bonus rather than adding a row.
+The account's own multipliers - the save's earnings percentage and this
+port's premium-vehicle credit and experience bonuses - are therefore packed
+as `boosterCredits`, `boosterXP` and `boosterFreeXP` and added with one `ADD`
+step, which is the single #1513 row for an account-owned multiplier on a
+finished battle. `ValueReplay.__add__` writes the running total back through
+the connector, so the packed total, the breakdown and the wallet agree. An
+award below the battle's own income has no #1513 row that honestly names the
+reduction, so `original*` reports the reduced amount instead.
 
 Kill XP uses victim durability as an offline balance proxy. This does not
 implement an exact tier-difference rule: equal-tier vehicles can have different
