@@ -219,6 +219,50 @@ class EquipmentStateTests(unittest.TestCase):
         self.assertEqual(
             'repair_devices', state.poll_bot(95.02, critical)['action'])
 
+    def test_bot_spends_a_repair_kit_only_on_damage_worth_the_charge(self):
+        contract = equipment_mechanics.project_equipment(_defaults()[2])
+
+        def yellow(name):
+            return {'devices': [{'name': name, 'state': 'critical',
+                                 'hp': 40.0, 'max_hp': 100.0}],
+                    'destroyed': []}
+
+        # A Bot holds one charge, so a functional but damaged gun, engine or
+        # ammo bay earns it and a track, radio or observation device does not.
+        for name in ('gunHealth', 'engineHealth', 'ammoBayHealth'):
+            state = equipment_mechanics.EquipmentState(contract)
+            self.assertIsNone(state.poll_bot(5.0, yellow(name)), name)
+            self.assertEqual(
+                'repair_devices',
+                state.poll_bot(5.01, yellow(name))['action'], name)
+        for name in ('leftTrackHealth', 'rightTrackHealth', 'radioHealth',
+                     'surveyingDeviceHealth', 'turretRotatorHealth',
+                     'fuelTankHealth'):
+            state = equipment_mechanics.EquipmentState(contract)
+            self.assertIsNone(state.poll_bot(5.0, yellow(name)), name)
+            self.assertIsNone(state.poll_bot(5.01, yellow(name)), name)
+            self.assertIsNone(state.poll_bot(9.0, yellow(name)), name)
+            self.assertEqual(
+                equipment_mechanics.EquipmentState(contract).uses_left,
+                state.uses_left, name)
+
+    def test_bot_keeps_the_kit_for_a_track_that_is_actually_destroyed(self):
+        contract = equipment_mechanics.project_equipment(_defaults()[2])
+        state = equipment_mechanics.EquipmentState(contract)
+        yellow = {'devices': [{'name': 'leftTrackHealth', 'state': 'critical',
+                               'hp': 40.0, 'max_hp': 100.0}],
+                  'destroyed': []}
+        broken = {'devices': [{'name': 'leftTrackHealth',
+                               'state': 'destroyed', 'hp': 0.0,
+                               'max_hp': 100.0}],
+                  'destroyed': ['leftTrackHealth']}
+
+        self.assertIsNone(state.poll_bot(5.0, yellow))
+        self.assertIsNone(state.poll_bot(5.01, yellow))
+        self.assertIsNone(state.poll_bot(6.0, broken))
+        self.assertEqual(
+            'repair_devices', state.poll_bot(6.01, broken)['action'])
+
     def test_bot_large_medkit_waits_then_clears_stun_without_crew_damage(self):
         contract = equipment_mechanics.project_equipment(_defaults()[1])
         state = equipment_mechanics.EquipmentState(contract)

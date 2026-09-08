@@ -42,19 +42,36 @@ DEFAULT_FIRE_BURN_FRACTION = 0.0875  # engine default healthBurnPerSec fraction
 # 'critical' (orange).  This is a damage-state threshold; maxRegenHealth is a
 # separate auto-repair destination and must not decide the first yellow state.
 CRITICAL_HP_FRACTION = 0.5
-# Seconds to auto-repair a destroyed module back to functional with a nominal
-# crew at 0% Repair *secondary* skill (major qualification 100%), no toolbox, no
-# large kit. Tracks are quicker. The Repair skill / toolbox / kit multiply this.
-BASE_TRACK_REPAIR_SECONDS = 10.0
-BASE_MODULE_REPAIR_SECONDS = 18.0
-# Repair-speed gain at 100% crew Repair skill: 1.0 => ~2x faster than 0% skill.
-REPAIR_SKILL_SPEEDUP = 1.0
+# Seconds to auto-repair a destroyed module back to functional with the default
+# crew this port gives every vehicle: 100% major qualification, no Repair
+# *secondary* skill, no toolbox, no large kit, i.e. the number a player reads on
+# the damage panel of a stock crew.  Tracks are quicker.  The Repair skill,
+# toolbox and large repair kit divide it (see repair_seconds).
+#
+# #1513 cannot prove these: `readDeviceHealthParams` reads `healthRegenPerSec`
+# and `hysteresisHealth` only under `not IS_CLIENT and not IS_BOT`, so the
+# shipped descriptors carry no repair rate at all, and Avatar only *receives*
+# the remaining seconds with VEHICLE_MISC_STATUS.DESTROYED_DEVICE_IS_REPAIRING.
+# Wargaming never published the base times either, so the track value is the
+# retail number this project settled on (2026-09-08) and the module value keeps
+# this port's own 1.8x module/track ratio, no retail figure being retrievable.
+#
+# Retail derives the time from per-device `healthRegenPerSec`, so real repair
+# times differ per vehicle.  This port keeps one time per device class; a
+# per-vehicle law would need the stripped rates, not a guessed coefficient.
+#
+# The crew part of the law is EXACT: repair_seconds divides by the client's own
+# 'repairSpeed' factor (CREW_FACTOR_BASE + CREW_FACTOR_SLOPE * efficiency below)
+# normalized to the untrained crew these constants describe.
+BASE_TRACK_REPAIR_SECONDS = 12.0
+BASE_MODULE_REPAIR_SECONDS = 21.6
 # Fraction of max HP lost per second while on fire (bots + player DoT).
 FIRE_DAMAGE_FRACTION_PER_SEC = 0.05
 # How long a fire burns before the crew smothers it, when no extinguisher is
-# used. Nothing in the client can supply this: vehicles.py reads healthBurnPerSec,
-# healthRegenPerSec and hysteresisHealth only under `not IS_CLIENT or
-# IS_DEVELOPMENT`, so the shipped descriptors carry no burn parameters at all.
+# used. Nothing in the client can supply this: shared_readers.py reads
+# healthBurnPerSec, healthRegenPerSec and hysteresisHealth only under
+# `not IS_CLIENT and not IS_BOT`, so the shipped descriptors carry no burn
+# parameters at all.
 FIRE_DURATION_SECONDS = 10.0
 # The fuel tank is the one device with no repair bar: it is not patched up over
 # time, it simply stops being the thing that is burning. When the fire ends it
@@ -545,50 +562,60 @@ def is_crit_only(name):
     return name in CRIT_ONLY_DEVICES
 
 
-def crew_repair_factor(repair_skill_pct):
-    """Repair-speed multiplier from the crew's average Repair *secondary* skill.
-    0% Repair -> 1.0 (base time); 100% Repair -> 1 + REPAIR_SKILL_SPEEDUP (~2x)."""
+def crew_repair_speed(repair_skill_pct):
+    """#1513's factors['repairSpeed'] for an average Repair *secondary* skill.
+
+    VehicleDescrCrew._processSkills builds it as 0.57 + 0.43 * efficiency, so a
+    crew that has not trained Repair is 0.57 and a fully trained one is 1.0.
+    """
     s = repair_skill_pct
     if s < 0.0:
         s = 0.0
     elif s > 100.0:
         s = 100.0
-    return 1.0 + REPAIR_SKILL_SPEEDUP * (s / 100.0)
+    return CREW_FACTOR_BASE + CREW_FACTOR_SLOPE * (s / 100.0)
 
 
-def repair_seconds(name, td, repair_skill_pct=0.0, has_big_repairkit=False,
-                   repair_factor=None):
+def crew_repair_factor(repair_skill_pct):
+    """Repair-speed multiplier from the crew's average Repair *secondary* skill.
+    0% Repair -> 1.0 (base time); 100% Repair -> 1/0.57 (~1.75x)."""
+    return crew_repair_speed(repair_skill_pct) / CREW_FACTOR_BASE
+
+
+def repair_seconds(name, td, repair_skill_pct=0.0, repair_factor=None):
     """Seconds to auto-repair the named device from destroyed to functional,
     combining the reconstructed base (at 0% Repair skill) with the multipliers:
       crew Repair skill  (factors['repairSpeed'] = 0.57 + 0.43*efficiency)
       toolbox            (td.miscAttrs['repairSpeedFactor'], 1.25 when mounted)
-      large repair kit   (passive +10% while carried, bonusValue 0.1).
     A ``repair_factor`` from the client's own factor dictionary replaces the
-    percentage, and stays normalized so a fully trained crew keeps the speed
-    this port has always used."""
+    percentage.  Both forms are normalized by CREW_FACTOR_BASE, so the base
+    above is exactly the time a crew without the Repair skill takes and a fully
+    trained one divides it by 1/0.57.
+
+    An unused large repair kit belongs in ``repair_factor``: #1513 gives
+    Repairkit no updateVehicleAttrFactors hook, so its bonusValue never reaches
+    a mounted factor and the caller folds it in from the live consumable
+    ledger, which is also what makes the bonus stop once the kit is spent."""
     base = BASE_TRACK_REPAIR_SECONDS if 'track' in name.lower() else BASE_MODULE_REPAIR_SECONDS
     if repair_factor is None:
         factor = crew_repair_factor(repair_skill_pct)
     else:
-        factor = (1.0 + REPAIR_SKILL_SPEEDUP) * max(0.0, float(repair_factor))
+        factor = max(0.0, float(repair_factor)) / CREW_FACTOR_BASE
     factor *= _misc_factor(td, 'repairSpeedFactor')
-    if has_big_repairkit:
-        factor *= 1.10
     if factor <= 0.0:
         factor = 1.0
     return base / factor
 
 
 def repair_step_hp(current_hp, name, td, dt, repair_skill_pct=0.0,
-                   has_big_repairkit=False, repair_factor=None):
+                   repair_factor=None):
     """Advance a device's HP one tick toward its regen cap (~50%). Returns the new
     HP (unchanged if already at/above the cap). Repair kits set HP directly and
     should not go through here."""
     cap = device_regen_hp(td, name)
     if cap is None or current_hp >= cap:
         return current_hp
-    secs = repair_seconds(name, td, repair_skill_pct, has_big_repairkit,
-                          repair_factor)
+    secs = repair_seconds(name, td, repair_skill_pct, repair_factor)
     rate = cap / max(0.1, secs)          # HP per second
     new_hp = current_hp + rate * dt
     if new_hp > cap:
@@ -682,17 +709,26 @@ if __name__ == '__main__':
 
     # Repair: base is at 0% Repair skill; skill/toolbox/kit only speed it up.
     check('crew factor 0%% == 1.0', abs(crew_repair_factor(0.0) - 1.0) < 1e-9)
-    check('crew factor 100%% == 2.0', abs(crew_repair_factor(100.0) - 2.0) < 1e-9)
-    check('track base repair == 10s', abs(repair_seconds('leftTrackHealth', td) - 10.0) < 1e-6)
-    check('module base repair == 18s', abs(repair_seconds('engineHealth', td) - 18.0) < 1e-6)
-    check('100%% repair halves time', abs(repair_seconds('leftTrackHealth', td, repair_skill_pct=100.0) - 5.0) < 1e-6)
+    check('crew factor 100%% == 1/0.57', abs(crew_repair_factor(100.0) - 1.0 / 0.57) < 1e-9)
+    check('untrained client factor == base time',
+          abs(repair_seconds('leftTrackHealth', td, repair_factor=0.57) - 12.0) < 1e-6)
+    check('track base repair == 12s', abs(repair_seconds('leftTrackHealth', td) - 12.0) < 1e-6)
+    check('module base repair == 21.6s', abs(repair_seconds('engineHealth', td) - 21.6) < 1e-6)
+    check('100%% repair divides by 1/0.57',
+          abs(repair_seconds('leftTrackHealth', td, repair_skill_pct=100.0) - 12.0 * 0.57) < 1e-6)
+    check('both repair inputs agree at 100%%',
+          abs(repair_seconds('leftTrackHealth', td, repair_skill_pct=100.0) -
+              repair_seconds('leftTrackHealth', td, repair_factor=1.0)) < 1e-9)
     td.miscAttrs['repairSpeedFactor'] = 1.25
-    check('toolbox speeds repair', abs(repair_seconds('leftTrackHealth', td) - 8.0) < 1e-6)
+    check('toolbox speeds repair', abs(repair_seconds('leftTrackHealth', td) - 9.6) < 1e-6)
     td.miscAttrs['repairSpeedFactor'] = 1.0
-    check('big kit speeds repair', repair_seconds('engineHealth', td, has_big_repairkit=True) < 18.0)
-    check('trained crew speeds repair', repair_seconds('engineHealth', td, repair_skill_pct=50.0) < 18.0)
+    check('unused big kit speeds repair',
+          abs(repair_seconds('engineHealth', td,
+                             repair_factor=CREW_FACTOR_BASE * 1.10) -
+              21.6 / 1.10) < 1e-6)
+    check('trained crew speeds repair', repair_seconds('engineHealth', td, repair_skill_pct=50.0) < 21.6)
 
-    # Repair step reaches the regen cap (destroyed track -> ~130 over ~10s at 100% crew)
+    # Repair step reaches the regen cap (destroyed track -> ~130 over ~12s at 100% crew)
     hp = 0.0
     for _ in range(600):
         hp = repair_step_hp(hp, 'leftTrackHealth', td, 0.02)

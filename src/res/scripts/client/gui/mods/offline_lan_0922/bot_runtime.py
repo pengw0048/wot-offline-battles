@@ -2853,9 +2853,22 @@ class BotRuntime(object):
         states = self._equipment_states.get(bot_id, ())
         self._equipment_wire_cache.pop(bot_id, None)
         self._equipment_wire_exposed_in_update.discard(bot_id)
-        self._equipment_passives[bot_id] = \
-            equipment_mechanics.passive_effects(states)
+        self._refresh_equipment_passives(bot_id)
         return states
+
+    def _refresh_equipment_passives(self, bot_id):
+        """Re-read one Bot's passives from its live consumable ledger.
+
+        An unused large repair kit lends its bonusValue to the repair factor
+        and a spent one does not, so the cached factor cannot outlive a
+        consumed charge or a restored ledger.
+        """
+        bot_id = int(bot_id)
+        self._equipment_passives[bot_id] = \
+            equipment_mechanics.passive_effects(
+                self._equipment_states.get(bot_id, ()))
+        self._repair_factors.pop(bot_id, None)
+        return self._equipment_passives[bot_id]
 
     def _advance_equipment_clock(self, step):
         """Advance cooldowns on simulation time, never wall-clock time."""
@@ -3998,6 +4011,8 @@ class BotRuntime(object):
             self._apply_bot_equipment_effect(
                 state, descriptor, effect, strict=True)
             effects.append(dict(effect))
+        if effects:
+            self._refresh_equipment_passives(state['id'])
         self._publish_equipment_state(state)
         return effects
 
