@@ -49,4 +49,4 @@ else
 fi
 
 python3 "$repo_root/tools/validate_wotmod.py" \
-  "$repo_root/dist/org.peng.offline_lan_0922_0.7.0.wotmod"
+  "$repo_root/dist/org.peng.offline_lan_0922_0.7.1.wotmod"

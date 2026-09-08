@@ -2468,6 +2468,19 @@ class GarageSaveDurabilityTests(unittest.TestCase):
         with open(self.path, 'rb') as stream:
             return json.load(stream)
 
+    def test_unreadable_or_unknown_save_cannot_be_overwritten(self):
+        for raw in (b'{broken', b'{"schema": 999, "vehicles": {}}'):
+            with open(self.path, 'wb') as stream:
+                stream.write(raw)
+            store = self._store()
+            self.assertFalse(store.apply(copy.deepcopy(SNAPSHOT)))
+            self.assertTrue(store.restore_degraded())
+            store.mark_dirty()
+            self.assertFalse(store.flush(copy.deepcopy(SNAPSHOT)))
+            with open(self.path, 'rb') as stream:
+                self.assertEqual(raw, stream.read())
+            self.assertTrue(self._variants('rejected'))
+
     def _variants(self, marker):
         return sorted(
             name for name in os.listdir(self.directory)

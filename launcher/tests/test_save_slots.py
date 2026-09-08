@@ -319,7 +319,7 @@ class SaveBackupTests(unittest.TestCase):
         source = self._slot_with_state("Career")
         save_slots.backup_slot(
             source["id"], self._archive(), root=self.root)
-        target = self._slot_with_state("Other", **{
+        target = self._slot_with_state("Renamed career", **{
             "garage_state.json": {"schema": 7, "vehicles": {"50009": {}}},
         })
 
@@ -332,12 +332,37 @@ class SaveBackupTests(unittest.TestCase):
             self.assertEqual(["50001"], list(json.load(stream)["vehicles"]))
         # The save keeps its own name and the replaced files stay recoverable.
         self.assertEqual(
-            "Other",
+            "Renamed career",
             save_slots.read_slot(target["id"], root=self.root)["name"])
         self.assertEqual("Career", result["from_name"])
         with open(os.path.join(result["replaced"], "garage_state.json"),
                   encoding="utf-8") as stream:
             self.assertEqual(["50009"], list(json.load(stream)["vehicles"]))
+
+    def test_failed_rollback_keeps_the_original_files_for_recovery(self):
+        from unittest import mock
+        record = self._slot_with_state()
+        save_slots.backup_slot(record["id"], self._archive(), root=self.root)
+        real_replace = os.replace
+
+        def replace(source, destination):
+            if "pre-restore-" in source:
+                raise OSError("restore target is locked")
+            return real_replace(source, destination)
+
+        backup = save_slots.read_backup(self._archive())
+        with mock.patch.object(save_slots, "read_backup", return_value=backup), \
+                mock.patch.object(save_slots.os, "replace", side_effect=replace), \
+                mock.patch("zipfile.ZipFile.open", side_effect=OSError("read failed")):
+            with self.assertRaises(save_slots.SaveSlotError):
+                save_slots.restore_slot(
+                    record["id"], self._archive(), root=self.root,
+                    is_running=lambda: False)
+        kept = [name for name in os.listdir(record["path"])
+                if name.startswith("pre-restore-")]
+        self.assertEqual(1, len(kept))
+        with open(os.path.join(record["path"], kept[0], "garage_state.json")) as stream:
+            self.assertIn("50001", json.load(stream)["vehicles"])
 
     def test_a_restore_refuses_while_the_game_may_be_writing_the_save(self):
         record = self._slot_with_state()

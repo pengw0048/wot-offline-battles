@@ -580,6 +580,10 @@ def restore_slot(slot_id, archive_path, game_root=None, environment=None,
                 os.replace(os.path.join(directory, name),
                            os.path.join(replaced, name))
                 moved.append(name)
+                if keep_name and name == METADATA_NAME:
+                    shutil.copyfile(os.path.join(replaced, name),
+                                    os.path.join(directory, name))
+                    written.append(name)
         with zipfile.ZipFile(archive_path) as archive:
             for name in backup["files"]:
                 if keep_name and name == METADATA_NAME:
@@ -603,20 +607,23 @@ def restore_slot(slot_id, archive_path, game_root=None, environment=None,
                 os.unlink(os.path.join(directory, name))
             except (IOError, OSError):
                 pass
+        rollback_failed = False
         for name in moved:
             try:
                 os.replace(os.path.join(replaced, name),
                            os.path.join(directory, name))
             except (IOError, OSError):
-                pass
-        shutil.rmtree(replaced, ignore_errors=True)
+                rollback_failed = True
+        if not rollback_failed:
+            shutil.rmtree(replaced, ignore_errors=True)
         if isinstance(error, SaveSlotError):
             raise
         raise SaveSlotError("The save could not be restored: %s" % error)
     return {
         "id": record["id"],
         "name": record["name"],
-        "files": sorted(written),
+        "files": sorted(name for name in written
+                        if not (keep_name and name == METADATA_NAME)),
         "replaced": replaced if moved else None,
         "from_id": backup["id"],
         "from_name": backup["name"],

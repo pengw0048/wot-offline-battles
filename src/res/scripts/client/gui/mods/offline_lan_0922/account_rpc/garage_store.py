@@ -387,7 +387,7 @@ class GarageStore(object):
         """
         if self._path is None:
             return False
-        if self._vehicles_unrestored and os.path.isfile(self._path):
+        if self._vehicles_unrestored:
             # Not a judgement about this payload: no saved vehicle reached
             # this session at all, so any payload it builds describes a
             # garage this file never held.  Whether the vehicle count or the
@@ -784,6 +784,13 @@ class GarageStore(object):
         stored = self._read()
         self._session_crew_xp = {}
         if stored is None:
+            if self._path is not None and any(os.path.isfile(path) for path in
+                    (self._path, self._path + '.bak')):
+                self._restore_degraded = True
+                self._vehicles_unrestored = True
+                for path in (self._path, self._path + '.bak'):
+                    port_config.quarantine_state_file(
+                        path, port_config.QUARANTINE_REJECTED)
             self._receipts_loaded = True
             return False
         skipped = set()
