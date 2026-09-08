@@ -37,7 +37,7 @@ class DecodedInteriorTableTests(unittest.TestCase):
         # from, so a reader can re-derive every number.
         self.assertTrue(internal_layout_console.GEOMETRY_SOURCES)
         self.assertTrue(internal_layout_console.REFERENCE_FRAME_SOURCE)
-        self.assertGreater(internal_layout_console.MAX_SHELL_RESIDUAL_M, 0.0)
+        self.assertGreater(internal_layout_console.MAX_HULL_REGISTRATION_M, 0.0)
 
     def test_every_record_is_structurally_usable(self):
         for key, record in self.layouts.items():
@@ -172,6 +172,89 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
                 self.assertLess(min(zone[3][2] for zone in engines), 0.5)
                 checked += 1
         self.assertTrue(checked, 'none of the sampled hulls were decoded')
+
+
+class HullRegistrationRuleTests(unittest.TestCase):
+    """The rule that decides whether a decoded hull registers at all.
+
+    The baker gates the hull on its footprint extents and on its shell floor
+    sitting on the PC box floor, and deliberately does not gate the height
+    extent: an open-topped vehicle's armour shell has no roof while the
+    collision box encloses the compartment, and because ``fractions`` anchors
+    a Console metre coordinate at the box minimum rather than scaling it to
+    the box span, that difference does not move a zone.  These tests pin both
+    halves of that rule, because loosening the wrong half would place
+    geometry at the wrong height.
+    """
+
+    def setUp(self):
+        tools = ROOT / 'tools'
+        if str(tools) not in sys.path:
+            sys.path.insert(0, str(tools))
+        try:
+            import bake_internal_layout_console_0922 as baker
+        except ImportError as error:  # pragma: no cover - tool deps absent
+            self.skipTest('baker not importable: %s' % error)
+        self.baker = baker
+
+    def _hull(self, low, high):
+        return {'armor_1': {'minimum': low, 'maximum': high,
+                            'vertices': ()}}
+
+    def test_a_roofless_shell_still_registers(self):
+        # Same footprint, floor on the floor, 0.8 m short at the ceiling.
+        bound = ((-1.5, 0.0, -3.0), (1.5, 2.0, 3.0))
+        surfaces = self._hull((-1.5, 0.0, -3.0), (1.5, 1.2, 3.0))
+        gaps = self.baker.residual(surfaces, bound)
+        floor = self.baker.floor_offset(surfaces, bound)
+        self.assertAlmostEqual(0.0, gaps[0], places=6)
+        self.assertAlmostEqual(0.0, gaps[2], places=6)
+        self.assertAlmostEqual(0.8, gaps[1], places=6)
+        self.assertAlmostEqual(0.0, floor, places=6)
+        self.assertLessEqual(max(gaps[0], gaps[2]),
+                             internal_layout_console.MAX_HULL_REGISTRATION_M)
+        self.assertLessEqual(abs(floor),
+                             internal_layout_console.MAX_HULL_REGISTRATION_M)
+
+    def test_a_vertically_shifted_shell_does_not_register(self):
+        # Every extent agrees, so the old extent-only check passed it, but the
+        # shell sits 0.9 m up: its modules would be placed that far too low.
+        bound = ((-1.5, 0.0, -3.0), (1.5, 2.0, 3.0))
+        surfaces = self._hull((-1.5, 0.9, -3.0), (1.5, 2.9, 3.0))
+        gaps = self.baker.residual(surfaces, bound)
+        floor = self.baker.floor_offset(surfaces, bound)
+        self.assertEqual((0.0, 0.0, 0.0),
+                         tuple(round(value, 6) for value in gaps))
+        self.assertAlmostEqual(0.9, floor, places=6)
+        self.assertGreater(abs(floor),
+                           internal_layout_console.MAX_HULL_REGISTRATION_M)
+
+    def test_a_wider_shell_does_not_register(self):
+        # The footprint is the part both platforms must agree on, because it
+        # is the closed track-to-track hull.
+        bound = ((-1.5, 0.0, -3.0), (1.5, 2.0, 3.0))
+        surfaces = self._hull((-2.1, 0.0, -3.0), (2.1, 2.0, 3.0))
+        gaps = self.baker.residual(surfaces, bound)
+        self.assertGreater(max(gaps[0], gaps[2]),
+                           internal_layout_console.MAX_HULL_REGISTRATION_M)
+
+    def test_anchoring_preserves_a_zone_position_despite_a_span_gap(self):
+        # The reason the height extent need not be gated: fractions() anchors
+        # at the box minimum, and fit_target reconstructs against the same
+        # build's bbox, so metres in equal metres out.
+        bound = ((-1.5, 0.0, -3.0), (1.5, 2.0, 3.0))
+        box = ((-0.2, 0.6, -0.4), (0.2, 1.0, 0.4))
+        shaped = self.baker.fractions(box, bound)
+        self.assertIsNotNone(shaped)
+        centre, half = shaped
+        for axis in range(3):
+            span = bound[1][axis] - bound[0][axis]
+            middle = bound[0][axis] + centre[axis] * span
+            extent = half[axis] * span
+            self.assertAlmostEqual(
+                (box[0][axis] + box[1][axis]) * 0.5, middle, places=3)
+            self.assertAlmostEqual(
+                (box[1][axis] - box[0][axis]) * 0.5, extent, places=3)
 
 
 if __name__ == '__main__':

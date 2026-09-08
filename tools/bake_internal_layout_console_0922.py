@@ -32,15 +32,21 @@ The archived ``pc9.22.0`` catalogue is roster-identical to the pinned client --
 all 680 entries, no difference either way -- which is what ties the archive to
 this build.
 
-Registration is measured, not assumed, in two ways.  Both platforms carry the
-same vehicle's hull shell as ``armor_*`` surfaces, so the tool compares that
-shell's extent against the PC hull bounding box on every axis; and for every
-component it checks that the decoded surfaces sit inside the PC bounding box
-the client reports for it.  A component failing either check is rejected
-rather than used, and both figures are recorded per vehicle in the report.
-Only the hull's shells are comparable directly: a gun component's plates
-cover the breech while its bounding box spans the barrel, and a turret proxy
-is not built to the same silhouette.
+Hull registration is measured; every other component is checked for frame
+containment.  Both platforms carry the same vehicle's hull shell as ``armor_*``
+surfaces, so the tool compares that shell against the PC hull bounding box:
+the footprint extents must agree, and the shell floor must sit on the box
+floor, both inside one tolerance.  The shell's height extent is deliberately
+not gated -- see ``floor_offset``.  Separately, for every component, the
+decoded surfaces must sit inside the PC bounding box the client reports for
+it; a surface reaching outside is declined rather than costing the vehicle its
+other modules.  Every figure is recorded per vehicle in the report.
+
+Only the hull's shells are comparable directly: a gun component's plates cover
+the breech while its bounding box spans the barrel, and a turret proxy is not
+built to the same silhouette.  So containment is what is known about those
+components -- it bounds the frame they sit in, not the accuracy of the
+interior inside it.
 
     python3 tools/bake_internal_layout_console_0922.py "$WOT_0922_CLIENT" \
         --cache ~/console-collision-cache
@@ -313,6 +319,31 @@ def residual(surfaces, bound):
                  for axis in range(3))
 
 
+def floor_offset(surfaces, bound):
+    """How far the Console shell's lowest plate sits off the PC box floor.
+
+    ``residual`` compares extents, and an extent disagreement is not by
+    itself a registration error: ``fractions`` places a Console metre
+    coordinate into the PC box by anchoring it at the box minimum, and
+    ``fit_target`` reconstructs that against the live bbox of the same
+    build, so a zone's position is preserved exactly.  What has to hold is
+    that the two datasets share an origin on the axis.
+
+    On x and z, matching extents plus containment force that: a shell as wide
+    as the box, inside the box, can only be aligned with it.  On y the
+    extents often disagree because the armour shell of an open-topped
+    vehicle has no roof while the collision box encloses the compartment, and
+    then containment is weak -- a shell 0.8 m shorter fits inside the box at
+    any height.  So measure the vertical origin directly: the belly plate on
+    the box floor, with the whole shortfall at the ceiling, is that
+    open-topped signature and the anchoring holds.
+    """
+    shell = outer_shell(surfaces)
+    if shell is None or bound is None:
+        return None
+    return shell[0][1] - bound[0][1]
+
+
 def overshoot(surfaces, bound):
     """How far the decoded surfaces reach outside the PC bounding box.
 
@@ -409,8 +440,11 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
             continue
         record = {}
         gaps = residual(surfaces, bound) if parent == 'hull' else None
+        floor = floor_offset(surfaces, bound) if parent == 'hull' else None
         if gaps is not None:
             record['shell'] = [round(value, 4) for value in gaps]
+        if floor is not None:
+            record['floor'] = round(floor, 4)
         # Drop the individual surfaces that reach outside the bound rather
         # than the whole vehicle: a roof cupola sitting above the hull's
         # collision box does not mean the frames disagree, and the hull shell
@@ -435,7 +469,12 @@ def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
         if dropped:
             record['dropped_surfaces'] = sorted(dropped)
         residuals[parent] = record
-        if gaps is not None and max(gaps) > max_residual:
+        # The hull registers when the two datasets describe the same
+        # footprint and share a vertical origin, both inside one tolerance.
+        # The height extent is deliberately not gated: see floor_offset.
+        if gaps is not None and max(gaps[0], gaps[2]) > max_residual:
+            continue
+        if floor is not None and abs(floor) > max_residual:
             continue
         if kept:
             usable[parent] = (kept, bound)
@@ -526,16 +565,25 @@ enclosed by a single box that also covers the space between them: separating
 lobes would need triangle connectivity this decoder does not read, and
 guessing them would invent geometry.
 
-Registration is measured: both platforms carry the same vehicle's outer shell
-as ``armor_*`` surfaces, and a component whose two shells disagreed by more
-than MAX_SHELL_RESIDUAL_M on any axis was rejected rather than used.
+Hull registration is measured; every other component is checked for frame
+containment.  Both platforms carry the same vehicle's outer shell as
+``armor_*`` surfaces, so the hull's two shells are directly comparable: a
+vehicle whose footprint extents disagreed by more than
+MAX_HULL_REGISTRATION_M, or whose shell floor sat that far off the PC box
+floor, was rejected rather than used.  The shell's *height* extent is not
+gated, because the armour shell of an open-topped vehicle has no roof while
+the collision box encloses the compartment; positions are anchored at the box
+minimum rather than scaled to its span, so that difference does not move a
+zone.  A turret or gun shell is not built to the same silhouette as its
+bounding box, so those components are checked only by containment -- which
+bounds the frame, not the interior.
 """
 
 CLIENT_VERSION = %(version)r
 CLIENT_BUILD = %(build)r
 GEOMETRY_SOURCES = %(sources)r
 REFERENCE_FRAME_SOURCE = %(pc_package)r
-MAX_SHELL_RESIDUAL_M = %(max_residual)r
+MAX_HULL_REGISTRATION_M = %(max_residual)r
 CATALOGUE_SIZE = %(catalogue)d
 DECODED_COUNT = %(decoded)d
 CONFIDENCE = 'decoded'
