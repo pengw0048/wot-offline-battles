@@ -9950,23 +9950,34 @@ class BattleRuntime(object):
         return True
 
     @staticmethod
-    def _hit_indicator_damage(event, shot, damage):
-        """Report the damage a stopped shell carried, not the HP it removed.
+    def _hit_indicator_marker(event, shot, damage):
+        """Return the (damage, isBlocked) pair #1513 can actually draw.
 
-        #1513's damage indicator prints ``str(HitData.getDamage())`` as the
-        marker label and picks ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG``
-        from ``damage / playerVehMaxHP``, so a blocked marker is built to
-        carry a real value; passing the removed hit points labels every
-        bounce ``0`` and pins it to the smallest blocked art.  A direct hit
-        that did not pierce never drew a damage roll, so the shell's
-        published damage is what its armour stopped.  A splash keeps the
-        applied value: its damage falls off with distance and absorption,
-        and the armour ledger excludes splash for the same reason.
+        The exact client has no marker for zero blocked damage.
+        ``_MarkerData.__getMarkerType`` routes on ``HitData.isBlocked()``
+        first, and the blocked branch is numeric:
+        ``_ExtendedMarkerVOBuilder`` prints ``str(HitData.getDamage())`` as
+        the label and selects ``DAMAGEINDICATOR.BLOCKED_SMALL/MEDIUM/BIG``
+        from ``damage / playerVehMaxHP``.  Every other zero-damage hit falls
+        to ``CRITICAL_DAMAGE``, whose three sizes all map to the single
+        ``CRIT`` frame and whose label is the empty string below two
+        criticals.  So retail draws either a blocked marker carrying a real
+        value or an unlabelled critical marker -- never the ``0`` this port
+        published for every hit that removed no hit points.
+
+        A direct shell stopped by armour is the blocked case, and it never
+        drew a damage roll, so it carries the shell's published damage.  A
+        splash is not a stopped shell: its damage falls off with distance
+        before armour absorbs the rest, and the armour ledger excludes
+        splash for the same reason, so an absorbed near miss keeps retail's
+        unlabelled critical marker instead of claiming a blocked value.
         """
-        if (damage > 0 or bool(event.get('splash', False)) or
-                max(0, min(int(event.get('shot_result', 2)), 2)) == 2):
-            return damage
-        return max(0, int(combat_rules.shell_nominal_damage(shot)))
+        blocked = bool(
+            damage <= 0 and not bool(event.get('splash', False)) and
+            max(0, min(int(event.get('shot_result', 2)), 2)) != 2)
+        if not blocked:
+            return damage, False
+        return max(0, int(combat_rules.shell_nominal_damage(shot))), True
 
     def _present_combat_hit(self, event, target_record, attacker_record,
                             attacker_id):
@@ -10012,11 +10023,12 @@ class BattleRuntime(object):
             hit_yaw = math.atan2(
                 -(attacker_position[0] - target_position[0]),
                 -(attacker_position[2] - target_position[2]))
+            indicator_damage, indicator_blocked = (
+                self._hit_indicator_marker(event, shot, damage))
             self._avatar.showOwnVehicleHitDirection(
-                hit_yaw, int(attacker_id or 0),
-                self._hit_indicator_damage(event, shot, damage),
+                hit_yaw, int(attacker_id or 0), indicator_damage,
                 self._critical_hit_mask(event.get('critical')),
-                damage <= 0, combat_rules.is_he(shot),
+                indicator_blocked, combat_rules.is_he(shot),
                 int(target_record['engine_id']))
 
         # An armour effect belongs to the visible world model.  Team/radio

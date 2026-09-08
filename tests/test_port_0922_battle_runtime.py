@@ -12757,6 +12757,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 self.assertEqual(100, direction[2])
                 self.assertIs(True, direction[4])
                 self.assertEqual(0, direction[3])
+                self.assertIs(False, direction[5])
                 events = battle._avatar.battle_events[-1]
                 self.assertEqual(
                     [5], [value['eventType'] for value in events])
@@ -12765,18 +12766,32 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     direction[2],
                     _unpack_damage(events[0]['details'])[0])
 
-    def test_absorbed_splash_and_penetration_keep_the_applied_damage(self):
-        """Only a stopped direct shell owes its published damage.
+    def test_indicator_never_labels_a_marker_zero(self):
+        """Retail cannot draw a blocked marker worth zero damage.
 
-        A splash falls off with distance and absorption, and the armour
-        ledger excludes it, so a fully absorbed near miss stays at zero.  A
-        penetration already spent its roll, so it reports what it removed.
+        ``_MarkerData.__getMarkerType`` reads ``HitData.isBlocked()``
+        first and the blocked branch is numeric, while every other
+        zero-damage hit falls to ``CRITICAL_DAMAGE``, whose label is empty
+        below two criticals.  So a stopped shell claims blocked with the
+        shell's published damage, and a hit that removed no hit points
+        without being stopped -- an absorbed splash, or a penetration that
+        only broke modules -- keeps retail's unlabelled critical marker
+        rather than a blocked ``0``.
         """
         for label, event, expected in (
+                ('ricochet', {
+                    'shot_result': 0, 'damage': 0}, (100, True)),
+                ('non-penetration', {
+                    'shot_result': 1, 'damage': 0}, (100, True)),
                 ('absorbed splash', {
-                    'shot_result': 1, 'damage': 0, 'splash': True}, 0),
+                    'shot_result': 1, 'damage': 0, 'splash': True},
+                 (0, False)),
+                ('module-only penetration', {
+                    'shot_result': 2, 'damage': 0}, (0, False)),
                 ('penetration', {
-                    'shot_result': 2, 'damage': 144}, 144)):
+                    'shot_result': 2, 'damage': 144}, (144, False)),
+                ('leaking non-penetration', {
+                    'shot_result': 1, 'damage': 40}, (40, False))):
             with self.subTest(label):
                 battle, target_record, attacker_record = (
                     self._blocked_hit_fixture())
@@ -12789,8 +12804,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 battle._present_combat_hit(
                     event, target_record, attacker_record, 11)
 
-                self.assertEqual(
-                    expected, battle._avatar.hit_directions[-1][2])
+                direction = battle._avatar.hit_directions[-1]
+                self.assertEqual(expected, (direction[2], direction[4]))
+                self.assertFalse(direction[2] == 0 and direction[4])
 
     def test_native_impact_effect_exception_keeps_nonvisual_feedback(self):
         runtime = _runtime()
