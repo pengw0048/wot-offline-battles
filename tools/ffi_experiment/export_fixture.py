@@ -31,7 +31,8 @@ def main():
     parser.add_argument('output', type=Path)
     args = parser.parse_args()
     bodies = select('tests/test_port_0922_bot_runtime.py', (
-        '_Strict1513Component', '_HitTester1513', '_combat_descriptor', '_bot_equipment_contracts'))
+        '_Strict1513Component', '_HitTester1513', '_combat_descriptor', '_bot_equipment_contracts',
+        '_effective_params_snapshot'))
     bodies.update(select('tests/test_port_0922_destructibles.py', (
         '_Vector', '_Manager', '_catalog', '_empty_catalog_scan_fixture')))
     bodies.update(select('tools/benchmark_bot_workload.py', ('make_runtime', 'combat_native_queries')))

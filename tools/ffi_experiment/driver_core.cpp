@@ -15,6 +15,7 @@ struct Reader {
     double *b;int n,i;
     Reader(double *v,int size):b(v),n(size),i(1){}
     double next(){if(i>=n || !std::isfinite(b[i])) throw std::invalid_argument("driver buffer");return b[i++];}
+    double stopping(){if(i>=n||std::isnan(b[i])||b[i]<0)throw std::invalid_argument("driver stopping distance");return b[i++];}
     int integer(){double v=next();if(v!=std::floor(v)||std::abs(v)>1000000000) throw std::invalid_argument("driver int");return static_cast<int>(v);}
     void end(){if(i!=n) throw std::invalid_argument("driver width");}
 };
@@ -239,6 +240,10 @@ void resume(Driver &d,double *b,int out){
 void optional(double *b,int &i,Optional v){b[i++]=v.present;b[i++]=v.value;}
 }
 void offline_driver_reset(){drivers.clear();}
+bool offline_driver_waiting(int id,int bot){
+    auto found=drivers.find(id);if(found==drivers.end())return false;
+    auto state=found->second.states.find(bot);return state!=found->second.states.end()&&state->second.traffic_present&&state->second.traffic;
+}
 void offline_driver_remember(int id,int bot,double yaw,bool has_ttl,double ttl){
     auto found=drivers.find(id);if(found==drivers.end())throw std::invalid_argument("unknown driver");
     Driver &d=found->second;if(d.pending.active)throw std::invalid_argument("driver mutation during query");
@@ -261,7 +266,7 @@ int offline_driver_dispatch(double *b,int n){
         Input in;in.bot=r.integer();in.slot=r.integer();if(in.slot<0 || in.slot>=15)throw std::invalid_argument("team slot");
         in.pos=vec(r);in.yaw=r.next();in.speed=r.next();in.dt=r.next();in.target=vec(r);
         in.length=r.next();in.width=r.next();in.moving=r.integer()!=0;in.has_stopping=r.integer()!=0;
-        in.stopping=r.next();in.stop=r.integer()!=0;in.horizon=r.next();in.pose=r.integer()!=0;in.key_x=r.next();in.key_z=r.next();
+        in.stopping=r.stopping();in.stop=r.integer()!=0;in.horizon=r.next();in.pose=r.integer()!=0;in.key_x=r.next();in.key_z=r.next();
         int count=r.integer();if(count<0 || count>10000)throw std::invalid_argument("neighbour count");
         for(int i=0;i<count;++i){
             Neighbour v;v.pos=vec(r);v.yaw=r.next();v.length=r.next();v.width=r.next();v.has_id=r.integer()!=0;v.id=r.next();v.alive=r.integer()!=0;in.neighbours.push_back(v);

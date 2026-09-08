@@ -42,6 +42,9 @@ extern "C" int offline_query_can_enter(const double *buffer,int count) {
 extern "C" int offline_query(double *packet, int count) {
     return active_callback ? active_callback(active_owner, packet, count) : 18;
 }
+OfflineQueryRoute::OfflineQueryRoute(OfflineQueryCallback callback,void *owner):previous(active_callback),previous_owner(active_owner){active_callback=callback;active_owner=owner;}
+OfflineQueryRoute::~OfflineQueryRoute(){active_callback=previous;active_owner=previous_owner;}
+int OfflineQueryRoute::forward(double *packet,int count)const{return previous?previous(previous_owner,packet,count):18;}
 extern "C" int offline_query_dispatch(double *buffer, int count,
                                      double *query_buffer,int query_count,
                                      OfflineQueryCallback callback, void *owner) {

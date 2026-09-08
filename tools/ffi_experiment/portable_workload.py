@@ -120,7 +120,7 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
-    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow')
+    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow,kernel')
     parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
     args = parser.parse_args()
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
@@ -131,6 +131,7 @@ def main():
     stage_recorder = None
     components = []
     motion_component = None
+    kernel_component = None
     world_recorder = None
     messages, progress = [], []
     random.seed(17)
@@ -144,8 +145,10 @@ def main():
             components.append(world_recorder)
         init_started = CLOCK()
         if args.backend != 'python':
-            backend = Backend(args.module).install(navigation, batch=args.backend == 'native')
-            backend.graph(runtime.navigator.grid, navigation)
+            backend = Backend(args.module)
+            if 'kernel' not in args.components.split(','):
+                backend.install(navigation, batch=args.backend == 'native')
+                backend.graph(runtime.navigator.grid, navigation)
             if 'aiming' in args.components.split(','):
                 from combat_adapter import CombatBackend
                 components.append(CombatBackend(backend, fixture['fixtures']._load()).install())
@@ -176,6 +179,12 @@ def main():
                    if args.scenario == 'combat' else no_queries())
         try:
             with context as queries:
+                if 'kernel' in args.components.split(','):
+                    from kernel_adapter import KernelBackend
+                    kernel_started = CLOCK()
+                    kernel_component = KernelBackend(backend, runtime, fixture['fixtures']._load()).install()
+                    components.append(kernel_component)
+                    init_seconds += CLOCK() - kernel_started
                 if args.stage_timing:
                     from stage_timing import Recorder
                     stage_recorder = Recorder(backend, runtime)
@@ -197,6 +206,8 @@ def main():
                         'paths': sorted((repr(key), path) for key, path in nav.paths.items()),
                     })
                 cpu_seconds = CLOCK() - started
+            if kernel_component is not None:
+                runtime._decision_counts = kernel_component.counters()['decisions']
             counts = ({'calls': backend.calls, 'expansions': backend.expansions,
                        'completed': backend.completed} if backend else {})
             snapshot = {'messages': messages, 'native_queries': queries,
