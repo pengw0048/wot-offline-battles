@@ -866,20 +866,6 @@ class LauncherWindow(object):
             self.log_panel, height=10, width=72, state="disabled",
                                 wrap="none")
         self.log_view.pack(fill="both", expand=True)
-        self.author_text = tk.StringVar(value=(
-            "作者：伪红学家  Bilibili：@tiancaihb  GitHub: "
-            "https://github.com/pengw0048/wot-offline-battles"))
-        self.author_entry = tk.Entry(
-            frame, textvariable=self.author_text, state="readonly",
-            relief="flat", borderwidth=0, highlightthickness=0)
-        self.author_entry.grid(row=5, column=0, sticky="we", pady=(8, 0))
-        self.qq_group_text = tk.StringVar(value=(
-            "坦克世界QQ群：1108778562、302519768"))
-        self.qq_group_entry = tk.Entry(
-            frame, textvariable=self.qq_group_text, state="readonly",
-            relief="flat", borderwidth=0, highlightthickness=0)
-        self.qq_group_entry.grid(
-            row=6, column=0, sticky="we", pady=(2, 0))
         self.distribution_notice_text = tk.StringVar(value=(
             "本mod免费传播、开源、欢迎二创，使用无需付费，售卖与本人无关，"
             "仅供个人学习交流"))
@@ -888,7 +874,7 @@ class LauncherWindow(object):
             state="readonly", relief="flat", borderwidth=0,
             highlightthickness=0)
         self.distribution_notice_entry.grid(
-            row=7, column=0, sticky="we", pady=(2, 0))
+            row=5, column=0, sticky="we", pady=(8, 0))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(4, weight=1)
 

@@ -291,25 +291,10 @@ class WindowTest(unittest.TestCase):
             self.window.report_button.cget("text"))
         self.assertIn("bold", str(self.window.report_button.cget("font")))
         self.assertEqual(
-            "作者：伪红学家  Bilibili：@tiancaihb  "
-            "GitHub: https://github.com/pengw0048/wot-offline-battles",
-            self.window.author_text.get())
-        self.assertEqual(
-            "坦克世界QQ群：1108778562、302519768",
-            self.window.qq_group_text.get())
-        self.assertEqual(
             "本mod免费传播、开源、欢迎二创，使用无需付费，售卖与本人无关，仅供个人学习交流",
             self.window.distribution_notice_text.get())
-        self.assertEqual("readonly", self.window.author_entry.cget("state"))
-        self.assertEqual("readonly", self.window.qq_group_entry.cget("state"))
         self.assertEqual(
             "readonly", self.window.distribution_notice_entry.cget("state"))
-        self.assertIs(
-            self.window.author_text,
-            self.window.author_entry.cget("textvariable"))
-        self.assertIs(
-            self.window.qq_group_text,
-            self.window.qq_group_entry.cget("textvariable"))
         self.assertIs(
             self.window.distribution_notice_text,
             self.window.distribution_notice_entry.cget("textvariable"))
