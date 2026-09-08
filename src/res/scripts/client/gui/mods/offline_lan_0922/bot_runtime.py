@@ -11510,8 +11510,21 @@ class BotRuntime(object):
                         not (isinstance(motion_probe, dict) and
                              motion_probe.get('collision', False)) and
                         command.get('move_position') is not None):
-                    report_blocked(state['id'], position,
-                                   command.get('move_position'), now)
+                    blocked_target = command.get('move_position')
+                    if navigation_grid is not None:
+                        # The generic probe just rejected travel_yaw before
+                        # this slice turns the hull.  Mark that local edge,
+                        # rather than the strategic waypoint it was pursuing.
+                        edge_length = _number(
+                            getattr(navigation_grid, 'cell_size', 0.0), 0.0)
+                        if edge_length > 0.0:
+                            blocked_target = (
+                                position[0] + math.sin(travel_yaw) *
+                                edge_length,
+                                position[1],
+                                position[2] + math.cos(travel_yaw) *
+                                edge_length)
+                    report_blocked(state['id'], position, blocked_target, now)
             steer_dir = 0
             if abs(turn) > 0.01:
                 # LocalDriver already inverts reverse recovery steering for the
@@ -11699,11 +11712,27 @@ class BotRuntime(object):
                             descriptor, step, now)
                     report_contact = getattr(
                         self.navigator, 'report_blocked_step', None)
+                    contact_target = command.get('move_position')
+                    if (contact_target is not None and
+                            navigation_grid is not None):
+                        # The exact hull sweep used committed_travel_yaw, not
+                        # the strategic waypoint.  A tank may hit a wall while
+                        # turning toward that waypoint, so reporting the latter
+                        # can veto an unrelated route edge for this Bot.
+                        edge_length = _number(
+                            getattr(navigation_grid, 'cell_size', 0.0), 0.0)
+                        if edge_length > 0.0:
+                            contact_target = (
+                                position[0] + math.sin(
+                                    committed_travel_yaw) * edge_length,
+                                position[1],
+                                position[2] + math.cos(
+                                    committed_travel_yaw) * edge_length)
                     if (callable(report_contact) and
-                            command.get('move_position') is not None):
+                            contact_target is not None):
                         report_contact(
                             state['id'], position,
-                            command.get('move_position'), now)
+                            contact_target, now)
                 elif motion_status in ('soft', 'cap_crushed'):
                     self._hard_contact_grinds[state['id']] = 1
                 if resolved_motion and callable(self.motion_report):

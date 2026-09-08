@@ -1934,7 +1934,8 @@ class BotRuntimeTests(unittest.TestCase):
             (0.0, 0.0, 0.0), 0.0, 0.0, allow_shallow=True))
 
     def test_repeated_water_veto_reports_a_blocked_step_for_that_bot(self):
-        aim = (0.0, 0.0, 200.0)
+        aim = (math.sin(0.75) * 200.0, 0.0,
+               math.cos(0.75) * 200.0)
         command = self._stationary_command()
         command.update({
             'throttle': 1.0, 'combat_mode': 'route',
@@ -1960,7 +1961,8 @@ class BotRuntimeTests(unittest.TestCase):
 
         runtime.update(.04, 1.0)
 
-        self.assertEqual([(11, (0.0, 0.0, 0.0), aim, 1.0)], reports)
+        self.assertEqual(
+            [(11, (0.0, 0.0, 0.0), (0.0, 0.0, 4.0), 1.0)], reports)
         self.assertEqual((0.0, 0.0), (state['x'], state['z']))
 
     def test_post_turn_travel_yaw_cannot_enter_unplanned_shallow(self):
@@ -3708,8 +3710,8 @@ class BotRuntimeTests(unittest.TestCase):
 
     def test_realised_hard_contact_invalidates_cached_command_and_probe(self):
         attempted_yaw = 0.25
-        aim = (math.sin(attempted_yaw) * 200.0, 0.0,
-               math.cos(attempted_yaw) * 200.0)
+        aim = (math.sin(attempted_yaw + 0.75) * 200.0, 0.0,
+               math.cos(attempted_yaw + 0.75) * 200.0)
         command = {
             'target_yaw': attempted_yaw, 'throttle': 1.0, 'turn': 0.0,
             'shell_index': 0, 'fire_allowed': False, 'target_id': None,
@@ -3757,7 +3759,9 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual([(11, attempted_yaw, 5.0)],
                          adapter.driver.calls)
         self.assertEqual(1, len(contact_reports))
-        self.assertEqual((11, before_position, aim, 1.0),
+        realised_edge = (math.sin(attempted_yaw) * 4.0, 0.0,
+                         math.cos(attempted_yaw) * 4.0)
+        self.assertEqual((11, before_position, realised_edge, 1.0),
                          contact_reports[0])
         self.assertEqual(1, len(adapter.calls))
 
