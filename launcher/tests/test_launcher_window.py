@@ -2473,6 +2473,10 @@ class WindowTest(unittest.TestCase):
             environment[wot_launcher.CRASH_DUMP_PATH_ENV])
         self.assertEqual(
             "mini", environment[wot_launcher.CRASH_DUMP_MODE_ENV])
+        self.assertEqual(
+            wot_launcher.error_reports.session_trail_path(
+                boundary, wot_launcher.error_reports.ROLE_HIDDEN_WORKER),
+            environment[wot_launcher.EXCEPTION_TRAIL_PATH_ENV])
         self.window._stop_worker()
 
     def test_crash_capture_environment_requests_full_memory_dumps(self):
@@ -2489,6 +2493,33 @@ class WindowTest(unittest.TestCase):
 
         self.assertEqual(
             "full", environment[wot_launcher.CRASH_DUMP_MODE_ENV])
+
+    def test_each_role_records_its_faults_in_its_own_trail(self):
+        # Both processes load the same sidecar, so two roles sharing one
+        # trail path would interleave records from different processes.
+        boundary = wot_launcher.error_reports.begin_session(
+            self.settings_dir, needs_worker=True,
+            session_id="20260823T120000Z-333333333333")
+        self.window._active_report_session = boundary
+        self.window._crash_capture_enabled = True
+        self.window._procdump_path = "C:\\tools\\procdump.exe"
+
+        paths = set()
+        for role in wot_launcher.error_reports.DUMP_ROLES:
+            environment = self.window._crash_capture_environment({}, role)
+            paths.add(environment[wot_launcher.EXCEPTION_TRAIL_PATH_ENV])
+
+        self.assertEqual(
+            len(wot_launcher.error_reports.DUMP_ROLES), len(paths))
+
+    def test_a_session_without_crash_capture_sets_no_trail_path(self):
+        self.window._active_report_session = None
+        self.window._crash_capture_enabled = False
+
+        environment = self.window._crash_capture_environment(
+            {"KEEP": "1"}, wot_launcher.error_reports.ROLE_VISIBLE_CLIENT)
+
+        self.assertEqual({"KEEP": "1"}, environment)
 
     def test_worker_stop_waits_for_the_native_starter_cleanup(self):
         worker = _Process(exit_code=None, pid=42)

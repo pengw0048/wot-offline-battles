@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -43,6 +45,100 @@ class _NativeBridge(object):
     def show_process_windows(self):
         self.events.append('show_process_windows')
         return self.show_result
+
+
+class _TrailBridge(_NativeBridge):
+    def __init__(self, trail_status=0, **keywords):
+        _NativeBridge.__init__(self, **keywords)
+        self.trail_status = trail_status
+
+    def install_exception_trail(self):
+        self.events.append('install_exception_trail')
+        if isinstance(self.trail_status, Exception):
+            raise self.trail_status
+        return self.trail_status
+
+
+def _load_bridge(module, bridge):
+    class ImpModule(object):
+        def load_dynamic(self, name, path):
+            sys.modules[name] = bridge
+            return bridge
+
+    output = io.StringIO()
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / module.NATIVE_FILENAME
+        path.write_bytes(b'PE sidecar')
+        try:
+            with contextlib.redirect_stdout(output):
+                loaded = module._load_native_bridge(
+                    path=str(path), imp_module=ImpModule())
+        finally:
+            sys.modules.pop(module.NATIVE_MODULE_NAME, None)
+            module._native_bridge = None
+    return loaded, output.getvalue()
+
+
+class ExceptionTrailTests(unittest.TestCase):
+    """The trail records faults #1513's own reporter consumes, so it must
+    never be able to stop the game from starting."""
+
+    def setUp(self):
+        self.module = _load_module()
+
+    def test_trail_is_installed_after_the_atmosphere_guard(self):
+        bridge = _TrailBridge()
+
+        loaded, output = _load_bridge(self.module, bridge)
+
+        self.assertIs(bridge, loaded)
+        self.assertEqual(
+            ['install_atmosphere_owner_guard', 'install_exception_trail'],
+            bridge.events)
+        self.assertIn('installed #1513 exception trail', output)
+
+    def test_unconfigured_trail_is_silent_and_still_publishes(self):
+        bridge = _TrailBridge(
+            trail_status=self.module.TRAIL_STATUS_NOT_CONFIGURED)
+
+        loaded, output = _load_bridge(self.module, bridge)
+
+        self.assertIs(bridge, loaded)
+        self.assertNotIn('exception trail', output)
+
+    def test_refused_trail_is_reported_but_never_fatal(self):
+        for status in (self.module.TRAIL_STATUS_NOT_CONFIGURED + 1, -1):
+            bridge = _TrailBridge(trail_status=status)
+
+            loaded, output = _load_bridge(self.module, bridge)
+
+            self.assertIs(bridge, loaded)
+            self.assertIn('exception trail unavailable', output)
+
+    def test_raising_trail_is_contained_to_the_recorder(self):
+        bridge = _TrailBridge(trail_status=RuntimeError('no handler'))
+
+        loaded, output = _load_bridge(self.module, bridge)
+
+        self.assertIs(bridge, loaded)
+        self.assertIn('exception trail refused: no handler', output)
+
+    def test_older_sidecar_without_the_trail_still_loads(self):
+        bridge = _NativeBridge()
+
+        loaded, output = _load_bridge(self.module, bridge)
+
+        self.assertIs(bridge, loaded)
+        self.assertEqual(['install_atmosphere_owner_guard'], bridge.events)
+        self.assertNotIn('exception trail', output)
+
+    def test_a_failed_atmosphere_guard_still_refuses_the_whole_bridge(self):
+        bridge = _TrailBridge(atmosphere_status=201)
+
+        with self.assertRaises(self.module.ClientInstanceGuardError):
+            _load_bridge(self.module, bridge)
+
+        self.assertEqual(['install_atmosphere_owner_guard'], bridge.events)
 
 
 class ClientInstanceGuardTests(unittest.TestCase):

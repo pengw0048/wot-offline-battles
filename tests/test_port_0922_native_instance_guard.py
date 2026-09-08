@@ -92,10 +92,28 @@ class NativeInstanceGuardArtifactTests(unittest.TestCase):
                 b'apply_standard_gameplay_mask\0',
                 b'restore_standard_gameplay_mask\0',
                 b'hide_process_windows\0',
-                b'show_process_windows\0'):
+                b'show_process_windows\0',
+                b'install_exception_trail\0'):
             self.assertIn(method_name, payload)
         self.assertIn('wgc_api.dll'.encode('utf-16le'), payload)
         self.assertIn('wot_client_mutex'.encode('utf-16le'), payload)
+
+    def test_exception_trail_records_only_client_side_cxx_throws(self):
+        # The Chinese IME, the display driver and the WGC client all throw
+        # and catch their own C++ exceptions while the game runs normally,
+        # so the shipped filter must name the client image and its runtime.
+        payload = BRIDGE_PATH.read_bytes()
+
+        self.assertIn(
+            'WOT_OFFLINE_EXCEPTION_TRAIL_PATH'.encode('utf-16le'), payload)
+        for module_name in (
+                'WorldOfTanks.exe', 'msvcp140.dll', 'vcruntime140.dll'):
+            self.assertIn(module_name.encode('utf-16le'), payload)
+        for record_field in (
+                b'EXC session ', b'EXC seq=', b'EXC cxx throwinfo=',
+                b'EXC access kind=', b'EXC reg eip=0x', b'EXC frame ',
+                b'EXC end seq='):
+            self.assertIn(record_field, payload)
 
     def test_atmosphere_thunk_rebinds_from_live_esi_before_tail_jump(self):
         # Inspect the shipped x86 instructions, not a C-source approximation.
@@ -128,6 +146,29 @@ class NativeInstanceGuardArtifactTests(unittest.TestCase):
             'OpenMutexW(SYNCHRONIZE, FALSE, CLIENT_MUTEX_NAME)', source)
         self.assertNotIn('ReleaseMutex', source)
         self.assertIn('CloseHandle(probe)', source)
+        self.assertIn(
+            'AddVectoredExceptionHandler(1UL, exception_trail_handler)',
+            source)
+        # The recorder must never change what the process does: it always
+        # continues the search and restores the raising thread's last error.
+        self.assertNotIn('EXCEPTION_CONTINUE_EXECUTION', source)
+        self.assertNotIn('EXCEPTION_EXECUTE_HANDLER', source)
+        self.assertEqual(
+            source.count('return EXCEPTION_CONTINUE_SEARCH;'),
+            source.count('SetLastError(saved_error);'))
+        self.assertIn('0x19930520U', source)
+        self.assertIn('#define TRAIL_MAX_RECORDS 512L', source)
+        # The engine aborts on the fault that ends the process, so it is
+        # always the last record: a repeating fault must not spend the budget.
+        self.assertIn('++g_trail_repeats;', source)
+        self.assertIn('after_repeats=', source)
+        probe = (PORT_ROOT / 'tests' / 'native_exception_trail.c').read_text(
+            encoding='utf-8')
+        self.assertIn('#include "../native/offline_instance_guard_native.c"',
+                      probe)
+        self.assertIn('trail_module_is_local(L"SogouPY.ime")', probe)
+        self.assertIn('probe_fill_records();', probe)
+        self.assertIn('after_repeats=5', probe)
         self.assertIn('i686-w64-mingw32-gcc', build)
         self.assertIn('--no-insert-timestamp', build)
         self.assertIn('--kill-at', build)

@@ -1125,6 +1125,61 @@ repeat installation and injected protection/cache failures. The native harness
 and package checks do not substitute for repeated battle-to-hangar acceptance
 on the exact Windows game client.
 
+## First-chance exception trail
+
+#1513 installs its own `__try/__except` around the whole main loop at
+`0x00602F00`. Its filter formats the crash text on the faulting stack
+(`"The BigWorld Client has encountered an unhandled exception ..."`), routes
+it through the registered debug-message handlers at `0x00687E80`, then calls
+`_set_abort_behavior` and `abort` at `0x00685D6A`/`0x00685D73`, which is where
+this port's `exit code 3` comes from. Because the engine handles the exception
+itself, nothing reaches second chance: ProcDump's `-e` trigger cannot fire, so
+every collected dump is a `-t` termination dump. Whether it is usable is then
+luck: the 2026-09-08 16:00 worker report kept the main thread and its crash
+text, while the 16:16 report kept only an audio worker thread and no evidence
+at all.
+
+The sidecar therefore records the fault itself. `install_exception_trail`
+snapshots the module table with `CreateToolhelp32Snapshot` while it is still a
+normal Python call — resolving names inside the handler would take the loader
+lock the faulting thread may already hold — then installs a vectored handler
+as first in the chain. Vectored handlers run before any frame-based handler,
+so it observes the exception with the faulting thread's own registers and
+frames intact.
+
+The handler only records. It always returns `EXCEPTION_CONTINUE_SEARCH`, never
+writes to the context, and restores the thread's last-error value, so
+first-chance exceptions used as control flow behave exactly as before. It
+records the fatal status codes unconditionally, and a C++ throw
+(`0xE06D7363`) only when `ExceptionInformation[0]` is the MSVC magic
+`0x19930520` and its ThrowInfo lies inside `WorldOfTanks.exe`, `msvcp140.dll`
+or `vcruntime140.dll`: `SogouPY.ime`, `nvgpucomp32.dll` and `wgc_api.dll` all
+throw and catch their own C++ exceptions while the game runs normally. Each
+record carries the code, faulting address, thread, registers, an EBP frame
+walk resolved to module and RVA, and — only when every byte up to its
+terminator is printable — the `std::exception` message. A shared buffer and a
+try-lock keep the handler off a stack that a stack overflow has already
+exhausted.
+
+The engine aborts on the fault that ends the process, so that fault is always
+the last record. The budget therefore has to survive for it: a fault that
+repeats with the same code and address is counted rather than written, and its
+count reaches the next distinct record as `after_repeats=`. Distinct records
+are bounded at 512, and the launcher keeps the tail of an oversized trail
+rather than its head.
+
+The trail is diagnostics, so `instance_guard` never fails startup over it: an
+older sidecar without the method, an unconfigured path, and a refusing handler
+all leave the atmosphere guard and the game untouched.
+
+`tests/native_exception_trail.c` runs the production handler in a 32-bit
+Windows process built by `tools/build_native_exception_trail_probe.sh`, and CI
+executes it on `windows-latest`. It asserts the module filter, the ThrowInfo
+gate, rethrow and foreign-magic rejection, the access-violation fields, the
+record limit, and that the handler leaves both the disposition and the
+last-error value unchanged. None of that proves what the recorder writes
+during a real #1513 crash; only a Windows session that produces a report can.
+
 ## Battle-result presentation
 
 The exact #1513 `gui/battle_results/context.pyc` constructor takes

@@ -70,6 +70,14 @@ _DUMP_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.dmp",
     ROLE_HIDDEN_WORKER: "hidden-worker.dmp",
 }
+# The native sidecar appends one record per recorded first-chance fault. It
+# shares the session dump folder but is not a dump: it survives abort(), and
+# it is the only evidence when the faulting thread has already gone.
+_TRAIL_FILENAMES = {
+    ROLE_VISIBLE_CLIENT: "visible-client.exceptions.txt",
+    ROLE_HIDDEN_WORKER: "hidden-worker.exceptions.txt",
+}
+TRAIL_MAX_BYTES = 1024 * 1024
 _SESSION_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _CHUNK_BYTES = 64 * 1024
 LOG_MAX_BYTES = 16 * 1024 * 1024
@@ -636,6 +644,55 @@ def _open_valid_source(session, role, source):
         return None
 
 
+def session_trail_path(session, role):
+    """Return where one role records the faults #1513's reporter consumes."""
+    roles = _normalize_dump_roles((role,))
+    directory, _paths = _recorded_dump_layout(session)
+    _safe_dump_directory(directory, create=True)
+    return os.path.join(directory, _TRAIL_FILENAMES[roles[0]])
+
+
+def _open_recorded_trail(session, role):
+    """Open one fixed native exception trail inside this session's folder."""
+    layout = _recorded_dump_layout(session, required=False)
+    if layout is None or role not in DUMP_ROLES:
+        return None
+    directory, _paths = layout
+    try:
+        if not _safe_dump_directory(directory, create=False):
+            return None
+    except core.LauncherError:
+        return None
+    path = os.path.join(directory, _TRAIL_FILENAMES[role])
+    try:
+        path_stat = os.lstat(path)
+        if (_is_reparse_point(path_stat) or
+                stat.S_ISLNK(path_stat.st_mode) or
+                not stat.S_ISREG(path_stat.st_mode)):
+            return None
+        stream = open(path, "rb")
+    except (IOError, OSError):
+        return None
+    try:
+        value = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(value.st_mode) or
+                not _same_identity(
+                    _file_identity(path_stat), _file_identity(value))):
+            stream.close()
+            return None
+        size = int(value.st_size)
+        if size <= 0:
+            stream.close()
+            return None
+        # Keep the tail: the fault that ended the process is the last record.
+        length = min(size, TRAIL_MAX_BYTES)
+        stream.seek(size - length)
+        return stream, length
+    except Exception:
+        stream.close()
+        return None
+
+
 def _open_recorded_dump(session, role):
     """Open one fixed launcher-owned dump without selecting it for a ZIP."""
     layout = _recorded_dump_layout(session, required=False)
@@ -913,6 +970,17 @@ def create_report(now=None):
                 finally:
                     stream.close()
                 included_roles.append(role)
+                included_files.append(archive_name)
+            for role in DUMP_ROLES:
+                opened = _open_recorded_trail(session, role)
+                if opened is None:
+                    continue
+                stream, length = opened
+                try:
+                    archive_name = _TRAIL_FILENAMES[role]
+                    _write_slice(archive, archive_name, stream, length)
+                finally:
+                    stream.close()
                 included_files.append(archive_name)
             for role in DUMP_ROLES:
                 opened = _open_valid_dump(session, role)
