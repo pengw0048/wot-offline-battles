@@ -75,6 +75,10 @@ def _fitting(context, mutate, extension=None):
     # rather than re-reading the inventory, so the mutation can name one.
     ext = None if extension is None else extension(outcome)
     context['selected_vehicle'] = state.snapshot()
+    # Capture this command's result before deferred publication. Another
+    # command may mutate the garage before publish runs; its new unlocks and
+    # elite vehicles must belong only to its own notification delta.
+    current_stats = data.stats(state.snapshot())['stats']
     mutated = _clock()
     store = context.get('garage_store')
     if store is not None:
@@ -100,7 +104,6 @@ def _fitting(context, mutate, extension=None):
             only_items=touched_items, touched_tankmen=moved_tankmen)
         # StatsRequester merges these fields before the command callback.
         # Publish the ledger with the inventory for every paid garage action.
-        current_stats = data.stats(state.snapshot())['stats']
         changed_stats = dict((name, current_stats[name]) for name in (
             'credits', 'gold', 'freeXP', 'slots', 'berths', 'vehicleSellsLeft',
             'vehTypeXP', 'unlocks', 'eliteVehicles')

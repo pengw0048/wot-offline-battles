@@ -792,9 +792,12 @@ def sync_data(revision=0, selected_vehicle=None, int_user_settings=None,
     # helpers only create a requester cache entry when the corresponding key
     # exists in the sync diff; several lobby requesters then index that entry
     # directly instead of applying a missing-value default.
+    # This response contains the complete account, not a revision delta.
+    # #1513 identifies full sync by the absence of prevRev. Marking this as
+    # incremental replays every elite notification after first sync and
+    # keeps stale entries in the inventory and stats caches.
     result = {
         'rev': int(revision) + 1,
-        'prevRev': int(revision),
         'quests': {},
         'tokens': {},
         'potapovQuests': personal_missions(),

@@ -853,6 +853,20 @@ class AccountRpcTests(unittest.TestCase):
         self.assertEqual(set(range(1, 13)), set(data['inventory']))
         self.assertEqual({}, data['inventory'][1]['compDescr'])
 
+    def test_repeated_sync_keeps_existing_elite_vehicles_out_of_notifications(self):
+        snapshot = _full_garage_snapshot()
+        self.server.update_context({'selected_vehicle': snapshot})
+        for revision in (0, 7, 8):
+            self.server.doCmdInt3(37, commands.CMD_SYNC_DATA, revision, 0, 0)
+            self._run()
+            value = pickle.loads(self.player.ext_responses[-1][3])
+            self.assertEqual(revision + 1, value['rev'])
+            self.assertEqual({50001, 50002}, value['stats']['eliteVehicles'])
+            # AccountSyncData.__onSyncResponse enables events after the
+            # first sync. Account._update suppresses elite events only when
+            # prevRev is absent, marking this complete snapshot as full.
+            self.assertNotIn('prevRev', value)
+
     def test_sync_data_populates_all_exact_lobby_consumer_caches(self):
         self.server.doCmdInt3(37, commands.CMD_SYNC_DATA, 0, 0, 0)
         self._run()
@@ -1509,6 +1523,45 @@ class DepotTests(unittest.TestCase):
             lambda garage: garage.snapshot()['unlockItemCompactDescrs'].add(4444))
         result.before_response()
         self.assertEqual({4444}, pushed[0]['stats']['unlocks'])
+
+    def test_queued_research_notifies_each_new_elite_vehicle_once(self):
+        snapshot = _full_garage_snapshot()
+        snapshot['wallet'] = {'credits': 0, 'gold': 0, 'freeXP': 100}
+        snapshot['shopItemPrices'].update({
+            4444: {'credits': 10}, 5555: {'credits': 20}})
+        vehicle_types = {
+            50001: types.SimpleNamespace(unlocksDescrs=((10, 4444),)),
+            50002: types.SimpleNamespace(unlocksDescrs=((20, 5555),)),
+        }
+        vehicles = types.SimpleNamespace(
+            getVehicleType=vehicle_types.__getitem__,
+            getTypeOfCompactDescr=lambda value: 4)
+        state = account_requests.garage.GarageState(
+            snapshot, vehicles_module=vehicles)
+        pushed = []
+        context = {'garage': state, 'push_update': pushed.append}
+        # Commands mutate immediately; FakeServer schedules their publication.
+        # The first response must not also notify the second research result.
+        with mock.patch.dict(sys.modules, {
+                'items': types.SimpleNamespace(vehicles=vehicles)}):
+            results = [account_requests.dispatch(
+                commands.CMD_UNLOCK, context, (vehicle, 0))
+                for vehicle in (50001, 50002)]
+            for result in results:
+                self.assertEqual(commands.RES_SUCCESS, result.result_id)
+                result.before_response()
+            self.assertEqual([{50001}, {50002}], [
+                diff['stats']['eliteVehicles'] for diff in pushed])
+            self.assertEqual([{4444}, {5555}], [
+                diff['stats']['unlocks'] for diff in pushed])
+            self.assertEqual(70, state.snapshot()['wallet']['freeXP'])
+            # Researching an already unlocked item spends nothing and emits
+            # no additional unlock or elite notification.
+            result = account_requests.dispatch(
+                commands.CMD_UNLOCK, context, (50002, 0))
+            result.before_response()
+            self.assertNotIn('stats', pushed[-1])
+            self.assertEqual(70, state.snapshot()['wallet']['freeXP'])
 
     def test_special_mode_item_cannot_be_bought_or_supplied(self):
         state = self._garage(item_type=11)

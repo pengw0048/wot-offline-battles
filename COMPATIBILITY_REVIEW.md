@@ -901,7 +901,7 @@ not inferred from another 0.9.22 build:
 
 | Producer | Exact consumer contract covered |
 | --- | --- |
-| `CMD_SYNC_DATA` / `AccountSyncData` | `rev` and `prevRev`; every initial `Account._update` subscriber receives an explicit cache value instead of depending on a missing-key fallback. |
+| `CMD_SYNC_DATA` / `AccountSyncData` | Complete snapshots carry `rev` and omit `prevRev`; every initial `Account._update` subscriber receives an explicit cache value instead of depending on a missing-key fallback. The exact `AccountSyncData.__onSyncResponse` enables events after first sync, and `Account._update` treats any non-`None` `prevRev` as incremental, replaying all supplied `eliteVehicles`. Only actual pushed deltas carry `prevRev`; research captures its post-command stats before deferred publication so queued commands cannot repeat later unlock/elite events. |
 | `Stats` / `StatsRequester` / lobby controllers | Zeroed money and account scalars; mapping-shaped restrictions, referral data and clan locks; a non-empty `dailyPlayHours`; and full daily/weekly `playLimits`. Zero periods mean exhausted parental-control time in this build. `mayConsumeWalletResources` starts true because false is the native wallet's `SYNCING` state, and `tutorialsCompleted` carries the completed offline bitmask. |
 | `Inventory` / `InventoryRequester` | All item-type indices exist; vehicle `compDescr` and crew maps exist; `repair` is a two-item tuple and `shellsLayout` is a mapping. |
 | `QuestProgress` / personal-mission requesters | `quests`, `tokens`, and `potapovQuests`; both `regular` and `training` contain `slots`, `selected`, and `lastIDs`, while `compDescr` is always present. |
