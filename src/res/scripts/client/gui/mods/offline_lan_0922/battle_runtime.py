@@ -3499,9 +3499,18 @@ class BattleRuntime(object):
         deadline = getattr(self.client, 'combat_end_deadline', None)
         if deadline is not None:
             duration = max(0.1, float(deadline) - _monotonic_time())
+        refresh_movement = (not self._worker_mode and bool(getattr(
+            self._avatar, '_PlayerAvatar__isOnArena', False)))
         if not self._worker_mode:
             self._binding.arena_period('battle', duration)
         self._battle_live = True
+        if refresh_movement:
+            # The countdown reticle already raised isOnArena, so #1513's
+            # __setIsOnArena(True) skips its normal current-input refresh.
+            # Re-read stock keys/cruise now, including any cancellation;
+            # replaying a cached throttle would resurrect stale input.
+            self._avatar.moveVehicle(
+                self._avatar.makeVehicleMovementCommandByKeys(), False)
         # Publish one fresh live set even when it matches the prebattle state.
         self._spotted_signature = None
         self._next_spotting_time = 0.0

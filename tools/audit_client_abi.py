@@ -471,6 +471,8 @@ EXPECTED_ABI = {
             'periodAdditionalInfo'),
         'PlayerAvatar.__setIsOnArena': ('self', 'onArena'),
         'PlayerAvatar.__onInitStepCompleted': ('self',),
+        'PlayerAvatar.makeVehicleMovementCommandByKeys': (
+            'self', 'forceFlags', 'forceMask'),
         'PlayerAvatar.moveVehicle': ('self', 'flags', 'isKeyDown'),
         'PlayerAvatar.handleVehicleCollidedVehicle': (
             'self', 'vehA', 'vehB', 'hitPt', 'time'),
@@ -1225,6 +1227,10 @@ EXPECTED_CODE_NAMES = {
             '_PlayerAvatar__setIsOnArena', 'ARENA_PERIOD', 'BATTLE'),
         'PlayerAvatar.__setIsOnArena': (
             'moveVehicle', 'makeVehicleMovementCommandByKeys'),
+        'PlayerAvatar.makeVehicleMovementCommandByKeys': (
+            '_PlayerAvatar__stopUntilFire', '_PlayerAvatar__cruiseControlMode',
+            'CommandMapping', 'CRUISE_CONTROL25', 'CRUISE_CONTROL50',
+            'CMD_BLOCK_TRACKS'),
         'PlayerAvatar.moveVehicle': (
             'filter', 'notifyInputKeysDown', 'base', 'vehicle_moveWith'),
         'PlayerAvatar.getOwnVehicleSpeeds': (
