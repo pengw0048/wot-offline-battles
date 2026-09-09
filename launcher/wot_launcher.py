@@ -43,7 +43,7 @@ _SHOP_HELP = (
     "next game startup. Owned or queued vehicles cannot be added twice. "
     "Close the game before adding vehicles.")
 
-LAUNCHER_VERSION = "0.7.1"
+LAUNCHER_VERSION = "0.7.3"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
 
 _CHINESE = {
@@ -159,7 +159,19 @@ _CHINESE = {
     "Edit this save's balances and battle earnings. Before the first "
     "game, these are its starting funds. Close the game before editing.":
         "设置此存档的余额和战斗收益。首次进入游戏前，这些数值就是初始资金；修改前请关闭游戏。",
-    "Apply balances": "应用余额",
+    "Balances saved, but the earnings multiplier could not be saved: %s":
+        "余额已保存，但收益倍数保存失败：%s",
+    "Save changes": "保存",
+    "Nation": "国家",
+    "Vehicle type": "类型",
+    "All": "全部",
+    "ussr": "苏联", "germany": "德国", "usa": "美国",
+    "france": "法国", "uk": "英国", "china": "中国",
+    "japan": "日本", "czech": "捷克", "sweden": "瑞典",
+    "poland": "波兰", "italy": "意大利",
+    "Light tank": "轻型坦克", "Medium tank": "中型坦克",
+    "Heavy tank": "重型坦克", "Tank destroyer": "坦克歼击车",
+    "SPG": "自行火炮",
     "Customize save...": "自定义存档…",
     "Customize save: %s": "自定义存档：%s",
     "Close": "关闭",
@@ -766,20 +778,13 @@ class LauncherWindow(object):
             padx=(6, 0), pady=(0, 4))
         self.earnings_entry = tk.Entry(earnings_row, width=8)
         self.earnings_entry.pack(side="left")
-        self.apply_earnings_button = tk.Button(
-            earnings_row, text="", command=self._apply_earnings)
-        self.apply_earnings_button.pack(side="left", padx=(6, 0))
         account_actions = tk.Frame(self.account_panel)
         account_actions.grid(
             row=len(save_ledger.CURRENCIES) + 1, column=0, columnspan=2,
             sticky="we", pady=(6, 0))
-        self.apply_balances_button = tk.Button(
-            account_actions, text="", command=self._apply_balances)
-        self.apply_balances_button.pack(side="left", fill="x", expand=True)
-        self.reload_balances_button = tk.Button(
-            account_actions, text="", command=self._refresh_balances)
-        self.reload_balances_button.pack(
-            side="left", fill="x", expand=True, padx=(6, 0))
+        self.save_account_button = tk.Button(
+            account_actions, text="", command=self._apply_account)
+        self.save_account_button.pack(side="left", fill="x", expand=True)
         self.account_help_label = tk.Label(
             self.account_panel, text="", anchor="w", justify="left",
             wraplength=620)
@@ -793,29 +798,39 @@ class LauncherWindow(object):
         # This is the only place a player can reach them.
         self._gold_offers = []
         self._gold_offer_by_label = {}
+        self.gold_nation = tk.StringVar(value="")
+        self.gold_class = tk.StringVar(value="")
+        self.gold_nation_label = tk.Label(self.shop_panel, text="")
+        self.gold_nation_label.grid(row=0, column=0, sticky="w")
+        self.gold_nation_box = self._ttk.Combobox(
+            self.shop_panel, textvariable=self.gold_nation, state="readonly")
+        self.gold_nation_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.gold_class_label = tk.Label(self.shop_panel, text="")
+        self.gold_class_label.grid(row=1, column=0, sticky="w", pady=(4, 4))
+        self.gold_class_box = self._ttk.Combobox(
+            self.shop_panel, textvariable=self.gold_class, state="readonly")
+        self.gold_class_box.grid(row=1, column=1, sticky="we", padx=(6, 0))
+        for box in (self.gold_nation_box, self.gold_class_box):
+            box.bind("<<ComboboxSelected>>", self._filter_gold_shop)
         self.gold_vehicle_label = tk.Label(self.shop_panel, text="")
-        self.gold_vehicle_label.grid(row=0, column=0, sticky="w")
+        self.gold_vehicle_label.grid(row=2, column=0, sticky="w")
         self.gold_vehicle = tk.StringVar(value="")
         self.gold_vehicle_box = self._ttk.Combobox(
             self.shop_panel, textvariable=self.gold_vehicle, values=(),
             state="readonly", width=48)
-        self.gold_vehicle_box.grid(row=0, column=1, sticky="we", padx=(6, 0))
+        self.gold_vehicle_box.grid(row=2, column=1, sticky="we", padx=(6, 0))
         self.gold_vehicle_box.bind("<<ComboboxSelected>>", self._update_vehicle_add_button)
         shop_actions = tk.Frame(self.shop_panel)
         shop_actions.grid(
-            row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+            row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
         self.buy_gold_vehicle_button = tk.Button(
             shop_actions, text="", command=self._buy_gold_vehicle)
         self.buy_gold_vehicle_button.pack(side="left", fill="x", expand=True)
-        self.refresh_gold_shop_button = tk.Button(
-            shop_actions, text="", command=self._refresh_gold_shop)
-        self.refresh_gold_shop_button.pack(
-            side="left", fill="x", expand=True, padx=(6, 0))
         self.shop_help_label = tk.Label(
             self.shop_panel, text="", anchor="w", justify="left",
             wraplength=620)
         self.shop_help_label.grid(
-            row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            row=4, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.shop_panel.grid_columnconfigure(1, weight=1)
 
         self._bot_lineup_store = bot_lineup_profiles.normalize_store(
@@ -983,17 +998,14 @@ class LauncherWindow(object):
         self.account_panel.config(text=self._t("Account"))
         for name, label in self.balance_labels.items():
             label.config(text=self._t(_BALANCE_LABELS[name]))
-        self.apply_balances_button.config(text=self._t("Apply balances"))
-        self.reload_balances_button.config(text=self._t("Reload"))
+        self.save_account_button.config(text=self._t("Save changes"))
         self.earnings_label.config(text=self._t("Earnings multiplier"))
-        self.apply_earnings_button.config(text=self._t("Apply"))
         self.account_help_label.config(text=self._t(
             "Edit this save's balances and battle earnings. Before the first "
             "game, these are its starting funds. Close the game before editing."))
         self.shop_panel.config(text=self._t("Garage vehicles"))
         self.gold_vehicle_label.config(text=self._t("Gold and reward vehicle"))
         self.buy_gold_vehicle_button.config(text=self._t("Add to garage"))
-        self.refresh_gold_shop_button.config(text=self._t("Reload"))
         self.shop_help_label.config(text=self._t(_SHOP_HELP))
         self._refresh_save_slots()
         self.tools_tabs.tab(
@@ -1334,7 +1346,7 @@ class LauncherWindow(object):
             else:
                 entry.config(state="disabled")
         state = "normal" if editable else "disabled"
-        self.apply_balances_button.config(state=state)
+        self.save_account_button.config(state=state)
         return editable
 
     def _selected_save_record(self):
@@ -1361,14 +1373,14 @@ class LauncherWindow(object):
         text = "%.2f" % (percent / 100.0)
         return text.rstrip("0").rstrip(".") or "0"
 
-    def _apply_earnings(self):
+    def _apply_account(self):
         if self._busy or self._maintenance_busy:
             self._log("Wait for the current launcher operation to finish.")
             return False
         raw = self.earnings_entry.get().strip().rstrip("xX\u00d7")
         try:
             percent = int(round(float(raw) * 100))
-        except ValueError:
+        except (ValueError, OverflowError):
             self._log("The earnings multiplier must be a number.")
             self._refresh_earnings()
             return False
@@ -1378,24 +1390,6 @@ class LauncherWindow(object):
                       % (self._earnings_text(save_slots.MIN_EARNINGS_PERCENT),
                          self._earnings_text(save_slots.MAX_EARNINGS_PERCENT)))
             self._refresh_earnings()
-            return False
-        game_root = self.game_root.get().strip()
-        try:
-            save_slots.set_earnings_percent(
-                self._save_slot_id, percent, game_root or None)
-        except save_slots.SaveSlotError as error:
-            self._log("The earnings multiplier could not be saved: %s" % error)
-            self._refresh_earnings()
-            return False
-        self._save_slot_records = save_slots.list_slots(game_root or None)
-        self._refresh_earnings()
-        self._log("Earnings multiplier saved: %sx"
-                  % self._earnings_text(percent))
-        return True
-
-    def _apply_balances(self):
-        if self._busy or self._maintenance_busy:
-            self._log("Wait for the current launcher operation to finish.")
             return False
         wanted = {}
         for name, entry in self.balance_entries.items():
@@ -1417,10 +1411,21 @@ class LauncherWindow(object):
             self._log("The balances could not be saved: %s" % error)
             self._refresh_balances()
             return False
-        self._refresh_balances()
+        try:
+            save_slots.set_earnings_percent(
+                self._save_slot_id, percent, game_root or None)
+        except save_slots.SaveSlotError as error:
+            self._refresh_save_slots()
+            self._log(self._t(
+                "Balances saved, but the earnings multiplier could not be saved: %s")
+                % error)
+            return False
+        self._refresh_save_slots()
         self._log("Balances saved: %s" % ", ".join(
             "%s %d" % (self._t(_BALANCE_LABELS[name]), balances[name])
             for name in save_ledger.CURRENCIES))
+        self._log("Earnings multiplier saved: %sx"
+                  % self._earnings_text(percent))
         return True
 
     def _gold_offer_label(self, offer):
@@ -1462,12 +1467,41 @@ class LauncherWindow(object):
                 self._log("The gold vehicles could not be listed: %s" % error)
             offers = []
         self._gold_offers = offers
+        self.gold_nation_label.config(text=self._t("Nation"))
+        self.gold_class_label.config(text=self._t("Vehicle type"))
+        self._gold_nation_by_label = {self._t("All"): None}
+        self._gold_nation_by_label.update(
+            (self._t(nation), nation)
+            for nation in sorted(set(row["nation"] for row in offers)))
+        self._gold_class_by_label = {self._t("All"): None}
+        self._gold_class_by_label.update(
+            (self._t(label), name)
+            for name, label in vehicle_editor_ui.VEHICLE_CLASS_LABELS)
+        for box, variable, choices in (
+                (self.gold_nation_box, self.gold_nation, self._gold_nation_by_label),
+                (self.gold_class_box, self.gold_class, self._gold_class_by_label)):
+            box.config(values=tuple(choices))
+            if variable.get() not in choices:
+                variable.set(self._t("All"))
+        self.shop_help_label.config(text=self._t(_SHOP_HELP))
+        return self._filter_gold_shop()
+
+    def _filter_gold_shop(self, unused_event=None):
+        selected = self._gold_offer_by_label.get(self.gold_vehicle.get())
+        nation = self._gold_nation_by_label.get(self.gold_nation.get())
+        vehicle_class = self._gold_class_by_label.get(self.gold_class.get())
         self._gold_offer_by_label = {}
         values = []
-        for offer in offers:
+        for offer in self._gold_offers:
+            if nation is not None and offer["nation"] != nation:
+                continue
+            if vehicle_class is not None and offer.get("vehicleClass") != vehicle_class:
+                continue
             label = self._gold_offer_label(offer)
             self._gold_offer_by_label[label] = offer["name"]
             values.append(label)
+            if offer["name"] == selected:
+                self.gold_vehicle.set(label)
         self.gold_vehicle_box.config(values=tuple(values))
         if self.gold_vehicle.get() not in self._gold_offer_by_label:
             self.gold_vehicle.set(values[0] if values else "")
@@ -1497,7 +1531,6 @@ class LauncherWindow(object):
                 vehicle_overlays.VehicleOverlayError) as error:
             self._log(self._t("The vehicle could not be added: %s") % error)
             return False
-        self._refresh_balances()
         self._refresh_gold_shop()
         self._log(
             self._t("Added %s to the queue. It arrives on the next game startup.")

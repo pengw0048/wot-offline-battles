@@ -19,6 +19,21 @@ _WORLD_SOFT_RECAST_BUDGET = 4
 _UNPREPARED_COLLISION_FILTER = object()
 
 
+def _record_hard_contact(trace, reason, start, end, collision,
+        ground_ahead=None, heights=()):
+    """Copy existing query evidence; diagnostics must never change the verdict."""
+    if trace is None:
+        return
+    try:
+        def vector(value):
+            return tuple(float(getattr(value, axis)) for axis in ('x', 'y', 'z'))
+        trace.update(reason=reason, ray_start=vector(start), ray_end=vector(end),
+                     hit=vector(collision[0]), normal=vector(collision[1]),
+                     ground_ahead=ground_ahead, profile=list(heights))
+    except Exception:
+        trace['reason'] = reason
+
+
 def _collide_horizontal(spaceID, start, end,
 		collision_filter=_UNPREPARED_COLLISION_FILTER):
 	"""Raycast while hiding only exact destructibles already marked broken."""
@@ -265,23 +280,26 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 	footprint_ground = _ground_top(
 		spaceID, Math, pos, footprint_x, footprint_z, look, ground_plane,
 		collision_filter)
-	if descending and start_ground is not None and footprint_ground is not None:
-		if (support_start_y is not None and
-				float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
-			# The witness starts above its old support while leaving the crest.
-			# A floor below it cannot lower the occupied hull's collision ray.
-			return None
-		# A crest can already lie beneath the front of the footprint while
-		# the body is still supported behind it. A chord through that lower
-		# floor is outside the occupied hull. Confirm the middle of the
-		# support chord before allowing it to pull a descending ray down.
+	if (start_ground is not None and support_start_y is not None and
+			float(start_ground) < float(support_start_y) - _GROUND_HIT_EPSILON):
+		# A floor below the posed chassis is not its support. This also applies
+		# to outward corner lanes, whose clamped local endpoints coincide: they
+		# have no descending pose trend even when a trench lies below them.
+		# Pulling their end down to that floor invents a collision with the lip.
+		return None
+	if (start_ground is not None and footprint_ground is not None and
+			(descending or float(footprint_ground) < float(start_ground))):
+		# The ground may descend even while the hull lane rises. Before
+		# extrapolating that descent, require the middle to agree with the
+		# same support chord. Either a high crest or a low trench sample
+		# breaks continuity; neither may bend the occupied ray into a lip.
 		middle_ground = _ground_top(
 			spaceID, Math, pos, (start_x + footprint_x) * 0.5,
 			(start_z + footprint_z) * 0.5, look, ground_plane,
 			collision_filter)
 		if (middle_ground is None or
-				float(middle_ground) >
-				(float(start_ground) + float(footprint_ground)) * 0.5 +
+				abs(float(middle_ground) -
+					(float(start_ground) + float(footprint_ground)) * 0.5) >
 				_GROUND_HIT_EPSILON):
 			return None
 	try:
@@ -340,7 +358,7 @@ def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
 		local_start, local_end, pose_y, target_length,
 		maximum_gradient=_MAX_DRIVABLE_GRADIENT, ground_profile=None,
 		collision_filter=_UNPREPARED_COLLISION_FILTER,
-		ground_ahead=None):
+		ground_ahead=None, trace=None):
 	"""A drivable lower slope must not hide an independent wall above it."""
 	for height in (1.1, 1.6):
 		start, end = _posed_ray(
@@ -364,6 +382,8 @@ def _raised_ray_has_wall(spaceID, Math, pos, x1, z1, x2, z2,
 					spaceID, Math, pos, collision, ground_profile[7],
 					ground_profile[8], collision_filter):
 				continue
+		_record_hard_contact(trace, 'raised_wall', start, end, collision,
+			ground_ahead)
 		return True
 	return False
 
@@ -479,7 +499,7 @@ def check_horizontal_collision(bigworld, math_module, *args, **kwargs):
 def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		airborne=False, dt=0.04, return_status=False,
 		allow_kinetic=False, kinetic_speed=None, commit_enabled=True,
-		motion_yaw=None, pitch=0.0, roll=0.0):
+		motion_yaw=None, pitch=0.0, roll=0.0, trace=None):
 	import math, BigWorld, Math
 	try:
 		hw = 1.5
@@ -489,6 +509,12 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		extents = _vehicle_motion_extents(td)
 		if extents is not None:
 			hw, hl_back, hl_front = extents
+
+		if trace is not None:
+			trace.clear()
+			trace.update(position=(pos.x, pos.y, pos.z), yaw=yaw, speed=vel,
+				dt=dt, motion_yaw=motion_yaw, pitch=pitch, roll=roll,
+				airborne=airborne, extents=(hw, hl_back, hl_front))
 
 		# Look-ahead beyond the hull. The old flat +2.0 m made an invisible
 		# wall 2 m before every obstacle, and DURING A FALL it saw the cliff
@@ -684,6 +710,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 							# This is a proved continuous-direction terrain profile, not
 							# a small prop. An ascent/descent outside its directional
 							# bound remains solid instead of falling into prop handling.
+							_record_hard_contact(trace, 'ground_profile', start_bot,
+								end_bot, col_bot, _ground_ahead, _heights)
 							return 'hard' if return_status else True
 					_surface_is_ground = _drivable_surface(
 						col_bot, _gradient_limit)
@@ -707,7 +735,7 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 								 profile_x, profile_z,
 								 profile_sin, profile_cos,
 								 profile_direction, profile_look, _profile_plane),
-								_sweep_filter, _ground_ahead):
+								_sweep_filter, _ground_ahead, trace=trace):
 							return 'hard' if return_status else True
 						continue
 					# Treat every occupied hull height as independent evidence.  The
@@ -742,6 +770,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 						if _resolved == 'kinetic':
 							_kinetic_contact = True
 						elif _resolved is not True:
+							_record_hard_contact(trace, 'solid_lane', _ray_start,
+								_ray_end, _ray_hit, _ground_ahead, _heights)
 							return 'hard' if return_status else True
 			if col_bot is None or d_bot >= target_len:
 				# A suspended beam or upper wall may miss the 0.6 m ray entirely.
@@ -773,6 +803,8 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 					if _resolved == 'kinetic':
 						_kinetic_contact = True
 					elif _resolved is not True:
+						_record_hard_contact(trace, 'upper_lane', _ray_start,
+							_ray_end, _ray_hit, _ground_ahead)
 						return 'hard' if return_status else True
 	except Exception:
 		raise

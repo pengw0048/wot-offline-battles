@@ -6096,10 +6096,15 @@ class BotRuntime(object):
             position[0], position[2], position[1])
         if centre is not None:
             centre = float(centre)
-            if (follow_gap is not None and
-                    position[1] - centre > float(follow_gap)):
+            # Speed and a forward corridor grade can enlarge follow_gap
+            # beyond an entire trench. Check the tracks before accepting that
+            # drop; the dynamic envelope alone proves no surface continuity.
+            support_gap = (None if follow_gap is None else min(
+                float(follow_gap), vehicle_physics.GROUND_FOLLOW_MIN))
+            if (support_gap is not None and
+                    position[1] - centre > support_gap):
                 bridged = self._straddled_terrain_support(
-                    state, position, follow_gap)
+                    state, position, support_gap)
                 if bridged is not None and bridged > centre:
                     return bridged, bridged
             # The vertical law below always selects centre while it exists;
@@ -11628,6 +11633,14 @@ class BotRuntime(object):
                     path_clear = False
                     throttle = 0.0
                     state['movement_dir'] = 0
+                # The corridor grade ranks future navigation, but a trench
+                # below that probe need not support the tracks now. Reuse the
+                # accepted suspension plane for drive gravity, projected onto
+                # the post-turn hull heading used by this integration slice.
+                supported_pitch = vehicle_physics.suspension_drive_pitch(
+                    state.get('_suspension_ground_plane'), candidate_hull_yaw)
+                if supported_pitch is not None:
+                    slope_pitch = supported_pitch
                 previous_speed = state['speed']
                 speed = (0.0 if siege_motion_locked else
                     vehicle_physics.longitudinal_step(

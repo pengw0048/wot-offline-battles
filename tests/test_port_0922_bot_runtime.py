@@ -4307,6 +4307,47 @@ class BotRuntimeTests(unittest.TestCase):
         # One centre column on flat ground, five only at the fall transition.
         self.assertEqual(5, len(calls))
 
+    def test_fast_bot_checks_track_support_before_following_a_trench_floor(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=12.0,
+                     last_drive_pitch=0.5, grounded_once=True,
+                     airborne=False, vertical_speed=0.0)
+        probe, calls = self._trench_probe(
+            8.46, {(1.5, 0.0): 10.0, (-1.5, 0.0): 10.0})
+        self.runtime._physics_ground_probe = probe
+        # The forward corridor's downhill grade expands the follow envelope
+        # beyond this 1.54 m trench; it is not proof of a continuous surface.
+        self.assertGreater(self.module.vehicle_physics.ground_follow_gap(
+            state['speed'], state['last_drive_pitch'], 0.15), 1.54)
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.15))
+
+        self.assertAlmostEqual(10.0, state['y'])
+        self.assertFalse(state['airborne'])
+        self.assertEqual(5, len(calls))
+
+    def test_fast_bot_follow_gap_still_accepts_an_unbridged_drop(self):
+        for single_rim in (False, True):
+            with self.subTest(single_rim=single_rim):
+                self.runtime.battle_start(self.start)
+                state = self.runtime.states[11]
+                state.update(x=0.0, y=10.0, z=0.0, yaw=0.0, speed=12.0,
+                             last_drive_pitch=0.5, grounded_once=True,
+                             airborne=False, vertical_speed=0.0)
+                calls = []
+                def probe(x, z, hint):
+                    calls.append((x, z))
+                    if single_rim and z < -3.0:
+                        return 10.0
+                    return 8.46 - z * 0.2
+                self.runtime._physics_ground_probe = probe
+
+                self.assertFalse(self.runtime._update_vertical_motion(state, 0.15))
+
+                self.assertAlmostEqual(8.46, state['y'])
+                self.assertEqual(5, len(calls))
+
     def test_bot_bridges_a_slot_running_along_its_hull(self):
         self.runtime.battle_start(self.start)
         state = self.runtime.states[11]
@@ -4441,6 +4482,25 @@ class BotRuntimeTests(unittest.TestCase):
             'suspension_roll_velocity': 0.0,
         })
         return runtime, state, calls
+
+    def test_bot_drive_uses_contacted_plane_instead_of_corridor_grade(self):
+        runtime, state, unused_calls = self._full_suspension_case(
+            lambda x, z: 0.0)
+        self.assertFalse(runtime._update_vertical_motion(state, 0.04))
+        self.assertIn('_suspension_ground_plane', state)
+        command = self._stationary_command()
+        command.update(throttle=1.0, movement_intent=True,
+                       move_position=(0.0, 0.0, 10.0),
+                       combat_mode='advance', recovery_mode='drive')
+        runtime.adapter.decide = lambda *unused: dict(command)
+        runtime.direction_probe = lambda *unused: {
+            'clear': True, 'collision': False, 'slope': 0.375}
+        state['speed'] = 4.0
+
+        runtime.update(0.1, 1.1)
+
+        self.assertAlmostEqual(0.0, state['last_drive_pitch'])
+        self.assertGreater(state['speed'], 4.0)
 
     def test_ten_spring_bot_samples_22_contacts_once_per_outer_tick(self):
         runtime, state, calls = self._suspension_case(

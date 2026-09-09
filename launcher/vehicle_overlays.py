@@ -817,6 +817,7 @@ def list_gold_vehicles(game_root):
             "nation": nation,
             "vehicle": record["vehicle"],
             "name": "%s:%s" % (nation, record["vehicle"]),
+            "vehicleClass": record["vehicleClass"],
             "label": _vehicle_label(record, translators[nation]),
             "level": record["level"],
             "gold": record["gold"],

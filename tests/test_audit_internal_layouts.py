@@ -21,8 +21,36 @@ def _string(value):
 
 
 class InternalLayoutAuditTests(unittest.TestCase):
+    def test_mesh_inventory_verifies_topology_and_reports_source(self):
+        result = audit.geometry_inventory('ussr:R45_IS-7', verify=True)
+        self.assertEqual('decoded_console_mesh', result['provenance'])
+        self.assertFalse(result['fallback_retained'])
+        hull_ammo = next(m for m in result['decoded_meshes']
+                         if m['entity']=='ammoBay' and m['parent']=='hull')
+        self.assertEqual(8, hull_ammo['closed_pieces'])
+        self.assertTrue(hull_ammo['verified'])
+        self.assertNotIn('payload', hull_ammo)
+        self.assertEqual('console4.3', hull_ammo['source_package'])
+        self.assertEqual([], result['missing_crew_slots'])
+        self.assertEqual({'commander','driver','gunner1','loader1','loader2'},
+            set(m['entity'] for m in result['decoded_meshes'] if m['zone_id'].startswith('crew_')))
+
+    def test_unavailable_and_retained_reconstruction_are_never_decoded(self):
+        result = audit.geometry_inventory('usa:A26_T18')
+        self.assertEqual('reconstructed_archetype', result['provenance'])
+        self.assertTrue(result['fallback_retained'])
+        self.assertEqual([], result['decoded_meshes'])
+        result = audit.geometry_inventory('usa:nonexistent')
+        self.assertEqual('unavailable', result['provenance'])
+        self.assertFalse(result['fallback_retained'])
+
     def test_catalog_inventory_distinguishes_missing_and_mismatched_profiles(self):
-        names = ('Ch02_Type62', 'Ch04_T34_1')
+        # One real vehicle, which resolves a profile, and one name the
+        # catalogue does not contain, which cannot.  The second must not be a
+        # real vehicle that merely happens to have no profile today: coverage
+        # is data that improves, and this test is about the audit reporting
+        # the three states distinctly, not about which tanks are covered.
+        names = ('Ch02_Type62', 'Ch99_Not_In_The_Catalogue')
         listing = packed_xml.PackedElement(children=[
             (name.encode('ascii'), _string('')) for name in names])
         # Compressed Packed XML strings are base64 byte storage, not UTF-8.

@@ -1310,6 +1310,27 @@ This is static and pure-data coverage. It proves which fields reach the native
 packers with which values; only acceptance on the exact Windows client can show
 the results window rendering those ribbons, counters and tooltips.
 
+### Critical-hit ribbons and shot-result voices
+
+The pinned `Avatar.PlayerAvatar.showShotResults` selects voices independently
+of `onBattleEvents` ribbons. Its `IS_ANY_PIERCING_MASK` includes
+`DEVICE_PIERCED_BY_PROJECTILE` and `DEVICE_PIERCED_BY_EXPLOSION`, but not
+`DEVICE_DAMAGED_*`. Confirmed device/crew damage supplies the piercing bit;
+otherwise a module hit followed by a ricochet selects the ricochet voice.
+External explosions set the positive-damage-factor material bit only when
+they damage vehicle HP, so a module-only explosion selects the no-HP-damage
+voice instead. The exact extracted method was executed under CPython 2.7
+with old/new flags to verify both selections, empty splash and killing shots.
+
+`BATTLE_EVENT_TYPE.packCrits` packs a critical count. The adapter counts device
+damage transitions and crew knockouts, excluding repair, fire-state and
+ammo-rack-death effects. Both outgoing and received critical ribbons use this
+count. Stock `ribbons_aggregator` excludes `CRITS` when the same target has a
+destruction ribbon; the adapter leaves that filtering and voice priority to
+the client. These checks prove RPC input and Python voice selection, not
+audible Chinese voice playback or the original server's hidden module-HP
+notification thresholds.
+
 ### Mastery badges and Marks of Excellence
 
 Both awards rank one player against every other player who drove the same
@@ -2120,19 +2141,46 @@ Repair reports remain pending until the server acknowledges their proposal
 revision, so a successful socket write or an older snapshot cannot rewind the
 HUD state.
 
-The internal-module model is a reconstruction, not the recovered #1513
-server collision model. Native component collision queries supply the armour
-and exposed-device contacts; `internal_layout_profiles.py` supplies interior
-boxes fitted to the selected component bounds and transformed by the current
-vehicle/turret/gun pose. `BattleRuntime._vehicle_trace` limits solid-shell
-travel to ten calibres from the first vehicle material. HE uses the separate
-finite interior cone. The active critical loop scores each reached device
-once, using the shell's independent `damage[1]` channel. The current device
-roll is uniform within +/-25%; the available client contracts do not establish
-that server-side distribution. The common ammo-bay material specifies device
-damage and 0.27 for both projectile and explosion hit chances. Deadeye adds
-three percentage points for AP/APCR/HEAT. A successful hit that reduces the
-rack to zero destroys the vehicle without a second detonation roll.
+The internal-module model now retains indexed Console collision surfaces in
+component-local metres. It is not the recovered #1513 PC-server model.
+`internal_layout_console.py` supplies the source triangles; the exact PC
+9.22 `collision_client` bounds and installed `models.undamaged` part select the
+registered frame. The #1513 bytecode chain is `shared_readers.readModels` ->
+`_readHull`/`_readTurret` -> `ModelStatesPaths.undamaged`; the direct model
+consumer is `tankStructure.getPartModelsFromDesc`. Destroyed/shared model
+paths cannot select an installed variant. No new native API is introduced.
+Native gun and track contacts retain their existing ownership. Vehicle,
+turret and gun transforms remain the current collision pose's transforms.
+
+HKX decoding uses big-endian words with numerical low-to-high x/y/z fields,
+section-local offset/scale, shared vertices, data fixups and indexed quad
+triangulation. The old bounds-only decoder's bit order could reproduce an
+AABB while moving individual vertices by over one metre. As independent
+resource checks, 310 shared surfaces on IS-7, Type 59, T1 Cunningham, Maus,
+FV215b (183) and M103 match across HKX/BigWorld formats after ignoring
+zero-area triangles. This supports the reviewed Console format, not a claim
+that other Havok platforms or all later vehicle revisions are identical.
+[Smithbox HKX2](https://github.com/vawser/Smithbox/tree/main/src/Havok/HKX2)
+is a format lead; the Console resources supply the validation evidence.
+
+Mesh bounds accelerate queries but never replace occupied geometry. Exact
+edge-connected pieces and their gaps survive baking, ray/starts-inside,
+distance and HE-cone queries. Open/nonmanifold pieces provide surface contacts
+only; no hole repair or invented solid is applied. Source meshes bypass
+physical caps, template shapes, relocation and saved calibration overrides.
+Invalid payloads and unmatched component variants are reported per target;
+an incomplete crew does not replace the remaining decoded interior with an
+archetype. A small per-piece BVH is built lazily with the cached layout.
+
+`BattleRuntime._vehicle_trace` still limits solid-shell travel to ten calibres
+from the first vehicle material. HE uses its separate finite interior cone.
+The critical loop scores each reached device once using `damage[1]`; this
+change does not alter saving throws, ammunition bookkeeping or damage rolls.
+The current device roll is uniform within +/-25%; available client contracts
+do not establish that server-side distribution. The common ammo-bay material
+specifies 0.27 for projectile and explosion hit chances. Deadeye adds three
+percentage points for AP/APCR/HEAT. A successful hit reducing the rack to zero
+destroys the vehicle without a second detonation roll.
 
 The launcher editor writes `damage/devices`, and the mounted-shell snapshot
 and projectile launch preserve a value of 2000. Tests cover AP, APCR, HEAT,
@@ -2140,7 +2188,7 @@ APHE and HE, player and Bot victims, the 27% saving-throw boundary and duplicate
 contacts with one rack. Even the low 1500 damage roll destroys a reached
 ordinary rack after its saving throw. This proves the numerical path once a
 module contact exists; it does not prove that a retail aiming point intersects
-the reconstructed box. A missing/invalid profile supplies no internal contact,
+the selected Console mesh. A missing/invalid profile supplies no internal contact,
 so raising damage cannot fix missing geometry. Run the read-only inventory:
 
 ```bash
@@ -2148,13 +2196,54 @@ PYTHONDONTWRITEBYTECODE=1 python3 tools/audit_internal_layouts.py \
   "$WOT_0922_CLIENT/res/packages/scripts.pkg"
 ```
 
-The reviewed resource catalog has 680 listed vehicle definitions: 248 match
-the retained profiles and their #1513 crew-role bindings, and 432 lack a
-profile. These totals include special/training variants and the one vehicle
-already excluded for missing client art. A profile match does not validate
-its geometry against the retail server. Filling the missing entries with
-generic boxes or enlarging existing boxes would change gameplay without
-establishing correctness; this audit does neither.
+The reproducible source bake contains 650 decoded vehicles out of 680 listed
+definitions. The other 30 comprise 20 with no Console source and 10 with no
+registered usable hull/interior. Eight retain explicitly identified authored
+reconstructions; 22 have no profile. Within decoded entries, missing targets
+remain explicit (including two incomplete crew rosters). The audit covers
+870 available turret configurations; it does not claim completeness for an
+unavailable variant. Aliases retain reviewed archive identity, component or
+content evidence and crew mapping, rather than suffix/name guesses.
+
+Reproduce the bake into temporary output, then compare before replacing the
+tracked catalog. The password file is private and must not enter output:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 tools/bake_internal_layout_console_0922.py \
+  "$WOT_0922_CLIENT" --cache "$MESH_CACHE" --password-file "$PRIVATE_PASSWORD_FILE" \
+  --output "$MESH_OUTPUT/internal_layout_console.py" --report "$MESH_OUTPUT/bake.json"
+PYTHONDONTWRITEBYTECODE=1 python3 tools/audit_internal_layouts.py \
+  "$WOT_0922_CLIENT/res/packages/scripts.pkg" --verify-meshes --cache "$MESH_CACHE" \
+  --bake-report "$MESH_OUTPUT/bake.json" > "$MESH_OUTPUT/audit.json"
+python3 tools/internal_geometry_evidence.py \
+  --scripts-package "$WOT_0922_CLIENT/res/packages/scripts.pkg" --cache "$MESH_CACHE" \
+  --baseline-root "$BASELINE_CHECKOUT" --output "$MESH_OUTPUT/evidence"
+```
+
+Review the checked-in [four-view X-ray](tools/evidence/internal_mesh_0922/is7-runtime-xray.png),
+[roster audit](tools/evidence/internal_mesh_0922/roster-audit.json) and
+[query evidence](tools/evidence/internal_mesh_0922/query-evidence.json).
+The audit's `--compact` option reproduces the review inventory.
+`tools/audit_internal_mesh_formats.py` reproduces the cross-format probes
+with `--cache`, `--password-file` and `--output` arguments.
+
+The evidence renderer requires NumPy/Matplotlib; the bake requires pyzipper.
+Its baseline checkout should be the pre-correction `f436f298` source. It
+exports both revisions through `build_layout`, uses the same PC frames and
+renders top/side/front/oblique views with a source legend. Its front-shoulder
+ray grid records coordinates, angles and 100/130/152 mm finite hull-only
+budgets; tracks/spaced plates may shorten that budget. The old screenshot's
+exact ray was unavailable, so this is a defined geometric experiment, not
+reproduction of that aiming point or a damage probability.
+
+The OCI run used an extracted `scripts.pkg` with pinned entity-definition
+and PYC contracts (`--scripts-package` bake mode). A full #1513 installation
+was unavailable: `inspect_client.py` could not verify it. Resource contracts,
+870 layout snapshots, analytic regression tests and 35,277 BVH-versus-flat
+queries establish source/logic evidence only. The workload uses 7,035 unique
+meshes and 11,759 pieces; standalone Linux timings do not establish Windows
+frame pacing. Native physics, rendering, lifecycle and gameplay feel still
+require acceptance on Chinese HD 0.9.22.0.1 #1513.
 
 Ammo-rack death also has a separate presentation contract. LAN health remains
 zero, but the stock Vehicle, marker feedback and local

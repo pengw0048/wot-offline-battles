@@ -2304,10 +2304,12 @@ def _runtime():
             VEHICLE_KILLED=1, FIRE_STARTED=4, RICOCHET=8,
             MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_PROJECTILE=16,
             MATERIAL_WITH_POSITIVE_DF_NOT_PIERCED_BY_PROJECTILE=32,
+            DEVICE_PIERCED_BY_PROJECTILE=256,
             DEVICE_DAMAGED_BY_PROJECTILE=1024,
             CHASSIS_DAMAGED_BY_PROJECTILE=2048,
             GUN_DAMAGED_BY_PROJECTILE=4096,
             MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_EXPLOSION=8192,
+            DEVICE_PIERCED_BY_EXPLOSION=32768,
             DEVICE_DAMAGED_BY_EXPLOSION=65536,
             CHASSIS_DAMAGED_BY_EXPLOSION=131072,
             GUN_DAMAGED_BY_EXPLOSION=262144,
@@ -13715,11 +13717,86 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             flags.ATTACK_IS_DIRECT_PROJECTILE |
             flags.MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_PROJECTILE |
+            flags.DEVICE_PIERCED_BY_PROJECTILE |
             flags.DEVICE_DAMAGED_BY_PROJECTILE,
             packed >> 32)
         self.assertEqual([7, 6], [
             value['eventType']
             for value in battle._avatar.battle_events[0]])
+
+    def test_critical_ribbons_count_damage_not_effects_or_repairs(self):
+        damage_events = [
+            {'kind': 'device', 'name': 'fuelTankHealth',
+             'old_state': 'normal', 'state': 'destroyed'},
+            {'kind': 'device', 'name': 'ammoBayHealth',
+             'old_state': 'critical', 'state': 'destroyed'},
+            {'kind': 'crew', 'name': 'commander', 'state': 'destroyed'},
+        ]
+        other_events = [
+            {'kind': 'fire', 'state': True},
+            {'kind': 'fire', 'state': False},
+            {'kind': 'ammo_rack', 'state': 'destroyed'},
+            {'kind': 'device', 'name': 'gunHealth',
+             'old_state': 'destroyed', 'state': 'critical'},
+            {'kind': 'device', 'name': 'engineHealth', 'state': 'normal'},
+            {'kind': 'crew', 'name': 'driver', 'state': 'normal'},
+        ]
+        for outgoing in (True, False):
+            for events, expected in ((damage_events + other_events, 3),
+                                     (other_events, 0)):
+                with self.subTest(outgoing=outgoing, expected=expected):
+                    runtime = _runtime()
+                    battle = BattleRuntime(runtime)
+                    battle._avatar = runtime.bigworld.avatar
+                    battle._avatar.playerVehicleID = 10
+                    battle._synchronise_player_identity(10)
+                    attacker = {'engine_id': 10, 'local': outgoing,
+                                'kind': 'player', 'state': {'team': 1}}
+                    target = {'engine_id': 11, 'local': not outgoing,
+                              'kind': 'bot', 'state': {'team': 2}}
+                    battle._present_combat_feedback({
+                        'kind': 'bot_hit', 'damage': 0, 'shot_result': 1,
+                        'source': 'shot', 'attack_reason': 0,
+                        'critical': {'events': events}}, target, attacker)
+                    ribbons = [item for batch in battle._avatar.battle_events
+                               for item in batch]
+                    self.assertEqual(1 if expected else 0, len(ribbons))
+                    if expected:
+                        self.assertEqual(6 if outgoing else 9,
+                                         ribbons[0]['eventType'])
+                        self.assertEqual(expected, ribbons[0]['details'] >> 16)
+
+    def test_module_only_shots_supply_stock_voice_piercing_flags(self):
+        for splash in (False, True):
+            for kind in ('device', 'crew', None):
+                with self.subTest(splash=splash, kind=kind):
+                    runtime = _runtime()
+                    battle = BattleRuntime(runtime)
+                    battle._avatar = runtime.bigworld.avatar
+                    battle._avatar.playerVehicleID = 10
+                    battle._synchronise_player_identity(10)
+                    attacker = {'engine_id': 10, 'local': True,
+                                'kind': 'player', 'state': {'team': 1}}
+                    target = {'engine_id': 11, 'local': False,
+                              'kind': 'bot', 'state': {'team': 2}}
+                    events = [] if kind is None else [{
+                        'kind': kind, 'name': 'engineHealth' if kind ==
+                        'device' else 'commander', 'state': 'destroyed',
+                        'cause': 'explosion' if splash else 'shot'}]
+                    battle._present_combat_feedback({
+                        'kind': 'bot_hit', 'damage': 0, 'shot_result': 0,
+                        'source': 'shot', 'attack_reason': 0, 'splash': splash,
+                        'critical': {'events': events}}, target, attacker)
+                    flags = battle._avatar.shot_results[0][0] >> 32
+                    vhf = runtime.constants.VEHICLE_HIT_FLAGS
+                    piercing = (vhf.DEVICE_PIERCED_BY_EXPLOSION if splash
+                                else vhf.DEVICE_PIERCED_BY_PROJECTILE)
+                    self.assertEqual(bool(kind), bool(flags & piercing))
+                    self.assertFalse(flags & (
+                        vhf.MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_EXPLOSION |
+                        vhf.MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_PROJECTILE))
+                    if not splash:
+                        self.assertTrue(flags & vhf.RICOCHET)
 
     def test_hidden_worker_never_invokes_stock_combat_feedback(self):
         runtime = _runtime()
@@ -13765,6 +13842,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             flags.ATTACK_IS_DIRECT_PROJECTILE |
             flags.MATERIAL_WITH_POSITIVE_DF_NOT_PIERCED_BY_PROJECTILE |
+            flags.DEVICE_PIERCED_BY_PROJECTILE |
             flags.DEVICE_DAMAGED_BY_PROJECTILE |
             flags.CHASSIS_DAMAGED_BY_PROJECTILE |
             flags.GUN_DAMAGED_BY_PROJECTILE |
@@ -13804,6 +13882,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             flags.ATTACK_IS_EXTERNAL_EXPLOSION |
             flags.MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_EXPLOSION |
+            flags.DEVICE_PIERCED_BY_EXPLOSION |
             flags.DEVICE_DAMAGED_BY_EXPLOSION |
             flags.CHASSIS_DAMAGED_BY_EXPLOSION |
             flags.GUN_DAMAGED_BY_EXPLOSION |
@@ -21785,6 +21864,70 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertEqual((0.0, 0.0, 0.0), position)
         self.assertGreater(battle._local_slide_speed, 0.0)
+
+    def test_local_slowdown_retains_first_contact_above_stall_speed(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_speed = 4.0
+        battle._local_support_rise_blocked = False
+        battle._local_world_collision_trace = {}
+        first = {'reason': 'ground_profile', 'hit': [1.0, 2.0, 3.0]}
+        with mock.patch('sys.stdout') as output:
+            self.assertTrue(battle._report_local_motion_stall(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.08), 0.02, 1.0,
+                'deflect', 10.0, 10.1, 0.0, first))
+        text = ''.join(call.args[0] for call in output.write.call_args_list)
+        self.assertIn('before=10.0000 drive=10.1000 final=4.0000', text)
+        self.assertIn('"reason": "ground_profile"', text)
+        battle._next_local_stall_report = 0.0
+        with mock.patch('sys.stdout') as output:
+            self.assertFalse(battle._report_local_motion_stall(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.08), 0.02, 1.0,
+                'advance', 4.0, 4.0, 0.0))
+        output.write.assert_not_called()
+
+    def test_supported_tracks_do_not_use_trench_floor_as_drive_grade(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        # Both tracks bridge a short depression around the centre-line probe
+        # at z=2.0. Every contacting road wheel is still on the level banks.
+        params = {'springs': [{'x': x, 'y': 0.0, 'z': z}
+                             for x in (-1.0, 1.0)
+                             for z in (-2.4, -1.2, 0.0, 1.2, 2.4)]}
+        battle._local_suspension_params = params
+        battle._local_ground_plane = vehicle_physics.suspension_world_ground_plane(
+            params, (0.0,) * 10, (0.0, 0.0, 0.0), 0.0, 0.15)
+        # Deliberately rock the rendered body; its attitude is not the grade.
+        battle._local_pitch = -0.2
+        runtime.bigworld.wg_collideSegment = mock.Mock(side_effect=(
+            lambda space, start, end, mask: (
+                _Vector(start.x, -1.5 if start.z > 0 else 0.0, start.z),)))
+
+        self.assertEqual(0.0, battle._drive_pitch((0.0, 0.0, 0.0), 0.0))
+        runtime.bigworld.wg_collideSegment.assert_not_called()
+
+    def test_suspension_drive_grade_follows_current_heading_not_body_rock(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_suspension_params = {'springs': ()}
+        battle._local_ground_plane = {'gradient_x': 0.2, 'gradient_z': -0.3}
+        battle._local_pitch, battle._local_roll = 0.5, -0.4
+        battle._collide_down = mock.Mock(side_effect=AssertionError('extra query'))
+        for yaw, tangent in ((0.0, -0.3), (math.pi, 0.3),
+                             (math.pi / 2.0, 0.2)):
+            self.assertAlmostEqual(-math.atan(tangent),
+                battle._drive_pitch((0.0, 0.0, 0.0), yaw))
+
+    def test_retired_suspension_does_not_supply_cached_drive_grade(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_suspension_params = {'springs': ()}
+        battle._local_suspension_disabled = True
+        battle._local_ground_plane = {'gradient_x': 0.0, 'gradient_z': 0.0}
+        runtime.bigworld.wg_collideSegment = lambda space, start, end, mask: (
+            _Vector(start.x, 0.2 * start.z, start.z),)
+        self.assertAlmostEqual(-math.atan(0.2),
+            battle._drive_pitch((0.0, 0.0, 0.0), 0.0))
 
     def test_drive_pitch_skips_bridge_deck_above_the_hull(self):
         runtime = _runtime()
