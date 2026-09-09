@@ -1310,6 +1310,27 @@ This is static and pure-data coverage. It proves which fields reach the native
 packers with which values; only acceptance on the exact Windows client can show
 the results window rendering those ribbons, counters and tooltips.
 
+### Critical-hit ribbons and shot-result voices
+
+The pinned `Avatar.PlayerAvatar.showShotResults` selects voices independently
+of `onBattleEvents` ribbons. Its `IS_ANY_PIERCING_MASK` includes
+`DEVICE_PIERCED_BY_PROJECTILE` and `DEVICE_PIERCED_BY_EXPLOSION`, but not
+`DEVICE_DAMAGED_*`. Confirmed device/crew damage supplies the piercing bit;
+otherwise a module hit followed by a ricochet selects the ricochet voice.
+External explosions set the positive-damage-factor material bit only when
+they damage vehicle HP, so a module-only explosion selects the no-HP-damage
+voice instead. The exact extracted method was executed under CPython 2.7
+with old/new flags to verify both selections, empty splash and killing shots.
+
+`BATTLE_EVENT_TYPE.packCrits` packs a critical count. The adapter counts device
+damage transitions and crew knockouts, excluding repair, fire-state and
+ammo-rack-death effects. Both outgoing and received critical ribbons use this
+count. Stock `ribbons_aggregator` excludes `CRITS` when the same target has a
+destruction ribbon; the adapter leaves that filtering and voice priority to
+the client. These checks prove RPC input and Python voice selection, not
+audible Chinese voice playback or the original server's hidden module-HP
+notification thresholds.
+
 ### Mastery badges and Marks of Excellence
 
 Both awards rank one player against every other player who drove the same
