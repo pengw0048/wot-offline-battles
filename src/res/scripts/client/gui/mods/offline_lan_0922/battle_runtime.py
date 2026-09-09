@@ -10330,7 +10330,18 @@ class BattleRuntime(object):
         shell_type, shell_is_gold = self._feedback_shell_fields(
             event, attacker_record)
         critical = event.get('critical')
-        critical_count = len((critical or {}).get('events') or ())
+        # CRIT counts newly damaged devices/crew, not fire, ammo-rack death
+        # effects or repairs carried alongside them in the state payload.
+        critical_events = []
+        for item in (critical or {}).get('events') or ():
+            kind, state = item.get('kind'), item.get('state')
+            if kind == 'crew' and state == 'destroyed':
+                critical_events.append(item)
+            elif kind == 'device' and state in ('critical', 'destroyed'):
+                old_state = item.get('old_state', 'normal')
+                if (old_state != state and old_state != 'destroyed'):
+                    critical_events.append(item)
+        critical_count = len(critical_events)
         if attacker_record.get('local'):
             self._assert_player_identity(attacker_record['engine_id'])
         target_team = self._combat_record_team(target_record)
@@ -10380,10 +10391,12 @@ class BattleRuntime(object):
                 explosion = bool(event.get('splash'))
                 if explosion:
                     flags = int(flags_type.ATTACK_IS_EXTERNAL_EXPLOSION)
-                    flags |= int(
-                        flags_type.
-                        MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_EXPLOSION)
+                    if damage > 0:
+                        flags |= int(
+                            flags_type.
+                            MATERIAL_WITH_POSITIVE_DF_PIERCED_BY_EXPLOSION)
                     critical_cause = 'explosion'
+                    pierced_flag = int(flags_type.DEVICE_PIERCED_BY_EXPLOSION)
                     device_flag = int(
                         flags_type.DEVICE_DAMAGED_BY_EXPLOSION)
                     chassis_flag = int(
@@ -10405,6 +10418,7 @@ class BattleRuntime(object):
                     else:
                         flags |= int(flags_type.RICOCHET)
                     critical_cause = 'shot'
+                    pierced_flag = int(flags_type.DEVICE_PIERCED_BY_PROJECTILE)
                     device_flag = int(
                         flags_type.DEVICE_DAMAGED_BY_PROJECTILE)
                     chassis_flag = int(
@@ -10420,8 +10434,12 @@ class BattleRuntime(object):
                     state = critical_event.get('state')
                     if kind == 'fire' and bool(state):
                         flags |= int(flags_type.FIRE_STARTED)
-                    elif (kind == 'device' and
-                          state in ('critical', 'destroyed')):
+                    elif critical_event in critical_events:
+                        # #1513's voice selector tests DEVICE_PIERCED, not
+                        # DEVICE_DAMAGED, for module-only hits and ricochets.
+                        flags |= pierced_flag
+                        if kind != 'device':
+                            continue
                         name = str(critical_event.get('name', ''))
                         flags |= device_flag
                         if name in ('leftTrackHealth', 'rightTrackHealth'):
