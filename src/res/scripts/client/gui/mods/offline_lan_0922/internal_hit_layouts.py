@@ -19,6 +19,14 @@ except Exception:
 		_layout_store = None
 
 try:
+	from gui.mods.offline_lan_0922 import internal_layout_console as _layout_console
+except Exception:
+	try:
+		import internal_layout_console as _layout_console
+	except Exception:
+		_layout_console = None
+
+try:
 	from gui.mods.offline_lan_0922 import internal_layout_profiles as _layout_profiles
 except Exception:
 	try:
@@ -63,7 +71,7 @@ except Exception:
 		return _decorate
 
 
-LAYOUT_KEY = 14
+LAYOUT_KEY = 15
 _LAYOUT_MODE = 'profile'
 
 
@@ -211,12 +219,98 @@ def _profile_key(vehicle_name):
 	return nation, _normal_name(parts[1])
 
 
+def _decoded_layout(key):
+	'''The decoded interior for this vehicle, or None.
+
+	These zones are collision surfaces read out of the exact-era resources by
+	tools/bake_internal_layout_console_0922.py, not reconstructions, so they
+	take precedence over the retained archetypes.  Centres and half extents
+	are already fractions of the component's collision bounding box, which is
+	the same bound this client's hit tester reports, so they drop straight
+	into the profile record the rest of this module expects.'''
+	if _layout_console is None:
+		return None
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None:
+		return None
+	try:
+		(vehicle_class, tier, crew_roles, unmodelled, module_zones,
+			crew_zones) = record
+		confidence = getattr(_layout_console, 'CONFIDENCE', 'decoded')
+		source = 'decoded_collision_surfaces'
+		if unmodelled:
+			# Every zone in a decoded record comes from one source, so a module
+			# that source does not model is published as explicitly
+			# unavailable rather than borrowed from a reconstruction.
+			source = '%s+unmodelled:%s' % (source, ','.join(unmodelled))
+		return (source, vehicle_class, tier, confidence, tuple(crew_roles),
+			tuple(module_zones), tuple(crew_zones))
+	except Exception:
+		LOG_EXCEPTION('modules', 'decoded_layout_read_failed')
+		return None
+
+
+def decoded_unmodelled_entities(vehicle_name):
+	'''Module targets a decoded vehicle's resources do not model at all.
+
+	These carry no zone and are reported unavailable, the same way the tracks
+	are when no native collision extra was donated.  The alternative would be
+	to discard a vehicle's decoded ammunition rack, engine, fuel tank, radio
+	and crew because Console models no traverse mechanism for its fixed
+	superstructure, which is how these vehicles ended up with no interior at
+	all.  Nothing is invented for them.
+	'''
+	if _layout_console is None:
+		return ()
+	key = _profile_key(vehicle_name)
+	if key is None:
+		return ()
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None or len(record) < 4:
+		return ()
+	return tuple(record[3])
+
+
+def decoded_layout_available(vehicle_name):
+	'''True when this vehicle's interior comes from decoded geometry.'''
+	key = _profile_key(vehicle_name)
+	return key is not None and _decoded_layout(key) is not None
+
+
 def _compiled_profile(vehicle_name):
 	if _layout_profiles is None:
 		return None, None
 	key = _profile_key(vehicle_name)
 	if key is None:
 		return None, None
+	decoded = _decoded_layout(key)
+	authored_key, authored = _profile_for_key(key)
+	if decoded is not None:
+		# A decoded record whose resources model no station for some of the
+		# crew leaves those crewmen unhittable.  That is the right answer when
+		# the alternative is no interior at all, but not when a retained
+		# archetype already seats every one of them: an approximate crew the
+		# player can hit is closer to retail than an exact one he cannot, and
+		# on the E 100 the resources miss four of six stations.  A module hole
+		# costs a single crit target and does not trigger this.
+		if authored is None or not _decoded_crew_incomplete(key):
+			return key, decoded
+		return authored_key, authored
+	return authored_key, authored
+
+
+def _decoded_crew_incomplete(key):
+	'''Whether the decoded record leaves a crew station without a zone.'''
+	if _layout_console is None:
+		return False
+	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
+	if record is None or len(record) < 6:
+		return False
+	return any(zone is None for zone in record[5])
+
+
+def _profile_for_key(key):
+	'''The retained archetype for this key, through the alias table.'''
 	profile = _layout_profiles.PROFILES.get(key)
 	if profile is not None:
 		return key, profile
@@ -663,6 +757,15 @@ def build_layout(vehicle_descriptor, log_build=True):
 		vehicle_descriptor)
 	profile_key, compiled_profile = _compiled_profile(vehicle_name)
 	profile = _profile_record(compiled_profile)
+	# Provenance and unavailable targets belong to the selected profile.
+	# A decoded table entry may have yielded to a complete crew archetype.
+	decoded_geometry = (profile is not None and
+		profile['source_id'].startswith('decoded_collision_surfaces'))
+	if _layout_console is not None:
+		layouts = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', None)
+		if (not isinstance(layouts, dict) or
+				getattr(_layout_console, 'DECODED_COUNT', -1) != len(layouts)):
+			errors.append('decoded_layout_table_invalid')
 	if _layout_profiles is None:
 		errors.append('compiled_profile_module_unavailable')
 	elif (getattr(_layout_profiles, 'PROFILE_COUNT', 0) != 251 or
@@ -681,6 +784,11 @@ def build_layout(vehicle_descriptor, log_build=True):
 
 	official_geometry = _official_geometry_bindings(
 		vehicle_descriptor, crew)
+	# Targets the exact-era resources model no surface for.  The baked record
+	# names the modules; a crewman is added below when his station is a hole in
+	# the positional crew list.
+	unmodelled_entities = (frozenset(decoded_unmodelled_entities(vehicle_name))
+		if decoded_geometry else frozenset())
 	candidate_specs = []
 	if profile is not None:
 		for module_zone in profile['module_zones']:
@@ -719,6 +827,15 @@ def build_layout(vehicle_descriptor, log_build=True):
 			if role_data['entity'] in official_geometry:
 				continue
 			crew_zone = profile['crew_zones'][crew_index]
+			if crew_zone is None:
+				# The exact-era resources model no station for this crewman on
+				# this vehicle.  Publish him unavailable, the same way a module
+				# the resources do not model is published, rather than seating
+				# him at a guessed position or discarding the vehicle's whole
+				# decoded interior over one absent surface.
+				unmodelled_entities = unmodelled_entities.union(
+					(role_data['entity'],))
+				continue
 			parent, zone_id, center_fractions, half_fractions = crew_zone
 			candidate_specs.append({
 				'entity': role_data['entity'],
@@ -754,6 +871,16 @@ def build_layout(vehicle_descriptor, log_build=True):
 			if entity in OPTIONAL_NATIVE_GEOMETRY_TARGETS:
 				logical_entity_sources[entity] = {
 					'mode': 'OPTIONAL_NATIVE_COLLISION_GEOMETRY',
+				}
+			elif entity in unmodelled_entities:
+				# The exact-era resources model no surface for this module on
+				# this vehicle and no archetype covers it, so it is published
+				# unavailable rather than placed at a guessed position.  Every
+				# other module and every crew station here is decoded.
+				logical_entity_sources[entity] = {
+					'mode': 'RESOURCE_GEOMETRY_UNMODELLED',
+					'profile_source_id': (profile['source_id']
+						if profile is not None else None),
 				}
 			else:
 				logical_entity_sources[entity] = {
@@ -839,6 +966,9 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'layout_key': LAYOUT_KEY,
 		'layout_mode': _LAYOUT_MODE,
 		'profile_key': profile_key,
+		'profile_geometry_provenance': ('decoded_collision_surfaces'
+			if decoded_geometry else 'reconstructed_archetype'),
+		'profile_unmodelled_entities': tuple(sorted(unmodelled_entities)),
 		'profile_source_id': (profile['source_id']
 			if profile is not None else None),
 		'profile_confidence': (profile['confidence']
@@ -1097,6 +1227,12 @@ def validate_layout(layout):
 		elif mode == 'OPTIONAL_NATIVE_COLLISION_GEOMETRY':
 			# Honest server boundary: no native MaterialInfo was donated, and no
 			# synthetic track box participates in the interior resolver.
+			continue
+		elif mode == 'RESOURCE_GEOMETRY_UNMODELLED':
+			# Honest resource boundary, the same contract: the exact-era
+			# resources model no surface for this module on this vehicle, so it
+			# is unavailable rather than invented.  The rest of the interior is
+			# decoded geometry and stays usable.
 			continue
 		else:
 			missing.append('geometry_source:' + entity)

@@ -22,7 +22,12 @@ def _string(value):
 
 class InternalLayoutAuditTests(unittest.TestCase):
     def test_catalog_inventory_distinguishes_missing_and_mismatched_profiles(self):
-        names = ('Ch02_Type62', 'Ch04_T34_1')
+        # One real vehicle, which resolves a profile, and one name the
+        # catalogue does not contain, which cannot.  The second must not be a
+        # real vehicle that merely happens to have no profile today: coverage
+        # is data that improves, and this test is about the audit reporting
+        # the three states distinctly, not about which tanks are covered.
+        names = ('Ch02_Type62', 'Ch99_Not_In_The_Catalogue')
         listing = packed_xml.PackedElement(children=[
             (name.encode('ascii'), _string('')) for name in names])
         # Compressed Packed XML strings are base64 byte storage, not UTF-8.
