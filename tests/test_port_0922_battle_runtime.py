@@ -21642,6 +21642,26 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((0.0, 0.0, 0.0), position)
         self.assertGreater(battle._local_slide_speed, 0.0)
 
+    def test_local_slowdown_retains_first_contact_above_stall_speed(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_speed = 4.0
+        battle._local_support_rise_blocked = False
+        battle._local_world_collision_trace = {}
+        first = {'reason': 'ground_profile', 'hit': [1.0, 2.0, 3.0]}
+        with mock.patch('sys.stdout') as output:
+            self.assertTrue(battle._report_local_motion_stall(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.08), 0.02, 1.0,
+                'deflect', 10.0, 10.1, 0.0, first))
+        text = ''.join(call.args[0] for call in output.write.call_args_list)
+        self.assertIn('before=10.0000 drive=10.1000 final=4.0000', text)
+        self.assertIn('"reason": "ground_profile"', text)
+        battle._next_local_stall_report = 0.0
+        with mock.patch('sys.stdout') as output:
+            self.assertFalse(battle._report_local_motion_stall(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.08), 0.02, 1.0,
+                'advance', 4.0, 4.0, 0.0))
+        output.write.assert_not_called()
+
     def test_supported_tracks_do_not_use_trench_floor_as_drive_grade(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

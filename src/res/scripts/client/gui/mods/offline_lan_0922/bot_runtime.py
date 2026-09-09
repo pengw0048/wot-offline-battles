@@ -6096,10 +6096,15 @@ class BotRuntime(object):
             position[0], position[2], position[1])
         if centre is not None:
             centre = float(centre)
-            if (follow_gap is not None and
-                    position[1] - centre > float(follow_gap)):
+            # Speed and a forward corridor grade can enlarge follow_gap
+            # beyond an entire trench. Check the tracks before accepting that
+            # drop; the dynamic envelope alone proves no surface continuity.
+            support_gap = (None if follow_gap is None else min(
+                float(follow_gap), vehicle_physics.GROUND_FOLLOW_MIN))
+            if (support_gap is not None and
+                    position[1] - centre > support_gap):
                 bridged = self._straddled_terrain_support(
-                    state, position, follow_gap)
+                    state, position, support_gap)
                 if bridged is not None and bridged > centre:
                     return bridged, bridged
             # The vertical law below always selects centre while it exists;
