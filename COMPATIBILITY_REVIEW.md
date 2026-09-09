@@ -549,10 +549,20 @@ under the pinned-client bridge that a descriptor's `type` is the same native
 category returned for that item, and only after every resolvable native item
 has been enumerated. A whole category with zero non-empty names is known to be
 unnamed. A nonzero unequal name/item count is only a partial alignment.
-The schema-v8 catalog also supplies exact WGDE/SpTr tree wires, resource
+The schema-v9 catalog also supplies exact WGDE/SpTr tree wires, resource
 names, and quantized initial transforms for every supported map. A compacted
 category can use those authored identities when its surviving names form an
 ordered subsequence; each consumer still verifies the live slot and matrix.
+Standard-battle admission now follows bit `0x1` in every SpTr and BSMI
+visibility mask, after assigning the original WGDE item indices. Mode-excluded
+slots remain explicit in `excluded_instances`, but never enter descriptor
+recovery, native query/animation admission, collision boxes, or standing/fallen
+concealment. Name alignment skips those absent scene objects without shifting
+later native indices. The exact #1513 crash at `0x00ABB0AA` accessed a missing
+tree scene object for Prohorovka `(32639, 31)`, whose SpTr mask is `0x7fff4000`.
+The matched dump's scene registry omitted exactly the trees excluded by bit 0.
+All 41 source maps have been audited against that mask; Windows replay remains
+the acceptance boundary for the repaired native animation lifecycle.
 An unresolved category is isolated only at its own item indices, preserving
 independently aligned types in the same chunk. An unknown or malformed
 non-empty descriptor or malformed category payload that prevents typing the

@@ -96,13 +96,24 @@ def _normalized_filename(filename):
 	return filename.replace('\\', '/').strip().lower()
 
 
+def is_excluded_1513(chunk_id, item_index):
+	"""An authored mode-excluded slot has no native scene object in standard battle."""
+	return (int(chunk_id), int(item_index)) in (_destructible_catalog or {}).get(
+		'excluded_instances', ())
+
+
 def _destructible_isolated_1513(chunk_id, item_index=None):
-	"""Return whether runtime validation quarantined this native identity."""
+	"""Gate quarantined identities and authored slots absent from this mode.
+
+	Excluded slots are never added to quarantine diagnostics or collision bins.
+	"""
 	chunk_id = int(chunk_id)
 	if chunk_id in globals().get('g_offh_destr_isolated_chunks', ()):
 		return True
 	if item_index is None:
 		return False
+	if is_excluded_1513(chunk_id, item_index):
+		return True
 	return (chunk_id, int(item_index)) in globals().get(
 		'g_offh_destr_isolated_slots', ())
 
@@ -702,6 +713,9 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 			ignored_items = set(item_index for chunk, item_index in
 				globals().get('g_offh_destr_isolated_slots', ())
 				if int(chunk) == int(chunk_id))
+			ignored_items.update(item_index for chunk, item_index in
+				(_destructible_catalog or {}).get('excluded_instances', ())
+				if int(chunk) == int(chunk_id))
 		names_by_type, status, item_failures = _native_name_groups_1513(
 			area_destructibles, names, ignored_items, full_width)
 		for item_index, failure_type, detail in item_failures:
@@ -752,6 +766,9 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 	end_item = entry['next_item'] + query_count
 	for item_index in range(entry['next_item'], end_item):
 		identity = (int(chunk_id), int(item_index))
+		if is_excluded_1513(*identity):
+			entry['ignored_items'].add(item_index)
+			continue
 		if _destructible_isolated_1513(*identity):
 			known_type = globals().get(
 				'g_offh_destr_isolated_name_types', {}).get(
@@ -1555,6 +1572,21 @@ def set_catalog(catalog):
 			'kind': 'tree', 'signature': tuple(row[:12]),
 		}
 		tree_resources[filename] = row[12]
+	excluded_instances = set()
+	raw_excluded = catalog.get('excluded_instances', [])
+	if (not isinstance(raw_excluded, list) or
+			(catalog_version >= 9 and 'excluded_instances' not in catalog)):
+		raise ValueError('excluded instance index is invalid')
+	for row in raw_excluded:
+		if (not isinstance(row, (list, tuple)) or len(row) != 3 or
+				any(type(value) not in _INTEGER_TYPES or value < 0 for value in row) or
+				row[0] > 0xFFFFFFFF or row[2] > 0xFFFFFFFF or row[2] & 1):
+			raise ValueError('excluded instance row is invalid')
+		wire = tuple(row[:2])
+		if wire in excluded_instances or wire in seen_wires or wire in tree_instances:
+			raise ValueError('excluded instance identity overlaps')
+		excluded_instances.add(wire)
+
 	_destructible_catalog = {
 		'map': catalog.get('map'),
 		'resources': prepared, 'quantization': quantization,
@@ -1565,6 +1597,7 @@ def set_catalog(catalog):
 		'baked_shot_bins': baked_shot_bins,
 		'tree_instances': tree_instances,
 		'tree_resources': tree_resources,
+		'excluded_instances': excluded_instances,
 	}
 	_clear_runtime_registry()
 

@@ -766,6 +766,34 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             side_effect=AssertionError('unsafe scalar filename query'))
         return area, bigworld, math_module, vehicle, tree, matrices
 
+    def test_mode_excluded_tree_never_reaches_native_descriptor_or_registry(self):
+        area, bigworld, math_module, vehicle, tree, unused = (
+            self._authored_tree_identity_fixture())
+        # The compiled slot still exists, but its scene tree does not.
+        catalog = destructibles_sensor._destructible_catalog
+        catalog['tree_instances'].pop((22, 1))
+        catalog['excluded_instances'].add((22, 1))
+        category = bigworld.wg_getDestructibleEffectCategory.side_effect
+        matrix = bigworld.wg_getDestructibleMatrix.side_effect
+        def category_guard(space, chunk, item, module):
+            self.assertNotEqual(1, item, 'queried mode-excluded native slot')
+            return category(space, chunk, item, module)
+        def matrix_guard(space, chunk, item):
+            self.assertNotEqual(1, item, 'queried nonexistent scene tree')
+            return matrix(space, chunk, item)
+        bigworld.wg_getDestructibleEffectCategory.side_effect = category_guard
+        bigworld.wg_getDestructibleMatrix.side_effect = matrix_guard
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            self.assertEqual(('invalid', None),
+                destructibles_compat.inspect_destructible_desc(area.g_cache, 1, 22, 1))
+            self.assertEqual('ready', destructibles_sensor.prewarm_tree_registry(
+                1, _Vector(), 0.0, vehicle, 1.0)['status'])
+            self.assertEqual(('resolved', {'type': 1, 'health': 10, 'mass': 20}),
+                destructibles_compat.inspect_destructible_desc(area.g_cache, 1, 22, 0))
+        self.assertFalse(getattr(destructibles_sensor, 'g_offh_destr_isolated_slots', ()))
+
     def test_authored_tree_names_recover_compaction_without_blocking_fence(self):
         area, bigworld, math_module, vehicle, tree, unused = (
             self._authored_tree_identity_fixture())

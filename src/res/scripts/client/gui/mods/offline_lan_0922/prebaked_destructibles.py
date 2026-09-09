@@ -12,7 +12,7 @@ from gui.mods.offline_lan_0922.prebaked_navigation import mod_dir
 
 
 FORMAT_NAME = 'offline-lan-0922-destructible-catalog'
-FORMAT_VERSION = 8
+FORMAT_VERSION = 9
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 _STRUCTURE_MAT_KIND_MIN_1513 = 73
 _STRUCTURE_MAT_KIND_MAX_1513 = 86
@@ -233,6 +233,17 @@ def _validate(data, map_name):
 		if wire in seen_wires:
 			raise ValueError('tree instance wire is duplicated')
 		seen_wires.add(wire)
+	excluded = data.get('excluded_instances')
+	if not isinstance(excluded, list):
+		raise ValueError('excluded instance index is unavailable')
+	for row in excluded:
+		if (not isinstance(row, list) or len(row) != 3 or
+				any(type(value) not in _INTEGER_TYPES or value < 0 for value in row) or
+				row[0] > 0xFFFFFFFF or row[2] > 0xFFFFFFFF or row[2] & 1 or
+				tuple(row[:2]) in seen_wires):
+			raise ValueError('excluded instance row is invalid')
+		seen_wires.add(tuple(row[:2]))
+
 	return data
 
 
