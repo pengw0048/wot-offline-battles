@@ -460,6 +460,72 @@ class ErrorReportTest(unittest.TestCase):
         self.assertFalse(
             error_reports.visible_client_exited_cleanly(session))
 
+    def test_native_exception_trails_travel_with_the_session_report(self):
+        # The engine consumes its own unhandled exceptions, so a termination
+        # dump often keeps no faulting thread. The trail is the only record
+        # of what actually faulted, and it must reach the ZIP even when no
+        # dump was written at all.
+        session = error_reports.begin_session(
+            self.game, needs_worker=True, session_id=self.SESSION_1,
+            started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT), b"visible\n")
+        self._write(
+            self._game_log(error_reports.ROLE_HIDDEN_WORKER), b"worker\n")
+        worker_trail = error_reports.session_trail_path(
+            session, error_reports.ROLE_HIDDEN_WORKER)
+        self._write(worker_trail, b"EXC session pid=1\r\nEXC seq=1 \r\n")
+        error_reports.finalize_session(session, ended_at="end")
+
+        report = error_reports.create_report()
+        payloads = self._archive(report)
+
+        self.assertIn("hidden-worker.exceptions.txt", payloads)
+        self.assertEqual(
+            b"EXC session pid=1\r\nEXC seq=1 \r\n",
+            payloads["hidden-worker.exceptions.txt"])
+        self.assertNotIn("visible-client.exceptions.txt", payloads)
+        self.assertIn("hidden-worker.exceptions.txt", report["included"])
+
+    def test_trail_paths_are_two_fixed_names_inside_the_session_folder(self):
+        session = error_reports.begin_session(
+            self.game, needs_worker=True, session_id=self.SESSION_1)
+
+        paths = dict(
+            (role, error_reports.session_trail_path(session, role))
+            for role in error_reports.DUMP_ROLES)
+        dumps = error_reports.session_dump_paths(session)
+
+        self.assertEqual(
+            sorted(error_reports.DUMP_ROLES), sorted(paths))
+        for role, path in paths.items():
+            self.assertEqual(
+                os.path.dirname(dumps[role]), os.path.dirname(path))
+            self.assertTrue(path.endswith(".exceptions.txt"))
+        self.assertEqual(len(set(paths.values())), len(paths))
+
+    def test_an_empty_or_oversized_trail_never_breaks_the_report(self):
+        session = error_reports.begin_session(
+            self.game, needs_worker=True, session_id=self.SESSION_1,
+            started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT), b"visible\n")
+        self._write(
+            error_reports.session_trail_path(
+                session, error_reports.ROLE_VISIBLE_CLIENT), b"")
+        self._write(
+            error_reports.session_trail_path(
+                session, error_reports.ROLE_HIDDEN_WORKER),
+            b"E" * (error_reports.TRAIL_MAX_BYTES + 4096))
+        error_reports.finalize_session(session, ended_at="end")
+
+        payloads = self._archive(error_reports.create_report())
+
+        self.assertNotIn("visible-client.exceptions.txt", payloads)
+        self.assertEqual(
+            error_reports.TRAIL_MAX_BYTES,
+            len(payloads["hidden-worker.exceptions.txt"]))
+
     def test_partial_single_player_report_names_missing_current_logs(self):
         session = error_reports.begin_session(
             self.game, needs_worker=True, local_server=True,

@@ -26,6 +26,10 @@ _GUARD_STATUS_OPERATIONS = {
     14: 'WGC named-mutex result probe',
 }
 
+# The native trail is diagnostics, not gameplay: a process that cannot record
+# its own faults must still play. Only this status means "not requested".
+TRAIL_STATUS_NOT_CONFIGURED = 301
+
 _attempted = False
 _release_succeeded = False
 _release_error = None
@@ -84,6 +88,7 @@ def _load_native_bridge(path=None, imp_module=None):
         status = int(bridge.install_atmosphere_owner_guard())
         if status != 0:
             raise ClientInstanceGuardError('atmosphere owner guard', status)
+        _install_exception_trail(bridge)
     except Exception:
         # load_dynamic can publish the module before validation finishes.
         if sys.modules.get(NATIVE_MODULE_NAME) is bridge:
@@ -96,6 +101,35 @@ def _load_native_bridge(path=None, imp_module=None):
     sys.modules[NATIVE_MODULE_NAME] = bridge
     _native_bridge = bridge
     return bridge
+
+
+def _install_exception_trail(bridge):
+    """Record first-chance faults #1513's own crash reporter would consume.
+
+    The engine wraps its main loop in its own __try/__except, formats a crash
+    message on the faulting stack and calls abort(), so nothing reaches second
+    chance and every collected dump is a termination dump whose faulting
+    thread has usually already gone. Never fail startup over the recorder.
+    """
+    install = getattr(bridge, 'install_exception_trail', None)
+    if not callable(install):
+        # An older sidecar than this payload; the guard above still applies.
+        return False
+    try:
+        status = int(install())
+    except Exception as error:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] exception trail refused: %s\n' % error)
+        return False
+    if status == 0:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] installed #1513 exception trail\n')
+        return True
+    if status != TRAIL_STATUS_NOT_CONFIGURED:
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] exception trail unavailable: native '
+            'status %d\n' % status)
+    return False
 
 
 def _raise_release_failure(status):

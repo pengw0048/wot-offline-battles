@@ -7437,29 +7437,30 @@ class BattleRuntime(object):
             return False
         if now is None:
             now = self._clock()
+        # Stock #1513 resets the expanded selector's key map on every
+        # equipment update, including identical READY echoes. Publish only
+        # item transitions; the stock HUD owns countdown interpolation.
+        previous = dict(self._equipment_signature or ())
+        signature = []
+        changed = False
         for equipment in self._equipment_state:
+            compact = equipment.contract['compactDescr']
             quantity, stage, remaining = self._equipment_echo(equipment, now)
+            state = (quantity, stage)
+            signature.append((compact, state))
+            if previous.get(compact) == state:
+                continue
             self._avatar.updateVehicleAmmo(
-                self._server.vehicle_id,
-                equipment.contract['compactDescr'],
-                quantity, stage, remaining)
-        self._equipment_signature = tuple(
-            self._equipment_echo(equipment, now)
-            for equipment in self._equipment_state)
-        return True
+                self._server.vehicle_id, compact, quantity, stage, remaining)
+            changed = True
+        self._equipment_signature = tuple(signature)
+        return changed
 
     def _tick_equipment_cooldowns(self, now):
         """Republish a consumable the moment its cooldown expires."""
         if not self._equipment_state:
             return False
-        signature = tuple(
-            self._equipment_echo(equipment, now)
-            for equipment in self._equipment_state)
-        if signature == self._equipment_signature:
-            return False
-        self._equipment_signature = signature
-        self._present_equipments(now)
-        return True
+        return self._present_equipments(now)
 
     @staticmethod
     def _critical_name_from_extra_index(descriptor, extra_index):

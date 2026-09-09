@@ -39,9 +39,10 @@ except ImportError:
     import vehicle_prices
 
 try:
-    from . import core
+    from . import core, bot_lineup_profiles
 except ImportError:
     import core
+    import bot_lineup_profiles
 
 
 TARGET_VERSION = "0.9.22.0.1"
@@ -781,17 +782,12 @@ def list_vehicle_choices(game_root):
 
 
 def list_gold_vehicles(game_root):
-    """List every vehicle the installed client prices in gold.
+    """List gold and reward vehicles the client can add to a save.
 
-    #1513 ships 196 of them and marks 145 ``notInShop``: reward and event
-    tanks the retail shop never sold and that no tech tree leads to. Offline
-    they are exactly as reachable as the rest, which is why this reads the
-    whole roster rather than the shop's own subset.
-
-    The ``selectable`` filter the vehicle editor uses is deliberately not
-    applied. It keeps native construction hazards out of an editor that
-    rewrites a vehicle's data; owning one is a different question, and the
-    client answers it when it builds the record.
+    Include zero-credit ``notInShop`` rewards such as White Tiger without
+    adding the free starter tech-tree vehicles. Keep hidden rewards, but apply
+    the same standard-battle and resource exclusions as vehicle_records.
+    The launcher already mirrors those rules for Bot lineup choices.
     """
     status, package_path = _require_target(game_root)
     try:
@@ -809,7 +805,9 @@ def list_gold_vehicles(game_root):
     translators = {}
     vehicles = []
     for record in roster:
-        if record["gold"] <= 0:
+        is_reward = record["credits"] == 0 and record["notInShop"]
+        if ((record["gold"] <= 0 and not is_reward) or
+                not bot_lineup_profiles.vehicle_choice_is_eligible(record)):
             continue
         nation = record["nation"]
         if nation not in translators:
@@ -819,6 +817,7 @@ def list_gold_vehicles(game_root):
             "nation": nation,
             "vehicle": record["vehicle"],
             "name": "%s:%s" % (nation, record["vehicle"]),
+            "vehicleClass": record["vehicleClass"],
             "label": _vehicle_label(record, translators[nation]),
             "level": record["level"],
             "gold": record["gold"],

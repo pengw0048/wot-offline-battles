@@ -17,6 +17,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
+sys.path.insert(0, str(ROOT / 'tools'))
+
+import bake_mastery_thresholds_0922 as mastery_baker
 
 from gui.mods.offline_lan_0922 import battle_mastery, mastery_catalog
 from gui.mods.offline_lan_0922.account_rpc import data, postbattle_store
@@ -140,6 +143,33 @@ def _receipt(account_key='account-key-123456', index=1, xp=600, damage=900,
 
 
 class MasteryDecisionTests(unittest.TestCase):
+    def test_baker_keeps_playable_secret_vehicles_but_excludes_helpers(self):
+        roster = {
+            62977: ('ussr', 'R127_T44_100_P', 8,
+                    ['mediumTank', 'secret', 'telecom']),
+            1: ('ussr', 'retired_tank', 8,
+                ['mediumTank', 'secret', 'unrecoverable']),
+            2: ('ussr', 'tank_bootcamp', 2, ['mediumTank', 'secret']),
+            3: ('ussr', 'tank_bot', 8, ['mediumTank', 'secret']),
+            4: ('ussr', 'tank_IGR', 8, ['mediumTank', 'premiumIGR']),
+            5: ('ussr', 'Observer', 1, ['observer', 'secret']),
+            6: ('ussr', 'event_tank', 8, ['mediumTank', 'fallout']),
+        }
+        self.assertEqual({62977, 1}, set(
+            mastery_baker.standard_battle_roster(roster)))
+
+    def test_shipped_secret_variants_resolve_fallback_without_overrides(self):
+        for intcd in (62977, 48897):
+            self.assertEqual((8, 'mediumTank'),
+                             battle_mastery.vehicle_profile(intcd))
+            self.assertNotIn(intcd, mastery_catalog.MARKS_DAMAGE)
+            self.assertEqual(
+                mastery_catalog.MARKS_DAMAGE_FALLBACK[(8, 'mediumTank')],
+                battle_mastery.marks_curve(intcd))
+            self.assertEqual(
+                mastery_catalog.MASTERY_XP_FALLBACK[(8, 'mediumTank')],
+                battle_mastery.mastery_thresholds(intcd))
+
     def test_combined_damage_takes_the_largest_assist_not_the_sum(self):
         # Wargaming's rule: "The maximum damage caused by destroying a track,
         # spotting, or stunning is counted - not the sum of these values."
@@ -337,6 +367,31 @@ class MasteryResultTests(unittest.TestCase):
             replay_types=(_Replay, _ReplayConnector),
             record_db_ids={('achievements', 'marksOnGun'): MARKS_DB_ID}))
         return packers.vehicle()
+
+    def test_secret_vehicle_earns_and_persists_marks_and_mastery(self):
+        postbattle_store._vehicle_type_compact_descr = lambda unused: 62977
+        name = 'ussr:R127_T44_100_P'
+        curve = battle_mastery.marks_curve(62977)
+        one_mark = curve[mastery_catalog.MARKS_PERCENTILES.index(65)]
+        ace_xp = battle_mastery.mastery_thresholds(62977)[3]
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            self.assertTrue(store.accept(_receipt(
+                store.account_key, vehicle=name, damage=one_mark)))
+            row = store._progress['vehicles'][name]
+            self.assertEqual(0, row['marksOnGun'])
+            row['movingAvgDamage'] = one_mark - 1
+            crossing = _receipt(store.account_key, index=2, vehicle=name,
+                                damage=one_mark * 3, xp=ace_xp)
+            self.assertTrue(store.accept(crossing))
+            result = self._result(store, crossing)
+            self.assertEqual(1, result['marksOnGun'])
+            self.assertEqual(4, result['markOfMastery'])
+            self.assertGreaterEqual(result['damageRating'], 65)
+            self.assertIn((MARKS_DB_ID, 1), result['dossierPopUps'])
+            restarted = postbattle_store.PostBattleStore(path=path)
+            self.assertEqual(result, self._result(restarted, crossing))
 
     def test_results_carry_the_badge_fields_and_the_new_mark_popup(self):
         curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]

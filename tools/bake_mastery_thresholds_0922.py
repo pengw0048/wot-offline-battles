@@ -44,9 +44,15 @@ import re
 import sys
 import urllib.request
 import zipfile
+from collections import namedtuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from packed_xml import read_packed_xml, PackedElement
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'src', 'res', 'scripts', 'client'))
+from gui.mods.offline_lan_0922.vehicle_configuration import (
+    is_standard_battle_vehicle)
 
 
 MARKS_API = ('https://poliroid.me/gunmarks/api/v2/data/%s/vehicles/'
@@ -218,6 +224,14 @@ def _scalar(value):
 VEHICLE_CLASS_TAGS = ('lightTank', 'mediumTank', 'heavyTank', 'AT-SPG', 'SPG')
 
 
+def standard_battle_roster(roster):
+    """Use the garage's eligibility rule, including playable secret tanks."""
+    vehicle_type = namedtuple('VehicleType', 'name tags')
+    return dict((intcd, row) for intcd, row in roster.items()
+                if is_standard_battle_vehicle(vehicle_type(
+                    '%s:%s' % (row[0], row[1]), row[3])))
+
+
 def vehicle_class(tags):
     for tag in VEHICLE_CLASS_TAGS:
         if tag in tags:
@@ -322,9 +336,7 @@ def main(argv=None):
     if options.client:
         roster = read_client_roster(options.client)
         print('client roster: %d vehicles' % len(roster))
-        playable = dict(
-            (intcd, row) for intcd, row in roster.items()
-            if 'observer' not in row[3] and 'secret' not in row[3])
+        playable = standard_battle_roster(roster)
         marks = dict((k, v) for k, v in marks.items() if k in playable)
         mastery = dict((k, v) for k, v in mastery.items() if k in playable)
         mastery_fallback = build_fallbacks(mastery, playable)
