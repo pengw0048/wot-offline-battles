@@ -28,6 +28,8 @@ except ImportError:
 SESSION_SCHEMA = 1
 SESSION_STATE_FILENAME = "latest-error-report-session.json"
 REPORTS_DIRECTORY_NAME = "reports"
+REPORT_RETENTION_COUNT = 3
+_REPORT_NAME = re.compile(r"^wot-error-report-[0-9]{8}-[0-9]{6}-[0-9a-f]{12}\.zip$")
 SESSION_LOGS_DIRECTORY_NAME = "session-logs"
 SESSION_DUMPS_DIRECTORY_NAME = "session-dumps"
 SERVER_SESSION_ENV = "WOT_OFFLINE_REPORT_SESSION"
@@ -919,6 +921,37 @@ def _prepare_reports_directory():
     return directory
 
 
+def cleanup_reports():
+    """Keep the newest three completed launcher reports, without UI consent."""
+    try:
+        directory = _prepare_reports_directory()
+        candidates = []
+        for name in os.listdir(directory):
+            if not _REPORT_NAME.fullmatch(name):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                value = os.lstat(path)
+                if (_is_reparse_point(value) or stat.S_ISLNK(value.st_mode) or
+                        not stat.S_ISREG(value.st_mode) or value.st_size == 0):
+                    continue
+                candidates.append((value.st_mtime_ns, name, path))
+            except OSError:
+                continue
+        candidates.sort(reverse=True)
+        removed = []
+        for unused_time, unused_name, path in candidates[REPORT_RETENTION_COUNT:]:
+            try:
+                if delete_report(path):
+                    removed.append(path)
+            except core.LauncherError:
+                # A locked file must not prevent later cleanup or game startup.
+                continue
+        return tuple(removed)
+    except (OSError, core.LauncherError):
+        return ()
+
+
 def _publish_report(temporary, report_path):
     try:
         descriptor = os.open(
@@ -998,6 +1031,7 @@ def create_report(now=None):
                 "The latest game session has not produced any diagnostic "
                 "logs yet. No earlier session was included.")
         _publish_report(temporary, report_path)
+        cleanup_reports()
     except Exception:
         try:
             os.unlink(temporary)

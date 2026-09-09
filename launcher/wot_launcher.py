@@ -3356,6 +3356,7 @@ class LauncherWindow(object):
         self._prompt_initial_crash_collection()
 
     def run(self):
+        error_reports.cleanup_reports()
         self.root.after(0, self._show_startup_notices)
         self.root.mainloop()
 
