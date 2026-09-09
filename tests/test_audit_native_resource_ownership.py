@@ -37,7 +37,7 @@ class NativeResourceOwnershipAuditTests(unittest.TestCase):
     def test_repository_inventory_and_ownership_contracts_pass(self):
         report = AUDIT.audit(SOURCE_ROOT)
 
-        self.assertEqual(7, report['approvedAcquisitionSites'])
+        self.assertEqual(8, report['approvedAcquisitionSites'])
         self.assertGreaterEqual(report['checkedOwnershipContracts'], 14)
 
     def test_new_create_entity_call_site_is_rejected(self):
