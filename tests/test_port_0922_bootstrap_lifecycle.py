@@ -1551,6 +1551,21 @@ class BootstrapLifecycleTests(unittest.TestCase):
             self.assertIsNone(bootstrap._cleanup_runtime())
         self.assertEqual('uninstall_announcement_router', events[-1])
 
+    def test_inventory_refresh_notifies_only_the_current_lan_session(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+        first = types.SimpleNamespace(on_inventory_refreshed=mock.Mock())
+        second = types.SimpleNamespace(on_inventory_refreshed=mock.Mock())
+        bootstrap._session = first
+        bootstrap._on_inventory_refreshed()
+        bootstrap._session = second
+        bootstrap._on_inventory_refreshed()
+        bootstrap._session = None
+        bootstrap._on_inventory_refreshed()
+        first.on_inventory_refreshed.assert_called_once_with()
+        second.on_inventory_refreshed.assert_called_once_with()
+
     def test_lobby_view_load_immediately_notifies_the_lan_session(self):
         (bootstrap, unused_callbacks, unused_compatibility,
          unused_app_loader, unused_spaces, unused_events,

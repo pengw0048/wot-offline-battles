@@ -6635,6 +6635,7 @@ class BootstrapContractTests(unittest.TestCase):
                         account_context={'selected_vehicle': {
                             'id': 1, 'compDescr': 12345},
                             'garage_store': None,
+                            'on_inventory_refreshed': module._on_inventory_refreshed,
                             'account_state': account_state})],
                     lobby_entry.mock_calls)
                 bigworld.run_next()
@@ -6760,6 +6761,7 @@ class BootstrapContractTests(unittest.TestCase):
             account_context={'selected_vehicle': {
                 'id': 1, 'compDescr': 12345},
                 'garage_store': None,
+                'on_inventory_refreshed': module._on_inventory_refreshed,
                 'account_state': account_state})
         self.assertEqual([expected_connect, expected_connect],
                          compatibility.connect.call_args_list)

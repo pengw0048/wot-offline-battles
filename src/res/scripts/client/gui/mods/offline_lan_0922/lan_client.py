@@ -1784,7 +1784,7 @@ class LANClient(object):
 
     def select_vehicle(self, vehicle, max_health, outfits=None,
                        vehicle_compact_descr=None, effective_params=None):
-        """Publish one waiting-room garage change for the next round."""
+        """Accept the current loadout, sending only a changed selection."""
         if not self.ready or self.phase != 'waiting':
             return False
         vehicle = _safe_text(vehicle, '', 64)
@@ -1806,7 +1806,7 @@ class LANClient(object):
                 outfits == self.outfits and
                 compact == self.vehicle_compact_descr and
                 params == self.effective_params):
-            return False
+            return True
         message = {'type': 'select_vehicle', 'vehicle': vehicle,
                    'max_health': max_health,
                    'vehicle_compact_descr': compact,

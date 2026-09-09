@@ -796,6 +796,12 @@ def _selected_vehicle(config, restore_saved=True):
         raise
 
 
+def _on_inventory_refreshed():
+    notify = getattr(_session, 'on_inventory_refreshed', None)
+    if callable(notify):
+        notify()
+
+
 def _on_lobby_view_loaded(event):
     global _lobby_view_loaded
     _lobby_view_loaded = True
@@ -1254,6 +1260,7 @@ def _run_once():
             _account_context = {
                 'selected_vehicle': _selected_vehicle(_config),
                 'garage_store': _garage_store(),
+                'on_inventory_refreshed': _on_inventory_refreshed,
                 # Account settings are server-owned in #1513. Keep their
                 # local offline substitute beside config across restarts.
                 'account_state': account_state,

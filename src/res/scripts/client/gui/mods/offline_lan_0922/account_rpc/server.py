@@ -81,6 +81,7 @@ class FakeServer(object):
     def __init__(self, player_getter, callback=None, context=None):
         self._player_getter = player_getter
         self._context = dict(context or {})
+        self._pending_inventory_updates = 0
         if self._context.get('account_state') is None:
             from gui.mods.offline_lan_0922.account_rpc.state import AccountState
             self._context['account_state'] = AccountState(path=None)
@@ -96,6 +97,10 @@ class FakeServer(object):
         self._context.setdefault('push_update', self._push_update)
         self._context.setdefault(
             'push_update_and_wait', self._push_update)
+
+    @property
+    def inventory_refresh_pending(self):
+        return self._pending_inventory_updates > 0
 
     def _push_update(self, diff, after_publish=None):
         """Publish one account diff through the exact #1513 entity method.
@@ -127,29 +132,57 @@ class FakeServer(object):
         diff.setdefault('prevRev', revision)
         diff.setdefault('rev', revision + 1)
         payload = _pickle.dumps(diff, _pickle.HIGHEST_PROTOCOL)
+        inventory = 'inventory' in diff
+        completed = [False]
+        if inventory:
+            self._pending_inventory_updates += 1
+
+        def release():
+            if completed[0]:
+                return False
+            completed[0] = True
+            if inventory:
+                self._pending_inventory_updates -= 1
+            return True
+
+        def finish():
+            if not release() or self._player() is not player:
+                return
+            try:
+                if callable(after_publish):
+                    after_publish(player)
+            finally:
+                # Account.update is queued and ItemsCache refresh can yield.
+                # The room may read CurrentVehicle only after both complete,
+                # including any inventory update queued by the response.
+                notify = self._context.get('on_inventory_refreshed')
+                if (inventory and not self.inventory_refresh_pending and
+                        self._player() is player and callable(notify)):
+                    try:
+                        notify()
+                    except Exception as error:
+                        print('[Offline LAN 0.9.22] refreshed garage could '
+                              'not be published to the room: %s' % error)
 
         def publish():
             if self._player() is not player:
+                release()
                 return
-            player.update(payload)
+            try:
+                player.update(payload)
+                if inventory:
+                    _refresh_garage_views(diff, after_refresh=finish)
+                else:
+                    finish()
+            except Exception:
+                release()
+                raise
 
-            def finish():
-                if (self._player() is player and
-                        callable(after_publish)):
-                    after_publish(player)
-
-            # The fallback exists for fitting changes whose inventory payload
-            # must be re-read by the current-vehicle cache.  Reapplying a
-            # stats-only update needlessly runs that expensive inventory path
-            # a second time.  An accepted fitting command chains its success
-            # response through ``after_publish``, so finish only after the
-            # CurrentVehicle listener can read the new descriptor.
-            if 'inventory' in diff:
-                _refresh_garage_views(diff, after_refresh=finish)
-            else:
-                finish()
-
-        self._callback(0.0, publish)
+        try:
+            self._callback(0.0, publish)
+        except Exception:
+            release()
+            raise
         return True
 
     def _player(self):

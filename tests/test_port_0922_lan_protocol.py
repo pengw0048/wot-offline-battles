@@ -255,7 +255,8 @@ class LanProtocolTests(unittest.TestCase):
         self.client.vehicle = 'ussr:R11_MS-1'
         self.client.max_health = 90
 
-        self.assertFalse(self.client.select_vehicle('ussr:R11_MS-1', 90))
+        self.assertTrue(self.client.select_vehicle('ussr:R11_MS-1', 90))
+        self.assertEqual([], self.sent)
         self.assertTrue(self.client.select_vehicle(
             'germany:G01_PzI', 150,
             vehicle_compact_descr='cHpp'))
@@ -284,7 +285,7 @@ class LanProtocolTests(unittest.TestCase):
 
         self.assertEqual('germany:G01_PzI', self.client.vehicle)
         self.assertEqual(150, self.client.max_health)
-        self.assertFalse(self.client.select_vehicle('germany:G01_PzI', 150))
+        self.assertTrue(self.client.select_vehicle('germany:G01_PzI', 150))
 
     def test_modern_vehicle_change_rejects_non_exact_health_atomically(self):
         invalid_values = (

@@ -2761,6 +2761,14 @@ The source audit deliberately keeps the following differences visible:
   layout mapped onto the gun's shot order, and the consumables come from the
   mounted slots, so an empty slot carries nothing. Bots keep a synthetic
   loadout by design;
+- `PlayerAvatar.__startVehicleVisual` calls `EquipmentsController.clear(False)`
+  for the own vehicle. Loading snapshots must retain their equipment state
+  without publishing or caching HUD echoes until native client readiness,
+  after that clear. The normal item-transition deduplication then remains
+  necessary to preserve the expanded repair/medical selector. Garage inventory
+  updates publish the room loadout after the asynchronous stock cache refresh;
+  starting a round checks that refresh has finished and queues the current
+  loadout before the start request;
 - the spotting law now applies the situational devices and the vision and
   concealment crew skills for the player and for authority bots. Coated optics
   stay implicit through `miscAttrs['circularVisionRadiusFactor']`, which

@@ -281,6 +281,74 @@ class AccountRpcTests(unittest.TestCase):
         self.assertEqual(set(), touched_items[10])
         self.assertEqual(set(), touched_items[11])
 
+    def test_inventory_ready_notification_waits_for_all_cache_refreshes(self):
+        refreshed = []
+        completed = []
+        self.server._context['on_inventory_refreshed'] = lambda: refreshed.append(
+            self.server.inventory_refresh_pending)
+        diff = {'inventory': {1: {'eqs': {9: [11001, 0, 0]}}}}
+        with mock.patch(
+                'gui.mods.offline_lan_0922.account_rpc.server.'
+                '_refresh_garage_views',
+                side_effect=lambda diff, after_refresh: completed.append(
+                    after_refresh)):
+            self.server._push_update(diff)
+            self.server._push_update(diff)
+            self.assertTrue(self.server.inventory_refresh_pending)
+            self._run()
+            self._run()
+        self.assertEqual([], refreshed)
+        completed[0]()
+        completed[0]()
+        self.assertTrue(self.server.inventory_refresh_pending)
+        self.assertEqual([], refreshed)
+        completed[1]()
+        self.assertFalse(self.server.inventory_refresh_pending)
+        self.assertEqual([False], refreshed)
+
+    def test_retired_inventory_update_does_not_notify_replacement_account(self):
+        refreshed = mock.Mock()
+        self.server._context['on_inventory_refreshed'] = refreshed
+        self.server._push_update({'inventory': {}})
+        self.player = _Player()
+        self._run()
+        self.assertFalse(self.server.inventory_refresh_pending)
+        refreshed.assert_not_called()
+
+    def test_inventory_notification_waits_for_response_queued_update(self):
+        refreshed = mock.Mock()
+        self.server._context['on_inventory_refreshed'] = refreshed
+        completed = []
+
+        def queue_another(unused_player):
+            self.server._push_update({'inventory': {}})
+
+        with mock.patch(
+                'gui.mods.offline_lan_0922.account_rpc.server.'
+                '_refresh_garage_views',
+                side_effect=lambda diff, after_refresh: completed.append(
+                    after_refresh)):
+            self.server._push_update(
+                {'inventory': {}}, after_publish=queue_another)
+            self._run()
+            completed[0]()
+            self.assertTrue(self.server.inventory_refresh_pending)
+            refreshed.assert_not_called()
+            self._run()
+            completed[1]()
+        refreshed.assert_called_once_with()
+        self.assertFalse(self.server.inventory_refresh_pending)
+
+    def test_failed_inventory_publication_releases_pending_state(self):
+        refreshed = mock.Mock()
+        self.server._context['on_inventory_refreshed'] = refreshed
+        self.player.update = mock.Mock(side_effect=RuntimeError('retired update'))
+        self.server._push_update({'inventory': {}})
+        with self.assertRaises(RuntimeError):
+            self._run()
+        self.assertFalse(self.server.inventory_refresh_pending)
+        refreshed.assert_not_called()
+
     def test_stats_update_does_not_run_the_inventory_refresh_fallback(self):
         with mock.patch(
                 'gui.mods.offline_lan_0922.account_rpc.server.'
